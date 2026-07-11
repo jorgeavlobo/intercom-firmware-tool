@@ -57,10 +57,11 @@ namespace IntercomFirmwareTool.Core
             using var fs = ExtFileSystem.Open(disk, disk.Partitions[0]);
             using var file = fs.OpenFile(fileInsideImage, FileMode.Open, FileAccess.Read);
 
+            const long maxBytes = 64L * 1024 * 1024; // 64 MiB: chega para texto/config
             long length = file.Length;
-            if (length > int.MaxValue)
+            if (length > maxBytes)
                 throw new NotSupportedException(
-                    $"Ficheiro demasiado grande para este teste: {length} bytes (limite ~2GB).");
+                    $"Ficheiro demasiado grande para este teste: {length} bytes (limite {maxBytes} bytes).");
 
             int len = (int)length;
             var buf = new byte[len];

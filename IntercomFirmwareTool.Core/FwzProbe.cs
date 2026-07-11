@@ -64,30 +64,25 @@ namespace IntercomFirmwareTool.Core
 
             zip.Password = goodPassword;
 
-            // 3) Extrai o .gz para um temporário, faz gunzip para outro
-            //    temporário (a imagem ext4) e lê o ficheiro pedido.
-            string gzTemp = NewTempPath(".gz");
+            // 3) Descodifica (ZipCrypto) e descomprime (gzip) num só fluxo,
+            //    direto para o temporário .ext4 — sem escrever o .gz intermédio
+            //    em disco (menos I/O e menos exposição em %TEMP%). Depois lê o
+            //    ficheiro pedido reutilizando o leitor de ext4 (que trata
+            //    sozinho do embrulho MBR das imagens cruas).
             string extTemp = NewTempPath(".ext4");
             try
             {
                 using (var zin = zip.GetInputStream(selected))
-                using (var gzOut = new FileStream(gzTemp, FileMode.CreateNew, FileAccess.Write))
-                    zin.CopyTo(gzOut);
-
-                using (var gzIn = new FileStream(gzTemp, FileMode.Open, FileAccess.Read))
-                using (var gunzip = new GZipStream(gzIn, CompressionMode.Decompress))
+                using (var gunzip = new GZipStream(zin, CompressionMode.Decompress))
                 using (var extOut = new FileStream(extTemp, FileMode.CreateNew, FileAccess.Write))
                     gunzip.CopyTo(extOut);
 
-                // Reutiliza o leitor de ext4 já existente (trata sozinho do
-                // embrulho MBR das imagens ext4 cruas).
                 string content = Ext4Probe.ReadFile(extTemp, fileInsideImage);
 
                 return new FwzReadResult(goodPassword, selected.Name, content);
             }
             finally
             {
-                TryDelete(gzTemp);
                 TryDelete(extTemp);
             }
         }
