@@ -14,7 +14,9 @@ namespace IntercomFirmwareTool.Core
         public static string ReadFile(string imagePath, string fileInsideImage)
         {
             var disk = ExtDisk.Open(imagePath);
-            var fs = ExtFileSystem.Open(disk.Partitions[0]);
+            // A API real é Open(ExtDisk, Partition) — dois argumentos.
+            // (O README da SharpExt4 mostra só um, mas está errado.)
+            var fs = ExtFileSystem.Open(disk, disk.Partitions[0]);
             var file = fs.OpenFile(fileInsideImage, FileMode.Open, FileAccess.Read);
             try
             {
