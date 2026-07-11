@@ -17,7 +17,7 @@ namespace IntercomFirmwareTool.App
             InitializeComponent();
         }
 
-        private void BtnRead_Click(object sender, RoutedEventArgs e)
+        private async void BtnRead_Click(object sender, RoutedEventArgs e)
         {
             // 1) Deixa o utilizador escolher a imagem ext4 no disco.
             var dialog = new OpenFileDialog
@@ -49,10 +49,13 @@ namespace IntercomFirmwareTool.App
             sb.AppendLine($"Ficheiro a ler: {fileInside}");
             sb.AppendLine();
 
-            // 3) A leitura em si, protegida por try/catch.
+            // 3) A leitura em si, em background para não bloquear a janela,
+            //    protegida por try/catch e com o botão desativado enquanto lê.
+            BtnRead.IsEnabled = false;
+            TxtResult.Text = "A ler…";
             try
             {
-                string content = Ext4Probe.ReadFile(imagePath, fileInside);
+                string content = await Task.Run(() => Ext4Probe.ReadFile(imagePath, fileInside));
                 sb.AppendLine("SUCESSO:");
                 sb.AppendLine(content);
             }
@@ -60,6 +63,10 @@ namespace IntercomFirmwareTool.App
             {
                 sb.AppendLine("ERRO:");
                 sb.AppendLine(ex.ToString());
+            }
+            finally
+            {
+                BtnRead.IsEnabled = true;
             }
 
             TxtResult.Text = sb.ToString();

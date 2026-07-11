@@ -20,7 +20,12 @@ namespace IntercomFirmwareTool.Core
             var file = fs.OpenFile(fileInsideImage, FileMode.Open, FileAccess.Read);
             try
             {
-                var len = (int)file.Length;
+                long length = file.Length;
+                if (length > int.MaxValue)
+                    throw new NotSupportedException(
+                        $"Ficheiro demasiado grande para este teste: {length} bytes (limite ~2GB).");
+
+                int len = (int)length;
                 var buf = new byte[len];
                 int total = 0;
                 while (total < len)
