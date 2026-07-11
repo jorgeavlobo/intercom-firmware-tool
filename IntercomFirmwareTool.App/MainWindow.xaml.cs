@@ -1,13 +1,9 @@
-﻿using System.Text;
+using System;
+using System.IO;
+using System.Text;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Navigation;
-using System.Windows.Shapes;
+using IntercomFirmwareTool.Core;
+using Microsoft.Win32;
 
 namespace IntercomFirmwareTool.App
 {
@@ -19,6 +15,89 @@ namespace IntercomFirmwareTool.App
         public MainWindow()
         {
             InitializeComponent();
+        }
+
+        /// <summary>
+        /// Button: pick a .fwz and run the full chain (password, selection,
+        /// gunzip, ext4), showing the result or the error in the box.
+        /// </summary>
+        private async void BtnReadFwz_Click(object sender, RoutedEventArgs e)
+        {
+            var dialog = new OpenFileDialog
+            {
+                Title = "Choose the .fwz file",
+                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*"
+            };
+            if (dialog.ShowDialog(this) != true)
+                return;
+
+            string fwzPath = dialog.FileName;
+            string fileInside = InternalPath();
+
+            var sb = new StringBuilder();
+            AppendDiagnostics(sb);
+            sb.AppendLine($".fwz file    : {fwzPath}");
+            sb.AppendLine($"File to read : {fileInside}");
+            sb.AppendLine();
+
+            await RunAndShow(sb, () =>
+            {
+                FwzReadResult r = FwzProbe.ReadFileFromFwz(fwzPath, fileInside);
+                sb.AppendLine($"Password that worked : {r.PasswordUsed}");
+                sb.AppendLine($"Selected inner entry : {r.SelectedEntry}");
+                sb.AppendLine();
+                sb.AppendLine("SUCCESS:");
+                sb.AppendLine(r.Content);
+            });
+        }
+
+        // ---- Shared helpers --------------------------------------------------
+
+        /// <summary>Returns the internal path from the text box (or /etc/hostname).</summary>
+        private string InternalPath() =>
+            string.IsNullOrWhiteSpace(TxtInternalPath.Text)
+                ? "/etc/hostname"
+                : TxtInternalPath.Text.Trim();
+
+        /// <summary>
+        /// Appends the runtime diagnostics: whether the process is 64-bit and
+        /// whether the three SharpExt4 DLLs are in the execution folder.
+        /// </summary>
+        private static void AppendDiagnostics(StringBuilder sb)
+        {
+            sb.AppendLine($"64-bit process? {Environment.Is64BitProcess}  (must be True)");
+            sb.AppendLine($"Execution folder: {AppContext.BaseDirectory}");
+            foreach (var dll in new[] { "SharpExt4.dll", "DiskPartitionInfo.dll", "Ijwhost.dll" })
+            {
+                string path = Path.Combine(AppContext.BaseDirectory, dll);
+                sb.AppendLine($"  {(File.Exists(path) ? "OK     " : "MISSING")} {dll}");
+            }
+            sb.AppendLine();
+        }
+
+        /// <summary>
+        /// Runs the work in the background (so the window doesn't freeze), with
+        /// the button disabled, and shows the result or the full error in the box.
+        /// </summary>
+        private async Task RunAndShow(StringBuilder sb, Action work)
+        {
+            BtnReadFwz.IsEnabled = false;
+            TxtResult.Text = "Processing…";
+            try
+            {
+                await Task.Run(work);
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("ERROR:");
+                sb.AppendLine(ex.ToString());
+            }
+            finally
+            {
+                BtnReadFwz.IsEnabled = true;
+            }
+
+            TxtResult.Text = sb.ToString();
         }
     }
 }

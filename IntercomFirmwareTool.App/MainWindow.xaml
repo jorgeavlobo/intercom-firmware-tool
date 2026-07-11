@@ -1,12 +1,41 @@
-﻿<Window x:Class="IntercomFirmwareTool.App.MainWindow"
+<Window x:Class="IntercomFirmwareTool.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:IntercomFirmwareTool.App"
         mc:Ignorable="d"
-        Title="MainWindow" Height="450" Width="800">
-    <Grid>
+        Title="Test: read ext4 from inside a .fwz" Height="500" Width="800">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
+        <!-- Row 0: path of the file INSIDE the image -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="File to read inside the image:"
+                       VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <TextBox x:Name="TxtInternalPath" Width="300" Text="/etc/hostname"
+                     VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Row 1: test button — read the ext4 from inside a .fwz -->
+        <Button x:Name="BtnReadFwz" Grid.Row="1" HorizontalAlignment="Left"
+                Padding="12,6" Margin="0,0,0,8"
+                Content="Choose .fwz and read…"
+                Click="BtnReadFwz_Click"/>
+
+        <!-- Row 2: result label -->
+        <TextBlock Grid.Row="2" Text="Result:" Margin="0,0,0,4"/>
+
+        <!-- Row 3: result box (multi-line, scroll, read-only) -->
+        <TextBox x:Name="TxtResult" Grid.Row="3"
+                 IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                 VerticalScrollBarVisibility="Auto"
+                 HorizontalScrollBarVisibility="Auto"
+                 FontFamily="Consolas" FontSize="12"/>
     </Grid>
 </Window>
