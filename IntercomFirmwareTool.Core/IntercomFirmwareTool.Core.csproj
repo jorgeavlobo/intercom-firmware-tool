@@ -16,11 +16,16 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Link achata o caminho: as DLLs vão para a RAIZ do output (ao lado
+         do .exe), não para bin\...\lib\SharpExt4\. A Ijwhost.dll nativa só é
+         encontrada se estiver ao lado do executável. -->
     <None Update="lib\SharpExt4\DiskPartitionInfo.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>DiskPartitionInfo.dll</Link>
     </None>
     <None Update="lib\SharpExt4\Ijwhost.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>Ijwhost.dll</Link>
     </None>
     <None Update="lib\SharpExt4\SharpExt4.dll">
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
