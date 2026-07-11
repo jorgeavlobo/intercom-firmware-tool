@@ -34,7 +34,10 @@ namespace IntercomFirmwareTool.Core
             {
                 if (!entry.IsFile) continue;
                 string name = entry.Name;
-                if (name.Contains("gz", StringComparison.OrdinalIgnoreCase) &&
+                // Regra do fquinto (nome com "gz" e sem "recovery"), mas a exigir
+                // que termine mesmo em ".gz" para não apanhar sidecars de
+                // assinatura tipo "btweb_only.ext4.gz.sig".
+                if (name.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) &&
                     !name.Contains("recovery", StringComparison.OrdinalIgnoreCase))
                 {
                     selected = entry;
