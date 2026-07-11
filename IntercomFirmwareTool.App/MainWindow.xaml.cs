@@ -17,7 +17,10 @@ namespace IntercomFirmwareTool.App
             InitializeComponent();
         }
 
-        // ---- Botão: cadeia completa a partir de um .fwz ----------------------
+        /// <summary>
+        /// Botão: escolhe um .fwz e corre a cadeia completa (password, seleção,
+        /// gunzip, ext4), mostrando o resultado ou o erro na caixa.
+        /// </summary>
         private async void BtnReadFwz_Click(object sender, RoutedEventArgs e)
         {
             var dialog = new OpenFileDialog
@@ -50,11 +53,16 @@ namespace IntercomFirmwareTool.App
 
         // ---- Auxiliares partilhados ------------------------------------------
 
+        /// <summary>Devolve o caminho interno da caixa de texto (ou /etc/hostname).</summary>
         private string InternalPath() =>
             string.IsNullOrWhiteSpace(TxtInternalPath.Text)
                 ? "/etc/hostname"
                 : TxtInternalPath.Text.Trim();
 
+        /// <summary>
+        /// Acrescenta o diagnóstico de runtime: se o processo é 64-bit e se as
+        /// três DLLs da SharpExt4 estão na pasta de execução.
+        /// </summary>
         private static void AppendDiagnostics(StringBuilder sb)
         {
             sb.AppendLine($"Processo 64-bit? {Environment.Is64BitProcess}  (tem de ser True)");

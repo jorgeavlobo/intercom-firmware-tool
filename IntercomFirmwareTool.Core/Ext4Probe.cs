@@ -42,6 +42,10 @@ namespace IntercomFirmwareTool.Core
             return ReadFromDiskImage(imagePath, fileInsideImage);
         }
 
+        /// <summary>
+        /// Abre uma imagem de disco já particionada, entra na primeira partição
+        /// e lê (só leitura) o ficheiro pedido, com o tamanho limitado.
+        /// </summary>
         private static string ReadFromDiskImage(string diskImagePath, string fileInsideImage)
         {
             // 'using' liberta disk, fs e file (todos IDisposable, via destrutor
@@ -173,6 +177,7 @@ namespace IntercomFirmwareTool.Core
             }
         }
 
+        /// <summary>Escreve um uint32 em little-endian num buffer, no offset dado.</summary>
         private static void WriteUInt32LE(byte[] buffer, int offset, uint value)
         {
             buffer[offset + 0] = (byte)(value & 0xFF);
@@ -181,6 +186,7 @@ namespace IntercomFirmwareTool.Core
             buffer[offset + 3] = (byte)((value >> 24) & 0xFF);
         }
 
+        /// <summary>Apaga um ficheiro se existir, ignorando falhas (best-effort).</summary>
         private static void TryDelete(string path)
         {
             try { if (File.Exists(path)) File.Delete(path); }

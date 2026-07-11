@@ -23,6 +23,12 @@ namespace IntercomFirmwareTool.Core
         // Passwords do .fwz por modelo (são os próprios nomes de modelo no fquinto).
         private static readonly string[] Passwords = { "C300X", "C100X", "SMARTDES" };
 
+        /// <summary>
+        /// Corre a cadeia completa a partir de um .fwz: descobre a password,
+        /// seleciona o payload, faz gunzip e lê o ficheiro pedido da imagem ext4.
+        /// </summary>
+        /// <param name="fwzPath">Caminho para o ficheiro .fwz.</param>
+        /// <param name="fileInsideImage">Ficheiro dentro do ext4, ex.: "/etc/hostname".</param>
         public static FwzReadResult ReadFileFromFwz(string fwzPath, string fileInsideImage)
         {
             using var zip = new ZipFile(fwzPath);
@@ -108,9 +114,11 @@ namespace IntercomFirmwareTool.Core
             }
         }
 
+        /// <summary>Gera um caminho único na pasta temporária com a extensão dada.</summary>
         private static string NewTempPath(string extension) =>
             Path.Combine(Path.GetTempPath(), $"fwzprobe_{Guid.NewGuid():N}{extension}");
 
+        /// <summary>Apaga um ficheiro se existir, ignorando falhas (best-effort).</summary>
         private static void TryDelete(string path)
         {
             try { if (File.Exists(path)) File.Delete(path); }
