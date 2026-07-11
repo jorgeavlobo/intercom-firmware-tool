@@ -1,5 +1,8 @@
 using System.IO.Compression;
 using ICSharpCode.SharpZipLib.Zip;
+// Desambigua: existe ZipFile em System.IO.Compression e na SharpZipLib.
+// Aqui "ZipFile" é sempre o da SharpZipLib (o que suporta ZipCrypto).
+using ZipFile = ICSharpCode.SharpZipLib.Zip.ZipFile;
 
 namespace IntercomFirmwareTool.Core
 {
