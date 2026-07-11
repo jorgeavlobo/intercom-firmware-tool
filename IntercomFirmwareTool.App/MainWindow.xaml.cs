@@ -18,15 +18,15 @@ namespace IntercomFirmwareTool.App
         }
 
         /// <summary>
-        /// Botão: escolhe um .fwz e corre a cadeia completa (password, seleção,
-        /// gunzip, ext4), mostrando o resultado ou o erro na caixa.
+        /// Button: pick a .fwz and run the full chain (password, selection,
+        /// gunzip, ext4), showing the result or the error in the box.
         /// </summary>
         private async void BtnReadFwz_Click(object sender, RoutedEventArgs e)
         {
             var dialog = new OpenFileDialog
             {
-                Title = "Escolhe o ficheiro .fwz",
-                Filter = "Firmware Bticino (*.fwz)|*.fwz|Todos os ficheiros (*.*)|*.*"
+                Title = "Choose the .fwz file",
+                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*"
             };
             if (dialog.ShowDialog(this) != true)
                 return;
@@ -36,60 +36,60 @@ namespace IntercomFirmwareTool.App
 
             var sb = new StringBuilder();
             AppendDiagnostics(sb);
-            sb.AppendLine($"Ficheiro .fwz : {fwzPath}");
-            sb.AppendLine($"Ficheiro a ler: {fileInside}");
+            sb.AppendLine($".fwz file    : {fwzPath}");
+            sb.AppendLine($"File to read : {fileInside}");
             sb.AppendLine();
 
             await RunAndShow(sb, () =>
             {
                 FwzReadResult r = FwzProbe.ReadFileFromFwz(fwzPath, fileInside);
-                sb.AppendLine($"Password que funcionou   : {r.PasswordUsed}");
-                sb.AppendLine($"Ficheiro interno escolhido: {r.SelectedEntry}");
+                sb.AppendLine($"Password that worked : {r.PasswordUsed}");
+                sb.AppendLine($"Selected inner entry : {r.SelectedEntry}");
                 sb.AppendLine();
-                sb.AppendLine("SUCESSO:");
+                sb.AppendLine("SUCCESS:");
                 sb.AppendLine(r.Content);
             });
         }
 
-        // ---- Auxiliares partilhados ------------------------------------------
+        // ---- Shared helpers --------------------------------------------------
 
-        /// <summary>Devolve o caminho interno da caixa de texto (ou /etc/hostname).</summary>
+        /// <summary>Returns the internal path from the text box (or /etc/hostname).</summary>
         private string InternalPath() =>
             string.IsNullOrWhiteSpace(TxtInternalPath.Text)
                 ? "/etc/hostname"
                 : TxtInternalPath.Text.Trim();
 
         /// <summary>
-        /// Acrescenta o diagnóstico de runtime: se o processo é 64-bit e se as
-        /// três DLLs da SharpExt4 estão na pasta de execução.
+        /// Appends the runtime diagnostics: whether the process is 64-bit and
+        /// whether the three SharpExt4 DLLs are in the execution folder.
         /// </summary>
         private static void AppendDiagnostics(StringBuilder sb)
         {
-            sb.AppendLine($"Processo 64-bit? {Environment.Is64BitProcess}  (tem de ser True)");
-            sb.AppendLine($"Pasta de execução: {AppContext.BaseDirectory}");
+            sb.AppendLine($"64-bit process? {Environment.Is64BitProcess}  (must be True)");
+            sb.AppendLine($"Execution folder: {AppContext.BaseDirectory}");
             foreach (var dll in new[] { "SharpExt4.dll", "DiskPartitionInfo.dll", "Ijwhost.dll" })
             {
                 string path = Path.Combine(AppContext.BaseDirectory, dll);
-                sb.AppendLine($"  {(File.Exists(path) ? "OK   " : "FALTA")} {dll}");
+                sb.AppendLine($"  {(File.Exists(path) ? "OK     " : "MISSING")} {dll}");
             }
             sb.AppendLine();
         }
 
         /// <summary>
-        /// Corre o trabalho em background (para a janela não bloquear), com os
-        /// botões desativados, e mostra o resultado ou o erro completo na caixa.
+        /// Runs the work in the background (so the window doesn't freeze), with
+        /// the button disabled, and shows the result or the full error in the box.
         /// </summary>
         private async Task RunAndShow(StringBuilder sb, Action work)
         {
             BtnReadFwz.IsEnabled = false;
-            TxtResult.Text = "A processar…";
+            TxtResult.Text = "Processing…";
             try
             {
                 await Task.Run(work);
             }
             catch (Exception ex)
             {
-                sb.AppendLine("ERRO:");
+                sb.AppendLine("ERROR:");
                 sb.AppendLine(ex.ToString());
             }
             finally

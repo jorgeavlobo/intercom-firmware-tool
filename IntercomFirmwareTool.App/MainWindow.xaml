@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:IntercomFirmwareTool.App"
         mc:Ignorable="d"
-        Title="Teste: ler ext4 de dentro de .fwz" Height="500" Width="800">
+        Title="Test: read ext4 from inside a .fwz" Height="500" Width="800">
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -14,24 +14,24 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <!-- Linha 0: caminho do ficheiro DENTRO da imagem -->
+        <!-- Row 0: path of the file INSIDE the image -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <TextBlock Text="Ficheiro a ler dentro da imagem:"
+            <TextBlock Text="File to read inside the image:"
                        VerticalAlignment="Center" Margin="0,0,8,0"/>
             <TextBox x:Name="TxtInternalPath" Width="300" Text="/etc/hostname"
                      VerticalAlignment="Center"/>
         </StackPanel>
 
-        <!-- Linha 1: botão de teste — ler o ext4 de dentro de um .fwz -->
+        <!-- Row 1: test button — read the ext4 from inside a .fwz -->
         <Button x:Name="BtnReadFwz" Grid.Row="1" HorizontalAlignment="Left"
                 Padding="12,6" Margin="0,0,0,8"
-                Content="Escolher .fwz e ler…"
+                Content="Choose .fwz and read…"
                 Click="BtnReadFwz_Click"/>
 
-        <!-- Linha 2: rótulo do resultado -->
-        <TextBlock Grid.Row="2" Text="Resultado:" Margin="0,0,0,4"/>
+        <!-- Row 2: result label -->
+        <TextBlock Grid.Row="2" Text="Result:" Margin="0,0,0,4"/>
 
-        <!-- Linha 3: caixa de resultado (multi-linha, scroll, só-leitura) -->
+        <!-- Row 3: result box (multi-line, scroll, read-only) -->
         <TextBox x:Name="TxtResult" Grid.Row="3"
                  IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
                  VerticalScrollBarVisibility="Auto"

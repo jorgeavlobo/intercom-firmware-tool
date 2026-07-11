@@ -1,48 +1,52 @@
 using System.IO.Compression;
 using ICSharpCode.SharpZipLib.Zip;
-// Desambigua: existe ZipFile em System.IO.Compression e na SharpZipLib.
-// Aqui "ZipFile" é sempre o da SharpZipLib (o que suporta ZipCrypto).
+// Disambiguate: ZipFile exists in both System.IO.Compression and SharpZipLib.
+// Here "ZipFile" always means the SharpZipLib one (which supports ZipCrypto).
 using ZipFile = ICSharpCode.SharpZipLib.Zip.ZipFile;
 
 namespace IntercomFirmwareTool.Core
 {
-    /// <summary>Resultado da leitura da cadeia completa a partir de um .fwz.</summary>
+    /// <summary>Result of reading the full chain from a .fwz.</summary>
     public sealed record FwzReadResult(
         string PasswordUsed,
         string SelectedEntry,
         string Content);
 
     /// <summary>
-    /// Replica (só leitura) o fluxo do instalador do fquinto até à imagem ext4:
-    /// abre o .fwz (ZIP com ZipCrypto), tenta as passwords conhecidas, escolhe o
-    /// ficheiro correto (contém "gz" e não "recovery"), faz gunzip e lê um
-    /// ficheiro de dentro da imagem ext4 resultante.
+    /// Replicates (read-only) the fquinto installer flow up to the ext4 image:
+    /// opens the .fwz (a ZipCrypto ZIP), tries the known passwords, picks the
+    /// right file (name ending in ".gz" and not containing "recovery"), gunzips
+    /// it and reads a file from the resulting ext4 image.
     /// </summary>
     public static class FwzProbe
     {
-        // Passwords do .fwz por modelo (são os próprios nomes de modelo no fquinto).
+        // .fwz passwords per model (they are the model names themselves in fquinto).
         private static readonly string[] Passwords = { "C300X", "C100X", "SMARTDES" };
 
+        // Upper bound on the decompressed ext4 image, so a malformed/malicious
+        // .gz cannot expand until the temp disk is exhausted.
+        private const long MaxImageBytes = 2L * 1024 * 1024 * 1024; // 2 GiB
+
         /// <summary>
-        /// Corre a cadeia completa a partir de um .fwz: descobre a password,
-        /// seleciona o payload, faz gunzip e lê o ficheiro pedido da imagem ext4.
+        /// Runs the full chain from a .fwz: finds the password, selects the
+        /// payload, gunzips it and reads the requested file from the ext4 image.
         /// </summary>
-        /// <param name="fwzPath">Caminho para o ficheiro .fwz.</param>
-        /// <param name="fileInsideImage">Ficheiro dentro do ext4, ex.: "/etc/hostname".</param>
+        /// <param name="fwzPath">Path to the .fwz file.</param>
+        /// <param name="fileInsideImage">File inside the ext4, e.g. "/etc/hostname".</param>
         public static FwzReadResult ReadFileFromFwz(string fwzPath, string fileInsideImage)
         {
             using var zip = new ZipFile(fwzPath);
 
-            // 1) Seleciona a entrada: nome contém "gz" e não contém "recovery"
-            //    (regra do fquinto). Dá btweb_only.ext4.gz.
+            // 1) Select the entry: name ends in ".gz" and does not contain
+            //    "recovery" (fquinto's rule). Yields btweb_only.ext4.gz.
             ZipEntry? selected = null;
             foreach (ZipEntry entry in zip)
             {
                 if (!entry.IsFile) continue;
                 string name = entry.Name;
-                // Regra do fquinto (nome com "gz" e sem "recovery"), mas a exigir
-                // que termine mesmo em ".gz" para não apanhar sidecars de
-                // assinatura tipo "btweb_only.ext4.gz.sig".
+                // fquinto's rule (name with "gz" and without "recovery"), but
+                // requiring it to actually end in ".gz" so we don't pick a
+                // signature sidecar like "btweb_only.ext4.gz.sig".
                 if (name.EndsWith(".gz", StringComparison.OrdinalIgnoreCase) &&
                     !name.Contains("recovery", StringComparison.OrdinalIgnoreCase))
                 {
@@ -52,9 +56,9 @@ namespace IntercomFirmwareTool.Core
             }
             if (selected is null)
                 throw new InvalidOperationException(
-                    "Nenhum ficheiro 'gz' (não-recovery) encontrado dentro do .fwz.");
+                    "No '.gz' (non-recovery) file found inside the .fwz.");
 
-            // 2) Descobre qual das passwords conhecidas abre a entrada.
+            // 2) Find which of the known passwords opens the entry.
             string? goodPassword = null;
             foreach (string pw in Passwords)
             {
@@ -66,22 +70,23 @@ namespace IntercomFirmwareTool.Core
             }
             if (goodPassword is null)
                 throw new InvalidOperationException(
-                    "Nenhuma das passwords conhecidas (C300X, C100X, SMARTDES) abriu o .fwz.");
+                    "None of the known passwords (C300X, C100X, SMARTDES) opened the .fwz.");
 
             zip.Password = goodPassword;
 
-            // 3) Descodifica (ZipCrypto) e descomprime (gzip) num só fluxo,
-            //    direto para o temporário .ext4 — sem escrever o .gz intermédio
-            //    em disco (menos I/O e menos exposição em %TEMP%). Depois lê o
-            //    ficheiro pedido reutilizando o leitor de ext4 (que trata
-            //    sozinho do embrulho MBR das imagens cruas).
+            // 3) Decrypt (ZipCrypto) and decompress (gzip) in a single stream,
+            //    straight into the .ext4 temp file — without writing the
+            //    intermediate .gz to disk (less I/O, less data left in %TEMP%).
+            //    The copy is bounded so a bad .gz cannot fill the temp disk.
+            //    Then read the requested file reusing the ext4 reader (which
+            //    handles the MBR wrapping of bare images itself).
             string extTemp = NewTempPath(".ext4");
             try
             {
                 using (var zin = zip.GetInputStream(selected))
                 using (var gunzip = new GZipStream(zin, CompressionMode.Decompress))
                 using (var extOut = new FileStream(extTemp, FileMode.CreateNew, FileAccess.Write))
-                    gunzip.CopyTo(extOut);
+                    CopyBounded(gunzip, extOut, MaxImageBytes);
 
                 string content = Ext4Probe.ReadFile(extTemp, fileInsideImage);
 
@@ -94,9 +99,28 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Verifica se uma password descodifica a entrada: como cada entrada é um
-        /// .gz, o conteúdo descodificado tem de começar pelos bytes mágicos do
-        /// gzip (0x1F 0x8B). Isto evita falsos positivos do ZipCrypto.
+        /// Copies <paramref name="source"/> to <paramref name="destination"/>,
+        /// throwing once more than <paramref name="maxBytes"/> have been written.
+        /// </summary>
+        private static void CopyBounded(Stream source, Stream destination, long maxBytes)
+        {
+            var buffer = new byte[81920];
+            long written = 0;
+            int read;
+            while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                written += read;
+                if (written > maxBytes)
+                    throw new NotSupportedException(
+                        $"Decompressed image exceeds the {maxBytes} byte limit; aborting.");
+                destination.Write(buffer, 0, read);
+            }
+        }
+
+        /// <summary>
+        /// Checks whether a password decrypts the entry: since each entry is a
+        /// .gz, the decrypted content must start with the gzip magic bytes
+        /// (0x1F 0x8B). This avoids ZipCrypto false positives.
         /// </summary>
         private static bool PasswordOpensEntry(ZipFile zip, ZipEntry entry, string password)
         {
@@ -110,19 +134,19 @@ namespace IntercomFirmwareTool.Core
             }
             catch (ZipException)
             {
-                return false; // password errada
+                return false; // wrong password
             }
         }
 
-        /// <summary>Gera um caminho único na pasta temporária com a extensão dada.</summary>
+        /// <summary>Builds a unique path in the temp folder with the given extension.</summary>
         private static string NewTempPath(string extension) =>
             Path.Combine(Path.GetTempPath(), $"fwzprobe_{Guid.NewGuid():N}{extension}");
 
-        /// <summary>Apaga um ficheiro se existir, ignorando falhas (best-effort).</summary>
+        /// <summary>Deletes a file if it exists, ignoring failures (best-effort).</summary>
         private static void TryDelete(string path)
         {
             try { if (File.Exists(path)) File.Delete(path); }
-            catch { /* limpeza best-effort */ }
+            catch { /* best-effort cleanup */ }
         }
     }
 }

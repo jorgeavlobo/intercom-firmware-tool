@@ -1,11 +1,11 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <!-- SharpExt4.dll é mixed-mode C++/CLI e Ijwhost.dll é nativa x64:
-         todo o processo tem de correr como x64. -->
+    <!-- SharpExt4.dll is mixed-mode C++/CLI and Ijwhost.dll is native x64:
+         the whole process must run as x64. -->
     <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
 
@@ -16,15 +16,15 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- ZipCrypto (password tradicional do ZIP) não é suportado pelo
-         System.IO.Compression; a SharpZipLib suporta. -->
+    <!-- ZipCrypto (the traditional ZIP password) is not supported by
+         System.IO.Compression; SharpZipLib supports it. -->
     <PackageReference Include="SharpZipLib" Version="1.4.2" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- TargetPath achata o caminho: as DLLs vão para a RAIZ do output (ao
-         lado do .exe), não para bin\...\lib\SharpExt4\. A Ijwhost.dll nativa
-         só é encontrada pelo loader se estiver ao lado do executável. -->
+    <!-- TargetPath flattens the path: the DLLs go to the output ROOT (next to
+         the .exe), not to bin\...\lib\SharpExt4\. The native Ijwhost.dll is
+         only found by the loader if it sits next to the executable. -->
     <None Update="lib\SharpExt4\DiskPartitionInfo.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <TargetPath>DiskPartitionInfo.dll</TargetPath>
