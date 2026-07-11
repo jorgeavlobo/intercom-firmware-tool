@@ -22,11 +22,15 @@
                      VerticalAlignment="Center"/>
         </StackPanel>
 
-        <!-- Row 1: test button — read the ext4 from inside a .fwz -->
-        <Button x:Name="BtnReadFwz" Grid.Row="1" HorizontalAlignment="Left"
-                Padding="12,6" Margin="0,0,0,8"
-                Content="Choose .fwz and read…"
-                Click="BtnReadFwz_Click"/>
+        <!-- Row 1: test buttons — read, and the write proof of concept -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+            <Button x:Name="BtnReadFwz" Padding="12,6" Margin="0,0,8,0"
+                    Content="Choose .fwz and read…"
+                    Click="BtnReadFwz_Click"/>
+            <Button x:Name="BtnWriteTest" Padding="12,6"
+                    Content="Choose .fwz and TEST WRITE…"
+                    Click="BtnWriteTest_Click"/>
+        </StackPanel>
 
         <!-- Row 2: result label -->
         <TextBlock Grid.Row="2" Text="Result:" Margin="0,0,0,4"/>

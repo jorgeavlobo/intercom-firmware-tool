@@ -12,6 +12,22 @@ namespace IntercomFirmwareTool.Core
         string SelectedEntry,
         string Content);
 
+    /// <summary>Password, selected entry and the temp path of the extracted bare ext4.</summary>
+    public sealed record FwzExtractResult(
+        string PasswordUsed,
+        string SelectedEntry,
+        string BareImagePath);
+
+    /// <summary>Result of the .fwz write proof of concept.</summary>
+    public sealed record FwzWriteResult(
+        string PasswordUsed,
+        string SelectedEntry,
+        string TargetFile,
+        bool CanWrite,
+        string Before,
+        string After,
+        bool Persisted);
+
     /// <summary>
     /// Replicates (read-only) the fquinto installer flow up to the ext4 image:
     /// opens the .fwz (a ZipCrypto ZIP), tries the known passwords, picks the
@@ -34,6 +50,49 @@ namespace IntercomFirmwareTool.Core
         /// <param name="fwzPath">Path to the .fwz file.</param>
         /// <param name="fileInsideImage">File inside the ext4, e.g. "/etc/hostname".</param>
         public static FwzReadResult ReadFileFromFwz(string fwzPath, string fileInsideImage)
+        {
+            FwzExtractResult ex = ExtractBareImage(fwzPath);
+            try
+            {
+                string content = Ext4Probe.ReadFile(ex.BareImagePath, fileInsideImage);
+                return new FwzReadResult(ex.PasswordUsed, ex.SelectedEntry, content);
+            }
+            finally
+            {
+                TryDelete(ex.BareImagePath);
+            }
+        }
+
+        /// <summary>
+        /// Runs the same chain and then a WRITE proof of concept on the
+        /// extracted ext4 (all on temp files): mounts it read-write, reports
+        /// <c>CanWrite</c>, and if writable appends a test line to
+        /// <paramref name="targetFile"/> and verifies it persists after a raw
+        /// round-trip. The caller's .fwz is never modified.
+        /// </summary>
+        public static FwzWriteResult TestWriteFromFwz(string fwzPath, string targetFile, string testLine)
+        {
+            FwzExtractResult ex = ExtractBareImage(fwzPath);
+            try
+            {
+                Ext4WriteResult w = Ext4Probe.TestAppendPersists(ex.BareImagePath, targetFile, testLine);
+                return new FwzWriteResult(
+                    ex.PasswordUsed, ex.SelectedEntry, targetFile,
+                    w.CanWrite, w.Before, w.After, w.Persisted);
+            }
+            finally
+            {
+                TryDelete(ex.BareImagePath);
+            }
+        }
+
+        /// <summary>
+        /// Opens the .fwz, finds the password, selects the non-recovery ".gz"
+        /// payload and gunzips it into a temporary bare ext4 file. Returns the
+        /// password, the entry name and the temp path — the caller must delete
+        /// the temp file when done.
+        /// </summary>
+        public static FwzExtractResult ExtractBareImage(string fwzPath)
         {
             using var zip = new ZipFile(fwzPath);
 
@@ -78,8 +137,6 @@ namespace IntercomFirmwareTool.Core
             //    straight into the .ext4 temp file — without writing the
             //    intermediate .gz to disk (less I/O, less data left in %TEMP%).
             //    The copy is bounded so a bad .gz cannot fill the temp disk.
-            //    Then read the requested file reusing the ext4 reader (which
-            //    handles the MBR wrapping of bare images itself).
             string extTemp = NewTempPath(".ext4");
             try
             {
@@ -88,13 +145,12 @@ namespace IntercomFirmwareTool.Core
                 using (var extOut = new FileStream(extTemp, FileMode.CreateNew, FileAccess.Write))
                     CopyBounded(gunzip, extOut, MaxImageBytes);
 
-                string content = Ext4Probe.ReadFile(extTemp, fileInsideImage);
-
-                return new FwzReadResult(goodPassword, selected.Name, content);
+                return new FwzExtractResult(goodPassword, selected.Name, extTemp);
             }
-            finally
+            catch
             {
                 TryDelete(extTemp);
+                throw;
             }
         }
 

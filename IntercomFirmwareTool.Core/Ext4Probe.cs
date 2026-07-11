@@ -3,6 +3,13 @@ using System.Text;
 
 namespace IntercomFirmwareTool.Core
 {
+    /// <summary>Result of the ext4 write-persistence proof of concept.</summary>
+    public sealed record Ext4WriteResult(
+        bool CanWrite,
+        string Before,
+        string After,
+        bool Persisted);
+
     public static class Ext4Probe
     {
         private const int SectorSize = 512;
@@ -59,6 +66,15 @@ namespace IntercomFirmwareTool.Core
             // The real API is Open(ExtDisk, Partition) — two arguments.
             // (The SharpExt4 README shows only one, but it's wrong.)
             using var fs = ExtFileSystem.Open(disk, disk.Partitions[0]);
+            return ReadAllTextFromFs(fs, fileInsideImage);
+        }
+
+        /// <summary>
+        /// Reads a whole file from an already-open filesystem as text, with a
+        /// bounded size so a huge file can't exhaust memory.
+        /// </summary>
+        private static string ReadAllTextFromFs(ExtFileSystem fs, string fileInsideImage)
+        {
             using var file = fs.OpenFile(fileInsideImage, FileMode.Open, FileAccess.Read);
 
             const long maxBytes = 64L * 1024 * 1024; // 64 MiB: plenty for text/config
@@ -79,6 +95,92 @@ namespace IntercomFirmwareTool.Core
                 total += n;
             }
             return Encoding.UTF8.GetString(buf, 0, total);
+        }
+
+        /// <summary>
+        /// Proof-of-concept WRITE test on a bare ext4 image, all on temp files:
+        /// wraps the image in an MBR disk, mounts it read-write and reports
+        /// <c>CanWrite</c>; if writable, appends <paramref name="testLine"/> to
+        /// <paramref name="targetFile"/>, flushes/unmounts, slices the modified
+        /// partition back out to a raw ext4 (same format and size), reopens it
+        /// and re-reads the file to confirm the change persisted.
+        /// Never touches the caller's original files.
+        /// </summary>
+        public static Ext4WriteResult TestAppendPersists(
+            string bareImagePath, string targetFile, string testLine)
+        {
+            // Content before any change (read via the normal wrap-and-read path).
+            string before = ReadFile(bareImagePath, targetFile);
+
+            long bareSize = new FileInfo(bareImagePath).Length;
+            string disk = WrapBareFilesystem(bareImagePath);
+            string modifiedBare = Path.Combine(
+                Path.GetTempPath(), $"sharpext4_out_{Guid.NewGuid():N}.ext4");
+            try
+            {
+                bool canWrite;
+
+                // --- write scope: everything is flushed/unmounted when this
+                //     block ends (fs then disk are disposed in reverse order). ---
+                using (var d = ExtDisk.Open(disk))
+                using (var fs = ExtFileSystem.Open(d, d.Partitions[0]))
+                {
+                    canWrite = fs.CanWrite;
+                    if (canWrite)
+                    {
+                        // Read current content, append the test line, write the
+                        // whole file back (Create truncates then rewrites).
+                        string current = ReadAllTextFromFs(fs, targetFile);
+                        string updated = current;
+                        if (updated.Length > 0 && !updated.EndsWith("\n"))
+                            updated += "\n";
+                        updated += testLine + "\n";
+
+                        byte[] bytes = Encoding.UTF8.GetBytes(updated);
+                        using var wf = fs.OpenFile(targetFile, FileMode.Create, FileAccess.Write);
+                        wf.Write(bytes, 0, bytes.Length);
+                    }
+                }
+
+                if (!canWrite)
+                    return new Ext4WriteResult(false, before, before, false);
+
+                // Back to a raw ext4: copy the partition region [1 MiB, 1 MiB+size)
+                // out of the (now modified) wrapper disk.
+                SlicePartitionToBare(disk, modifiedBare, bareSize);
+
+                // Reopen the raw ext4 from scratch and re-read the file.
+                string after = ReadFile(modifiedBare, targetFile);
+                bool persisted = after.Contains(testLine);
+                return new Ext4WriteResult(true, before, after, persisted);
+            }
+            finally
+            {
+                TryDelete(disk);
+                TryDelete(modifiedBare);
+            }
+        }
+
+        /// <summary>
+        /// Copies the partition region (offset 1 MiB, length <paramref name="bareSize"/>)
+        /// out of a wrapper disk into a standalone raw ext4 file.
+        /// </summary>
+        private static void SlicePartitionToBare(string diskImagePath, string outBarePath, long bareSize)
+        {
+            using var inFs = new FileStream(diskImagePath, FileMode.Open, FileAccess.Read);
+            using var outFs = new FileStream(outBarePath, FileMode.CreateNew, FileAccess.Write);
+            inFs.Seek(PartitionOffsetBytes, SeekOrigin.Begin);
+
+            var buffer = new byte[81920];
+            long remaining = bareSize;
+            while (remaining > 0)
+            {
+                int toRead = (int)Math.Min(buffer.Length, remaining);
+                int n = inFs.Read(buffer, 0, toRead);
+                if (n <= 0) break;
+                outFs.Write(buffer, 0, n);
+                remaining -= n;
+            }
         }
 
         /// <summary>
