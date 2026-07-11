@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj" Id="9c50d34e-09e9-49d2-aa00-e00d2d760b20" />
+  <Project Path="IntercomFirmwareTool.Core/IntercomFirmwareTool.Core.csproj" Id="ff71f4b7-a286-40d2-8a89-7d160123026c" />
+</Solution>

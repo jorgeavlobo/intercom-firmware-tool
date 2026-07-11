@@ -1,0 +1,39 @@
+{
+  "runtimeTarget": {
+    "name": "net6.0",
+    "signature": ""
+  },
+  "compilationOptions": {},
+  "targets": {
+    "net6.0": {
+      "SharpExt4/1.0.0": {
+        "dependencies": {
+          "DiskPartitionInfo": "1.0.0.0"
+        },
+        "runtime": {
+          "SharpExt4.dll": {}
+        }
+      },
+      "DiskPartitionInfo/1.0.0.0": {
+        "runtime": {
+          "DiskPartitionInfo.dll": {
+            "assemblyVersion": "1.0.0.0",
+            "fileVersion": "1.0.0.0"
+          }
+        }
+      }
+    }
+  },
+  "libraries": {
+    "SharpExt4/1.0.0": {
+      "type": "project",
+      "serviceable": false,
+      "sha512": ""
+    },
+    "DiskPartitionInfo/1.0.0.0": {
+      "type": "reference",
+      "serviceable": false,
+      "sha512": ""
+    }
+  }
+}
