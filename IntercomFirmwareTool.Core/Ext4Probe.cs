@@ -45,6 +45,10 @@ namespace IntercomFirmwareTool.Core
             // C++/CLI) no fim — em sucesso ou em exceção — evitando fugas de
             // handles nativos.
             using var disk = ExtDisk.Open(diskImagePath);
+            if (disk.Partitions.Count == 0)
+                throw new InvalidOperationException(
+                    "A imagem não tem partições reconhecíveis (MBR sem entradas válidas).");
+
             // A API real é Open(ExtDisk, Partition) — dois argumentos.
             // (O README da SharpExt4 mostra só um, mas está errado.)
             using var fs = ExtFileSystem.Open(disk, disk.Partitions[0]);
@@ -61,7 +65,9 @@ namespace IntercomFirmwareTool.Core
             while (total < len)
             {
                 int n = file.Read(buf, total, len - total);
-                if (n <= 0) break;
+                if (n <= 0)
+                    throw new EndOfStreamException(
+                        $"Leitura incompleta: esperados {len} bytes, lidos {total}.");
                 total += n;
             }
             return Encoding.UTF8.GetString(buf, 0, total);
