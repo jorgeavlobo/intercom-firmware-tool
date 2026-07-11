@@ -22,11 +22,15 @@
                      VerticalAlignment="Center"/>
         </StackPanel>
 
-        <!-- Linha 1: botão que escolhe a imagem e lê -->
-        <Button x:Name="BtnRead" Grid.Row="1" HorizontalAlignment="Left"
-                Padding="12,6" Margin="0,0,0,8"
-                Content="Escolher imagem ext4 e ler…"
-                Click="BtnRead_Click"/>
+        <!-- Linha 1: os dois botões de teste -->
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+            <Button x:Name="BtnRead" Padding="12,6" Margin="0,0,8,0"
+                    Content="Escolher imagem ext4 e ler…"
+                    Click="BtnRead_Click"/>
+            <Button x:Name="BtnReadFwz" Padding="12,6"
+                    Content="Escolher .fwz e ler cadeia completa…"
+                    Click="BtnReadFwz_Click"/>
+        </StackPanel>
 
         <!-- Linha 2: rótulo do resultado -->
         <TextBlock Grid.Row="2" Text="Resultado:" Margin="0,0,0,4"/>

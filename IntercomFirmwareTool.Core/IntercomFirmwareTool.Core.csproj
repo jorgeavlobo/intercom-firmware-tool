@@ -16,6 +16,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- ZipCrypto (password tradicional do ZIP) não é suportado pelo
+         System.IO.Compression; a SharpZipLib suporta. -->
+    <PackageReference Include="SharpZipLib" Version="1.4.2" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- TargetPath achata o caminho: as DLLs vão para a RAIZ do output (ao
          lado do .exe), não para bin\...\lib\SharpExt4\. A Ijwhost.dll nativa
          só é encontrada pelo loader se estiver ao lado do executável. -->
