@@ -107,6 +107,27 @@ namespace IntercomFirmwareTool.App
             });
         }
 
+        /// <summary>
+        /// Button: run the MD5-crypt ($1$) self-test against the known-good
+        /// vectors (verified against openssl). No file needed — pure computation.
+        /// </summary>
+        private async void BtnMd5Test_Click(object sender, RoutedEventArgs e)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("MD5-crypt ($1$) self-test — vectors verified against `openssl passwd -1`");
+            sb.AppendLine();
+
+            await RunAndShow(sb, () =>
+            {
+                (bool allPass, string report) = Md5Crypt.SelfTest();
+                sb.Append(report);
+                sb.AppendLine();
+                sb.AppendLine(allPass
+                    ? "ALL PASS ✅  the C# MD5-crypt matches openssl byte-for-byte"
+                    : "SOME FAILED ❌  the implementation does NOT match — do not use it yet");
+            });
+        }
+
         // ---- Shared helpers --------------------------------------------------
 
         /// <summary>Returns the internal path from the text box (or /etc/hostname).</summary>
@@ -139,6 +160,7 @@ namespace IntercomFirmwareTool.App
         {
             BtnReadFwz.IsEnabled = false;
             BtnWriteTest.IsEnabled = false;
+            BtnMd5Test.IsEnabled = false;
             TxtResult.Text = "Processing…";
             try
             {
@@ -153,6 +175,7 @@ namespace IntercomFirmwareTool.App
             {
                 BtnReadFwz.IsEnabled = true;
                 BtnWriteTest.IsEnabled = true;
+                BtnMd5Test.IsEnabled = true;
             }
 
             TxtResult.Text = sb.ToString();

@@ -27,9 +27,12 @@
             <Button x:Name="BtnReadFwz" Padding="12,6" Margin="0,0,8,0"
                     Content="Choose .fwz and read…"
                     Click="BtnReadFwz_Click"/>
-            <Button x:Name="BtnWriteTest" Padding="12,6"
+            <Button x:Name="BtnWriteTest" Padding="12,6" Margin="0,0,8,0"
                     Content="Choose .fwz and TEST WRITE…"
                     Click="BtnWriteTest_Click"/>
+            <Button x:Name="BtnMd5Test" Padding="12,6"
+                    Content="Test MD5-crypt"
+                    Click="BtnMd5Test_Click"/>
         </StackPanel>
 
         <!-- Row 2: result label -->
