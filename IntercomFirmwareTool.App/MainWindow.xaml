@@ -1,12 +1,41 @@
-﻿<Window x:Class="IntercomFirmwareTool.App.MainWindow"
+<Window x:Class="IntercomFirmwareTool.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:IntercomFirmwareTool.App"
         mc:Ignorable="d"
-        Title="MainWindow" Height="450" Width="800">
-    <Grid>
+        Title="Teste SharpExt4 (leitura ext4)" Height="500" Width="800">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
 
+        <!-- Linha 0: caminho do ficheiro DENTRO da imagem -->
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="Ficheiro a ler dentro da imagem:"
+                       VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <TextBox x:Name="TxtInternalPath" Width="300" Text="/etc/hostname"
+                     VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <!-- Linha 1: botão que escolhe a imagem e lê -->
+        <Button x:Name="BtnRead" Grid.Row="1" HorizontalAlignment="Left"
+                Padding="12,6" Margin="0,0,0,8"
+                Content="Escolher imagem ext4 e ler…"
+                Click="BtnRead_Click"/>
+
+        <!-- Linha 2: rótulo do resultado -->
+        <TextBlock Grid.Row="2" Text="Resultado:" Margin="0,0,0,4"/>
+
+        <!-- Linha 3: caixa de resultado (multi-linha, scroll, só-leitura) -->
+        <TextBox x:Name="TxtResult" Grid.Row="3"
+                 IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                 VerticalScrollBarVisibility="Auto"
+                 HorizontalScrollBarVisibility="Auto"
+                 FontFamily="Consolas" FontSize="12"/>
     </Grid>
 </Window>

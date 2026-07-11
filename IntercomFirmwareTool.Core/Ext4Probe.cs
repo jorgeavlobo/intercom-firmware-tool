@@ -1,19 +1,38 @@
-﻿using SharpExt4;
+using SharpExt4;
 using System.Text;
 
 namespace IntercomFirmwareTool.Core
 {
     public static class Ext4Probe
     {
+        /// <summary>
+        /// Abre uma imagem ext4, entra na primeira partição e lê (só leitura)
+        /// o conteúdo de um ficheiro lá de dentro, devolvendo-o como texto.
+        /// </summary>
+        /// <param name="imagePath">Caminho para a imagem ext4 no disco.</param>
+        /// <param name="fileInsideImage">Caminho do ficheiro dentro da imagem, ex.: "/etc/hostname".</param>
         public static string ReadFile(string imagePath, string fileInsideImage)
         {
             var disk = ExtDisk.Open(imagePath);
             var fs = ExtFileSystem.Open(disk.Partitions[0]);
             var file = fs.OpenFile(fileInsideImage, FileMode.Open, FileAccess.Read);
-            var buf = new byte[file.Length];
-            file.Read(buf, 0, buf.Length);
-            file.Close();
-            return Encoding.UTF8.GetString(buf);
+            try
+            {
+                var len = (int)file.Length;
+                var buf = new byte[len];
+                int total = 0;
+                while (total < len)
+                {
+                    int n = file.Read(buf, total, len - total);
+                    if (n <= 0) break;
+                    total += n;
+                }
+                return Encoding.UTF8.GetString(buf, 0, total);
+            }
+            finally
+            {
+                file.Close();
+            }
         }
     }
 }
