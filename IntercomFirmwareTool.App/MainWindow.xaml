@@ -5,7 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:IntercomFirmwareTool.App"
         mc:Ignorable="d"
-        Title="Teste SharpExt4 (leitura ext4)" Height="500" Width="800">
+        Title="Teste: ler ext4 de dentro de .fwz" Height="500" Width="800">
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -22,15 +22,11 @@
                      VerticalAlignment="Center"/>
         </StackPanel>
 
-        <!-- Linha 1: os dois botões de teste -->
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
-            <Button x:Name="BtnRead" Padding="12,6" Margin="0,0,8,0"
-                    Content="Escolher imagem ext4 e ler…"
-                    Click="BtnRead_Click"/>
-            <Button x:Name="BtnReadFwz" Padding="12,6"
-                    Content="Escolher .fwz e ler cadeia completa…"
-                    Click="BtnReadFwz_Click"/>
-        </StackPanel>
+        <!-- Linha 1: botão de teste — ler o ext4 de dentro de um .fwz -->
+        <Button x:Name="BtnReadFwz" Grid.Row="1" HorizontalAlignment="Left"
+                Padding="12,6" Margin="0,0,0,8"
+                Content="Escolher .fwz e ler…"
+                Click="BtnReadFwz_Click"/>
 
         <!-- Linha 2: rótulo do resultado -->
         <TextBlock Grid.Row="2" Text="Resultado:" Margin="0,0,0,4"/>

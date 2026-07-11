@@ -17,35 +17,7 @@ namespace IntercomFirmwareTool.App
             InitializeComponent();
         }
 
-        // ---- Botão 1: ler diretamente uma imagem ext4 -------------------------
-        private async void BtnRead_Click(object sender, RoutedEventArgs e)
-        {
-            var dialog = new OpenFileDialog
-            {
-                Title = "Escolhe a imagem ext4",
-                Filter = "Imagens de disco (*.img;*.bin;*.ext4)|*.img;*.bin;*.ext4|Todos os ficheiros (*.*)|*.*"
-            };
-            if (dialog.ShowDialog(this) != true)
-                return;
-
-            string imagePath = dialog.FileName;
-            string fileInside = InternalPath();
-
-            var sb = new StringBuilder();
-            AppendDiagnostics(sb);
-            sb.AppendLine($"Imagem        : {imagePath}");
-            sb.AppendLine($"Ficheiro a ler: {fileInside}");
-            sb.AppendLine();
-
-            await RunAndShow(sb, () =>
-            {
-                string content = Ext4Probe.ReadFile(imagePath, fileInside);
-                sb.AppendLine("SUCESSO:");
-                sb.AppendLine(content);
-            });
-        }
-
-        // ---- Botão 2: cadeia completa a partir de um .fwz ---------------------
+        // ---- Botão: cadeia completa a partir de um .fwz ----------------------
         private async void BtnReadFwz_Click(object sender, RoutedEventArgs e)
         {
             var dialog = new OpenFileDialog
@@ -101,7 +73,6 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private async Task RunAndShow(StringBuilder sb, Action work)
         {
-            BtnRead.IsEnabled = false;
             BtnReadFwz.IsEnabled = false;
             TxtResult.Text = "A processar…";
             try
@@ -115,7 +86,6 @@ namespace IntercomFirmwareTool.App
             }
             finally
             {
-                BtnRead.IsEnabled = true;
                 BtnReadFwz.IsEnabled = true;
             }
 
