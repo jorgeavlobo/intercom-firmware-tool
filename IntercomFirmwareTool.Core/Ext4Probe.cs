@@ -83,14 +83,15 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// Detects a plausible MBR: the 0x55AA signature at the end of the first
-        /// sector plus at least one non-empty partition entry. If present, the
-        /// image is already a partitioned disk and should be read directly (not
-        /// wrapped).
+        /// sector plus at least one partition entry that is non-empty, starts
+        /// past the MBR, and fits within the file. If present, the image is
+        /// already a partitioned disk and should be read directly (not wrapped).
         /// </summary>
         private static bool HasValidMbr(string imagePath)
         {
             using var fs = new FileStream(imagePath, FileMode.Open, FileAccess.Read);
-            if (fs.Length < SectorSize) return false;
+            long fileLength = fs.Length;
+            if (fileLength < SectorSize) return false;
 
             var mbr = new byte[SectorSize];
             fs.ReadExactly(mbr);
@@ -100,11 +101,14 @@ namespace IntercomFirmwareTool.Core
             {
                 int entry = 446 + i * 16;
                 byte type = mbr[entry + 4];
-                uint sectors = (uint)(mbr[entry + 12]
-                                    | (mbr[entry + 13] << 8)
-                                    | (mbr[entry + 14] << 16)
-                                    | (mbr[entry + 15] << 24));
-                if (type != 0 && sectors != 0) return true;
+                uint startSector = ReadUInt32LE(mbr, entry + 8);
+                uint sectorCount = ReadUInt32LE(mbr, entry + 12);
+                if (type == 0 || startSector == 0 || sectorCount == 0) continue;
+
+                // The declared partition must start past the MBR and fit inside
+                // the file — this rejects a stray 0x55AA in a bare ext4 image.
+                long end = ((long)startSector + sectorCount) * SectorSize;
+                if (end <= fileLength) return true;
             }
             return false;
         }
@@ -177,6 +181,13 @@ namespace IntercomFirmwareTool.Core
                 throw;
             }
         }
+
+        /// <summary>Reads a little-endian uint32 from a buffer at the given offset.</summary>
+        private static uint ReadUInt32LE(byte[] buffer, int offset) =>
+            (uint)(buffer[offset]
+                 | (buffer[offset + 1] << 8)
+                 | (buffer[offset + 2] << 16)
+                 | (buffer[offset + 3] << 24));
 
         /// <summary>Writes a uint32 in little-endian into a buffer at the given offset.</summary>
         private static void WriteUInt32LE(byte[] buffer, int offset, uint value)

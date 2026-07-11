@@ -119,8 +119,9 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// Checks whether a password decrypts the entry: since each entry is a
-        /// .gz, the decrypted content must start with the gzip magic bytes
-        /// (0x1F 0x8B). This avoids ZipCrypto false positives.
+        /// .gz, the decrypted content must start with the gzip header — magic
+        /// bytes 0x1F 0x8B followed by the deflate compression method 0x08.
+        /// This makes a ZipCrypto false positive extremely unlikely (~1/16M).
         /// </summary>
         private static bool PasswordOpensEntry(ZipFile zip, ZipEntry entry, string password)
         {
@@ -130,7 +131,8 @@ namespace IntercomFirmwareTool.Core
                 using var s = zip.GetInputStream(entry);
                 int b0 = s.ReadByte();
                 int b1 = s.ReadByte();
-                return b0 == 0x1F && b1 == 0x8B;
+                int b2 = s.ReadByte();
+                return b0 == 0x1F && b1 == 0x8B && b2 == 0x08;
             }
             catch (ZipException)
             {
