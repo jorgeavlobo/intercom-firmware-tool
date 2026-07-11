@@ -106,26 +106,35 @@ namespace IntercomFirmwareTool.Core
                 Path.GetTempPath(),
                 $"sharpext4_probe_{Guid.NewGuid():N}.img");
 
-            using (var outFs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write))
+            try
             {
-                var mbr = new byte[SectorSize];
-                const int entry = 446; // primeira entrada da tabela de partições
-                mbr[entry + 0] = 0x00;                                     // não-arrancável
-                mbr[entry + 4] = 0x83;                                     // tipo: Linux
-                WriteUInt32LE(mbr, entry + 8, (uint)PartitionStartSector); // LBA inicial
-                WriteUInt32LE(mbr, entry + 12, (uint)sectorCount);         // nº de setores
-                mbr[510] = 0x55;                                           // assinatura de MBR
-                mbr[511] = 0xAA;
-                outFs.Write(mbr, 0, SectorSize);
+                using (var outFs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write))
+                {
+                    var mbr = new byte[SectorSize];
+                    const int entry = 446; // primeira entrada da tabela de partições
+                    mbr[entry + 0] = 0x00;                                     // não-arrancável
+                    mbr[entry + 4] = 0x83;                                     // tipo: Linux
+                    WriteUInt32LE(mbr, entry + 8, (uint)PartitionStartSector); // LBA inicial
+                    WriteUInt32LE(mbr, entry + 12, (uint)sectorCount);         // nº de setores
+                    mbr[510] = 0x55;                                           // assinatura de MBR
+                    mbr[511] = 0xAA;
+                    outFs.Write(mbr, 0, SectorSize);
 
-                // Salta para o offset da partição (o intervalo fica a zeros) e
-                // copia lá para dentro os dados do ext4.
-                outFs.Seek(PartitionOffsetBytes, SeekOrigin.Begin);
-                using var inFs = new FileStream(bareImagePath, FileMode.Open, FileAccess.Read);
-                inFs.CopyTo(outFs);
+                    // Salta para o offset da partição (o intervalo fica a zeros) e
+                    // copia lá para dentro os dados do ext4.
+                    outFs.Seek(PartitionOffsetBytes, SeekOrigin.Begin);
+                    using var inFs = new FileStream(bareImagePath, FileMode.Open, FileAccess.Read);
+                    inFs.CopyTo(outFs);
+                }
+
+                return tempPath;
             }
-
-            return tempPath;
+            catch
+            {
+                // Se a criação/cópia falhar a meio, não deixa o temporário órfão.
+                TryDelete(tempPath);
+                throw;
+            }
         }
 
         private static void WriteUInt32LE(byte[] buffer, int offset, uint value)
