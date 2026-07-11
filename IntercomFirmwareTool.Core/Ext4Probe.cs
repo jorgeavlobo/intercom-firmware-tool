@@ -23,7 +23,10 @@ namespace IntercomFirmwareTool.Core
         /// <param name="fileInsideImage">Ficheiro dentro da imagem, ex.: "/etc/hostname".</param>
         public static string ReadFile(string imagePath, string fileInsideImage)
         {
-            if (IsBareExt4(imagePath))
+            // Uma imagem já particionada (MBR válido) lê-se diretamente; só se
+            // embrulha quando NÃO há MBR e o conteúdo é mesmo ext4 cru. Assim
+            // evita-se embrulhar por engano uma imagem já particionada.
+            if (!HasValidMbr(imagePath) && IsBareExt4(imagePath))
             {
                 string wrapped = WrapBareFilesystem(imagePath);
                 try
@@ -71,6 +74,33 @@ namespace IntercomFirmwareTool.Core
                 total += n;
             }
             return Encoding.UTF8.GetString(buf, 0, total);
+        }
+
+        /// <summary>
+        /// Deteta um MBR plausível: assinatura 0x55AA no fim do 1.º setor e pelo
+        /// menos uma entrada de partição não-vazia. Se existir, a imagem já é um
+        /// disco particionado e deve ser lida diretamente (não embrulhada).
+        /// </summary>
+        private static bool HasValidMbr(string imagePath)
+        {
+            using var fs = new FileStream(imagePath, FileMode.Open, FileAccess.Read);
+            if (fs.Length < SectorSize) return false;
+
+            var mbr = new byte[SectorSize];
+            fs.ReadExactly(mbr);
+            if (mbr[510] != 0x55 || mbr[511] != 0xAA) return false;
+
+            for (int i = 0; i < 4; i++)
+            {
+                int entry = 446 + i * 16;
+                byte type = mbr[entry + 4];
+                uint sectors = (uint)(mbr[entry + 12]
+                                    | (mbr[entry + 13] << 8)
+                                    | (mbr[entry + 14] << 16)
+                                    | (mbr[entry + 15] << 24));
+                if (type != 0 && sectors != 0) return true;
+            }
+            return false;
         }
 
         /// <summary>
@@ -123,8 +153,13 @@ namespace IntercomFirmwareTool.Core
                     // Salta para o offset da partição (o intervalo fica a zeros) e
                     // copia lá para dentro os dados do ext4.
                     outFs.Seek(PartitionOffsetBytes, SeekOrigin.Begin);
-                    using var inFs = new FileStream(bareImagePath, FileMode.Open, FileAccess.Read);
-                    inFs.CopyTo(outFs);
+                    using (var inFs = new FileStream(bareImagePath, FileMode.Open, FileAccess.Read))
+                        inFs.CopyTo(outFs);
+
+                    // Garante que a partição declarada no MBR existe por inteiro
+                    // (padding a zeros se fsSize não for múltiplo do setor), para
+                    // a SharpExt4 poder ler até ao fim sem passar do EOF.
+                    outFs.SetLength(PartitionOffsetBytes + sectorCount * (long)SectorSize);
                 }
 
                 return tempPath;
