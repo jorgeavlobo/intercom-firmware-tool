@@ -195,6 +195,82 @@ namespace IntercomFirmwareTool.App
             });
         }
 
+        /// <summary>
+        /// Button: full write pipeline — pick a .fwz and a public key, apply the
+        /// SSH-enable edits, repack a NEW .fwz (chosen via Save As), and
+        /// round-trip it (reopen and re-validate). The output is for validation,
+        /// not flashing; the input .fwz is never modified.
+        /// </summary>
+        private async void BtnBuildFwz_Click(object sender, RoutedEventArgs e)
+        {
+            var fwzDlg = new OpenFileDialog
+            {
+                Title = "Choose the .fwz file",
+                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*"
+            };
+            if (fwzDlg.ShowDialog(this) != true)
+                return;
+            string fwzPath = fwzDlg.FileName;
+
+            var keyDlg = new OpenFileDialog
+            {
+                Title = "Choose your SSH public key (.pub) — Cancel to use a built-in sample",
+                Filter = "Public key (*.pub)|*.pub|All files (*.*)|*.*"
+            };
+            string publicKey, keySource;
+            if (keyDlg.ShowDialog(this) == true)
+            {
+                publicKey = File.ReadAllText(keyDlg.FileName).Trim();
+                keySource = keyDlg.FileName;
+            }
+            else
+            {
+                publicKey = SampleKey;
+                keySource = "(built-in sample key)";
+            }
+
+            var saveDlg = new SaveFileDialog
+            {
+                Title = "Save the modified .fwz as… (for validation, NOT for flashing)",
+                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*",
+                FileName = Path.GetFileNameWithoutExtension(fwzPath) + "_ssh.fwz",
+                InitialDirectory = Path.GetDirectoryName(fwzPath)
+            };
+            if (saveDlg.ShowDialog(this) != true)
+                return;
+            string outputPath = saveDlg.FileName;
+
+            const string rootPassword = "pwned123"; // fquinto default; MD5-crypt path
+            var opts = new EnableSshOptions(publicKey, rootPassword);
+
+            var sb = new StringBuilder();
+            AppendDiagnostics(sb);
+            sb.AppendLine($".fwz in   : {fwzPath}");
+            sb.AppendLine($"Public key: {keySource}");
+            sb.AppendLine($"Root pw   : {rootPassword}  (MD5-crypt $1$root$…)");
+            sb.AppendLine($".fwz out  : {outputPath}");
+            sb.AppendLine();
+
+            await RunAndShow(sb, () =>
+            {
+                FwzBuildResult r = FwzProbe.BuildModifiedFwz(fwzPath, opts, outputPath);
+                sb.AppendLine($"Password used        : {r.PasswordUsed}");
+                sb.AppendLine($"Modified inner entry : {r.SelectedEntry}");
+                sb.AppendLine($"Wrote                : {r.OutputPath}");
+                sb.AppendLine();
+                sb.AppendLine("Round-trip (reopened the OUTPUT .fwz through the full read chain):");
+                foreach (var c in r.RoundTripChecks)
+                {
+                    string detail = string.IsNullOrEmpty(c.Detail) ? "" : $"   [{c.Detail}]";
+                    sb.AppendLine($"  {(c.Pass ? "PASS" : "FAIL")}  {c.Name}{detail}");
+                }
+                sb.AppendLine();
+                sb.AppendLine(r.RoundTripAllPass
+                    ? "ALL PASS ✅  the modified .fwz repacked, decrypted, gunzipped and kept every edit"
+                    : "SOME FAILED ❌  see the failing checks above");
+            });
+        }
+
         // ---- Shared helpers --------------------------------------------------
 
         /// <summary>Returns the internal path from the text box (or /etc/hostname).</summary>
@@ -229,6 +305,7 @@ namespace IntercomFirmwareTool.App
             BtnWriteTest.IsEnabled = false;
             BtnMd5Test.IsEnabled = false;
             BtnSshEnable.IsEnabled = false;
+            BtnBuildFwz.IsEnabled = false;
             TxtResult.Text = "Processing…";
             try
             {
@@ -245,6 +322,7 @@ namespace IntercomFirmwareTool.App
                 BtnWriteTest.IsEnabled = true;
                 BtnMd5Test.IsEnabled = true;
                 BtnSshEnable.IsEnabled = true;
+                BtnBuildFwz.IsEnabled = true;
             }
 
             TxtResult.Text = sb.ToString();

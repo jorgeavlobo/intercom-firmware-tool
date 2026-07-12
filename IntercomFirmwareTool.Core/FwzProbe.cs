@@ -35,6 +35,14 @@ namespace IntercomFirmwareTool.Core
         bool AllPass,
         IReadOnlyList<Ext4Check> Checks);
 
+    /// <summary>Result of building a modified .fwz and round-tripping it.</summary>
+    public sealed record FwzBuildResult(
+        string OutputPath,
+        string PasswordUsed,
+        string SelectedEntry,
+        bool RoundTripAllPass,
+        IReadOnlyList<Ext4Check> RoundTripChecks);
+
     /// <summary>
     /// Replicates (read-only) the fquinto installer flow up to the ext4 image:
     /// opens the .fwz (a ZipCrypto ZIP), tries the known passwords, picks the
@@ -116,6 +124,93 @@ namespace IntercomFirmwareTool.Core
                 if (modified != null) TryDelete(modified);
                 TryDelete(ex.BareImagePath);
             }
+        }
+
+        /// <summary>
+        /// Full write pipeline (all on temp files except the chosen output):
+        /// extract → SSH-enable → re-gzip → repack into a NEW .fwz at
+        /// <paramref name="outputPath"/> (all 4 entries DEFLATE level 9 +
+        /// ZipCrypto, like fquinto), then round-trip: reopen the output .fwz
+        /// with our own read chain and re-validate every SSH change. The input
+        /// .fwz is never modified; the output is for validation, not flashing.
+        /// </summary>
+        public static FwzBuildResult BuildModifiedFwz(string inputFwz, EnableSshOptions opts, string outputPath)
+        {
+            FwzExtractResult ex = ExtractBareImage(inputFwz);
+            string? modifiedBare = null;
+            string? modifiedGz = null;
+            try
+            {
+                // 1) Apply Phase A–D to a modified raw ext4.
+                modifiedBare = Ext4Probe.EnableSsh(ex.BareImagePath, opts);
+
+                // 2) Re-gzip the modified ext4 into a temp .gz.
+                modifiedGz = NewTempPath(".gz");
+                using (var inFs = new FileStream(modifiedBare, FileMode.Open, FileAccess.Read))
+                using (var outGz = new FileStream(modifiedGz, FileMode.CreateNew, FileAccess.Write))
+                using (var gz = new GZipStream(outGz, CompressionLevel.SmallestSize))
+                    inFs.CopyTo(gz);
+
+                // 3) Repack a new ZipCrypto .fwz with the modified entry replaced.
+                Repack(inputFwz, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, outputPath);
+
+                // 4) Round-trip: read the OUTPUT .fwz back through our chain and
+                //    re-validate all the SSH edits survived gzip + ZipCrypto zip.
+                FwzExtractResult rt = ExtractBareImage(outputPath);
+                try
+                {
+                    IReadOnlyList<Ext4Check> checks = Ext4Probe.ValidateSsh(rt.BareImagePath, opts);
+                    bool all = true;
+                    foreach (var c in checks) all &= c.Pass;
+                    return new FwzBuildResult(outputPath, ex.PasswordUsed, ex.SelectedEntry, all, checks);
+                }
+                finally
+                {
+                    TryDelete(rt.BareImagePath);
+                }
+            }
+            finally
+            {
+                if (modifiedGz != null) TryDelete(modifiedGz);
+                if (modifiedBare != null) TryDelete(modifiedBare);
+                TryDelete(ex.BareImagePath);
+            }
+        }
+
+        /// <summary>
+        /// Writes a new .fwz: every entry of <paramref name="inputFwz"/> re-added
+        /// with DEFLATE level 9 + ZipCrypto (<paramref name="password"/>), in the
+        /// original order, with <paramref name="modifiedEntryName"/> replaced by
+        /// the bytes of <paramref name="modifiedGzPath"/>. Mirrors fquinto's
+        /// pyminizip.compress_multiple(level=9).
+        /// </summary>
+        private static void Repack(
+            string inputFwz, string password, string modifiedEntryName,
+            string modifiedGzPath, string outputPath)
+        {
+            using var srcZip = new ZipFile(inputFwz) { Password = password };
+            using var outFs = new FileStream(outputPath, FileMode.Create, FileAccess.Write);
+            using var zipOut = new ZipOutputStream(outFs) { Password = password };
+            zipOut.SetLevel(9); // DEFLATE level 9, like fquinto
+
+            foreach (ZipEntry src in srcZip)
+            {
+                if (!src.IsFile) continue;
+                var entry = new ZipEntry(src.Name) { CompressionMethod = CompressionMethod.Deflated };
+                zipOut.PutNextEntry(entry);
+                if (string.Equals(src.Name, modifiedEntryName, StringComparison.Ordinal))
+                {
+                    using var gzFs = new FileStream(modifiedGzPath, FileMode.Open, FileAccess.Read);
+                    gzFs.CopyTo(zipOut);
+                }
+                else
+                {
+                    using var s = srcZip.GetInputStream(src);
+                    s.CopyTo(zipOut);
+                }
+                zipOut.CloseEntry();
+            }
+            zipOut.Finish();
         }
 
         /// <summary>
