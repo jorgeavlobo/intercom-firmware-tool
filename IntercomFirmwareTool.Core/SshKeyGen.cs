@@ -54,9 +54,11 @@ namespace IntercomFirmwareTool.Core
                 }
                 catch
                 {
-                    // Best-effort rollback to the original pair before rethrowing.
-                    if (bakPriv != null) TryRestore(bakPriv, privateKeyPath);
-                    if (bakPub != null) TryRestore(bakPub, pubPath);
+                    // Best-effort rollback before rethrowing: restore the original
+                    // where we have a backup, otherwise delete the newly created
+                    // file so no mismatched (new/old) pair is left on disk.
+                    if (bakPriv != null) TryRestore(bakPriv, privateKeyPath); else TryDelete(privateKeyPath);
+                    if (bakPub != null) TryRestore(bakPub, pubPath); else TryDelete(pubPath);
                     throw;
                 }
                 return pubPath;
@@ -80,7 +82,11 @@ namespace IntercomFirmwareTool.Core
         public static bool IsLikelyPublicKey(string text)
         {
             if (string.IsNullOrWhiteSpace(text)) return false;
-            string line = text.Trim().Split('\n')[0].Trim();
+            string line = text.Trim();
+            // Reject multi-line input: the ENTIRE string is written to
+            // authorized_keys, so a valid first key with an appended second key
+            // must not pass validation and silently authorize both.
+            if (line.IndexOfAny(new[] { '\r', '\n' }) >= 0) return false;
             string[] parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
             if (parts.Length < 2) return false;
 
@@ -98,7 +104,8 @@ namespace IntercomFirmwareTool.Core
                 byte[] blob = Convert.FromBase64String(parts[1]);
                 if (blob.Length < 4) return false;
                 int len = (blob[0] << 24) | (blob[1] << 16) | (blob[2] << 8) | blob[3];
-                if (len <= 0 || 4 + len > blob.Length) return false;
+                // Overflow-safe: blob.Length >= 4 here, so (blob.Length - 4) >= 0.
+                if (len <= 0 || len > blob.Length - 4) return false;
                 return Encoding.ASCII.GetString(blob, 4, len) == type;
             }
             catch (FormatException)
