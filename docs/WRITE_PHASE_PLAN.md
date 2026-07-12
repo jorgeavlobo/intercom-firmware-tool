@@ -182,8 +182,21 @@ unit (with USB/SAM-BA recovery ready), and **only then** consider innovations.
 
 ## Implementation order (status)
 
-1. **MD5-crypt generator** — isolated, tested against the vector. ✅ Done.
+1. **MD5-crypt generator** — isolated, tested against the vector. ✅ Done
+   (self-test ALL PASS on real hardware).
 2. **ext4 write routine (Phase A–D) + recut** + logical validation. ✅ Done
-   (the "APPLY SSH-enable (test)" button); pending on-device confirmation.
-3. **Re-gzip + re-zip (ZipCrypto) + round-trip.** ⏳ Next.
-4. **Golden cross-validation against fquinto.** ⏳ After step 3.
+   ("APPLY SSH-enable (test)" button; all 18 checks PASS on real firmware,
+   including SetOwner 0:0 and SetMode 0700/0600).
+3. **Re-gzip + re-zip (ZipCrypto) + round-trip.** ✅ Done
+   ("BUILD modified .fwz (test)" button; the output .fwz round-trips through
+   our own read chain with every edit intact — SharpZipLib ZipCrypto writing
+   proven).
+4. **Golden cross-validation against fquinto.** ⏳ Tooling ready
+   ("Validate SSH-enable in an existing .fwz" button runs the checklist on any
+   .fwz). Remaining: run fquinto (Docker/Linux) with the same inputs and
+   confirm its output passes the same checks. This is a confidence booster —
+   every operation is already cross-checked line-by-line against
+   `reference/fquinto/main.py` and the MD5-crypt matches `openssl`.
+
+**Still required before flashing a real unit:** step 4 confirmation, a clean
+product UI/flow (the buttons are a PoC surface), and USB/SAM-BA recovery ready.

@@ -271,6 +271,69 @@ namespace IntercomFirmwareTool.App
             });
         }
 
+        /// <summary>
+        /// Button: read-only cross-validation. Pick an already-modified .fwz
+        /// (e.g. one produced by fquinto) plus the public key and password it was
+        /// built with, and run the same 18-point checklist against it. Nothing
+        /// is modified.
+        /// </summary>
+        private async void BtnValidateFwz_Click(object sender, RoutedEventArgs e)
+        {
+            var fwzDlg = new OpenFileDialog
+            {
+                Title = "Choose an already-modified .fwz to validate (e.g. fquinto's output)",
+                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*"
+            };
+            if (fwzDlg.ShowDialog(this) != true)
+                return;
+            string fwzPath = fwzDlg.FileName;
+
+            var keyDlg = new OpenFileDialog
+            {
+                Title = "Choose the SSH public key (.pub) that .fwz was built with — Cancel for the sample",
+                Filter = "Public key (*.pub)|*.pub|All files (*.*)|*.*"
+            };
+            string publicKey, keySource;
+            if (keyDlg.ShowDialog(this) == true)
+            {
+                publicKey = File.ReadAllText(keyDlg.FileName).Trim();
+                keySource = keyDlg.FileName;
+            }
+            else
+            {
+                publicKey = SampleKey;
+                keySource = "(built-in sample key)";
+            }
+
+            const string rootPassword = "pwned123"; // must match how that .fwz was built
+            var opts = new EnableSshOptions(publicKey, rootPassword);
+
+            var sb = new StringBuilder();
+            AppendDiagnostics(sb);
+            sb.AppendLine($".fwz to check: {fwzPath}");
+            sb.AppendLine($"Public key   : {keySource}");
+            sb.AppendLine($"Root pw      : {rootPassword}  (the .fwz must have been built with this)");
+            sb.AppendLine();
+
+            await RunAndShow(sb, () =>
+            {
+                SshEnableReport r = FwzProbe.ValidateSshInFwz(fwzPath, opts);
+                sb.AppendLine($"Password that worked : {r.PasswordUsed}");
+                sb.AppendLine($"Selected inner entry : {r.SelectedEntry}");
+                sb.AppendLine();
+                sb.AppendLine("Checklist (read-only, the .fwz is not modified):");
+                foreach (var c in r.Checks)
+                {
+                    string detail = string.IsNullOrEmpty(c.Detail) ? "" : $"   [{c.Detail}]";
+                    sb.AppendLine($"  {(c.Pass ? "PASS" : "FAIL")}  {c.Name}{detail}");
+                }
+                sb.AppendLine();
+                sb.AppendLine(r.AllPass
+                    ? "ALL PASS ✅  this .fwz has all the expected SSH-enable edits"
+                    : "SOME FAILED ❌  this .fwz is missing/differs on the failing checks");
+            });
+        }
+
         // ---- Shared helpers --------------------------------------------------
 
         /// <summary>Returns the internal path from the text box (or /etc/hostname).</summary>
@@ -306,6 +369,7 @@ namespace IntercomFirmwareTool.App
             BtnMd5Test.IsEnabled = false;
             BtnSshEnable.IsEnabled = false;
             BtnBuildFwz.IsEnabled = false;
+            BtnValidateFwz.IsEnabled = false;
             TxtResult.Text = "Processing…";
             try
             {
@@ -323,6 +387,7 @@ namespace IntercomFirmwareTool.App
                 BtnMd5Test.IsEnabled = true;
                 BtnSshEnable.IsEnabled = true;
                 BtnBuildFwz.IsEnabled = true;
+                BtnValidateFwz.IsEnabled = true;
             }
 
             TxtResult.Text = sb.ToString();

@@ -39,6 +39,9 @@
             <Button x:Name="BtnBuildFwz" Padding="12,6" Margin="0,0,8,8"
                     Content="Choose .fwz + key → BUILD modified .fwz (test)"
                     Click="BtnBuildFwz_Click"/>
+            <Button x:Name="BtnValidateFwz" Padding="12,6" Margin="0,0,8,8"
+                    Content="Validate SSH-enable in an existing .fwz"
+                    Click="BtnValidateFwz_Click"/>
         </WrapPanel>
 
         <!-- Row 2: result label -->

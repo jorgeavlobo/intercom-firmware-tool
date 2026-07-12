@@ -127,6 +127,29 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
+        /// Read-only: opens an already-modified .fwz, extracts its ext4 and runs
+        /// the SSH-enable validation checklist against it — WITHOUT modifying
+        /// anything. Use it to cross-validate a .fwz produced by another tool
+        /// (e.g. fquinto) against the same expected edits, given the password and
+        /// public key that .fwz was built with.
+        /// </summary>
+        public static SshEnableReport ValidateSshInFwz(string fwzPath, EnableSshOptions opts)
+        {
+            FwzExtractResult ex = ExtractBareImage(fwzPath);
+            try
+            {
+                IReadOnlyList<Ext4Check> checks = Ext4Probe.ValidateSsh(ex.BareImagePath, opts);
+                bool all = true;
+                foreach (var c in checks) all &= c.Pass;
+                return new SshEnableReport(ex.PasswordUsed, ex.SelectedEntry, all, checks);
+            }
+            finally
+            {
+                TryDelete(ex.BareImagePath);
+            }
+        }
+
+        /// <summary>
         /// Full write pipeline (all on temp files except the chosen output):
         /// extract → SSH-enable → re-gzip → repack into a NEW .fwz at
         /// <paramref name="outputPath"/> (all 4 entries DEFLATE level 9 +
