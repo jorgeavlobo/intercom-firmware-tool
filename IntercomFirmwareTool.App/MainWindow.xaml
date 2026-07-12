@@ -20,6 +20,42 @@
             <Setter Property="MinWidth" Value="90"/>
             <Setter Property="HorizontalAlignment" Value="Left"/>
         </Style>
+        <!-- Small flat icon button (Segoe MDL2 Assets glyphs) for the inline
+             password actions: reveal, copy, generate. -->
+        <Style TargetType="Button" x:Key="IconButton">
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+            <Setter Property="FontSize" Value="15"/>
+            <Setter Property="Width" Value="30"/>
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="Margin" Value="4,0,0,0"/>
+            <Setter Property="Foreground" Value="#FF444444"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="VerticalAlignment" Value="Stretch"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bg" CornerRadius="4"
+                                Background="{TemplateBinding Background}">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bg" Property="Background" Value="#22000000"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bg" Property="Background" Value="#33000000"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#FFBFBFBF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid Margin="14">
@@ -85,16 +121,20 @@
             <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="Root password:"/>
             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <TextBox x:Name="TxtPassword" Width="200" Padding="4,3"
+                <TextBox x:Name="TxtPassword" Width="220" Padding="4,3"
                          FontFamily="Consolas" VerticalContentAlignment="Center"/>
-                <Button x:Name="BtnRandomPwd" Content="Random" MinWidth="60"
-                        Padding="8,3" Margin="8,0,0,0" VerticalAlignment="Stretch"
-                        ToolTip="Generate a strong random password into both fields"
+                <!-- Inline actions: reveal (eye), copy, generate. Toggling reveal
+                     affects BOTH the password and confirm fields. -->
+                <Button x:Name="BtnToggleReveal" Style="{StaticResource IconButton}"
+                        Content="&#xE7B3;" ToolTip="Show password"
+                        Click="BtnToggleReveal_Click"/>
+                <Button x:Name="BtnCopyPwd" Style="{StaticResource IconButton}"
+                        Content="&#xE8C8;" ToolTip="Copy password to clipboard"
+                        Click="BtnCopyPwd_Click"/>
+                <Button x:Name="BtnRandomPwd" Style="{StaticResource IconButton}"
+                        Content="&#xE8B1;" ToolTip="Generate a strong random password"
                         Click="BtnRandomPwd_Click"/>
-                <Button x:Name="BtnPeek" Content="Show" MinWidth="52"
-                        Padding="8,3" Margin="6,0,0,0" VerticalAlignment="Stretch"
-                        ToolTip="Hold to reveal the password"/>
-                <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="14,0,0,0"
+                <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="16,0,0,0"
                           Content="Key-only login (no password)"
                           Checked="ChkKeyOnly_Toggled" Unchecked="ChkKeyOnly_Toggled"/>
             </StackPanel>

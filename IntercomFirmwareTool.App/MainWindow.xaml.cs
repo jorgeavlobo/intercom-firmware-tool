@@ -43,7 +43,6 @@ namespace IntercomFirmwareTool.App
             _confirm = new MaskedPasswordField(TxtConfirm);
             _pw.Changed += UpdatePasswordHint;
             _confirm.Changed += UpdatePasswordHint;
-            WirePeekButton();
 
             // Password fields start EMPTY on purpose: the user must enter a root
             // password (or tick key-only), so a build can never ship the publicly
@@ -51,44 +50,50 @@ namespace IntercomFirmwareTool.App
             UpdatePasswordHint();
         }
 
-        // ---- Password reveal button (press-and-hold) -------------------------
+        // ---- Inline password actions (reveal / copy / generate) --------------
 
-        /// <summary>
-        /// Wires the "Show" button to reveal the passwords only WHILE it is held
-        /// down (mouse or keyboard), re-masking on release — the peek pattern
-        /// common in modern forms.
-        /// </summary>
-        private void WirePeekButton()
-        {
-            BtnPeek.PreviewMouseLeftButtonDown += (_, _) => SetPeek(true);
-            BtnPeek.PreviewMouseLeftButtonUp += (_, _) => SetPeek(false);
-            BtnPeek.LostMouseCapture += (_, _) => SetPeek(false);
-            BtnPeek.MouseLeave += (_, _) => SetPeek(false);
-            // Re-mask if focus leaves the button before the key-up (e.g. Tab away
-            // while Space/Enter is held) — otherwise peek could stay on.
-            BtnPeek.LostKeyboardFocus += (_, _) => SetPeek(false);
-            BtnPeek.PreviewKeyDown += (_, e) =>
-            {
-                if (e.Key == Key.Space || e.Key == Key.Enter) { SetPeek(true); e.Handled = true; }
-            };
-            BtnPeek.PreviewKeyUp += (_, e) =>
-            {
-                if (e.Key == Key.Space || e.Key == Key.Enter) { SetPeek(false); e.Handled = true; }
-            };
-        }
+        private static readonly string EyeShow = ""; // Segoe MDL2: RedEye  → "reveal"
+        private static readonly string EyeHide = ""; // Segoe MDL2: Hide    → "conceal"
+        private bool _revealed;
 
-        private void SetPeek(bool on)
+        /// <summary>Reveals or masks BOTH password fields and updates the eye icon.</summary>
+        private void SetReveal(bool on)
         {
             if (ChkKeyOnly.IsChecked == true) on = false; // nothing to reveal in key-only
+            _revealed = on;
             _pw.Peek = on;
             _confirm.Peek = on;
-            BtnPeek.Content = on ? "Hide" : "Show";
+            BtnToggleReveal.Content = on ? EyeHide : EyeShow;
+            BtnToggleReveal.ToolTip = on ? "Hide password" : "Show password";
+        }
+
+        /// <summary>Eye toggle: click to reveal, click again to conceal.</summary>
+        private void BtnToggleReveal_Click(object sender, RoutedEventArgs e) => SetReveal(!_revealed);
+
+        /// <summary>Copies the current password to the clipboard (nothing is shown).</summary>
+        private void BtnCopyPwd_Click(object sender, RoutedEventArgs e)
+        {
+            string pwd = _pw.Value;
+            if (pwd.Length == 0)
+            {
+                TxtResult.Text = "Nothing to copy — the password field is empty.";
+                return;
+            }
+            try
+            {
+                Clipboard.SetText(pwd);
+                TxtResult.Text = "Password copied to the clipboard.";
+            }
+            catch (Exception ex)
+            {
+                TxtResult.Text = "Could not copy to the clipboard:\n" + ex.Message;
+            }
         }
 
         /// <summary>
         /// Fills both password fields with a fresh strong random password and
-        /// shows it in the Result box so the user can record it (a generated
-        /// password is only recoverable if copied now — it is not stored).
+        /// reveals them so the user can read/copy it. Nothing is written to the
+        /// Result box — the password is only shown in the (now revealed) fields.
         /// </summary>
         private void BtnRandomPwd_Click(object sender, RoutedEventArgs e)
         {
@@ -98,12 +103,11 @@ namespace IntercomFirmwareTool.App
             _pw.Value = pwd;
             _confirm.Value = pwd; // both set → the match hint shows ✓
             UpdatePasswordHint();
+            SetReveal(true);      // reveal so it can be read/copied — never stored
 
             TxtResult.Text =
-                "🔑 Generated a random root password and filled both fields:\n\n" +
-                "    " + pwd + "\n\n" +
-                "COPY IT NOW and keep it safe — it is NOT stored anywhere, and you will\n" +
-                "need it to log in as root. (Hold \"Show\" to confirm the fields match.)";
+                "Generated a strong random password and filled both fields (now revealed).\n" +
+                "Copy it (📋) and keep it safe — it is not stored, and you'll need it to log in.";
         }
 
         /// <summary>A strong random password from an unambiguous character set.</summary>
@@ -327,11 +331,12 @@ namespace IntercomFirmwareTool.App
             // Key-only means no password login; grey the password fields out and
             // stop any active reveal.
             bool usePassword = ChkKeyOnly.IsChecked != true;
-            if (!usePassword) SetPeek(false);
+            if (!usePassword) SetReveal(false);
 
             TxtPassword.IsEnabled = usePassword;
             TxtConfirm.IsEnabled = usePassword;
-            BtnPeek.IsEnabled = usePassword;
+            BtnToggleReveal.IsEnabled = usePassword;
+            BtnCopyPwd.IsEnabled = usePassword;
             BtnRandomPwd.IsEnabled = usePassword;
             UpdatePasswordHint();
         }
@@ -698,7 +703,8 @@ namespace IntercomFirmwareTool.App
             ChkKeyOnly.IsEnabled = enabled;
             TxtPassword.IsEnabled = creds;
             TxtConfirm.IsEnabled = creds;
-            BtnPeek.IsEnabled = creds;
+            BtnToggleReveal.IsEnabled = creds;
+            BtnCopyPwd.IsEnabled = creds;
             BtnRandomPwd.IsEnabled = creds;
         }
     }
