@@ -18,9 +18,10 @@ namespace IntercomFirmwareTool.App
     ///   <item>while <see cref="Peek"/> is set (a Show button held down) the
     ///   whole value is shown in clear text.</item>
     /// </list>
-    /// The real text is kept in a private buffer; the TextBox only ever displays
-    /// the masked (or peeked) representation, so the clear-text password is never
-    /// left sitting in the control's Text.
+    /// The real text is kept in a private buffer. The TextBox shows the MASKED
+    /// representation by default; the clear-text value is put in the control's
+    /// Text only while the user deliberately reveals it (<see cref="Peek"/>, or
+    /// the one-character reveal), and is re-masked afterwards.
     /// </summary>
     public sealed class MaskedPasswordField
     {
@@ -121,7 +122,8 @@ namespace IntercomFirmwareTool.App
             // Cut (Ctrl+X) is handled by the ApplicationCommands.Cut binding.
             // Arrows / Home / End / Tab / Ctrl+A / Ctrl+C fall through; the caret
             // index maps 1:1 to _real because the display has the same length.
-            // (Ctrl+C copies the masked text, not the real password.)
+            // (Ctrl+C copies whatever is shown: the mask when concealed, or the
+            // real password while the field is revealed — same as any text box.)
         }
 
         private void OnCanCut(object sender, CanExecuteRoutedEventArgs e)

@@ -194,18 +194,27 @@ namespace IntercomFirmwareTool.Core
                     // 4) Round-trip: validate the TEMP .fwz (reopen it through our
                     //    chain) before it is allowed to become the output.
                     FwzExtractResult rt = ExtractBareImage(tempOut);
-                    IReadOnlyList<Ext4Check> checks;
-                    bool all;
+                    var checkList = new List<Ext4Check>();
                     try
                     {
-                        checks = Ext4Probe.ValidateSsh(rt.BareImagePath, opts);
-                        all = true;
-                        foreach (var c in checks) all &= c.Pass;
+                        checkList.AddRange(Ext4Probe.ValidateSsh(rt.BareImagePath, opts));
                     }
                     finally
                     {
                         TryDelete(rt.BareImagePath);
                     }
+
+                    // Assert the repacked entry is still ZipCrypto-encrypted and
+                    // decrypts with the SAME password as the input. The round-trip
+                    // above would otherwise "pass" an accidentally unencrypted
+                    // archive, since any password reads an unencrypted entry.
+                    checkList.Add(new Ext4Check(
+                        $"{ex.SelectedEntry} is ZipCrypto-encrypted (input password)",
+                        EntryEncryptedWith(tempOut, ex.SelectedEntry, ex.PasswordUsed), ""));
+
+                    IReadOnlyList<Ext4Check> checks = checkList;
+                    bool all = true;
+                    foreach (var c in checks) all &= c.Pass;
 
                     // Only move the verified build into place; a failed build
                     // never overwrites/creates the user's output path.
@@ -227,6 +236,28 @@ namespace IntercomFirmwareTool.Core
                 if (modifiedGz != null) TryDelete(modifiedGz);
                 if (modifiedBare != null) TryDelete(modifiedBare);
                 TryDelete(ex.BareImagePath);
+            }
+        }
+
+        /// <summary>
+        /// True if the named entry of <paramref name="fwz"/> is ZipCrypto-encrypted
+        /// AND decrypts with <paramref name="password"/> to gzip data (magic
+        /// 1F 8B). Guards against a repack that produced an unencrypted archive
+        /// (which any password reads) or one under a different password.
+        /// </summary>
+        private static bool EntryEncryptedWith(string fwz, string entryName, string password)
+        {
+            try
+            {
+                using var zf = new ZipFile(fwz) { Password = password };
+                ZipEntry? entry = zf.GetEntry(entryName);
+                if (entry == null || !entry.IsCrypted) return false;
+                using var s = zf.GetInputStream(entry);
+                return s.ReadByte() == 0x1F && s.ReadByte() == 0x8B; // gzip magic ⇒ decrypted OK
+            }
+            catch
+            {
+                return false;
             }
         }
 
