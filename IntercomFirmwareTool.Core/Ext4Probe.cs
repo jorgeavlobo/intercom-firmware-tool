@@ -347,6 +347,18 @@ namespace IntercomFirmwareTool.Core
         /// <summary>Applies the ordered Phase A–D edits on an open, writable fs.</summary>
         private static void ApplySshEnable(ExtFileSystem fs, EnableSshOptions opts)
         {
+            // Guard: the edits are meant for an ORIGINAL firmware. Appending the
+            // accounts is not idempotent, so refuse an image that already has a
+            // "root2" account (e.g. a previously-modified .fwz) rather than
+            // duplicating entries and producing an ambiguous result.
+            string existingPasswd = fs.FileExists("/etc/passwd") ? ReadAllTextFromFs(fs, "/etc/passwd") : "";
+            bool alreadyModified = existingPasswd.Replace("\r\n", "\n").Split('\n')
+                .Any(l => l.StartsWith("root2:", StringComparison.Ordinal));
+            if (alreadyModified)
+                throw new InvalidOperationException(
+                    "This firmware already contains a 'root2' account — it appears to be already " +
+                    "SSH-enabled. Run the tool on the ORIGINAL, unmodified firmware.");
+
             // Phase A — accounts. Same MD5-crypt hash for both users (salt
             // "root"); key-only mode disables the password with "*".
             string secret = opts.KeyOnly ? "*" : Md5Crypt.Crypt(opts.RootPassword, "root");
@@ -390,7 +402,19 @@ namespace IntercomFirmwareTool.Core
             if (!fs.DirectoryExists("/etc/rc5.d"))
                 throw new InvalidOperationException(
                     "/etc/rc5.d is missing in the image; cannot create the S98dropbear symlink.");
-            fs.CreateSymLink("../init.d/dropbear", "/etc/rc5.d/S98dropbear");
+
+            // Create the symlink, but tolerate one that is already correct and
+            // fail clearly on one that points elsewhere (rather than letting the
+            // native call throw opaquely on an existing path).
+            const string linkPath = "/etc/rc5.d/S98dropbear";
+            const string linkTarget = "../init.d/dropbear";
+            string? existingTarget = null;
+            try { existingTarget = fs.ReadSymLink(linkPath); } catch { /* absent or not a symlink */ }
+            if (existingTarget == null)
+                fs.CreateSymLink(linkTarget, linkPath);
+            else if (existingTarget != linkTarget)
+                throw new InvalidOperationException(
+                    $"{linkPath} already exists but points to '{existingTarget}', not '{linkTarget}'.");
         }
 
         /// <summary>
