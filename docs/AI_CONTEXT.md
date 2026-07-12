@@ -74,7 +74,12 @@ not a change to the ext4 itself.
    mounts as root, so it gets `root:root` ownership for free and relies on the
    root umask for directory modes. We do **not** — we call `SetOwner(0,0)` and
    `SetMode(...)` explicitly on every new file/dir. Missing this would make
-   dropbear reject the SSH key.
+   dropbear reject the SSH key. One **deliberate divergence**: we set
+   `/home/root/.ssh` to `0700`, whereas fquinto's `mkdir` leaves it at `0755`.
+   Both satisfy dropbear/OpenSSH `StrictModes` (not group/other-writable), so
+   both work; ours is just tighter. `ValidateSsh` therefore checks the
+   **functional requirement** (not group/other-writable) rather than an exact
+   mode, so both our and fquinto's output PASS.
 5. **Passwords:** fquinto uses `openssl passwd -1` (MD5-crypt, `$1$`, salt
    `root`). We reimplement md5crypt in C# (`Md5Crypt.cs`), validated against a
    known test vector. Do not "modernize" to SHA-512 while replicating — that
@@ -101,5 +106,11 @@ not a change to the ext4 itself.
 - ✅ Read chain proven on real firmware (`/etc/hostname` → `Bticino_Classe_100_X`).
 - ✅ ext4 write persists (`CanWrite=True`, survives flush + raw round-trip).
 - ✅ MD5-crypt generator matches `openssl passwd -1` (self-test ALL PASS).
-- ⏳ Phase A–D write routine implemented; on-device validation in progress.
-- ⏳ Repackaging (re-gzip + ZipCrypto re-zip) and golden cross-validation: next.
+- ✅ Phase A–D write routine + logical validation (18 checks PASS on real firmware).
+- ✅ Repackaging (re-gzip + ZipCrypto re-zip) round-trips through our read chain.
+- ✅ **Golden cross-validation done** — fquinto (Docker/Linux) run on the same
+  input produced the identical MD5-crypt hash, and its output `.fwz` passes our
+  validator (the only divergence being our deliberate `.ssh` 0700-vs-0755
+  hardening, which the functional-requirement check accepts on both sides).
+- ⏳ Next (user's call): productionize the UI (the buttons are a PoC surface),
+  then optional real-device flashing with USB/SAM-BA recovery ready.

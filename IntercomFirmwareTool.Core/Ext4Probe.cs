@@ -349,8 +349,10 @@ namespace IntercomFirmwareTool.Core
                 $"bticino2:{secret}:18033:0:99999:7:::",
             });
 
-            // Phase B — the key in root's home. Create parents, then .ssh (0700,
-            // root:root), then authorized_keys (0600, root:root).
+            // Phase B — the key in root's home. Create parents, then .ssh, then
+            // authorized_keys (0600, root:root). We set .ssh to 0700 — a
+            // deliberate hardening: fquinto leaves it at the mkdir default 0755,
+            // but both are dropbear-safe (not group/other-writable).
             EnsureDir(fs, "/home");
             EnsureDir(fs, "/home/root");
             EnsureDir(fs, "/home/root/.ssh");
@@ -396,7 +398,7 @@ namespace IntercomFirmwareTool.Core
                 checks.Add(new("/etc/shadow has root2 entry", shadow.Contains($"root2:{secret}:"), ""));
                 checks.Add(new("/etc/shadow has bticino2 entry", shadow.Contains($"bticino2:{secret}:"), ""));
 
-                CheckDir(fs, checks, "/home/root/.ssh", ToMode(700));
+                CheckDir(fs, checks, "/home/root/.ssh");
                 CheckAuthKeys(fs, checks, "/home/root/.ssh/authorized_keys", opts.PublicKey);
                 CheckAuthKeys(fs, checks, "/etc/dropbear/authorized_keys", opts.PublicKey);
 
@@ -416,14 +418,21 @@ namespace IntercomFirmwareTool.Core
             return checks;
         }
 
-        private static void CheckDir(ExtFileSystem fs, List<Ext4Check> checks, string path, uint expectedMode)
+        private static void CheckDir(ExtFileSystem fs, List<Ext4Check> checks, string path)
         {
             bool exists = fs.DirectoryExists(path);
             checks.Add(new($"{path} exists", exists, ""));
             if (!exists) return;
+
+            // Functional requirement (dropbear/OpenSSH StrictModes): the .ssh
+            // directory must not be writable by group or other. Both 0700 (our
+            // tool's deliberate hardening) and 0755 (fquinto's mkdir default)
+            // satisfy this; 0770/0777 would not.
             uint mode = fs.GetMode(path) & 0xFFF;
-            checks.Add(new($"{path} mode 0{Convert.ToString((long)expectedMode, 8)}",
-                mode == expectedMode, $"actual 0{Convert.ToString((long)mode, 8)}"));
+            bool safe = (mode & 0b000_010_010u) == 0;
+            checks.Add(new($"{path} not group/other-writable",
+                safe, $"actual 0{Convert.ToString((long)mode, 8)}"));
+
             var owner = fs.GetOwner(path);
             checks.Add(new($"{path} owner 0:0",
                 owner != null && owner.Item1 == 0 && owner.Item2 == 0,

@@ -34,6 +34,14 @@ Inside the `.fwz` — only 1 of the 4 entries is modified:
 > and its output works on real devices** → the updater does not verify a
 > checksum/signature of the payload against `fwz.xml`. We rely on this
 > empirical fact (and keep recovery ready before any flash).
+>
+> ² **0700 is a deliberate hardening.** fquinto mounts as root and lets
+> `mkdir` leave `/home/root/.ssh` at its default **0755**; we `SetMode(0700)`.
+> Both satisfy dropbear/OpenSSH `StrictModes` (the directory must not be
+> group/other-writable), so both work. The golden cross-validation (§e) found
+> this is the **only** difference between our output and fquinto's, and the
+> validator now checks the functional requirement rather than an exact mode —
+> so both 0700 and 0755 PASS, while 0770/0777 would FAIL.
 
 Inside `btweb_only.ext4` — objects touched:
 
@@ -42,7 +50,7 @@ Inside `btweb_only.ext4` — objects touched:
 | `/etc/passwd` | append (2 lines) | (kept) | (kept) |
 | `/etc/shadow` | append (2 lines) | (kept) | (kept) |
 | `/home/root` | create if missing | — | 0:0 |
-| `/home/root/.ssh` | create | **0700** | **0:0** |
+| `/home/root/.ssh` | create | **0700** ² | **0:0** |
 | `/home/root/.ssh/authorized_keys` | create (public key) | **0600** | **0:0** |
 | `/etc/dropbear` | create if missing | — | 0:0 if created |
 | `/etc/dropbear/authorized_keys` | create (public key) | **0600** | **0:0** |
@@ -149,8 +157,9 @@ Before any flashing, prove our output equals fquinto's:
    - `/etc/shadow` — the 2 lines, identical hash (fixed salt → identical);
    - `authorized_keys` (both) — content == public key;
    - `/etc/rc5.d/S98dropbear` — exists, target == `../init.d/dropbear`;
-   - **modes** (`.ssh`=0700, `authorized_keys`=0600) **and owners** (0:0 on the
-     new objects).
+   - **modes** — `authorized_keys`=0600 (exact); `.ssh` checked by the
+     **functional requirement** (not group/other-writable), so our 0700 and
+     fquinto's 0755 both PASS — **and owners** (0:0 on the new objects).
 3. **Self-consistency:** reopen our modified ext4 (with our own tool) and re-read
    every change.
 4. **Hash test vector:** the `$1$root$0i6hbFPn3JOGMeEF0LgEV1` check (§c).
@@ -191,12 +200,17 @@ unit (with USB/SAM-BA recovery ready), and **only then** consider innovations.
    ("BUILD modified .fwz (test)" button; the output .fwz round-trips through
    our own read chain with every edit intact — SharpZipLib ZipCrypto writing
    proven).
-4. **Golden cross-validation against fquinto.** ⏳ Tooling ready
-   ("Validate SSH-enable in an existing .fwz" button runs the checklist on any
-   .fwz). Remaining: run fquinto (Docker/Linux) with the same inputs and
-   confirm its output passes the same checks. This is a confidence booster —
-   every operation is already cross-checked line-by-line against
-   `reference/fquinto/main.py` and the MD5-crypt matches `openssl`.
+4. **Golden cross-validation against fquinto.** ✅ Done.
+   fquinto was run in Docker on a Linux VPS against the **same** input
+   (`c100x_1.5.8.fwz`), the **same** public key, and default password —
+   producing `$1$root$0i6hbFPn3JOGMeEF0LgEV1` (the exact hash our MD5-crypt
+   generates). fquinto's output `.fwz` was fed to our "Validate SSH-enable in
+   an existing .fwz" button: **17/18 identical**, the one divergence being the
+   deliberate `.ssh` hardening (fquinto 0755 vs our 0700). The validator now
+   checks the functional requirement (not group/other-writable) instead of an
+   exact mode, so both outputs report a clean **ALL PASS**. Every operation
+   was also cross-checked line-by-line against `reference/fquinto/main.py`, and
+   the MD5-crypt matches `openssl passwd -1`.
 
-**Still required before flashing a real unit:** step 4 confirmation, a clean
-product UI/flow (the buttons are a PoC surface), and USB/SAM-BA recovery ready.
+**Still required before flashing a real unit:** a clean product UI/flow (the
+buttons are a PoC surface) and USB/SAM-BA recovery ready.
