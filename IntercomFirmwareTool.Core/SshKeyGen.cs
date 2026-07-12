@@ -102,20 +102,43 @@ namespace IntercomFirmwareTool.Core
             try
             {
                 byte[] blob = Convert.FromBase64String(parts[1]);
-                if (blob.Length < 4) return false;
-                int len = (blob[0] << 24) | (blob[1] << 16) | (blob[2] << 8) | blob[3];
-                // Overflow-safe: blob.Length >= 4 here, so (blob.Length - 4) >= 0.
-                if (len <= 0 || len > blob.Length - 4) return false;
-                if (Encoding.ASCII.GetString(blob, 4, len) != type) return false;
 
-                // Require actual key material after the algorithm name: a blob
-                // that is ONLY the type string (e.g. "ssh-rsa" and nothing else)
-                // decodes and matches the prefix but is not a usable key.
-                int pos = 4 + len;
-                if (pos + 4 > blob.Length) return false;
-                int nextLen = (blob[pos] << 24) | (blob[pos + 1] << 16) | (blob[pos + 2] << 8) | blob[pos + 3];
-                if (nextLen <= 0 || (long)pos + 4 + nextLen > blob.Length) return false;
-                return true;
+                // Walk every SSH wire field (uint32 length + bytes): each length
+                // must fit, and the fields must consume the blob EXACTLY (no
+                // truncation, no trailing garbage). The first field must equal
+                // the advertised type. This rejects a corrupt/partial .pub whose
+                // blob decodes but is missing key material (e.g. ssh-rsa without
+                // its exponent/modulus) — which would otherwise be written into
+                // authorized_keys and fail login while the round-trip (text-only)
+                // check still passes.
+                int pos = 0, fields = 0;
+                while (pos < blob.Length)
+                {
+                    if (pos + 4 > blob.Length) return false; // truncated length prefix
+                    long fieldLen = ((long)blob[pos] << 24) | ((long)blob[pos + 1] << 16)
+                                  | ((long)blob[pos + 2] << 8) | blob[pos + 3];
+                    pos += 4;
+                    if (fieldLen < 0 || pos + fieldLen > blob.Length) return false; // truncated / overflow
+                    if (fields == 0 &&
+                        (fieldLen == 0 || Encoding.ASCII.GetString(blob, pos, (int)fieldLen) != type))
+                        return false; // first field must be the algorithm name
+                    pos += (int)fieldLen;
+                    fields++;
+                }
+
+                // Exact consumption plus the field count for the type. Enforce
+                // the exact count only for the two common, well-defined formats
+                // (ssh-rsa: name,e,n = 3; ssh-ed25519: name,key = 2 — the type we
+                // generate and the most common one users supply). For any other
+                // type require only name + at least one key field, so a valid but
+                // less common key (dss/ecdsa/FIDO) is not wrongly rejected.
+                int expected = type switch
+                {
+                    "ssh-rsa" => 3,
+                    "ssh-ed25519" => 2,
+                    _ => -1,
+                };
+                return pos == blob.Length && (expected == -1 ? fields >= 2 : fields == expected);
             }
             catch (FormatException)
             {
