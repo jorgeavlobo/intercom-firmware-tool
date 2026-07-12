@@ -152,7 +152,9 @@ namespace IntercomFirmwareTool.App
             // GetData can return null or a non-string even when UnicodeText is
             // reported present; guard the cast so it can't throw.
             if (e.DataObject.GetData(DataFormats.UnicodeText) is not string raw) return;
-            string text = raw.Trim(); // tolerate surrounding whitespace / a trailing newline
+            // Trim only CR/LF (a trailing newline from a clipboard copy); keep
+            // spaces/tabs, which can be valid password characters.
+            string text = raw.Trim('\r', '\n');
             if (text.Length == 0) return;
             // Reject — rather than silently transform — a genuinely multi-line or
             // non-BMP paste, so the stored password matches what the user pasted.
