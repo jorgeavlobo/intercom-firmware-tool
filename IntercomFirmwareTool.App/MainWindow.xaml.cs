@@ -44,10 +44,9 @@ namespace IntercomFirmwareTool.App
             _confirm.Changed += UpdatePasswordHint;
             WirePeekButton();
 
-            // Sensible default password (fquinto's), pre-filled in both fields
-            // so they already match (shown masked).
-            _pw.Value = "pwned123";
-            _confirm.Value = "pwned123";
+            // Password fields start EMPTY on purpose: the user must enter a root
+            // password (or tick key-only), so a build can never ship the publicly
+            // known fquinto default. The empty-password guard in Build enforces it.
             UpdatePasswordHint();
         }
 
