@@ -29,6 +29,12 @@ namespace IntercomFirmwareTool.App
             InitializeComponent();
             ShowStartupDiagnostics();
             TryPrefillDefaultKey();
+
+            // Sensible default (fquinto's), pre-filled in both masked fields so
+            // they already match.
+            PwdPassword.Password = "pwned123";
+            PwdConfirm.Password = "pwned123";
+            UpdatePasswordHint();
         }
 
         // ---- Input selection -------------------------------------------------
@@ -62,7 +68,8 @@ namespace IntercomFirmwareTool.App
             var dlg = new OpenFileDialog
             {
                 Title = "Choose your SSH public key (.pub)",
-                Filter = "Public key (*.pub)|*.pub|All files (*.*)|*.*"
+                Filter = "Public key (*.pub)|*.pub|All files (*.*)|*.*",
+                InitialDirectory = DefaultSshDir()
             };
             if (dlg.ShowDialog(this) != true) return;
 
@@ -91,8 +98,76 @@ namespace IntercomFirmwareTool.App
 
         private void ChkKeyOnly_Toggled(object sender, RoutedEventArgs e)
         {
-            // Key-only means no password login; grey the password field out.
-            TxtPassword.IsEnabled = ChkKeyOnly.IsChecked != true;
+            // Key-only means no password login; grey the password fields out.
+            bool usePassword = ChkKeyOnly.IsChecked != true;
+            PwdPassword.IsEnabled = usePassword;
+            TxtPassword.IsEnabled = usePassword;
+            PwdConfirm.IsEnabled = usePassword;
+            TxtConfirm.IsEnabled = usePassword;
+            BtnShowPwd.IsEnabled = usePassword;
+            UpdatePasswordHint();
+        }
+
+        /// <summary>Reveals or masks BOTH password fields (kept in sync at toggle time).</summary>
+        private void BtnShowPwd_Toggled(object sender, RoutedEventArgs e)
+        {
+            bool reveal = BtnShowPwd.IsChecked == true;
+            if (reveal)
+            {
+                TxtPassword.Text = PwdPassword.Password;
+                TxtConfirm.Text = PwdConfirm.Password;
+            }
+            else
+            {
+                PwdPassword.Password = TxtPassword.Text;
+                PwdConfirm.Password = TxtConfirm.Text;
+            }
+            PwdPassword.Visibility = reveal ? Visibility.Collapsed : Visibility.Visible;
+            PwdConfirm.Visibility = reveal ? Visibility.Collapsed : Visibility.Visible;
+            TxtPassword.Visibility = reveal ? Visibility.Visible : Visibility.Collapsed;
+            TxtConfirm.Visibility = reveal ? Visibility.Visible : Visibility.Collapsed;
+            BtnShowPwd.Content = reveal ? "Hide" : "Show";
+        }
+
+        /// <summary>Fires from either the masked or the revealed field; updates the match hint.</summary>
+        private void Password_Changed(object sender, RoutedEventArgs e) => UpdatePasswordHint();
+
+        /// <summary>The current password value, from whichever field is visible.</summary>
+        private string CurrentPassword() =>
+            BtnShowPwd.IsChecked == true ? TxtPassword.Text : PwdPassword.Password;
+
+        /// <summary>The current confirmation value, from whichever field is visible.</summary>
+        private string CurrentConfirm() =>
+            BtnShowPwd.IsChecked == true ? TxtConfirm.Text : PwdConfirm.Password;
+
+        /// <summary>Shows a small match/mismatch hint next to the confirm field.</summary>
+        private void UpdatePasswordHint()
+        {
+            // TxtPwdHint may not exist yet during very early initialization.
+            if (TxtPwdHint is null) return;
+
+            if (ChkKeyOnly.IsChecked == true)
+            {
+                TxtPwdHint.Text = "(password login disabled)";
+                TxtPwdHint.Foreground = Brushes.Gray;
+                return;
+            }
+            if (CurrentPassword().Length == 0 && CurrentConfirm().Length == 0)
+            {
+                TxtPwdHint.Text = "";
+                return;
+            }
+            bool match = CurrentPassword() == CurrentConfirm();
+            TxtPwdHint.Text = match ? "✓ match" : "✗ do not match";
+            TxtPwdHint.Foreground = match ? Brushes.Green : Brushes.Firebrick;
+        }
+
+        /// <summary>The user's ~/.ssh folder if it exists, else the profile folder.</summary>
+        private static string DefaultSshDir()
+        {
+            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string ssh = Path.Combine(profile, ".ssh");
+            return Directory.Exists(ssh) ? ssh : profile;
         }
 
         private void UpdateBuildEnabled()
@@ -124,7 +199,27 @@ namespace IntercomFirmwareTool.App
             }
 
             bool keyOnly = ChkKeyOnly.IsChecked == true;
-            string password = TxtPassword.Text;
+            string password = CurrentPassword();
+
+            // Passwords must match unless key-only login is selected.
+            if (!keyOnly && password != CurrentConfirm())
+            {
+                MessageBox.Show(this,
+                    "The password and its confirmation do not match.",
+                    "Password mismatch", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // Confirm before overwriting an existing output file (the path may
+            // have been auto-suggested, bypassing the Save dialog's own prompt).
+            if (File.Exists(_outputPath))
+            {
+                var answer = MessageBox.Show(this,
+                    $"The file already exists:\n\n{_outputPath}\n\nOverwrite it?",
+                    "File exists", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (answer != MessageBoxResult.Yes) return;
+            }
+
             var opts = new EnableSshOptions(publicKey, password, keyOnly);
 
             string fwz = _fwzPath, output = _outputPath, keyPath = _keyPath;
@@ -182,7 +277,8 @@ namespace IntercomFirmwareTool.App
                 var keyDlg = new OpenFileDialog
                 {
                     Title = "Choose the SSH public key that .fwz was built with",
-                    Filter = "Public key (*.pub)|*.pub|All files (*.*)|*.*"
+                    Filter = "Public key (*.pub)|*.pub|All files (*.*)|*.*",
+                    InitialDirectory = DefaultSshDir()
                 };
                 if (keyDlg.ShowDialog(this) != true) return;
                 keyPath = keyDlg.FileName;
@@ -200,7 +296,7 @@ namespace IntercomFirmwareTool.App
             }
 
             bool keyOnly = ChkKeyOnly.IsChecked == true;
-            string password = TxtPassword.Text;
+            string password = CurrentPassword();
             var opts = new EnableSshOptions(publicKey, password, keyOnly);
 
             var sb = new StringBuilder();
