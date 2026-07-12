@@ -85,17 +85,11 @@
             <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="Root password:"/>
             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <Grid Width="200">
-                    <PasswordBox x:Name="PwdPassword" Padding="4,3"
-                                 VerticalContentAlignment="Center"
-                                 PasswordChanged="Password_Changed"/>
-                    <TextBox x:Name="TxtPassword" Padding="4,3"
-                             VerticalContentAlignment="Center" Visibility="Collapsed"
-                             TextChanged="Password_Changed"/>
-                </Grid>
-                <ToggleButton x:Name="BtnShowPwd" Content="Show" MinWidth="52"
-                              Padding="8,3" Margin="8,0,0,0" VerticalAlignment="Stretch"
-                              Checked="BtnShowPwd_Toggled" Unchecked="BtnShowPwd_Toggled"/>
+                <TextBox x:Name="TxtPassword" Width="200" Padding="4,3"
+                         FontFamily="Consolas" VerticalContentAlignment="Center"/>
+                <Button x:Name="BtnPeek" Content="Show" MinWidth="52"
+                        Padding="8,3" Margin="8,0,0,0" VerticalAlignment="Stretch"
+                        ToolTip="Hold to reveal the password"/>
                 <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="14,0,0,0"
                           Content="Key-only login (no password)"
                           Checked="ChkKeyOnly_Toggled" Unchecked="ChkKeyOnly_Toggled"/>
@@ -105,14 +99,8 @@
             <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="Confirm password:"/>
             <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <Grid Width="200">
-                    <PasswordBox x:Name="PwdConfirm" Padding="4,3"
-                                 VerticalContentAlignment="Center"
-                                 PasswordChanged="Password_Changed"/>
-                    <TextBox x:Name="TxtConfirm" Padding="4,3"
-                             VerticalContentAlignment="Center" Visibility="Collapsed"
-                             TextChanged="Password_Changed"/>
-                </Grid>
+                <TextBox x:Name="TxtConfirm" Width="200" Padding="4,3"
+                         FontFamily="Consolas" VerticalContentAlignment="Center"/>
                 <TextBlock x:Name="TxtPwdHint" VerticalAlignment="Center" Margin="10,0,0,0"
                            Foreground="Gray"/>
             </StackPanel>

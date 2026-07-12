@@ -3,6 +3,7 @@ using System.IO;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using IntercomFirmwareTool.Core;
 using Microsoft.Win32;
@@ -24,6 +25,11 @@ namespace IntercomFirmwareTool.App
         private string? _keyPath;
         private string? _outputPath;
 
+        // Masked password fields with reveal-last-char behaviour (see
+        // MaskedPasswordField); the real values live in these, not in the TextBoxes.
+        private readonly MaskedPasswordField _pw;
+        private readonly MaskedPasswordField _confirm;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -32,11 +38,48 @@ namespace IntercomFirmwareTool.App
             // The key is chosen explicitly (Choose existing… / Generate new…), so
             // nothing is pre-selected — this avoids silently picking the wrong key.
 
-            // Sensible default password (fquinto's), pre-filled in both masked
-            // fields so they already match.
-            PwdPassword.Password = "pwned123";
-            PwdConfirm.Password = "pwned123";
+            _pw = new MaskedPasswordField(TxtPassword);
+            _confirm = new MaskedPasswordField(TxtConfirm);
+            _pw.Changed += UpdatePasswordHint;
+            _confirm.Changed += UpdatePasswordHint;
+            WirePeekButton();
+
+            // Sensible default password (fquinto's), pre-filled in both fields
+            // so they already match (shown masked).
+            _pw.Value = "pwned123";
+            _confirm.Value = "pwned123";
             UpdatePasswordHint();
+        }
+
+        // ---- Password reveal button (press-and-hold) -------------------------
+
+        /// <summary>
+        /// Wires the "Show" button to reveal the passwords only WHILE it is held
+        /// down (mouse or keyboard), re-masking on release — the peek pattern
+        /// common in modern forms.
+        /// </summary>
+        private void WirePeekButton()
+        {
+            BtnPeek.PreviewMouseLeftButtonDown += (_, _) => SetPeek(true);
+            BtnPeek.PreviewMouseLeftButtonUp += (_, _) => SetPeek(false);
+            BtnPeek.LostMouseCapture += (_, _) => SetPeek(false);
+            BtnPeek.MouseLeave += (_, _) => SetPeek(false);
+            BtnPeek.PreviewKeyDown += (_, e) =>
+            {
+                if (e.Key == Key.Space || e.Key == Key.Enter) { SetPeek(true); e.Handled = true; }
+            };
+            BtnPeek.PreviewKeyUp += (_, e) =>
+            {
+                if (e.Key == Key.Space || e.Key == Key.Enter) { SetPeek(false); e.Handled = true; }
+            };
+        }
+
+        private void SetPeek(bool on)
+        {
+            if (ChkKeyOnly.IsChecked == true) on = false; // nothing to reveal in key-only
+            _pw.Peek = on;
+            _confirm.Peek = on;
+            BtnPeek.Content = on ? "Hide" : "Show";
         }
 
         // ---- Input selection -------------------------------------------------
@@ -177,54 +220,22 @@ namespace IntercomFirmwareTool.App
 
         private void ChkKeyOnly_Toggled(object sender, RoutedEventArgs e)
         {
-            // Key-only means no password login; grey the password fields out.
+            // Key-only means no password login; grey the password fields out and
+            // stop any active reveal.
             bool usePassword = ChkKeyOnly.IsChecked != true;
+            if (!usePassword) SetPeek(false);
 
-            // Going key-only: re-mask first (the Unchecked handler copies the
-            // text back into the PasswordBox and hides it), so a previously
-            // "Shown" password isn't left visible in the now-disabled fields.
-            if (!usePassword && BtnShowPwd.IsChecked == true)
-                BtnShowPwd.IsChecked = false;
-
-            PwdPassword.IsEnabled = usePassword;
             TxtPassword.IsEnabled = usePassword;
-            PwdConfirm.IsEnabled = usePassword;
             TxtConfirm.IsEnabled = usePassword;
-            BtnShowPwd.IsEnabled = usePassword;
+            BtnPeek.IsEnabled = usePassword;
             UpdatePasswordHint();
         }
 
-        /// <summary>Reveals or masks BOTH password fields (kept in sync at toggle time).</summary>
-        private void BtnShowPwd_Toggled(object sender, RoutedEventArgs e)
-        {
-            bool reveal = BtnShowPwd.IsChecked == true;
-            if (reveal)
-            {
-                TxtPassword.Text = PwdPassword.Password;
-                TxtConfirm.Text = PwdConfirm.Password;
-            }
-            else
-            {
-                PwdPassword.Password = TxtPassword.Text;
-                PwdConfirm.Password = TxtConfirm.Text;
-            }
-            PwdPassword.Visibility = reveal ? Visibility.Collapsed : Visibility.Visible;
-            PwdConfirm.Visibility = reveal ? Visibility.Collapsed : Visibility.Visible;
-            TxtPassword.Visibility = reveal ? Visibility.Visible : Visibility.Collapsed;
-            TxtConfirm.Visibility = reveal ? Visibility.Visible : Visibility.Collapsed;
-            BtnShowPwd.Content = reveal ? "Hide" : "Show";
-        }
+        /// <summary>The current password value (real text, held by the masked field).</summary>
+        private string CurrentPassword() => _pw.Value;
 
-        /// <summary>Fires from either the masked or the revealed field; updates the match hint.</summary>
-        private void Password_Changed(object sender, RoutedEventArgs e) => UpdatePasswordHint();
-
-        /// <summary>The current password value, from whichever field is visible.</summary>
-        private string CurrentPassword() =>
-            BtnShowPwd.IsChecked == true ? TxtPassword.Text : PwdPassword.Password;
-
-        /// <summary>The current confirmation value, from whichever field is visible.</summary>
-        private string CurrentConfirm() =>
-            BtnShowPwd.IsChecked == true ? TxtConfirm.Text : PwdConfirm.Password;
+        /// <summary>The current confirmation value (real text, held by the masked field).</summary>
+        private string CurrentConfirm() => _confirm.Value;
 
         /// <summary>Shows a small match/mismatch hint next to the confirm field.</summary>
         private void UpdatePasswordHint()
