@@ -28,6 +28,13 @@ namespace IntercomFirmwareTool.Core
         string After,
         bool Persisted);
 
+    /// <summary>Result of the SSH-enable edit + logical validation from a .fwz.</summary>
+    public sealed record SshEnableReport(
+        string PasswordUsed,
+        string SelectedEntry,
+        bool AllPass,
+        IReadOnlyList<Ext4Check> Checks);
+
     /// <summary>
     /// Replicates (read-only) the fquinto installer flow up to the ext4 image:
     /// opens the .fwz (a ZipCrypto ZIP), tries the known passwords, picks the
@@ -82,6 +89,31 @@ namespace IntercomFirmwareTool.Core
             }
             finally
             {
+                TryDelete(ex.BareImagePath);
+            }
+        }
+
+        /// <summary>
+        /// Extracts the bare ext4 from the .fwz, applies the SSH/root-enable
+        /// edits (Phase A–D) on a temporary copy, reopens the modified image and
+        /// validates every change. All on temp files — the .fwz is never
+        /// modified and no repackaging happens here (that is a later step).
+        /// </summary>
+        public static SshEnableReport TestSshEnableFromFwz(string fwzPath, EnableSshOptions opts)
+        {
+            FwzExtractResult ex = ExtractBareImage(fwzPath);
+            string? modified = null;
+            try
+            {
+                modified = Ext4Probe.EnableSsh(ex.BareImagePath, opts);
+                IReadOnlyList<Ext4Check> checks = Ext4Probe.ValidateSsh(modified, opts);
+                bool all = true;
+                foreach (var c in checks) all &= c.Pass;
+                return new SshEnableReport(ex.PasswordUsed, ex.SelectedEntry, all, checks);
+            }
+            finally
+            {
+                if (modified != null) TryDelete(modified);
                 TryDelete(ex.BareImagePath);
             }
         }

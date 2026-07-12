@@ -10,6 +10,15 @@ namespace IntercomFirmwareTool.Core
         string After,
         bool Persisted);
 
+    /// <summary>Options for the SSH/root-enable edit (Phase A–D).</summary>
+    public sealed record EnableSshOptions(
+        string PublicKey,
+        string RootPassword,
+        bool KeyOnly = false);
+
+    /// <summary>One validation check: a name, pass/fail, and an optional detail.</summary>
+    public sealed record Ext4Check(string Name, bool Pass, string Detail);
+
     public static class Ext4Probe
     {
         private const int SectorSize = 512;
@@ -282,6 +291,185 @@ namespace IntercomFirmwareTool.Core
                 TryDelete(tempPath);
                 throw;
             }
+        }
+
+        // ---- Write phase: enable SSH (replicates fquinto's rootfs edits) -----
+
+        /// <summary>
+        /// Applies the fquinto SSH/root-enable edits (Phase A–D) to a bare ext4
+        /// image and returns the path of a NEW modified bare ext4 (same format
+        /// and size). The input image is never modified. Throws if the
+        /// filesystem mounts read-only.
+        /// </summary>
+        public static string EnableSsh(string bareImagePath, EnableSshOptions opts)
+        {
+            long bareSize = new FileInfo(bareImagePath).Length;
+            string disk = WrapBareFilesystem(bareImagePath);
+            string modifiedBare = Path.Combine(
+                Path.GetTempPath(), $"sharpext4_ssh_{Guid.NewGuid():N}.ext4");
+            try
+            {
+                using (var d = ExtDisk.Open(disk))
+                using (var fs = ExtFileSystem.Open(d, d.Partitions[0]))
+                {
+                    if (!fs.CanWrite)
+                        throw new InvalidOperationException(
+                            "The filesystem mounted READ-ONLY (CanWrite=false); cannot write.");
+                    ApplySshEnable(fs, opts);
+                }
+                // fs/disk disposed above => flushed + unmounted; now recut to raw.
+                SlicePartitionToBare(disk, modifiedBare, bareSize);
+                return modifiedBare;
+            }
+            catch
+            {
+                TryDelete(modifiedBare);
+                throw;
+            }
+            finally
+            {
+                TryDelete(disk);
+            }
+        }
+
+        /// <summary>Applies the ordered Phase A–D edits on an open, writable fs.</summary>
+        private static void ApplySshEnable(ExtFileSystem fs, EnableSshOptions opts)
+        {
+            // Phase A — accounts. Same MD5-crypt hash for both users (salt
+            // "root"); key-only mode disables the password with "*".
+            string secret = opts.KeyOnly ? "*" : Md5Crypt.Crypt(opts.RootPassword, "root");
+            AppendLines(fs, "/etc/passwd", new[]
+            {
+                "root2:x:0:0:root:/home/root:/bin/sh",
+                "bticino2:x:1000:1000::/home/bticino:/bin/sh",
+            });
+            AppendLines(fs, "/etc/shadow", new[]
+            {
+                $"root2:{secret}:18033:0:99999:7:::",
+                $"bticino2:{secret}:18033:0:99999:7:::",
+            });
+
+            // Phase B — the key in root's home. Create parents, then .ssh (0700,
+            // root:root), then authorized_keys (0600, root:root).
+            EnsureDir(fs, "/home");
+            EnsureDir(fs, "/home/root");
+            EnsureDir(fs, "/home/root/.ssh");
+            fs.SetMode("/home/root/.ssh", ToMode(700));
+            fs.SetOwner("/home/root/.ssh", 0, 0);
+            WriteTextFile(fs, "/home/root/.ssh/authorized_keys", EnsureTrailingNewline(opts.PublicKey));
+            fs.SetMode("/home/root/.ssh/authorized_keys", ToMode(600));
+            fs.SetOwner("/home/root/.ssh/authorized_keys", 0, 0);
+
+            // Phase C — the key in dropbear's system path (0600, root:root).
+            EnsureDir(fs, "/etc/dropbear");
+            WriteTextFile(fs, "/etc/dropbear/authorized_keys", EnsureTrailingNewline(opts.PublicKey));
+            fs.SetMode("/etc/dropbear/authorized_keys", ToMode(600));
+            fs.SetOwner("/etc/dropbear/authorized_keys", 0, 0);
+
+            // Phase D — start dropbear at boot via the rc5.d symlink (relative
+            // target, stored verbatim). Prerequisite: /etc/init.d/dropbear must
+            // already exist on the device (verified separately).
+            fs.CreateSymLink("../init.d/dropbear", "/etc/rc5.d/S98dropbear");
+        }
+
+        /// <summary>
+        /// Reopens a modified bare ext4 and re-reads every expected change,
+        /// returning a pass/fail checklist (self-consistency validation).
+        /// </summary>
+        public static IReadOnlyList<Ext4Check> ValidateSsh(string bareImagePath, EnableSshOptions opts)
+        {
+            var checks = new List<Ext4Check>();
+            string disk = WrapBareFilesystem(bareImagePath);
+            try
+            {
+                using var d = ExtDisk.Open(disk);
+                using var fs = ExtFileSystem.Open(d, d.Partitions[0]);
+
+                string passwd = ReadAllTextFromFs(fs, "/etc/passwd");
+                checks.Add(new("/etc/passwd has root2",
+                    passwd.Contains("root2:x:0:0:root:/home/root:/bin/sh"), ""));
+                checks.Add(new("/etc/passwd has bticino2",
+                    passwd.Contains("bticino2:x:1000:1000::/home/bticino:/bin/sh"), ""));
+
+                string secret = opts.KeyOnly ? "*" : Md5Crypt.Crypt(opts.RootPassword, "root");
+                string shadow = ReadAllTextFromFs(fs, "/etc/shadow");
+                checks.Add(new("/etc/shadow has root2 entry", shadow.Contains($"root2:{secret}:"), ""));
+                checks.Add(new("/etc/shadow has bticino2 entry", shadow.Contains($"bticino2:{secret}:"), ""));
+
+                CheckDir(fs, checks, "/home/root/.ssh", ToMode(700));
+                CheckAuthKeys(fs, checks, "/home/root/.ssh/authorized_keys", opts.PublicKey);
+                CheckAuthKeys(fs, checks, "/etc/dropbear/authorized_keys", opts.PublicKey);
+
+                string target = "";
+                bool symOk = false;
+                try { target = fs.ReadSymLink("/etc/rc5.d/S98dropbear"); symOk = target == "../init.d/dropbear"; }
+                catch { /* missing or not a symlink */ }
+                checks.Add(new("/etc/rc5.d/S98dropbear -> ../init.d/dropbear", symOk, target));
+
+                checks.Add(new("/etc/init.d/dropbear exists (prerequisite)",
+                    fs.FileExists("/etc/init.d/dropbear"), ""));
+            }
+            finally
+            {
+                TryDelete(disk);
+            }
+            return checks;
+        }
+
+        private static void CheckDir(ExtFileSystem fs, List<Ext4Check> checks, string path, uint expectedMode)
+        {
+            bool exists = fs.DirectoryExists(path);
+            checks.Add(new($"{path} exists", exists, ""));
+            if (!exists) return;
+            uint mode = fs.GetMode(path) & 0xFFF;
+            checks.Add(new($"{path} mode 0{Convert.ToString((long)expectedMode, 8)}",
+                mode == expectedMode, $"actual 0{Convert.ToString((long)mode, 8)}"));
+            var owner = fs.GetOwner(path);
+            checks.Add(new($"{path} owner 0:0",
+                owner != null && owner.Item1 == 0 && owner.Item2 == 0,
+                owner != null ? $"{owner.Item1}:{owner.Item2}" : "null"));
+        }
+
+        private static void CheckAuthKeys(ExtFileSystem fs, List<Ext4Check> checks, string path, string publicKey)
+        {
+            bool exists = fs.FileExists(path);
+            checks.Add(new($"{path} exists", exists, ""));
+            if (!exists) return;
+            string content = ReadAllTextFromFs(fs, path);
+            checks.Add(new($"{path} content == key", content.Trim() == publicKey.Trim(), ""));
+            uint mode = fs.GetMode(path) & 0xFFF;
+            checks.Add(new($"{path} mode 0600",
+                mode == ToMode(600), $"actual 0{Convert.ToString((long)mode, 8)}"));
+            var owner = fs.GetOwner(path);
+            checks.Add(new($"{path} owner 0:0",
+                owner != null && owner.Item1 == 0 && owner.Item2 == 0,
+                owner != null ? $"{owner.Item1}:{owner.Item2}" : "null"));
+        }
+
+        private static uint ToMode(int octalDigits) => Convert.ToUInt32(octalDigits.ToString(), 8);
+
+        private static string EnsureTrailingNewline(string s) => s.EndsWith("\n") ? s : s + "\n";
+
+        private static void AppendLines(ExtFileSystem fs, string path, string[] lines)
+        {
+            string current = fs.FileExists(path) ? ReadAllTextFromFs(fs, path) : "";
+            var sb = new StringBuilder(current);
+            // Correction #3: don't glue the new line onto the last existing one.
+            if (sb.Length > 0 && sb[sb.Length - 1] != '\n') sb.Append('\n');
+            foreach (var line in lines) sb.Append(line).Append('\n');
+            WriteTextFile(fs, path, sb.ToString());
+        }
+
+        private static void WriteTextFile(ExtFileSystem fs, string path, string text)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(text);
+            using var f = fs.OpenFile(path, FileMode.Create, FileAccess.Write);
+            f.Write(bytes, 0, bytes.Length);
+        }
+
+        private static void EnsureDir(ExtFileSystem fs, string path)
+        {
+            if (!fs.DirectoryExists(path)) fs.CreateDirectory(path);
         }
 
         /// <summary>Reads a little-endian uint32 from a buffer at the given offset.</summary>

@@ -22,18 +22,21 @@
                      VerticalAlignment="Center"/>
         </StackPanel>
 
-        <!-- Row 1: test buttons — read, and the write proof of concept -->
-        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
-            <Button x:Name="BtnReadFwz" Padding="12,6" Margin="0,0,8,0"
+        <!-- Row 1: test buttons -->
+        <WrapPanel Grid.Row="1" Margin="0,0,0,8">
+            <Button x:Name="BtnReadFwz" Padding="12,6" Margin="0,0,8,8"
                     Content="Choose .fwz and read…"
                     Click="BtnReadFwz_Click"/>
-            <Button x:Name="BtnWriteTest" Padding="12,6" Margin="0,0,8,0"
+            <Button x:Name="BtnWriteTest" Padding="12,6" Margin="0,0,8,8"
                     Content="Choose .fwz and TEST WRITE…"
                     Click="BtnWriteTest_Click"/>
-            <Button x:Name="BtnMd5Test" Padding="12,6"
+            <Button x:Name="BtnMd5Test" Padding="12,6" Margin="0,0,8,8"
                     Content="Test MD5-crypt"
                     Click="BtnMd5Test_Click"/>
-        </StackPanel>
+            <Button x:Name="BtnSshEnable" Padding="12,6" Margin="0,0,8,8"
+                    Content="Choose .fwz + key → APPLY SSH-enable (test)"
+                    Click="BtnSshEnable_Click"/>
+        </WrapPanel>
 
         <!-- Row 2: result label -->
         <TextBlock Grid.Row="2" Text="Result:" Margin="0,0,0,4"/>
