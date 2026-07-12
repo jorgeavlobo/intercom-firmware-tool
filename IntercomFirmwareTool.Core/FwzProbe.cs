@@ -385,9 +385,19 @@ namespace IntercomFirmwareTool.Core
             }
         }
 
-        /// <summary>True if two paths resolve to the same file (case-insensitive, Windows).</summary>
-        private static bool PathsEqual(string a, string b) =>
-            string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
+        /// <summary>
+        /// True if two paths resolve to the same file. Path comparison is
+        /// case-insensitive on Windows and case-sensitive elsewhere, matching the
+        /// host filesystem (Core targets net10.0, so this stays correct if reused
+        /// on Linux/macOS).
+        /// </summary>
+        private static bool PathsEqual(string a, string b)
+        {
+            var cmp = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+            return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), cmp);
+        }
 
         /// <summary>Builds a unique path in the temp folder with the given extension.</summary>
         private static string NewTempPath(string extension) =>
