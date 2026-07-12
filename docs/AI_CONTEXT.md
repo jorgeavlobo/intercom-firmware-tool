@@ -13,10 +13,12 @@ script does on Linux** — but as a native Windows GUI tool, without needing
 Linux, WSL, root, or `mount`.
 
 - **Upstream we replicate:** https://github.com/fquinto/bticinoClasse300x
-- **A verbatim copy of that script is in this repo** for offline reference:
-  [`reference/fquinto/main.py`](../reference/fquinto/main.py) (GPL-2.0, external
-  reference only — do **not** copy its code into our C# sources; we reimplement
-  the *result*, clean-room).
+- **The upstream script (`main.py`) is GPL-2.0 and is NOT vendored here** (this
+  is an MIT repo). Its provenance — exact raw URL, MD5, and a line-number map of
+  the relevant functions — is recorded in
+  [`reference/fquinto/README.md`](../reference/fquinto/README.md); fetch it from
+  there if you need to read it. We reimplement the *result*, clean-room — do
+  **not** copy its code into our C# sources.
 - **The write-phase design** is in
   [`docs/WRITE_PHASE_PLAN.md`](WRITE_PHASE_PLAN.md).
 
@@ -75,12 +77,13 @@ not a change to the ext4 itself.
    mounts as root, so it gets `root:root` ownership for free and relies on the
    root umask for directory modes. We do **not** — we call `SetOwner(0,0)` and
    `SetMode(...)` explicitly on every new file/dir. Missing this would make
-   dropbear reject the SSH key. One **deliberate divergence**: we set
-   `/home/root/.ssh` to `0700`, whereas fquinto's `mkdir` leaves it at `0755`.
-   Both satisfy dropbear/OpenSSH `StrictModes` (not group/other-writable), so
-   both work; ours is just tighter. `ValidateSsh` therefore checks the
-   **functional requirement** (not group/other-writable) rather than an exact
-   mode, so both our and fquinto's output PASS.
+   dropbear reject the SSH key. `/home/root/.ssh` is set to `0755`, **matching
+   fquinto exactly** (its `mkdir -p` under the default umask). Note: neither
+   `.ssh` nor any `authorized_keys` exists in the factory firmware — this whole
+   mechanism is created here; there is no factory mode to copy. Security comes
+   from the parent (`/home/root` is `0700 root:root` at factory), so `.ssh` is
+   unreachable by other users regardless. `ValidateSsh` checks the **functional
+   requirement** (not group/other-writable), which `0755` satisfies.
 5. **Passwords:** fquinto uses `openssl passwd -1` (MD5-crypt, `$1$`, salt
    `root`). We reimplement md5crypt in C# (`Md5Crypt.cs`), validated against a
    known test vector. Do not "modernize" to SHA-512 while replicating — that
@@ -102,7 +105,8 @@ not a change to the ext4 itself.
   modified `.fwz` (verified by a full read-back round-trip). Two secondary
   actions **Verify an existing `.fwz`** and run the **MD5-crypt self-test**.
   A startup line reports 64-bit + DLL presence; it turns red if anything is off.
-- `reference/fquinto/main.py` — the upstream script (reference only).
+- `reference/fquinto/README.md` — provenance of the upstream GPL-2.0 script
+  (URL + MD5 + line-number map); the script itself is not vendored.
 - `docs/WRITE_PHASE_PLAN.md` — the detailed write-phase plan.
 
 ## Status snapshot
@@ -114,8 +118,7 @@ not a change to the ext4 itself.
 - ✅ Repackaging (re-gzip + ZipCrypto re-zip) round-trips through our read chain.
 - ✅ **Golden cross-validation done** — fquinto (Docker/Linux) run on the same
   input produced the identical MD5-crypt hash, and its output `.fwz` passes our
-  validator (the only divergence being our deliberate `.ssh` 0700-vs-0755
-  hardening, which the functional-requirement check accepts on both sides).
+  validator with **no divergence** (`.ssh` is 0755, matching fquinto exactly).
 - ✅ Product UI — a single Build flow (choose .fwz + key + output → build +
   verify), plus Verify-existing and self-test actions.
 - ⏳ Next (user's call): optional real-device flashing with USB/SAM-BA recovery

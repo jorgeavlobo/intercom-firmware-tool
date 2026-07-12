@@ -1,67 +1,42 @@
-# Reference: fquinto `main.py`
+# Reference: fquinto `main.py` (provenance — not vendored)
 
-`main.py` in this folder is a **verbatim, unmodified copy** of the firmware
-preparation script from the fquinto project, kept here for **offline reference
-only** — so we can compare our C# implementation against what it does without
-going back to GitHub each time.
+Our tool replicates the *result* of the fquinto firmware-preparation script.
+The upstream script, **`main.py`, is GPL-2.0**, so to keep this MIT repository
+free of GPL-licensed content it is **not vendored here** — this file records its
+exact provenance and the map of the parts we replicate, so it stays reproducible
+without carrying the file in the tree.
 
 - **Source (raw):** https://raw.githubusercontent.com/fquinto/bticinoClasse300x/main/main.py
 - **Author:** fquinto (and contributors)
-- **License:** GPL-2.0 (as declared by the upstream repository); the full
-  license text is in [`COPYING`](COPYING) in this folder
-- **Fetched:** 2026-07 (branch `main`)
+- **License:** GPL-2.0 (as declared by the upstream repository)
+- **Fetched / verified:** 2026-07 (branch `main`)
 - **Content anchor (deterministic):** MD5 `a6b777888e140df789cc026a4673b7e9`,
-  1068 lines, upstream version `0.0.13`. This exact byte-for-byte content was
-  re-verified identical to upstream `main` HEAD. Verify with:
+  1068 lines, upstream version `0.0.13`. Fetch and verify the exact content the
+  line-number map below refers to:
   ```shell
   curl -fsSL https://raw.githubusercontent.com/fquinto/bticinoClasse300x/main/main.py | md5sum
   # => a6b777888e140df789cc026a4673b7e9
   ```
-  The MD5 pins the *content* (a tighter anchor than a branch name); the
-  line-number map below is valid for exactly this file. A commit SHA could not
-  be recorded from the build environment (the GitHub API is not reachable here),
-  but if upstream ever changes `main.py`, the MD5 above no longer matching `main`
-  is the signal to find the specific commit that produced this content.
-- **Purpose here:** documentation / comparison only. It is **not** compiled,
-  imported, executed, or shipped by this tool. Our tool is a clean-room C#/WPF
-  reimplementation of the *result* (see `docs/WRITE_PHASE_PLAN.md`), not a
-  translation of this code.
+  The MD5 pins the *content* (a tighter anchor than a branch name). If upstream
+  ever changes `main.py`, the MD5 no longer matching `main` is the signal that
+  the line numbers below may have shifted.
 
-Because this file is GPL-2.0 and third-party, treat it as an external reference
-document. Do not copy code from it into the C# sources; use it only to confirm
-exact paths, contents, permissions and ordering.
+The tool is a clean-room C#/WPF reimplementation of the *result*
+(see `docs/WRITE_PHASE_PLAN.md`), not a translation of this code. Do not copy
+code from the upstream script into the C# sources; use it only to confirm exact
+paths, contents, permissions and ordering.
 
-## License and attribution
+## Licensing
 
-`main.py` is Copyright © the fquinto project authors and is licensed under the
-**GNU General Public License, version 2 (GPL-2.0)**. The complete license text
-is in [`COPYING`](COPYING) alongside this file.
-
-`main.py` is included **verbatim and unmodified** — no changes have been made to
-it. The rest of this repository is a separate, independent work under its own
-license (MIT); `main.py` is kept here only as an external reference and is
-**not** linked into, compiled with, or shipped as part of the tool's binaries.
-
-### Compliance note (MIT product + this GPL-2.0 file)
-
-The product code (MIT) and this GPL-2.0 file are **not combined** — they are not
-compiled or linked together, and no code is copied between them. Their presence
-in one repository is **"mere aggregation"** (GPLv2 §2): the MIT product stays
-MIT, and `main.py` stays GPL-2.0; neither relicenses the other.
-
-However, this file's GPL-2.0 terms **do** travel with it. If you **redistribute
-the repository source** (or any source archive that includes this folder), you
-are redistributing a GPL-2.0 file and must keep its license and attribution —
-that is why the full text is in [`COPYING`](COPYING) next to it.
-
-If you would rather not carry a GPL-2.0 file in the tree at all, it can be
-**removed** and re-fetched on demand — this README records the exact raw URL and
-MD5 above, so the reference is reproducible without vendoring the file. (Binary
-releases of the tool are unaffected either way: `main.py` is never shipped.)
+This repository is **MIT**. The upstream `main.py` is **GPL-2.0** and is **not
+included here**, so the repository (source and releases) carries no GPL-licensed
+content. If you fetch `main.py` via the URL above for your own reference, that
+copy remains GPL-2.0 and its terms apply to *that* copy only — they do not affect
+this MIT project.
 
 ## The rootfs edits this script makes (map to our C# plan)
 
-Verified line numbers in this copy:
+Verified line numbers in the pinned content (MD5 above):
 
 | Lines | What it does |
 |------:|--------------|
@@ -73,7 +48,15 @@ Verified line numbers in this copy:
 | 908–915 | `enable_dropbear`: `cd /etc/rc5.d && ln -s ../init.d/dropbear S98dropbear` |
 | 824–828 | verifies `/etc/rc5.d` exists before creating the symlink |
 
-Note: the script runs as root via `sudo mount`, so new files/dirs are already
-owned `root:root` and it never `chown`s them, and it doesn't `chmod` the `.ssh`
-directory. Our SharpExt4 approach has no such luxury, so we set ownership
-(`0:0`) and the `.ssh` mode (`0700`) explicitly — see the plan.
+**On the `/home/root/.ssh` mode:** the script runs as root via `sudo mount`, so
+new files/dirs are already `root:root` and it never `chown`s them, and it does
+**not** `chmod` the `.ssh` directory — `mkdir -p` under the default umask leaves
+it **0755**. We replicate exactly that (`.ssh` = 0755, `authorized_keys` = 0600,
+owners 0:0). Note that neither `.ssh` nor any `authorized_keys` exists in the
+factory firmware (verified on the original image: `/home/root` has only
+`.bash_history` and `.cache`; `/etc/dropbear` has only `dropbear_rsa_host_key`),
+so this whole key-login mechanism is created by the edits — there is no factory
+mode to copy. Security is guaranteed by the parent directory: factory
+`/home/root` is **0700 `root:root`** (verified `drwx------`), so its contents are
+unreachable by other users whether `.ssh` is 0755 or 0700, and dropbear accepts
+0755 because it only rejects a group/other-**writable** `.ssh`.

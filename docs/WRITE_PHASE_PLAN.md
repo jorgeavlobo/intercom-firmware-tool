@@ -14,8 +14,9 @@ target, faithful to fquinto, with a test vector already validated (see §c).
 **Plan B (documented):** set the shadow password field to `*`/`!` (key-only
 SSH), used only if MD5-crypt in C# turns out to be problematic.
 
-All operations below are verified against `reference/fquinto/main.py`
-(line numbers verified in that copy).
+All operations below are verified against fquinto's `main.py` (upstream, GPL-2.0
+— not vendored here). The exact line numbers, raw URL, and MD5 are in
+[`reference/fquinto/README.md`](../reference/fquinto/README.md).
 
 ---
 
@@ -35,13 +36,18 @@ Inside the `.fwz` — only 1 of the 4 entries is modified:
 > checksum/signature of the payload against `fwz.xml`. We rely on this
 > empirical fact (and keep recovery ready before any flash).
 >
-> ² **0700 is a deliberate hardening.** fquinto mounts as root and lets
-> `mkdir` leave `/home/root/.ssh` at its default **0755**; we `SetMode(0700)`.
-> Both satisfy dropbear/OpenSSH `StrictModes` (the directory must not be
-> group/other-writable), so both work. The golden cross-validation (§e) found
-> this is the **only** difference between our output and fquinto's, and the
-> validator now checks the functional requirement rather than an exact mode —
-> so both 0700 and 0755 PASS, while 0770/0777 would FAIL.
+> ² **The `.ssh` dir is 0755, matching fquinto exactly.** Neither
+> `/home/root/.ssh` nor any `authorized_keys` exists in the factory firmware —
+> the whole key-login mechanism is created here (verified on the original image:
+> factory `/home/root` has only `.bash_history` and `.cache`; `/etc/dropbear`
+> has only `dropbear_rsa_host_key`). There is no "factory mode" to copy; 0755 is
+> simply fquinto's `mkdir -p` under the default umask, replicated for fidelity.
+> Security is guaranteed by the parent: factory `/home/root` is **0700
+> root:root** (verified `drwx------`), so anything inside is unreachable by other
+> users whether `.ssh` is 0755 or 0700. dropbear accepts 0755 (confirmed: key
+> login works) — it only rejects a group/other-**writable** `.ssh`, which 0755
+> is not. The validator checks that functional requirement, so 0755 PASSES
+> (0770/0777 would FAIL).
 
 Inside `btweb_only.ext4` — objects touched:
 
@@ -50,7 +56,7 @@ Inside `btweb_only.ext4` — objects touched:
 | `/etc/passwd` | append (2 lines) | (kept) | (kept) |
 | `/etc/shadow` | append (2 lines) | (kept) | (kept) |
 | `/home/root` | create if missing | — | 0:0 |
-| `/home/root/.ssh` | create | **0700** ² | **0:0** |
+| `/home/root/.ssh` | create | **0755** ² | **0:0** |
 | `/home/root/.ssh/authorized_keys` | create (public key) | **0600** | **0:0** |
 | `/etc/dropbear` | create if missing | — | 0:0 if created |
 | `/etc/dropbear/authorized_keys` | create (public key) | **0600** | **0:0** |
@@ -63,7 +69,8 @@ Inside `btweb_only.ext4` — objects touched:
 **Phase A — accounts** (append; no dependencies):
 
 1. Compute the MD5-crypt hash: `md5crypt(password, salt="root")` → `$1$root$…`.
-   Default password `pwned123` (choosable). Same hash for both users.
+   The password is entered by the user (or key-only login disables it); no
+   default is pre-filled. Same hash for both users.
 2. **`/etc/passwd`** → ensure it ends with `\n` (correction #3), then append:
    - `root2:x:0:0:root:/home/root:/bin/sh`
    - `bticino2:x:1000:1000::/home/bticino:/bin/sh`
@@ -76,7 +83,7 @@ right after creating each object — corrections #1 and #2):
 
 4. Ensure `/home` and `/home/root` exist (`mkdir -p` equivalent). If created,
    `SetOwner(0,0)`.
-5. Create `/home/root/.ssh` → `SetMode(0700)` → `SetOwner(0,0)`.
+5. Create `/home/root/.ssh` → `SetMode(0755)` → `SetOwner(0,0)`.
 6. Create `/home/root/.ssh/authorized_keys` (public key) → `SetMode(0600)` →
    `SetOwner(0,0)`.
 
@@ -163,9 +170,9 @@ Before any flashing, prove our output equals fquinto's:
    - `/etc/shadow` — the 2 lines, identical hash (fixed salt → identical);
    - `authorized_keys` (both) — content == public key;
    - `/etc/rc5.d/S98dropbear` — exists, target == `../init.d/dropbear`;
-   - **modes** — `authorized_keys`=0600 (exact); `.ssh` checked by the
-     **functional requirement** (not group/other-writable), so our 0700 and
-     fquinto's 0755 both PASS — **and owners** (0:0 on the new objects).
+   - **modes** — `authorized_keys`=0600 (exact); `.ssh`=0755 (matching fquinto),
+     checked by the **functional requirement** (not group/other-writable) so it
+     PASSES — **and owners** (0:0 on the new objects).
 3. **Self-consistency:** reopen our modified ext4 (with our own tool) and re-read
    every change.
 4. **Hash test vector:** the `$1$root$0i6hbFPn3JOGMeEF0LgEV1` check (§c).
@@ -204,22 +211,22 @@ unit (with USB/SAM-BA recovery ready), and **only then** consider innovations.
    (self-test ALL PASS on real hardware).
 2. **ext4 write routine (Phase A–D) + recut** + logical validation. ✅ Done
    (all 18 checks PASS on real firmware, including SetOwner 0:0 and SetMode
-   0700/0600).
+   0755/0600).
 3. **Re-gzip + re-zip (ZipCrypto) + round-trip.** ✅ Done
    ("BUILD modified .fwz (test)" button; the output .fwz round-trips through
    our own read chain with every edit intact — SharpZipLib ZipCrypto writing
    proven).
 4. **Golden cross-validation against fquinto.** ✅ Done.
    fquinto was run in Docker on a Linux VPS against the **same** input
-   (`c100x_1.5.8.fwz`), the **same** public key, and default password —
+   (`c100x_1.5.8.fwz`), the **same** public key, and the password `pwned123` —
    producing `$1$root$0i6hbFPn3JOGMeEF0LgEV1` (the exact hash our MD5-crypt
    generates). fquinto's output `.fwz` was fed to our "Validate SSH-enable in
-   an existing .fwz" button: **17/18 identical**, the one divergence being the
-   deliberate `.ssh` hardening (fquinto 0755 vs our 0700). The validator now
-   checks the functional requirement (not group/other-writable) instead of an
-   exact mode, so both outputs report a clean **ALL PASS**. Every operation
-   was also cross-checked line-by-line against `reference/fquinto/main.py`, and
-   the MD5-crypt matches `openssl passwd -1`.
+   an existing .fwz" button: with `.ssh` set to **0755** the output now matches
+   fquinto with **no divergence** (a clean **ALL PASS**). Every operation was
+   also cross-checked line-by-line against fquinto's `main.py` (its provenance
+   and a line-number map are in `reference/fquinto/README.md`; the file itself
+   is not vendored, to keep this MIT repo free of GPL-2.0 content), and the
+   MD5-crypt matches `openssl passwd -1`.
 
 5. **Product UI.** ✅ Done. The six PoC buttons were replaced with a single
    product flow: choose `.fwz` + public key + output → **Build modified

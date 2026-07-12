@@ -391,13 +391,20 @@ namespace IntercomFirmwareTool.Core
             });
 
             // Phase B — the key in root's home. Create parents, then .ssh, then
-            // authorized_keys (0600, root:root). We set .ssh to 0700 — a
-            // deliberate hardening: fquinto leaves it at the mkdir default 0755,
-            // but both are dropbear-safe (not group/other-writable).
+            // authorized_keys (0600, root:root). The .ssh dir is 0755, matching
+            // fquinto exactly (its `mkdir -p` under the default umask). Neither
+            // /home/root/.ssh nor any authorized_keys exists in the factory
+            // firmware (verified: /home/root has only .bash_history and .cache;
+            // /etc/dropbear has only dropbear_rsa_host_key) — the whole key-login
+            // mechanism is created here, so there is no "factory" mode to copy.
+            // Security comes from the parent: /home/root is 0700 root:root at
+            // factory (verified drwx------), so anything inside (.ssh at 0755 or
+            // 0700) is unreachable by other users regardless. dropbear accepts
+            // 0755 — it only rejects a group/other-WRITABLE .ssh, which 0755 is not.
             EnsureDir(fs, "/home");
             EnsureDir(fs, "/home/root");
             EnsureDir(fs, "/home/root/.ssh");
-            fs.SetMode("/home/root/.ssh", ToMode(700));
+            fs.SetMode("/home/root/.ssh", ToMode(755));
             fs.SetOwner("/home/root/.ssh", 0, 0);
             WriteTextFile(fs, "/home/root/.ssh/authorized_keys", EnsureTrailingNewline(opts.PublicKey));
             fs.SetMode("/home/root/.ssh/authorized_keys", ToMode(600));
@@ -507,9 +514,9 @@ namespace IntercomFirmwareTool.Core
             if (!exists) return;
 
             // Functional requirement (dropbear/OpenSSH StrictModes): the .ssh
-            // directory must not be writable by group or other. Both 0700 (our
-            // tool's deliberate hardening) and 0755 (fquinto's mkdir default)
-            // satisfy this; 0770/0777 would not.
+            // directory must not be writable by group or other. We set 0755
+            // (matching fquinto); the check stays functional — 0755 passes,
+            // 0770/0777 would fail — so it also tolerates a stricter 0700.
             uint mode = fs.GetMode(path) & 0xFFF;
             bool safe = (mode & 0b000_010_010u) == 0;
             checks.Add(new($"{path} not group/other-writable",
@@ -576,8 +583,8 @@ namespace IntercomFirmwareTool.Core
             if (fs.DirectoryExists(path)) return;
             // lwext4 does not give a newly created object root:root or a known
             // mode, so set both explicitly (0755 is a safe, not group/other-
-            // writable default; callers tighten it further where needed, e.g.
-            // .ssh to 0700).
+            // writable default; callers override it where a specific mode is
+            // required).
             fs.CreateDirectory(path);
             fs.SetMode(path, ToMode(755));
             fs.SetOwner(path, 0, 0);
