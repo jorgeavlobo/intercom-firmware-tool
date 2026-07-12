@@ -1,0 +1,38 @@
+# Reference: fquinto `main.py`
+
+`main.py` in this folder is a **verbatim, unmodified copy** of the firmware
+preparation script from the fquinto project, kept here for **offline reference
+only** — so we can compare our C# implementation against what it does without
+going back to GitHub each time.
+
+- **Source:** https://github.com/fquinto/bticinoClasse300x/blob/main/main.py
+- **Author:** fquinto (and contributors)
+- **License:** GPL-2.0 (as declared by the upstream repository)
+- **Fetched:** 2026-07 (branch `main`)
+- **Purpose here:** documentation / comparison only. It is **not** compiled,
+  imported, executed, or shipped by this tool. Our tool is a clean-room C#/WPF
+  reimplementation of the *result* (see `docs/WRITE_PHASE_PLAN.md`), not a
+  translation of this code.
+
+Because this file is GPL-2.0 and third-party, treat it as an external reference
+document. Do not copy code from it into the C# sources; use it only to confirm
+exact paths, contents, permissions and ordering.
+
+## The rootfs edits this script makes (map to our C# plan)
+
+Verified line numbers in this copy:
+
+| Lines | What it does |
+|------:|--------------|
+| 501–503 | `openssl passwd -1 -salt root <password>` → MD5-crypt hash (`$1$root$…`) |
+| 527–532 | `set_shadow_file`: append `root2:` and `bticino2:` to `/etc/shadow` |
+| 535–540 | `set_passwd_file`: append `root2:` and `bticino2:` to `/etc/passwd` |
+| 561–572 | `set_ssh_key`: copy pubkey to `/etc/dropbear/authorized_keys`, `mkdir /home/root/.ssh`, copy pubkey to `/home/root/.ssh/authorized_keys` |
+| 899–905 | `setup_ssh_key_rights`: `chmod 600` on both `authorized_keys` |
+| 908–915 | `enable_dropbear`: `cd /etc/rc5.d && ln -s ../init.d/dropbear S98dropbear` |
+| 824–828 | verifies `/etc/rc5.d` exists before creating the symlink |
+
+Note: the script runs as root via `sudo mount`, so new files/dirs are already
+owned `root:root` and it never `chown`s them, and it doesn't `chmod` the `.ssh`
+directory. Our SharpExt4 approach has no such luxury, so we set ownership
+(`0:0`) and the `.ssh` mode (`0700`) explicitly — see the plan.
