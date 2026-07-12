@@ -179,6 +179,13 @@ namespace IntercomFirmwareTool.App
         {
             // Key-only means no password login; grey the password fields out.
             bool usePassword = ChkKeyOnly.IsChecked != true;
+
+            // Going key-only: re-mask first (the Unchecked handler copies the
+            // text back into the PasswordBox and hides it), so a previously
+            // "Shown" password isn't left visible in the now-disabled fields.
+            if (!usePassword && BtnShowPwd.IsChecked == true)
+                BtnShowPwd.IsChecked = false;
+
             PwdPassword.IsEnabled = usePassword;
             TxtPassword.IsEnabled = usePassword;
             PwdConfirm.IsEnabled = usePassword;
