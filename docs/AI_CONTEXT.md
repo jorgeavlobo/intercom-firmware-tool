@@ -96,8 +96,11 @@ not a change to the ext4 itself.
   - `FwzProbe.cs` — the `.fwz` chain (SharpZipLib ZipCrypto, gunzip, orchestration).
   - `Md5Crypt.cs` — the `$1$` MD5-crypt generator + self-test.
   - `lib/SharpExt4/` — the SharpExt4 + lwext4 binaries (x64 native).
-- `IntercomFirmwareTool.App/` — the WPF UI (buttons that drive the Core and show
-  results). The UI is intentionally a test/PoC surface right now.
+- `IntercomFirmwareTool.App/` — the WPF UI. A single product flow: choose the
+  original `.fwz`, an SSH public key and an output path, then **Build** a
+  modified `.fwz` (verified by a full read-back round-trip). Two secondary
+  actions **Verify an existing `.fwz`** and run the **MD5-crypt self-test**.
+  A startup line reports 64-bit + DLL presence; it turns red if anything is off.
 - `reference/fquinto/main.py` — the upstream script (reference only).
 - `docs/WRITE_PHASE_PLAN.md` — the detailed write-phase plan.
 
@@ -112,5 +115,7 @@ not a change to the ext4 itself.
   input produced the identical MD5-crypt hash, and its output `.fwz` passes our
   validator (the only divergence being our deliberate `.ssh` 0700-vs-0755
   hardening, which the functional-requirement check accepts on both sides).
-- ⏳ Next (user's call): productionize the UI (the buttons are a PoC surface),
-  then optional real-device flashing with USB/SAM-BA recovery ready.
+- ✅ Product UI — a single Build flow (choose .fwz + key + output → build +
+  verify), plus Verify-existing and self-test actions.
+- ⏳ Next (user's call): optional real-device flashing with USB/SAM-BA recovery
+  ready; optional 100%-faithful extras (e.g. fquinto's patch_github.xml edit).

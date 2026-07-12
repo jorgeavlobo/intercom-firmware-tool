@@ -212,5 +212,13 @@ unit (with USB/SAM-BA recovery ready), and **only then** consider innovations.
    was also cross-checked line-by-line against `reference/fquinto/main.py`, and
    the MD5-crypt matches `openssl passwd -1`.
 
-**Still required before flashing a real unit:** a clean product UI/flow (the
-buttons are a PoC surface) and USB/SAM-BA recovery ready.
+5. **Product UI.** ✅ Done. The six PoC buttons were replaced with a single
+   product flow: choose `.fwz` + public key + output → **Build modified
+   firmware** (runs extract → SSH-enable → repack → read-back verification and
+   reports a clear pass/fail summary). Secondary actions **Verify an existing
+   `.fwz`** and the **MD5-crypt self-test** remain. A startup diagnostics line
+   reports 64-bit + DLL presence (red if anything is wrong). The window carries
+   the recovery/safety reminder.
+
+**Still required before flashing a real unit:** USB/SAM-BA recovery ready (the
+tool itself never flashes — that is a deliberate manual, out-of-band step).

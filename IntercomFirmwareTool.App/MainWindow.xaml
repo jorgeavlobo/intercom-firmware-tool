@@ -5,53 +5,122 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:IntercomFirmwareTool.App"
         mc:Ignorable="d"
-        Title="Test: read ext4 from inside a .fwz" Height="500" Width="800">
-    <Grid Margin="12">
+        Title="Intercom Firmware Tool — SSH-enable (Classe 100X / 300X)"
+        Height="640" Width="880" MinHeight="560" MinWidth="720">
+    <Window.Resources>
+        <Style TargetType="TextBlock" x:Key="FieldLabel">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+            <Setter Property="HorizontalAlignment" Value="Right"/>
+        </Style>
+        <Style TargetType="Button" x:Key="BrowseButton">
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Setter Property="MinWidth" Value="90"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="14">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>   <!-- 0: intro + safety -->
+            <RowDefinition Height="Auto"/>   <!-- 1: input form -->
+            <RowDefinition Height="Auto"/>   <!-- 2: action buttons -->
+            <RowDefinition Height="Auto"/>   <!-- 3: result label -->
+            <RowDefinition Height="*"/>      <!-- 4: result box -->
+            <RowDefinition Height="Auto"/>   <!-- 5: diagnostics status -->
         </Grid.RowDefinitions>
 
-        <!-- Row 0: path of the file INSIDE the image -->
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <TextBlock Text="File to read inside the image:"
-                       VerticalAlignment="Center" Margin="0,0,8,0"/>
-            <TextBox x:Name="TxtInternalPath" Width="300" Text="/etc/hostname"
-                     VerticalAlignment="Center"/>
+        <!-- Row 0: what this does + safety note -->
+        <Border Grid.Row="0" Background="#FFF7F2E8" BorderBrush="#FFE0C98A"
+                BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,0,0,12">
+            <StackPanel>
+                <TextBlock TextWrapping="Wrap" FontWeight="SemiBold"
+                           Text="Builds a modified BTicino firmware (.fwz) that enables SSH/root login, replicating the fquinto project on Windows."/>
+                <TextBlock TextWrapping="Wrap" Margin="0,4,0,0" Foreground="#FF7A5B00"
+                           Text="⚠ Flashing modified firmware can brick a device. Keep USB/SAM-BA recovery ready before you flash. Your input .fwz is never modified — a new file is written."/>
+            </StackPanel>
+        </Border>
+
+        <!-- Row 1: the input form -->
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Firmware .fwz -->
+            <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                       Text="Firmware (.fwz):"/>
+            <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtFwzPath" IsReadOnly="True"
+                     VerticalContentAlignment="Center" Padding="4,3" Margin="0,0,0,6"
+                     Text="(choose the original .fwz to modify)" Foreground="Gray"/>
+            <Button Grid.Row="0" Grid.Column="2" x:Name="BtnBrowseFwz"
+                    Style="{StaticResource BrowseButton}" Margin="8,0,0,6"
+                    Content="Browse…" Click="BtnBrowseFwz_Click"/>
+
+            <!-- SSH public key -->
+            <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                       Text="SSH public key:"/>
+            <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtKeyPath" IsReadOnly="True"
+                     VerticalContentAlignment="Center" Padding="4,3" Margin="0,0,0,6"
+                     Text="(choose your .pub key to install)" Foreground="Gray"/>
+            <Button Grid.Row="1" Grid.Column="2" x:Name="BtnBrowseKey"
+                    Style="{StaticResource BrowseButton}" Margin="8,0,0,6"
+                    Content="Browse…" Click="BtnBrowseKey_Click"/>
+
+            <!-- Root password + key-only -->
+            <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                       Text="Root password:"/>
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+                <TextBox x:Name="TxtPassword" Width="200" Padding="4,3"
+                         VerticalContentAlignment="Center" Text="pwned123"/>
+                <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="14,0,0,0"
+                          Content="Key-only login (no password)"
+                          Checked="ChkKeyOnly_Toggled" Unchecked="ChkKeyOnly_Toggled"/>
+            </StackPanel>
+
+            <!-- Output -->
+            <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                       Text="Save output as:"/>
+            <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtOutputPath" IsReadOnly="True"
+                     VerticalContentAlignment="Center" Padding="4,3"
+                     Text="(where to write the modified .fwz)" Foreground="Gray"/>
+            <Button Grid.Row="3" Grid.Column="2" x:Name="BtnBrowseOutput"
+                    Style="{StaticResource BrowseButton}"
+                    Content="Browse…" Click="BtnBrowseOutput_Click"/>
+        </Grid>
+
+        <!-- Row 2: actions -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button x:Name="BtnBuild" Padding="16,8" Margin="0,0,10,0"
+                    FontWeight="SemiBold" IsEnabled="False"
+                    Content="Build modified firmware" Click="BtnBuild_Click"/>
+            <Button x:Name="BtnVerify" Padding="12,8" Margin="0,0,10,0"
+                    Content="Verify an existing .fwz…" Click="BtnVerify_Click"/>
+            <Button x:Name="BtnSelfTest" Padding="12,8"
+                    Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
         </StackPanel>
 
-        <!-- Row 1: test buttons -->
-        <WrapPanel Grid.Row="1" Margin="0,0,0,8">
-            <Button x:Name="BtnReadFwz" Padding="12,6" Margin="0,0,8,8"
-                    Content="Choose .fwz and read…"
-                    Click="BtnReadFwz_Click"/>
-            <Button x:Name="BtnWriteTest" Padding="12,6" Margin="0,0,8,8"
-                    Content="Choose .fwz and TEST WRITE…"
-                    Click="BtnWriteTest_Click"/>
-            <Button x:Name="BtnMd5Test" Padding="12,6" Margin="0,0,8,8"
-                    Content="Test MD5-crypt"
-                    Click="BtnMd5Test_Click"/>
-            <Button x:Name="BtnSshEnable" Padding="12,6" Margin="0,0,8,8"
-                    Content="Choose .fwz + key → APPLY SSH-enable (test)"
-                    Click="BtnSshEnable_Click"/>
-            <Button x:Name="BtnBuildFwz" Padding="12,6" Margin="0,0,8,8"
-                    Content="Choose .fwz + key → BUILD modified .fwz (test)"
-                    Click="BtnBuildFwz_Click"/>
-            <Button x:Name="BtnValidateFwz" Padding="12,6" Margin="0,0,8,8"
-                    Content="Validate SSH-enable in an existing .fwz"
-                    Click="BtnValidateFwz_Click"/>
-        </WrapPanel>
+        <!-- Row 3: result label -->
+        <TextBlock Grid.Row="3" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
 
-        <!-- Row 2: result label -->
-        <TextBlock Grid.Row="2" Text="Result:" Margin="0,0,0,4"/>
-
-        <!-- Row 3: result box (multi-line, scroll, read-only) -->
-        <TextBox x:Name="TxtResult" Grid.Row="3"
-                 IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+        <!-- Row 4: result box -->
+        <TextBox x:Name="TxtResult" Grid.Row="4"
+                 IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
                  VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Auto"
-                 FontFamily="Consolas" FontSize="12"/>
+                 FontFamily="Consolas" FontSize="12"
+                 Text="Choose a firmware, a public key and an output path, then click Build."/>
+
+        <!-- Row 5: diagnostics -->
+        <TextBlock Grid.Row="5" x:Name="TxtDiag" Margin="0,8,0,0"
+                   Foreground="Gray" FontFamily="Consolas" FontSize="11"/>
     </Grid>
 </Window>
