@@ -375,7 +375,10 @@ namespace IntercomFirmwareTool.App
                 }
                 else
                 {
-                    sb.AppendLine("❌ Some checks FAILED — do NOT flash this output. See above.");
+                    sb.AppendLine("❌ Some checks FAILED — the verified build was NOT written.");
+                    sb.AppendLine($"   Your chosen output path was left unchanged: {output}");
+                    sb.AppendLine("   (any existing file there is NOT this build — do not flash it.)");
+                    sb.AppendLine("   See the failing checks above.");
                 }
             });
         }
@@ -414,6 +417,15 @@ namespace IntercomFirmwareTool.App
             catch (Exception ex)
             {
                 TxtResult.Text = $"Could not read the public key:\n{ex.Message}";
+                return;
+            }
+            if (publicKey.Length == 0 || !SshKeyGen.IsLikelyPublicKey(publicKey))
+            {
+                MessageBox.Show(this,
+                    "The chosen key file does not look like an OpenSSH public key\n" +
+                    "(expected a line like \"ssh-rsa AAAA… comment\"). Verification compares\n" +
+                    "against this key, so it must be the .pub the .fwz was built with.",
+                    "Not a public key", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 

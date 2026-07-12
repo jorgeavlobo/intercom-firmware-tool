@@ -5,11 +5,23 @@ preparation script from the fquinto project, kept here for **offline reference
 only** — so we can compare our C# implementation against what it does without
 going back to GitHub each time.
 
-- **Source:** https://github.com/fquinto/bticinoClasse300x/blob/main/main.py
+- **Source (raw):** https://raw.githubusercontent.com/fquinto/bticinoClasse300x/main/main.py
 - **Author:** fquinto (and contributors)
 - **License:** GPL-2.0 (as declared by the upstream repository); the full
   license text is in [`COPYING`](COPYING) in this folder
 - **Fetched:** 2026-07 (branch `main`)
+- **Content anchor (deterministic):** MD5 `a6b777888e140df789cc026a4673b7e9`,
+  1068 lines, upstream version `0.0.13`. This exact byte-for-byte content was
+  re-verified identical to upstream `main` HEAD. Verify with:
+  ```
+  curl -fsSL https://raw.githubusercontent.com/fquinto/bticinoClasse300x/main/main.py | md5sum
+  # => a6b777888e140df789cc026a4673b7e9
+  ```
+  The MD5 pins the *content* (a tighter anchor than a branch name); the
+  line-number map below is valid for exactly this file. A commit SHA could not
+  be recorded from the build environment (the GitHub API is not reachable here),
+  but if upstream ever changes `main.py`, the MD5 above no longer matching `main`
+  is the signal to find the specific commit that produced this content.
 - **Purpose here:** documentation / comparison only. It is **not** compiled,
   imported, executed, or shipped by this tool. Our tool is a clean-room C#/WPF
   reimplementation of the *result* (see `docs/WRITE_PHASE_PLAN.md`), not a
