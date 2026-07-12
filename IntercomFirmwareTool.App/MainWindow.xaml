@@ -56,6 +56,13 @@
                 </Setter.Value>
             </Setter>
         </Style>
+        <!-- Larger icon button for the form rows (Browse / choose / generate). -->
+        <Style TargetType="Button" x:Key="RowIconButton" BasedOn="{StaticResource IconButton}">
+            <Setter Property="Width" Value="38"/>
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="Margin" Value="6,0,0,6"/>
+        </Style>
     </Window.Resources>
 
     <Grid Margin="14">
@@ -101,8 +108,9 @@
                      VerticalContentAlignment="Center" Padding="4,3" Margin="0,0,0,6"
                      Text="(choose the original .fwz to modify)" Foreground="Gray"/>
             <Button Grid.Row="0" Grid.Column="2" x:Name="BtnBrowseFwz"
-                    Style="{StaticResource BrowseButton}" Margin="8,0,0,6"
-                    Content="Browse…" Click="BtnBrowseFwz_Click"/>
+                    Style="{StaticResource RowIconButton}" Content="&#xE8B7;"
+                    ToolTip="Browse for the original firmware (.fwz)…"
+                    Click="BtnBrowseFwz_Click"/>
 
             <!-- SSH public key: choose an existing one or generate a new pair -->
             <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
@@ -110,11 +118,13 @@
             <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtKeyPath" IsReadOnly="True"
                      VerticalContentAlignment="Center" Padding="4,3" Margin="0,0,0,6"
                      Text="(choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
-            <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal" Margin="8,0,0,6">
-                <Button x:Name="BtnChooseKey" Padding="10,4" MinWidth="110"
-                        Content="Choose existing…" Click="BtnChooseKey_Click"/>
-                <Button x:Name="BtnGenKey" Padding="10,4" MinWidth="110" Margin="6,0,0,0"
-                        Content="Generate new…" Click="BtnGenKey_Click"/>
+            <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal">
+                <Button x:Name="BtnChooseKey" Style="{StaticResource RowIconButton}"
+                        Content="&#xE8B7;" ToolTip="Choose an existing public key (.pub)…"
+                        Click="BtnChooseKey_Click"/>
+                <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
+                        Content="&#xE192;" ToolTip="Generate a new SSH key pair…"
+                        Click="BtnGenKey_Click"/>
             </StackPanel>
 
             <!-- Root password (masked) + reveal toggle + key-only -->
@@ -123,19 +133,19 @@
             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <TextBox x:Name="TxtPassword" Width="220" Padding="4,3"
                          FontFamily="Consolas" VerticalContentAlignment="Center"/>
-                <!-- Inline actions: reveal (eye), copy, generate. Toggling reveal
-                     affects BOTH the password and confirm fields. -->
-                <Button x:Name="BtnToggleReveal" Style="{StaticResource IconButton}"
-                        Content="&#xE7B3;" ToolTip="Show password"
-                        Click="BtnToggleReveal_Click"/>
-                <Button x:Name="BtnCopyPwd" Style="{StaticResource IconButton}"
-                        Content="&#xE8C8;" ToolTip="Copy password to clipboard"
-                        Click="BtnCopyPwd_Click"/>
+                <!-- Inline actions, in order: generate, reveal (hold-to-show eye),
+                     copy. Reveal affects BOTH the password and confirm fields. -->
                 <Button x:Name="BtnRandomPwd" Style="{StaticResource IconButton}"
                         Content="&#xE8B1;" ToolTip="Generate a strong random password"
                         Click="BtnRandomPwd_Click"/>
+                <Button x:Name="BtnToggleReveal" Style="{StaticResource IconButton}"
+                        Content="&#xE7B3;" ToolTip="Hold to show the password"/>
+                <Button x:Name="BtnCopyPwd" Style="{StaticResource IconButton}"
+                        Content="&#xE8C8;" ToolTip="Copy password to clipboard"
+                        Click="BtnCopyPwd_Click"/>
                 <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="16,0,0,0"
-                          Content="Key-only login (no password)"
+                          Content="Disable"
+                          ToolTip="Key-only login — disable password login (no root password)"
                           Checked="ChkKeyOnly_Toggled" Unchecked="ChkKeyOnly_Toggled"/>
             </StackPanel>
 
@@ -157,8 +167,9 @@
                      VerticalContentAlignment="Center" Padding="4,3"
                      Text="(where to write the modified .fwz)" Foreground="Gray"/>
             <Button Grid.Row="4" Grid.Column="2" x:Name="BtnBrowseOutput"
-                    Style="{StaticResource BrowseButton}" IsEnabled="False"
-                    Content="Browse…" Click="BtnBrowseOutput_Click"/>
+                    Style="{StaticResource RowIconButton}" IsEnabled="False"
+                    Content="&#xE74E;" ToolTip="Choose where to save the modified .fwz…"
+                    Click="BtnBrowseOutput_Click"/>
         </Grid>
 
         <!-- Row 2: actions -->
