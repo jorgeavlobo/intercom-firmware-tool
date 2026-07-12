@@ -6,7 +6,8 @@
         xmlns:local="clr-namespace:IntercomFirmwareTool.App"
         mc:Ignorable="d"
         Title="Intercom Firmware Tool — SSH-enable (Classe 100X / 300X)"
-        Height="700" Width="880" MinHeight="620" MinWidth="720">
+        Height="700" Width="880" MinHeight="620" MinWidth="720"
+        WindowStartupLocation="CenterScreen">
     <Window.Resources>
         <Style TargetType="TextBlock" x:Key="FieldLabel">
             <Setter Property="VerticalAlignment" Value="Center"/>
