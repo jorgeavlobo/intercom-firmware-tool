@@ -410,11 +410,25 @@ namespace IntercomFirmwareTool.Core
             const string linkTarget = "../init.d/dropbear";
             string? existingTarget = null;
             try { existingTarget = fs.ReadSymLink(linkPath); } catch { /* absent or not a symlink */ }
-            if (existingTarget == null)
-                fs.CreateSymLink(linkTarget, linkPath);
-            else if (existingTarget != linkTarget)
+            if (existingTarget != null)
+            {
+                // A symlink already exists: fine if it points at our target,
+                // otherwise fail clearly rather than overwriting it.
+                if (existingTarget != linkTarget)
+                    throw new InvalidOperationException(
+                        $"{linkPath} already exists but points to '{existingTarget}', not '{linkTarget}'.");
+            }
+            else if (fs.FileExists(linkPath) || fs.DirectoryExists(linkPath))
+            {
+                // The path is occupied by a non-symlink (regular file or dir);
+                // give a clear error instead of an opaque native "exists" throw.
                 throw new InvalidOperationException(
-                    $"{linkPath} already exists but points to '{existingTarget}', not '{linkTarget}'.");
+                    $"{linkPath} already exists but is not a symlink; refusing to overwrite it.");
+            }
+            else
+            {
+                fs.CreateSymLink(linkTarget, linkPath);
+            }
         }
 
         /// <summary>

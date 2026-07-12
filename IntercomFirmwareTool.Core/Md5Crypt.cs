@@ -18,11 +18,24 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// Computes the $1$ MD5-crypt hash of <paramref name="password"/> with
-        /// <paramref name="salt"/> (truncated to 8 chars). Returns "$1$salt$hash".
+        /// <paramref name="salt"/>. Returns "$1$salt$hash".
+        /// <para>
+        /// The salt is normalized exactly like crypt(3)/<c>openssl passwd -1</c>:
+        /// an optional leading <c>$1$</c> magic is stripped, the salt ends at the
+        /// first <c>$</c>, and it is capped at 8 characters. So a full setting
+        /// string such as <c>$1$root$…</c> yields the same hash as the bare salt
+        /// <c>root</c>.
+        /// </para>
         /// </summary>
         public static string Crypt(string password, string salt)
         {
             byte[] pw = Encoding.UTF8.GetBytes(password);
+
+            // Normalize the salt as crypt(3) does: drop the "$1$" magic prefix,
+            // stop at the next '$', then cap at 8 chars.
+            if (salt.StartsWith("$1$")) salt = salt.Substring(3);
+            int dollar = salt.IndexOf('$');
+            if (dollar >= 0) salt = salt.Substring(0, dollar);
             string saltStr = salt.Length > 8 ? salt.Substring(0, 8) : salt;
             byte[] saltBytes = Encoding.ASCII.GetBytes(saltStr);
 
@@ -82,6 +95,9 @@ namespace IntercomFirmwareTool.Core
                 ("password",             "12345678", "$1$12345678$o2n/JiO/h5VviOInWJ4OQ/"),
                 ("Bticino_Classe_100_X", "xyz",      "$1$xyz$GyaadV4enfbk3tpI30lSS1"),
                 ("hello world",          "aB.7/xQ2", "$1$aB.7/xQ2$RGQ3Krk5B5/wUwoCMC5Md/"),
+                // Salt normalization: a full "$1$root$" setting string must
+                // yield the same hash as the bare salt "root" (as openssl does).
+                ("pwned123",             "$1$root$", "$1$root$0i6hbFPn3JOGMeEF0LgEV1"),
             };
 
             var sb = new StringBuilder();
