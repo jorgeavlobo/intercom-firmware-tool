@@ -7,7 +7,8 @@ going back to GitHub each time.
 
 - **Source:** https://github.com/fquinto/bticinoClasse300x/blob/main/main.py
 - **Author:** fquinto (and contributors)
-- **License:** GPL-2.0 (as declared by the upstream repository)
+- **License:** GPL-2.0 (as declared by the upstream repository); the full
+  license text is in [`COPYING`](COPYING) in this folder
 - **Fetched:** 2026-07 (branch `main`)
 - **Purpose here:** documentation / comparison only. It is **not** compiled,
   imported, executed, or shipped by this tool. Our tool is a clean-room C#/WPF
@@ -17,6 +18,17 @@ going back to GitHub each time.
 Because this file is GPL-2.0 and third-party, treat it as an external reference
 document. Do not copy code from it into the C# sources; use it only to confirm
 exact paths, contents, permissions and ordering.
+
+## License and attribution
+
+`main.py` is Copyright © the fquinto project authors and is licensed under the
+**GNU General Public License, version 2 (GPL-2.0)**. The complete license text
+is in [`COPYING`](COPYING) alongside this file.
+
+`main.py` is included **verbatim and unmodified** — no changes have been made to
+it. The rest of this repository is a separate, independent work under its own
+license; `main.py` is kept here only as an external reference and is **not**
+linked into, compiled with, or shipped as part of the tool's binaries.
 
 ## The rootfs edits this script makes (map to our C# plan)
 
