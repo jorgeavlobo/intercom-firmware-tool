@@ -28,10 +28,12 @@ namespace IntercomFirmwareTool.App
         {
             InitializeComponent();
             ShowStartupDiagnostics();
-            TryPrefillDefaultKey();
 
-            // Sensible default (fquinto's), pre-filled in both masked fields so
-            // they already match.
+            // The key is chosen explicitly (Choose existing… / Generate new…), so
+            // nothing is pre-selected — this avoids silently picking the wrong key.
+
+            // Sensible default password (fquinto's), pre-filled in both masked
+            // fields so they already match.
             PwdPassword.Password = "pwned123";
             PwdConfirm.Password = "pwned123";
             UpdatePasswordHint();
@@ -51,7 +53,11 @@ namespace IntercomFirmwareTool.App
             _fwzPath = dlg.FileName;
             SetPathText(TxtFwzPath, _fwzPath);
 
-            // Suggest an output next to the input, if the user hasn't set one.
+            // The output only makes sense once there is an input, so reveal that
+            // row now and suggest an output next to the input.
+            LblOutput.Visibility = Visibility.Visible;
+            TxtOutputPath.Visibility = Visibility.Visible;
+            BtnBrowseOutput.Visibility = Visibility.Visible;
             if (_outputPath is null)
             {
                 string suggested = Path.Combine(
@@ -63,7 +69,7 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
-        private void BtnBrowseKey_Click(object sender, RoutedEventArgs e)
+        private void BtnChooseKey_Click(object sender, RoutedEventArgs e)
         {
             var dlg = new OpenFileDialog
             {
@@ -76,6 +82,67 @@ namespace IntercomFirmwareTool.App
             _keyPath = dlg.FileName;
             SetPathText(TxtKeyPath, _keyPath);
             UpdateBuildEnabled();
+        }
+
+        /// <summary>
+        /// Generates a fresh RSA key pair: asks where to save the PRIVATE key
+        /// (defaults to the .ssh folder), writes it plus the OpenSSH ".pub", and
+        /// selects the new public key for the build. The private key stays with
+        /// the user — it is what they will log in with.
+        /// </summary>
+        private async void BtnGenKey_Click(object sender, RoutedEventArgs e)
+        {
+            var dlg = new SaveFileDialog
+            {
+                Title = "Save the NEW private key as… (the public .pub is written beside it)",
+                Filter = "SSH private key (all files)|*.*",
+                InitialDirectory = DefaultSshDir(),
+                FileName = "intercom_id_rsa",
+                OverwritePrompt = true
+            };
+            if (dlg.ShowDialog(this) != true) return;
+            string privatePath = dlg.FileName;
+            string comment = $"{Environment.UserName}@{Environment.MachineName}";
+
+            SetButtonsEnabled(false);
+            TxtResult.Text = "Generating a new 4096-bit RSA key pair…";
+            string? pubPath = null;
+            string? error = null;
+            try
+            {
+                pubPath = await Task.Run(() => SshKeyGen.Generate(privatePath, comment));
+            }
+            catch (Exception ex)
+            {
+                error = ex.ToString();
+            }
+            finally
+            {
+                SetButtonsEnabled(true);
+            }
+
+            if (error != null || pubPath is null)
+            {
+                TxtResult.Text = "Could not generate the key:\n" + error;
+                return;
+            }
+
+            _keyPath = pubPath;
+            SetPathText(TxtKeyPath, pubPath);
+            UpdateBuildEnabled();
+
+            TxtResult.Text =
+                "New SSH key pair created.\n\n" +
+                $"  Private key : {privatePath}\n" +
+                $"  Public key  : {pubPath}\n\n" +
+                "The public key is now selected for the build. KEEP THE PRIVATE KEY SAFE —\n" +
+                "it is what you will use to log in (ssh -i \"" + privatePath + "\" root@<device>).\n" +
+                "It has no passphrase; add one later with:  ssh-keygen -p -f \"" + privatePath + "\"";
+
+            MessageBox.Show(this,
+                $"Key pair created.\n\nPrivate key:\n{privatePath}\n\nPublic key:\n{pubPath}\n\n" +
+                "Keep the private key safe — it has no passphrase.",
+                "New SSH key", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
         private void BtnBrowseOutput_Click(object sender, RoutedEventArgs e)
@@ -360,27 +427,6 @@ namespace IntercomFirmwareTool.App
             box.Foreground = SystemColors.WindowTextBrush;
         }
 
-        /// <summary>Pre-fills the key box from the user's default ~/.ssh key, if present.</summary>
-        private void TryPrefillDefaultKey()
-        {
-            try
-            {
-                string sshDir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh");
-                foreach (var name in new[] { "id_ed25519.pub", "id_rsa.pub", "id_ecdsa.pub" })
-                {
-                    string candidate = Path.Combine(sshDir, name);
-                    if (File.Exists(candidate))
-                    {
-                        _keyPath = candidate;
-                        SetPathText(TxtKeyPath, candidate);
-                        break;
-                    }
-                }
-            }
-            catch { /* best-effort convenience only */ }
-        }
-
         /// <summary>
         /// Shows, once at startup, whether the process is 64-bit and whether the
         /// three SharpExt4 DLLs are present. If anything is wrong the line turns
@@ -433,7 +479,8 @@ namespace IntercomFirmwareTool.App
         private void SetButtonsEnabled(bool enabled)
         {
             BtnBrowseFwz.IsEnabled = enabled;
-            BtnBrowseKey.IsEnabled = enabled;
+            BtnChooseKey.IsEnabled = enabled;
+            BtnGenKey.IsEnabled = enabled;
             BtnBrowseOutput.IsEnabled = enabled;
             BtnVerify.IsEnabled = enabled;
             BtnSelfTest.IsEnabled = enabled;

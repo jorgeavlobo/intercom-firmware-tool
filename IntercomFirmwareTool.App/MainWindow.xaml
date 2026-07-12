@@ -17,6 +17,7 @@
             <Setter Property="Padding" Value="10,4"/>
             <Setter Property="Margin" Value="8,0,0,0"/>
             <Setter Property="MinWidth" Value="90"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
         </Style>
     </Window.Resources>
 
@@ -66,15 +67,18 @@
                     Style="{StaticResource BrowseButton}" Margin="8,0,0,6"
                     Content="Browse…" Click="BtnBrowseFwz_Click"/>
 
-            <!-- SSH public key -->
+            <!-- SSH public key: choose an existing one or generate a new pair -->
             <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="SSH public key:"/>
             <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtKeyPath" IsReadOnly="True"
                      VerticalContentAlignment="Center" Padding="4,3" Margin="0,0,0,6"
-                     Text="(choose your .pub key to install)" Foreground="Gray"/>
-            <Button Grid.Row="1" Grid.Column="2" x:Name="BtnBrowseKey"
-                    Style="{StaticResource BrowseButton}" Margin="8,0,0,6"
-                    Content="Browse…" Click="BtnBrowseKey_Click"/>
+                     Text="(choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
+            <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal" Margin="8,0,0,6">
+                <Button x:Name="BtnChooseKey" Padding="10,4" MinWidth="110"
+                        Content="Choose existing…" Click="BtnChooseKey_Click"/>
+                <Button x:Name="BtnGenKey" Padding="10,4" MinWidth="110" Margin="6,0,0,0"
+                        Content="Generate new…" Click="BtnGenKey_Click"/>
+            </StackPanel>
 
             <!-- Root password (masked) + reveal toggle + key-only -->
             <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
@@ -112,14 +116,15 @@
                            Foreground="Gray"/>
             </StackPanel>
 
-            <!-- Output -->
-            <TextBlock Grid.Row="4" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Save output as:"/>
+            <!-- Output (revealed only after a firmware is chosen) -->
+            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" Visibility="Collapsed"
+                       Style="{StaticResource FieldLabel}" Text="Save output as:"/>
             <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtOutputPath" IsReadOnly="True"
+                     Visibility="Collapsed"
                      VerticalContentAlignment="Center" Padding="4,3"
                      Text="(where to write the modified .fwz)" Foreground="Gray"/>
             <Button Grid.Row="4" Grid.Column="2" x:Name="BtnBrowseOutput"
-                    Style="{StaticResource BrowseButton}"
+                    Style="{StaticResource BrowseButton}" Visibility="Collapsed"
                     Content="Browse…" Click="BtnBrowseOutput_Click"/>
         </Grid>
 
