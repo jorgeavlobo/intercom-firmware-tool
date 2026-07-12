@@ -149,7 +149,7 @@ namespace IntercomFirmwareTool.App
 
             TxtResult.Text =
                 "✅ " + check.Message + "\n\n" +
-                $"Recognized original name: {check.Match!.OriginalName}\n" +
+                check.Match!.Describe() + "\n\n" +
                 "You can now choose a key and Build.";
         }
 
