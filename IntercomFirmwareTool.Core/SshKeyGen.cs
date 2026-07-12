@@ -34,22 +34,39 @@ namespace IntercomFirmwareTool.Core
             string pubPath = privateKeyPath + ".pub";
             string pubText = OpenSshPublicKey(rsa, comment) + "\n";
 
-            // Write both to temp files first, then move them into place, so a
-            // failure partway through never leaves a mismatched private/.pub pair.
+            // Write both to temp files first, then move them into place. Back up
+            // any existing destinations so that if the second move fails we can
+            // roll back — never leaving a mismatched private/.pub pair on disk.
             string tmpPriv = privateKeyPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
             string tmpPub = pubPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            string? bakPriv = null, bakPub = null;
             try
             {
                 File.WriteAllText(tmpPriv, privatePem);
                 File.WriteAllText(tmpPub, pubText);
-                File.Move(tmpPriv, privateKeyPath, overwrite: true);
-                File.Move(tmpPub, pubPath, overwrite: true);
+
+                bakPriv = BackupIfExists(privateKeyPath);
+                bakPub = BackupIfExists(pubPath);
+                try
+                {
+                    File.Move(tmpPriv, privateKeyPath, overwrite: true);
+                    File.Move(tmpPub, pubPath, overwrite: true);
+                }
+                catch
+                {
+                    // Best-effort rollback to the original pair before rethrowing.
+                    if (bakPriv != null) TryRestore(bakPriv, privateKeyPath);
+                    if (bakPub != null) TryRestore(bakPub, pubPath);
+                    throw;
+                }
                 return pubPath;
             }
             finally
             {
                 TryDelete(tmpPriv);
                 TryDelete(tmpPub);
+                if (bakPriv != null) TryDelete(bakPriv);
+                if (bakPub != null) TryDelete(bakPub);
             }
         }
 
@@ -88,6 +105,22 @@ namespace IntercomFirmwareTool.Core
             {
                 return false; // parts[1] was not valid base64
             }
+        }
+
+        /// <summary>Copies a file to a temp ".bak" sibling if it exists; returns the backup path or null.</summary>
+        private static string? BackupIfExists(string path)
+        {
+            if (!File.Exists(path)) return null;
+            string bak = path + "." + Guid.NewGuid().ToString("N") + ".bak";
+            File.Copy(path, bak, overwrite: true);
+            return bak;
+        }
+
+        /// <summary>Restores a backup over the destination, ignoring failures (best-effort rollback).</summary>
+        private static void TryRestore(string backup, string destination)
+        {
+            try { File.Copy(backup, destination, overwrite: true); }
+            catch { /* best-effort rollback */ }
         }
 
         /// <summary>Deletes a file if it exists, ignoring failures (best-effort temp cleanup).</summary>

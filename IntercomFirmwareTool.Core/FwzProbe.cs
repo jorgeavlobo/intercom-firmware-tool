@@ -181,22 +181,45 @@ namespace IntercomFirmwareTool.Core
                 using (var gz = new GZipStream(outGz, CompressionLevel.SmallestSize))
                     inFs.CopyTo(gz);
 
-                // 3) Repack a new ZipCrypto .fwz with the modified entry replaced.
-                Repack(inputFwz, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, outputPath);
-
-                // 4) Round-trip: read the OUTPUT .fwz back through our chain and
-                //    re-validate all the SSH edits survived gzip + ZipCrypto zip.
-                FwzExtractResult rt = ExtractBareImage(outputPath);
+                // 3) Repack a new ZipCrypto .fwz to a TEMP file in the same
+                //    directory as the output, so the user's chosen path is only
+                //    ever replaced by a fully written, verified artifact.
+                string outDir = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".";
+                string tempOut = Path.Combine(outDir, $".fwzbuild_{Guid.NewGuid():N}.tmp");
+                bool committed = false;
                 try
                 {
-                    IReadOnlyList<Ext4Check> checks = Ext4Probe.ValidateSsh(rt.BareImagePath, opts);
-                    bool all = true;
-                    foreach (var c in checks) all &= c.Pass;
-                    return new FwzBuildResult(outputPath, ex.PasswordUsed, ex.SelectedEntry, all, checks);
+                    Repack(inputFwz, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut);
+
+                    // 4) Round-trip: validate the TEMP .fwz (reopen it through our
+                    //    chain) before it is allowed to become the output.
+                    FwzExtractResult rt = ExtractBareImage(tempOut);
+                    IReadOnlyList<Ext4Check> checks;
+                    bool all;
+                    try
+                    {
+                        checks = Ext4Probe.ValidateSsh(rt.BareImagePath, opts);
+                        all = true;
+                        foreach (var c in checks) all &= c.Pass;
+                    }
+                    finally
+                    {
+                        TryDelete(rt.BareImagePath);
+                    }
+
+                    // Only move the verified build into place; a failed build
+                    // never overwrites/creates the user's output path.
+                    if (all)
+                    {
+                        File.Move(tempOut, outputPath, overwrite: true);
+                        committed = true;
+                    }
+                    return new FwzBuildResult(
+                        committed ? outputPath : "", ex.PasswordUsed, ex.SelectedEntry, all, checks);
                 }
                 finally
                 {
-                    TryDelete(rt.BareImagePath);
+                    if (!committed) TryDelete(tempOut);
                 }
             }
             finally
