@@ -84,7 +84,7 @@ namespace IntercomFirmwareTool.App
 
         // ---- Input selection -------------------------------------------------
 
-        private void BtnBrowseFwz_Click(object sender, RoutedEventArgs e)
+        private async void BtnBrowseFwz_Click(object sender, RoutedEventArgs e)
         {
             var dlg = new OpenFileDialog
             {
@@ -92,24 +92,65 @@ namespace IntercomFirmwareTool.App
                 Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*"
             };
             if (dlg.ShowDialog(this) != true) return;
+            string chosen = dlg.FileName;
 
-            _fwzPath = dlg.FileName;
-            SetPathText(TxtFwzPath, _fwzPath);
+            // Integrity gate: only a byte-for-byte known-good original may be
+            // modified. Verify by size + SHA-256 (may hash ~100 MB, so do it off
+            // the UI thread) before accepting the file.
+            SetButtonsEnabled(false);
+            TxtResult.Text = $"Verifying firmware integrity (size + SHA-256)…\n{chosen}";
+            FirmwareCheckResult check;
+            try { check = await Task.Run(() => FirmwareRegistry.Verify(chosen)); }
+            finally { SetButtonsEnabled(true); }
 
-            // The output only makes sense once there is an input, so enable that
-            // row now and suggest an output next to the input.
+            if (!check.Ok)
+            {
+                // Reject and DE-SELECT: no build is allowed on an unrecognized or
+                // unmodifiable file.
+                _fwzPath = null;
+                _outputPath = null;
+                TxtFwzPath.Text = "(no valid firmware selected)";
+                TxtFwzPath.Foreground = Brushes.Firebrick;
+                TxtOutputPath.Text = "(where to write the modified .fwz)";
+                TxtOutputPath.Foreground = Brushes.Gray;
+                LblOutput.IsEnabled = false;
+                TxtOutputPath.IsEnabled = false;
+                BtnBrowseOutput.IsEnabled = false;
+                UpdateBuildEnabled();
+
+                TxtResult.Text =
+                    "❌ This file was NOT accepted — selection cleared, Build stays disabled.\n\n" +
+                    check.Message + "\n\n" +
+                    "Only known-good original firmware can be modified, so a corrupt or wrong\n" +
+                    "download can't be turned into a broken image. The file's NAME does not matter —\n" +
+                    "its content (size + SHA-256) must match a known original.";
+                MessageBox.Show(this,
+                    "This file is not an accepted original firmware.\n\n" + check.Message +
+                    "\n\nThe selection was cleared.",
+                    "Firmware not accepted", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // Accepted: record the path and enable the output row.
+            _fwzPath = chosen;
+            SetPathText(TxtFwzPath, chosen);
             LblOutput.IsEnabled = true;
             TxtOutputPath.IsEnabled = true;
             BtnBrowseOutput.IsEnabled = true;
             if (_outputPath is null)
             {
                 string suggested = Path.Combine(
-                    Path.GetDirectoryName(_fwzPath) ?? "",
-                    Path.GetFileNameWithoutExtension(_fwzPath) + "_ssh.fwz");
+                    Path.GetDirectoryName(chosen) ?? "",
+                    Path.GetFileNameWithoutExtension(chosen) + "_ssh.fwz");
                 _outputPath = suggested;
                 SetPathText(TxtOutputPath, _outputPath);
             }
             UpdateBuildEnabled();
+
+            TxtResult.Text =
+                "✅ " + check.Message + "\n\n" +
+                $"Recognized original name: {check.Match!.OriginalName}\n" +
+                "You can now choose a key and Build.";
         }
 
         private void BtnChooseKey_Click(object sender, RoutedEventArgs e)
