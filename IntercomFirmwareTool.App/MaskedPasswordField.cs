@@ -86,11 +86,13 @@ namespace IntercomFirmwareTool.App
         {
             e.Handled = true; // we manage the Text ourselves
             if (string.IsNullOrEmpty(e.Text)) return;
-            string ins = StripNonBmp(e.Text); // keep every stored char one code unit
-            if (ins.Length == 0) return;
+            // Reject (don't silently drop) non-BMP input: passwords here are BMP
+            // text, and rejecting keeps every stored char a single UTF-16 code
+            // unit so caret/selection indices map 1:1 to the buffer.
+            if (HasSurrogate(e.Text)) return;
             int start = ReplaceSelection();
-            _real.Insert(start, ins);
-            int caret = start + ins.Length;
+            _real.Insert(start, e.Text);
+            int caret = start + e.Text.Length;
             _revealIndex = caret - 1;   // reveal the character just typed
             _timer.Stop();
             _timer.Start();
@@ -150,8 +152,11 @@ namespace IntercomFirmwareTool.App
             // GetData can return null or a non-string even when UnicodeText is
             // reported present; guard the cast so it can't throw.
             if (e.DataObject.GetData(DataFormats.UnicodeText) is not string raw) return;
-            string text = StripNonBmp(raw.Replace("\r", "").Replace("\n", "")); // single line, BMP only
+            string text = raw.Trim(); // tolerate surrounding whitespace / a trailing newline
             if (text.Length == 0) return;
+            // Reject — rather than silently transform — a genuinely multi-line or
+            // non-BMP paste, so the stored password matches what the user pasted.
+            if (text.IndexOfAny(new[] { '\r', '\n' }) >= 0 || HasSurrogate(text)) return;
             int start = ReplaceSelection();
             _real.Insert(start, text);
             StopReveal(); // don't flash a pasted secret
@@ -160,16 +165,26 @@ namespace IntercomFirmwareTool.App
         }
 
         /// <summary>
-        /// Drops any surrogate (non-BMP) code unit so every stored character is a
-        /// single UTF-16 code unit. WPF's CaretIndex/SelectionStart count code
-        /// units, so this keeps them mapping 1:1 to the buffer — a character can
-        /// never be split or half-deleted. Passwords for this tool are plain text.
+        /// True if the string contains any surrogate (non-BMP) code unit. Such
+        /// input is rejected on the user-facing paths so every stored character
+        /// stays a single UTF-16 code unit — WPF's CaretIndex/SelectionStart
+        /// count code units, so this keeps them mapping 1:1 to the buffer and a
+        /// character can never be split or half-deleted.
+        /// </summary>
+        private static bool HasSurrogate(string s)
+        {
+            foreach (char c in s) if (char.IsSurrogate(c)) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Defensive sanitiser for programmatic <see cref="Value"/> assignments
+        /// (internal, always plain text): drops any surrogate so the BMP-only
+        /// invariant holds even if a caller passes non-BMP text.
         /// </summary>
         private static string StripNonBmp(string s)
         {
-            bool has = false;
-            foreach (char c in s) if (char.IsSurrogate(c)) { has = true; break; }
-            if (!has) return s;
+            if (!HasSurrogate(s)) return s;
             var sb = new StringBuilder(s.Length);
             foreach (char c in s) if (!char.IsSurrogate(c)) sb.Append(c);
             return sb.ToString();
