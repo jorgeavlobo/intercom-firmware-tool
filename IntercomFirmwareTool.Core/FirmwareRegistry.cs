@@ -50,12 +50,9 @@ namespace IntercomFirmwareTool.Core
             new KnownFirmware("C300X_010717.fwz", 100476940,
                 "D0C42410254A9DFA4F18D2F8A94B2CBD7C99A393AC78334463D1EC4D3320F517",
                 "FD7FBC5522488A257075CE2792B0D2D4", true),
-            // A raw .bin (not a .fwz ZIP): recognized as genuine, but the current
-            // unpack pipeline only handles the .fwz container, so it is marked
-            // not-a-container and Build is not offered for it.
-            new KnownFirmware("C300X_010719.bin", 100512599,
-                "6366019E04382A8FEE884815F2534A91293134CE7978ED12D12B75968E9282C1",
-                "F66D2CD23723D0AE5EA9D384DF457586", false),
+            new KnownFirmware("C300X_010719.fwz", 100510249,
+                "8E6FDE2070168704FDD46DF8825FF124F993A0C81AC1EE32EBDCC5821EC2DBA7",
+                "70795123E8A6C06E324909862B062522", true),
         };
 
         /// <summary>
