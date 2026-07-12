@@ -70,7 +70,15 @@ namespace IntercomFirmwareTool.App
         public bool Peek
         {
             get => _peek;
-            set { if (_peek == value) return; _peek = value; Render(_box.CaretIndex); }
+            set
+            {
+                if (_peek == value) return;
+                _peek = value;
+                // Turning peek off must mask EVERY character at once — otherwise a
+                // char typed while holding Show would linger via the reveal timer.
+                if (!value) StopReveal();
+                Render(_box.CaretIndex);
+            }
         }
 
         private void OnPreviewTextInput(object sender, TextCompositionEventArgs e)
