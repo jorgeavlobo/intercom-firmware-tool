@@ -235,7 +235,9 @@ namespace IntercomFirmwareTool.App
                 "It has no passphrase; add one later with:  ssh-keygen -p -f \"" + privatePath + "\"\n\n" +
                 "If Windows OpenSSH later reports the key is too open (\"UNPROTECTED PRIVATE\n" +
                 "KEY FILE\"), restrict it to your account with:\n" +
-                "  icacls \"" + privatePath + "\" /inheritance:r /grant:r \"%USERNAME%:R\"";
+                "  icacls \"" + privatePath + "\" /inheritance:r /grant:r \"%USERNAME%:F\"\n" +
+                "(Full control for you only — OpenSSH just needs other users locked out, and\n" +
+                "you keep write access to add a passphrase later.)";
 
             MessageBox.Show(this,
                 $"Key pair created.\n\nPrivate key:\n{privatePath}\n\nPublic key:\n{pubPath}\n\n" +

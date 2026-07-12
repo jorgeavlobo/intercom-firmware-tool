@@ -39,8 +39,25 @@ is in [`COPYING`](COPYING) alongside this file.
 
 `main.py` is included **verbatim and unmodified** — no changes have been made to
 it. The rest of this repository is a separate, independent work under its own
-license; `main.py` is kept here only as an external reference and is **not**
-linked into, compiled with, or shipped as part of the tool's binaries.
+license (MIT); `main.py` is kept here only as an external reference and is
+**not** linked into, compiled with, or shipped as part of the tool's binaries.
+
+### Compliance note (MIT product + this GPL-2.0 file)
+
+The product code (MIT) and this GPL-2.0 file are **not combined** — they are not
+compiled or linked together, and no code is copied between them. Their presence
+in one repository is **"mere aggregation"** (GPLv2 §2): the MIT product stays
+MIT, and `main.py` stays GPL-2.0; neither relicenses the other.
+
+However, this file's GPL-2.0 terms **do** travel with it. If you **redistribute
+the repository source** (or any source archive that includes this folder), you
+are redistributing a GPL-2.0 file and must keep its license and attribution —
+that is why the full text is in [`COPYING`](COPYING) next to it.
+
+If you would rather not carry a GPL-2.0 file in the tree at all, it can be
+**removed** and re-fetched on demand — this README records the exact raw URL and
+MD5 above, so the reference is reproducible without vendoring the file. (Binary
+releases of the tool are unaffected either way: `main.py` is never shipped.)
 
 ## The rootfs edits this script makes (map to our C# plan)
 
