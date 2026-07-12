@@ -102,6 +102,18 @@ namespace IntercomFirmwareTool.App
             };
             if (dlg.ShowDialog(this) != true) return;
             string privatePath = dlg.FileName;
+
+            // The Save dialog only prompted about the private-key path; confirm
+            // the sibling .pub too, since generating overwrites it.
+            string pubDest = privatePath + ".pub";
+            if (File.Exists(pubDest))
+            {
+                var ans = MessageBox.Show(this,
+                    $"A public key already exists and will be overwritten:\n\n{pubDest}\n\nContinue?",
+                    "Public key exists", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                if (ans != MessageBoxResult.Yes) return;
+            }
+
             string comment = $"{Environment.UserName}@{Environment.MachineName}";
 
             SetButtonsEnabled(false);
@@ -276,6 +288,19 @@ namespace IntercomFirmwareTool.App
 
             bool keyOnly = ChkKeyOnly.IsChecked == true;
             string password = CurrentPassword();
+
+            // With password login, refuse an empty password — it would produce a
+            // valid /etc/shadow hash for a BLANK password, letting the added
+            // accounts log in with no password. Require one, or tick key-only.
+            if (!keyOnly && password.Length == 0)
+            {
+                MessageBox.Show(this,
+                    "Enter a root password, or tick \"Key-only login (no password)\".\n\n" +
+                    "Building with an empty password would let the added accounts log in " +
+                    "with no password at all.",
+                    "Password required", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
 
             // Passwords must match unless key-only login is selected.
             if (!keyOnly && password != CurrentConfirm())
