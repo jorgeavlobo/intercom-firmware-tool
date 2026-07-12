@@ -231,10 +231,12 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Writes a new .fwz: every entry of <paramref name="inputFwz"/> re-added
-        /// with DEFLATE level 9 + ZipCrypto (<paramref name="password"/>), in the
-        /// original order, with <paramref name="modifiedEntryName"/> replaced by
-        /// the bytes of <paramref name="modifiedGzPath"/>. Mirrors fquinto's
+        /// Writes a new .fwz: every entry of <paramref name="inputFwz"/> — except
+        /// <c>.sig</c> signature sidecars, which are dropped like fquinto's
+        /// default — re-added with DEFLATE level 9 + ZipCrypto
+        /// (<paramref name="password"/>), in the original order, with
+        /// <paramref name="modifiedEntryName"/> replaced by the bytes of
+        /// <paramref name="modifiedGzPath"/>. Mirrors fquinto's
         /// pyminizip.compress_multiple(level=9).
         /// </summary>
         private static void Repack(
@@ -249,6 +251,13 @@ namespace IntercomFirmwareTool.Core
             foreach (ZipEntry src in srcZip)
             {
                 if (!src.IsFile) continue;
+                // Drop stale signature sidecars. fquinto removes .sig files by
+                // default (main.py: remove_sig defaults to 'y', filtered out of
+                // the repack list), and its output works on real devices — so
+                // the updater tolerates their absence. Keeping a signature for
+                // the now-modified payload could instead get the archive
+                // rejected by a signature-checking updater.
+                if (src.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase)) continue;
                 var entry = new ZipEntry(src.Name) { CompressionMethod = CompressionMethod.Deflated };
                 zipOut.PutNextEntry(entry);
                 if (string.Equals(src.Name, modifiedEntryName, StringComparison.Ordinal))

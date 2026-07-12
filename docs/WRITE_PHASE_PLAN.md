@@ -136,10 +136,12 @@ Operating on the MBR-wrapped ext4 (RW), then recut to raw:
 8. **Recut raw:** copy bytes `[1 MiB, 1 MiB + original size)` → modified bare
    `.ext4` (same format and size).
 9. **Re-gzip:** modified `.ext4` → `btweb_only.ext4.gz`.
-10. **Re-zip:** build a **new** `.fwz` with all 4 entries — the modified entry
-    replaced, the other 3 entries' **contents** re-added from the source zip;
-    every entry is re-compressed **DEFLATE level 9** and encrypted with ZipCrypto
-    under the model password. This mirrors fquinto's
+10. **Re-zip:** build a **new** `.fwz` — the modified entry replaced, the other
+    entries' **contents** re-added from the source zip, **except `.sig`
+    signature sidecars, which are dropped** (fquinto removes them by default, and
+    keeping a signature for the now-modified payload could get the archive
+    rejected). Every entry is re-compressed **DEFLATE level 9** and encrypted with
+    ZipCrypto under the model password. This mirrors fquinto's
     `pyminizip.compress_multiple(level=9)` (which likewise re-compresses, rather
     than preserving each entry's original method byte-for-byte).
 11. **Output:** the build is written to a temp file in the output directory,
