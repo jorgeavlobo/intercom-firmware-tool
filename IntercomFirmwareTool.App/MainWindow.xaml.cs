@@ -192,7 +192,10 @@ namespace IntercomFirmwareTool.App
                 $"  Public key  : {pubPath}\n\n" +
                 "The public key is now selected for the build. KEEP THE PRIVATE KEY SAFE —\n" +
                 "it is what you will use to log in (ssh -i \"" + privatePath + "\" root@<device>).\n" +
-                "It has no passphrase; add one later with:  ssh-keygen -p -f \"" + privatePath + "\"";
+                "It has no passphrase; add one later with:  ssh-keygen -p -f \"" + privatePath + "\"\n\n" +
+                "If Windows OpenSSH later reports the key is too open (\"UNPROTECTED PRIVATE\n" +
+                "KEY FILE\"), restrict it to your account with:\n" +
+                "  icacls \"" + privatePath + "\" /inheritance:r /grant:r \"%USERNAME%:R\"";
 
             MessageBox.Show(this,
                 $"Key pair created.\n\nPrivate key:\n{privatePath}\n\nPublic key:\n{pubPath}\n\n" +

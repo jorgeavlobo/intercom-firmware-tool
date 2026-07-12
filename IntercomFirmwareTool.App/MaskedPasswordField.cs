@@ -44,6 +44,10 @@ namespace IntercomFirmwareTool.App
             _box.PreviewKeyDown += OnPreviewKeyDown;
             _box.LostFocus += (_, _) => { StopReveal(); Render(_box.CaretIndex); };
             DataObject.AddPastingHandler(_box, OnPaste);
+            // Intercept Cut at the command level so BOTH the keyboard (Ctrl+X)
+            // and the context-menu "Cut" go through us and can't edit the
+            // display directly (which would desync _real).
+            _box.CommandBindings.Add(new CommandBinding(ApplicationCommands.Cut, OnCut, OnCanCut));
 
             _timer = new DispatcherTimer { Interval = RevealFor };
             _timer.Tick += (_, _) => { StopReveal(); Render(_box.CaretIndex); };
@@ -85,8 +89,6 @@ namespace IntercomFirmwareTool.App
 
         private void OnPreviewKeyDown(object sender, KeyEventArgs e)
         {
-            bool ctrl = (Keyboard.Modifiers & ModifierKeys.Control) != 0;
-
             if (e.Key == Key.Back)
             {
                 e.Handled = true;
@@ -103,25 +105,41 @@ namespace IntercomFirmwareTool.App
                 StopReveal();
                 Changed?.Invoke();
             }
-            else if (ctrl && e.Key == Key.X)
-            {
-                // Handle Cut ourselves (deleting the selection) so it can't
-                // desync _real; the clear-text password is not put on the
-                // clipboard.
-                e.Handled = true;
-                if (_box.SelectionLength > 0) { int s = ReplaceSelection(); Render(s); StopReveal(); Changed?.Invoke(); }
-            }
+            // Cut (Ctrl+X) is handled by the ApplicationCommands.Cut binding.
             // Arrows / Home / End / Tab / Ctrl+A / Ctrl+C fall through; the caret
             // index maps 1:1 to _real because the display has the same length.
             // (Ctrl+C copies the masked text, not the real password.)
+        }
+
+        private void OnCanCut(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = _box.SelectionLength > 0;
+            e.Handled = true;
+        }
+
+        private void OnCut(object sender, ExecutedRoutedEventArgs e)
+        {
+            // Delete the selection from the buffer WITHOUT copying the clear-text
+            // password to the clipboard. Reached by both Ctrl+X and context-menu
+            // Cut, so the display can never diverge from _real.
+            e.Handled = true;
+            if (_box.SelectionLength > 0)
+            {
+                int s = ReplaceSelection();
+                Render(s);
+                StopReveal();
+                Changed?.Invoke();
+            }
         }
 
         private void OnPaste(object sender, DataObjectPastingEventArgs e)
         {
             e.CancelCommand(); // insert manually so _real stays in sync
             if (!e.DataObject.GetDataPresent(DataFormats.UnicodeText)) return;
-            string text = ((string)e.DataObject.GetData(DataFormats.UnicodeText))
-                .Replace("\r", "").Replace("\n", ""); // single line only
+            // GetData can return null or a non-string even when UnicodeText is
+            // reported present; guard the cast so it can't throw.
+            if (e.DataObject.GetData(DataFormats.UnicodeText) is not string raw) return;
+            string text = raw.Replace("\r", "").Replace("\n", ""); // single line only
             if (text.Length == 0) return;
             int start = ReplaceSelection();
             _real.Insert(start, text);

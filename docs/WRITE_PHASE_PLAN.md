@@ -203,7 +203,7 @@ unit (with USB/SAM-BA recovery ready), and **only then** consider innovations.
 1. **MD5-crypt generator** — isolated, tested against the vector. ✅ Done
    (self-test ALL PASS on real hardware).
 2. **ext4 write routine (Phase A–D) + recut** + logical validation. ✅ Done
-   (all 17 checks PASS on real firmware, including SetOwner 0:0 and SetMode
+   (all 18 checks PASS on real firmware, including SetOwner 0:0 and SetMode
    0700/0600).
 3. **Re-gzip + re-zip (ZipCrypto) + round-trip.** ✅ Done
    ("BUILD modified .fwz (test)" button; the output .fwz round-trips through

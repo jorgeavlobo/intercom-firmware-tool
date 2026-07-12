@@ -469,6 +469,10 @@ namespace IntercomFirmwareTool.Core
                 catch { /* missing or not a symlink */ }
                 checks.Add(new("/etc/rc5.d/S98dropbear -> ../init.d/dropbear", symOk, target));
 
+                // Explicit prerequisites, so a missing rc5.d/init script shows up
+                // as its own clear check instead of only as a failing symlink.
+                checks.Add(new("/etc/rc5.d exists (prerequisite)",
+                    fs.DirectoryExists("/etc/rc5.d"), ""));
                 checks.Add(new("/etc/init.d/dropbear exists (prerequisite)",
                     fs.FileExists("/etc/init.d/dropbear"), ""));
             }

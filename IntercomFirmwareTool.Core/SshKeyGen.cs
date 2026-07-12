@@ -106,7 +106,16 @@ namespace IntercomFirmwareTool.Core
                 int len = (blob[0] << 24) | (blob[1] << 16) | (blob[2] << 8) | blob[3];
                 // Overflow-safe: blob.Length >= 4 here, so (blob.Length - 4) >= 0.
                 if (len <= 0 || len > blob.Length - 4) return false;
-                return Encoding.ASCII.GetString(blob, 4, len) == type;
+                if (Encoding.ASCII.GetString(blob, 4, len) != type) return false;
+
+                // Require actual key material after the algorithm name: a blob
+                // that is ONLY the type string (e.g. "ssh-rsa" and nothing else)
+                // decodes and matches the prefix but is not a usable key.
+                int pos = 4 + len;
+                if (pos + 4 > blob.Length) return false;
+                int nextLen = (blob[pos] << 24) | (blob[pos + 1] << 16) | (blob[pos + 2] << 8) | blob[pos + 3];
+                if (nextLen <= 0 || (long)pos + 4 + nextLen > blob.Length) return false;
+                return true;
             }
             catch (FormatException)
             {
