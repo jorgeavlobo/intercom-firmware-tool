@@ -118,6 +118,7 @@
             <Button Grid.Row="0" Grid.Column="2" x:Name="BtnBrowseFwz"
                     Style="{StaticResource RowIconButton}" Content="&#xE8B7;"
                     ToolTip="Browse for the original firmware (.fwz)…"
+                    AutomationProperties.Name="Browse for the original firmware"
                     Click="BtnBrowseFwz_Click"/>
 
             <!-- SSH public key: choose an existing one or generate a new pair -->
@@ -129,9 +130,11 @@
             <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal">
                 <Button x:Name="BtnChooseKey" Style="{StaticResource RowIconButton}"
                         Content="&#xE8B7;" ToolTip="Choose an existing public key (.pub)…"
+                        AutomationProperties.Name="Choose an existing public key"
                         Click="BtnChooseKey_Click"/>
                 <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
                         Content="&#xE192;" ToolTip="Generate a new SSH key pair…"
+                        AutomationProperties.Name="Generate a new SSH key pair"
                         Click="BtnGenKey_Click"/>
             </StackPanel>
 
@@ -145,11 +148,14 @@
                      copy. Reveal affects BOTH the password and confirm fields. -->
                 <Button x:Name="BtnRandomPwd" Style="{StaticResource IconButton}"
                         Content="&#xE8B1;" ToolTip="Generate a strong random password"
+                        AutomationProperties.Name="Generate a strong random password"
                         Click="BtnRandomPwd_Click"/>
                 <Button x:Name="BtnToggleReveal" Style="{StaticResource IconButton}"
-                        Content="&#xE7B3;" ToolTip="Hold to show the password"/>
+                        Content="&#xE7B3;" ToolTip="Hold to show the password"
+                        AutomationProperties.Name="Hold to show the password"/>
                 <Button x:Name="BtnCopyPwd" Style="{StaticResource IconButton}"
                         Content="&#xE8C8;" ToolTip="Copy password to clipboard"
+                        AutomationProperties.Name="Copy password to clipboard"
                         Click="BtnCopyPwd_Click"/>
                 <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="16,0,0,0"
                           Content="Disable"
@@ -176,6 +182,7 @@
             <Button Grid.Row="4" Grid.Column="2" x:Name="BtnBrowseOutput"
                     Style="{StaticResource RowIconButton}" IsEnabled="False"
                     Content="&#xE74E;" ToolTip="Choose where to save the modified .fwz…"
+                    AutomationProperties.Name="Choose where to save the modified firmware"
                     Click="BtnBrowseOutput_Click"/>
         </Grid>
 
