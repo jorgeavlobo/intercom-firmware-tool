@@ -116,15 +116,15 @@
                            Foreground="Gray"/>
             </StackPanel>
 
-            <!-- Output (revealed only after a firmware is chosen) -->
-            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" Visibility="Collapsed"
+            <!-- Output (disabled until a firmware is chosen) -->
+            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
                        Style="{StaticResource FieldLabel}" Text="Save output as:"/>
             <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtOutputPath" IsReadOnly="True"
-                     Visibility="Collapsed"
+                     IsEnabled="False"
                      VerticalContentAlignment="Center" Padding="4,3"
                      Text="(where to write the modified .fwz)" Foreground="Gray"/>
             <Button Grid.Row="4" Grid.Column="2" x:Name="BtnBrowseOutput"
-                    Style="{StaticResource BrowseButton}" Visibility="Collapsed"
+                    Style="{StaticResource BrowseButton}" IsEnabled="False"
                     Content="Browse…" Click="BtnBrowseOutput_Click"/>
         </Grid>
 

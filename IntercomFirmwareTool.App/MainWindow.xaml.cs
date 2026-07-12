@@ -53,11 +53,11 @@ namespace IntercomFirmwareTool.App
             _fwzPath = dlg.FileName;
             SetPathText(TxtFwzPath, _fwzPath);
 
-            // The output only makes sense once there is an input, so reveal that
+            // The output only makes sense once there is an input, so enable that
             // row now and suggest an output next to the input.
-            LblOutput.Visibility = Visibility.Visible;
-            TxtOutputPath.Visibility = Visibility.Visible;
-            BtnBrowseOutput.Visibility = Visibility.Visible;
+            LblOutput.IsEnabled = true;
+            TxtOutputPath.IsEnabled = true;
+            BtnBrowseOutput.IsEnabled = true;
             if (_outputPath is null)
             {
                 string suggested = Path.Combine(
@@ -481,7 +481,8 @@ namespace IntercomFirmwareTool.App
             BtnBrowseFwz.IsEnabled = enabled;
             BtnChooseKey.IsEnabled = enabled;
             BtnGenKey.IsEnabled = enabled;
-            BtnBrowseOutput.IsEnabled = enabled;
+            // The output row stays disabled until a firmware is chosen.
+            BtnBrowseOutput.IsEnabled = enabled && _fwzPath != null;
             BtnVerify.IsEnabled = enabled;
             BtnSelfTest.IsEnabled = enabled;
             // Build only re-enables if the three inputs are set.
