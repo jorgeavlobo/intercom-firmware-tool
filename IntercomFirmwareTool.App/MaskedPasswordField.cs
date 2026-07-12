@@ -60,9 +60,10 @@ namespace IntercomFirmwareTool.App
             set
             {
                 _real.Clear();
-                if (!string.IsNullOrEmpty(value)) _real.Append(value);
+                if (!string.IsNullOrEmpty(value)) _real.Append(StripNonBmp(value));
                 StopReveal();
                 Render(_real.Length);
+                Changed?.Invoke(); // let subscribers (e.g. the match hint) refresh
             }
         }
 
@@ -85,9 +86,11 @@ namespace IntercomFirmwareTool.App
         {
             e.Handled = true; // we manage the Text ourselves
             if (string.IsNullOrEmpty(e.Text)) return;
+            string ins = StripNonBmp(e.Text); // keep every stored char one code unit
+            if (ins.Length == 0) return;
             int start = ReplaceSelection();
-            _real.Insert(start, e.Text);
-            int caret = start + e.Text.Length;
+            _real.Insert(start, ins);
+            int caret = start + ins.Length;
             _revealIndex = caret - 1;   // reveal the character just typed
             _timer.Stop();
             _timer.Start();
@@ -100,17 +103,17 @@ namespace IntercomFirmwareTool.App
             if (e.Key == Key.Back)
             {
                 e.Handled = true;
+                StopReveal(); // mask first, so a still-revealed char can't linger after an adjacent edit
                 if (_box.SelectionLength > 0) { int s = ReplaceSelection(); Render(s); }
                 else if (_box.CaretIndex > 0) { int i = _box.CaretIndex - 1; _real.Remove(i, 1); Render(i); }
-                StopReveal();
                 Changed?.Invoke();
             }
             else if (e.Key == Key.Delete)
             {
                 e.Handled = true;
+                StopReveal();
                 if (_box.SelectionLength > 0) { int s = ReplaceSelection(); Render(s); }
                 else if (_box.CaretIndex < _real.Length) { int i = _box.CaretIndex; _real.Remove(i, 1); Render(i); }
-                StopReveal();
                 Changed?.Invoke();
             }
             // Cut (Ctrl+X) is handled by the ApplicationCommands.Cut binding.
@@ -133,9 +136,9 @@ namespace IntercomFirmwareTool.App
             e.Handled = true;
             if (_box.SelectionLength > 0)
             {
+                StopReveal();
                 int s = ReplaceSelection();
                 Render(s);
-                StopReveal();
                 Changed?.Invoke();
             }
         }
@@ -147,13 +150,29 @@ namespace IntercomFirmwareTool.App
             // GetData can return null or a non-string even when UnicodeText is
             // reported present; guard the cast so it can't throw.
             if (e.DataObject.GetData(DataFormats.UnicodeText) is not string raw) return;
-            string text = raw.Replace("\r", "").Replace("\n", ""); // single line only
+            string text = StripNonBmp(raw.Replace("\r", "").Replace("\n", "")); // single line, BMP only
             if (text.Length == 0) return;
             int start = ReplaceSelection();
             _real.Insert(start, text);
             StopReveal(); // don't flash a pasted secret
             Render(start + text.Length);
             Changed?.Invoke();
+        }
+
+        /// <summary>
+        /// Drops any surrogate (non-BMP) code unit so every stored character is a
+        /// single UTF-16 code unit. WPF's CaretIndex/SelectionStart count code
+        /// units, so this keeps them mapping 1:1 to the buffer — a character can
+        /// never be split or half-deleted. Passwords for this tool are plain text.
+        /// </summary>
+        private static string StripNonBmp(string s)
+        {
+            bool has = false;
+            foreach (char c in s) if (char.IsSurrogate(c)) { has = true; break; }
+            if (!has) return s;
+            var sb = new StringBuilder(s.Length);
+            foreach (char c in s) if (!char.IsSurrogate(c)) sb.Append(c);
+            return sb.ToString();
         }
 
         /// <summary>Removes the current selection from the buffer; returns the new caret index.</summary>

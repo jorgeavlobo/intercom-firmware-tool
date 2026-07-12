@@ -13,7 +13,7 @@ going back to GitHub each time.
 - **Content anchor (deterministic):** MD5 `a6b777888e140df789cc026a4673b7e9`,
   1068 lines, upstream version `0.0.13`. This exact byte-for-byte content was
   re-verified identical to upstream `main` HEAD. Verify with:
-  ```
+  ```shell
   curl -fsSL https://raw.githubusercontent.com/fquinto/bticinoClasse300x/main/main.py | md5sum
   # => a6b777888e140df789cc026a4673b7e9
   ```

@@ -137,14 +137,13 @@ namespace IntercomFirmwareTool.App
             LblOutput.IsEnabled = true;
             TxtOutputPath.IsEnabled = true;
             BtnBrowseOutput.IsEnabled = true;
-            if (_outputPath is null)
-            {
-                string suggested = Path.Combine(
-                    Path.GetDirectoryName(chosen) ?? "",
-                    Path.GetFileNameWithoutExtension(chosen) + "_ssh.fwz");
-                _outputPath = suggested;
-                SetPathText(TxtOutputPath, _outputPath);
-            }
+            // Always re-suggest the output next to the NEW input, so switching
+            // firmware can't leave the output pointing at the previous file's
+            // name/location (the user can still Browse to change it).
+            _outputPath = Path.Combine(
+                Path.GetDirectoryName(chosen) ?? "",
+                Path.GetFileNameWithoutExtension(chosen) + "_ssh.fwz");
+            SetPathText(TxtOutputPath, _outputPath);
             UpdateBuildEnabled();
 
             TxtResult.Text =
@@ -400,7 +399,7 @@ namespace IntercomFirmwareTool.App
             await RunAndShow(sb, () =>
             {
                 FwzBuildResult r = FwzProbe.BuildModifiedFwz(fwz, opts, output);
-                sb.AppendLine($"Detected model : {r.PasswordUsed}");
+                sb.AppendLine($"Archive password : {r.PasswordUsed}  (ZipCrypto key, not the device model)");
                 sb.AppendLine($"Modified entry : {r.SelectedEntry}");
                 sb.AppendLine();
                 sb.AppendLine("Verification (reopened the OUTPUT .fwz and re-read every change):");
@@ -486,7 +485,7 @@ namespace IntercomFirmwareTool.App
             await RunAndShow(sb, () =>
             {
                 SshEnableReport r = FwzProbe.ValidateSshInFwz(fwzPath, opts);
-                sb.AppendLine($"Detected model : {r.PasswordUsed}");
+                sb.AppendLine($"Archive password : {r.PasswordUsed}  (ZipCrypto key, not the device model)");
                 sb.AppendLine($"Inner entry    : {r.SelectedEntry}");
                 sb.AppendLine();
                 sb.AppendLine("Checklist:");

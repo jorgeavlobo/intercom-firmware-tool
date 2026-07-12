@@ -126,7 +126,14 @@ namespace IntercomFirmwareTool.Core
                 return new(false, null,
                     $"Unrecognized firmware: size {size:N0} bytes does not match any known original.");
 
-            string sha = Sha256Hex(path);
+            string sha;
+            try { sha = Sha256Hex(path); }
+            catch (Exception ex)
+            {
+                // Deleted/locked/unreadable after the size check: reject through
+                // the normal flow instead of faulting the (uncaught) caller.
+                return new(false, null, $"Cannot read the file while hashing: {ex.Message}");
+            }
             var match = bySize.FirstOrDefault(
                 k => string.Equals(k.Sha256, sha, StringComparison.OrdinalIgnoreCase));
             if (match is null)
@@ -147,7 +154,9 @@ namespace IntercomFirmwareTool.Core
         private static string Sha256Hex(string path)
         {
             using var sha = SHA256.Create();
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
+            // FileShare.Read: tolerate other readers (Explorer preview, AV scan)
+            // holding the file open; we only read, so this stays safe.
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             return Convert.ToHexString(sha.ComputeHash(fs)); // uppercase hex
         }
     }
