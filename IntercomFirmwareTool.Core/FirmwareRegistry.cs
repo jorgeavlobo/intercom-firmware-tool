@@ -11,19 +11,20 @@ namespace IntercomFirmwareTool.Core
     /// <summary>
     /// A known-good original firmware file. Identity is by <b>content</b>
     /// (size + SHA-256), never by name — the same file may be downloaded under
-    /// any name. The name, MD5 and model metadata are recorded for display /
-    /// future use, not for validation.
+    /// any name. The name, MD5, model metadata and download URL are recorded for
+    /// display / future use, not for validation.
     /// </summary>
     public sealed record KnownFirmware(
         string OriginalName,
         long SizeBytes,
-        string Sha256,      // uppercase hex — the authoritative validation value
-        string Md5,         // uppercase hex — stored, not used for validation
+        string Sha256,          // uppercase hex — the authoritative validation value
+        string Md5,             // uppercase hex — stored, not used for validation
         bool IsFwzContainer,
-        string Line,        // product line, e.g. "Classe 300X" / "Classe 100X"
-        string Version,     // firmware version, e.g. "1.7.19"
-        string? Edition,    // 100X firmware family: "Home + Security" / "Door Entry"; null for 300X
-        IReadOnlyList<FirmwareModel> Models)
+        string Line,            // product line, e.g. "Classe 300X" / "Classe 100X"
+        string Version,         // firmware version, e.g. "1.7.19"
+        string? Edition,        // 100X firmware family: "Home + Security" / "Door Entry"; null for 300X
+        IReadOnlyList<FirmwareModel> Models,
+        string? DownloadUrl = null) // official download URL, where known
     {
         /// <summary>A labelled multi-line description for the Result window.</summary>
         public string Describe()
@@ -82,6 +83,11 @@ namespace IntercomFirmwareTool.Core
                 "7E7CC789A261B85CC1C344E9D2894F5652BE2DC2FBE5644D54BA6C2BEE4FCDE2",
                 "50F0FA138198F845873688F6113F918F", true,
                 "Classe 100X", "2.0.12", "Home + Security", new[] { M100X }),
+            new KnownFirmware("C100XR_020311.fwz", 184914730,
+                "6D199A2FADD08213E37115EA9BF9AA302CD5158E654FD872D1EFF48731588545",
+                "43A635AD3BD024690F431776C5641814", true,
+                "Classe 100X", "2.3.11", "Home + Security", new[] { M100X },
+                "https://assets.legrand.com/pim/AUTRE/C100XR_020311.fwz"),
 
             // ---- Classe 100X (344682) — Door Entry family ----
             new KnownFirmware("C100X_010505.fwz", 106477062,
@@ -95,7 +101,8 @@ namespace IntercomFirmwareTool.Core
             new KnownFirmware("C100X_010508.fwz", 106240356,
                 "BCA0DD7E407C2406D6F8C696F0A9E50BC1E795C8E4700C89E83F09FF96C3EFB2",
                 "0BDD681AC772B886767B4F5D792DB3D3", true,
-                "Classe 100X", "1.5.8", "Door Entry", new[] { M100X }),
+                "Classe 100X", "1.5.8", "Door Entry", new[] { M100X },
+                "https://assets.legrand.com/pim/AUTRE/C100X_010508.fwz"),
 
             // ---- Classe 300X13E (344642 light / 344643 dark) ----
             new KnownFirmware("C300X_010717.fwz", 100476940,
@@ -105,7 +112,8 @@ namespace IntercomFirmwareTool.Core
             new KnownFirmware("C300X_010719.fwz", 100510249,
                 "8E6FDE2070168704FDD46DF8825FF124F993A0C81AC1EE32EBDCC5821EC2DBA7",
                 "70795123E8A6C06E324909862B062522", true,
-                "Classe 300X", "1.7.19", null, new[] { M300X_Light, M300X_Dark }),
+                "Classe 300X", "1.7.19", null, new[] { M300X_Light, M300X_Dark },
+                "https://assets.legrand.com/pim/AUTRE/C300X_010719.fwz"),
         };
 
         /// <summary>
