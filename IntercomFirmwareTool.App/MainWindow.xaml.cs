@@ -64,6 +64,9 @@ namespace IntercomFirmwareTool.App
             BtnPeek.PreviewMouseLeftButtonUp += (_, _) => SetPeek(false);
             BtnPeek.LostMouseCapture += (_, _) => SetPeek(false);
             BtnPeek.MouseLeave += (_, _) => SetPeek(false);
+            // Re-mask if focus leaves the button before the key-up (e.g. Tab away
+            // while Space/Enter is held) — otherwise peek could stay on.
+            BtnPeek.LostKeyboardFocus += (_, _) => SetPeek(false);
             BtnPeek.PreviewKeyDown += (_, e) =>
             {
                 if (e.Key == Key.Space || e.Key == Key.Enter) { SetPeek(true); e.Handled = true; }
@@ -101,6 +104,12 @@ namespace IntercomFirmwareTool.App
             TxtResult.Text = $"Verifying firmware integrity (size + SHA-256)…\n{chosen}";
             FirmwareCheckResult check;
             try { check = await Task.Run(() => FirmwareRegistry.Verify(chosen)); }
+            catch (Exception ex)
+            {
+                // Never let an exception escape this async void handler (it would
+                // crash the dispatcher); turn it into a normal rejection below.
+                check = new FirmwareCheckResult(false, null, "Could not verify the firmware: " + ex.Message);
+            }
             finally { SetButtonsEnabled(true); }
 
             if (!check.Ok)
@@ -185,10 +194,25 @@ namespace IntercomFirmwareTool.App
             };
             if (dlg.ShowDialog(this) != true) return;
             string privatePath = dlg.FileName;
+            string pubDest = privatePath + ".pub";
+
+            // Never write the key pair over a selected firmware / output / key —
+            // that would violate "the input is never modified" (and destroy the
+            // output or the chosen key).
+            foreach (var (label, p) in new[] { ("input firmware", _fwzPath), ("output firmware", _outputPath), ("selected public key", _keyPath) })
+            {
+                if (p != null && (SamePath(privatePath, p) || SamePath(pubDest, p)))
+                {
+                    MessageBox.Show(this,
+                        $"The key would be written over the {label}:\n\n{p}\n\n" +
+                        "Choose a different location for the new key.",
+                        "Path collision", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+            }
 
             // The Save dialog only prompted about the private-key path; confirm
             // the sibling .pub too, since generating overwrites it.
-            string pubDest = privatePath + ".pub";
             if (File.Exists(pubDest))
             {
                 var ans = MessageBox.Show(this,
@@ -371,6 +395,17 @@ namespace IntercomFirmwareTool.App
                 MessageBox.Show(this,
                     "The password and its confirmation do not match.",
                     "Password mismatch", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            // The output must not clobber the selected public key (build moves the
+            // verified artifact onto the output path with overwrite).
+            if (_keyPath != null && SamePath(_outputPath!, _keyPath))
+            {
+                MessageBox.Show(this,
+                    "The output path is the same file as the selected public key.\n\n" +
+                    "Choose a different output so the key isn't overwritten.",
+                    "Output collides with the key", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -595,6 +630,18 @@ namespace IntercomFirmwareTool.App
             TxtResult.Text = sb.ToString();
         }
 
+        /// <summary>Same file path? Case-insensitive on Windows, case-sensitive elsewhere.</summary>
+        private static bool SamePath(string a, string b)
+        {
+            try
+            {
+                var cmp = OperatingSystem.IsWindows()
+                    ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+                return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), cmp);
+            }
+            catch { return false; }
+        }
+
         private void SetButtonsEnabled(bool enabled)
         {
             BtnBrowseFwz.IsEnabled = enabled;
@@ -607,6 +654,15 @@ namespace IntercomFirmwareTool.App
             // Build only re-enables if the three inputs are set.
             BtnBuild.IsEnabled = enabled
                 && _fwzPath != null && _keyPath != null && _outputPath != null;
+
+            // Also lock the credential inputs during an operation so the visible
+            // UI can't drift from the values snapshotted for the build. When
+            // re-enabling, respect key-only mode (password fields stay disabled).
+            bool creds = enabled && ChkKeyOnly.IsChecked != true;
+            ChkKeyOnly.IsEnabled = enabled;
+            TxtPassword.IsEnabled = creds;
+            TxtConfirm.IsEnabled = creds;
+            BtnPeek.IsEnabled = creds;
         }
     }
 }

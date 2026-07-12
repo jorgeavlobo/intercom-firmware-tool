@@ -315,6 +315,7 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         public static string EnableSsh(string bareImagePath, EnableSshOptions opts)
         {
+            ValidateOptions(opts);
             long bareSize = new FileInfo(bareImagePath).Length;
             string disk = WrapBareFilesystem(bareImagePath);
             string modifiedBare = Path.Combine(
@@ -342,6 +343,22 @@ namespace IntercomFirmwareTool.Core
             {
                 TryDelete(disk);
             }
+        }
+
+        /// <summary>
+        /// Defensive validation of the options, independent of any UI-layer
+        /// checks, so a non-UI caller can't produce an insecure or non-functional
+        /// image: a public key is always required, and a password is required
+        /// unless key-only login is selected (an empty password would still hash
+        /// to a valid BLANK-password /etc/shadow entry).
+        /// </summary>
+        private static void ValidateOptions(EnableSshOptions opts)
+        {
+            if (string.IsNullOrWhiteSpace(opts.PublicKey))
+                throw new ArgumentException("A non-empty SSH public key is required.", nameof(opts));
+            if (!opts.KeyOnly && string.IsNullOrEmpty(opts.RootPassword))
+                throw new ArgumentException(
+                    "A non-empty root password is required unless KeyOnly is set.", nameof(opts));
         }
 
         /// <summary>Applies the ordered Phase A–D edits on an open, writable fs.</summary>
@@ -510,7 +527,10 @@ namespace IntercomFirmwareTool.Core
             checks.Add(new($"{path} exists", exists, ""));
             if (!exists) return;
             string content = ReadAllTextFromFs(fs, path);
-            checks.Add(new($"{path} content == key", content.Trim() == publicKey.Trim(), ""));
+            // Require a non-empty expected key, otherwise an empty authorized_keys
+            // would "match" an empty expectation and PASS misleadingly.
+            bool keyOk = !string.IsNullOrWhiteSpace(publicKey) && content.Trim() == publicKey.Trim();
+            checks.Add(new($"{path} content == key", keyOk, ""));
             uint mode = fs.GetMode(path) & 0xFFF;
             checks.Add(new($"{path} mode 0600",
                 mode == ToMode(600), $"actual 0{Convert.ToString((long)mode, 8)}"));
