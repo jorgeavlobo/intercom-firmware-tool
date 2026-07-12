@@ -264,6 +264,15 @@ namespace IntercomFirmwareTool.App
                 TxtResult.Text = "The selected public key file is empty.";
                 return;
             }
+            if (!SshKeyGen.IsLikelyPublicKey(publicKey))
+            {
+                MessageBox.Show(this,
+                    "The selected file does not look like an OpenSSH public key\n" +
+                    "(expected a line like \"ssh-rsa AAAA… comment\" or \"ssh-ed25519 AAAA…\").\n\n" +
+                    "Pick your .pub file, or use \"Generate new…\".",
+                    "Not a public key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
 
             bool keyOnly = ChkKeyOnly.IsChecked == true;
             string password = CurrentPassword();
@@ -297,7 +306,7 @@ namespace IntercomFirmwareTool.App
             sb.AppendLine($"  Public key : {keyPath}");
             sb.AppendLine(keyOnly
                 ? "  Login      : key-only (password disabled)"
-                : $"  Root pw    : {password}  (MD5-crypt $1$root$…)");
+                : "  Root pw    : (set — stored as MD5-crypt $1$root$…)");
             sb.AppendLine($"  Output     : {output}");
             sb.AppendLine();
 
@@ -372,7 +381,7 @@ namespace IntercomFirmwareTool.App
             sb.AppendLine($"  Public key : {keyPath}");
             sb.AppendLine(keyOnly
                 ? "  Login      : key-only (password disabled)"
-                : $"  Root pw    : {password}  (must match how that .fwz was built)");
+                : "  Root pw    : (as entered — must match how that .fwz was built)");
             sb.AppendLine();
 
             await RunAndShow(sb, () =>

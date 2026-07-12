@@ -175,11 +175,14 @@ unit (with USB/SAM-BA recovery ready), and **only then** consider innovations.
 
 - ⚠️ **MD5-crypt in C#** — must match the vector byte-for-byte (mitigated: we
   have the vector + a self-test; validated ALL PASS on real hardware).
-- ⚠️ **SharpZipLib ZipCrypto *writing*** is still unproven — reading worked;
-  producing a `.fwz` the device (or at least fquinto's unpack) accepts is the
-  critical test. Per-entry compression method must match the original.
+- ✅ **SharpZipLib ZipCrypto *writing*** — proven: the repacked `.fwz`
+  round-trips through our own read chain with every edit intact (step 3 below).
+  What remains untested is acceptance by a real device's updater (deliberately
+  not attempted until a flash with recovery ready). Per-entry compression method
+  matches the original.
 - ⚠️ **Ownership assigned by lwext4** to new objects is unknown — so
-  `SetOwner(0,0)` explicitly on everything, without assuming.
+  `SetOwner(0,0)` explicitly on every new object (`EnsureDir` sets `0:0` + `0755`
+  on directories it creates; files get `SetOwner(0,0)` after writing).
 - ⚠️ **`/etc/init.d/dropbear` must exist** in the image (fquinto relies on it).
 - ⚠️ **Free space in the ext4** — additions are tiny (~1–3 KB); `ENOSPC` is
   theoretical but must surface as a clear error.
@@ -194,8 +197,8 @@ unit (with USB/SAM-BA recovery ready), and **only then** consider innovations.
 1. **MD5-crypt generator** — isolated, tested against the vector. ✅ Done
    (self-test ALL PASS on real hardware).
 2. **ext4 write routine (Phase A–D) + recut** + logical validation. ✅ Done
-   ("APPLY SSH-enable (test)" button; all 18 checks PASS on real firmware,
-   including SetOwner 0:0 and SetMode 0700/0600).
+   (all 17 checks PASS on real firmware, including SetOwner 0:0 and SetMode
+   0700/0600).
 3. **Re-gzip + re-zip (ZipCrypto) + round-trip.** ✅ Done
    ("BUILD modified .fwz (test)" button; the output .fwz round-trips through
    our own read chain with every edit intact — SharpZipLib ZipCrypto writing

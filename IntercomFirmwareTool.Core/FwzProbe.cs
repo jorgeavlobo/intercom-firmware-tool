@@ -159,6 +159,13 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         public static FwzBuildResult BuildModifiedFwz(string inputFwz, EnableSshOptions opts, string outputPath)
         {
+            // Repack opens the output with FileMode.Create while still reading the
+            // input; if they are the same file the source is truncated mid-read
+            // and the original archive is destroyed. Reject that up front.
+            if (PathsEqual(inputFwz, outputPath))
+                throw new InvalidOperationException(
+                    "The output .fwz must be a different file from the input .fwz.");
+
             FwzExtractResult ex = ExtractBareImage(inputFwz);
             string? modifiedBare = null;
             string? modifiedGz = null;
@@ -345,6 +352,10 @@ namespace IntercomFirmwareTool.Core
                 return false; // wrong password
             }
         }
+
+        /// <summary>True if two paths resolve to the same file (case-insensitive, Windows).</summary>
+        private static bool PathsEqual(string a, string b) =>
+            string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
 
         /// <summary>Builds a unique path in the temp folder with the given extension.</summary>
         private static string NewTempPath(string extension) =>

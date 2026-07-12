@@ -160,7 +160,13 @@ namespace IntercomFirmwareTool.Core
 
                 // Reopen the raw ext4 from scratch and re-read the file.
                 string after = ReadFile(modifiedBare, targetFile);
-                bool persisted = after.Contains(testLine);
+                // Persisted only if the file exactly equals what we wrote (the
+                // original content plus the appended line), not merely contains
+                // the marker — that would also pass for a pre-existing marker.
+                string expected = before;
+                if (expected.Length > 0 && !expected.EndsWith("\n")) expected += "\n";
+                expected += testLine + "\n";
+                bool persisted = after == expected;
                 return new Ext4WriteResult(true, before, after, persisted);
             }
             finally
@@ -186,7 +192,13 @@ namespace IntercomFirmwareTool.Core
             {
                 int toRead = (int)Math.Min(buffer.Length, remaining);
                 int n = inFs.Read(buffer, 0, toRead);
-                if (n <= 0) break;
+                if (n <= 0)
+                    // The wrapper disk should always be at least PartitionOffset +
+                    // bareSize; if it ends early we would emit a truncated ext4 —
+                    // fail loudly rather than write a corrupt image.
+                    throw new EndOfStreamException(
+                        $"Wrapper disk ended early: {remaining} of {bareSize} bytes unread; " +
+                        "the sliced ext4 would be truncated.");
                 outFs.Write(buffer, 0, n);
                 remaining -= n;
             }
@@ -369,8 +381,15 @@ namespace IntercomFirmwareTool.Core
             fs.SetOwner("/etc/dropbear/authorized_keys", 0, 0);
 
             // Phase D — start dropbear at boot via the rc5.d symlink (relative
-            // target, stored verbatim). Prerequisite: /etc/init.d/dropbear must
-            // already exist on the device (verified separately).
+            // target, stored verbatim). Check the prerequisites first so a
+            // missing init script or rc5.d dir gives a clear error instead of a
+            // dangling link or an opaque native failure.
+            if (!fs.FileExists("/etc/init.d/dropbear"))
+                throw new InvalidOperationException(
+                    "/etc/init.d/dropbear is missing in the image; cannot enable dropbear at boot.");
+            if (!fs.DirectoryExists("/etc/rc5.d"))
+                throw new InvalidOperationException(
+                    "/etc/rc5.d is missing in the image; cannot create the S98dropbear symlink.");
             fs.CreateSymLink("../init.d/dropbear", "/etc/rc5.d/S98dropbear");
         }
 
@@ -387,16 +406,20 @@ namespace IntercomFirmwareTool.Core
                 using var d = ExtDisk.Open(disk);
                 using var fs = ExtFileSystem.Open(d, d.Partitions[0]);
 
+                // Match whole lines (not substrings) so e.g. a "notroot2:…"
+                // entry can't satisfy the "root2" check, and require exactly one.
                 string passwd = ReadAllTextFromFs(fs, "/etc/passwd");
                 checks.Add(new("/etc/passwd has root2",
-                    passwd.Contains("root2:x:0:0:root:/home/root:/bin/sh"), ""));
+                    HasExactLine(passwd, "root2:x:0:0:root:/home/root:/bin/sh"), ""));
                 checks.Add(new("/etc/passwd has bticino2",
-                    passwd.Contains("bticino2:x:1000:1000::/home/bticino:/bin/sh"), ""));
+                    HasExactLine(passwd, "bticino2:x:1000:1000::/home/bticino:/bin/sh"), ""));
 
                 string secret = opts.KeyOnly ? "*" : Md5Crypt.Crypt(opts.RootPassword, "root");
                 string shadow = ReadAllTextFromFs(fs, "/etc/shadow");
-                checks.Add(new("/etc/shadow has root2 entry", shadow.Contains($"root2:{secret}:"), ""));
-                checks.Add(new("/etc/shadow has bticino2 entry", shadow.Contains($"bticino2:{secret}:"), ""));
+                checks.Add(new("/etc/shadow has root2 entry",
+                    HasExactLine(shadow, $"root2:{secret}:18033:0:99999:7:::"), ""));
+                checks.Add(new("/etc/shadow has bticino2 entry",
+                    HasExactLine(shadow, $"bticino2:{secret}:18033:0:99999:7:::"), ""));
 
                 CheckDir(fs, checks, "/home/root/.ssh");
                 CheckAuthKeys(fs, checks, "/home/root/.ssh/authorized_keys", opts.PublicKey);
@@ -459,9 +482,19 @@ namespace IntercomFirmwareTool.Core
 
         private static string EnsureTrailingNewline(string s) => s.EndsWith("\n") ? s : s + "\n";
 
+        /// <summary>True if exactly one line of <paramref name="content"/> equals <paramref name="expected"/>.</summary>
+        private static bool HasExactLine(string content, string expected) =>
+            content.Replace("\r\n", "\n").Split('\n').Count(line => line == expected) == 1;
+
         private static void AppendLines(ExtFileSystem fs, string path, string[] lines)
         {
-            string current = fs.FileExists(path) ? ReadAllTextFromFs(fs, path) : "";
+            // /etc/passwd and /etc/shadow must already exist: appending re-uses
+            // their inode (preserving mode/owner). Creating them here would give
+            // them unknown metadata, so refuse if they are missing.
+            if (!fs.FileExists(path))
+                throw new InvalidOperationException(
+                    $"{path} does not exist in the image; refusing to create it (it would get unknown mode/owner).");
+            string current = ReadAllTextFromFs(fs, path);
             var sb = new StringBuilder(current);
             // Correction #3: don't glue the new line onto the last existing one.
             if (sb.Length > 0 && sb[sb.Length - 1] != '\n') sb.Append('\n');
@@ -478,7 +511,14 @@ namespace IntercomFirmwareTool.Core
 
         private static void EnsureDir(ExtFileSystem fs, string path)
         {
-            if (!fs.DirectoryExists(path)) fs.CreateDirectory(path);
+            if (fs.DirectoryExists(path)) return;
+            // lwext4 does not give a newly created object root:root or a known
+            // mode, so set both explicitly (0755 is a safe, not group/other-
+            // writable default; callers tighten it further where needed, e.g.
+            // .ssh to 0700).
+            fs.CreateDirectory(path);
+            fs.SetMode(path, ToMode(755));
+            fs.SetOwner(path, 0, 0);
         }
 
         /// <summary>Reads a little-endian uint32 from a buffer at the given offset.</summary>

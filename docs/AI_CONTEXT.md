@@ -47,9 +47,10 @@ to read and write the ext4 filesystem directly from Windows, then repackage.
 passwords → select the `.gz` payload (name ends `.gz`, not `recovery`) → gunzip
 → read files from the ext4.
 
-**Write phase** (in progress): apply fquinto's rootfs edits (create the SSH
-authorized_keys, the `/home/root/.ssh` dir, `/etc/shadow` + `/etc/passwd`
-entries, and the `S98dropbear` rc5.d symlink), then recut and repackage.
+**Write phase** (done — see the status snapshot below): apply fquinto's rootfs
+edits (create the SSH authorized_keys, the `/home/root/.ssh` dir, `/etc/shadow`
++ `/etc/passwd` entries, and the `S98dropbear` rc5.d symlink), then recut and
+repackage.
 
 ## Important implementation detail: bare ext4 has no partition table
 
@@ -109,7 +110,7 @@ not a change to the ext4 itself.
 - ✅ Read chain proven on real firmware (`/etc/hostname` → `Bticino_Classe_100_X`).
 - ✅ ext4 write persists (`CanWrite=True`, survives flush + raw round-trip).
 - ✅ MD5-crypt generator matches `openssl passwd -1` (self-test ALL PASS).
-- ✅ Phase A–D write routine + logical validation (18 checks PASS on real firmware).
+- ✅ Phase A–D write routine + logical validation (17 checks PASS on real firmware).
 - ✅ Repackaging (re-gzip + ZipCrypto re-zip) round-trips through our read chain.
 - ✅ **Golden cross-validation done** — fquinto (Docker/Linux) run on the same
   input produced the identical MD5-crypt hash, and its output `.fwz` passes our

@@ -29,15 +29,72 @@ namespace IntercomFirmwareTool.Core
             using var rsa = RSA.Create(bits);
 
             // Private key: PKCS#1 PEM ("RSA PRIVATE KEY"), read natively by OpenSSH.
-            string privatePem = rsa.ExportRSAPrivateKeyPem();
-            File.WriteAllText(privateKeyPath, privatePem + "\n");
-
+            string privatePem = rsa.ExportRSAPrivateKeyPem() + "\n";
             // Public key: OpenSSH one-line format.
-            string pub = OpenSshPublicKey(rsa, comment);
             string pubPath = privateKeyPath + ".pub";
-            File.WriteAllText(pubPath, pub + "\n");
+            string pubText = OpenSshPublicKey(rsa, comment) + "\n";
 
-            return pubPath;
+            // Write both to temp files first, then move them into place, so a
+            // failure partway through never leaves a mismatched private/.pub pair.
+            string tmpPriv = privateKeyPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            string tmpPub = pubPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(tmpPriv, privatePem);
+                File.WriteAllText(tmpPub, pubText);
+                File.Move(tmpPriv, privateKeyPath, overwrite: true);
+                File.Move(tmpPub, pubPath, overwrite: true);
+                return pubPath;
+            }
+            finally
+            {
+                TryDelete(tmpPriv);
+                TryDelete(tmpPub);
+            }
+        }
+
+        /// <summary>
+        /// Heuristic check that <paramref name="text"/> is an OpenSSH public key
+        /// line (<c>type base64 [comment]</c>). It verifies the type token is a
+        /// known one AND that the base64 blob decodes to a wire-format key whose
+        /// embedded type matches — so a non-key file or random text is rejected
+        /// before it gets written verbatim into <c>authorized_keys</c>.
+        /// </summary>
+        public static bool IsLikelyPublicKey(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            string line = text.Trim().Split('\n')[0].Trim();
+            string[] parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2) return false;
+
+            string type = parts[0];
+            string[] allowed =
+            {
+                "ssh-rsa", "ssh-ed25519", "ssh-dss",
+                "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+                "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+            };
+            if (Array.IndexOf(allowed, type) < 0) return false;
+
+            try
+            {
+                byte[] blob = Convert.FromBase64String(parts[1]);
+                if (blob.Length < 4) return false;
+                int len = (blob[0] << 24) | (blob[1] << 16) | (blob[2] << 8) | blob[3];
+                if (len <= 0 || 4 + len > blob.Length) return false;
+                return Encoding.ASCII.GetString(blob, 4, len) == type;
+            }
+            catch (FormatException)
+            {
+                return false; // parts[1] was not valid base64
+            }
+        }
+
+        /// <summary>Deletes a file if it exists, ignoring failures (best-effort temp cleanup).</summary>
+        private static void TryDelete(string path)
+        {
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch { /* best-effort cleanup */ }
         }
 
         /// <summary>Encodes an RSA public key as "ssh-rsa &lt;base64&gt; &lt;comment&gt;".</summary>
