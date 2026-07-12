@@ -6,6 +6,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using IntercomFirmwareTool.Core;
 using Microsoft.Win32;
 
@@ -88,6 +89,23 @@ namespace IntercomFirmwareTool.App
             BtnToggleReveal.ToolTip = on ? "Release to hide" : "Hold to show the password";
         }
 
+        private DispatcherTimer? _flashTimer;
+
+        /// <summary>Briefly reveals both fields (~0.5 s), then re-masks — a visible
+        /// cue that the password just changed (e.g. after generating one).</summary>
+        private void FlashReveal()
+        {
+            if (ChkKeyOnly.IsChecked == true) return;
+            SetReveal(true);
+            if (_flashTimer is null)
+            {
+                _flashTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+                _flashTimer.Tick += (_, _) => { _flashTimer!.Stop(); SetReveal(false); };
+            }
+            _flashTimer.Stop();
+            _flashTimer.Start();
+        }
+
         /// <summary>Copies the current password to the clipboard (nothing is shown).</summary>
         private void BtnCopyPwd_Click(object sender, RoutedEventArgs e)
         {
@@ -121,6 +139,7 @@ namespace IntercomFirmwareTool.App
             _pw.Value = pwd;
             _confirm.Value = pwd; // both set → the match hint shows ✓
             UpdatePasswordHint();
+            FlashReveal();        // briefly show it as a visible "it changed" cue
 
             TxtResult.Text =
                 "Generated a strong random password and filled both fields.\n" +
