@@ -87,8 +87,12 @@
             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <TextBox x:Name="TxtPassword" Width="200" Padding="4,3"
                          FontFamily="Consolas" VerticalContentAlignment="Center"/>
-                <Button x:Name="BtnPeek" Content="Show" MinWidth="52"
+                <Button x:Name="BtnRandomPwd" Content="Random" MinWidth="60"
                         Padding="8,3" Margin="8,0,0,0" VerticalAlignment="Stretch"
+                        ToolTip="Generate a strong random password into both fields"
+                        Click="BtnRandomPwd_Click"/>
+                <Button x:Name="BtnPeek" Content="Show" MinWidth="52"
+                        Padding="8,3" Margin="6,0,0,0" VerticalAlignment="Stretch"
                         ToolTip="Hold to reveal the password"/>
                 <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="14,0,0,0"
                           Content="Key-only login (no password)"

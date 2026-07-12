@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -82,6 +83,41 @@ namespace IntercomFirmwareTool.App
             _pw.Peek = on;
             _confirm.Peek = on;
             BtnPeek.Content = on ? "Hide" : "Show";
+        }
+
+        /// <summary>
+        /// Fills both password fields with a fresh strong random password and
+        /// shows it in the Result box so the user can record it (a generated
+        /// password is only recoverable if copied now — it is not stored).
+        /// </summary>
+        private void BtnRandomPwd_Click(object sender, RoutedEventArgs e)
+        {
+            if (ChkKeyOnly.IsChecked == true) return; // password login disabled
+
+            string pwd = GenerateRandomPassword(20);
+            _pw.Value = pwd;
+            _confirm.Value = pwd; // both set → the match hint shows ✓
+            UpdatePasswordHint();
+
+            TxtResult.Text =
+                "🔑 Generated a random root password and filled both fields:\n\n" +
+                "    " + pwd + "\n\n" +
+                "COPY IT NOW and keep it safe — it is NOT stored anywhere, and you will\n" +
+                "need it to log in as root. (Hold \"Show\" to confirm the fields match.)";
+        }
+
+        /// <summary>A strong random password from an unambiguous character set.</summary>
+        private static string GenerateRandomPassword(int length)
+        {
+            // Drop visually ambiguous characters (0/O, 1/l/I) so it is easy to read
+            // and retype; include a few symbols for strength. RandomNumberGenerator
+            // gives an unbiased, cryptographically strong selection.
+            const string alphabet =
+                "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#%^*-_=+";
+            var chars = new char[length];
+            for (int i = 0; i < length; i++)
+                chars[i] = alphabet[RandomNumberGenerator.GetInt32(alphabet.Length)];
+            return new string(chars);
         }
 
         // ---- Input selection -------------------------------------------------
@@ -296,6 +332,7 @@ namespace IntercomFirmwareTool.App
             TxtPassword.IsEnabled = usePassword;
             TxtConfirm.IsEnabled = usePassword;
             BtnPeek.IsEnabled = usePassword;
+            BtnRandomPwd.IsEnabled = usePassword;
             UpdatePasswordHint();
         }
 
@@ -662,6 +699,7 @@ namespace IntercomFirmwareTool.App
             TxtPassword.IsEnabled = creds;
             TxtConfirm.IsEnabled = creds;
             BtnPeek.IsEnabled = creds;
+            BtnRandomPwd.IsEnabled = creds;
         }
     }
 }
