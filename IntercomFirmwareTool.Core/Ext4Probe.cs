@@ -690,6 +690,20 @@ namespace IntercomFirmwareTool.Core
                     : passwordLogin ? "password" : keyInstalled ? "key" : "none";
                 checks.Add(new("At least one login credential present (password or key)",
                     passwordLogin || keyInstalled, how));
+
+                // Key-only images (no password) authenticate solely by key, so the
+                // key must be a type the device's dropbear actually accepts —
+                // verified only for RSA, exactly as the build path requires for a
+                // key-only build. A key-only image whose only key is Ed25519/ECDSA/
+                // DSA would look complete but may leave the device with no usable
+                // login, so flag it. (When password login is enabled, a non-RSA
+                // key is a harmless extra — the password is the working fallback.)
+                if (!passwordLogin && keyInstalled)
+                {
+                    string kt = SshKeyGen.KeyType(homeKey ?? dropbearKey!) ?? "unknown";
+                    checks.Add(new("Key-only image uses an RSA key (only type verified on this device)",
+                        kt == "ssh-rsa", kt));
+                }
             }
             finally
             {
