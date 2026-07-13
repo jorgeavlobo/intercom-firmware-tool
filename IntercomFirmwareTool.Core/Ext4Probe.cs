@@ -348,14 +348,22 @@ namespace IntercomFirmwareTool.Core
         /// <summary>
         /// Defensive validation of the options, independent of any UI-layer
         /// checks, so a non-UI caller can't produce an insecure or non-functional
-        /// image: a public key is always required, and a password is required
-        /// unless key-only login is selected (an empty password would still hash
-        /// to a valid BLANK-password /etc/shadow entry).
+        /// image: a valid single-line public key is always required, and a
+        /// password is required unless key-only login is selected (an empty
+        /// password would still hash to a valid BLANK-password /etc/shadow entry).
         /// </summary>
         private static void ValidateOptions(EnableSshOptions opts)
         {
             if (string.IsNullOrWhiteSpace(opts.PublicKey))
                 throw new ArgumentException("A non-empty SSH public key is required.", nameof(opts));
+            // The key is written into authorized_keys, so it must be a SINGLE
+            // valid OpenSSH public-key line. Reject multi-line/garbage here too
+            // (the UI already checks this) so a non-UI caller cannot pass text
+            // that silently authorizes more than the one intended key.
+            if (!SshKeyGen.IsLikelyPublicKey(opts.PublicKey))
+                throw new ArgumentException(
+                    "The SSH public key must be a single valid OpenSSH public-key line " +
+                    "(e.g. \"ssh-rsa AAAA… comment\").", nameof(opts));
             if (!opts.KeyOnly && string.IsNullOrEmpty(opts.RootPassword))
                 throw new ArgumentException(
                     "A non-empty root password is required unless KeyOnly is set.", nameof(opts));

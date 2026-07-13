@@ -87,9 +87,9 @@ namespace IntercomFirmwareTool.App
         {
             e.Handled = true; // we manage the Text ourselves
             if (string.IsNullOrEmpty(e.Text)) return;
-            // Reject (don't silently drop) non-BMP input: passwords here are BMP
-            // text, and rejecting keeps every stored char a single UTF-16 code
-            // unit so caret/selection indices map 1:1 to the buffer.
+            // Silently ignore non-BMP input: passwords here are BMP text, and
+            // dropping surrogate-pair input keeps every stored char a single
+            // UTF-16 code unit so caret/selection indices map 1:1 to the buffer.
             if (HasSurrogate(e.Text)) return;
             int start = ReplaceSelection();
             _real.Insert(start, e.Text);
