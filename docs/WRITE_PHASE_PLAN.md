@@ -182,7 +182,8 @@ Before any flashing, prove our output equals fquinto's:
    read chain (and ideally by fquinto's own unpack) without errors.
 
 Only when all of this matches is replication done. **Only then** flash a real
-unit (with USB/SAM-BA recovery ready), and **only then** consider innovations.
+unit (keeping the original firmware to re-flash via My Home Suite if needed —
+i.MX SoC, no documented low-level un-brick), and **only then** consider innovations.
 
 ---
 
@@ -238,5 +239,7 @@ unit (with USB/SAM-BA recovery ready), and **only then** consider innovations.
    reports 64-bit + DLL presence (red if anything is wrong). The window carries
    the recovery/safety reminder.
 
-**Still required before flashing a real unit:** USB/SAM-BA recovery ready (the
-tool itself never flashes — that is a deliberate manual, out-of-band step).
+**Still required before flashing a real unit:** keep the original firmware and be
+ready to re-flash it via My Home Suite over Mini-USB (i.MX SoC — no documented
+low-level un-brick / SAM-BA does not apply; a hard brick may be unrecoverable).
+The tool itself never flashes — that is a deliberate manual, out-of-band step.

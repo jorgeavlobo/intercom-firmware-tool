@@ -92,8 +92,11 @@ not a change to the ext4 itself.
    known test vector. Do not "modernize" to SHA-512 while replicating — that
    would diverge from fquinto.
 6. **Safety:** nothing is flashed to a device from this tool. Any real flashing
-   is a manual, out-of-band step the user does with recovery (USB/SAM-BA) ready,
-   only after golden cross-validation against fquinto passes.
+   is a manual, out-of-band step (via BTicino's My Home Suite over Mini-USB),
+   only after golden cross-validation against fquinto passes. These units use an
+   **i.MX SoC**, so there is **no documented low-level un-brick** (SAM-BA is for
+   Atmel/Microchip chips and does not apply); the only realistic recovery is
+   re-flashing the original firmware while the device still boots, so keep it.
 
 ## Where things live
 
@@ -124,5 +127,6 @@ not a change to the ext4 itself.
   validator with **no divergence** (`.ssh` is 0755, matching fquinto exactly).
 - ✅ Product UI — a single Build flow (choose .fwz + key + output → build +
   verify), plus Verify-existing and self-test actions.
-- ⏳ Next (user's call): optional real-device flashing with USB/SAM-BA recovery
-  ready; optional 100%-faithful extras (e.g. fquinto's patch_github.xml edit).
+- ⏳ Next (user's call): optional real-device flashing (My Home Suite, Mini-USB;
+  keep the original firmware — no documented un-brick, i.MX SoC not SAM-BA);
+  optional 100%-faithful extras (e.g. fquinto's patch_github.xml edit).

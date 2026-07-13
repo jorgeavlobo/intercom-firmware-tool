@@ -90,7 +90,7 @@
                 <TextBlock TextWrapping="Wrap" FontWeight="SemiBold"
                            Text="Builds a modified BTicino firmware (.fwz) that enables SSH/root login, replicating the fquinto project on Windows."/>
                 <TextBlock TextWrapping="Wrap" Margin="0,4,0,0" Foreground="#FF7A5B00"
-                           Text="⚠ Flashing modified firmware can brick a device. Keep USB/SAM-BA recovery ready before you flash. Your input .fwz is never modified — a new file is written."/>
+                           Text="⚠ Flashing modified firmware can brick the device. These units use an i.MX SoC, so there is no documented low-level un-brick (SAM-BA does not apply). Keep the ORIGINAL firmware and be ready to re-flash it with My Home Suite over Mini-USB — a bad flash may be unrecoverable. Your input .fwz is never modified — a new file is written."/>
             </StackPanel>
         </Border>
 

@@ -664,8 +664,10 @@ namespace IntercomFirmwareTool.App
                     sb.AppendLine("✅ SUCCESS — the modified firmware was built and verified.");
                     sb.AppendLine($"   Written to: {r.OutputPath}");
                     sb.AppendLine();
-                    sb.AppendLine("Before flashing: have USB/SAM-BA recovery ready. Your original");
-                    sb.AppendLine(".fwz was not modified.");
+                    sb.AppendLine("Before flashing: keep the ORIGINAL firmware and be ready to re-flash it");
+                    sb.AppendLine("with My Home Suite over Mini-USB. These units use an i.MX SoC — there is");
+                    sb.AppendLine("no documented low-level un-brick (SAM-BA does not apply), so a bad flash");
+                    sb.AppendLine("may be unrecoverable. Your original .fwz was not modified.");
                 }
                 else
                 {
