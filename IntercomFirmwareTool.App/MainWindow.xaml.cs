@@ -428,8 +428,13 @@ namespace IntercomFirmwareTool.App
                 };
                 using var p = Process.Start(psi);
                 if (p is null) return false;
-                p.WaitForExit(5000);
-                return p.HasExited && p.ExitCode == 0;
+                if (!p.WaitForExit(5000))
+                {
+                    // Timed out: kill it (disposing Process wouldn't) and give up.
+                    try { p.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+                    return false;
+                }
+                return p.ExitCode == 0;
             }
             catch { return false; }
         }

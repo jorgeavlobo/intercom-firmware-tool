@@ -128,9 +128,21 @@ namespace IntercomFirmwareTool.Core
 
         private static byte[] Md5(params byte[][] parts)
         {
-            var buf = new List<byte>();
-            foreach (var p in parts) buf.AddRange(p);
-            return MD5.HashData(buf.ToArray());
+            // Hash the concatenation of the parts. Same bytes as before (the golden
+            // self-test still passes), but avoid List growth + ToArray: a single
+            // part is hashed directly, multiple parts go into one pre-sized buffer.
+            // This matters in the 1000-round stretch loop, which passes one buffer.
+            if (parts.Length == 1) return MD5.HashData(parts[0]);
+            int total = 0;
+            foreach (var p in parts) total += p.Length;
+            var buf = new byte[total];
+            int pos = 0;
+            foreach (var p in parts)
+            {
+                Buffer.BlockCopy(p, 0, buf, pos, p.Length);
+                pos += p.Length;
+            }
+            return MD5.HashData(buf);
         }
     }
 }
