@@ -417,9 +417,23 @@ namespace IntercomFirmwareTool.App
         private void BtnClearKey_Click(object sender, RoutedEventArgs e)
         {
             _keyPath = null;
-            TxtKeyPath.Text = "(optional: choose an existing .pub key, or generate a new pair)";
-            TxtKeyPath.Foreground = Brushes.Gray;
+            UpdateKeyPlaceholder();
             UpdateBuildEnabled();
+        }
+
+        /// <summary>
+        /// Refreshes the key box placeholder to say whether the key is optional or
+        /// required (key-only). Only while no key is selected — otherwise the box
+        /// shows the chosen path.
+        /// </summary>
+        private void UpdateKeyPlaceholder()
+        {
+            if (_keyPath != null) return;
+            bool required = ChkKeyOnly.IsChecked == true;
+            TxtKeyPath.Text = required
+                ? "(required: choose an existing .pub key, or generate a new pair)"
+                : "(optional: choose an existing .pub key, or generate a new pair)";
+            TxtKeyPath.Foreground = Brushes.Gray;
         }
 
         /// <summary>
@@ -438,8 +452,9 @@ namespace IntercomFirmwareTool.App
             BtnRandomPwd.IsEnabled = usePassword;
 
             // With password login off, the key is the only credential, so mark it
-            // required; with password on, the key is optional again.
+            // required (label + placeholder); with password on, it is optional again.
             LblKey.Text = usePassword ? "SSH public key (optional):" : "SSH public key (required):";
+            UpdateKeyPlaceholder();
 
             UpdatePasswordHint();
             UpdateBuildEnabled();
