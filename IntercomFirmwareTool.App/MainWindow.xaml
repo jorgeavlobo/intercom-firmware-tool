@@ -121,8 +121,9 @@
                     AutomationProperties.Name="Browse for the original firmware"
                     Click="BtnBrowseFwz_Click"/>
 
-            <!-- Root password (masked) + reveal toggle. REQUIRED — the minimum
-                 credential to build a modified firmware. -->
+            <!-- Root password (masked) + reveal toggle + Disable (key-only). One of
+                 the password or the key is required; ticking Disable turns password
+                 login off, so a key becomes the credential. -->
             <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="Root password:"/>
             <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
@@ -141,6 +142,10 @@
                         Content="&#xE8C8;" ToolTip="Copy password to clipboard"
                         AutomationProperties.Name="Copy password to clipboard"
                         Click="BtnCopyPwd_Click"/>
+                <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="16,0,0,0"
+                          Content="Disable"
+                          ToolTip="Disable password login (key-only) — requires an SSH key"
+                          Checked="ChkKeyOnly_Toggled" Unchecked="ChkKeyOnly_Toggled"/>
             </StackPanel>
 
             <!-- Confirm password -->
@@ -169,6 +174,10 @@
                         Content="&#xE192;" ToolTip="Generate a new SSH key pair…"
                         AutomationProperties.Name="Generate a new SSH key pair"
                         Click="BtnGenKey_Click"/>
+                <Button x:Name="BtnClearKey" Style="{StaticResource RowIconButton}"
+                        Content="&#xE711;" ToolTip="Clear the selected key (build with password only)"
+                        AutomationProperties.Name="Clear the selected SSH key"
+                        Click="BtnClearKey_Click"/>
             </StackPanel>
 
             <!-- Output (disabled until a firmware is chosen) -->
@@ -204,7 +213,7 @@
                  VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Auto"
                  FontFamily="Consolas" FontSize="12"
-                 Text="Choose a firmware, set a root password and an output path (an SSH key is optional), then click Build."/>
+                 Text="Choose a firmware and an output path, set a root password and/or an SSH key (at least one), then click Build."/>
 
         <!-- Row 5: diagnostics -->
         <TextBlock Grid.Row="5" x:Name="TxtDiag" Margin="0,8,0,0"

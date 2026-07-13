@@ -11,15 +11,20 @@ namespace IntercomFirmwareTool.Core
         bool Persisted);
 
     /// <summary>
-    /// Options for the SSH/root-enable edit (Phase A–D). A root password is
-    /// <b>always</b> set (MD5-crypt) — it is the minimum credential. An SSH public
-    /// key is <b>optional</b>: when null/blank, no <c>authorized_keys</c> is written
-    /// and login is by password only.
+    /// Options for the SSH/root-enable edit (Phase A–D). <b>At least one</b>
+    /// credential must be present — a root password and/or an SSH public key:
+    /// <list type="bullet">
+    ///   <item>password only → key login off, no <c>authorized_keys</c> written;</item>
+    ///   <item>key only → password login disabled (shadow field <c>*</c>);</item>
+    ///   <item>both → password and key login.</item>
+    /// </list>
     /// </summary>
     public sealed record EnableSshOptions(
-        string RootPassword,
+        string? RootPassword = null,
         string? PublicKey = null)
     {
+        /// <summary>True when a non-empty root password is set (else login is key-only).</summary>
+        public bool HasPassword => !string.IsNullOrEmpty(RootPassword);
         /// <summary>True when an SSH public key was supplied (so authorized_keys is written).</summary>
         public bool HasKey => !string.IsNullOrWhiteSpace(PublicKey);
     }
@@ -380,24 +385,33 @@ namespace IntercomFirmwareTool.Core
         /// <summary>
         /// Defensive validation of the options, independent of any UI-layer
         /// checks, so a non-UI caller can't produce an insecure or non-functional
-        /// image: a non-empty root password is always required (it is the minimum
-        /// credential; an empty password would hash to a valid BLANK-password
-        /// /etc/shadow entry), and an SSH public key is optional — but if supplied
-        /// it must be a single valid OpenSSH public-key line.
+        /// image: at least one credential (a root password and/or an SSH public
+        /// key) is required; a supplied key must be a single valid OpenSSH
+        /// public-key line; and a key-only build (no password fallback) must use an
+        /// RSA key — the only type verified to authenticate on the target firmware.
         /// </summary>
         private static void ValidateOptions(EnableSshOptions opts)
         {
-            if (string.IsNullOrEmpty(opts.RootPassword))
+            if (!opts.HasPassword && !opts.HasKey)
                 throw new ArgumentException(
-                    "A non-empty root password is required.", nameof(opts));
-            // A key is optional. If one is supplied it is written into
-            // authorized_keys, so it must be a SINGLE valid OpenSSH public-key line
-            // — reject multi-line/garbage here too (the UI already checks this) so a
-            // non-UI caller cannot pass text that silently authorizes extra keys.
+                    "At least one credential is required: a root password and/or an SSH public key.",
+                    nameof(opts));
+            // A supplied key is written into authorized_keys, so it must be a SINGLE
+            // valid OpenSSH public-key line — reject multi-line/garbage here too (the
+            // UI already checks this) so a non-UI caller cannot pass text that
+            // silently authorizes extra keys.
             if (opts.HasKey && !SshKeyGen.IsLikelyPublicKey(opts.PublicKey!))
                 throw new ArgumentException(
                     "The SSH public key must be a single valid OpenSSH public-key line " +
                     "(e.g. \"ssh-rsa AAAA… comment\").", nameof(opts));
+            // Key-only login has NO password fallback, so the key must be RSA — the
+            // only algorithm verified to authenticate on the target firmware's
+            // dropbear; a non-RSA key-only build could yield no usable login.
+            if (!opts.HasPassword && opts.HasKey && SshKeyGen.KeyType(opts.PublicKey!) != "ssh-rsa")
+                throw new ArgumentException(
+                    "Key-only login (no password) requires an RSA public key — the only key type " +
+                    "verified to authenticate on the target firmware. Add a password, or use an RSA key.",
+                    nameof(opts));
         }
 
         /// <summary>Applies the ordered Phase A–D edits on an open, writable fs.</summary>
@@ -415,9 +429,10 @@ namespace IntercomFirmwareTool.Core
                     "This firmware already contains a 'root2' account — it appears to be already " +
                     "SSH-enabled. Run the tool on the ORIGINAL, unmodified firmware.");
 
-            // Phase A — accounts. A root password is always set (MD5-crypt, salt
-            // "root") — it is the minimum credential.
-            string secret = Md5Crypt.Crypt(opts.RootPassword, "root");
+            // Phase A — accounts. Password set via MD5-crypt (salt "root") when
+            // one was given; otherwise the shadow field is "*" (password login
+            // disabled — key-only). At least one credential is guaranteed above.
+            string secret = opts.HasPassword ? Md5Crypt.Crypt(opts.RootPassword!, "root") : "*";
             AppendLines(fs, "/etc/passwd", new[]
             {
                 "root2:x:0:0:root:/home/root:/bin/sh",
@@ -524,7 +539,7 @@ namespace IntercomFirmwareTool.Core
                 checks.Add(new("/etc/passwd has bticino2",
                     HasExactLine(passwd, "bticino2:x:1000:1000::/home/bticino:/bin/sh"), ""));
 
-                string secret = Md5Crypt.Crypt(opts.RootPassword, "root");
+                string secret = opts.HasPassword ? Md5Crypt.Crypt(opts.RootPassword!, "root") : "*";
                 string shadow = ReadAllTextFromFs(fs, "/etc/shadow");
                 checks.Add(new("/etc/shadow has root2 entry",
                     HasExactLine(shadow, $"root2:{secret}:18033:0:99999:7:::"), ""));

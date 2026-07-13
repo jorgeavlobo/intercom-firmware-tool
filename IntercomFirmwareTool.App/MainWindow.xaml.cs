@@ -16,9 +16,9 @@ namespace IntercomFirmwareTool.App
     /// <summary>
     /// Interaction logic for MainWindow.xaml.
     ///
-    /// One product flow: choose the original .fwz, set a root password and an
-    /// output path (an SSH public key is optional), then Build a modified .fwz
-    /// that enables SSH/root login (the fquinto edits), verified by a full
+    /// One product flow: choose the original .fwz and an output path, set a root
+    /// password and/or an SSH public key (at least one), then Build a modified
+    /// .fwz that enables SSH/root login (the fquinto edits), verified by a full
     /// read-back round-trip. Two secondary actions verify an existing .fwz and
     /// run the MD5-crypt self-test. The input .fwz is never modified.
     /// </summary>
@@ -86,6 +86,7 @@ namespace IntercomFirmwareTool.App
         /// <summary>Reveals or masks BOTH password fields and updates the eye icon.</summary>
         private void SetReveal(bool on)
         {
+            if (ChkKeyOnly.IsChecked == true) on = false; // nothing to reveal when password is disabled
             // An explicit reveal cancels any pending flash auto-remask, so holding
             // the eye during the ~0.5 s flash window is not cut short by the timer.
             if (on) _flashTimer?.Stop();
@@ -105,6 +106,7 @@ namespace IntercomFirmwareTool.App
         /// cue that the password just changed (e.g. after generating one).</summary>
         private void FlashReveal()
         {
+            if (ChkKeyOnly.IsChecked == true) return; // password disabled — nothing to flash
             SetReveal(true);
             if (_flashTimer is null)
             {
@@ -143,6 +145,8 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private void BtnRandomPwd_Click(object sender, RoutedEventArgs e)
         {
+            if (ChkKeyOnly.IsChecked == true) return; // password login disabled
+
             string pwd = GenerateRandomPassword(20);
             _pw.Value = pwd;
             _confirm.Value = pwd; // both set → the match hint shows ✓
@@ -243,7 +247,7 @@ namespace IntercomFirmwareTool.App
             TxtResult.Text =
                 "✅ " + check.Message + "\n\n" +
                 check.Match!.Describe() + "\n\n" +
-                "Set a root password and Build (an SSH key is optional).";
+                "Set a root password and/or an SSH key (at least one), then Build.";
         }
 
         /// <summary>Picks an existing OpenSSH public key and selects it for the build.</summary>
@@ -409,6 +413,33 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
+        /// <summary>Clears the selected SSH key so the build uses the password only.</summary>
+        private void BtnClearKey_Click(object sender, RoutedEventArgs e)
+        {
+            _keyPath = null;
+            TxtKeyPath.Text = "(optional: choose an existing .pub key, or generate a new pair)";
+            TxtKeyPath.Foreground = Brushes.Gray;
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>
+        /// Toggles password login off/on (key-only). When disabled, greys the
+        /// password fields and stops any active reveal; a key becomes the credential.
+        /// </summary>
+        private void ChkKeyOnly_Toggled(object sender, RoutedEventArgs e)
+        {
+            bool usePassword = ChkKeyOnly.IsChecked != true;
+            if (!usePassword) SetReveal(false);
+
+            TxtPassword.IsEnabled = usePassword;
+            TxtConfirm.IsEnabled = usePassword;
+            BtnToggleReveal.IsEnabled = usePassword;
+            BtnCopyPwd.IsEnabled = usePassword;
+            BtnRandomPwd.IsEnabled = usePassword;
+            UpdatePasswordHint();
+            UpdateBuildEnabled();
+        }
+
         /// <summary>The current password value (real text, held by the masked field).</summary>
         private string CurrentPassword() => _pw.Value;
 
@@ -421,6 +452,12 @@ namespace IntercomFirmwareTool.App
             // TxtPwdHint may not exist yet during very early initialization.
             if (TxtPwdHint is null) return;
 
+            if (ChkKeyOnly.IsChecked == true)
+            {
+                TxtPwdHint.Text = "(password login disabled)";
+                TxtPwdHint.Foreground = Brushes.Gray;
+                return;
+            }
             if (CurrentPassword().Length == 0 && CurrentConfirm().Length == 0)
             {
                 TxtPwdHint.Text = "";
@@ -440,14 +477,17 @@ namespace IntercomFirmwareTool.App
         }
 
         /// <summary>
-        /// Enables the Build button only when firmware, output and a non-empty root
-        /// password are all set. The SSH public key is optional, so it is not part
-        /// of this condition.
+        /// Enables the Build button when firmware and output are set and at least
+        /// one credential is available: with password login disabled a key is
+        /// required; otherwise a non-empty password is required (key optional).
         /// </summary>
         private void UpdateBuildEnabled()
         {
+            bool passwordOff = ChkKeyOnly.IsChecked == true;
+            bool haveCredential = passwordOff ? _keyPath != null
+                                              : CurrentPassword().Length > 0;
             BtnBuild.IsEnabled =
-                _fwzPath != null && _outputPath != null && CurrentPassword().Length > 0;
+                _fwzPath != null && _outputPath != null && haveCredential;
         }
 
         // ---- Primary action: Build ------------------------------------------
@@ -457,29 +497,32 @@ namespace IntercomFirmwareTool.App
         {
             if (_fwzPath is null || _outputPath is null) return;
 
-            string password = CurrentPassword();
-
-            // The root password is the minimum credential — require a non-empty,
-            // matching one. An empty password would hash to a valid BLANK-password
-            // /etc/shadow entry (login with no password at all).
-            if (password.Length == 0)
+            // One of the password or the key is required. "Disable" turns password
+            // login off (key-only); otherwise a non-empty, matching password is used.
+            bool passwordOff = ChkKeyOnly.IsChecked == true;
+            string? password = null;
+            if (!passwordOff)
             {
-                MessageBox.Show(this,
-                    "Enter a root password. It is the minimum credential to build a\n" +
-                    "modified firmware (an SSH public key is optional).",
-                    "Password required", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-            if (password != CurrentConfirm())
-            {
-                MessageBox.Show(this,
-                    "The password and its confirmation do not match.",
-                    "Password mismatch", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                password = CurrentPassword();
+                if (password.Length == 0)
+                {
+                    MessageBox.Show(this,
+                        "Enter a root password, or tick \"Disable\" to build a key-only\n" +
+                        "firmware (which then requires an SSH key).",
+                        "Password required", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                if (password != CurrentConfirm())
+                {
+                    MessageBox.Show(this,
+                        "The password and its confirmation do not match.",
+                        "Password mismatch", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
             }
 
-            // The SSH key is OPTIONAL. If one was chosen, read and validate it, and
-            // make sure the output won't overwrite it.
+            // The key is required only when password login is disabled; otherwise
+            // it is optional. If one is present, read and validate it.
             string? publicKey = null;
             if (_keyPath is { } keyPath) // captured non-null: field re-widens after calls
             {
@@ -522,6 +565,32 @@ namespace IntercomFirmwareTool.App
                 }
             }
 
+            // Key-only (password disabled) needs a key, and it must be RSA — the only
+            // algorithm verified to authenticate on the target firmware's dropbear,
+            // so a non-RSA key-only build could leave the device with no usable login.
+            if (passwordOff)
+            {
+                if (publicKey is null)
+                {
+                    MessageBox.Show(this,
+                        "Password login is disabled, so an SSH key is required.\n\n" +
+                        "Choose or generate a key, or untick \"Disable\" and set a password.",
+                        "Key required", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                if (SshKeyGen.KeyType(publicKey) != "ssh-rsa")
+                {
+                    MessageBox.Show(this,
+                        "Key-only login requires an RSA public key.\n\n" +
+                        "RSA is the only key type verified to authenticate on this firmware's\n" +
+                        "dropbear, so a key-only build with another type could leave the device\n" +
+                        "with no way to log in. Use an RSA key, or untick \"Disable\" and set a\n" +
+                        "root password as a fallback.",
+                        "RSA key required for key-only", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+            }
+
             // Confirm before overwriting an existing output file (the path may
             // have been auto-suggested, bypassing the Save dialog's own prompt).
             if (File.Exists(_outputPath))
@@ -535,14 +604,16 @@ namespace IntercomFirmwareTool.App
             var opts = new EnableSshOptions(password, publicKey);
 
             // Non-null here: guarded above (and Build is only enabled with firmware,
-            // output and a password set). They are fields, so the compiler re-widens
+            // output and a credential set). They are fields, so the compiler re-widens
             // them to maybe-null after the intervening calls — assert with '!'.
             string fwz = _fwzPath!, output = _outputPath!;
 
             var sb = new StringBuilder();
             sb.AppendLine("Building modified firmware…");
             sb.AppendLine($"  Input      : {fwz}");
-            sb.AppendLine("  Root pw    : (set — stored as MD5-crypt $1$root$…)");
+            sb.AppendLine(opts.HasPassword
+                ? "  Root pw    : (set — stored as MD5-crypt $1$root$…)"
+                : "  Root pw    : (disabled — key-only login)");
             sb.AppendLine(opts.HasKey
                 ? $"  Public key : {_keyPath}"
                 : "  Public key : (none — password login only)");
@@ -599,30 +670,36 @@ namespace IntercomFirmwareTool.App
             if (fwzDlg.ShowDialog(this) != true) return;
             string fwzPath = fwzDlg.FileName;
 
-            string password = CurrentPassword();
-
-            // Verify compares against the password the .fwz was built with. An empty
-            // password compares against the BLANK-password hash — a misleading
-            // false-negative that fails even a correctly built firmware. Require one.
-            if (password.Length == 0)
+            // The .fwz may have a password, a key, or both. "Disable" means it was
+            // built key-only (no password). When password login is expected, verify
+            // needs the password it was built with — an empty one compares against
+            // the blank-password hash (a misleading false-negative).
+            bool passwordOff = ChkKeyOnly.IsChecked == true;
+            string? password = null;
+            if (!passwordOff)
             {
-                MessageBox.Show(this,
-                    "Enter the root password that .fwz was built with.\n\n" +
-                    "Verifying with an empty password compares against the blank-password\n" +
-                    "hash, which fails even for a correctly built firmware.",
-                    "Password required", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                password = CurrentPassword();
+                if (password.Length == 0)
+                {
+                    MessageBox.Show(this,
+                        "Enter the root password that .fwz was built with, or tick\n" +
+                        "\"Disable\" if it is a key-only build.\n\n" +
+                        "Verifying with an empty password compares against the blank-password\n" +
+                        "hash, which fails even for a correctly built firmware.",
+                        "Password required", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
             }
 
-            // The SSH key is optional. Use the form's key if set; otherwise ask
-            // whether this .fwz was built with one (a password-only build has none).
+            // The key: reuse the form's key if set; otherwise ask whether this .fwz
+            // was built with one.
             string? keyPath = _keyPath;
             if (keyPath is null)
             {
                 var ans = MessageBox.Show(this,
                     "Was this firmware built with an SSH public key?\n\n" +
                     "Yes — pick the .pub it was built with (its authorized_keys is checked).\n" +
-                    "No  — it is a password-only build (the key checks are skipped).",
+                    "No  — no key (verify by the root password only).",
                     "Include an SSH key?", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
                 if (ans == MessageBoxResult.Cancel) return;
                 if (ans == MessageBoxResult.Yes)
@@ -661,15 +738,27 @@ namespace IntercomFirmwareTool.App
                 }
             }
 
+            // Need at least one credential to verify against.
+            if (password is null && publicKey is null)
+            {
+                MessageBox.Show(this,
+                    "Nothing to verify against: enter the password the .fwz was built\n" +
+                    "with, or provide its SSH key (or both).",
+                    "No credential", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
             var opts = new EnableSshOptions(password, publicKey);
 
             var sb = new StringBuilder();
             sb.AppendLine("Verifying an existing firmware (read-only, the .fwz is not modified)…");
             sb.AppendLine($"  .fwz       : {fwzPath}");
-            sb.AppendLine("  Root pw    : (as entered — must match how that .fwz was built)");
+            sb.AppendLine(opts.HasPassword
+                ? "  Root pw    : (as entered — must match how that .fwz was built)"
+                : "  Root pw    : (disabled — key-only build)");
             sb.AppendLine(opts.HasKey
                 ? $"  Public key : {keyPath}"
-                : "  Public key : (none — password-only build)");
+                : "  Public key : (none)");
             sb.AppendLine();
 
             await RunAndShow(sb, () =>
@@ -807,22 +896,28 @@ namespace IntercomFirmwareTool.App
             BtnBrowseFwz.IsEnabled = enabled;
             BtnChooseKey.IsEnabled = enabled;
             BtnGenKey.IsEnabled = enabled;
+            BtnClearKey.IsEnabled = enabled;
             // The output row stays disabled until a firmware is chosen.
             BtnBrowseOutput.IsEnabled = enabled && _fwzPath != null;
             BtnVerify.IsEnabled = enabled;
             BtnSelfTest.IsEnabled = enabled;
-            // Build only re-enables when firmware + output + a password are set
-            // (the key is optional).
+            // Build only re-enables when firmware + output + a credential are set
+            // (a password, or a key when password login is disabled).
+            bool passwordOff = ChkKeyOnly.IsChecked == true;
+            bool haveCredential = passwordOff ? _keyPath != null : CurrentPassword().Length > 0;
             BtnBuild.IsEnabled = enabled
-                && _fwzPath != null && _outputPath != null && CurrentPassword().Length > 0;
+                && _fwzPath != null && _outputPath != null && haveCredential;
 
-            // Also lock the credential inputs during an operation so the visible
-            // UI can't drift from the values snapshotted for the build.
-            TxtPassword.IsEnabled = enabled;
-            TxtConfirm.IsEnabled = enabled;
-            BtnToggleReveal.IsEnabled = enabled;
-            BtnCopyPwd.IsEnabled = enabled;
-            BtnRandomPwd.IsEnabled = enabled;
+            // Also lock the credential inputs during an operation so the visible UI
+            // can't drift from the values snapshotted for the build. When
+            // re-enabling, respect the Disable (key-only) state.
+            bool creds = enabled && !passwordOff;
+            ChkKeyOnly.IsEnabled = enabled;
+            TxtPassword.IsEnabled = creds;
+            TxtConfirm.IsEnabled = creds;
+            BtnToggleReveal.IsEnabled = creds;
+            BtnCopyPwd.IsEnabled = creds;
+            BtnRandomPwd.IsEnabled = creds;
         }
     }
 }
