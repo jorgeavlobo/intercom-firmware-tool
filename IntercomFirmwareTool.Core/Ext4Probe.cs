@@ -701,10 +701,15 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Reports an authorized_keys file: appends a "not installed"/"installed"
-        /// finding (with the key's label + SHA-256 fingerprint when installed),
-        /// and — when present — adds the objective 0600 mode and 0:0 owner checks.
-        /// Returns the trimmed key content, or null if the file is absent.
+        /// Reports an authorized_keys file: appends a finding (absent / present
+        /// but invalid / installed with the key's label + SHA-256 fingerprint),
+        /// and — when the file exists — adds the objective 0600 mode and 0:0 owner
+        /// checks. Returns the trimmed key content ONLY when it is a usable
+        /// OpenSSH public key; returns null when the file is absent OR its content
+        /// is not a valid key. Returning null for garbage content is important:
+        /// the caller counts a non-null return as an installed credential, so a
+        /// present-but-unparseable authorized_keys must NOT make the image look
+        /// like it has a working key-based login (it cannot authenticate).
         /// </summary>
         private static string? InspectAuthKeys(
             ExtFileSystem fs, List<Ext4Check> checks, List<string> findings, string path, string label)
@@ -714,12 +719,9 @@ namespace IntercomFirmwareTool.Core
                 findings.Add($"SSH key ({label}) : not installed  ({path} absent)");
                 return null;
             }
-            string content = ReadAllTextFromFs(fs, path).Trim();
-            var info = SshKeyGen.DescribePublicKey(content);
-            findings.Add(info != null
-                ? $"SSH key ({label}) : installed  {info.Label}  {info.Sha256Fingerprint}"
-                : $"SSH key ({label}) : installed  (unrecognized key format)");
 
+            // Objective perms/ownership (StrictModes contract) apply to whatever
+            // file is there, valid key or not.
             uint mode = fs.GetMode(path) & 0xFFF;
             checks.Add(new($"{path} mode 0600",
                 mode == ToMode(600), $"actual 0{Convert.ToString((long)mode, 8)}"));
@@ -727,6 +729,18 @@ namespace IntercomFirmwareTool.Core
             checks.Add(new($"{path} owner 0:0",
                 owner != null && owner.Item1 == 0 && owner.Item2 == 0,
                 owner != null ? $"{owner.Item1}:{owner.Item2}" : "null"));
+
+            string content = ReadAllTextFromFs(fs, path).Trim();
+            var info = SshKeyGen.DescribePublicKey(content);
+            if (info == null)
+            {
+                // Present but not a usable key: report it and flag a FAILING
+                // check, and return null so it is not counted as a credential.
+                findings.Add($"SSH key ({label}) : present but INVALID — not a usable OpenSSH public key ({path})");
+                checks.Add(new($"{path} is a valid OpenSSH public key", false, ""));
+                return null;
+            }
+            findings.Add($"SSH key ({label}) : installed  {info.Label}  {info.Sha256Fingerprint}");
             return content;
         }
 
