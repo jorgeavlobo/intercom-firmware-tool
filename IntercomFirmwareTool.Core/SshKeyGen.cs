@@ -200,10 +200,25 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// ECDSA / SK-ECDSA shape check: exact field count, the curve-name field
-        /// matches the type's curve, and the public point Q is non-empty.
+        /// matches the type's curve, and a well-formed <b>uncompressed</b> EC point
+        /// Q (<c>0x04 || X || Y</c>, X and Y each the curve's field size — the only
+        /// form SSH/Dropbear use). A truncated/short/compressed Q is rejected, so a
+        /// corrupt <c>.pub</c> cannot pass here and yield a firmware that verifies
+        /// yet cannot authenticate (worst in key-only mode).
         /// </summary>
         private static bool IsEcdsaKey(List<byte[]> fields, string curve, int count)
-            => fields.Count == count && FieldEquals(fields[1], curve) && fields[2].Length > 0;
+        {
+            if (fields.Count != count || !FieldEquals(fields[1], curve)) return false;
+            int pointLen = curve switch
+            {
+                "nistp256" => 65,   // 0x04 + 32 + 32
+                "nistp384" => 97,   // 0x04 + 48 + 48
+                "nistp521" => 133,  // 0x04 + 66 + 66
+                _ => -1,
+            };
+            byte[] q = fields[2];
+            return pointLen > 0 && q.Length == pointLen && q[0] == 0x04;
+        }
 
         /// <summary>Splits an SSH blob into its length-prefixed fields, or null if malformed.</summary>
         private static List<byte[]>? ReadFields(byte[] blob)
