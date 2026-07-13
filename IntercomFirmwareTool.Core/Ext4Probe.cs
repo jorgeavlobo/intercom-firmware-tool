@@ -462,8 +462,19 @@ namespace IntercomFirmwareTool.Core
                 // factory (verified drwx------), so anything inside (.ssh at 0755 or
                 // 0700) is unreachable by other users regardless. dropbear accepts
                 // 0755 — it only rejects a group/other-WRITABLE .ssh, which 0755 is not.
+                // /home/root is 0700 root:root at factory — that 0700 is precisely
+                // what keeps .ssh unreachable by other users. It always exists on
+                // real firmware (so we leave it untouched, like fquinto). This is
+                // defensive: if an image ever lacked it, create it at 0700 (not
+                // EnsureDir's 0755 default) so the security invariant still holds.
+                bool homeRootExisted = fs.DirectoryExists("/home/root");
                 EnsureDir(fs, "/home");
                 EnsureDir(fs, "/home/root");
+                if (!homeRootExisted)
+                {
+                    fs.SetMode("/home/root", ToMode(700));
+                    fs.SetOwner("/home/root", 0, 0);
+                }
                 EnsureDir(fs, "/home/root/.ssh");
                 fs.SetMode("/home/root/.ssh", ToMode(755));
                 fs.SetOwner("/home/root/.ssh", 0, 0);
@@ -523,6 +534,10 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         public static IReadOnlyList<Ext4Check> ValidateSsh(string bareImagePath, EnableSshOptions opts)
         {
+            // Same credential/key contract as EnableSsh: reject empty or malformed
+            // options up front, so a non-UI caller can't get a misleading all-pass
+            // for an image with no usable credential (root2 "*" and no key).
+            ValidateOptions(opts);
             EnsureBareExt4(bareImagePath);
             var checks = new List<Ext4Check>();
             string disk = WrapBareFilesystem(bareImagePath);
