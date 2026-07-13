@@ -50,6 +50,12 @@ namespace IntercomFirmwareTool.App
             // and the context-menu "Cut" go through us and can't edit the
             // display directly (which would desync _real).
             _box.CommandBindings.Add(new CommandBinding(ApplicationCommands.Cut, OnCut, OnCanCut));
+            // Intercept Copy too: while the field is revealed (Peek or the one-char
+            // reveal) the TextBox shows the real password, so the DEFAULT copy would
+            // place the plaintext on the normal clipboard — bypassing the history/
+            // cloud-sync exclusion the dedicated Copy button uses. Route it through
+            // SecureClipboard so a copied secret is never retained by the OS.
+            _box.CommandBindings.Add(new CommandBinding(ApplicationCommands.Copy, OnCopy, OnCanCopy));
             // Same reason for Delete: the context-menu "Delete" command would edit
             // the mask directly, leaving _real (what Build uses) stale. Route both
             // command forms through our buffer-aware handler. The Delete KEY is
@@ -129,11 +135,11 @@ namespace IntercomFirmwareTool.App
                 else if (_box.CaretIndex < _real.Length) { int i = _box.CaretIndex; _real.Remove(i, 1); Render(i); }
                 Changed?.Invoke();
             }
-            // Cut (Ctrl+X) is handled by the ApplicationCommands.Cut binding.
-            // Arrows / Home / End / Tab / Ctrl+A / Ctrl+C fall through; the caret
-            // index maps 1:1 to _real because the display has the same length.
-            // (Ctrl+C copies whatever is shown: the mask when concealed, or the
-            // real password while the field is revealed — same as any text box.)
+            // Cut (Ctrl+X) and Copy (Ctrl+C) are handled by their ApplicationCommands
+            // bindings (Copy routes through SecureClipboard so a revealed password is
+            // never left on the normal clipboard). Arrows / Home / End / Tab / Ctrl+A
+            // fall through; the caret index maps 1:1 to _real because the display has
+            // the same length.
         }
 
         /// <summary>Enables the Cut command only when there is a selection.</summary>
@@ -157,6 +163,31 @@ namespace IntercomFirmwareTool.App
                 Render(s);
                 Changed?.Invoke();
             }
+        }
+
+        /// <summary>Enables the Copy command only when there is a selection.</summary>
+        private void OnCanCopy(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = _box.SelectionLength > 0;
+            e.Handled = true;
+        }
+
+        /// <summary>
+        /// Copy command: copies the REAL selected characters (not the mask) to the
+        /// clipboard via <see cref="SecureClipboard"/>, so the payload is excluded
+        /// from clipboard history / cloud sync. Reached by both Ctrl+C and the
+        /// context-menu "Copy", so the default TextBox copy — which would place the
+        /// revealed plaintext on the normal clipboard — never runs.
+        /// </summary>
+        private void OnCopy(object sender, ExecutedRoutedEventArgs e)
+        {
+            e.Handled = true;
+            int start = _box.SelectionStart;
+            int len = _box.SelectionLength;
+            // The masked display has the same length as the buffer, so the TextBox
+            // selection indices map 1:1 onto _real.
+            if (len > 0 && start >= 0 && start + len <= _real.Length)
+                SecureClipboard.SetText(_real.ToString(start, len));
         }
 
         /// <summary>Enables the Delete command when there is a selection or a character to the right of the caret.</summary>
