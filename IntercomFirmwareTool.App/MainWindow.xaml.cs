@@ -779,6 +779,12 @@ namespace IntercomFirmwareTool.App
         /// <summary>Enables/disables the action buttons and credential inputs during an operation.</summary>
         private void SetButtonsEnabled(bool enabled)
         {
+            // Starting an operation: force the fields back to masked first. If the
+            // user was holding the eye (Peek), disabling the button can swallow the
+            // mouse/key-up that would re-mask, leaving the password visible for the
+            // whole operation.
+            if (!enabled) SetReveal(false);
+
             BtnBrowseFwz.IsEnabled = enabled;
             BtnChooseKey.IsEnabled = enabled;
             BtnGenKey.IsEnabled = enabled;
