@@ -221,6 +221,19 @@ namespace IntercomFirmwareTool.Core
             using var inputLock = new FileStream(
                 inputFwz, FileMode.Open, FileAccess.Read, FileShare.Read);
 
+            // Tie the whitelist guarantee to the exact bytes we are about to
+            // modify. A UI may pre-verify the selection, but between that check
+            // and here the path could be replaced or a symlink retargeted; by
+            // re-verifying now — while inputLock holds the file open with a share
+            // mode that denies deletion/rename — the file that passes this gate is
+            // the same one ExtractBareImage reads below. This is the authoritative
+            // check: no non-UI caller can build from an unrecognized firmware.
+            var verified = FirmwareRegistry.Verify(inputFwz);
+            if (!verified.Ok)
+                throw new InvalidOperationException(
+                    "Refusing to build: the input is not a recognized original firmware.\n" +
+                    verified.Message);
+
             FwzExtractResult ex = ExtractBareImage(inputFwz);
             string? modifiedBare = null;
             string? modifiedGz = null;
