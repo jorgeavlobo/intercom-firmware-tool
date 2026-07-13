@@ -86,12 +86,7 @@
         <!-- Row 0: what this does + safety note -->
         <Border Grid.Row="0" Background="#FFF7F2E8" BorderBrush="#FFE0C98A"
                 BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,0,0,12">
-            <StackPanel>
-                <TextBlock TextWrapping="Wrap" FontWeight="SemiBold"
-                           Text="Builds a modified BTicino firmware (.fwz) that enables SSH/root login, replicating the fquinto project on Windows."/>
-                <TextBlock TextWrapping="Wrap" Margin="0,4,0,0" Foreground="#FF7A5B00"
-                           Text="⚠ Flashing modified firmware can brick the device. These units use an i.MX SoC, so there is no documented low-level un-brick (SAM-BA does not apply). Keep the ORIGINAL firmware and be ready to re-flash it with My Home Suite over Mini-USB — a bad flash may be unrecoverable. Your input .fwz is never modified — a new file is written."/>
-            </StackPanel>
+            <TextBlock TextWrapping="Wrap" Foreground="#FF7A5B00"><Run Text="⚠ Flashing modified firmware can brick the device. "/><Run Text="Do it at your own risk!" FontWeight="Bold" TextDecorations="Underline"/><Run Text=" Use "/><Hyperlink NavigateUri="https://assets.legrand.com/pim/AUTRE/MyHOME_Suite_030538.exe" RequestNavigate="Hyperlink_RequestNavigate">MyHOME Suite</Hyperlink><Run Text="."/></TextBlock>
         </Border>
 
         <!-- Row 1: the input form -->

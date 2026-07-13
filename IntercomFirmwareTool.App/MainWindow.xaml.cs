@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -419,6 +420,17 @@ namespace IntercomFirmwareTool.App
             _keyPath = null;
             UpdateKeyPlaceholder();
             UpdateBuildEnabled();
+        }
+
+        /// <summary>Opens a header hyperlink (the MyHOME Suite download) in the default browser.</summary>
+        private void Hyperlink_RequestNavigate(object sender, System.Windows.Navigation.RequestNavigateEventArgs e)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo(e.Uri.AbsoluteUri) { UseShellExecute = true });
+            }
+            catch { /* opening a browser is best-effort, non-critical */ }
+            e.Handled = true;
         }
 
         /// <summary>
