@@ -147,7 +147,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     case "ssh-rsa": // name, e, n
                         return fields.Count == 3
-                            && fields[1].Length >= 1                 // public exponent present
+                            && IsValidRsaExponent(fields[1])         // sane public exponent (odd, >= 3)
                             && MpintBitLength(fields[2]) >= 2048;    // reject weak/empty moduli
                                                                      // (RSA-512/1024 are breakable;
                                                                      // we generate 4096)
@@ -260,6 +260,22 @@ namespace IntercomFirmwareTool.Core
                 case "ecdsa-sha2-nistp521": return 521;
                 default: return 0;
             }
+        }
+
+        /// <summary>
+        /// True if a big-endian mpint is a valid RSA public exponent: a positive,
+        /// odd integer &gt;= 3. Rejects 0, 1, and even values (e.g. a corrupt <c>.pub</c>
+        /// whose exponent field has bytes but is not usable), which would otherwise
+        /// be written to authorized_keys and never authenticate.
+        /// </summary>
+        private static bool IsValidRsaExponent(byte[] e)
+        {
+            int i = 0;
+            while (i < e.Length && e[i] == 0) i++; // strip leading zero/sign bytes
+            if (i >= e.Length) return false;        // value is zero
+            if ((e[^1] & 1) == 0) return false;     // must be odd (LSB = last byte)
+            // >= 3: more than one significant byte (>= 256), or a single byte >= 3.
+            return (e.Length - i) > 1 || e[^1] >= 3;
         }
 
         /// <summary>Bit length of a big-endian SSH mpint (leading zero/sign bytes ignored).</summary>
