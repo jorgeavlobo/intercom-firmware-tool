@@ -418,7 +418,12 @@ namespace IntercomFirmwareTool.App
                 // where DOMAIN\user or a plain name may not.
                 string? sid = WindowsIdentity.GetCurrent().User?.Value;
                 if (string.IsNullOrEmpty(sid)) return false;
-                var psi = new ProcessStartInfo("icacls",
+                // Launch by absolute path (…\System32\icacls.exe), not the bare
+                // name: a bare "icacls" resolves through the executable search
+                // order, so a planted icacls.exe in the app/working directory could
+                // run instead. Environment.SystemDirectory is locale/drive-safe.
+                string icacls = Path.Combine(Environment.SystemDirectory, "icacls.exe");
+                var psi = new ProcessStartInfo(icacls,
                     $"\"{path}\" /inheritance:r /grant:r \"*{sid}:F\"")
                 {
                     UseShellExecute = false,
