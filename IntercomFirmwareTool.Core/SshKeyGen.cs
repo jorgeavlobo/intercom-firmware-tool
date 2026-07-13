@@ -4,17 +4,6 @@ using System.Text;
 namespace IntercomFirmwareTool.Core
 {
     /// <summary>
-    /// Generates an SSH RSA key pair using only built-in .NET cryptography (no
-    /// external dependency). Writes the private key as a classic PKCS#1 PEM
-    /// (<c>-----BEGIN RSA PRIVATE KEY-----</c>, which OpenSSH reads directly) and
-    /// the public key in the OpenSSH one-line format (<c>ssh-rsa AAAA… comment</c>)
-    /// that dropbear/authorized_keys expects.
-    ///
-    /// RSA is used (rather than Ed25519) because it is available in the base
-    /// class library on every target, and the BTicino firmware's dropbear
-    /// accepts it — the same key type as the project's existing keys.
-    /// </summary>
-    /// <summary>
     /// Type, size and SHA-256 fingerprint of an OpenSSH public key, for display.
     /// </summary>
     public sealed record PublicKeyInfo(string Type, int Bits, string Sha256Fingerprint)
@@ -31,6 +20,17 @@ namespace IntercomFirmwareTool.Core
         };
     }
 
+    /// <summary>
+    /// Generates an SSH RSA key pair using only built-in .NET cryptography (no
+    /// external dependency). Writes the private key as a classic PKCS#1 PEM
+    /// (<c>-----BEGIN RSA PRIVATE KEY-----</c>, which OpenSSH reads directly) and
+    /// the public key in the OpenSSH one-line format (<c>ssh-rsa AAAA… comment</c>)
+    /// that dropbear/authorized_keys expects.
+    ///
+    /// RSA is used (rather than Ed25519) because it is available in the base
+    /// class library on every target, and the BTicino firmware's dropbear
+    /// accepts it — the same key type as the project's existing keys.
+    /// </summary>
     public static class SshKeyGen
     {
         /// <summary>

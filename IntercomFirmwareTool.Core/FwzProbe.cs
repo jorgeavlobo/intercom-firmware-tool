@@ -417,17 +417,38 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// True if two paths resolve to the same file. Path comparison is
-        /// case-insensitive on Windows and case-sensitive elsewhere, matching the
-        /// host filesystem (Core targets net10.0, so this stays correct if reused
-        /// on Linux/macOS).
+        /// True if two paths resolve to the same file. Symlinks/junctions are
+        /// resolved to their final target first (when the file exists), so an
+        /// output path that is a link aliasing the input is still rejected —
+        /// otherwise the string paths differ but both truncate the same file.
+        /// Path comparison is case-insensitive on Windows and case-sensitive
+        /// elsewhere, matching the host filesystem (Core targets net10.0, so this
+        /// stays correct if reused on Linux/macOS).
         /// </summary>
         private static bool PathsEqual(string a, string b)
         {
             var cmp = OperatingSystem.IsWindows()
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
-            return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), cmp);
+            return string.Equals(ResolveFinal(a), ResolveFinal(b), cmp);
+        }
+
+        /// <summary>
+        /// Full path with any symlink/junction resolved to its final target. Falls
+        /// back to the plain full path when the target does not exist (the normal
+        /// case for a not-yet-created output) or is not a link — so behaviour is
+        /// unchanged except that link-based aliasing is now caught.
+        /// </summary>
+        private static string ResolveFinal(string path)
+        {
+            string full = Path.GetFullPath(path);
+            try
+            {
+                var target = File.ResolveLinkTarget(full, returnFinalTarget: true);
+                if (target != null) return Path.GetFullPath(target.FullName);
+            }
+            catch { /* missing / not a link / unsupported — use the plain full path */ }
+            return full;
         }
 
         /// <summary>Builds a unique path in the temp folder with the given extension.</summary>

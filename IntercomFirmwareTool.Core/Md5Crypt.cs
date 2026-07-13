@@ -33,7 +33,7 @@ namespace IntercomFirmwareTool.Core
 
             // Normalize the salt as crypt(3) does: drop the "$1$" magic prefix,
             // stop at the next '$', then cap at 8 chars.
-            if (salt.StartsWith("$1$")) salt = salt.Substring(3);
+            if (salt.StartsWith("$1$", StringComparison.Ordinal)) salt = salt.Substring(3);
             int dollar = salt.IndexOf('$');
             if (dollar >= 0) salt = salt.Substring(0, dollar);
             string saltStr = salt.Length > 8 ? salt.Substring(0, 8) : salt;

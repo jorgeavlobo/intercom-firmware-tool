@@ -611,6 +611,21 @@ namespace IntercomFirmwareTool.App
 
             bool keyOnly = ChkKeyOnly.IsChecked == true;
             string password = CurrentPassword();
+
+            // With password login, an empty password validates against the
+            // BLANK-password /etc/shadow hash — a misleading false-negative that
+            // would never match a real build. Require one, or tick key-only.
+            if (!keyOnly && password.Length == 0)
+            {
+                MessageBox.Show(this,
+                    "Enter the root password that .fwz was built with, or tick\n" +
+                    "\"Key-only login (no password)\" if it has no password login.\n\n" +
+                    "Verifying with an empty password compares against the blank-password\n" +
+                    "hash, which will fail even for a correctly built firmware.",
+                    "Password required", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
             var opts = new EnableSshOptions(publicKey, password, keyOnly);
 
             var sb = new StringBuilder();
