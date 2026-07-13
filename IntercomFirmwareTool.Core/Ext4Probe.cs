@@ -261,11 +261,16 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         private static void EnsureBareExt4(string bareImagePath)
         {
-            if (!IsBareExt4(bareImagePath))
+            // Bare ext4 = NO partition table AND the ext4 superblock magic at
+            // 0x438. Reject a partitioned disk even if 0xEF53 happens to appear at
+            // that offset, so we never wrap/slice the wrong bytes — same shape
+            // decision ReadFile uses (!HasValidMbr && IsBareExt4), failing closed.
+            if (HasValidMbr(bareImagePath) || !IsBareExt4(bareImagePath))
                 throw new ArgumentException(
-                    "Expected a bare ext4 image (ext4 superblock magic 0xEF53 not found at " +
-                    "offset 0x438). This method operates on the raw ext4 payload, not a .fwz " +
-                    "container or an already-partitioned disk image.", nameof(bareImagePath));
+                    "Expected a bare ext4 image (no partition table, ext4 superblock magic " +
+                    "0xEF53 at offset 0x438). This method operates on the raw ext4 payload, " +
+                    "not a .fwz container or an already-partitioned disk image.",
+                    nameof(bareImagePath));
         }
 
         /// <summary>
