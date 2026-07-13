@@ -118,6 +118,8 @@ namespace IntercomFirmwareTool.Core
         public static Ext4WriteResult TestAppendPersists(
             string bareImagePath, string targetFile, string testLine)
         {
+            EnsureBareExt4(bareImagePath); // wraps/slices below; require a bare ext4
+
             // Content before any change (read via the normal wrap-and-read path).
             string before = ReadFile(bareImagePath, targetFile);
 
