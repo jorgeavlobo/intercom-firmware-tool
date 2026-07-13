@@ -174,6 +174,18 @@ namespace IntercomFirmwareTool.Core
                 throw new DirectoryNotFoundException(
                     $"The output folder does not exist: {outDir}");
 
+            // Hold the input open for the WHOLE build with a share mode that denies
+            // deletion/replacement (FileShare.Read allows our own re-reads and any
+            // other reader, but NOT delete). PathIdentity.SamePath above catches the
+            // common aliases up front with a clear message; this lock is the backstop
+            // no string-based path check can guarantee on Windows: if the output
+            // resolves to the input through ANY alias the path comparison cannot see
+            // as equal (a SUBST drive, an 8.3 short name, a hard link, …), the final
+            // File.Move that would overwrite the input fails with a sharing violation
+            // instead of destroying it. A genuinely different output is unaffected.
+            using var inputLock = new FileStream(
+                inputFwz, FileMode.Open, FileAccess.Read, FileShare.Read);
+
             FwzExtractResult ex = ExtractBareImage(inputFwz);
             string? modifiedBare = null;
             string? modifiedGz = null;
