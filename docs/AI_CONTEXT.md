@@ -67,9 +67,12 @@ not a change to the ext4 itself.
 
 1. **Replicate fquinto faithfully first.** Same paths, contents, permissions,
    symlink target. Innovate only after we match fquinto and validate.
-2. **Read-only until validated.** The tool operates on **temp copies**; it never
-   modifies the user's original `.fwz`, and the test buttons produce **no
-   flashable firmware**.
+2. **Never modify the input; write the output only after validation.** The tool
+   operates on **temp copies** and **never modifies the user's original `.fwz`**.
+   The Build flow *does* write a new, modified `.fwz`, but only a fully written
+   artifact that has passed a full read-back round-trip is moved into place. The
+   tool itself **never flashes a device** — any real flashing is a separate,
+   manual step the user performs out of band.
 3. **Validate logically, not byte-for-byte.** Two ext4 images with the same
    logical changes are never bit-identical (free-block allocation, timestamps).
    Compare file contents, modes, owners and symlink targets.

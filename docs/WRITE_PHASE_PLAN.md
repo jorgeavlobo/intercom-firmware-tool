@@ -6,8 +6,10 @@ same content, same permissions, same symlink — but via SharpExt4 instead of a
 Linux `mount -o loop` (which is impossible on Windows).
 
 **Principle:** replicate the *result*, not the *method*. Replicate faithfully
-→ validate against fquinto → only then innovate. Everything is sandbox (temp
-files) until validation passes; no flashable firmware is produced by the tests.
+→ validate against fquinto → only then innovate. All work happens on temp files;
+the **input `.fwz` is never modified**, and the Build flow writes its modified
+`.fwz` output **only after a full read-back round-trip passes**. The tool itself
+**never flashes a device** — flashing is a separate, manual step.
 
 **Password decision:** replicate with **MD5-crypt (`$1$`)** — the primary
 target, faithful to fquinto, with a test vector already validated (see §c).
