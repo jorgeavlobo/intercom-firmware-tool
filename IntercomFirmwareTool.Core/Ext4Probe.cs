@@ -648,9 +648,8 @@ namespace IntercomFirmwareTool.Core
 
         private static void AppendLines(ExtFileSystem fs, string path, string[] lines)
         {
-            // /etc/passwd and /etc/shadow must already exist: appending re-uses
-            // their inode (preserving mode/owner). Creating them here would give
-            // them unknown metadata, so refuse if they are missing.
+            // /etc/passwd and /etc/shadow must already exist: creating them here
+            // would give them unknown metadata, so refuse if they are missing.
             if (!fs.FileExists(path))
                 throw new InvalidOperationException(
                     $"{path} does not exist in the image; refusing to create it (it would get unknown mode/owner).");
@@ -659,7 +658,16 @@ namespace IntercomFirmwareTool.Core
             // Correction #3: don't glue the new line onto the last existing one.
             if (sb.Length > 0 && sb[sb.Length - 1] != '\n') sb.Append('\n');
             foreach (var line in lines) sb.Append(line).Append('\n');
+
+            // Capture the existing mode/owner and re-apply them after the rewrite.
+            // WriteTextFile truncates via FileMode.Create; lwext4 truncates in
+            // place, but re-applying makes the perms/owner independent of that
+            // behaviour — important for /etc/shadow, which must stay 0600 root:root.
+            uint mode = fs.GetMode(path) & 0xFFF;
+            var owner = fs.GetOwner(path);
             WriteTextFile(fs, path, sb.ToString());
+            fs.SetMode(path, mode);
+            if (owner != null) fs.SetOwner(path, owner.Item1, owner.Item2);
         }
 
         private static void WriteTextFile(ExtFileSystem fs, string path, string text)

@@ -360,6 +360,11 @@ namespace IntercomFirmwareTool.App
             SetPathText(TxtKeyPath, pubPath);
             UpdateBuildEnabled();
 
+            // Lock the private key to the current Windows account (best-effort):
+            // OpenSSH refuses a world-readable key, and other local users must not
+            // read it. The UI keeps the manual command as a fallback.
+            bool restricted = RestrictKeyToCurrentUser(privatePath);
+
             // Report exactly what was generated so the user can see and verify it:
             // the key type/size and the SHA-256 fingerprint (same value that
             // `ssh-keygen -lf <file>.pub` prints).
@@ -383,16 +388,44 @@ namespace IntercomFirmwareTool.App
                 "it is what you will use to log in. This build adds a root2 account (uid 0),\n" +
                 "so connect as root2:  ssh -i \"" + privatePath + "\" root2@<device>\n" +
                 "It has no passphrase; add one later with:  ssh-keygen -p -f \"" + privatePath + "\"\n\n" +
-                "If Windows OpenSSH later reports the key is too open (\"UNPROTECTED PRIVATE\n" +
-                "KEY FILE\"), restrict it to your account with:\n" +
-                "  icacls \"" + privatePath + "\" /inheritance:r /grant:r \"%USERNAME%:F\"\n" +
-                "(Full control for you only — OpenSSH just needs other users locked out, and\n" +
-                "you keep write access to add a passphrase later.)";
+                (restricted
+                    ? "The private key was restricted to your Windows account (other users locked\n" +
+                      "out), so OpenSSH will accept it."
+                    : "If Windows OpenSSH reports the key is too open (\"UNPROTECTED PRIVATE KEY\n" +
+                      "FILE\"), restrict it to your account with:\n" +
+                      "  icacls \"" + privatePath + "\" /inheritance:r /grant:r \"%USERNAME%:F\"\n" +
+                      "(Full control for you only — OpenSSH just needs other users locked out.)");
 
             MessageBox.Show(this,
                 $"Key pair created.\n\nPrivate key:\n{privatePath}\n\nPublic key:\n{pubPath}\n\n" +
                 "Keep the private key safe — it has no passphrase.",
                 "New SSH key", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        /// <summary>
+        /// Best-effort: lock a freshly written private key to the current Windows
+        /// account (break inheritance, grant only this user) via icacls, so OpenSSH
+        /// accepts it and other local users can't read it. Returns true on a clean
+        /// exit; the UI keeps the manual command as a fallback.
+        /// </summary>
+        private static bool RestrictKeyToCurrentUser(string path)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("icacls",
+                    $"\"{path}\" /inheritance:r /grant:r \"{Environment.UserName}:F\"")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                using var p = Process.Start(psi);
+                if (p is null) return false;
+                p.WaitForExit(5000);
+                return p.HasExited && p.ExitCode == 0;
+            }
+            catch { return false; }
         }
 
         /// <summary>Opens the Save dialog to choose the modified-firmware output path.</summary>
