@@ -218,23 +218,31 @@ namespace IntercomFirmwareTool.Core
             // as equal (a SUBST drive, an 8.3 short name, a hard link, …), the final
             // File.Move that would overwrite the input fails with a sharing violation
             // instead of destroying it. A genuinely different output is unaffected.
+            // Resolve the input to its concrete final target ONCE, following any
+            // symlink/junction. Every subsequent step (lock, verify, extract,
+            // repack) uses this resolved path rather than reopening the original
+            // name — otherwise a link retargeted mid-build could point the extract
+            // at different bytes than the ones the whitelist gate just approved.
+            string realInput = PathIdentity.ResolveFinal(inputFwz);
+
             using var inputLock = new FileStream(
-                inputFwz, FileMode.Open, FileAccess.Read, FileShare.Read);
+                realInput, FileMode.Open, FileAccess.Read, FileShare.Read);
 
             // Tie the whitelist guarantee to the exact bytes we are about to
             // modify. A UI may pre-verify the selection, but between that check
             // and here the path could be replaced or a symlink retargeted; by
-            // re-verifying now — while inputLock holds the file open with a share
-            // mode that denies deletion/rename — the file that passes this gate is
-            // the same one ExtractBareImage reads below. This is the authoritative
-            // check: no non-UI caller can build from an unrecognized firmware.
-            var verified = FirmwareRegistry.Verify(inputFwz);
+            // re-verifying the resolved target now — while inputLock holds it open
+            // with a share mode that denies deletion/rename — the file that passes
+            // this gate is the same one ExtractBareImage reads below. This is the
+            // authoritative check: no non-UI caller can build from an unrecognized
+            // firmware.
+            var verified = FirmwareRegistry.Verify(realInput);
             if (!verified.Ok)
                 throw new InvalidOperationException(
                     "Refusing to build: the input is not a recognized original firmware.\n" +
                     verified.Message);
 
-            FwzExtractResult ex = ExtractBareImage(inputFwz);
+            FwzExtractResult ex = ExtractBareImage(realInput);
             string? modifiedBare = null;
             string? modifiedGz = null;
             try
@@ -257,7 +265,7 @@ namespace IntercomFirmwareTool.Core
                 bool committed = false;
                 try
                 {
-                    Repack(inputFwz, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut);
+                    Repack(realInput, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut);
 
                     // 4) Round-trip: validate the TEMP .fwz (reopen it through our
                     //    chain) before it is allowed to become the output.
