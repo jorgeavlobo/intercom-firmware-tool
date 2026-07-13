@@ -120,56 +120,44 @@ namespace IntercomFirmwareTool.Core
             {
                 byte[] blob = Convert.FromBase64String(parts[1]);
 
-                // Walk every SSH wire field (uint32 length + bytes): each length
-                // must fit, and the fields must consume the blob EXACTLY (no
-                // truncation, no trailing garbage). The first field must equal
-                // the advertised type. This rejects a corrupt/partial .pub whose
-                // blob decodes but is missing key material (e.g. ssh-rsa without
-                // its exponent/modulus) — which would otherwise be written into
-                // authorized_keys and fail login while the round-trip (text-only)
-                // check still passes.
-                int pos = 0, fields = 0;
-                while (pos < blob.Length)
-                {
-                    if (pos + 4 > blob.Length) return false; // truncated length prefix
-                    long fieldLen = ((long)blob[pos] << 24) | ((long)blob[pos + 1] << 16)
-                                  | ((long)blob[pos + 2] << 8) | blob[pos + 3];
-                    pos += 4;
-                    if (fieldLen < 0 || pos + fieldLen > blob.Length) return false; // truncated / overflow
-                    if (fields == 0 &&
-                        (fieldLen == 0 || Encoding.ASCII.GetString(blob, pos, (int)fieldLen) != type))
-                        return false; // first field must be the algorithm name
-                    pos += (int)fieldLen;
-                    fields++;
-                }
+                // Split into wire fields (uint32 length + bytes). ReadFields returns
+                // null unless the fields consume the blob EXACTLY (no truncation, no
+                // trailing garbage), so a corrupt/partial blob is rejected here.
+                var fields = ReadFields(blob);
+                if (fields is null || fields.Count == 0) return false;
+                // First field must be the advertised algorithm name.
+                if (!FieldEquals(fields[0], type)) return false;
 
-                // Exact consumption plus the exact wire-field count for the type.
-                // Every allowed type has a known blob layout, so require its exact
-                // count — a truncated blob (algorithm name plus too few fields)
-                // must NOT pass, or it gets written into authorized_keys and the
-                // build's text-only round-trip still "succeeds" while the device
-                // cannot authenticate (worst with key-only login). Any allowed type
-                // without a count here fails closed (expected -1 → rejected), so
-                // this table and `allowed` above must stay in sync.
-                //   ssh-rsa            : name, e, n                       = 3
-                //   ssh-ed25519        : name, key                        = 2
-                //   ssh-dss            : name, p, q, g, y                 = 5
-                //   ecdsa-sha2-nistp*  : name, curve, Q                   = 3
-                //   sk-ssh-ed25519     : name, key, application           = 3
-                //   sk-ecdsa-nistp256  : name, curve, Q, application      = 4
-                int expected = type switch
+                // Every allowed type has a known layout: require the exact field
+                // COUNT and validate the CONTENT of the key material. A blob with
+                // the right shape but empty/wrong-sized material (e.g. ssh-rsa with
+                // an empty modulus, or a 0-byte ed25519 key) must NOT pass, or it
+                // gets written into authorized_keys and the build's text-only
+                // round-trip still "succeeds" while the device cannot authenticate
+                // (worst in key-only mode, where there is no password fallback).
+                // Unknown allowed types fall through to `false` (fail closed).
+                switch (type)
                 {
-                    "ssh-rsa" => 3,
-                    "ssh-ed25519" => 2,
-                    "ssh-dss" => 5,
-                    "ecdsa-sha2-nistp256" => 3,
-                    "ecdsa-sha2-nistp384" => 3,
-                    "ecdsa-sha2-nistp521" => 3,
-                    "sk-ssh-ed25519@openssh.com" => 3,
-                    "sk-ecdsa-sha2-nistp256@openssh.com" => 4,
-                    _ => -1,
-                };
-                return pos == blob.Length && expected != -1 && fields == expected;
+                    case "ssh-rsa": // name, e, n
+                        return fields.Count == 3
+                            && fields[1].Length >= 1                 // public exponent present
+                            && MpintBitLength(fields[2]) >= 512;     // a real RSA modulus, not empty
+                    case "ssh-ed25519": // name, key(32)
+                        return fields.Count == 2 && fields[1].Length == 32;
+                    case "ssh-dss": // name, p, q, g, y
+                        return fields.Count == 5
+                            && fields[1].Length > 0 && fields[2].Length > 0
+                            && fields[3].Length > 0 && fields[4].Length > 0;
+                    case "ecdsa-sha2-nistp256": return IsEcdsaKey(fields, "nistp256", 3);
+                    case "ecdsa-sha2-nistp384": return IsEcdsaKey(fields, "nistp384", 3);
+                    case "ecdsa-sha2-nistp521": return IsEcdsaKey(fields, "nistp521", 3);
+                    case "sk-ssh-ed25519@openssh.com": // name, key(32), application
+                        return fields.Count == 3 && fields[1].Length == 32 && fields[2].Length > 0;
+                    case "sk-ecdsa-sha2-nistp256@openssh.com": // name, curve, Q, application
+                        return IsEcdsaKey(fields, "nistp256", 4) && fields[3].Length > 0;
+                    default:
+                        return false;
+                }
             }
             catch (FormatException)
             {
@@ -198,6 +186,22 @@ namespace IntercomFirmwareTool.Core
             string fp = "SHA256:" + Convert.ToBase64String(SHA256.HashData(blob)).TrimEnd('=');
             return new PublicKeyInfo(type, KeyBits(type, blob), fp);
         }
+
+        /// <summary>True if an SSH wire field equals the given ASCII token exactly.</summary>
+        private static bool FieldEquals(byte[] field, string ascii)
+        {
+            if (field.Length != ascii.Length) return false;
+            for (int i = 0; i < field.Length; i++)
+                if (field[i] != (byte)ascii[i]) return false;
+            return true;
+        }
+
+        /// <summary>
+        /// ECDSA / SK-ECDSA shape check: exact field count, the curve-name field
+        /// matches the type's curve, and the public point Q is non-empty.
+        /// </summary>
+        private static bool IsEcdsaKey(List<byte[]> fields, string curve, int count)
+            => fields.Count == count && FieldEquals(fields[1], curve) && fields[2].Length > 0;
 
         /// <summary>Splits an SSH blob into its length-prefixed fields, or null if malformed.</summary>
         private static List<byte[]>? ReadFields(byte[] blob)

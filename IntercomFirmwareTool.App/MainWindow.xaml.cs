@@ -742,17 +742,12 @@ namespace IntercomFirmwareTool.App
             TxtResult.Text = sb.ToString();
         }
 
-        /// <summary>Same file path? Case-insensitive on Windows, case-sensitive elsewhere.</summary>
-        private static bool SamePath(string a, string b)
-        {
-            try
-            {
-                var cmp = OperatingSystem.IsWindows()
-                    ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-                return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), cmp);
-            }
-            catch { return false; }
-        }
+        /// <summary>
+        /// Same underlying file? Delegates to the shared Core rule, which resolves
+        /// symlinks/junctions (final component and parent chain) so a path-collision
+        /// warning is not bypassed by an alias. Case-insensitive on Windows.
+        /// </summary>
+        private static bool SamePath(string a, string b) => PathIdentity.SamePath(a, b);
 
         private void SetButtonsEnabled(bool enabled)
         {

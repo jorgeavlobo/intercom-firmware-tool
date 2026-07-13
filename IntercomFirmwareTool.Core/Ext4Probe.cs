@@ -253,6 +253,22 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
+        /// Fast guard for the write-phase entry points, which always wrap the input
+        /// in a fresh MBR: require a <b>bare</b> ext4 image (superblock magic at
+        /// 0x438, no partition table). A partitioned disk or a non-ext4 file would
+        /// otherwise be wrapped blindly and fail in non-obvious ways or corrupt the
+        /// output. This mirrors the shape check <see cref="ReadFile"/> uses.
+        /// </summary>
+        private static void EnsureBareExt4(string bareImagePath)
+        {
+            if (!IsBareExt4(bareImagePath))
+                throw new ArgumentException(
+                    "Expected a bare ext4 image (ext4 superblock magic 0xEF53 not found at " +
+                    "offset 0x438). This method operates on the raw ext4 payload, not a .fwz " +
+                    "container or an already-partitioned disk image.", nameof(bareImagePath));
+        }
+
+        /// <summary>
         /// Creates a temporary disk file made of an MBR (with one Linux
         /// partition starting at the 1 MiB offset) followed by the ext4 data.
         /// Returns the temp path, which must then be deleted.
@@ -316,6 +332,7 @@ namespace IntercomFirmwareTool.Core
         public static string EnableSsh(string bareImagePath, EnableSshOptions opts)
         {
             ValidateOptions(opts);
+            EnsureBareExt4(bareImagePath);
             long bareSize = new FileInfo(bareImagePath).Length;
             string disk = WrapBareFilesystem(bareImagePath);
             string modifiedBare = Path.Combine(
@@ -469,6 +486,7 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         public static IReadOnlyList<Ext4Check> ValidateSsh(string bareImagePath, EnableSshOptions opts)
         {
+            EnsureBareExt4(bareImagePath);
             var checks = new List<Ext4Check>();
             string disk = WrapBareFilesystem(bareImagePath);
             try
