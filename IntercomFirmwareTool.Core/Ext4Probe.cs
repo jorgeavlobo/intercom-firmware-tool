@@ -546,13 +546,21 @@ namespace IntercomFirmwareTool.Core
                 checks.Add(new("/etc/shadow has bticino2 entry",
                     HasExactLine(shadow, $"bticino2:{secret}:18033:0:99999:7:::"), ""));
 
-                // Key checks only when the build included a key; a password-only
-                // build writes no authorized_keys, so those paths must be absent.
+                // With a key: assert it is deployed correctly. Without a key
+                // (password-only): assert the key material is ABSENT — a stray
+                // authorized_keys would be an unexpected, unauthorized credential.
                 if (opts.HasKey)
                 {
                     CheckDir(fs, checks, "/home/root/.ssh");
                     CheckAuthKeys(fs, checks, "/home/root/.ssh/authorized_keys", opts.PublicKey!);
                     CheckAuthKeys(fs, checks, "/etc/dropbear/authorized_keys", opts.PublicKey!);
+                }
+                else
+                {
+                    checks.Add(new("/home/root/.ssh/authorized_keys absent (password-only)",
+                        !fs.FileExists("/home/root/.ssh/authorized_keys"), ""));
+                    checks.Add(new("/etc/dropbear/authorized_keys absent (password-only)",
+                        !fs.FileExists("/etc/dropbear/authorized_keys"), ""));
                 }
 
                 string target = "";
