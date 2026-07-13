@@ -440,8 +440,10 @@ namespace IntercomFirmwareTool.App
                 {
                     UseShellExecute = false,
                     CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
+                    // Do NOT redirect stdout/stderr: we never read them, and a
+                    // redirected pipe that fills would block WaitForExit and cause a
+                    // false timeout. Only the exit code matters here, and
+                    // CreateNoWindow already suppresses any console window.
                 };
                 using var p = Process.Start(psi);
                 if (p is null) return false;
@@ -570,11 +572,6 @@ namespace IntercomFirmwareTool.App
         }
 
         /// <summary>
-        /// Enables the Build button when firmware and output are set and at least
-        /// one credential is available: with password login disabled a key is
-        /// required; otherwise a non-empty password is required (key optional).
-        /// </summary>
-        /// <summary>
         /// Whether a credential is currently available for Build: with password
         /// login disabled a key is required; otherwise a non-empty password.
         /// Single source of truth so the two enable-gates can't drift.
@@ -585,6 +582,11 @@ namespace IntercomFirmwareTool.App
             return passwordOff ? _keyPath != null : CurrentPassword().Length > 0;
         }
 
+        /// <summary>
+        /// Enables the Build button when firmware and output are set and at least
+        /// one credential is available: with password login disabled a key is
+        /// required; otherwise a non-empty password is required (key optional).
+        /// </summary>
         private void UpdateBuildEnabled()
         {
             BtnBuild.IsEnabled =
