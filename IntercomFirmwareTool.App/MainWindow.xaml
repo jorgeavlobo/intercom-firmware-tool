@@ -127,7 +127,7 @@
             <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="Root password:"/>
             <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <TextBox x:Name="TxtPassword" Width="200" Style="{StaticResource InputField}"
+                <TextBox x:Name="TxtPassword" Width="170" Style="{StaticResource InputField}"
                          FontFamily="Consolas"/>
                 <!-- Inline actions, in order: generate, reveal (hold-to-show eye),
                      copy. Reveal affects BOTH the password and confirm fields. -->
@@ -152,7 +152,7 @@
             <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="Confirm password:"/>
             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <TextBox x:Name="TxtConfirm" Width="200" Style="{StaticResource InputField}"
+                <TextBox x:Name="TxtConfirm" Width="170" Style="{StaticResource InputField}"
                          FontFamily="Consolas"/>
                 <TextBlock x:Name="TxtPwdHint" VerticalAlignment="Center" Margin="10,0,0,0"
                            Foreground="Gray"/>
@@ -160,7 +160,8 @@
 
             <!-- SSH public key: OPTIONAL — choose an existing one or generate a
                  new pair. Without a key, login is by the root password above. -->
-            <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}"
+            <TextBlock Grid.Row="3" Grid.Column="0" x:Name="LblKey"
+                       Style="{StaticResource FieldLabel}"
                        Text="SSH public key (optional):"/>
             <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"

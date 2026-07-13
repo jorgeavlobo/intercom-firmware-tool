@@ -436,6 +436,11 @@ namespace IntercomFirmwareTool.App
             BtnToggleReveal.IsEnabled = usePassword;
             BtnCopyPwd.IsEnabled = usePassword;
             BtnRandomPwd.IsEnabled = usePassword;
+
+            // With password login off, the key is the only credential, so mark it
+            // required; with password on, the key is optional again.
+            LblKey.Text = usePassword ? "SSH public key (optional):" : "SSH public key (required):";
+
             UpdatePasswordHint();
             UpdateBuildEnabled();
         }
