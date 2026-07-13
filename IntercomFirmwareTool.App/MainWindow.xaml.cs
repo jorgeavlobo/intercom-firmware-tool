@@ -130,8 +130,20 @@ namespace IntercomFirmwareTool.App
             }
             try
             {
-                Clipboard.SetText(pwd);
-                TxtResult.Text = "Password copied to the clipboard.";
+                // Copy WITHOUT leaving the plaintext password in Windows Clipboard
+                // History or cloud clipboard sync. Windows honours these clipboard
+                // formats to exclude a payload from monitoring, history and cloud
+                // upload; the "Can…" flags take a DWORD 0.
+                var data = new DataObject();
+                data.SetText(pwd);
+                data.SetData("ExcludeClipboardContentFromMonitorProcessing",
+                    new MemoryStream(new byte[] { 0, 0, 0, 0 }));
+                data.SetData("CanIncludeInClipboardHistory",
+                    new MemoryStream(new byte[] { 0, 0, 0, 0 }));
+                data.SetData("CanUploadToCloudClipboard",
+                    new MemoryStream(new byte[] { 0, 0, 0, 0 }));
+                Clipboard.SetDataObject(data, copy: true);
+                TxtResult.Text = "Password copied (excluded from clipboard history / cloud sync).";
             }
             catch (Exception ex)
             {
@@ -562,13 +574,21 @@ namespace IntercomFirmwareTool.App
         /// one credential is available: with password login disabled a key is
         /// required; otherwise a non-empty password is required (key optional).
         /// </summary>
-        private void UpdateBuildEnabled()
+        /// <summary>
+        /// Whether a credential is currently available for Build: with password
+        /// login disabled a key is required; otherwise a non-empty password.
+        /// Single source of truth so the two enable-gates can't drift.
+        /// </summary>
+        private bool HaveCredential()
         {
             bool passwordOff = ChkKeyOnly.IsChecked == true;
-            bool haveCredential = passwordOff ? _keyPath != null
-                                              : CurrentPassword().Length > 0;
+            return passwordOff ? _keyPath != null : CurrentPassword().Length > 0;
+        }
+
+        private void UpdateBuildEnabled()
+        {
             BtnBuild.IsEnabled =
-                _fwzPath != null && _outputPath != null && haveCredential;
+                _fwzPath != null && _outputPath != null && HaveCredential();
         }
 
         // ---- Primary action: Build ------------------------------------------
@@ -911,9 +931,8 @@ namespace IntercomFirmwareTool.App
             // Build only re-enables when firmware + output + a credential are set
             // (a password, or a key when password login is disabled).
             bool passwordOff = ChkKeyOnly.IsChecked == true;
-            bool haveCredential = passwordOff ? _keyPath != null : CurrentPassword().Length > 0;
             BtnBuild.IsEnabled = enabled
-                && _fwzPath != null && _outputPath != null && haveCredential;
+                && _fwzPath != null && _outputPath != null && HaveCredential();
 
             // Also lock the credential inputs during an operation so the visible UI
             // can't drift from the values snapshotted for the build. When

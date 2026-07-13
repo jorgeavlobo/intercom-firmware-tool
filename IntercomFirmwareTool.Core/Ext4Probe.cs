@@ -632,16 +632,24 @@ namespace IntercomFirmwareTool.Core
                 using var d = ExtDisk.Open(disk);
                 using var fs = ExtFileSystem.Open(d, d.Partitions[0]);
 
-                // Accounts (objective): the two entries fquinto appends.
-                string passwd = ReadAllTextFromFs(fs, "/etc/passwd");
+                // Accounts (objective): the two entries fquinto appends. Guard the
+                // reads with FileExists — this path inspects an ARBITRARY .fwz, so a
+                // malformed image missing /etc/passwd must yield a failed "exists"
+                // check, not an exception that aborts the whole inspection.
+                bool passwdExists = fs.FileExists("/etc/passwd");
+                checks.Add(new("/etc/passwd exists", passwdExists, ""));
+                string passwd = passwdExists ? ReadAllTextFromFs(fs, "/etc/passwd") : "";
                 checks.Add(new("/etc/passwd has root2",
-                    HasExactLine(passwd, "root2:x:0:0:root:/home/root:/bin/sh"), ""));
+                    passwdExists && HasExactLine(passwd, "root2:x:0:0:root:/home/root:/bin/sh"), ""));
                 checks.Add(new("/etc/passwd has bticino2",
-                    HasExactLine(passwd, "bticino2:x:1000:1000::/home/bticino:/bin/sh"), ""));
+                    passwdExists && HasExactLine(passwd, "bticino2:x:1000:1000::/home/bticino:/bin/sh"), ""));
 
                 // Shadow: derive the password-login mode from the secret's shape,
-                // WITHOUT knowing (or being able to reverse) the plaintext.
-                string shadow = ReadAllTextFromFs(fs, "/etc/shadow");
+                // WITHOUT knowing (or being able to reverse) the plaintext. Same
+                // FileExists guard as above.
+                bool shadowExists = fs.FileExists("/etc/shadow");
+                checks.Add(new("/etc/shadow exists", shadowExists, ""));
+                string shadow = shadowExists ? ReadAllTextFromFs(fs, "/etc/shadow") : "";
                 string? root2Secret = ShadowSecret(shadow, "root2");
                 string? bticino2Secret = ShadowSecret(shadow, "bticino2");
                 bool root2Present = root2Secret != null;
