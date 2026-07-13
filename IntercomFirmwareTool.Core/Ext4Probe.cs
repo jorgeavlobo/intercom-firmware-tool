@@ -677,10 +677,19 @@ namespace IntercomFirmwareTool.Core
                 // Keys: report presence + fingerprint (informational) and enforce
                 // the perms/ownership contract wherever a key is actually deployed.
                 bool homeKeyPresent = fs.FileExists("/home/root/.ssh/authorized_keys");
+                bool dropbearKeyPresent = fs.FileExists("/etc/dropbear/authorized_keys");
                 if (homeKeyPresent) CheckDir(fs, checks, "/home/root/.ssh");
                 string? homeKey = InspectAuthKeys(fs, checks, findings, "/home/root/.ssh/authorized_keys", "home");
                 string? dropbearKey = InspectAuthKeys(fs, checks, findings, "/etc/dropbear/authorized_keys", "dropbear");
                 bool keyInstalled = homeKey != null || dropbearKey != null;
+
+                // The build writes the key to BOTH locations (dropbear reads one,
+                // root's home the other), so a valid image has both or neither.
+                // Exactly one present is an incomplete build — flag it (otherwise
+                // the equality check below is skipped and the gap goes unnoticed).
+                if (homeKeyPresent != dropbearKeyPresent)
+                    checks.Add(new("authorized_keys present in both locations (or neither)",
+                        false, homeKeyPresent ? "only /home/root/.ssh" : "only /etc/dropbear"));
 
                 if (homeKey != null && dropbearKey != null)
                     checks.Add(new("authorized_keys identical in both locations",
