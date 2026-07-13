@@ -90,6 +90,7 @@ namespace IntercomFirmwareTool.App
             }
         }
 
+        /// <summary>Handles typed input: stores it in the buffer and briefly reveals the last character.</summary>
         private void OnPreviewTextInput(object sender, TextCompositionEventArgs e)
         {
             e.Handled = true; // we manage the Text ourselves
@@ -108,6 +109,7 @@ namespace IntercomFirmwareTool.App
             Changed?.Invoke();
         }
 
+        /// <summary>Handles the Backspace and Delete keys against the buffer; other keys fall through.</summary>
         private void OnPreviewKeyDown(object sender, KeyEventArgs e)
         {
             if (e.Key == Key.Back)
@@ -133,12 +135,14 @@ namespace IntercomFirmwareTool.App
             // real password while the field is revealed — same as any text box.)
         }
 
+        /// <summary>Enables the Cut command only when there is a selection.</summary>
         private void OnCanCut(object sender, CanExecuteRoutedEventArgs e)
         {
             e.CanExecute = _box.SelectionLength > 0;
             e.Handled = true;
         }
 
+        /// <summary>Cut command: removes the selection from the buffer without copying the secret to the clipboard.</summary>
         private void OnCut(object sender, ExecutedRoutedEventArgs e)
         {
             // Delete the selection from the buffer WITHOUT copying the clear-text
@@ -154,12 +158,14 @@ namespace IntercomFirmwareTool.App
             }
         }
 
+        /// <summary>Enables the Delete command when there is a selection or a character to the right of the caret.</summary>
         private void OnCanDelete(object sender, CanExecuteRoutedEventArgs e)
         {
             e.CanExecute = _box.SelectionLength > 0 || _box.CaretIndex < _real.Length;
             e.Handled = true;
         }
 
+        /// <summary>Delete command: removes the selection, or the next character, from the buffer.</summary>
         private void OnDelete(object sender, ExecutedRoutedEventArgs e)
         {
             // Delete the selection, or the character to the right of the caret —
@@ -177,6 +183,7 @@ namespace IntercomFirmwareTool.App
             }
         }
 
+        /// <summary>Paste handler: inserts clipboard text into the buffer manually, rejecting multi-line/non-BMP content.</summary>
         private void OnPaste(object sender, DataObjectPastingEventArgs e)
         {
             e.CancelCommand(); // insert manually so _real stays in sync
@@ -234,12 +241,18 @@ namespace IntercomFirmwareTool.App
             return start < 0 ? 0 : Math.Min(start, _real.Length);
         }
 
+        /// <summary>Cancels any active one-character reveal (stops the timer and clears the revealed index).</summary>
         private void StopReveal()
         {
             _timer.Stop();
             _revealIndex = -1;
         }
 
+        /// <summary>
+        /// Repaints the TextBox from the buffer: the clear-text value while
+        /// <see cref="Peek"/> is set, otherwise the mask with at most the single
+        /// briefly-revealed character shown, then restores the caret position.
+        /// </summary>
         private void Render(int caret)
         {
             string display;

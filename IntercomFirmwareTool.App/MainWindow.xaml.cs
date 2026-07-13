@@ -167,6 +167,7 @@ namespace IntercomFirmwareTool.App
 
         // ---- Input selection -------------------------------------------------
 
+        /// <summary>Picks the original firmware, verifies it against the whitelist (size + SHA-256), and selects it.</summary>
         private async void BtnBrowseFwz_Click(object sender, RoutedEventArgs e)
         {
             var dlg = new OpenFileDialog
@@ -241,6 +242,7 @@ namespace IntercomFirmwareTool.App
                 "You can now choose a key and Build.";
         }
 
+        /// <summary>Picks an existing OpenSSH public key and selects it for the build.</summary>
         private void BtnChooseKey_Click(object sender, RoutedEventArgs e)
         {
             var dlg = new OpenFileDialog
@@ -365,6 +367,7 @@ namespace IntercomFirmwareTool.App
                 "New SSH key", MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
+        /// <summary>Opens the Save dialog to choose the modified-firmware output path.</summary>
         private void BtnBrowseOutput_Click(object sender, RoutedEventArgs e)
         {
             var dlg = new SaveFileDialog
@@ -383,6 +386,7 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
+        /// <summary>Toggles key-only login: greys out the password fields and stops any active reveal when enabled.</summary>
         private void ChkKeyOnly_Toggled(object sender, RoutedEventArgs e)
         {
             // Key-only means no password login; grey the password fields out and
@@ -434,6 +438,7 @@ namespace IntercomFirmwareTool.App
             return Directory.Exists(ssh) ? ssh : profile;
         }
 
+        /// <summary>Enables the Build button only when firmware, key and output are all chosen.</summary>
         private void UpdateBuildEnabled()
         {
             BtnBuild.IsEnabled =
@@ -442,6 +447,7 @@ namespace IntercomFirmwareTool.App
 
         // ---- Primary action: Build ------------------------------------------
 
+        /// <summary>Validates the inputs, builds the modified firmware, and shows the verified round-trip result.</summary>
         private async void BtnBuild_Click(object sender, RoutedEventArgs e)
         {
             if (_fwzPath is null || _keyPath is null || _outputPath is null) return;
@@ -574,6 +580,7 @@ namespace IntercomFirmwareTool.App
 
         // ---- Secondary: Verify an existing .fwz -----------------------------
 
+        /// <summary>Verifies an existing modified .fwz against the expected SSH-enable changes (read-only).</summary>
         private async void BtnVerify_Click(object sender, RoutedEventArgs e)
         {
             var fwzDlg = new OpenFileDialog
@@ -663,6 +670,7 @@ namespace IntercomFirmwareTool.App
 
         // ---- Secondary: MD5-crypt self-test ---------------------------------
 
+        /// <summary>Runs the MD5-crypt self-test and shows the pass/fail result.</summary>
         private async void BtnSelfTest_Click(object sender, RoutedEventArgs e)
         {
             var sb = new StringBuilder();
@@ -768,6 +776,7 @@ namespace IntercomFirmwareTool.App
                 : null;
         }
 
+        /// <summary>Enables/disables the action buttons and credential inputs during an operation.</summary>
         private void SetButtonsEnabled(bool enabled)
         {
             BtnBrowseFwz.IsEnabled = enabled;
