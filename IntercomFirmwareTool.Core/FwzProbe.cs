@@ -277,7 +277,10 @@ namespace IntercomFirmwareTool.Core
                 // traditional ZipCrypto (AES entries report 128/192/256).
                 if (entry == null || !entry.IsCrypted || entry.AESKeySize != 0) return false;
                 using var s = zf.GetInputStream(entry);
-                return s.ReadByte() == 0x1F && s.ReadByte() == 0x8B; // gzip magic ⇒ decrypted OK
+                // gzip header: magic 1F 8B + method 08 (deflate) — the same 3-byte
+                // check PasswordOpensEntry uses, so a wrong password / garbage is far
+                // less likely to pass by chance than a 2-byte magic-only check.
+                return s.ReadByte() == 0x1F && s.ReadByte() == 0x8B && s.ReadByte() == 0x08;
             }
             catch
             {
