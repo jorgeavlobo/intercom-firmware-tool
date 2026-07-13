@@ -44,31 +44,45 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         public static string ResolveFinal(string path)
         {
-            string full = Path.GetFullPath(path);
-            string? root = Path.GetPathRoot(full);
-            if (string.IsNullOrEmpty(root)) return full;
+            // A malformed path (invalid characters, too long, …) can make
+            // Path.GetFullPath throw. Honour the "never throws, never worse than a
+            // string comparison" contract by degrading to the original string.
+            string full;
+            try { full = Path.GetFullPath(path); }
+            catch { return path; }
 
-            string[] parts = full.Substring(root.Length).Split(
-                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
-                StringSplitOptions.RemoveEmptyEntries);
-
-            string acc = root;
-            for (int i = 0; i < parts.Length; i++)
+            try
             {
-                acc = Path.Combine(acc, parts[i]);
-                bool isLast = i == parts.Length - 1;
-                try
+                string? root = Path.GetPathRoot(full);
+                if (string.IsNullOrEmpty(root)) return full;
+
+                string[] parts = full.Substring(root.Length).Split(
+                    new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                    StringSplitOptions.RemoveEmptyEntries);
+
+                string acc = root;
+                for (int i = 0; i < parts.Length; i++)
                 {
-                    // A file link only makes sense on the last component; parents
-                    // are resolved as directory links/junctions.
-                    var target = isLast
-                        ? File.ResolveLinkTarget(acc, returnFinalTarget: true)
-                        : Directory.ResolveLinkTarget(acc, returnFinalTarget: true);
-                    if (target != null) acc = Path.GetFullPath(target.FullName);
+                    acc = Path.Combine(acc, parts[i]);
+                    bool isLast = i == parts.Length - 1;
+                    try
+                    {
+                        // A file link only makes sense on the last component; parents
+                        // are resolved as directory links/junctions.
+                        var target = isLast
+                            ? File.ResolveLinkTarget(acc, returnFinalTarget: true)
+                            : Directory.ResolveLinkTarget(acc, returnFinalTarget: true);
+                        if (target != null) acc = Path.GetFullPath(target.FullName);
+                    }
+                    catch { /* missing / not a link / unsupported — keep this component */ }
                 }
-                catch { /* missing / not a link / unsupported — keep this component */ }
+                return acc;
             }
-            return acc;
+            catch
+            {
+                // Any other resolution failure degrades to the plain full path.
+                return full;
+            }
         }
     }
 }

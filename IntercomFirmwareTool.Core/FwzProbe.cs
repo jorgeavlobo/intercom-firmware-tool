@@ -421,8 +421,8 @@ namespace IntercomFirmwareTool.Core
                     "No '.gz' (non-recovery) file found inside the .fwz.");
 
             // The genuine firmware payload is traditional ZipCrypto. Reject an
-            // entry that is stored (unencrypted — then any password's gzip-header
-            // check would pass, falsely accepting the first candidate) or that is
+            // entry that is unencrypted (then any password's gzip-header check
+            // would pass, falsely accepting the first candidate) or that is
             // AES-encrypted. This mirrors the IsCrypted/AESKeySize gate that
             // EntryEncryptedWith applies on the output-verification path.
             if (!selected.IsCrypted || selected.AESKeySize != 0)
