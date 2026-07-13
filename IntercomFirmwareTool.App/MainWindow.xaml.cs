@@ -83,6 +83,9 @@ namespace IntercomFirmwareTool.App
         private void SetReveal(bool on)
         {
             if (ChkKeyOnly.IsChecked == true) on = false; // nothing to reveal in key-only
+            // An explicit reveal cancels any pending flash auto-remask, so holding
+            // the eye during the ~0.5 s flash window is not cut short by the timer.
+            if (on) _flashTimer?.Stop();
             _pw.Peek = on;
             _confirm.Peek = on;
             BtnToggleReveal.Content = on ? EyeHide : EyeShow;
@@ -128,8 +131,9 @@ namespace IntercomFirmwareTool.App
 
         /// <summary>
         /// Fills both password fields with a fresh strong random password and
-        /// reveals them so the user can read/copy it. Nothing is written to the
-        /// Result box — the password is only shown in the (now revealed) fields.
+        /// briefly reveals them so the user can read/copy it. Only guidance text is
+        /// written to the Result box — never the password itself, which appears
+        /// only in the (briefly revealed) fields.
         /// </summary>
         private void BtnRandomPwd_Click(object sender, RoutedEventArgs e)
         {

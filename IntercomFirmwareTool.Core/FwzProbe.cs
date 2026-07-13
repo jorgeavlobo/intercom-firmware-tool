@@ -434,21 +434,43 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Full path with any symlink/junction resolved to its final target. Falls
-        /// back to the plain full path when the target does not exist (the normal
-        /// case for a not-yet-created output) or is not a link — so behaviour is
-        /// unchanged except that link-based aliasing is now caught.
+        /// Canonical path with symlinks/junctions resolved to their final target —
+        /// the final component AND every parent directory in the chain — so an
+        /// output that reaches the input through an aliased parent (e.g.
+        /// <c>C:\link\fw.fwz</c> where <c>link</c> is a junction to the input's
+        /// directory) maps to the same path as the input and is rejected. Walked
+        /// component by component from the root; each component that does not exist
+        /// or is not a link is used as-is (so a not-yet-created output still
+        /// resolves through its existing parent chain), and any failure degrades to
+        /// the plain full path — never worse than a string comparison.
         /// </summary>
         private static string ResolveFinal(string path)
         {
             string full = Path.GetFullPath(path);
-            try
+            string? root = Path.GetPathRoot(full);
+            if (string.IsNullOrEmpty(root)) return full;
+
+            string[] parts = full.Substring(root.Length).Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                StringSplitOptions.RemoveEmptyEntries);
+
+            string acc = root;
+            for (int i = 0; i < parts.Length; i++)
             {
-                var target = File.ResolveLinkTarget(full, returnFinalTarget: true);
-                if (target != null) return Path.GetFullPath(target.FullName);
+                acc = Path.Combine(acc, parts[i]);
+                bool isLast = i == parts.Length - 1;
+                try
+                {
+                    // A file link only makes sense on the last component; parents
+                    // are resolved as directory links/junctions.
+                    var target = isLast
+                        ? File.ResolveLinkTarget(acc, returnFinalTarget: true)
+                        : Directory.ResolveLinkTarget(acc, returnFinalTarget: true);
+                    if (target != null) acc = Path.GetFullPath(target.FullName);
+                }
+                catch { /* missing / not a link / unsupported — keep this component */ }
             }
-            catch { /* missing / not a link / unsupported — use the plain full path */ }
-            return full;
+            return acc;
         }
 
         /// <summary>Builds a unique path in the temp folder with the given extension.</summary>

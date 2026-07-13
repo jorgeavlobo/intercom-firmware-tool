@@ -72,7 +72,10 @@ namespace IntercomFirmwareTool.Core
         // Recorded from the official Legrand/BTicino downloads (size + SHA-256 +
         // MD5). SHA-256 is the authoritative check; MD5 is kept for future use.
         // Names/models are informational only, never validation inputs.
-        public static readonly IReadOnlyList<KnownFirmware> Known = new[]
+        // Array.AsReadOnly: hand out a genuine read-only view — the backing array
+        // cannot be reached and cast back to KnownFirmware[] to mutate the
+        // whitelist at runtime, which would undermine the integrity gate.
+        public static readonly IReadOnlyList<KnownFirmware> Known = Array.AsReadOnly(new[]
         {
             // ---- Classe 100X (344682) — Home + Security family ----
             new KnownFirmware("C100X_010501.fwz", 106380638,
@@ -119,7 +122,7 @@ namespace IntercomFirmwareTool.Core
                 "70795123E8A6C06E324909862B062522", true,
                 "Classe 300X", "1.7.19", null, new[] { M300X_Light, M300X_Dark },
                 "https://assets.legrand.com/pim/AUTRE/C300X_010719.fwz"),
-        };
+        });
 
         /// <summary>
         /// Verifies a file against the whitelist. Fast path: reject on size
