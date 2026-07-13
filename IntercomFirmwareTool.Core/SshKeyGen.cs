@@ -78,14 +78,21 @@ namespace IntercomFirmwareTool.Core
                     if (bakPub != null) TryRestore(bakPub, pubPath); else TryDelete(pubPath);
                     throw;
                 }
+
+                // Both moves succeeded: the backups are now stale copies of the
+                // overwritten files — safe to remove. On failure we deliberately
+                // do NOT reach here, so the .bak files are left on disk for manual
+                // recovery in case the best-effort rollback above could not restore.
+                if (bakPriv != null) TryDelete(bakPriv);
+                if (bakPub != null) TryDelete(bakPub);
                 return pubPath;
             }
             finally
             {
+                // Temp files are always cleaned; backups are handled above so a
+                // failed/rolled-back move keeps a recoverable copy on disk.
                 TryDelete(tmpPriv);
                 TryDelete(tmpPub);
-                if (bakPriv != null) TryDelete(bakPriv);
-                if (bakPub != null) TryDelete(bakPub);
             }
         }
 

@@ -240,10 +240,12 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// True if the named entry of <paramref name="fwz"/> is ZipCrypto-encrypted
-        /// AND decrypts with <paramref name="password"/> to gzip data (magic
-        /// 1F 8B). Guards against a repack that produced an unencrypted archive
-        /// (which any password reads) or one under a different password.
+        /// True if the named entry of <paramref name="fwz"/> is <b>ZipCrypto</b>
+        /// (traditional PKWARE) encrypted AND decrypts with
+        /// <paramref name="password"/> to gzip data (magic 1F 8B). Guards against a
+        /// repack that produced an unencrypted archive (which any password reads),
+        /// one under a different password, or one that used AES instead of the
+        /// ZipCrypto the device firmware expects.
         /// </summary>
         private static bool EntryEncryptedWith(string fwz, string entryName, string password)
         {
@@ -251,7 +253,9 @@ namespace IntercomFirmwareTool.Core
             {
                 using var zf = new ZipFile(fwz) { Password = password };
                 ZipEntry? entry = zf.GetEntry(entryName);
-                if (entry == null || !entry.IsCrypted) return false;
+                // IsCrypted covers ZipCrypto AND AES; AESKeySize == 0 narrows it to
+                // traditional ZipCrypto (AES entries report 128/192/256).
+                if (entry == null || !entry.IsCrypted || entry.AESKeySize != 0) return false;
                 using var s = zf.GetInputStream(entry);
                 return s.ReadByte() == 0x1F && s.ReadByte() == 0x8B; // gzip magic ⇒ decrypted OK
             }
