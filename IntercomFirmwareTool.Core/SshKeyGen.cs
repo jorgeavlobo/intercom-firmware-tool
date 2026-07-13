@@ -14,6 +14,23 @@ namespace IntercomFirmwareTool.Core
     /// class library on every target, and the BTicino firmware's dropbear
     /// accepts it — the same key type as the project's existing keys.
     /// </summary>
+    /// <summary>
+    /// Type, size and SHA-256 fingerprint of an OpenSSH public key, for display.
+    /// </summary>
+    public sealed record PublicKeyInfo(string Type, int Bits, string Sha256Fingerprint)
+    {
+        /// <summary>A short human label, e.g. "RSA 4096" or "Ed25519".</summary>
+        public string Label => Type switch
+        {
+            "ssh-rsa" => Bits > 0 ? $"RSA {Bits}" : "RSA",
+            "ssh-ed25519" => "Ed25519",
+            "ssh-dss" => "DSA",
+            _ when Type.StartsWith("ecdsa-", StringComparison.Ordinal)
+                => Bits > 0 ? $"ECDSA {Bits}" : "ECDSA",
+            _ => Type,
+        };
+    }
+
     public static class SshKeyGen
     {
         /// <summary>
@@ -144,6 +161,74 @@ namespace IntercomFirmwareTool.Core
             {
                 return false; // parts[1] was not valid base64
             }
+        }
+
+        /// <summary>
+        /// Parses an OpenSSH public-key line and returns its type, size (bits) and
+        /// SHA-256 fingerprint (the standard <c>SHA256:&lt;base64&gt;</c> form that
+        /// <c>ssh-keygen -lf</c> prints), or null if it is not a valid key line.
+        /// The bit size is the real key size read from the blob (for RSA, the
+        /// modulus bit length), not an assumed value.
+        /// </summary>
+        public static PublicKeyInfo? DescribePublicKey(string publicKeyLine)
+        {
+            if (!IsLikelyPublicKey(publicKeyLine)) return null;
+            string[] parts = publicKeyLine.Trim()
+                .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            string type = parts[0];
+            byte[] blob;
+            try { blob = Convert.FromBase64String(parts[1]); }
+            catch (FormatException) { return null; }
+
+            // OpenSSH fingerprint: base64 of SHA-256 over the raw blob, no padding.
+            string fp = "SHA256:" + Convert.ToBase64String(SHA256.HashData(blob)).TrimEnd('=');
+            return new PublicKeyInfo(type, KeyBits(type, blob), fp);
+        }
+
+        /// <summary>Splits an SSH blob into its length-prefixed fields, or null if malformed.</summary>
+        private static List<byte[]>? ReadFields(byte[] blob)
+        {
+            var fields = new List<byte[]>();
+            int pos = 0;
+            while (pos < blob.Length)
+            {
+                if (pos + 4 > blob.Length) return null;
+                long len = ((long)blob[pos] << 24) | ((long)blob[pos + 1] << 16)
+                         | ((long)blob[pos + 2] << 8) | blob[pos + 3];
+                pos += 4;
+                if (len < 0 || pos + len > blob.Length) return null;
+                fields.Add(blob[pos..(int)(pos + len)]);
+                pos += (int)len;
+            }
+            return fields;
+        }
+
+        /// <summary>Key size in bits: RSA modulus bit length, or the fixed size of the curve.</summary>
+        private static int KeyBits(string type, byte[] blob)
+        {
+            switch (type)
+            {
+                case "ssh-rsa":
+                    // Fields: "ssh-rsa", e, n → the size is the modulus (n) bit length.
+                    var f = ReadFields(blob);
+                    return f is { Count: >= 3 } ? MpintBitLength(f[2]) : 0;
+                case "ssh-ed25519": return 256;
+                case "ecdsa-sha2-nistp256": return 256;
+                case "ecdsa-sha2-nistp384": return 384;
+                case "ecdsa-sha2-nistp521": return 521;
+                default: return 0;
+            }
+        }
+
+        /// <summary>Bit length of a big-endian SSH mpint (leading zero/sign bytes ignored).</summary>
+        private static int MpintBitLength(byte[] mpint)
+        {
+            int i = 0;
+            while (i < mpint.Length && mpint[i] == 0) i++;
+            if (i >= mpint.Length) return 0;
+            int bitsInTop = 0;
+            for (int b = mpint[i]; b != 0; b >>= 1) bitsInTop++;
+            return (mpint.Length - i - 1) * 8 + bitsInTop;
         }
 
         /// <summary>Copies a file to a temp ".bak" sibling if it exists; returns the backup path or null.</summary>

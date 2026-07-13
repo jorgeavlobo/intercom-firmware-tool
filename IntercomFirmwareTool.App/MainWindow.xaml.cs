@@ -326,10 +326,25 @@ namespace IntercomFirmwareTool.App
             SetPathText(TxtKeyPath, pubPath);
             UpdateBuildEnabled();
 
+            // Report exactly what was generated so the user can see and verify it:
+            // the key type/size and the SHA-256 fingerprint (same value that
+            // `ssh-keygen -lf <file>.pub` prints).
+            string keyDetails = "";
+            try
+            {
+                var info = SshKeyGen.DescribePublicKey(File.ReadAllText(pubPath));
+                if (info != null)
+                    keyDetails =
+                        $"  Key type    : {info.Label}\n" +
+                        $"  Fingerprint : {info.Sha256Fingerprint}\n";
+            }
+            catch { /* details are informational; never block on them */ }
+
             TxtResult.Text =
                 "New SSH key pair created.\n\n" +
                 $"  Private key : {privatePath}\n" +
-                $"  Public key  : {pubPath}\n\n" +
+                $"  Public key  : {pubPath}\n" +
+                keyDetails + "\n" +
                 "The public key is now selected for the build. KEEP THE PRIVATE KEY SAFE —\n" +
                 "it is what you will use to log in (ssh -i \"" + privatePath + "\" root@<device>).\n" +
                 "It has no passphrase; add one later with:  ssh-keygen -p -f \"" + privatePath + "\"\n\n" +
