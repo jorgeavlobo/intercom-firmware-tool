@@ -462,7 +462,11 @@ namespace IntercomFirmwareTool.Core
             // is by password only and no authorized_keys is created.
             if (opts.HasKey)
             {
-                string pub = EnsureTrailingNewline(opts.PublicKey!);
+                // Normalize to exactly one trailing '\n' with NO stray CR: a key
+                // passed with Windows CRLF would otherwise leave a '\r' in
+                // authorized_keys, which dropbear/OpenSSH can treat as part of the
+                // line and reject — even though Trim()-based validation still passes.
+                string pub = opts.PublicKey!.TrimEnd('\r', '\n') + "\n";
 
                 // Phase B — the key in root's home. Create parents, then .ssh, then
                 // authorized_keys (0600, root:root). The .ssh dir is 0755, matching
@@ -829,8 +833,6 @@ namespace IntercomFirmwareTool.Core
         }
 
         private static uint ToMode(int octalDigits) => Convert.ToUInt32(octalDigits.ToString(), 8);
-
-        private static string EnsureTrailingNewline(string s) => s.EndsWith("\n") ? s : s + "\n";
 
         /// <summary>True if exactly one line of <paramref name="content"/> equals <paramref name="expected"/>.</summary>
         private static bool HasExactLine(string content, string expected) =>
