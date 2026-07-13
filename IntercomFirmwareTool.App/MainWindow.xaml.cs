@@ -496,13 +496,17 @@ namespace IntercomFirmwareTool.App
                 return;
             }
 
-            // The output must not clobber the selected public key (build moves the
-            // verified artifact onto the output path with overwrite).
-            if (_keyPath != null && SamePath(_outputPath!, _keyPath))
+            // The output must not clobber the selected public key OR its private
+            // sibling (the build moves the verified artifact onto the output path
+            // with overwrite; deleting the private key would make a key-only build
+            // impossible to log into).
+            string? privKey = SelectedPrivateKeyPath();
+            if ((_keyPath != null && SamePath(_outputPath!, _keyPath)) ||
+                (privKey != null && SamePath(_outputPath!, privKey)))
             {
                 MessageBox.Show(this,
-                    "The output path is the same file as the selected public key.\n\n" +
-                    "Choose a different output so the key isn't overwritten.",
+                    "The output path is the same file as the selected SSH key (public or\n" +
+                    "private). Choose a different output so the key isn't overwritten.",
                     "Output collides with the key", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
@@ -749,6 +753,20 @@ namespace IntercomFirmwareTool.App
         /// warning is not bypassed by an alias. Case-insensitive on Windows.
         /// </summary>
         private static bool SamePath(string a, string b) => PathIdentity.SamePath(a, b);
+
+        /// <summary>
+        /// The private-key path paired with the selected public key, when derivable:
+        /// an OpenSSH "<c>.pub</c>" strips to its private sibling. This also matches
+        /// the pair produced by "Generate new…", where the public key is the private
+        /// path plus "<c>.pub</c>". Null if the selected key does not end in ".pub".
+        /// </summary>
+        private string? SelectedPrivateKeyPath()
+        {
+            const string pub = ".pub";
+            return _keyPath != null && _keyPath.EndsWith(pub, StringComparison.OrdinalIgnoreCase)
+                ? _keyPath[..^pub.Length]
+                : null;
+        }
 
         private void SetButtonsEnabled(bool enabled)
         {
