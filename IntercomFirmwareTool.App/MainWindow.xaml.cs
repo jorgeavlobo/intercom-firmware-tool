@@ -529,7 +529,10 @@ namespace IntercomFirmwareTool.App
 
             var opts = new EnableSshOptions(publicKey, password, keyOnly);
 
-            string fwz = _fwzPath, output = _outputPath, keyPath = _keyPath;
+            // Non-null here: guarded at the top of this handler (and Build is only
+            // enabled with all three set). They are fields, so the compiler re-widens
+            // them to maybe-null after the intervening calls — assert with '!'.
+            string fwz = _fwzPath!, output = _outputPath!, keyPath = _keyPath!;
 
             var sb = new StringBuilder();
             sb.AppendLine("Building modified firmware…");
