@@ -175,15 +175,6 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// The algorithm token of an OpenSSH public-key line (e.g. <c>ssh-rsa</c>),
-        /// or null if the text is not a valid public key.
-        /// </summary>
-        public static string? KeyType(string publicKeyLine)
-            => IsLikelyPublicKey(publicKeyLine)
-                ? publicKeyLine.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)[0]
-                : null;
-
-        /// <summary>
         /// Parses an OpenSSH public-key line and returns its type, size (bits) and
         /// SHA-256 fingerprint (the standard <c>SHA256:&lt;base64&gt;</c> form that
         /// <c>ssh-keygen -lf</c> prints), or null if it is not a valid key line.

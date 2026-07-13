@@ -10,11 +10,19 @@ namespace IntercomFirmwareTool.Core
         string After,
         bool Persisted);
 
-    /// <summary>Options for the SSH/root-enable edit (Phase A–D).</summary>
+    /// <summary>
+    /// Options for the SSH/root-enable edit (Phase A–D). A root password is
+    /// <b>always</b> set (MD5-crypt) — it is the minimum credential. An SSH public
+    /// key is <b>optional</b>: when null/blank, no <c>authorized_keys</c> is written
+    /// and login is by password only.
+    /// </summary>
     public sealed record EnableSshOptions(
-        string PublicKey,
         string RootPassword,
-        bool KeyOnly = false);
+        string? PublicKey = null)
+    {
+        /// <summary>True when an SSH public key was supplied (so authorized_keys is written).</summary>
+        public bool HasKey => !string.IsNullOrWhiteSpace(PublicKey);
+    }
 
     /// <summary>One validation check: a name, pass/fail, and an optional detail.</summary>
     public sealed record Ext4Check(string Name, bool Pass, string Detail);
@@ -372,34 +380,24 @@ namespace IntercomFirmwareTool.Core
         /// <summary>
         /// Defensive validation of the options, independent of any UI-layer
         /// checks, so a non-UI caller can't produce an insecure or non-functional
-        /// image: a valid single-line public key is always required, and a
-        /// password is required unless key-only login is selected (an empty
-        /// password would still hash to a valid BLANK-password /etc/shadow entry).
+        /// image: a non-empty root password is always required (it is the minimum
+        /// credential; an empty password would hash to a valid BLANK-password
+        /// /etc/shadow entry), and an SSH public key is optional — but if supplied
+        /// it must be a single valid OpenSSH public-key line.
         /// </summary>
         private static void ValidateOptions(EnableSshOptions opts)
         {
-            if (string.IsNullOrWhiteSpace(opts.PublicKey))
-                throw new ArgumentException("A non-empty SSH public key is required.", nameof(opts));
-            // The key is written into authorized_keys, so it must be a SINGLE
-            // valid OpenSSH public-key line. Reject multi-line/garbage here too
-            // (the UI already checks this) so a non-UI caller cannot pass text
-            // that silently authorizes more than the one intended key.
-            if (!SshKeyGen.IsLikelyPublicKey(opts.PublicKey))
+            if (string.IsNullOrEmpty(opts.RootPassword))
+                throw new ArgumentException(
+                    "A non-empty root password is required.", nameof(opts));
+            // A key is optional. If one is supplied it is written into
+            // authorized_keys, so it must be a SINGLE valid OpenSSH public-key line
+            // — reject multi-line/garbage here too (the UI already checks this) so a
+            // non-UI caller cannot pass text that silently authorizes extra keys.
+            if (opts.HasKey && !SshKeyGen.IsLikelyPublicKey(opts.PublicKey!))
                 throw new ArgumentException(
                     "The SSH public key must be a single valid OpenSSH public-key line " +
                     "(e.g. \"ssh-rsa AAAA… comment\").", nameof(opts));
-            // Key-only login has NO password fallback, so the key must be an
-            // algorithm proven to authenticate on the target firmware's dropbear.
-            // Only RSA is verified (and the only type this tool generates); a
-            // non-RSA key-only build could produce a firmware with no usable login.
-            if (opts.KeyOnly && SshKeyGen.KeyType(opts.PublicKey) != "ssh-rsa")
-                throw new ArgumentException(
-                    "Key-only login requires an RSA public key — the only key type verified to " +
-                    "authenticate on the target firmware. Use an RSA key, or set a password.",
-                    nameof(opts));
-            if (!opts.KeyOnly && string.IsNullOrEmpty(opts.RootPassword))
-                throw new ArgumentException(
-                    "A non-empty root password is required unless KeyOnly is set.", nameof(opts));
         }
 
         /// <summary>Applies the ordered Phase A–D edits on an open, writable fs.</summary>
@@ -417,9 +415,9 @@ namespace IntercomFirmwareTool.Core
                     "This firmware already contains a 'root2' account — it appears to be already " +
                     "SSH-enabled. Run the tool on the ORIGINAL, unmodified firmware.");
 
-            // Phase A — accounts. Same MD5-crypt hash for both users (salt
-            // "root"); key-only mode disables the password with "*".
-            string secret = opts.KeyOnly ? "*" : Md5Crypt.Crypt(opts.RootPassword, "root");
+            // Phase A — accounts. A root password is always set (MD5-crypt, salt
+            // "root") — it is the minimum credential.
+            string secret = Md5Crypt.Crypt(opts.RootPassword, "root");
             AppendLines(fs, "/etc/passwd", new[]
             {
                 "root2:x:0:0:root:/home/root:/bin/sh",
@@ -431,31 +429,39 @@ namespace IntercomFirmwareTool.Core
                 $"bticino2:{secret}:18033:0:99999:7:::",
             });
 
-            // Phase B — the key in root's home. Create parents, then .ssh, then
-            // authorized_keys (0600, root:root). The .ssh dir is 0755, matching
-            // fquinto exactly (its `mkdir -p` under the default umask). Neither
-            // /home/root/.ssh nor any authorized_keys exists in the factory
-            // firmware (verified: /home/root has only .bash_history and .cache;
-            // /etc/dropbear has only dropbear_rsa_host_key) — the whole key-login
-            // mechanism is created here, so there is no "factory" mode to copy.
-            // Security comes from the parent: /home/root is 0700 root:root at
-            // factory (verified drwx------), so anything inside (.ssh at 0755 or
-            // 0700) is unreachable by other users regardless. dropbear accepts
-            // 0755 — it only rejects a group/other-WRITABLE .ssh, which 0755 is not.
-            EnsureDir(fs, "/home");
-            EnsureDir(fs, "/home/root");
-            EnsureDir(fs, "/home/root/.ssh");
-            fs.SetMode("/home/root/.ssh", ToMode(755));
-            fs.SetOwner("/home/root/.ssh", 0, 0);
-            WriteTextFile(fs, "/home/root/.ssh/authorized_keys", EnsureTrailingNewline(opts.PublicKey));
-            fs.SetMode("/home/root/.ssh/authorized_keys", ToMode(600));
-            fs.SetOwner("/home/root/.ssh/authorized_keys", 0, 0);
+            // Phases B/C — SSH key (OPTIONAL). Only when a key was supplied: write
+            // it to root's home and to dropbear's system path. Without a key, login
+            // is by password only and no authorized_keys is created.
+            if (opts.HasKey)
+            {
+                string pub = EnsureTrailingNewline(opts.PublicKey!);
 
-            // Phase C — the key in dropbear's system path (0600, root:root).
-            EnsureDir(fs, "/etc/dropbear");
-            WriteTextFile(fs, "/etc/dropbear/authorized_keys", EnsureTrailingNewline(opts.PublicKey));
-            fs.SetMode("/etc/dropbear/authorized_keys", ToMode(600));
-            fs.SetOwner("/etc/dropbear/authorized_keys", 0, 0);
+                // Phase B — the key in root's home. Create parents, then .ssh, then
+                // authorized_keys (0600, root:root). The .ssh dir is 0755, matching
+                // fquinto exactly (its `mkdir -p` under the default umask). Neither
+                // /home/root/.ssh nor any authorized_keys exists in the factory
+                // firmware (verified: /home/root has only .bash_history and .cache;
+                // /etc/dropbear has only dropbear_rsa_host_key) — the whole key-login
+                // mechanism is created here, so there is no "factory" mode to copy.
+                // Security comes from the parent: /home/root is 0700 root:root at
+                // factory (verified drwx------), so anything inside (.ssh at 0755 or
+                // 0700) is unreachable by other users regardless. dropbear accepts
+                // 0755 — it only rejects a group/other-WRITABLE .ssh, which 0755 is not.
+                EnsureDir(fs, "/home");
+                EnsureDir(fs, "/home/root");
+                EnsureDir(fs, "/home/root/.ssh");
+                fs.SetMode("/home/root/.ssh", ToMode(755));
+                fs.SetOwner("/home/root/.ssh", 0, 0);
+                WriteTextFile(fs, "/home/root/.ssh/authorized_keys", pub);
+                fs.SetMode("/home/root/.ssh/authorized_keys", ToMode(600));
+                fs.SetOwner("/home/root/.ssh/authorized_keys", 0, 0);
+
+                // Phase C — the key in dropbear's system path (0600, root:root).
+                EnsureDir(fs, "/etc/dropbear");
+                WriteTextFile(fs, "/etc/dropbear/authorized_keys", pub);
+                fs.SetMode("/etc/dropbear/authorized_keys", ToMode(600));
+                fs.SetOwner("/etc/dropbear/authorized_keys", 0, 0);
+            }
 
             // Phase D — start dropbear at boot via the rc5.d symlink (relative
             // target, stored verbatim). Check the prerequisites first so a
@@ -518,16 +524,21 @@ namespace IntercomFirmwareTool.Core
                 checks.Add(new("/etc/passwd has bticino2",
                     HasExactLine(passwd, "bticino2:x:1000:1000::/home/bticino:/bin/sh"), ""));
 
-                string secret = opts.KeyOnly ? "*" : Md5Crypt.Crypt(opts.RootPassword, "root");
+                string secret = Md5Crypt.Crypt(opts.RootPassword, "root");
                 string shadow = ReadAllTextFromFs(fs, "/etc/shadow");
                 checks.Add(new("/etc/shadow has root2 entry",
                     HasExactLine(shadow, $"root2:{secret}:18033:0:99999:7:::"), ""));
                 checks.Add(new("/etc/shadow has bticino2 entry",
                     HasExactLine(shadow, $"bticino2:{secret}:18033:0:99999:7:::"), ""));
 
-                CheckDir(fs, checks, "/home/root/.ssh");
-                CheckAuthKeys(fs, checks, "/home/root/.ssh/authorized_keys", opts.PublicKey);
-                CheckAuthKeys(fs, checks, "/etc/dropbear/authorized_keys", opts.PublicKey);
+                // Key checks only when the build included a key; a password-only
+                // build writes no authorized_keys, so those paths must be absent.
+                if (opts.HasKey)
+                {
+                    CheckDir(fs, checks, "/home/root/.ssh");
+                    CheckAuthKeys(fs, checks, "/home/root/.ssh/authorized_keys", opts.PublicKey!);
+                    CheckAuthKeys(fs, checks, "/etc/dropbear/authorized_keys", opts.PublicKey!);
+                }
 
                 string target = "";
                 bool symOk = false;

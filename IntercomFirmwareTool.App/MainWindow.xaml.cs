@@ -16,11 +16,11 @@ namespace IntercomFirmwareTool.App
     /// <summary>
     /// Interaction logic for MainWindow.xaml.
     ///
-    /// One product flow: choose the original .fwz, an SSH public key and an
-    /// output path, then Build a modified .fwz that enables SSH/root login
-    /// (the fquinto edits), verified by a full read-back round-trip. Two
-    /// secondary actions verify an existing .fwz and run the MD5-crypt self-test.
-    /// The input .fwz is never modified.
+    /// One product flow: choose the original .fwz, set a root password and an
+    /// output path (an SSH public key is optional), then Build a modified .fwz
+    /// that enables SSH/root login (the fquinto edits), verified by a full
+    /// read-back round-trip. Two secondary actions verify an existing .fwz and
+    /// run the MD5-crypt self-test. The input .fwz is never modified.
     /// </summary>
     public partial class MainWindow : Window
     {
@@ -45,6 +45,9 @@ namespace IntercomFirmwareTool.App
             _confirm = new MaskedPasswordField(TxtConfirm);
             _pw.Changed += UpdatePasswordHint;
             _confirm.Changed += UpdatePasswordHint;
+            // The password is a Build precondition (the key is optional), so
+            // re-evaluate the Build button as it changes.
+            _pw.Changed += UpdateBuildEnabled;
             WirePeekButton();
 
             // Password fields start EMPTY on purpose: the user must enter a root
@@ -83,7 +86,6 @@ namespace IntercomFirmwareTool.App
         /// <summary>Reveals or masks BOTH password fields and updates the eye icon.</summary>
         private void SetReveal(bool on)
         {
-            if (ChkKeyOnly.IsChecked == true) on = false; // nothing to reveal in key-only
             // An explicit reveal cancels any pending flash auto-remask, so holding
             // the eye during the ~0.5 s flash window is not cut short by the timer.
             if (on) _flashTimer?.Stop();
@@ -103,7 +105,6 @@ namespace IntercomFirmwareTool.App
         /// cue that the password just changed (e.g. after generating one).</summary>
         private void FlashReveal()
         {
-            if (ChkKeyOnly.IsChecked == true) return;
             SetReveal(true);
             if (_flashTimer is null)
             {
@@ -142,8 +143,6 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private void BtnRandomPwd_Click(object sender, RoutedEventArgs e)
         {
-            if (ChkKeyOnly.IsChecked == true) return; // password login disabled
-
             string pwd = GenerateRandomPassword(20);
             _pw.Value = pwd;
             _confirm.Value = pwd; // both set → the match hint shows ✓
@@ -244,7 +243,7 @@ namespace IntercomFirmwareTool.App
             TxtResult.Text =
                 "✅ " + check.Message + "\n\n" +
                 check.Match!.Describe() + "\n\n" +
-                "You can now choose a key and Build.";
+                "Set a root password and Build (an SSH key is optional).";
         }
 
         /// <summary>Picks an existing OpenSSH public key and selects it for the build.</summary>
@@ -258,7 +257,26 @@ namespace IntercomFirmwareTool.App
             };
             if (dlg.ShowDialog(this) != true) return;
 
-            _keyPath = dlg.FileName;
+            // Validate on selection so bad input is caught here, not at Build time.
+            string chosen = dlg.FileName;
+            string content;
+            try { content = File.ReadAllText(chosen).Trim(); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not read the key file:\n{ex.Message}",
+                    "Cannot read key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (content.Length == 0 || !SshKeyGen.IsLikelyPublicKey(content))
+            {
+                MessageBox.Show(this,
+                    "That file does not look like an OpenSSH public key\n" +
+                    "(expected a line like \"ssh-rsa AAAA… comment\"). Pick the .pub file.",
+                    "Not a public key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            _keyPath = chosen;
             SetPathText(TxtKeyPath, _keyPath);
             UpdateBuildEnabled();
         }
@@ -391,22 +409,6 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
-        /// <summary>Toggles key-only login: greys out the password fields and stops any active reveal when enabled.</summary>
-        private void ChkKeyOnly_Toggled(object sender, RoutedEventArgs e)
-        {
-            // Key-only means no password login; grey the password fields out and
-            // stop any active reveal.
-            bool usePassword = ChkKeyOnly.IsChecked != true;
-            if (!usePassword) SetReveal(false);
-
-            TxtPassword.IsEnabled = usePassword;
-            TxtConfirm.IsEnabled = usePassword;
-            BtnToggleReveal.IsEnabled = usePassword;
-            BtnCopyPwd.IsEnabled = usePassword;
-            BtnRandomPwd.IsEnabled = usePassword;
-            UpdatePasswordHint();
-        }
-
         /// <summary>The current password value (real text, held by the masked field).</summary>
         private string CurrentPassword() => _pw.Value;
 
@@ -419,12 +421,6 @@ namespace IntercomFirmwareTool.App
             // TxtPwdHint may not exist yet during very early initialization.
             if (TxtPwdHint is null) return;
 
-            if (ChkKeyOnly.IsChecked == true)
-            {
-                TxtPwdHint.Text = "(password login disabled)";
-                TxtPwdHint.Foreground = Brushes.Gray;
-                return;
-            }
             if (CurrentPassword().Length == 0 && CurrentConfirm().Length == 0)
             {
                 TxtPwdHint.Text = "";
@@ -443,11 +439,15 @@ namespace IntercomFirmwareTool.App
             return Directory.Exists(ssh) ? ssh : profile;
         }
 
-        /// <summary>Enables the Build button only when firmware, key and output are all chosen.</summary>
+        /// <summary>
+        /// Enables the Build button only when firmware, output and a non-empty root
+        /// password are all set. The SSH public key is optional, so it is not part
+        /// of this condition.
+        /// </summary>
         private void UpdateBuildEnabled()
         {
             BtnBuild.IsEnabled =
-                _fwzPath != null && _keyPath != null && _outputPath != null;
+                _fwzPath != null && _outputPath != null && CurrentPassword().Length > 0;
         }
 
         // ---- Primary action: Build ------------------------------------------
@@ -455,67 +455,22 @@ namespace IntercomFirmwareTool.App
         /// <summary>Validates the inputs, builds the modified firmware, and shows the verified round-trip result.</summary>
         private async void BtnBuild_Click(object sender, RoutedEventArgs e)
         {
-            if (_fwzPath is null || _keyPath is null || _outputPath is null) return;
+            if (_fwzPath is null || _outputPath is null) return;
 
-            string publicKey;
-            try
-            {
-                publicKey = File.ReadAllText(_keyPath).Trim();
-            }
-            catch (Exception ex)
-            {
-                TxtResult.Text = $"Could not read the public key:\n{ex.Message}";
-                return;
-            }
-            if (publicKey.Length == 0)
-            {
-                TxtResult.Text = "The selected public key file is empty.";
-                return;
-            }
-            if (!SshKeyGen.IsLikelyPublicKey(publicKey))
-            {
-                MessageBox.Show(this,
-                    "The selected file does not look like an OpenSSH public key\n" +
-                    "(expected a line like \"ssh-rsa AAAA… comment\" or \"ssh-ed25519 AAAA…\").\n\n" +
-                    "Pick your .pub file, or use \"Generate new…\".",
-                    "Not a public key", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            bool keyOnly = ChkKeyOnly.IsChecked == true;
             string password = CurrentPassword();
 
-            // Key-only login has no password fallback, so the key must be RSA — the
-            // only algorithm verified to authenticate on the target firmware (and
-            // the only type this tool generates). A non-RSA key-only build could
-            // leave a device with no usable login. Require a password for such keys.
-            if (keyOnly && SshKeyGen.KeyType(publicKey) != "ssh-rsa")
+            // The root password is the minimum credential — require a non-empty,
+            // matching one. An empty password would hash to a valid BLANK-password
+            // /etc/shadow entry (login with no password at all).
+            if (password.Length == 0)
             {
                 MessageBox.Show(this,
-                    "Key-only login requires an RSA public key.\n\n" +
-                    "RSA is the only key type verified to authenticate on this firmware's\n" +
-                    "dropbear, so a key-only build with another type could leave the device\n" +
-                    "with no way to log in. Use an RSA key, or untick \"Key-only\" and set a\n" +
-                    "root password as a fallback.",
-                    "RSA key required for key-only", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            // With password login, refuse an empty password — it would produce a
-            // valid /etc/shadow hash for a BLANK password, letting the added
-            // accounts log in with no password. Require one, or tick key-only.
-            if (!keyOnly && password.Length == 0)
-            {
-                MessageBox.Show(this,
-                    "Enter a root password, or tick \"Key-only login (no password)\".\n\n" +
-                    "Building with an empty password would let the added accounts log in " +
-                    "with no password at all.",
+                    "Enter a root password. It is the minimum credential to build a\n" +
+                    "modified firmware (an SSH public key is optional).",
                     "Password required", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
-
-            // Passwords must match unless key-only login is selected.
-            if (!keyOnly && password != CurrentConfirm())
+            if (password != CurrentConfirm())
             {
                 MessageBox.Show(this,
                     "The password and its confirmation do not match.",
@@ -523,19 +478,48 @@ namespace IntercomFirmwareTool.App
                 return;
             }
 
-            // The output must not clobber the selected public key OR its private
-            // sibling (the build moves the verified artifact onto the output path
-            // with overwrite; deleting the private key would make a key-only build
-            // impossible to log into).
-            string? privKey = SelectedPrivateKeyPath();
-            if ((_keyPath != null && SamePath(_outputPath!, _keyPath)) ||
-                (privKey != null && SamePath(_outputPath!, privKey)))
+            // The SSH key is OPTIONAL. If one was chosen, read and validate it, and
+            // make sure the output won't overwrite it.
+            string? publicKey = null;
+            if (_keyPath is { } keyPath) // captured non-null: field re-widens after calls
             {
-                MessageBox.Show(this,
-                    "The output path is the same file as the selected SSH key (public or\n" +
-                    "private). Choose a different output so the key isn't overwritten.",
-                    "Output collides with the key", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
+                try
+                {
+                    publicKey = File.ReadAllText(keyPath).Trim();
+                }
+                catch (Exception ex)
+                {
+                    TxtResult.Text = $"Could not read the public key:\n{ex.Message}";
+                    return;
+                }
+                if (publicKey.Length == 0)
+                {
+                    TxtResult.Text = "The selected public key file is empty.";
+                    return;
+                }
+                if (!SshKeyGen.IsLikelyPublicKey(publicKey))
+                {
+                    MessageBox.Show(this,
+                        "The selected file does not look like an OpenSSH public key\n" +
+                        "(expected a line like \"ssh-rsa AAAA… comment\" or \"ssh-ed25519 AAAA…\").\n\n" +
+                        "Pick a valid .pub file, or generate a new pair.",
+                        "Not a public key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                // The output must not clobber the selected key OR its private sibling
+                // (the build moves the verified artifact onto the output path with
+                // overwrite; deleting the private key would make key login impossible).
+                string? privKey = SelectedPrivateKeyPath();
+                if (SamePath(_outputPath!, keyPath) ||
+                    (privKey != null && SamePath(_outputPath!, privKey)))
+                {
+                    MessageBox.Show(this,
+                        "The output path is the same file as the selected SSH key (public or\n" +
+                        "private). Choose a different output so the key isn't overwritten.",
+                        "Output collides with the key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
             }
 
             // Confirm before overwriting an existing output file (the path may
@@ -548,20 +532,20 @@ namespace IntercomFirmwareTool.App
                 if (answer != MessageBoxResult.Yes) return;
             }
 
-            var opts = new EnableSshOptions(publicKey, password, keyOnly);
+            var opts = new EnableSshOptions(password, publicKey);
 
-            // Non-null here: guarded at the top of this handler (and Build is only
-            // enabled with all three set). They are fields, so the compiler re-widens
+            // Non-null here: guarded above (and Build is only enabled with firmware,
+            // output and a password set). They are fields, so the compiler re-widens
             // them to maybe-null after the intervening calls — assert with '!'.
-            string fwz = _fwzPath!, output = _outputPath!, keyPath = _keyPath!;
+            string fwz = _fwzPath!, output = _outputPath!;
 
             var sb = new StringBuilder();
             sb.AppendLine("Building modified firmware…");
             sb.AppendLine($"  Input      : {fwz}");
-            sb.AppendLine($"  Public key : {keyPath}");
-            sb.AppendLine(keyOnly
-                ? "  Login      : key-only (password disabled)"
-                : "  Root pw    : (set — stored as MD5-crypt $1$root$…)");
+            sb.AppendLine("  Root pw    : (set — stored as MD5-crypt $1$root$…)");
+            sb.AppendLine(opts.HasKey
+                ? $"  Public key : {_keyPath}"
+                : "  Public key : (none — password login only)");
             sb.AppendLine($"  Output     : {output}");
             sb.AppendLine();
 
@@ -615,66 +599,77 @@ namespace IntercomFirmwareTool.App
             if (fwzDlg.ShowDialog(this) != true) return;
             string fwzPath = fwzDlg.FileName;
 
-            // Reuse the key from the form if set; otherwise ask for it.
-            string? keyPath = _keyPath;
-            if (keyPath is null)
-            {
-                var keyDlg = new OpenFileDialog
-                {
-                    Title = "Choose the SSH public key that .fwz was built with",
-                    Filter = "Public key (*.pub)|*.pub|All files (*.*)|*.*",
-                    InitialDirectory = DefaultSshDir()
-                };
-                if (keyDlg.ShowDialog(this) != true) return;
-                keyPath = keyDlg.FileName;
-            }
-
-            string publicKey;
-            try
-            {
-                publicKey = File.ReadAllText(keyPath).Trim();
-            }
-            catch (Exception ex)
-            {
-                TxtResult.Text = $"Could not read the public key:\n{ex.Message}";
-                return;
-            }
-            if (publicKey.Length == 0 || !SshKeyGen.IsLikelyPublicKey(publicKey))
-            {
-                MessageBox.Show(this,
-                    "The chosen key file does not look like an OpenSSH public key\n" +
-                    "(expected a line like \"ssh-rsa AAAA… comment\"). Verification compares\n" +
-                    "against this key, so it must be the .pub the .fwz was built with.",
-                    "Not a public key", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            bool keyOnly = ChkKeyOnly.IsChecked == true;
             string password = CurrentPassword();
 
-            // With password login, an empty password validates against the
-            // BLANK-password /etc/shadow hash — a misleading false-negative that
-            // would never match a real build. Require one, or tick key-only.
-            if (!keyOnly && password.Length == 0)
+            // Verify compares against the password the .fwz was built with. An empty
+            // password compares against the BLANK-password hash — a misleading
+            // false-negative that fails even a correctly built firmware. Require one.
+            if (password.Length == 0)
             {
                 MessageBox.Show(this,
-                    "Enter the root password that .fwz was built with, or tick\n" +
-                    "\"Key-only login (no password)\" if it has no password login.\n\n" +
+                    "Enter the root password that .fwz was built with.\n\n" +
                     "Verifying with an empty password compares against the blank-password\n" +
-                    "hash, which will fail even for a correctly built firmware.",
+                    "hash, which fails even for a correctly built firmware.",
                     "Password required", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
-            var opts = new EnableSshOptions(publicKey, password, keyOnly);
+            // The SSH key is optional. Use the form's key if set; otherwise ask
+            // whether this .fwz was built with one (a password-only build has none).
+            string? keyPath = _keyPath;
+            if (keyPath is null)
+            {
+                var ans = MessageBox.Show(this,
+                    "Was this firmware built with an SSH public key?\n\n" +
+                    "Yes — pick the .pub it was built with (its authorized_keys is checked).\n" +
+                    "No  — it is a password-only build (the key checks are skipped).",
+                    "Include an SSH key?", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+                if (ans == MessageBoxResult.Cancel) return;
+                if (ans == MessageBoxResult.Yes)
+                {
+                    var keyDlg = new OpenFileDialog
+                    {
+                        Title = "Choose the SSH public key that .fwz was built with",
+                        Filter = "Public key (*.pub)|*.pub|All files (*.*)|*.*",
+                        InitialDirectory = DefaultSshDir()
+                    };
+                    if (keyDlg.ShowDialog(this) != true) return;
+                    keyPath = keyDlg.FileName;
+                }
+            }
+
+            string? publicKey = null;
+            if (keyPath != null)
+            {
+                try
+                {
+                    publicKey = File.ReadAllText(keyPath).Trim();
+                }
+                catch (Exception ex)
+                {
+                    TxtResult.Text = $"Could not read the public key:\n{ex.Message}";
+                    return;
+                }
+                if (publicKey.Length == 0 || !SshKeyGen.IsLikelyPublicKey(publicKey))
+                {
+                    MessageBox.Show(this,
+                        "The chosen key file does not look like an OpenSSH public key\n" +
+                        "(expected a line like \"ssh-rsa AAAA… comment\"). Verification compares\n" +
+                        "against this key, so it must be the .pub the .fwz was built with.",
+                        "Not a public key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+            }
+
+            var opts = new EnableSshOptions(password, publicKey);
 
             var sb = new StringBuilder();
             sb.AppendLine("Verifying an existing firmware (read-only, the .fwz is not modified)…");
             sb.AppendLine($"  .fwz       : {fwzPath}");
-            sb.AppendLine($"  Public key : {keyPath}");
-            sb.AppendLine(keyOnly
-                ? "  Login      : key-only (password disabled)"
-                : "  Root pw    : (as entered — must match how that .fwz was built)");
+            sb.AppendLine("  Root pw    : (as entered — must match how that .fwz was built)");
+            sb.AppendLine(opts.HasKey
+                ? $"  Public key : {keyPath}"
+                : "  Public key : (none — password-only build)");
             sb.AppendLine();
 
             await RunAndShow(sb, () =>
@@ -816,20 +811,18 @@ namespace IntercomFirmwareTool.App
             BtnBrowseOutput.IsEnabled = enabled && _fwzPath != null;
             BtnVerify.IsEnabled = enabled;
             BtnSelfTest.IsEnabled = enabled;
-            // Build only re-enables if the three inputs are set.
+            // Build only re-enables when firmware + output + a password are set
+            // (the key is optional).
             BtnBuild.IsEnabled = enabled
-                && _fwzPath != null && _keyPath != null && _outputPath != null;
+                && _fwzPath != null && _outputPath != null && CurrentPassword().Length > 0;
 
             // Also lock the credential inputs during an operation so the visible
-            // UI can't drift from the values snapshotted for the build. When
-            // re-enabling, respect key-only mode (password fields stay disabled).
-            bool creds = enabled && ChkKeyOnly.IsChecked != true;
-            ChkKeyOnly.IsEnabled = enabled;
-            TxtPassword.IsEnabled = creds;
-            TxtConfirm.IsEnabled = creds;
-            BtnToggleReveal.IsEnabled = creds;
-            BtnCopyPwd.IsEnabled = creds;
-            BtnRandomPwd.IsEnabled = creds;
+            // UI can't drift from the values snapshotted for the build.
+            TxtPassword.IsEnabled = enabled;
+            TxtConfirm.IsEnabled = enabled;
+            BtnToggleReveal.IsEnabled = enabled;
+            BtnCopyPwd.IsEnabled = enabled;
+            BtnRandomPwd.IsEnabled = enabled;
         }
     }
 }

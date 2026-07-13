@@ -121,27 +121,11 @@
                     AutomationProperties.Name="Browse for the original firmware"
                     Click="BtnBrowseFwz_Click"/>
 
-            <!-- SSH public key: choose an existing one or generate a new pair -->
+            <!-- Root password (masked) + reveal toggle. REQUIRED — the minimum
+                 credential to build a modified firmware. -->
             <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="SSH public key:"/>
-            <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtKeyPath"
-                     Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
-                     Text="(choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
-            <StackPanel Grid.Row="1" Grid.Column="2" Orientation="Horizontal">
-                <Button x:Name="BtnChooseKey" Style="{StaticResource RowIconButton}"
-                        Content="&#xE8B7;" ToolTip="Choose an existing public key (.pub)…"
-                        AutomationProperties.Name="Choose an existing public key"
-                        Click="BtnChooseKey_Click"/>
-                <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
-                        Content="&#xE192;" ToolTip="Generate a new SSH key pair…"
-                        AutomationProperties.Name="Generate a new SSH key pair"
-                        Click="BtnGenKey_Click"/>
-            </StackPanel>
-
-            <!-- Root password (masked) + reveal toggle + key-only -->
-            <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="Root password:"/>
-            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <TextBox x:Name="TxtPassword" Width="200" Style="{StaticResource InputField}"
                          FontFamily="Consolas"/>
                 <!-- Inline actions, in order: generate, reveal (hold-to-show eye),
@@ -157,20 +141,34 @@
                         Content="&#xE8C8;" ToolTip="Copy password to clipboard"
                         AutomationProperties.Name="Copy password to clipboard"
                         Click="BtnCopyPwd_Click"/>
-                <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="16,0,0,0"
-                          Content="Disable"
-                          ToolTip="Key-only login — disable password login (no root password)"
-                          Checked="ChkKeyOnly_Toggled" Unchecked="ChkKeyOnly_Toggled"/>
             </StackPanel>
 
             <!-- Confirm password -->
-            <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}"
+            <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="Confirm password:"/>
-            <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <TextBox x:Name="TxtConfirm" Width="200" Style="{StaticResource InputField}"
                          FontFamily="Consolas"/>
                 <TextBlock x:Name="TxtPwdHint" VerticalAlignment="Center" Margin="10,0,0,0"
                            Foreground="Gray"/>
+            </StackPanel>
+
+            <!-- SSH public key: OPTIONAL — choose an existing one or generate a
+                 new pair. Without a key, login is by the root password above. -->
+            <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                       Text="SSH public key (optional):"/>
+            <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath"
+                     Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
+                     Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
+            <StackPanel Grid.Row="3" Grid.Column="2" Orientation="Horizontal">
+                <Button x:Name="BtnChooseKey" Style="{StaticResource RowIconButton}"
+                        Content="&#xE8B7;" ToolTip="Choose an existing public key (.pub)…"
+                        AutomationProperties.Name="Choose an existing public key"
+                        Click="BtnChooseKey_Click"/>
+                <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
+                        Content="&#xE192;" ToolTip="Generate a new SSH key pair…"
+                        AutomationProperties.Name="Generate a new SSH key pair"
+                        Click="BtnGenKey_Click"/>
             </StackPanel>
 
             <!-- Output (disabled until a firmware is chosen) -->
@@ -206,7 +204,7 @@
                  VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Auto"
                  FontFamily="Consolas" FontSize="12"
-                 Text="Choose a firmware, a public key and an output path, then click Build."/>
+                 Text="Choose a firmware, set a root password and an output path (an SSH key is optional), then click Build."/>
 
         <!-- Row 5: diagnostics -->
         <TextBlock Grid.Row="5" x:Name="TxtDiag" Margin="0,8,0,0"
