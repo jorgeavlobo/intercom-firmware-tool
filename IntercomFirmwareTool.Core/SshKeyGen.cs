@@ -143,19 +143,33 @@ namespace IntercomFirmwareTool.Core
                     fields++;
                 }
 
-                // Exact consumption plus the field count for the type. Enforce
-                // the exact count only for the two common, well-defined formats
-                // (ssh-rsa: name,e,n = 3; ssh-ed25519: name,key = 2 — the type we
-                // generate and the most common one users supply). For any other
-                // type require only name + at least one key field, so a valid but
-                // less common key (dss/ecdsa/FIDO) is not wrongly rejected.
+                // Exact consumption plus the exact wire-field count for the type.
+                // Every allowed type has a known blob layout, so require its exact
+                // count — a truncated blob (algorithm name plus too few fields)
+                // must NOT pass, or it gets written into authorized_keys and the
+                // build's text-only round-trip still "succeeds" while the device
+                // cannot authenticate (worst with key-only login). Any allowed type
+                // without a count here fails closed (expected -1 → rejected), so
+                // this table and `allowed` above must stay in sync.
+                //   ssh-rsa            : name, e, n                       = 3
+                //   ssh-ed25519        : name, key                        = 2
+                //   ssh-dss            : name, p, q, g, y                 = 5
+                //   ecdsa-sha2-nistp*  : name, curve, Q                   = 3
+                //   sk-ssh-ed25519     : name, key, application           = 3
+                //   sk-ecdsa-nistp256  : name, curve, Q, application      = 4
                 int expected = type switch
                 {
                     "ssh-rsa" => 3,
                     "ssh-ed25519" => 2,
+                    "ssh-dss" => 5,
+                    "ecdsa-sha2-nistp256" => 3,
+                    "ecdsa-sha2-nistp384" => 3,
+                    "ecdsa-sha2-nistp521" => 3,
+                    "sk-ssh-ed25519@openssh.com" => 3,
+                    "sk-ecdsa-sha2-nistp256@openssh.com" => 4,
                     _ => -1,
                 };
-                return pos == blob.Length && (expected == -1 ? fields >= 2 : fields == expected);
+                return pos == blob.Length && expected != -1 && fields == expected;
             }
             catch (FormatException)
             {
