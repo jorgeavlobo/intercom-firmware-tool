@@ -186,8 +186,18 @@ namespace IntercomFirmwareTool.App
             int len = _box.SelectionLength;
             // The masked display has the same length as the buffer, so the TextBox
             // selection indices map 1:1 onto _real.
-            if (len > 0 && start >= 0 && start + len <= _real.Length)
+            if (len <= 0 || start < 0 || start + len > _real.Length) return;
+            try
+            {
                 SecureClipboard.SetText(_real.ToString(start, len));
+            }
+            catch
+            {
+                // The clipboard can be transiently locked by another process. This
+                // is a routed-command handler, so an escaping exception would reach
+                // the WPF dispatcher and could crash the app mid-edit — a failed
+                // convenience copy must fail quietly (best-effort, like Cut/Delete).
+            }
         }
 
         /// <summary>Enables the Delete command when there is a selection or a character to the right of the caret.</summary>
