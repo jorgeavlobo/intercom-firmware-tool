@@ -7,6 +7,8 @@
 # the auto-pause churn during active development.
 language: en-US
 reviews:
+  # Don't post the "Review skipped" status message on every push.
+  review_status: false
   # Turn OFF automatic (incremental) reviews on push/PR-open.
   # Manual "@coderabbitai review" still works and is how we request reviews.
   auto_review:
