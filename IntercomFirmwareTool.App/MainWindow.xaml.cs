@@ -3,6 +3,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -89,7 +90,11 @@ namespace IntercomFirmwareTool.App
             _pw.Peek = on;
             _confirm.Peek = on;
             BtnToggleReveal.Content = on ? EyeHide : EyeShow;
-            BtnToggleReveal.ToolTip = on ? "Release to hide" : "Hold to show the password";
+            string hint = on ? "Release to hide the password" : "Hold to show the password";
+            BtnToggleReveal.ToolTip = hint;
+            // Keep the screen-reader name in sync with the state, not just the
+            // tooltip — otherwise it always announces the initial "Hold to show".
+            AutomationProperties.SetName(BtnToggleReveal, hint);
         }
 
         private DispatcherTimer? _flashTimer;
