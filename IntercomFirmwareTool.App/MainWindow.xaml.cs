@@ -350,7 +350,8 @@ namespace IntercomFirmwareTool.App
                 $"  Public key  : {pubPath}\n" +
                 keyDetails + "\n" +
                 "The public key is now selected for the build. KEEP THE PRIVATE KEY SAFE —\n" +
-                "it is what you will use to log in (ssh -i \"" + privatePath + "\" root@<device>).\n" +
+                "it is what you will use to log in. This build adds a root2 account (uid 0),\n" +
+                "so connect as root2:  ssh -i \"" + privatePath + "\" root2@<device>\n" +
                 "It has no passphrase; add one later with:  ssh-keygen -p -f \"" + privatePath + "\"\n\n" +
                 "If Windows OpenSSH later reports the key is too open (\"UNPROTECTED PRIVATE\n" +
                 "KEY FILE\"), restrict it to your account with:\n" +
