@@ -59,15 +59,21 @@ namespace IntercomFirmwareTool.Core
 
             byte[] final = Md5(ctx.ToArray());
 
-            // 1000 stretching rounds
+            // 1000 stretching rounds. Same byte sequence as the reference
+            // (pw/final, optional salt, optional pw, final/pw), assembled into a
+            // single pre-sized buffer per round instead of a List<byte>+ToArray.
+            byte[] round = new byte[pw.Length * 2 + saltBytes.Length + 16];
             for (int i = 0; i < 1000; i++)
             {
-                var c = new List<byte>();
-                c.AddRange((i & 1) != 0 ? pw : final);
-                if (i % 3 != 0) c.AddRange(saltBytes);
-                if (i % 7 != 0) c.AddRange(pw);
-                c.AddRange((i & 1) != 0 ? final : pw);
-                final = Md5(c.ToArray());
+                bool odd = (i & 1) != 0;
+                byte[] head = odd ? pw : final;
+                byte[] tail = odd ? final : pw;
+                int pos = 0;
+                Buffer.BlockCopy(head, 0, round, pos, head.Length); pos += head.Length;
+                if (i % 3 != 0) { Buffer.BlockCopy(saltBytes, 0, round, pos, saltBytes.Length); pos += saltBytes.Length; }
+                if (i % 7 != 0) { Buffer.BlockCopy(pw, 0, round, pos, pw.Length); pos += pw.Length; }
+                Buffer.BlockCopy(tail, 0, round, pos, tail.Length); pos += tail.Length;
+                final = MD5.HashData(round.AsSpan(0, pos));
             }
 
             // Custom base64 rearrangement of the 16 digest bytes.

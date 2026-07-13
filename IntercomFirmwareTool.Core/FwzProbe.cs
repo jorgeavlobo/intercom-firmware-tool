@@ -262,7 +262,7 @@ namespace IntercomFirmwareTool.Core
         /// <summary>
         /// True if the named entry of <paramref name="fwz"/> is <b>ZipCrypto</b>
         /// (traditional PKWARE) encrypted AND decrypts with
-        /// <paramref name="password"/> to gzip data (magic 1F 8B). Guards against a
+        /// <paramref name="password"/> to gzip data (magic 1F 8B 08). Guards against a
         /// repack that produced an unencrypted archive (which any password reads),
         /// one under a different password, or one that used AES instead of the
         /// ZipCrypto the device firmware expects.
