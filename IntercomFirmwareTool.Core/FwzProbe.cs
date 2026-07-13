@@ -364,6 +364,16 @@ namespace IntercomFirmwareTool.Core
                 throw new InvalidOperationException(
                     "No '.gz' (non-recovery) file found inside the .fwz.");
 
+            // The genuine firmware payload is traditional ZipCrypto. Reject an
+            // entry that is stored (unencrypted — then any password's gzip-header
+            // check would pass, falsely accepting the first candidate) or that is
+            // AES-encrypted. This mirrors the IsCrypted/AESKeySize gate that
+            // EntryEncryptedWith applies on the output-verification path.
+            if (!selected.IsCrypted || selected.AESKeySize != 0)
+                throw new InvalidOperationException(
+                    "The '.gz' payload inside the .fwz is not ZipCrypto-encrypted " +
+                    "(expected traditional PKWARE encryption).");
+
             // 2) Find which of the known passwords opens the entry.
             string? goodPassword = null;
             foreach (string pw in Passwords)
