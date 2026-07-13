@@ -15,3 +15,9 @@ reviews:
     enabled: false
   # Keep the high-level walkthrough/summary when a review IS requested.
   high_level_summary: true
+  # Pre-merge checks: turn OFF the docstring-coverage check. Its coverage number
+  # lags behind incremental reviews (it reuses a stale figure when files are
+  # skipped as "similar to previous changes"), so it reports false warnings.
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
