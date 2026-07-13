@@ -195,7 +195,7 @@
                     FontWeight="SemiBold" IsEnabled="False"
                     Content="Build modified firmware" Click="BtnBuild_Click"/>
             <Button x:Name="BtnVerify" Padding="12,8" Margin="0,0,10,0"
-                    Content="Verify an existing .fwz…" Click="BtnVerify_Click"/>
+                    Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
             <Button x:Name="BtnSelfTest" Padding="12,8"
                     Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
         </StackPanel>

@@ -109,7 +109,10 @@ not a change to the ext4 itself.
 - `IntercomFirmwareTool.App/` — the WPF UI. A single product flow: choose the
   original `.fwz`, an SSH public key and an output path, then **Build** a
   modified `.fwz` (verified by a full read-back round-trip). Two secondary
-  actions **Verify an existing `.fwz`** and run the **MD5-crypt self-test**.
+  actions **Inspect an existing `.fwz`** (a self-contained read-only report:
+  point at any `.fwz` and read what is installed — password-login mode, the
+  deployed key's SHA-256 fingerprint, and the structural checks) and run the
+  **MD5-crypt self-test**.
   A startup line reports 64-bit + DLL presence; it turns red if anything is off.
 - `reference/fquinto/README.md` — provenance of the upstream GPL-2.0 script
   (URL + MD5 + line-number map); the script itself is not vendored.
@@ -126,7 +129,7 @@ not a change to the ext4 itself.
   input produced the identical MD5-crypt hash, and its output `.fwz` passes our
   validator with **no divergence** (`.ssh` is 0755, matching fquinto exactly).
 - ✅ Product UI — a single Build flow (choose .fwz + key + output → build +
-  verify), plus Verify-existing and self-test actions.
+  verify), plus Inspect-existing and self-test actions.
 - ⏳ Next (user's call): optional real-device flashing (My Home Suite, Mini-USB;
   keep the original firmware — no documented un-brick, i.MX SoC not SAM-BA);
   optional 100%-faithful extras (e.g. fquinto's patch_github.xml edit).

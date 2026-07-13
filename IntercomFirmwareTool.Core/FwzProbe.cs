@@ -35,6 +35,19 @@ namespace IntercomFirmwareTool.Core
         bool AllPass,
         IReadOnlyList<Ext4Check> Checks);
 
+    /// <summary>
+    /// Result of inspecting an existing .fwz's SSH-enable state without any
+    /// caller-supplied credentials: the ZipCrypto password and inner entry, the
+    /// informational findings (password-login mode, installed key fingerprint)
+    /// and the objective structural checks.
+    /// </summary>
+    public sealed record SshInspectionReport(
+        string PasswordUsed,
+        string SelectedEntry,
+        IReadOnlyList<string> Findings,
+        IReadOnlyList<Ext4Check> Checks,
+        bool AllPass);
+
     /// <summary>Result of building a modified .fwz and round-tripping it.</summary>
     public sealed record FwzBuildResult(
         string OutputPath,
@@ -142,6 +155,28 @@ namespace IntercomFirmwareTool.Core
                 bool all = true;
                 foreach (var c in checks) all &= c.Pass;
                 return new SshEnableReport(ex.PasswordUsed, ex.SelectedEntry, all, checks);
+            }
+            finally
+            {
+                TryDelete(ex.BareImagePath);
+            }
+        }
+
+        /// <summary>
+        /// Read-only: opens an existing .fwz, extracts its ext4 and INSPECTS the
+        /// SSH-enable state — reporting what is installed (password-login mode,
+        /// key fingerprint) plus the objective structural checks — WITHOUT the
+        /// caller declaring the password or key. This backs the UI's
+        /// point-and-read "Verify existing .fwz" flow.
+        /// </summary>
+        public static SshInspectionReport InspectSshInFwz(string fwzPath)
+        {
+            FwzExtractResult ex = ExtractBareImage(fwzPath);
+            try
+            {
+                SshInspection ins = Ext4Probe.InspectSsh(ex.BareImagePath);
+                return new SshInspectionReport(
+                    ex.PasswordUsed, ex.SelectedEntry, ins.Findings, ins.Checks, ins.AllPass);
             }
             finally
             {

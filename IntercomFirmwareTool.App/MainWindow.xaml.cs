@@ -742,119 +742,43 @@ namespace IntercomFirmwareTool.App
 
         // ---- Secondary: Verify an existing .fwz -----------------------------
 
-        /// <summary>Verifies an existing modified .fwz against the expected SSH-enable changes (read-only).</summary>
+        /// <summary>
+        /// Inspects an existing .fwz and reports its SSH-enable state (read-only).
+        /// Self-contained: the operator just picks a file and reads a report — no
+        /// password to re-type and no key to re-pick, and it is independent of the
+        /// build form's fields. It reports what is actually installed
+        /// (password-login mode, the deployed key's SHA-256 fingerprint) plus the
+        /// objective structural checks.
+        /// </summary>
         private async void BtnVerify_Click(object sender, RoutedEventArgs e)
         {
             var fwzDlg = new OpenFileDialog
             {
-                Title = "Choose a modified .fwz to verify (e.g. this tool's or fquinto's output)",
+                Title = "Choose a modified .fwz to inspect (e.g. this tool's or fquinto's output)",
                 Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*"
             };
             if (fwzDlg.ShowDialog(this) != true) return;
             string fwzPath = fwzDlg.FileName;
 
-            // The .fwz may have a password, a key, or both. "Disable" means it was
-            // built key-only (no password). When password login is expected, verify
-            // needs the password it was built with — an empty one compares against
-            // the blank-password hash (a misleading false-negative).
-            bool passwordOff = ChkKeyOnly.IsChecked == true;
-            string? password = null;
-            if (!passwordOff)
-            {
-                password = CurrentPassword();
-                if (password.Length == 0)
-                {
-                    MessageBox.Show(this,
-                        "Enter the root password that .fwz was built with, or tick\n" +
-                        "\"Disable\" if it is a key-only build.\n\n" +
-                        "Verifying with an empty password compares against the blank-password\n" +
-                        "hash, which fails even for a correctly built firmware.",
-                        "Password required", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-            }
-
-            // The key: reuse the form's key if set; otherwise ask whether this .fwz
-            // was built with one.
-            string? keyPath = _keyPath;
-            if (keyPath is null)
-            {
-                var ans = MessageBox.Show(this,
-                    "Was this firmware built with an SSH public key?\n\n" +
-                    "Yes — pick the .pub it was built with (its authorized_keys is checked).\n" +
-                    "No  — no key (verify by the root password only).",
-                    "Include an SSH key?", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
-                if (ans == MessageBoxResult.Cancel) return;
-                if (ans == MessageBoxResult.Yes)
-                {
-                    var keyDlg = new OpenFileDialog
-                    {
-                        Title = "Choose the SSH public key that .fwz was built with",
-                        Filter = "Public key (*.pub)|*.pub|All files (*.*)|*.*",
-                        InitialDirectory = DefaultSshDir()
-                    };
-                    if (keyDlg.ShowDialog(this) != true) return;
-                    keyPath = keyDlg.FileName;
-                }
-            }
-
-            string? publicKey = null;
-            if (keyPath != null)
-            {
-                try
-                {
-                    publicKey = File.ReadAllText(keyPath).Trim();
-                }
-                catch (Exception ex)
-                {
-                    TxtResult.Text = $"Could not read the public key:\n{ex.Message}";
-                    return;
-                }
-                if (publicKey.Length == 0 || !SshKeyGen.IsLikelyPublicKey(publicKey))
-                {
-                    MessageBox.Show(this,
-                        "The chosen key file does not look like an OpenSSH public key\n" +
-                        "(expected a line like \"ssh-rsa AAAA… comment\"). Verification compares\n" +
-                        "against this key, so it must be the .pub the .fwz was built with.",
-                        "Not a public key", MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
-            }
-
-            // Need at least one credential to verify against.
-            if (password is null && publicKey is null)
-            {
-                MessageBox.Show(this,
-                    "Nothing to verify against: enter the password the .fwz was built\n" +
-                    "with, or provide its SSH key (or both).",
-                    "No credential", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            var opts = new EnableSshOptions(password, publicKey);
-
             var sb = new StringBuilder();
-            sb.AppendLine("Verifying an existing firmware (read-only, the .fwz is not modified)…");
+            sb.AppendLine("Inspecting an existing firmware (read-only, the .fwz is not modified)…");
             sb.AppendLine($"  .fwz       : {fwzPath}");
-            sb.AppendLine(opts.HasPassword
-                ? "  Root pw    : (as entered — must match how that .fwz was built)"
-                : "  Root pw    : (disabled — key-only build)");
-            sb.AppendLine(opts.HasKey
-                ? $"  Public key : {keyPath}"
-                : "  Public key : (none)");
             sb.AppendLine();
 
             await RunAndShow(sb, () =>
             {
-                SshEnableReport r = FwzProbe.ValidateSshInFwz(fwzPath, opts);
+                SshInspectionReport r = FwzProbe.InspectSshInFwz(fwzPath);
                 sb.AppendLine($"Archive password : {r.PasswordUsed}  (ZipCrypto key, not the device model)");
                 sb.AppendLine($"Inner entry    : {r.SelectedEntry}");
+                sb.AppendLine();
+                sb.AppendLine("What's inside:");
+                foreach (var f in r.Findings) sb.AppendLine("  " + f);
                 sb.AppendLine();
                 sb.AppendLine("Checklist:");
                 AppendChecks(sb, r.Checks);
                 sb.AppendLine();
                 sb.AppendLine(r.AllPass
-                    ? "✅ ALL PASS — this .fwz has all the expected SSH-enable edits."
+                    ? "✅ ALL PASS — a valid, complete SSH-enable with at least one working login."
                     : "❌ SOME FAILED — this .fwz is missing or differs on the checks above.");
             });
         }

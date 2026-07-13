@@ -32,6 +32,19 @@ namespace IntercomFirmwareTool.Core
     /// <summary>One validation check: a name, pass/fail, and an optional detail.</summary>
     public sealed record Ext4Check(string Name, bool Pass, string Detail);
 
+    /// <summary>
+    /// Result of inspecting a firmware image's SSH-enable state WITHOUT the
+    /// caller declaring the password or key: <see cref="Findings"/> are
+    /// informational lines (password-login mode, installed key fingerprint),
+    /// <see cref="Checks"/> are objective structural checks (accounts, perms,
+    /// ownership, dropbear autostart), and <see cref="AllPass"/> is true when
+    /// every structural check passed.
+    /// </summary>
+    public sealed record SshInspection(
+        IReadOnlyList<string> Findings,
+        IReadOnlyList<Ext4Check> Checks,
+        bool AllPass);
+
     public static class Ext4Probe
     {
         private const int SectorSize = 512;
@@ -597,6 +610,147 @@ namespace IntercomFirmwareTool.Core
             }
             return checks;
         }
+
+        /// <summary>
+        /// Inspects an already-built bare ext4 image and REPORTS its SSH-enable
+        /// state, instead of comparing against a caller-supplied password/key.
+        /// It reads what is actually installed — password-login mode (from the
+        /// shadow secret's shape, never the plaintext), the deployed key's
+        /// SHA-256 fingerprint — and runs the objective structural checks
+        /// (accounts, .ssh/authorized_keys permissions and ownership, dropbear
+        /// autostart). This is what the UI's "Verify existing .fwz" uses so the
+        /// operator just points at a file and reads a report.
+        /// </summary>
+        public static SshInspection InspectSsh(string bareImagePath)
+        {
+            EnsureBareExt4(bareImagePath);
+            var checks = new List<Ext4Check>();
+            var findings = new List<string>();
+            string disk = WrapBareFilesystem(bareImagePath);
+            try
+            {
+                using var d = ExtDisk.Open(disk);
+                using var fs = ExtFileSystem.Open(d, d.Partitions[0]);
+
+                // Accounts (objective): the two entries fquinto appends.
+                string passwd = ReadAllTextFromFs(fs, "/etc/passwd");
+                checks.Add(new("/etc/passwd has root2",
+                    HasExactLine(passwd, "root2:x:0:0:root:/home/root:/bin/sh"), ""));
+                checks.Add(new("/etc/passwd has bticino2",
+                    HasExactLine(passwd, "bticino2:x:1000:1000::/home/bticino:/bin/sh"), ""));
+
+                // Shadow: derive the password-login mode from the secret's shape,
+                // WITHOUT knowing (or being able to reverse) the plaintext.
+                string shadow = ReadAllTextFromFs(fs, "/etc/shadow");
+                string? root2Secret = ShadowSecret(shadow, "root2");
+                string? bticino2Secret = ShadowSecret(shadow, "bticino2");
+                bool root2Present = root2Secret != null;
+                checks.Add(new("/etc/shadow has root2 entry", root2Present, ""));
+                checks.Add(new("/etc/shadow has bticino2 entry", bticino2Secret != null, ""));
+
+                bool passwordLogin = IsMd5CryptHash(root2Secret);
+                if (passwordLogin)
+                    findings.Add("Password login : ENABLED  (root2 has an MD5-crypt $1$ hash in /etc/shadow)");
+                else if (root2Present)
+                    findings.Add($"Password login : disabled  (root2 shadow field is \"{root2Secret}\" — key-only)");
+                else
+                    findings.Add("Password login : n/a  (no root2 entry in /etc/shadow)");
+
+                // fquinto sets root2 and bticino2 to the same secret; a mismatch
+                // means the image was not built the expected way.
+                if (root2Present && bticino2Secret != null)
+                    checks.Add(new("/etc/shadow root2 and bticino2 use the same secret",
+                        root2Secret == bticino2Secret, ""));
+
+                // Keys: report presence + fingerprint (informational) and enforce
+                // the perms/ownership contract wherever a key is actually deployed.
+                bool homeKeyPresent = fs.FileExists("/home/root/.ssh/authorized_keys");
+                if (homeKeyPresent) CheckDir(fs, checks, "/home/root/.ssh");
+                string? homeKey = InspectAuthKeys(fs, checks, findings, "/home/root/.ssh/authorized_keys", "home");
+                string? dropbearKey = InspectAuthKeys(fs, checks, findings, "/etc/dropbear/authorized_keys", "dropbear");
+                bool keyInstalled = homeKey != null || dropbearKey != null;
+
+                if (homeKey != null && dropbearKey != null)
+                    checks.Add(new("authorized_keys identical in both locations",
+                        homeKey.Trim() == dropbearKey.Trim(), ""));
+
+                // Dropbear autostart (objective).
+                string target = "";
+                bool symOk = false;
+                try { target = fs.ReadSymLink("/etc/rc5.d/S98dropbear"); symOk = target == "../init.d/dropbear"; }
+                catch { /* missing or not a symlink */ }
+                checks.Add(new("/etc/rc5.d/S98dropbear -> ../init.d/dropbear", symOk, target));
+                checks.Add(new("/etc/rc5.d exists (prerequisite)",
+                    fs.DirectoryExists("/etc/rc5.d"), ""));
+                checks.Add(new("/etc/init.d/dropbear exists (prerequisite)",
+                    fs.FileExists("/etc/init.d/dropbear"), ""));
+
+                // A valid SSH-enable must leave at least one usable login.
+                string how = passwordLogin && keyInstalled ? "password + key"
+                    : passwordLogin ? "password" : keyInstalled ? "key" : "none";
+                checks.Add(new("At least one login credential present (password or key)",
+                    passwordLogin || keyInstalled, how));
+            }
+            finally
+            {
+                TryDelete(disk);
+            }
+            bool all = true;
+            foreach (var c in checks) all &= c.Pass;
+            return new SshInspection(findings, checks, all);
+        }
+
+        /// <summary>
+        /// Reports an authorized_keys file: appends a "not installed"/"installed"
+        /// finding (with the key's label + SHA-256 fingerprint when installed),
+        /// and — when present — adds the objective 0600 mode and 0:0 owner checks.
+        /// Returns the trimmed key content, or null if the file is absent.
+        /// </summary>
+        private static string? InspectAuthKeys(
+            ExtFileSystem fs, List<Ext4Check> checks, List<string> findings, string path, string label)
+        {
+            if (!fs.FileExists(path))
+            {
+                findings.Add($"SSH key ({label}) : not installed  ({path} absent)");
+                return null;
+            }
+            string content = ReadAllTextFromFs(fs, path).Trim();
+            var info = SshKeyGen.DescribePublicKey(content);
+            findings.Add(info != null
+                ? $"SSH key ({label}) : installed  {info.Label}  {info.Sha256Fingerprint}"
+                : $"SSH key ({label}) : installed  (unrecognized key format)");
+
+            uint mode = fs.GetMode(path) & 0xFFF;
+            checks.Add(new($"{path} mode 0600",
+                mode == ToMode(600), $"actual 0{Convert.ToString((long)mode, 8)}"));
+            var owner = fs.GetOwner(path);
+            checks.Add(new($"{path} owner 0:0",
+                owner != null && owner.Item1 == 0 && owner.Item2 == 0,
+                owner != null ? $"{owner.Item1}:{owner.Item2}" : "null"));
+            return content;
+        }
+
+        /// <summary>
+        /// Returns the second (secret) field of the /etc/shadow line for
+        /// <paramref name="user"/>, or null if there is no such line.
+        /// </summary>
+        private static string? ShadowSecret(string shadow, string user)
+        {
+            foreach (var line in shadow.Replace("\r\n", "\n").Split('\n'))
+            {
+                if (line.StartsWith(user + ":", StringComparison.Ordinal))
+                {
+                    string[] f = line.Split(':');
+                    return f.Length > 1 ? f[1] : "";
+                }
+            }
+            return null;
+        }
+
+        /// <summary>True if the shadow secret is an MD5-crypt ($1$) hash — i.e.
+        /// password login is enabled (as opposed to "*"/"!" which disable it).</summary>
+        private static bool IsMd5CryptHash(string? secret) =>
+            secret != null && secret.StartsWith("$1$", StringComparison.Ordinal);
 
         private static void CheckDir(ExtFileSystem fs, List<Ext4Check> checks, string path)
         {

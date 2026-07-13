@@ -234,8 +234,10 @@ i.MX SoC, no documented low-level un-brick), and **only then** consider innovati
 5. **Product UI.** ✅ Done. The six PoC buttons were replaced with a single
    product flow: choose `.fwz` + public key + output → **Build modified
    firmware** (runs extract → SSH-enable → repack → read-back verification and
-   reports a clear pass/fail summary). Secondary actions **Verify an existing
-   `.fwz`** and the **MD5-crypt self-test** remain. A startup diagnostics line
+   reports a clear pass/fail summary). Secondary actions **Inspect an existing
+   `.fwz`** (self-contained read-only report — password-login mode, installed
+   key fingerprint, structural checks; no credentials to re-enter) and the
+   **MD5-crypt self-test** remain. A startup diagnostics line
    reports 64-bit + DLL presence (red if anything is wrong). The window carries
    the recovery/safety reminder.
 
