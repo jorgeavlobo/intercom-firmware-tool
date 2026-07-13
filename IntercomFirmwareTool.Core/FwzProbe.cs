@@ -372,7 +372,16 @@ namespace IntercomFirmwareTool.Core
                 // the now-modified payload could instead get the archive
                 // rejected by a signature-checking updater.
                 if (src.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase)) continue;
-                var entry = new ZipEntry(src.Name) { CompressionMethod = CompressionMethod.Deflated };
+                // Mark the entry ZipCrypto-encrypted explicitly (not only via the
+                // stream Password): the device firmware requires traditional
+                // ZipCrypto, and being explicit keeps the repack correct regardless
+                // of SharpZipLib version behaviour. The build's round-trip re-check
+                // (EntryEncryptedWith) still fails the build if this ever regresses.
+                var entry = new ZipEntry(src.Name)
+                {
+                    CompressionMethod = CompressionMethod.Deflated,
+                    IsCrypted = true,
+                };
                 zipOut.PutNextEntry(entry);
                 if (string.Equals(src.Name, modifiedEntryName, StringComparison.Ordinal))
                 {
