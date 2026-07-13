@@ -796,10 +796,36 @@ namespace IntercomFirmwareTool.Core
             return null;
         }
 
-        /// <summary>True if the shadow secret is an MD5-crypt ($1$) hash — i.e.
-        /// password login is enabled (as opposed to "*"/"!" which disable it).</summary>
-        private static bool IsMd5CryptHash(string? secret) =>
-            secret != null && secret.StartsWith("$1$", StringComparison.Ordinal);
+        /// <summary>
+        /// True if the shadow secret is a COMPLETE MD5-crypt ($1$) setting —
+        /// "$1$&lt;salt&gt;$&lt;22-char hash&gt;", salt 1..8 chars, both salt and hash in the
+        /// crypt base64 alphabet (./0-9A-Za-z). Only then does password login
+        /// actually work. A field that merely starts with "$1$" but is truncated
+        /// (e.g. "$1$root" or "$1$root$short") would never authenticate, so it must
+        /// NOT count as an enabled password login (as opposed to "*"/"!", which
+        /// disable it).
+        /// </summary>
+        private static bool IsMd5CryptHash(string? secret)
+        {
+            if (secret == null || !secret.StartsWith("$1$", StringComparison.Ordinal)) return false;
+            string rest = secret.Substring(3);
+            int dollar = rest.IndexOf('$');
+            if (dollar < 1 || dollar > 8) return false;           // salt is 1..8 chars
+            string salt = rest.Substring(0, dollar);
+            string hash = rest.Substring(dollar + 1);
+            if (hash.Length != 22) return false;                  // MD5-crypt hash is 22 chars
+            return IsCryptBase64(salt) && IsCryptBase64(hash);
+        }
+
+        /// <summary>True if every character is in the crypt base64 alphabet (./0-9A-Za-z).</summary>
+        private static bool IsCryptBase64(string s)
+        {
+            foreach (char c in s)
+                if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+                      (c >= 'a' && c <= 'z') || c == '.' || c == '/'))
+                    return false;
+            return true;
+        }
 
         private static void CheckDir(ExtFileSystem fs, List<Ext4Check> checks, string path)
         {
