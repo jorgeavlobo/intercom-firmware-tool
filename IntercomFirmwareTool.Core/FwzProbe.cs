@@ -166,6 +166,14 @@ namespace IntercomFirmwareTool.Core
                 throw new InvalidOperationException(
                     "The output .fwz must be a different file from the input .fwz.");
 
+            // Validate the output folder up front, before the expensive extract/
+            // repack, so a nonexistent target fails with a clear message instead of
+            // a generic DirectoryNotFoundException from a later FileStream/File.Move.
+            string outDir = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".";
+            if (!Directory.Exists(outDir))
+                throw new DirectoryNotFoundException(
+                    $"The output folder does not exist: {outDir}");
+
             FwzExtractResult ex = ExtractBareImage(inputFwz);
             string? modifiedBare = null;
             string? modifiedGz = null;
@@ -182,9 +190,9 @@ namespace IntercomFirmwareTool.Core
                     inFs.CopyTo(gz);
 
                 // 3) Repack a new ZipCrypto .fwz to a TEMP file in the same
-                //    directory as the output, so the user's chosen path is only
-                //    ever replaced by a fully written, verified artifact.
-                string outDir = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".";
+                //    directory as the output (validated above), so the user's
+                //    chosen path is only ever replaced by a fully written,
+                //    verified artifact.
                 string tempOut = Path.Combine(outDir, $".fwzbuild_{Guid.NewGuid():N}.tmp");
                 bool committed = false;
                 try

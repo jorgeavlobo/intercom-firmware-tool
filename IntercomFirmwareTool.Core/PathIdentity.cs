@@ -1,11 +1,15 @@
 namespace IntercomFirmwareTool.Core
 {
     /// <summary>
-    /// Filesystem path identity. Decides whether two paths refer to the <b>same
-    /// underlying file</b>, resolving symlinks/junctions (the final component AND
-    /// every parent directory in the chain) so an aliased path is not mistaken for
-    /// a different file. Shared by the build guard (never overwrite the input
-    /// <c>.fwz</c>) and the UI's path-collision checks so both apply the same rule.
+    /// Filesystem path identity. Decides whether two paths point to the same file
+    /// by canonicalising each (resolving symlinks/junctions on the final component
+    /// AND every parent directory in the chain) and comparing the results, so an
+    /// aliased path is not mistaken for a different file. Shared by the build guard
+    /// (never overwrite the input <c>.fwz</c>) and the UI's path-collision checks so
+    /// both apply the same rule. Note: this catches symlink/junction aliases but
+    /// NOT hard links (which share data with no reparse point); the build's
+    /// temp-file-then-move commit makes a hard-linked target non-destructive anyway
+    /// (removing one hard link leaves the data reachable via the other).
     /// </summary>
     public static class PathIdentity
     {
