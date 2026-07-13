@@ -141,7 +141,9 @@ namespace IntercomFirmwareTool.Core
                     case "ssh-rsa": // name, e, n
                         return fields.Count == 3
                             && fields[1].Length >= 1                 // public exponent present
-                            && MpintBitLength(fields[2]) >= 512;     // a real RSA modulus, not empty
+                            && MpintBitLength(fields[2]) >= 2048;    // reject weak/empty moduli
+                                                                     // (RSA-512/1024 are breakable;
+                                                                     // we generate 4096)
                     case "ssh-ed25519": // name, key(32)
                         return fields.Count == 2 && fields[1].Length == 32;
                     case "ssh-dss": // name, p, q, g, y

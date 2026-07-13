@@ -72,9 +72,12 @@ namespace IntercomFirmwareTool.Core
         // Recorded from the official Legrand/BTicino downloads (size + SHA-256 +
         // MD5). SHA-256 is the authoritative check; MD5 is kept for future use.
         // Names/models are informational only, never validation inputs.
-        // Array.AsReadOnly: hand out a genuine read-only view — the backing array
-        // cannot be reached and cast back to KnownFirmware[] to mutate the
-        // whitelist at runtime, which would undermine the integrity gate.
+        // Array.AsReadOnly: hand out a read-only view of the top-level list, so the
+        // backing array cannot be cast back to KnownFirmware[] and have entries
+        // added/replaced at runtime. Each entry is an immutable record and the
+        // validation inputs (SizeBytes, Sha256) are init-only, so the integrity
+        // gate cannot be tampered with. The per-entry Models list is informational
+        // only (never a validation input), so it is intentionally not deep-wrapped.
         public static readonly IReadOnlyList<KnownFirmware> Known = Array.AsReadOnly(new[]
         {
             // ---- Classe 100X (344682) — Home + Security family ----
