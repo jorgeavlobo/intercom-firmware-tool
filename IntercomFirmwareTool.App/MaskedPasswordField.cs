@@ -49,6 +49,13 @@ namespace IntercomFirmwareTool.App
             // and the context-menu "Cut" go through us and can't edit the
             // display directly (which would desync _real).
             _box.CommandBindings.Add(new CommandBinding(ApplicationCommands.Cut, OnCut, OnCanCut));
+            // Same reason for Delete: the context-menu "Delete" command would edit
+            // the mask directly, leaving _real (what Build uses) stale. Route both
+            // command forms through our buffer-aware handler. The Delete KEY is
+            // already handled in OnPreviewKeyDown (and marked handled there, so it
+            // never reaches these command bindings).
+            _box.CommandBindings.Add(new CommandBinding(ApplicationCommands.Delete, OnDelete, OnCanDelete));
+            _box.CommandBindings.Add(new CommandBinding(EditingCommands.Delete, OnDelete, OnCanDelete));
 
             _timer = new DispatcherTimer { Interval = RevealFor };
             _timer.Tick += (_, _) => { StopReveal(); Render(_box.CaretIndex); };
@@ -143,6 +150,29 @@ namespace IntercomFirmwareTool.App
                 StopReveal();
                 int s = ReplaceSelection();
                 Render(s);
+                Changed?.Invoke();
+            }
+        }
+
+        private void OnCanDelete(object sender, CanExecuteRoutedEventArgs e)
+        {
+            e.CanExecute = _box.SelectionLength > 0 || _box.CaretIndex < _real.Length;
+            e.Handled = true;
+        }
+
+        private void OnDelete(object sender, ExecutedRoutedEventArgs e)
+        {
+            // Delete the selection, or the character to the right of the caret —
+            // from the buffer, keeping the display in sync. Reached by the
+            // context-menu "Delete" (the Delete key is handled in OnPreviewKeyDown).
+            e.Handled = true;
+            StopReveal();
+            if (_box.SelectionLength > 0) { int s = ReplaceSelection(); Render(s); Changed?.Invoke(); }
+            else if (_box.CaretIndex < _real.Length)
+            {
+                int i = _box.CaretIndex;
+                _real.Remove(i, 1);
+                Render(i);
                 Changed?.Invoke();
             }
         }
