@@ -485,6 +485,22 @@ namespace IntercomFirmwareTool.App
             bool keyOnly = ChkKeyOnly.IsChecked == true;
             string password = CurrentPassword();
 
+            // Key-only login has no password fallback, so the key must be RSA — the
+            // only algorithm verified to authenticate on the target firmware (and
+            // the only type this tool generates). A non-RSA key-only build could
+            // leave a device with no usable login. Require a password for such keys.
+            if (keyOnly && SshKeyGen.KeyType(publicKey) != "ssh-rsa")
+            {
+                MessageBox.Show(this,
+                    "Key-only login requires an RSA public key.\n\n" +
+                    "RSA is the only key type verified to authenticate on this firmware's\n" +
+                    "dropbear, so a key-only build with another type could leave the device\n" +
+                    "with no way to log in. Use an RSA key, or untick \"Key-only\" and set a\n" +
+                    "root password as a fallback.",
+                    "RSA key required for key-only", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
             // With password login, refuse an empty password — it would produce a
             // valid /etc/shadow hash for a BLANK password, letting the added
             // accounts log in with no password. Require one, or tick key-only.

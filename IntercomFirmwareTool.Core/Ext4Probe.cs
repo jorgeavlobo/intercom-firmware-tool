@@ -388,6 +388,15 @@ namespace IntercomFirmwareTool.Core
                 throw new ArgumentException(
                     "The SSH public key must be a single valid OpenSSH public-key line " +
                     "(e.g. \"ssh-rsa AAAA… comment\").", nameof(opts));
+            // Key-only login has NO password fallback, so the key must be an
+            // algorithm proven to authenticate on the target firmware's dropbear.
+            // Only RSA is verified (and the only type this tool generates); a
+            // non-RSA key-only build could produce a firmware with no usable login.
+            if (opts.KeyOnly && SshKeyGen.KeyType(opts.PublicKey) != "ssh-rsa")
+                throw new ArgumentException(
+                    "Key-only login requires an RSA public key — the only key type verified to " +
+                    "authenticate on the target firmware. Use an RSA key, or set a password.",
+                    nameof(opts));
             if (!opts.KeyOnly && string.IsNullOrEmpty(opts.RootPassword))
                 throw new ArgumentException(
                     "A non-empty root password is required unless KeyOnly is set.", nameof(opts));
