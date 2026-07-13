@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Windows;
 using System.Windows.Automation;
@@ -412,8 +413,13 @@ namespace IntercomFirmwareTool.App
         {
             try
             {
+                // Grant by SID (icacls accepts "*<SID>"), not a bare username: the
+                // SID is unambiguous and resolves for domain/Microsoft accounts too,
+                // where DOMAIN\user or a plain name may not.
+                string? sid = WindowsIdentity.GetCurrent().User?.Value;
+                if (string.IsNullOrEmpty(sid)) return false;
                 var psi = new ProcessStartInfo("icacls",
-                    $"\"{path}\" /inheritance:r /grant:r \"{Environment.UserName}:F\"")
+                    $"\"{path}\" /inheritance:r /grant:r \"*{sid}:F\"")
                 {
                     UseShellExecute = false,
                     CreateNoWindow = true,
