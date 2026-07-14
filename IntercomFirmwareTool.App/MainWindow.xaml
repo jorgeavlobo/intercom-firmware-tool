@@ -204,7 +204,7 @@
                        Text="Firmware:"/>
             <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtFwzPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
-                     Cursor="Hand" ToolTip="Click (or press Enter) to choose the original firmware (.fwz)…"
+                     Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose the original firmware (.fwz)…"
                      PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown" KeyDown="TxtFwzPath_KeyDown"
                      Text="(click to choose the original .fwz to modify)" Foreground="Gray"/>
             <Button Grid.Row="0" Grid.Column="2" x:Name="BtnClearFwz"
@@ -271,7 +271,7 @@
                        Text="SSH Public Key:"/>
             <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
-                     Cursor="Hand" ToolTip="Click (or press Enter) to choose an existing public key (.pub)…"
+                     Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose an existing public key (.pub)…"
                      PreviewMouseLeftButtonDown="TxtKeyPath_MouseDown" KeyDown="TxtKeyPath_KeyDown"
                      Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
             <StackPanel Grid.Row="3" Grid.Column="2" Orientation="Horizontal">
@@ -298,7 +298,7 @@
                        Style="{StaticResource FieldLabel}" Text="Save output as:"/>
             <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtOutputPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" IsEnabled="False"
-                     Cursor="Hand" ToolTip="Click (or press Enter) to choose where to save the modified .fwz…"
+                     Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose where to save the modified .fwz…"
                      PreviewMouseLeftButtonDown="TxtOutputPath_MouseDown" KeyDown="TxtOutputPath_KeyDown"
                      Text="(where to write the modified .fwz)" Foreground="Gray"/>
             <Button Grid.Row="5" Grid.Column="2" x:Name="BtnClearOutput"
