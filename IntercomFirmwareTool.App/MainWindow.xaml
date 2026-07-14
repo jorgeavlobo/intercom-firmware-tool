@@ -73,7 +73,7 @@
             <Setter Property="Padding" Value="6,0"/>
         </Style>
 
-        <!-- Rounded, brand-coloured pill button for the "buy me a coffee" links.
+        <!-- Rounded, brand-coloured button for the "buy me a coffee" links.
              Background/Foreground are set per-button to each brand's colour. -->
         <Style TargetType="Button" x:Key="DonateButton">
             <Setter Property="Foreground" Value="White"/>
@@ -95,6 +95,10 @@
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="pill" Property="Opacity" Value="0.75"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="pill" Property="Opacity" Value="0.4"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -255,12 +259,16 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
-                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock Text="&#x2615;" FontSize="20" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                <!-- DockPanel (not a horizontal StackPanel) so the message TextBlock is
+                     measured with a constrained width and actually wraps instead of
+                     overflowing and pushing the buttons off-screen at small widths. -->
+                <DockPanel Grid.Column="0" VerticalAlignment="Center" LastChildFill="True" Margin="0,0,8,0">
+                    <TextBlock DockPanel.Dock="Left" Text="&#x2615;" FontSize="20"
+                               VerticalAlignment="Center" Margin="0,0,10,0"/>
                     <TextBlock VerticalAlignment="Center" TextWrapping="Wrap" Foreground="#FF5B4A1E">
                         <Run Text="Found this tool useful? "/><Run Text="Buy me a coffee" FontWeight="SemiBold"/><Run Text=" — €5. Thank you! ☺"/>
                     </TextBlock>
-                </StackPanel>
+                </DockPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                     <!-- PayPal -->

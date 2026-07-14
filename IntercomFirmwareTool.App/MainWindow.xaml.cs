@@ -488,7 +488,9 @@ namespace IntercomFirmwareTool.App
         /// <summary>Opens a header hyperlink (the MyHOME Suite download) in the default browser.</summary>
         private void Hyperlink_RequestNavigate(object sender, System.Windows.Navigation.RequestNavigateEventArgs e)
         {
-            OpenUrl(e.Uri.AbsoluteUri);
+            // Guard the Uri: a hyperlink wired to this handler without a
+            // NavigateUri would otherwise NRE on e.Uri before OpenUrl's try/catch.
+            if (e.Uri != null) OpenUrl(e.Uri.AbsoluteUri);
             e.Handled = true;
         }
 
