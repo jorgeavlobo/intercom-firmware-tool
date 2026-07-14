@@ -67,8 +67,8 @@ namespace IntercomFirmwareTool.App
 
         /// <summary>
         /// Kicks off an independent, randomly-timed shine sweep on each donate
-        /// button. The two loops use separate random delays, so the glints never
-        /// fire together and never settle into a fixed rhythm — a quiet, occasional
+        /// button. The two loops use separate random delays, so the glints rarely
+        /// coincide and never settle into a fixed rhythm — a quiet, occasional
         /// catch-the-eye, not a constant animation.
         /// </summary>
         private void StartDonateShine()
