@@ -275,7 +275,7 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private async void TxtFwzPath_MouseDown(object sender, MouseButtonEventArgs e) => await ChooseFirmwareAsync();
 
-        private async void TxtFwzPath_KeyDown(object sender, KeyEventArgs e)
+        private async void TxtFwzPath_PreviewKeyDown(object sender, KeyEventArgs e)
         {
             if (!IsActivationKey(e)) return;
             e.Handled = true;
@@ -383,7 +383,7 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private void TxtKeyPath_MouseDown(object sender, MouseButtonEventArgs e) => ChooseKey();
 
-        private void TxtKeyPath_KeyDown(object sender, KeyEventArgs e)
+        private void TxtKeyPath_PreviewKeyDown(object sender, KeyEventArgs e)
         {
             if (!IsActivationKey(e)) return;
             e.Handled = true;
@@ -593,7 +593,7 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private void TxtOutputPath_MouseDown(object sender, MouseButtonEventArgs e) => ChooseOutput();
 
-        private void TxtOutputPath_KeyDown(object sender, KeyEventArgs e)
+        private void TxtOutputPath_PreviewKeyDown(object sender, KeyEventArgs e)
         {
             if (!IsActivationKey(e)) return;
             e.Handled = true;
