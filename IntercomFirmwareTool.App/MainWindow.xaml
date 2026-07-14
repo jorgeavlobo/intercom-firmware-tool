@@ -222,7 +222,7 @@
                              FontFamily="Consolas"/>
                     <!-- Placeholder overlay: shown (by UpdateRequiredCues) only while
                          the password is blank in password mode. -->
-                    <TextBlock x:Name="PhPassword" Text="(mandatory)" Foreground="Gray"
+                    <TextBlock x:Name="PhPassword" Text="(required)" Foreground="Gray"
                                IsHitTestVisible="False" VerticalAlignment="Center"
                                Margin="8,0,0,0"/>
                 </Grid>
@@ -247,14 +247,14 @@
 
             <!-- Confirm password -->
             <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Confirm password:"/>
+                       Text="Confirm Password:"/>
             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <Grid Width="170">
                     <TextBox x:Name="TxtConfirm" Style="{StaticResource InputField}"
                              FontFamily="Consolas"/>
                     <!-- Placeholder overlay: shown only after a password is typed and
                          while confirm is still blank (UpdateRequiredCues). -->
-                    <TextBlock x:Name="PhConfirm" Text="(mandatory)" Foreground="Gray"
+                    <TextBlock x:Name="PhConfirm" Text="(required)" Foreground="Gray"
                                IsHitTestVisible="False" VerticalAlignment="Center"
                                Margin="8,0,0,0" Visibility="Collapsed"/>
                 </Grid>
