@@ -618,9 +618,8 @@ namespace IntercomFirmwareTool.App
 
             TxtPassword.IsEnabled = usePassword;
             TxtConfirm.IsEnabled = usePassword;
-            BtnToggleReveal.IsEnabled = usePassword;
-            BtnCopyPwd.IsEnabled = usePassword;
-            BtnRandomPwd.IsEnabled = usePassword;
+            // The reveal/copy/generate buttons are set centrally (content-aware) by
+            // UpdatePasswordButtonStates, reached via UpdateBuildEnabled below.
 
             // With password login off, the key is the only credential, so mark it
             // required (label + placeholder); with password on, it is optional again.
@@ -760,6 +759,9 @@ namespace IntercomFirmwareTool.App
                 TxtBuildHint.Text = "Still needed: " + string.Join(", ", missing) + ".";
                 TxtBuildHint.Foreground = Brushes.Gray;
             }
+
+            // Reveal/copy availability depends on the same password/confirm content.
+            UpdatePasswordButtonStates();
         }
 
         /// <summary>Sets (or clears, when <paramref name="brush"/> is null) a 2px cue border on a field.</summary>
@@ -1156,9 +1158,32 @@ namespace IntercomFirmwareTool.App
             ChkKeyOnly.IsEnabled = enabled;
             TxtPassword.IsEnabled = creds;
             TxtConfirm.IsEnabled = creds;
-            BtnToggleReveal.IsEnabled = creds;
-            BtnCopyPwd.IsEnabled = creds;
-            BtnRandomPwd.IsEnabled = creds;
+            // The reveal/copy/generate buttons are content-aware; drive them centrally.
+            _uiEnabled = enabled;
+            UpdatePasswordButtonStates();
+        }
+
+        // Whether the UI is currently interactive (false during a build/verify op).
+        private bool _uiEnabled = true;
+
+        /// <summary>
+        /// Enables the password action buttons by what is actually present:
+        /// • Reveal (eye) needs at least one of the password/confirm fields to have
+        ///   text — nothing to reveal otherwise.
+        /// • Copy needs a confirmed, MATCHING password: blank → nothing to copy;
+        ///   mismatch → ambiguous which line the user means, so it must match first.
+        /// • Generate is always available while password login is on.
+        /// All gated by password-login mode and whether the UI is interactive.
+        /// </summary>
+        private void UpdatePasswordButtonStates()
+        {
+            bool active = _uiEnabled && ChkKeyOnly.IsChecked != true;
+            string pw = CurrentPassword();
+            string confirm = CurrentConfirm();
+
+            BtnRandomPwd.IsEnabled = active;
+            BtnToggleReveal.IsEnabled = active && (pw.Length > 0 || confirm.Length > 0);
+            BtnCopyPwd.IsEnabled = active && pw.Length > 0 && pw == confirm;
         }
     }
 }
