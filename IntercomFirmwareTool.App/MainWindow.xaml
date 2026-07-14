@@ -204,12 +204,14 @@
                        Text="Firmware:"/>
             <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtFwzPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
-                     Text="(choose the original .fwz to modify)" Foreground="Gray"/>
-            <Button Grid.Row="0" Grid.Column="2" x:Name="BtnBrowseFwz"
-                    Style="{StaticResource RowIconButton}" Content="&#xE8B7;"
-                    ToolTip="Browse for the original firmware (.fwz)…"
-                    AutomationProperties.Name="Browse for the original firmware"
-                    Click="BtnBrowseFwz_Click"/>
+                     Cursor="Hand" ToolTip="Click to choose the original firmware (.fwz)…"
+                     PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown"
+                     Text="(click to choose the original .fwz to modify)" Foreground="Gray"/>
+            <Button Grid.Row="0" Grid.Column="2" x:Name="BtnClearFwz"
+                    Style="{StaticResource RowIconButton}" Content="&#xE711;"
+                    ToolTip="Clear the selected firmware"
+                    AutomationProperties.Name="Clear the selected firmware"
+                    Click="BtnClearFwz_Click"/>
 
             <!-- Root password (masked) + reveal toggle + Disable (key-only). One of
                  the password or the key is required; ticking Disable turns password
@@ -286,7 +288,8 @@
             </StackPanel>
 
             <!-- The either/or credential rule, stated explicitly right below the two
-                 credential fields (reinforces the (optional)/(required) labels). -->
+                 credential fields (reinforces the "(required)" password placeholders
+                 and the key box's optional/required placeholder text). -->
             <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
                        Foreground="Gray" FontSize="11" TextWrapping="Wrap"
                        Text="At least one credential is required — a root password or an SSH key."/>

@@ -261,8 +261,14 @@ namespace IntercomFirmwareTool.App
         // ---- Input selection -------------------------------------------------
 
         /// <summary>Picks the original firmware, verifies it against the whitelist (size + SHA-256), and selects it.</summary>
-        private async void BtnBrowseFwz_Click(object sender, RoutedEventArgs e)
+        /// <summary>
+        /// The firmware path box doubles as its own "browse" button: clicking it
+        /// opens the file picker (there is no separate folder button — Grid.Column 2
+        /// is the clear button instead). Ignored while an operation is running.
+        /// </summary>
+        private async void TxtFwzPath_MouseDown(object sender, MouseButtonEventArgs e)
         {
+            if (!_uiEnabled) return;
             var dlg = new OpenFileDialog
             {
                 Title = "Choose the original firmware (.fwz)",
@@ -333,6 +339,25 @@ namespace IntercomFirmwareTool.App
                 "✅ " + check.Message + "\n\n" +
                 check.Match!.Describe() + "\n\n" +
                 "Set a root password and/or an SSH key (at least one), then Build.";
+        }
+
+        /// <summary>
+        /// Clears the firmware selection (the Grid.Column 2 button on the firmware
+        /// row), returning the box to its neutral placeholder and disabling the
+        /// output row again — mirrors the de-select branch of the picker above.
+        /// </summary>
+        private void BtnClearFwz_Click(object sender, RoutedEventArgs e)
+        {
+            _fwzPath = null;
+            _outputPath = null;
+            TxtFwzPath.Text = "(click to choose the original .fwz to modify)";
+            TxtFwzPath.Foreground = Brushes.Gray;
+            TxtOutputPath.Text = "(where to write the modified .fwz)";
+            TxtOutputPath.Foreground = Brushes.Gray;
+            LblOutput.IsEnabled = false;
+            TxtOutputPath.IsEnabled = false;
+            BtnBrowseOutput.IsEnabled = false;
+            UpdateBuildEnabled();
         }
 
         /// <summary>Picks an existing OpenSSH public key and selects it for the build.</summary>
@@ -686,8 +711,11 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private void UpdateBuildEnabled()
         {
-            BtnBuild.IsEnabled =
-                _fwzPath != null && _outputPath != null && HaveCredential();
+            // _uiEnabled is false while a build/verify/self-test is running, so the
+            // Build button (and the hint below, via UpdateRequiredCues) stay disabled
+            // and off the "✓ Ready to build." message for the duration of the op.
+            BtnBuild.IsEnabled = _uiEnabled
+                && _fwzPath != null && _outputPath != null && HaveCredential();
             UpdateRequiredCues();
         }
 
@@ -735,7 +763,7 @@ namespace IntercomFirmwareTool.App
             SetFieldBorder(TxtConfirm, needConfirm ? NeededBrush : confirmMismatch ? ErrorBrush : null);
             SetFieldBorder(TxtKeyPath, needKey ? NeededBrush : null);
 
-            // "(mandatory)" placeholders: on the password while it is blank, and on
+            // "(required)" placeholders: on the password while it is blank, and on
             // confirm only once a password has been typed (mirrors needPassword/needConfirm).
             PhPassword.Visibility = needPassword ? Visibility.Visible : Visibility.Collapsed;
             PhConfirm.Visibility = needConfirm ? Visibility.Visible : Visibility.Collapsed;
@@ -756,8 +784,10 @@ namespace IntercomFirmwareTool.App
             }
             else if (missing.Count == 0)
             {
-                TxtBuildHint.Text = "✓ Ready to build.";
-                TxtBuildHint.Foreground = ReadyBrush;
+                // Everything is set. While an operation is running the Build gate is
+                // closed, so show progress instead of claiming readiness.
+                TxtBuildHint.Text = _uiEnabled ? "✓ Ready to build." : "⏳ Working…";
+                TxtBuildHint.Foreground = _uiEnabled ? ReadyBrush : Brushes.Gray;
             }
             else
             {
@@ -1142,7 +1172,7 @@ namespace IntercomFirmwareTool.App
             // whole operation.
             if (!enabled) SetReveal(false);
 
-            BtnBrowseFwz.IsEnabled = enabled;
+            BtnClearFwz.IsEnabled = enabled;
             BtnChooseKey.IsEnabled = enabled;
             BtnGenKey.IsEnabled = enabled;
             BtnClearKey.IsEnabled = enabled;
@@ -1150,22 +1180,20 @@ namespace IntercomFirmwareTool.App
             BtnBrowseOutput.IsEnabled = enabled && _fwzPath != null;
             BtnVerify.IsEnabled = enabled;
             BtnSelfTest.IsEnabled = enabled;
-            // Build only re-enables when firmware + output + a credential are set
-            // (a password, or a key when password login is disabled).
-            bool passwordOff = ChkKeyOnly.IsChecked == true;
-            BtnBuild.IsEnabled = enabled
-                && _fwzPath != null && _outputPath != null && HaveCredential();
 
             // Also lock the credential inputs during an operation so the visible UI
             // can't drift from the values snapshotted for the build. When
             // re-enabling, respect the Disable (key-only) state.
+            bool passwordOff = ChkKeyOnly.IsChecked == true;
             bool creds = enabled && !passwordOff;
             ChkKeyOnly.IsEnabled = enabled;
             TxtPassword.IsEnabled = creds;
             TxtConfirm.IsEnabled = creds;
-            // The reveal/copy/generate buttons are content-aware; drive them centrally.
+            // Refresh the Build gate, the "still needed" hint/cues, and the content-
+            // aware reveal/copy/generate buttons so they all reflect the new op state
+            // (UpdateBuildEnabled gates Build on _uiEnabled and shows "⏳ Working…").
             _uiEnabled = enabled;
-            UpdatePasswordButtonStates();
+            UpdateBuildEnabled();
         }
 
         // Whether the UI is currently interactive (false during a build/verify op).
