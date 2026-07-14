@@ -684,6 +684,21 @@ namespace IntercomFirmwareTool.App
                 }
             }
 
+            // Never build over a PRIVATE KEY file. The .pub-sibling collision guard
+            // above only fires when the selected public key follows the .pub naming
+            // convention; a public key named otherwise (e.g. id_rsa.public) leaves
+            // the private sibling underivable, so the user could pick the matching
+            // private key as the output and a successful build would destroy it.
+            // A content check closes that gap regardless of file naming.
+            if (File.Exists(_outputPath) && LooksLikePrivateKeyFile(_outputPath!))
+            {
+                MessageBox.Show(this,
+                    "The output path is an SSH PRIVATE KEY file:\n\n" + _outputPath + "\n\n" +
+                    "Building there would overwrite and destroy the key. Choose a different output.",
+                    "Output is a private key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
             // Confirm before overwriting an existing output file (the path may
             // have been auto-suggested, bypassing the Save dialog's own prompt).
             if (File.Exists(_outputPath))
@@ -897,6 +912,24 @@ namespace IntercomFirmwareTool.App
             return _keyPath != null && _keyPath.EndsWith(pub, StringComparison.OrdinalIgnoreCase)
                 ? _keyPath[..^pub.Length]
                 : null;
+        }
+
+        /// <summary>
+        /// Best-effort: true if the file looks like an SSH/PEM PRIVATE key, so a
+        /// build must never overwrite it. Reads only a small prefix and matches the
+        /// PEM private-key marker (covers RSA/OPENSSH/PKCS#8/ENCRYPTED headers). Any
+        /// read error returns false — the generic overwrite prompt still applies.
+        /// </summary>
+        private static bool LooksLikePrivateKeyFile(string path)
+        {
+            try
+            {
+                using var r = new StreamReader(path);
+                var buf = new char[256];
+                int n = r.Read(buf, 0, buf.Length);
+                return new string(buf, 0, n).Contains("PRIVATE KEY-----", StringComparison.Ordinal);
+            }
+            catch { return false; }
         }
 
         /// <summary>Enables/disables the action buttons and credential inputs during an operation.</summary>
