@@ -9,6 +9,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using IntercomFirmwareTool.Core;
 using Microsoft.Win32;
@@ -56,6 +57,80 @@ namespace IntercomFirmwareTool.App
             // password (or tick key-only), so a build can never ship the publicly
             // known fquinto default. The empty-password guard in Build enforces it.
             UpdatePasswordHint();
+
+            // Start the subtle "shine" on the donate buttons once the visual tree
+            // (and their templates) are ready. Loaded can fire again on reparent, so
+            // guard to start the loops only once per window instance.
+            Loaded += (_, _) =>
+            {
+                if (_shineStarted) return;
+                _shineStarted = true;
+                StartDonateShine();
+            };
+        }
+
+        private readonly Random _shineRng = new();
+        private bool _shineStarted;
+
+        /// <summary>
+        /// Kicks off an independent, randomly-timed shine sweep on each donate
+        /// button. The two loops use separate random delays, so the glints rarely
+        /// coincide and never settle into a fixed rhythm — a quiet, occasional
+        /// catch-the-eye, not a constant animation.
+        /// </summary>
+        private void StartDonateShine()
+        {
+            BeginShineLoop(BtnPayPal);
+            BeginShineLoop(BtnRevolut);
+        }
+
+        private void BeginShineLoop(Button button)
+        {
+            // The animated band lives in the control template; pull out its named
+            // transform for this specific button instance.
+            button.ApplyTemplate();
+            if (button.Template?.FindName("sheenT", button) is not TranslateTransform sheen) return;
+
+            void ScheduleNext()
+            {
+                // Random gap between sweeps (~5–14 s) so the two buttons stay out of
+                // phase and the effect feels organic rather than mechanical.
+                var timer = new DispatcherTimer
+                {
+                    Interval = TimeSpan.FromMilliseconds(_shineRng.Next(5000, 14000))
+                };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    Sweep(button, sheen);
+                    ScheduleNext();
+                };
+                timer.Start();
+            }
+            ScheduleNext();
+        }
+
+        /// <summary>Sweeps the light band once across a button (left → right, then reverts off-screen).</summary>
+        private static void Sweep(Button button, TranslateTransform sheen)
+        {
+            // End just past the button's right edge so the band fully exits for this
+            // button's actual width (+ margin for the skewed band); fall back to a
+            // fixed value if the button hasn't been measured yet.
+            double end = button.ActualWidth > 0 ? button.ActualWidth + 60 : 170;
+            var anim = new DoubleAnimation
+            {
+                // Start at the template's base X (off the left edge, for any width) so
+                // there is no jump when a sweep begins.
+                From = -90,
+                To = end,
+                Duration = TimeSpan.FromMilliseconds(1500),
+                // Ease in/out for a smooth, premium glide rather than a linear wipe.
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut },
+                // Revert to the base (off-screen) X after each sweep instead of holding
+                // the final value, so the band is never parked on-screen at rest.
+                FillBehavior = FillBehavior.Stop
+            };
+            sheen.BeginAnimation(TranslateTransform.XProperty, anim);
         }
 
         // ---- Inline password actions (reveal / copy / generate) --------------
@@ -475,16 +550,41 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
+        /// <summary>
+        /// Opens an http/https URL in the default browser (best-effort; never
+        /// throws to the UI). Only absolute http/https URLs are allowed:
+        /// UseShellExecute=true would otherwise hand ANY scheme to the shell
+        /// (file:, ms-settings:, …), which is not something this tool should do.
+        /// </summary>
+        private static void OpenUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                return;
+            try
+            {
+                Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+            }
+            catch { /* opening a browser is best-effort, non-critical */ }
+        }
+
         /// <summary>Opens a header hyperlink (the MyHOME Suite download) in the default browser.</summary>
         private void Hyperlink_RequestNavigate(object sender, System.Windows.Navigation.RequestNavigateEventArgs e)
         {
-            try
-            {
-                Process.Start(new ProcessStartInfo(e.Uri.AbsoluteUri) { UseShellExecute = true });
-            }
-            catch { /* opening a browser is best-effort, non-critical */ }
+            // Guard the Uri: a hyperlink wired to this handler without a
+            // NavigateUri would otherwise NRE on e.Uri before OpenUrl's try/catch.
+            if (e.Uri != null) OpenUrl(e.Uri.AbsoluteUri);
             e.Handled = true;
         }
+
+        /// <summary>Opens the PayPal.me page to buy the author a coffee.</summary>
+        private void BtnPayPal_Click(object sender, RoutedEventArgs e) =>
+            OpenUrl("https://paypal.me/jorgeavlobo");
+
+        /// <summary>Opens the Revolut.me page to buy the author a coffee.</summary>
+        private void BtnRevolut_Click(object sender, RoutedEventArgs e) =>
+            OpenUrl("https://revolut.me/jorgeavlobo");
 
         /// <summary>
         /// Refreshes the key box placeholder to say whether the key is optional or

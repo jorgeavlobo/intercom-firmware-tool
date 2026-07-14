@@ -7,7 +7,7 @@
         mc:Ignorable="d"
         Title="Intercom Firmware Tool — SSH-enable (Classe 100X / 300X)"
         Icon="Assets/Icons/AppIcon.ico"
-        Height="700" Width="880" MinHeight="620" MinWidth="720"
+        Height="760" Width="880" MinHeight="690" MinWidth="720"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
         <Style TargetType="TextBlock" x:Key="FieldLabel">
@@ -72,6 +72,98 @@
             <Setter Property="VerticalContentAlignment" Value="Center"/>
             <Setter Property="Padding" Value="6,0"/>
         </Style>
+
+        <!-- Rounded, brand-coloured button for the "buy me a coffee" links.
+             Background/Foreground are set per-button to each brand's colour. -->
+        <Style TargetType="Button" x:Key="DonateButton">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <!-- Symmetric horizontal margin: in the UniformGrid this keeps an even
+                 gap between the buttons AND equal padding on the block's outer edges. -->
+            <Setter Property="Margin" Value="4,0,4,0"/>
+            <!-- Equal height (fixed) restored to the original taller size; equal
+                 WIDTH comes from the UniformGrid host, which sizes both cells to the
+                 wider button — so neither is forced wider than its natural size. -->
+            <Setter Property="Height" Value="40"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <!-- Constant 2px transparent border so the keyboard-focus ring
+                             (below) appears without shifting the layout. ClipToBounds
+                             keeps the shine sweep inside the button. -->
+                        <Border x:Name="pill" Background="{TemplateBinding Background}"
+                                CornerRadius="6" BorderThickness="2" BorderBrush="Transparent"
+                                ClipToBounds="True">
+                            <Grid>
+                                <ContentPresenter Margin="{TemplateBinding Padding}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <!-- Shine: a soft, skewed light band parked off the left
+                                     edge; the code-behind sweeps sheenT across at random
+                                     intervals (independently per button) for a subtle glint. -->
+                                <Border x:Name="sheen" Width="46" HorizontalAlignment="Left"
+                                        IsHitTestVisible="False">
+                                    <Border.Background>
+                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                            <GradientStop Color="#00FFFFFF" Offset="0.0"/>
+                                            <GradientStop Color="#4DFFFFFF" Offset="0.5"/>
+                                            <GradientStop Color="#00FFFFFF" Offset="1.0"/>
+                                        </LinearGradientBrush>
+                                    </Border.Background>
+                                    <Border.RenderTransform>
+                                        <TransformGroup>
+                                            <SkewTransform AngleX="-18"/>
+                                            <TranslateTransform x:Name="sheenT" X="-90"/>
+                                        </TransformGroup>
+                                    </Border.RenderTransform>
+                                </Border>
+                            </Grid>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="pill" Property="Opacity" Value="0.88"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="pill" Property="Opacity" Value="0.75"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="pill" Property="BorderBrush" Value="#CCFFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="pill" Property="Opacity" Value="0.4"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Brand icons, transcoded from Assets/Icons/PayPal.svg and Revolut.svg
+             into native WPF vectors (WPF can't render .svg directly; this keeps
+             the app dependency-free). The .svg files remain the design source. -->
+        <DrawingImage x:Key="PayPalIcon">
+            <DrawingImage.Drawing>
+                <DrawingGroup>
+                    <GeometryDrawing Brush="#002991" Geometry="F1 M38.914 13.35c0 5.574-5.144 12.15-12.927 12.15H18.49l-.368 2.322L16.373 39H7.056l5.605-36h15.095c5.083 0 9.082 2.833 10.555 6.77a9.687 9.687 0 0 1 .603 3.58z"/>
+                    <GeometryDrawing Brush="#60CDFF" Geometry="F1 M44.284 23.7A12.894 12.894 0 0 1 31.53 34.5h-5.206L24.157 48H14.89l1.483-9 1.75-11.178.367-2.322h7.497c7.773 0 12.927-6.576 12.927-12.15 3.825 1.974 6.055 5.963 5.37 10.35z"/>
+                    <GeometryDrawing Brush="#008CFF" Geometry="F1 M38.914 13.35C37.31 12.511 35.365 12 33.248 12h-12.64L18.49 25.5h7.497c7.773 0 12.927-6.576 12.927-12.15z"/>
+                </DrawingGroup>
+            </DrawingImage.Drawing>
+        </DrawingImage>
+
+        <DrawingImage x:Key="RevolutIcon">
+            <DrawingImage.Drawing>
+                <DrawingGroup>
+                    <GeometryDrawing Brush="#000000" Geometry="F1 M209.051 262.097h101.445v410.21H209.051z"/>
+                    <GeometryDrawing Brush="#000000" Geometry="F1 M628.623 285.554c0-87.043-70.882-157.86-158.011-157.86H209.051v87.603h249.125c39.43 0 72.093 30.978 72.814 69.051 0.361 19.064-6.794 37.056-20.146 50.66-13.357 13.61-31.204 21.109-50.251 21.109h-97.046c-3.446 0-6.25 2.8-6.25 6.245v77.859c0 1.324 0.409 2.59 1.179 3.656l164.655 228.43h120.53L478.623 443.253C561.736 439.08 628.623 369.248 628.623 285.554z"/>
+                </DrawingGroup>
+            </DrawingImage.Drawing>
+        </DrawingImage>
     </Window.Resources>
 
     <Grid Margin="14">
@@ -82,6 +174,7 @@
             <RowDefinition Height="Auto"/>   <!-- 3: result label -->
             <RowDefinition Height="*"/>      <!-- 4: result box -->
             <RowDefinition Height="Auto"/>   <!-- 5: diagnostics status -->
+            <RowDefinition Height="Auto"/>   <!-- 6: support / buy me a coffee -->
         </Grid.RowDefinitions>
 
         <!-- Row 0: what this does + safety note -->
@@ -215,5 +308,63 @@
         <!-- Row 5: diagnostics -->
         <TextBlock Grid.Row="5" x:Name="TxtDiag" Margin="0,8,0,0"
                    Foreground="Gray" FontFamily="Consolas" FontSize="11"/>
+
+        <!-- Row 6: support / buy me a coffee -->
+        <Border Grid.Row="6" Margin="0,10,0,0" Padding="12,9"
+                Background="#FFFBF7EF" BorderBrush="#FFE6D6AE" BorderThickness="1" CornerRadius="8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- DockPanel (not a horizontal StackPanel) so the message TextBlock is
+                     measured with a constrained width and actually wraps instead of
+                     overflowing and pushing the buttons off-screen at small widths. -->
+                <DockPanel Grid.Column="0" VerticalAlignment="Center" LastChildFill="True" Margin="0,0,8,0">
+                    <TextBlock DockPanel.Dock="Left" Text="&#x2615;" FontSize="20"
+                               VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <TextBlock VerticalAlignment="Center" TextWrapping="Wrap" Foreground="#FF5B4A1E">
+                        <Run Text="Found this tool useful? "/><Run Text="Buy me a coffee" FontWeight="SemiBold"/><Run Text=". Thank you! ☺"/>
+                    </TextBlock>
+                </DockPanel>
+
+                <!-- UniformGrid: both cells take the width of the WIDER button, so
+                     PayPal and Revolut end up equal without forcing an arbitrary width. -->
+                <UniformGrid Grid.Column="1" Rows="1" Columns="2" VerticalAlignment="Center">
+                    <!-- PayPal -->
+                    <Button x:Name="BtnPayPal" Style="{StaticResource DonateButton}"
+                            Background="#FF003087" Click="BtnPayPal_Click"
+                            ToolTip="Support via PayPal"
+                            AutomationProperties.Name="Buy me a coffee via PayPal">
+                        <StackPanel Orientation="Horizontal">
+                            <!-- Brand icon on a white chip (the multi-blue PayPal mark
+                                 would be unreadable directly on the blue button). -->
+                            <Border x:Name="IcoPayPal" Width="24" Height="24" CornerRadius="5"
+                                    Background="White" Padding="3" Margin="0,0,7,0">
+                                <Image Source="{StaticResource PayPalIcon}" Stretch="Uniform"/>
+                            </Border>
+                            <TextBlock Text="PayPal" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+
+                    <!-- Revolut -->
+                    <Button x:Name="BtnRevolut" Style="{StaticResource DonateButton}"
+                            Background="#FF191C1F" Click="BtnRevolut_Click"
+                            ToolTip="Support via Revolut"
+                            AutomationProperties.Name="Buy me a coffee via Revolut">
+                        <StackPanel Orientation="Horizontal">
+                            <!-- Brand icon on a white chip (the dark Revolut mark would
+                                 be unreadable directly on the near-black button). -->
+                            <Border x:Name="IcoRevolut" Width="24" Height="24" CornerRadius="5"
+                                    Background="White" Padding="4" Margin="0,0,7,0">
+                                <Image Source="{StaticResource RevolutIcon}" Stretch="Uniform"/>
+                            </Border>
+                            <TextBlock Text="Revolut" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                </UniformGrid>
+            </Grid>
+        </Border>
     </Grid>
 </Window>
