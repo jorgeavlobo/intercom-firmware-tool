@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
@@ -57,6 +58,9 @@ namespace IntercomFirmwareTool.App
             // password (or tick key-only), so a build can never ship the publicly
             // known fquinto default. The empty-password guard in Build enforces it.
             UpdatePasswordHint();
+            // Paint the initial required-field cues + "what's still needed" hint on
+            // the blank form (also sets the Build button's initial disabled state).
+            UpdateBuildEnabled();
 
             // Start the subtle "shine" on the donate buttons once the visual tree
             // (and their templates) are ready. Loaded can fire again on reparent, so
@@ -681,6 +685,74 @@ namespace IntercomFirmwareTool.App
         {
             BtnBuild.IsEnabled =
                 _fwzPath != null && _outputPath != null && HaveCredential();
+            UpdateRequiredCues();
+        }
+
+        // Amber cue for a required field that is still blank. Colour is never the
+        // ONLY signal: it is paired with the field labels and the textual
+        // "what's still needed" hint (WCAG 1.4.1).
+        private static readonly SolidColorBrush NeededBrush = MakeFrozen(Color.FromRgb(0xD9, 0x8A, 0x00));
+        private static readonly SolidColorBrush ReadyBrush = MakeFrozen(Color.FromRgb(0x2E, 0x7D, 0x32));
+
+        private static SolidColorBrush MakeFrozen(Color c)
+        {
+            var b = new SolidColorBrush(c);
+            b.Freeze();
+            return b;
+        }
+
+        /// <summary>
+        /// Highlights the fields still blocking a Build (blank + required) with an
+        /// amber border, and refreshes the "what's still needed" hint by the Build
+        /// button. Respects the password-OR-key rule — it flags whichever credential
+        /// is actually required for the current mode, never both. Driven from
+        /// UpdateBuildEnabled so it always matches the Build gate.
+        /// </summary>
+        private void UpdateRequiredCues()
+        {
+            bool passwordOff = ChkKeyOnly.IsChecked == true;
+            bool needFirmware = _fwzPath == null;
+            bool needOutput = _outputPath == null;
+            bool needPassword = !passwordOff && CurrentPassword().Length == 0;
+            bool needKey = passwordOff && _keyPath == null;
+
+            SetNeeded(TxtFwzPath, needFirmware);
+            // Output is disabled until a firmware is chosen; only cue it once usable.
+            SetNeeded(TxtOutputPath, needOutput && _fwzPath != null);
+            SetNeeded(TxtPassword, needPassword);
+            SetNeeded(TxtKeyPath, needKey);
+
+            var missing = new List<string>();
+            if (needFirmware) missing.Add("firmware");
+            if (needOutput) missing.Add("output path");
+            if (needPassword) missing.Add("a root password");
+            if (needKey) missing.Add("an SSH key");
+
+            if (missing.Count == 0)
+            {
+                TxtBuildHint.Text = "✓ Ready to build.";
+                TxtBuildHint.Foreground = ReadyBrush;
+            }
+            else
+            {
+                TxtBuildHint.Text = "Still needed: " + string.Join(", ", missing) + ".";
+                TxtBuildHint.Foreground = Brushes.Gray;
+            }
+        }
+
+        /// <summary>Amber 2px border when a required field is still blank; cleared otherwise.</summary>
+        private static void SetNeeded(Control field, bool needed)
+        {
+            if (needed)
+            {
+                field.BorderBrush = NeededBrush;
+                field.BorderThickness = new Thickness(2);
+            }
+            else
+            {
+                field.ClearValue(Control.BorderBrushProperty);
+                field.ClearValue(Control.BorderThicknessProperty);
+            }
         }
 
         // ---- Primary action: Build ------------------------------------------

@@ -191,11 +191,12 @@
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>   <!-- 0: firmware -->
+                <RowDefinition Height="Auto"/>   <!-- 1: root password -->
+                <RowDefinition Height="Auto"/>   <!-- 2: confirm -->
+                <RowDefinition Height="Auto"/>   <!-- 3: ssh key -->
+                <RowDefinition Height="Auto"/>   <!-- 4: credential rule -->
+                <RowDefinition Height="Auto"/>   <!-- 5: output -->
             </Grid.RowDefinitions>
 
             <!-- Firmware .fwz -->
@@ -270,29 +271,41 @@
                         Click="BtnClearKey_Click"/>
             </StackPanel>
 
+            <!-- The either/or credential rule, stated explicitly right below the two
+                 credential fields (reinforces the (optional)/(required) labels). -->
+            <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+                       Foreground="Gray" FontSize="11" TextWrapping="Wrap"
+                       Text="At least one credential is required — a root password or an SSH key."/>
+
             <!-- Output (disabled until a firmware is chosen) -->
-            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
+            <TextBlock Grid.Row="5" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
                        Style="{StaticResource FieldLabel}" Text="Save output as:"/>
-            <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtOutputPath"
+            <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtOutputPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" IsEnabled="False"
                      Text="(where to write the modified .fwz)" Foreground="Gray"/>
-            <Button Grid.Row="4" Grid.Column="2" x:Name="BtnBrowseOutput"
+            <Button Grid.Row="5" Grid.Column="2" x:Name="BtnBrowseOutput"
                     Style="{StaticResource RowIconButton}" IsEnabled="False"
                     Content="&#xE74E;" ToolTip="Choose where to save the modified .fwz…"
                     AutomationProperties.Name="Choose where to save the modified firmware"
                     Click="BtnBrowseOutput_Click"/>
         </Grid>
 
-        <!-- Row 2: actions -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
-            <Button x:Name="BtnBuild" Padding="16,8" Margin="0,0,10,0"
-                    FontWeight="SemiBold" IsEnabled="False"
-                    Content="Build modified firmware" Click="BtnBuild_Click"/>
-            <Button x:Name="BtnVerify" Padding="12,8" Margin="0,0,10,0"
-                    Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
-            <Button x:Name="BtnSelfTest" Padding="12,8"
-                    Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
-        </StackPanel>
+        <!-- Row 2: actions. DockPanel so the hint fills the remaining width and
+             trims, instead of pushing the buttons off-screen at small widths. -->
+        <DockPanel Grid.Row="2" Margin="0,0,0,10" LastChildFill="True">
+            <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
+                <Button x:Name="BtnBuild" Padding="16,8" Margin="0,0,10,0"
+                        FontWeight="SemiBold" IsEnabled="False"
+                        Content="Build modified firmware" Click="BtnBuild_Click"/>
+                <Button x:Name="BtnVerify" Padding="12,8" Margin="0,0,10,0"
+                        Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
+                <Button x:Name="BtnSelfTest" Padding="12,8"
+                        Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
+            </StackPanel>
+            <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled. -->
+            <TextBlock x:Name="TxtBuildHint" VerticalAlignment="Center" Margin="14,0,0,0"
+                       Foreground="Gray" TextTrimming="CharacterEllipsis"/>
+        </DockPanel>
 
         <!-- Row 3: result label -->
         <TextBlock Grid.Row="3" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
