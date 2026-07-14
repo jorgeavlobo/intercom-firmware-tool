@@ -50,8 +50,10 @@ namespace IntercomFirmwareTool.App
             _pw.Changed += UpdatePasswordHint;
             _confirm.Changed += UpdatePasswordHint;
             // The password is a Build precondition (the key is optional), so
-            // re-evaluate the Build button as it changes.
+            // re-evaluate the Build button/cues as either the password OR its
+            // confirmation changes (a build needs them to match).
             _pw.Changed += UpdateBuildEnabled;
+            _confirm.Changed += UpdateBuildEnabled;
             WirePeekButton();
 
             // Password fields start EMPTY on purpose: the user must enter a root
@@ -667,13 +669,15 @@ namespace IntercomFirmwareTool.App
 
         /// <summary>
         /// Whether a credential is currently available for Build: with password
-        /// login disabled a key is required; otherwise a non-empty password.
-        /// Single source of truth so the two enable-gates can't drift.
+        /// login disabled a key is required; otherwise a non-empty password that
+        /// matches its confirmation. Single source of truth so the gates can't drift.
         /// </summary>
         private bool HaveCredential()
         {
             bool passwordOff = ChkKeyOnly.IsChecked == true;
-            return passwordOff ? _keyPath != null : CurrentPassword().Length > 0;
+            if (passwordOff) return _keyPath != null;
+            // Password mode: a non-empty password that has been confirmed (matches).
+            return CurrentPassword().Length > 0 && CurrentPassword() == CurrentConfirm();
         }
 
         /// <summary>
@@ -693,6 +697,8 @@ namespace IntercomFirmwareTool.App
         // "what's still needed" hint (WCAG 1.4.1).
         private static readonly SolidColorBrush NeededBrush = MakeFrozen(Color.FromRgb(0xD9, 0x8A, 0x00));
         private static readonly SolidColorBrush ReadyBrush = MakeFrozen(Color.FromRgb(0x2E, 0x7D, 0x32));
+        // Error cue (e.g. confirm doesn't match) — Firebrick, matching the ✗ text hint.
+        private static readonly Brush ErrorBrush = Brushes.Firebrick;
 
         private static SolidColorBrush MakeFrozen(Color c)
         {
@@ -711,24 +717,40 @@ namespace IntercomFirmwareTool.App
         private void UpdateRequiredCues()
         {
             bool passwordOff = ChkKeyOnly.IsChecked == true;
+            string pw = CurrentPassword();
+            string confirm = CurrentConfirm();
+
             bool needFirmware = _fwzPath == null;
             bool needOutput = _outputPath == null;
-            bool needPassword = !passwordOff && CurrentPassword().Length == 0;
+            bool needPassword = !passwordOff && pw.Length == 0;
+            // Confirm becomes relevant only once a password is entered (password mode):
+            // amber while it is still blank, red while it is filled but doesn't match.
+            bool needConfirm = !passwordOff && pw.Length > 0 && confirm.Length == 0;
+            bool confirmMismatch = !passwordOff && pw.Length > 0 && confirm.Length > 0 && pw != confirm;
             bool needKey = passwordOff && _keyPath == null;
 
-            SetNeeded(TxtFwzPath, needFirmware);
+            SetFieldBorder(TxtFwzPath, needFirmware ? NeededBrush : null);
             // Output is disabled until a firmware is chosen; only cue it once usable.
-            SetNeeded(TxtOutputPath, needOutput && _fwzPath != null);
-            SetNeeded(TxtPassword, needPassword);
-            SetNeeded(TxtKeyPath, needKey);
+            SetFieldBorder(TxtOutputPath, needOutput && _fwzPath != null ? NeededBrush : null);
+            SetFieldBorder(TxtPassword, needPassword ? NeededBrush : null);
+            SetFieldBorder(TxtConfirm, needConfirm ? NeededBrush : confirmMismatch ? ErrorBrush : null);
+            SetFieldBorder(TxtKeyPath, needKey ? NeededBrush : null);
 
             var missing = new List<string>();
             if (needFirmware) missing.Add("firmware");
             if (needOutput) missing.Add("output path");
             if (needPassword) missing.Add("a root password");
+            if (needConfirm) missing.Add("confirm the password");
             if (needKey) missing.Add("an SSH key");
 
-            if (missing.Count == 0)
+            if (confirmMismatch)
+            {
+                // A concrete error takes priority over the "still needed" list.
+                string prefix = missing.Count > 0 ? "Still needed: " + string.Join(", ", missing) + " — " : "";
+                TxtBuildHint.Text = prefix + "passwords don't match.";
+                TxtBuildHint.Foreground = ErrorBrush;
+            }
+            else if (missing.Count == 0)
             {
                 TxtBuildHint.Text = "✓ Ready to build.";
                 TxtBuildHint.Foreground = ReadyBrush;
@@ -740,12 +762,12 @@ namespace IntercomFirmwareTool.App
             }
         }
 
-        /// <summary>Amber 2px border when a required field is still blank; cleared otherwise.</summary>
-        private static void SetNeeded(Control field, bool needed)
+        /// <summary>Sets (or clears, when <paramref name="brush"/> is null) a 2px cue border on a field.</summary>
+        private static void SetFieldBorder(Control field, Brush? brush)
         {
-            if (needed)
+            if (brush != null)
             {
-                field.BorderBrush = NeededBrush;
+                field.BorderBrush = brush;
                 field.BorderThickness = new Thickness(2);
             }
             else
