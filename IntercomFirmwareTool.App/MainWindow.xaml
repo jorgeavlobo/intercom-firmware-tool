@@ -72,6 +72,35 @@
             <Setter Property="VerticalContentAlignment" Value="Center"/>
             <Setter Property="Padding" Value="6,0"/>
         </Style>
+
+        <!-- Rounded, brand-coloured pill button for the "buy me a coffee" links.
+             Background/Foreground are set per-button to each brand's colour. -->
+        <Style TargetType="Button" x:Key="DonateButton">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="pill" Background="{TemplateBinding Background}"
+                                CornerRadius="6" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="pill" Property="Opacity" Value="0.88"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="pill" Property="Opacity" Value="0.75"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
     <Grid Margin="14">
@@ -82,6 +111,7 @@
             <RowDefinition Height="Auto"/>   <!-- 3: result label -->
             <RowDefinition Height="*"/>      <!-- 4: result box -->
             <RowDefinition Height="Auto"/>   <!-- 5: diagnostics status -->
+            <RowDefinition Height="Auto"/>   <!-- 6: support / buy me a coffee -->
         </Grid.RowDefinitions>
 
         <!-- Row 0: what this does + safety note -->
@@ -215,5 +245,57 @@
         <!-- Row 5: diagnostics -->
         <TextBlock Grid.Row="5" x:Name="TxtDiag" Margin="0,8,0,0"
                    Foreground="Gray" FontFamily="Consolas" FontSize="11"/>
+
+        <!-- Row 6: support / buy me a coffee -->
+        <Border Grid.Row="6" Margin="0,10,0,0" Padding="12,9"
+                Background="#FFFBF7EF" BorderBrush="#FFE6D6AE" BorderThickness="1" CornerRadius="8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="&#x2615;" FontSize="20" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <TextBlock VerticalAlignment="Center" TextWrapping="Wrap" Foreground="#FF5B4A1E">
+                        <Run Text="Found this tool useful? "/><Run Text="Buy me a coffee" FontWeight="SemiBold"/><Run Text=" — €5. Thank you! ☺"/>
+                    </TextBlock>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <!-- PayPal -->
+                    <Button x:Name="BtnPayPal" Style="{StaticResource DonateButton}"
+                            Background="#FF003087" Click="BtnPayPal_Click"
+                            ToolTip="Support via PayPal — https://paypal.me/jorgeavlobo"
+                            AutomationProperties.Name="Buy me a coffee via PayPal">
+                        <StackPanel Orientation="Horizontal">
+                            <!-- Placeholder monogram badge; replaced by the PayPal.svg icon once added. -->
+                            <Border x:Name="IcoPayPal" Width="22" Height="22" CornerRadius="11"
+                                    Background="White" Margin="0,0,7,0">
+                                <TextBlock Text="P" FontWeight="Bold" FontSize="13" Foreground="#FF003087"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <TextBlock Text="PayPal" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+
+                    <!-- Revolut -->
+                    <Button x:Name="BtnRevolut" Style="{StaticResource DonateButton}"
+                            Background="#FF191C1F" Click="BtnRevolut_Click"
+                            ToolTip="Support via Revolut — https://revolut.me/jorgeavlobo"
+                            AutomationProperties.Name="Buy me a coffee via Revolut">
+                        <StackPanel Orientation="Horizontal">
+                            <!-- Placeholder monogram badge; replaced by the Revolut.svg icon once added. -->
+                            <Border x:Name="IcoRevolut" Width="22" Height="22" CornerRadius="11"
+                                    Background="White" Margin="0,0,7,0">
+                                <TextBlock Text="R" FontWeight="Bold" FontSize="13" Foreground="#FF191C1F"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <TextBlock Text="Revolut" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Grid>
+        </Border>
     </Grid>
 </Window>

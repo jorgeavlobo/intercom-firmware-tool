@@ -475,16 +475,30 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
-        /// <summary>Opens a header hyperlink (the MyHOME Suite download) in the default browser.</summary>
-        private void Hyperlink_RequestNavigate(object sender, System.Windows.Navigation.RequestNavigateEventArgs e)
+        /// <summary>Opens a URL in the default browser (best-effort; never throws to the UI).</summary>
+        private static void OpenUrl(string url)
         {
             try
             {
-                Process.Start(new ProcessStartInfo(e.Uri.AbsoluteUri) { UseShellExecute = true });
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
             }
             catch { /* opening a browser is best-effort, non-critical */ }
+        }
+
+        /// <summary>Opens a header hyperlink (the MyHOME Suite download) in the default browser.</summary>
+        private void Hyperlink_RequestNavigate(object sender, System.Windows.Navigation.RequestNavigateEventArgs e)
+        {
+            OpenUrl(e.Uri.AbsoluteUri);
             e.Handled = true;
         }
+
+        /// <summary>Opens the PayPal.me page to buy the author a coffee.</summary>
+        private void BtnPayPal_Click(object sender, RoutedEventArgs e) =>
+            OpenUrl("https://paypal.me/jorgeavlobo");
+
+        /// <summary>Opens the Revolut.me page to buy the author a coffee.</summary>
+        private void BtnRevolut_Click(object sender, RoutedEventArgs e) =>
+            OpenUrl("https://revolut.me/jorgeavlobo");
 
         /// <summary>
         /// Refreshes the key box placeholder to say whether the key is optional or
