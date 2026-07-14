@@ -7,7 +7,7 @@
         mc:Ignorable="d"
         Title="Intercom Firmware Tool — SSH-enable (Classe 100X / 300X)"
         Icon="Assets/Icons/AppIcon.ico"
-        Height="700" Width="880" MinHeight="620" MinWidth="720"
+        Height="760" Width="880" MinHeight="690" MinWidth="720"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
         <Style TargetType="TextBlock" x:Key="FieldLabel">
