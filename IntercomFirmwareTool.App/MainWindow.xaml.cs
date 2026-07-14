@@ -715,16 +715,12 @@ namespace IntercomFirmwareTool.App
 
             await RunAndShow(sb, () =>
             {
-                // Re-verify at build time (TOCTOU): the file may have changed
-                // since the Browse-time check — a synced/replaced download, or a
-                // symlink retargeted — so re-run the size + SHA-256 gate on the
-                // actual bytes we are about to modify.
-                var recheck = FirmwareRegistry.Verify(fwz);
-                if (!recheck.Ok)
-                    throw new InvalidOperationException(
-                        "The selected firmware no longer matches a known-good original — build aborted. " +
-                        "Re-select the file.\n" + recheck.Message);
-
+                // No build-time re-hash here: BuildModifiedFwz performs the
+                // authoritative whitelist verification (size + SHA-256) itself,
+                // atomically under the input file lock — the TOCTOU-safe place to
+                // do it. A second ~100 MB hash here would only slow every build
+                // without adding safety. It throws a clear error if the input is
+                // not a recognized original, which RunAndShow surfaces.
                 FwzBuildResult r = FwzProbe.BuildModifiedFwz(fwz, opts, output);
                 sb.AppendLine($"Archive password : {r.PasswordUsed}  (ZipCrypto key, not the device model)");
                 sb.AppendLine($"Modified entry : {r.SelectedEntry}");
