@@ -11,7 +11,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Content Include="Assets\Icons\AppIcon.ico" />
+    <!-- Embedded so Window.Icon="Assets/Icons/AppIcon.ico" resolves via a pack
+         URI at runtime (the title-bar/taskbar icon). ApplicationIcon above is a
+         separate mechanism that embeds the icon into the .exe itself. -->
+    <Resource Include="Assets\Icons\AppIcon.ico" />
   </ItemGroup>
 
   <ItemGroup>
