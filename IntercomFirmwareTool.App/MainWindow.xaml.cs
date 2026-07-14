@@ -108,11 +108,16 @@ namespace IntercomFirmwareTool.App
         {
             var anim = new DoubleAnimation
             {
-                From = -70,
+                // Start at the template's base X (off the left edge) so there is no
+                // jump when a sweep begins.
+                From = -90,
                 To = 170,
                 Duration = TimeSpan.FromMilliseconds(1500),
                 // Ease in/out for a smooth, premium glide rather than a linear wipe.
-                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut },
+                // Revert to the base X after each sweep instead of holding the final
+                // value, so the band is never parked on-screen (any button width/DPI).
+                FillBehavior = FillBehavior.Stop
             };
             sheen.BeginAnimation(TranslateTransform.XProperty, anim);
         }
