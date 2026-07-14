@@ -81,10 +81,10 @@
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Padding" Value="10,6"/>
             <Setter Property="Margin" Value="8,0,0,0"/>
-            <!-- Equal height here; equal WIDTH comes from the UniformGrid host, which
-                 sizes both cells to the wider button — so neither is forced wider
-                 than its natural size. -->
-            <Setter Property="Height" Value="36"/>
+            <!-- Equal height (fixed) restored to the original taller size; equal
+                 WIDTH comes from the UniformGrid host, which sizes both cells to the
+                 wider button — so neither is forced wider than its natural size. -->
+            <Setter Property="Height" Value="40"/>
             <Setter Property="HorizontalContentAlignment" Value="Center"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
