@@ -295,7 +295,7 @@
                      PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown" PreviewKeyDown="TxtFwzPath_PreviewKeyDown"
                      Text="(click to choose the original .fwz to modify)" Foreground="Gray"/>
             <Button Grid.Row="0" Grid.Column="2" x:Name="BtnClearFwz"
-                    Style="{StaticResource RowIconButton}" Content="&#xE711;"
+                    Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
                     ToolTip="Clear the selected firmware"
                     AutomationProperties.Name="Clear the selected firmware"
                     Click="BtnClearFwz_Click"/>
@@ -387,7 +387,8 @@
                     </Grid>
                 </Button>
                 <Button x:Name="BtnClearKey" Style="{StaticResource RowIconButton}"
-                        Content="&#xE711;" ToolTip="Clear the selected key (build with password only)"
+                        Content="&#xE711;" IsEnabled="False"
+                        ToolTip="Clear the selected key (build with password only)"
                         AutomationProperties.Name="Clear the selected SSH key"
                         Click="BtnClearKey_Click"/>
             </StackPanel>

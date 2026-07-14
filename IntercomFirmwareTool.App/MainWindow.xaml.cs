@@ -320,7 +320,6 @@ namespace IntercomFirmwareTool.App
                 TxtOutputPath.Foreground = Brushes.Gray;
                 LblOutput.IsEnabled = false;
                 TxtOutputPath.IsEnabled = false;
-                BtnClearOutput.IsEnabled = false;
                 UpdateBuildEnabled();
 
                 TxtResult.Text =
@@ -336,12 +335,12 @@ namespace IntercomFirmwareTool.App
                 return;
             }
 
-            // Accepted: record the path and enable the output row.
+            // Accepted: record the path and enable the output row (BtnClearOutput is
+            // driven by UpdateBuildEnabled once _outputPath is set, below).
             _fwzPath = chosen;
             SetPathText(TxtFwzPath, chosen);
             LblOutput.IsEnabled = true;
             TxtOutputPath.IsEnabled = true;
-            BtnClearOutput.IsEnabled = true;
             // Always re-suggest the output next to the NEW input, so switching
             // firmware can't leave the output pointing at the previous file's
             // name/location (the user can still Browse to change it).
@@ -372,7 +371,6 @@ namespace IntercomFirmwareTool.App
             TxtOutputPath.Foreground = Brushes.Gray;
             LblOutput.IsEnabled = false;
             TxtOutputPath.IsEnabled = false;
-            BtnClearOutput.IsEnabled = false;
             UpdateBuildEnabled();
         }
 
@@ -761,13 +759,15 @@ namespace IntercomFirmwareTool.App
             bool passwordOff = ChkKeyOnly.IsChecked == true;
             if (passwordOff) return _keyPath != null;
             // Password mode: a non-empty password that has been confirmed (matches).
-            return CurrentPassword().Length > 0 && CurrentPassword() == CurrentConfirm();
+            // Read the value once so the two comparisons can't observe different state.
+            string pw = CurrentPassword();
+            return pw.Length > 0 && pw == CurrentConfirm();
         }
 
         /// <summary>
-        /// Enables the Build button when firmware and output are set and at least
-        /// one credential is available: with password login disabled a key is
-        /// required; otherwise a non-empty password is required (key optional).
+        /// Enables the Build button when firmware and output are set and a credential
+        /// is available: with password login disabled a key is required; otherwise a
+        /// non-empty root password that matches its confirmation (key optional).
         /// </summary>
         private void UpdateBuildEnabled()
         {
@@ -841,6 +841,12 @@ namespace IntercomFirmwareTool.App
                 : confirmMismatch ? "Confirm Password, does not match the password"
                 : "Confirm Password");
             AutomationProperties.SetName(TxtKeyPath, needKey ? "SSH Public Key, required" : "SSH Public Key");
+
+            // Each clear/erase button is only useful when its field holds something to
+            // clear — disable it while the path is empty (and while an op is running).
+            BtnClearFwz.IsEnabled = _uiEnabled && _fwzPath != null;
+            BtnClearKey.IsEnabled = _uiEnabled && _keyPath != null;
+            BtnClearOutput.IsEnabled = _uiEnabled && _outputPath != null;
 
             var missing = new List<string>();
             if (needFirmware) missing.Add("firmware");
@@ -1265,16 +1271,16 @@ namespace IntercomFirmwareTool.App
             // must be disabled during an operation too — otherwise they would look
             // active (hand cursor, focusable) while doing nothing.
             TxtFwzPath.IsEnabled = enabled;
-            BtnClearFwz.IsEnabled = enabled;
             TxtKeyPath.IsEnabled = enabled;
             BtnGenKey.IsEnabled = enabled;
-            BtnClearKey.IsEnabled = enabled;
-            // The output row stays disabled until a firmware is chosen (box + clear).
+            // The output row stays disabled until a firmware is chosen.
             TxtOutputPath.IsEnabled = enabled && _fwzPath != null;
-            BtnClearOutput.IsEnabled = enabled && _fwzPath != null;
             LblOutput.IsEnabled = enabled && _fwzPath != null;
             BtnVerify.IsEnabled = enabled;
             BtnSelfTest.IsEnabled = enabled;
+            // The three clear buttons are content-aware (enabled only when their field
+            // has something to clear); UpdateBuildEnabled below drives them from the
+            // current paths + _uiEnabled, so they aren't set here.
 
             // Also lock the credential inputs during an operation so the visible UI
             // can't drift from the values snapshotted for the build. When
