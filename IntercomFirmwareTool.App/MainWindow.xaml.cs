@@ -108,9 +108,9 @@ namespace IntercomFirmwareTool.App
         {
             var anim = new DoubleAnimation
             {
-                From = -90,
-                To = 210,
-                Duration = TimeSpan.FromMilliseconds(850),
+                From = -70,
+                To = 170,
+                Duration = TimeSpan.FromMilliseconds(1500),
                 // Ease in/out for a smooth, premium glide rather than a linear wipe.
                 EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
             };

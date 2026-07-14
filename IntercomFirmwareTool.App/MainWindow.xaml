@@ -81,9 +81,10 @@
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Padding" Value="10,6"/>
             <Setter Property="Margin" Value="8,0,0,0"/>
-            <!-- Fixed size so PayPal and Revolut look uniform regardless of label. -->
-            <Setter Property="Width" Value="134"/>
-            <Setter Property="Height" Value="38"/>
+            <!-- Equal height here; equal WIDTH comes from the UniformGrid host, which
+                 sizes both cells to the wider button — so neither is forced wider
+                 than its natural size. -->
+            <Setter Property="Height" Value="36"/>
             <Setter Property="HorizontalContentAlignment" Value="Center"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
@@ -326,7 +327,9 @@
                     </TextBlock>
                 </DockPanel>
 
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                <!-- UniformGrid: both cells take the width of the WIDER button, so
+                     PayPal and Revolut end up equal without forcing an arbitrary width. -->
+                <UniformGrid Grid.Column="1" Rows="1" Columns="2" VerticalAlignment="Center">
                     <!-- PayPal -->
                     <Button x:Name="BtnPayPal" Style="{StaticResource DonateButton}"
                             Background="#FF003087" Click="BtnPayPal_Click"
@@ -358,7 +361,7 @@
                             <TextBlock Text="Revolut" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Button>
-                </StackPanel>
+                </UniformGrid>
             </Grid>
         </Border>
     </Grid>
