@@ -737,7 +737,7 @@ namespace IntercomFirmwareTool.App
 
             var missing = new List<string>();
             if (needFirmware) missing.Add("firmware");
-            if (needOutput) missing.Add("output path");
+            if (needOutput && _fwzPath != null) missing.Add("output path");
             if (needPassword) missing.Add("a root password");
             if (needConfirm) missing.Add("confirm the password");
             if (needKey) missing.Add("an SSH key");
