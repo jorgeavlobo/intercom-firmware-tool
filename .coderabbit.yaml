@@ -1,0 +1,23 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit configuration.
+# We drive reviews manually: CodeRabbit should review only when explicitly
+# asked with "@coderabbitai review" (or the "Trigger review" checkbox), not
+# automatically on every push. This keeps review rounds deliberate and avoids
+# the auto-pause churn during active development.
+language: en-US
+reviews:
+  # Don't post the "Review skipped" status message on every push.
+  review_status: false
+  # Turn OFF automatic (incremental) reviews on push/PR-open.
+  # Manual "@coderabbitai review" still works and is how we request reviews.
+  auto_review:
+    enabled: false
+  # Keep the high-level walkthrough/summary when a review IS requested.
+  high_level_summary: true
+  # Pre-merge checks: turn OFF the docstring-coverage check. Its coverage number
+  # lags behind incremental reviews (it reuses a stale figure when files are
+  # skipped as "similar to previous changes"), so it reports false warnings.
+  pre_merge_checks:
+    docstrings:
+      mode: "off"

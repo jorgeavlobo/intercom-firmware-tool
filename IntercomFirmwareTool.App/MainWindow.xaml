@@ -5,37 +5,214 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:IntercomFirmwareTool.App"
         mc:Ignorable="d"
-        Title="Test: read ext4 from inside a .fwz" Height="500" Width="800">
-    <Grid Margin="12">
+        Title="Intercom Firmware Tool — SSH-enable (Classe 100X / 300X)"
+        Height="700" Width="880" MinHeight="620" MinWidth="720"
+        WindowStartupLocation="CenterScreen">
+    <Window.Resources>
+        <Style TargetType="TextBlock" x:Key="FieldLabel">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,12,0"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+        </Style>
+        <Style TargetType="Button" x:Key="BrowseButton">
+            <Setter Property="Padding" Value="10,4"/>
+            <Setter Property="Margin" Value="8,0,0,0"/>
+            <Setter Property="MinWidth" Value="90"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+        </Style>
+        <!-- Small flat icon button (Segoe MDL2 Assets glyphs) for the inline
+             password actions: reveal, copy, generate. -->
+        <Style TargetType="Button" x:Key="IconButton">
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+            <Setter Property="FontSize" Value="15"/>
+            <Setter Property="Width" Value="30"/>
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="Margin" Value="4,0,0,0"/>
+            <Setter Property="Foreground" Value="#FF444444"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="VerticalAlignment" Value="Stretch"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bg" CornerRadius="4"
+                                Background="{TemplateBinding Background}">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bg" Property="Background" Value="#22000000"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bg" Property="Background" Value="#33000000"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#FFBFBFBF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <!-- Larger icon button for the form rows (Browse / choose / generate).
+             Left-aligned so the first button of every row lines up vertically. -->
+        <Style TargetType="Button" x:Key="RowIconButton" BasedOn="{StaticResource IconButton}">
+            <Setter Property="Width" Value="38"/>
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="Margin" Value="6,0,0,6"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+        </Style>
+        <!-- Uniform data-entry field: same height everywhere. -->
+        <Style TargetType="TextBox" x:Key="InputField">
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Padding" Value="6,0"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="14">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>   <!-- 0: intro + safety -->
+            <RowDefinition Height="Auto"/>   <!-- 1: input form -->
+            <RowDefinition Height="Auto"/>   <!-- 2: action buttons -->
+            <RowDefinition Height="Auto"/>   <!-- 3: result label -->
+            <RowDefinition Height="*"/>      <!-- 4: result box -->
+            <RowDefinition Height="Auto"/>   <!-- 5: diagnostics status -->
         </Grid.RowDefinitions>
 
-        <!-- Row 0: path of the file INSIDE the image -->
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <TextBlock Text="File to read inside the image:"
-                       VerticalAlignment="Center" Margin="0,0,8,0"/>
-            <TextBox x:Name="TxtInternalPath" Width="300" Text="/etc/hostname"
-                     VerticalAlignment="Center"/>
+        <!-- Row 0: what this does + safety note -->
+        <Border Grid.Row="0" Background="#FFF7F2E8" BorderBrush="#FFE0C98A"
+                BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,0,0,12">
+            <TextBlock TextWrapping="Wrap" Foreground="#FF7A5B00"><Run Text="⚠ Flashing modified firmware can brick the device. "/><Run Text="Do it at your own risk!" FontWeight="Bold" TextDecorations="Underline"/><Run Text=" Use "/><Hyperlink NavigateUri="https://assets.legrand.com/pim/AUTRE/MyHOME_Suite_030538.exe" RequestNavigate="Hyperlink_RequestNavigate">MyHOME Suite</Hyperlink><Run Text="."/></TextBlock>
+        </Border>
+
+        <!-- Row 1: the input form -->
+        <Grid Grid.Row="1" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Firmware .fwz -->
+            <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                       Text="Firmware (.fwz):"/>
+            <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtFwzPath"
+                     Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
+                     Text="(choose the original .fwz to modify)" Foreground="Gray"/>
+            <Button Grid.Row="0" Grid.Column="2" x:Name="BtnBrowseFwz"
+                    Style="{StaticResource RowIconButton}" Content="&#xE8B7;"
+                    ToolTip="Browse for the original firmware (.fwz)…"
+                    AutomationProperties.Name="Browse for the original firmware"
+                    Click="BtnBrowseFwz_Click"/>
+
+            <!-- Root password (masked) + reveal toggle + Disable (key-only). One of
+                 the password or the key is required; ticking Disable turns password
+                 login off, so a key becomes the credential. -->
+            <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                       Text="Root password:"/>
+            <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+                <TextBox x:Name="TxtPassword" Width="170" Style="{StaticResource InputField}"
+                         FontFamily="Consolas"/>
+                <!-- Inline actions, in order: generate, reveal (hold-to-show eye),
+                     copy. Reveal affects BOTH the password and confirm fields. -->
+                <Button x:Name="BtnRandomPwd" Style="{StaticResource IconButton}"
+                        Content="&#xE8B1;" ToolTip="Generate a strong random password"
+                        AutomationProperties.Name="Generate a strong random password"
+                        Click="BtnRandomPwd_Click"/>
+                <Button x:Name="BtnToggleReveal" Style="{StaticResource IconButton}"
+                        Content="&#xE7B3;" ToolTip="Hold to show the password"
+                        AutomationProperties.Name="Hold to show the password"/>
+                <Button x:Name="BtnCopyPwd" Style="{StaticResource IconButton}"
+                        Content="&#xE8C8;" ToolTip="Copy password to clipboard"
+                        AutomationProperties.Name="Copy password to clipboard"
+                        Click="BtnCopyPwd_Click"/>
+                <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="16,0,0,0"
+                          Content="Disable"
+                          ToolTip="Disable password login (key-only) — requires an SSH key"
+                          Checked="ChkKeyOnly_Toggled" Unchecked="ChkKeyOnly_Toggled"/>
+            </StackPanel>
+
+            <!-- Confirm password -->
+            <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                       Text="Confirm password:"/>
+            <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
+                <TextBox x:Name="TxtConfirm" Width="170" Style="{StaticResource InputField}"
+                         FontFamily="Consolas"/>
+                <TextBlock x:Name="TxtPwdHint" VerticalAlignment="Center" Margin="10,0,0,0"
+                           Foreground="Gray"/>
+            </StackPanel>
+
+            <!-- SSH public key: OPTIONAL — choose an existing one or generate a
+                 new pair. Without a key, login is by the root password above. -->
+            <TextBlock Grid.Row="3" Grid.Column="0" x:Name="LblKey"
+                       Style="{StaticResource FieldLabel}"
+                       Text="SSH public key (optional):"/>
+            <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath"
+                     Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
+                     Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
+            <StackPanel Grid.Row="3" Grid.Column="2" Orientation="Horizontal">
+                <Button x:Name="BtnChooseKey" Style="{StaticResource RowIconButton}"
+                        Content="&#xE8B7;" ToolTip="Choose an existing public key (.pub)…"
+                        AutomationProperties.Name="Choose an existing public key"
+                        Click="BtnChooseKey_Click"/>
+                <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
+                        Content="&#xE192;" ToolTip="Generate a new SSH key pair…"
+                        AutomationProperties.Name="Generate a new SSH key pair"
+                        Click="BtnGenKey_Click"/>
+                <Button x:Name="BtnClearKey" Style="{StaticResource RowIconButton}"
+                        Content="&#xE711;" ToolTip="Clear the selected key (build with password only)"
+                        AutomationProperties.Name="Clear the selected SSH key"
+                        Click="BtnClearKey_Click"/>
+            </StackPanel>
+
+            <!-- Output (disabled until a firmware is chosen) -->
+            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
+                       Style="{StaticResource FieldLabel}" Text="Save output as:"/>
+            <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtOutputPath"
+                     Style="{StaticResource InputField}" IsReadOnly="True" IsEnabled="False"
+                     Text="(where to write the modified .fwz)" Foreground="Gray"/>
+            <Button Grid.Row="4" Grid.Column="2" x:Name="BtnBrowseOutput"
+                    Style="{StaticResource RowIconButton}" IsEnabled="False"
+                    Content="&#xE74E;" ToolTip="Choose where to save the modified .fwz…"
+                    AutomationProperties.Name="Choose where to save the modified firmware"
+                    Click="BtnBrowseOutput_Click"/>
+        </Grid>
+
+        <!-- Row 2: actions -->
+        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button x:Name="BtnBuild" Padding="16,8" Margin="0,0,10,0"
+                    FontWeight="SemiBold" IsEnabled="False"
+                    Content="Build modified firmware" Click="BtnBuild_Click"/>
+            <Button x:Name="BtnVerify" Padding="12,8" Margin="0,0,10,0"
+                    Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
+            <Button x:Name="BtnSelfTest" Padding="12,8"
+                    Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
         </StackPanel>
 
-        <!-- Row 1: test button — read the ext4 from inside a .fwz -->
-        <Button x:Name="BtnReadFwz" Grid.Row="1" HorizontalAlignment="Left"
-                Padding="12,6" Margin="0,0,0,8"
-                Content="Choose .fwz and read…"
-                Click="BtnReadFwz_Click"/>
+        <!-- Row 3: result label -->
+        <TextBlock Grid.Row="3" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
 
-        <!-- Row 2: result label -->
-        <TextBlock Grid.Row="2" Text="Result:" Margin="0,0,0,4"/>
-
-        <!-- Row 3: result box (multi-line, scroll, read-only) -->
-        <TextBox x:Name="TxtResult" Grid.Row="3"
-                 IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+        <!-- Row 4: result box -->
+        <TextBox x:Name="TxtResult" Grid.Row="4"
+                 IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
                  VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Auto"
-                 FontFamily="Consolas" FontSize="12"/>
+                 FontFamily="Consolas" FontSize="12"
+                 Text="Choose a firmware and an output path, set a root password and/or an SSH key (at least one), then click Build."/>
+
+        <!-- Row 5: diagnostics -->
+        <TextBlock Grid.Row="5" x:Name="TxtDiag" Margin="0,8,0,0"
+                   Foreground="Gray" FontFamily="Consolas" FontSize="11"/>
     </Grid>
 </Window>

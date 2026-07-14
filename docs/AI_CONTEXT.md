@@ -1,0 +1,135 @@
+# Project context for AI assistants
+
+If you are an AI reviewing or contributing to this repository, read this first.
+
+## What this project is
+
+**IntercomFirmwareTool** is a **C#/WPF desktop application for Windows**
+(.NET, **x64**) that prepares firmware images for a BTicino video intercom
+(Classe 100X / 300X family).
+
+Its purpose is to **replicate, on Windows, what the fquinto project's Python
+script does on Linux** — but as a native Windows GUI tool, without needing
+Linux, WSL, root, or `mount`.
+
+- **Upstream we replicate:** https://github.com/fquinto/bticinoClasse300x
+- **The upstream script (`main.py`) is GPL-2.0 and is NOT vendored here** (this
+  is an MIT repo). Its provenance — exact raw URL, MD5, and a line-number map of
+  the relevant functions — is recorded in
+  [`reference/fquinto/README.md`](../reference/fquinto/README.md); fetch it from
+  there if you need to read it. We reimplement the *result*, clean-room — do
+  **not** copy its code into our C# sources.
+- **The write-phase design** is in
+  [`docs/WRITE_PHASE_PLAN.md`](WRITE_PHASE_PLAN.md).
+
+## The core technical problem
+
+The firmware payload is a Linux **ext4** filesystem. On Windows you cannot
+`mount` ext4. fquinto uses `sudo mount -o loop` + shell tools (`cp`, `chmod`,
+`ln -s`, `openssl passwd`); we cannot.
+
+So we use **SharpExt4** — a .NET wrapper over the native **lwext4** C library —
+to read and write the ext4 filesystem directly from Windows, then repackage.
+
+- SharpExt4 is a **mixed-mode C++/CLI** assembly; its native part (`Ijwhost.dll`)
+  is **x64-only**, so the whole app must be x64 and those DLLs must sit next to
+  the executable. This is why the project pins `PlatformTarget=x64` and flattens
+  the SharpExt4 DLLs to the output root via `TargetPath`.
+
+## The pipeline (fquinto → us)
+
+```
+.fwz  (ZIP with ZipCrypto password, per model: C100X / C300X / SMARTDES)
+  └─ btweb_only.ext4.gz   ── gunzip ──►  btweb_only.ext4   (a *bare* ext4 image)
+        └─ modify the rootfs (enable SSH / root, etc.)
+        └─ gzip back, repackage into a new .fwz
+```
+
+**Read chain** (done and proven on real firmware): open `.fwz` → try the known
+passwords → select the `.gz` payload (name ends `.gz`, not `recovery`) → gunzip
+→ read files from the ext4.
+
+**Write phase** (done — see the status snapshot below): apply fquinto's rootfs
+edits (create the SSH authorized_keys, the `/home/root/.ssh` dir, `/etc/shadow`
++ `/etc/passwd` entries, and the `S98dropbear` rc5.d symlink), then recut and
+repackage.
+
+## Important implementation detail: bare ext4 has no partition table
+
+SharpExt4's `ExtDisk.Open` requires a **partitioned disk** (it runs
+`ext4_mbr_scan`). The firmware payload is a **bare** ext4 (filesystem only, no
+MBR). So we **wrap** the bare image in a temporary MBR disk (one Linux partition
+at the 1 MiB offset), operate on it, then **recut** the partition region back
+out to a raw ext4 of the same size. This wrapping/recut is internal plumbing,
+not a change to the ext4 itself.
+
+## Guiding principles (please respect these in reviews/changes)
+
+1. **Replicate fquinto faithfully first.** Same paths, contents, permissions,
+   symlink target. Innovate only after we match fquinto and validate.
+2. **Never modify the input; write the output only after validation.** The tool
+   operates on **temp copies** and **never modifies the user's original `.fwz`**.
+   The Build flow *does* write a new, modified `.fwz`, but only a fully written
+   artifact that has passed a full read-back round-trip is moved into place. The
+   tool itself **never flashes a device** — any real flashing is a separate,
+   manual step the user performs out of band.
+3. **Validate logically, not byte-for-byte.** Two ext4 images with the same
+   logical changes are never bit-identical (free-block allocation, timestamps).
+   Compare file contents, modes, owners and symlink targets.
+4. **SharpExt4 differences from fquinto must be handled explicitly.** fquinto
+   mounts as root, so it gets `root:root` ownership for free and relies on the
+   root umask for directory modes. We do **not** — we call `SetOwner(0,0)` and
+   `SetMode(...)` explicitly on every new file/dir. Missing this would make
+   dropbear reject the SSH key. `/home/root/.ssh` is set to `0755`, **matching
+   fquinto exactly** (its `mkdir -p` under the default umask). Note: neither
+   `.ssh` nor any `authorized_keys` exists in the factory firmware — this whole
+   mechanism is created here; there is no factory mode to copy. Security comes
+   from the parent (`/home/root` is `0700 root:root` at factory), so `.ssh` is
+   unreachable by other users regardless. `ValidateSsh` checks the **functional
+   requirement** (not group/other-writable), which `0755` satisfies.
+5. **Passwords:** fquinto uses `openssl passwd -1` (MD5-crypt, `$1$`, salt
+   `root`). We reimplement md5crypt in C# (`Md5Crypt.cs`), validated against a
+   known test vector. Do not "modernize" to SHA-512 while replicating — that
+   would diverge from fquinto.
+6. **Safety:** nothing is flashed to a device from this tool. Any real flashing
+   is a manual, out-of-band step (via BTicino's My Home Suite over Mini-USB),
+   only after golden cross-validation against fquinto passes. These units use an
+   **i.MX SoC**, so there is **no documented low-level un-brick** (SAM-BA is for
+   Atmel/Microchip chips and does not apply); the only realistic recovery is
+   re-flashing the original firmware while the device still boots, so keep it.
+
+## Where things live
+
+- `IntercomFirmwareTool.Core/` — the logic (no UI):
+  - `Ext4Probe.cs` — read/write ext4 (wrapping, reading, the Phase A–D write
+    routine `EnableSsh`, and `ValidateSsh`).
+  - `FwzProbe.cs` — the `.fwz` chain (SharpZipLib ZipCrypto, gunzip, orchestration).
+  - `Md5Crypt.cs` — the `$1$` MD5-crypt generator + self-test.
+  - `lib/SharpExt4/` — the SharpExt4 + lwext4 binaries (x64 native).
+- `IntercomFirmwareTool.App/` — the WPF UI. A single product flow: choose the
+  original `.fwz`, an SSH public key and an output path, then **Build** a
+  modified `.fwz` (verified by a full read-back round-trip). Two secondary
+  actions **Inspect an existing `.fwz`** (a self-contained read-only report:
+  point at any `.fwz` and read what is installed — password-login mode, the
+  deployed key's SHA-256 fingerprint, and the structural checks) and run the
+  **MD5-crypt self-test**.
+  A startup line reports 64-bit + DLL presence; it turns red if anything is off.
+- `reference/fquinto/README.md` — provenance of the upstream GPL-2.0 script
+  (URL + MD5 + line-number map); the script itself is not vendored.
+- `docs/WRITE_PHASE_PLAN.md` — the detailed write-phase plan.
+
+## Status snapshot
+
+- ✅ Read chain proven on real firmware (`/etc/hostname` → `Bticino_Classe_100_X`).
+- ✅ ext4 write persists (`CanWrite=True`, survives flush + raw round-trip).
+- ✅ MD5-crypt generator matches `openssl passwd -1` (self-test ALL PASS).
+- ✅ Phase A–D write routine + logical validation (18 checks PASS on real firmware).
+- ✅ Repackaging (re-gzip + ZipCrypto re-zip) round-trips through our read chain.
+- ✅ **Golden cross-validation done** — fquinto (Docker/Linux) run on the same
+  input produced the identical MD5-crypt hash, and its output `.fwz` passes our
+  validator with **no divergence** (`.ssh` is 0755, matching fquinto exactly).
+- ✅ Product UI — a single Build flow (choose .fwz + key + output → build +
+  verify), plus Inspect-existing and self-test actions.
+- ⏳ Next (user's call): optional real-device flashing (My Home Suite, Mini-USB;
+  keep the original firmware — no documented un-brick, i.MX SoC not SAM-BA);
+  optional 100%-faithful extras (e.g. fquinto's patch_github.xml edit).
