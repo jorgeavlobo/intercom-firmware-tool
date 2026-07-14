@@ -73,6 +73,93 @@
             <Setter Property="Padding" Value="6,0"/>
         </Style>
 
+        <!-- Modern flat action buttons (Windows 11 / Fluent look): a filled accent
+             PRIMARY for the main call-to-action and a subtle bordered SECONDARY for
+             the rest. Flat fills (no 3-D gradient), 6px rounded corners, smooth
+             hover/press states, a visible keyboard-focus ring and a clear disabled
+             state. Shared 36px height so the row lines up. -->
+        <Style TargetType="Button" x:Key="PrimaryButton">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Background" Value="#FF0F6CBD"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Height" Value="36"/>
+            <Setter Property="Padding" Value="20,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" CornerRadius="6" Background="{TemplateBinding Background}"
+                                BorderThickness="2" BorderBrush="Transparent" SnapsToDevicePixels="True">
+                            <ContentPresenter Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FF1A79C9"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FF0B5C9E"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#FF00335A"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="bd" Property="Background" Value="#FFDCDCDC"/>
+                                <Setter Property="Foreground" Value="#FF9A9A9A"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="Button" x:Key="SecondaryButton">
+            <Setter Property="Foreground" Value="#FF1F1F1F"/>
+            <Setter Property="Background" Value="#FFFDFDFD"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Height" Value="36"/>
+            <Setter Property="Padding" Value="16,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" CornerRadius="6" Background="{TemplateBinding Background}"
+                                BorderThickness="1" BorderBrush="#FFD2D2D2" SnapsToDevicePixels="True">
+                            <ContentPresenter Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FFF3F3F3"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#FFC4C4C4"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FFE9E9E9"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#FF0F6CBD"/>
+                                <Setter TargetName="bd" Property="BorderThickness" Value="2"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="bd" Property="Background" Value="#FFF7F7F7"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#FFE8E8E8"/>
+                                <Setter Property="Foreground" Value="#FFAFAFAF"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Rounded, brand-coloured button for the "buy me a coffee" links.
              Background/Foreground are set per-button to each brand's colour. -->
         <Style TargetType="Button" x:Key="DonateButton">
@@ -276,9 +363,27 @@
                      Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
             <StackPanel Grid.Row="3" Grid.Column="2" Orientation="Horizontal">
                 <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
-                        Content="&#xE192;" ToolTip="Generate a new SSH key pair…"
+                        ToolTip="Generate a new SSH key pair…"
                         AutomationProperties.Name="Generate a new SSH key pair"
-                        Click="BtnGenKey_Click"/>
+                        Click="BtnGenKey_Click">
+                    <!-- Key glyph with a small green "＋" badge = generate a NEW key.
+                         The key inherits the button Foreground (greys when disabled);
+                         the plus is drawn as two rounded bars so it stays crisp. -->
+                    <Grid Width="20" Height="18" SnapsToDevicePixels="True">
+                        <TextBlock Text="&#xE192;" FontFamily="Segoe MDL2 Assets" FontSize="16"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <Border Background="#FF107C10" CornerRadius="6" Width="12" Height="12"
+                                HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                Margin="0,0,-3,-2">
+                            <Grid>
+                                <Rectangle Fill="White" Width="6" Height="2" RadiusX="1" RadiusY="1"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <Rectangle Fill="White" Width="2" Height="6" RadiusX="1" RadiusY="1"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </Button>
                 <Button x:Name="BtnClearKey" Style="{StaticResource RowIconButton}"
                         Content="&#xE711;" ToolTip="Clear the selected key (build with password only)"
                         AutomationProperties.Name="Clear the selected SSH key"
@@ -295,7 +400,7 @@
 
             <!-- Output (disabled until a firmware is chosen) -->
             <TextBlock Grid.Row="5" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
-                       Style="{StaticResource FieldLabel}" Text="Save output as:"/>
+                       Style="{StaticResource FieldLabel}" Text="Save Output As:"/>
             <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtOutputPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" IsEnabled="False"
                      Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose where to save the modified .fwz…"
@@ -312,12 +417,13 @@
              trims, instead of pushing the buttons off-screen at small widths. -->
         <DockPanel Grid.Row="2" Margin="0,0,0,10" LastChildFill="True">
             <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
-                <Button x:Name="BtnBuild" Padding="16,8" Margin="0,0,10,0"
-                        FontWeight="SemiBold" IsEnabled="False"
-                        Content="Build modified firmware" Click="BtnBuild_Click"/>
-                <Button x:Name="BtnVerify" Padding="12,8" Margin="0,0,10,0"
+                <Button x:Name="BtnBuild" Style="{StaticResource PrimaryButton}"
+                        Margin="0,0,10,0" IsEnabled="False"
+                        Content="Build Modified Firmware" Click="BtnBuild_Click"/>
+                <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}"
+                        Margin="0,0,10,0"
                         Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
-                <Button x:Name="BtnSelfTest" Padding="12,8"
+                <Button x:Name="BtnSelfTest" Style="{StaticResource SecondaryButton}"
                         Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
             </StackPanel>
             <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled. -->
