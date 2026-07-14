@@ -81,16 +81,44 @@
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Padding" Value="10,6"/>
             <Setter Property="Margin" Value="8,0,0,0"/>
+            <!-- Fixed size so PayPal and Revolut look uniform regardless of label. -->
+            <Setter Property="Width" Value="134"/>
+            <Setter Property="Height" Value="38"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <!-- Constant 2px transparent border so the keyboard-focus ring
-                             (below) appears without shifting the layout. -->
+                             (below) appears without shifting the layout. ClipToBounds
+                             keeps the shine sweep inside the button. -->
                         <Border x:Name="pill" Background="{TemplateBinding Background}"
-                                CornerRadius="6" Padding="{TemplateBinding Padding}"
-                                BorderThickness="2" BorderBrush="Transparent">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                CornerRadius="6" BorderThickness="2" BorderBrush="Transparent"
+                                ClipToBounds="True">
+                            <Grid>
+                                <ContentPresenter Margin="{TemplateBinding Padding}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <!-- Shine: a soft, skewed light band parked off the left
+                                     edge; the code-behind sweeps sheenT across at random
+                                     intervals (independently per button) for a subtle glint. -->
+                                <Border x:Name="sheen" Width="46" HorizontalAlignment="Left"
+                                        IsHitTestVisible="False">
+                                    <Border.Background>
+                                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                            <GradientStop Color="#00FFFFFF" Offset="0.0"/>
+                                            <GradientStop Color="#4DFFFFFF" Offset="0.5"/>
+                                            <GradientStop Color="#00FFFFFF" Offset="1.0"/>
+                                        </LinearGradientBrush>
+                                    </Border.Background>
+                                    <Border.RenderTransform>
+                                        <TransformGroup>
+                                            <SkewTransform AngleX="-18"/>
+                                            <TranslateTransform x:Name="sheenT" X="-90"/>
+                                        </TransformGroup>
+                                    </Border.RenderTransform>
+                                </Border>
+                            </Grid>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
@@ -294,7 +322,7 @@
                     <TextBlock DockPanel.Dock="Left" Text="&#x2615;" FontSize="20"
                                VerticalAlignment="Center" Margin="0,0,10,0"/>
                     <TextBlock VerticalAlignment="Center" TextWrapping="Wrap" Foreground="#FF5B4A1E">
-                        <Run Text="Found this tool useful? "/><Run Text="Buy me a coffee" FontWeight="SemiBold"/><Run Text=" — €5. Thank you! ☺"/>
+                        <Run Text="Found this tool useful? "/><Run Text="Buy me a coffee" FontWeight="SemiBold"/><Run Text=". Thank you! ☺"/>
                     </TextBlock>
                 </DockPanel>
 

@@ -9,6 +9,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using IntercomFirmwareTool.Core;
 using Microsoft.Win32;
@@ -56,6 +57,64 @@ namespace IntercomFirmwareTool.App
             // password (or tick key-only), so a build can never ship the publicly
             // known fquinto default. The empty-password guard in Build enforces it.
             UpdatePasswordHint();
+
+            // Start the subtle "shine" on the donate buttons once the visual tree
+            // (and their templates) are ready.
+            Loaded += (_, _) => StartDonateShine();
+        }
+
+        private readonly Random _shineRng = new();
+
+        /// <summary>
+        /// Kicks off an independent, randomly-timed shine sweep on each donate
+        /// button. The two loops use separate random delays, so the glints never
+        /// fire together and never settle into a fixed rhythm — a quiet, occasional
+        /// catch-the-eye, not a constant animation.
+        /// </summary>
+        private void StartDonateShine()
+        {
+            BeginShineLoop(BtnPayPal);
+            BeginShineLoop(BtnRevolut);
+        }
+
+        private void BeginShineLoop(Button button)
+        {
+            // The animated band lives in the control template; pull out its named
+            // transform for this specific button instance.
+            button.ApplyTemplate();
+            if (button.Template?.FindName("sheenT", button) is not TranslateTransform sheen) return;
+
+            void ScheduleNext()
+            {
+                // Random gap between sweeps (~5–14 s) so the two buttons stay out of
+                // phase and the effect feels organic rather than mechanical.
+                var timer = new DispatcherTimer
+                {
+                    Interval = TimeSpan.FromMilliseconds(_shineRng.Next(5000, 14000))
+                };
+                timer.Tick += (_, _) =>
+                {
+                    timer.Stop();
+                    Sweep(sheen);
+                    ScheduleNext();
+                };
+                timer.Start();
+            }
+            ScheduleNext();
+        }
+
+        /// <summary>Sweeps the light band once across a button (left → right, then parked off-screen).</summary>
+        private static void Sweep(TranslateTransform sheen)
+        {
+            var anim = new DoubleAnimation
+            {
+                From = -90,
+                To = 210,
+                Duration = TimeSpan.FromMilliseconds(850),
+                // Ease in/out for a smooth, premium glide rather than a linear wipe.
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+            };
+            sheen.BeginAnimation(TranslateTransform.XProperty, anim);
         }
 
         // ---- Inline password actions (reveal / copy / generate) --------------
