@@ -7,6 +7,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -768,6 +769,20 @@ namespace IntercomFirmwareTool.App
             PhPassword.Visibility = needPassword ? Visibility.Visible : Visibility.Collapsed;
             PhConfirm.Visibility = needConfirm ? Visibility.Visible : Visibility.Collapsed;
 
+            // Mirror every visual cue into the accessibility tree so a screen reader
+            // announces the required / mismatch state when the field takes focus — the
+            // colour and "(required)" overlay are never the only signal (WCAG 1.4.1 /
+            // 1.3.1). The base names double as the (otherwise unassociated) field labels.
+            AutomationProperties.SetName(TxtFwzPath, needFirmware ? "Firmware, required" : "Firmware");
+            AutomationProperties.SetName(TxtOutputPath,
+                needOutput && _fwzPath != null ? "Save output as, required" : "Save output as");
+            AutomationProperties.SetName(TxtPassword, needPassword ? "Root Password, required" : "Root Password");
+            AutomationProperties.SetName(TxtConfirm,
+                needConfirm ? "Confirm Password, required"
+                : confirmMismatch ? "Confirm Password, does not match the password"
+                : "Confirm Password");
+            AutomationProperties.SetName(TxtKeyPath, needKey ? "SSH Public Key, required" : "SSH Public Key");
+
             var missing = new List<string>();
             if (needFirmware) missing.Add("firmware");
             if (needOutput && _fwzPath != null) missing.Add("output path");
@@ -775,6 +790,7 @@ namespace IntercomFirmwareTool.App
             if (needConfirm) missing.Add("confirm the password");
             if (needKey) missing.Add("an SSH key");
 
+            string previousHint = TxtBuildHint.Text;
             if (confirmMismatch)
             {
                 // A concrete error takes priority over the "still needed" list.
@@ -794,6 +810,14 @@ namespace IntercomFirmwareTool.App
                 TxtBuildHint.Text = "Still needed: " + string.Join(", ", missing) + ".";
                 TxtBuildHint.Foreground = Brushes.Gray;
             }
+
+            // The hint is a Polite live region (XAML), but WPF still needs the peer to
+            // raise the change event for it to be announced. FromElement returns a peer
+            // only when an automation client is attached, so this is a no-op otherwise;
+            // fire only on an actual text change to avoid repeat announcements.
+            if (!string.Equals(previousHint, TxtBuildHint.Text, StringComparison.Ordinal))
+                FrameworkElementAutomationPeer.FromElement(TxtBuildHint)
+                    ?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
 
             // Reveal/copy availability depends on the same password/confirm content.
             UpdatePasswordButtonStates();

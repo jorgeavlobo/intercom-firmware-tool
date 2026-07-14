@@ -320,8 +320,11 @@
                         Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
             </StackPanel>
             <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled. -->
+            <!-- LiveSetting=Polite so a screen reader announces the changing
+                 "still needed" / "Ready to build" hint as the form is filled. -->
             <TextBlock x:Name="TxtBuildHint" VerticalAlignment="Center" Margin="14,0,0,0"
-                       Foreground="Gray" TextTrimming="CharacterEllipsis"/>
+                       Foreground="Gray" TextTrimming="CharacterEllipsis"
+                       AutomationProperties.LiveSetting="Polite"/>
         </DockPanel>
 
         <!-- Row 3: result label -->
