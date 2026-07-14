@@ -475,12 +475,21 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
-        /// <summary>Opens a URL in the default browser (best-effort; never throws to the UI).</summary>
+        /// <summary>
+        /// Opens an http/https URL in the default browser (best-effort; never
+        /// throws to the UI). Only absolute http/https URLs are allowed:
+        /// UseShellExecute=true would otherwise hand ANY scheme to the shell
+        /// (file:, ms-settings:, …), which is not something this tool should do.
+        /// </summary>
         private static void OpenUrl(string url)
         {
+            if (string.IsNullOrWhiteSpace(url)) return;
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+                return;
             try
             {
-                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                Process.Start(new ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
             }
             catch { /* opening a browser is best-effort, non-critical */ }
         }
