@@ -19,7 +19,12 @@ without carrying the file in the tree.
   ```
   The MD5 pins the *content* (a tighter anchor than a branch name). If upstream
   ever changes `main.py`, the MD5 no longer matching `main` is the signal that
-  the line numbers below may have shifted.
+  the line numbers below may have shifted. It is a **change-detection
+  convenience, not a security guarantee** — MD5 is collision-prone, so don't
+  treat a match as tamper-proof. For a stronger identifier, use SHA-256:
+  ```shell
+  curl -fsSL https://raw.githubusercontent.com/fquinto/bticinoClasse300x/main/main.py | sha256sum
+  ```
 
 The tool is a clean-room C#/WPF reimplementation of the *result*
 (see `docs/WRITE_PHASE_PLAN.md`), not a translation of this code. Do not copy

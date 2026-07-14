@@ -263,6 +263,7 @@ namespace IntercomFirmwareTool.Core
                 //    verified artifact.
                 string tempOut = Path.Combine(outDir, $".fwzbuild_{Guid.NewGuid():N}.tmp");
                 bool committed = false;
+                bool preserveTemp = false;
                 try
                 {
                     Repack(realInput, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut);
@@ -296,15 +297,33 @@ namespace IntercomFirmwareTool.Core
                     // never overwrites/creates the user's output path.
                     if (all)
                     {
-                        File.Move(tempOut, outputPath, overwrite: true);
-                        committed = true;
+                        try
+                        {
+                            File.Move(tempOut, outputPath, overwrite: true);
+                            committed = true;
+                        }
+                        catch (Exception moveEx)
+                        {
+                            // The build passed every check but could not be placed at
+                            // the chosen output (e.g. the file is locked or the folder
+                            // is read-only). Don't discard the verified artifact —
+                            // keep the temp file and point the user at it to recover.
+                            preserveTemp = true;
+                            throw new IOException(
+                                "The firmware was built and verified, but could not be written to:\n" +
+                                outputPath + "\n(" + moveEx.Message + ")\n\n" +
+                                "The verified build was kept here — move/rename it manually:\n" + tempOut,
+                                moveEx);
+                        }
                     }
                     return new FwzBuildResult(
                         committed ? outputPath : "", ex.PasswordUsed, ex.SelectedEntry, all, checks);
                 }
                 finally
                 {
-                    if (!committed) TryDelete(tempOut);
+                    // Drop the temp only when it neither became the output nor is
+                    // being deliberately preserved for the user to recover.
+                    if (!committed && !preserveTemp) TryDelete(tempOut);
                 }
             }
             finally

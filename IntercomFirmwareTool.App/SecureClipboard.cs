@@ -23,7 +23,11 @@ namespace IntercomFirmwareTool.App
                 new MemoryStream(new byte[] { 0, 0, 0, 0 }));
             data.SetData("CanUploadToCloudClipboard",
                 new MemoryStream(new byte[] { 0, 0, 0, 0 }));
-            Clipboard.SetDataObject(data, copy: true);
+            // copy: false — let WPF clear the clipboard when the app exits instead
+            // of persisting the plaintext password on the system clipboard after we
+            // close. The exclusion formats above keep it out of history/cloud sync,
+            // but only copy:false stops the live clipboard from outliving the app.
+            Clipboard.SetDataObject(data, copy: false);
         }
     }
 }
