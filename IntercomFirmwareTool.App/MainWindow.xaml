@@ -80,7 +80,9 @@
             <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Padding" Value="10,6"/>
-            <Setter Property="Margin" Value="8,0,0,0"/>
+            <!-- Symmetric horizontal margin: in the UniformGrid this keeps an even
+                 gap between the buttons AND equal padding on the block's outer edges. -->
+            <Setter Property="Margin" Value="4,0,4,0"/>
             <!-- Equal height (fixed) restored to the original taller size; equal
                  WIDTH comes from the UniformGrid host, which sizes both cells to the
                  wider button — so neither is forced wider than its natural size. -->

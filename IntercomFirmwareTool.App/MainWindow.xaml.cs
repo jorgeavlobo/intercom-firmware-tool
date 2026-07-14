@@ -59,11 +59,18 @@ namespace IntercomFirmwareTool.App
             UpdatePasswordHint();
 
             // Start the subtle "shine" on the donate buttons once the visual tree
-            // (and their templates) are ready.
-            Loaded += (_, _) => StartDonateShine();
+            // (and their templates) are ready. Loaded can fire again on reparent, so
+            // guard to start the loops only once per window instance.
+            Loaded += (_, _) =>
+            {
+                if (_shineStarted) return;
+                _shineStarted = true;
+                StartDonateShine();
+            };
         }
 
         private readonly Random _shineRng = new();
+        private bool _shineStarted;
 
         /// <summary>
         /// Kicks off an independent, randomly-timed shine sweep on each donate
@@ -95,7 +102,7 @@ namespace IntercomFirmwareTool.App
                 timer.Tick += (_, _) =>
                 {
                     timer.Stop();
-                    Sweep(sheen);
+                    Sweep(button, sheen);
                     ScheduleNext();
                 };
                 timer.Start();
@@ -103,20 +110,24 @@ namespace IntercomFirmwareTool.App
             ScheduleNext();
         }
 
-        /// <summary>Sweeps the light band once across a button (left → right, then parked off-screen).</summary>
-        private static void Sweep(TranslateTransform sheen)
+        /// <summary>Sweeps the light band once across a button (left → right, then reverts off-screen).</summary>
+        private static void Sweep(Button button, TranslateTransform sheen)
         {
+            // End just past the button's right edge so the band fully exits for this
+            // button's actual width (+ margin for the skewed band); fall back to a
+            // fixed value if the button hasn't been measured yet.
+            double end = button.ActualWidth > 0 ? button.ActualWidth + 60 : 170;
             var anim = new DoubleAnimation
             {
-                // Start at the template's base X (off the left edge) so there is no
-                // jump when a sweep begins.
+                // Start at the template's base X (off the left edge, for any width) so
+                // there is no jump when a sweep begins.
                 From = -90,
-                To = 170,
+                To = end,
                 Duration = TimeSpan.FromMilliseconds(1500),
                 // Ease in/out for a smooth, premium glide rather than a linear wipe.
                 EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut },
-                // Revert to the base X after each sweep instead of holding the final
-                // value, so the band is never parked on-screen (any button width/DPI).
+                // Revert to the base (off-screen) X after each sweep instead of holding
+                // the final value, so the band is never parked on-screen at rest.
                 FillBehavior = FillBehavior.Stop
             };
             sheen.BeginAnimation(TranslateTransform.XProperty, anim);
