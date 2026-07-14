@@ -621,9 +621,9 @@ namespace IntercomFirmwareTool.App
             // The reveal/copy/generate buttons are set centrally (content-aware) by
             // UpdatePasswordButtonStates, reached via UpdateBuildEnabled below.
 
-            // With password login off, the key is the only credential, so mark it
-            // required (label + placeholder); with password on, it is optional again.
-            LblKey.Text = usePassword ? "SSH public key (optional):" : "SSH public key (required):";
+            // With password login off, the key is the only credential; the
+            // optional/required distinction is conveyed by the placeholder (the
+            // label stays the constant "SSH Public Key:").
             UpdateKeyPlaceholder();
 
             UpdatePasswordHint();
@@ -734,6 +734,11 @@ namespace IntercomFirmwareTool.App
             SetFieldBorder(TxtPassword, needPassword ? NeededBrush : null);
             SetFieldBorder(TxtConfirm, needConfirm ? NeededBrush : confirmMismatch ? ErrorBrush : null);
             SetFieldBorder(TxtKeyPath, needKey ? NeededBrush : null);
+
+            // "(mandatory)" placeholders: on the password while it is blank, and on
+            // confirm only once a password has been typed (mirrors needPassword/needConfirm).
+            PhPassword.Visibility = needPassword ? Visibility.Visible : Visibility.Collapsed;
+            PhConfirm.Visibility = needConfirm ? Visibility.Visible : Visibility.Collapsed;
 
             var missing = new List<string>();
             if (needFirmware) missing.Add("firmware");

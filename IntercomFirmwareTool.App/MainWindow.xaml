@@ -201,7 +201,7 @@
 
             <!-- Firmware .fwz -->
             <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Firmware (.fwz):"/>
+                       Text="Firmware:"/>
             <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtFwzPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
                      Text="(choose the original .fwz to modify)" Foreground="Gray"/>
@@ -215,10 +215,17 @@
                  the password or the key is required; ticking Disable turns password
                  login off, so a key becomes the credential. -->
             <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Root password:"/>
+                       Text="Root Password:"/>
             <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <TextBox x:Name="TxtPassword" Width="170" Style="{StaticResource InputField}"
-                         FontFamily="Consolas"/>
+                <Grid Width="170">
+                    <TextBox x:Name="TxtPassword" Style="{StaticResource InputField}"
+                             FontFamily="Consolas"/>
+                    <!-- Placeholder overlay: shown (by UpdateRequiredCues) only while
+                         the password is blank in password mode. -->
+                    <TextBlock x:Name="PhPassword" Text="(mandatory)" Foreground="Gray"
+                               IsHitTestVisible="False" VerticalAlignment="Center"
+                               Margin="8,0,0,0"/>
+                </Grid>
                 <!-- Inline actions, in order: generate, reveal (hold-to-show eye),
                      copy. Reveal affects BOTH the password and confirm fields. -->
                 <Button x:Name="BtnRandomPwd" Style="{StaticResource IconButton}"
@@ -242,8 +249,15 @@
             <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
                        Text="Confirm password:"/>
             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <TextBox x:Name="TxtConfirm" Width="170" Style="{StaticResource InputField}"
-                         FontFamily="Consolas"/>
+                <Grid Width="170">
+                    <TextBox x:Name="TxtConfirm" Style="{StaticResource InputField}"
+                             FontFamily="Consolas"/>
+                    <!-- Placeholder overlay: shown only after a password is typed and
+                         while confirm is still blank (UpdateRequiredCues). -->
+                    <TextBlock x:Name="PhConfirm" Text="(mandatory)" Foreground="Gray"
+                               IsHitTestVisible="False" VerticalAlignment="Center"
+                               Margin="8,0,0,0" Visibility="Collapsed"/>
+                </Grid>
                 <TextBlock x:Name="TxtPwdHint" VerticalAlignment="Center" Margin="10,0,0,0"
                            Foreground="Gray"/>
             </StackPanel>
@@ -252,7 +266,7 @@
                  new pair. Without a key, login is by the root password above. -->
             <TextBlock Grid.Row="3" Grid.Column="0" x:Name="LblKey"
                        Style="{StaticResource FieldLabel}"
-                       Text="SSH public key (optional):"/>
+                       Text="SSH Public Key:"/>
             <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
                      Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
