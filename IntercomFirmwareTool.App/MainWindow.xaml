@@ -204,8 +204,8 @@
                        Text="Firmware:"/>
             <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtFwzPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
-                     Cursor="Hand" ToolTip="Click to choose the original firmware (.fwz)…"
-                     PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown"
+                     Cursor="Hand" ToolTip="Click (or press Enter) to choose the original firmware (.fwz)…"
+                     PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown" KeyDown="TxtFwzPath_KeyDown"
                      Text="(click to choose the original .fwz to modify)" Foreground="Gray"/>
             <Button Grid.Row="0" Grid.Column="2" x:Name="BtnClearFwz"
                     Style="{StaticResource RowIconButton}" Content="&#xE711;"
@@ -271,12 +271,10 @@
                        Text="SSH Public Key:"/>
             <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
+                     Cursor="Hand" ToolTip="Click (or press Enter) to choose an existing public key (.pub)…"
+                     PreviewMouseLeftButtonDown="TxtKeyPath_MouseDown" KeyDown="TxtKeyPath_KeyDown"
                      Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
             <StackPanel Grid.Row="3" Grid.Column="2" Orientation="Horizontal">
-                <Button x:Name="BtnChooseKey" Style="{StaticResource RowIconButton}"
-                        Content="&#xE8B7;" ToolTip="Choose an existing public key (.pub)…"
-                        AutomationProperties.Name="Choose an existing public key"
-                        Click="BtnChooseKey_Click"/>
                 <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
                         Content="&#xE192;" ToolTip="Generate a new SSH key pair…"
                         AutomationProperties.Name="Generate a new SSH key pair"
@@ -299,12 +297,14 @@
                        Style="{StaticResource FieldLabel}" Text="Save output as:"/>
             <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtOutputPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" IsEnabled="False"
+                     Cursor="Hand" ToolTip="Click (or press Enter) to choose where to save the modified .fwz…"
+                     PreviewMouseLeftButtonDown="TxtOutputPath_MouseDown" KeyDown="TxtOutputPath_KeyDown"
                      Text="(where to write the modified .fwz)" Foreground="Gray"/>
-            <Button Grid.Row="5" Grid.Column="2" x:Name="BtnBrowseOutput"
+            <Button Grid.Row="5" Grid.Column="2" x:Name="BtnClearOutput"
                     Style="{StaticResource RowIconButton}" IsEnabled="False"
-                    Content="&#xE74E;" ToolTip="Choose where to save the modified .fwz…"
-                    AutomationProperties.Name="Choose where to save the modified firmware"
-                    Click="BtnBrowseOutput_Click"/>
+                    Content="&#xE711;" ToolTip="Clear the output location"
+                    AutomationProperties.Name="Clear the output location"
+                    Click="BtnClearOutput_Click"/>
         </Grid>
 
         <!-- Row 2: actions. DockPanel so the hint fills the remaining width and

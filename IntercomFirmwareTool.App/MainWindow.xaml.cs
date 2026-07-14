@@ -261,15 +261,30 @@ namespace IntercomFirmwareTool.App
 
         // ---- Input selection -------------------------------------------------
 
-        /// <summary>Picks the original firmware, verifies it against the whitelist (size + SHA-256), and selects it.</summary>
+        /// <summary>True when a key event is Enter or Space — the keyboard activation
+        /// for the click-to-browse path fields (WCAG 2.1.1), so keyboard-only and
+        /// screen-reader users can open the pickers the mouse handlers open.</summary>
+        private static bool IsActivationKey(KeyEventArgs e) => e.Key == Key.Enter || e.Key == Key.Space;
+
         /// <summary>
-        /// The firmware path box doubles as its own "browse" button: clicking it
-        /// opens the file picker (there is no separate folder button — Grid.Column 2
-        /// is the clear button instead). Ignored while an operation is running.
+        /// The firmware path box doubles as its own "browse" button (there is no
+        /// separate folder button — Grid.Column 2 is the clear button instead):
+        /// clicking it, or pressing Enter/Space while it has keyboard focus, opens
+        /// the picker, verifies the file against the whitelist (size + SHA-256), and
+        /// selects it.
         /// </summary>
-        private async void TxtFwzPath_MouseDown(object sender, MouseButtonEventArgs e)
+        private async void TxtFwzPath_MouseDown(object sender, MouseButtonEventArgs e) => await ChooseFirmwareAsync();
+
+        private async void TxtFwzPath_KeyDown(object sender, KeyEventArgs e)
         {
-            if (!_uiEnabled) return;
+            if (!IsActivationKey(e)) return;
+            e.Handled = true;
+            await ChooseFirmwareAsync();
+        }
+
+        private async Task ChooseFirmwareAsync()
+        {
+            if (!_uiEnabled) return; // ignored while an operation is running
             var dlg = new OpenFileDialog
             {
                 Title = "Choose the original firmware (.fwz)",
@@ -305,7 +320,7 @@ namespace IntercomFirmwareTool.App
                 TxtOutputPath.Foreground = Brushes.Gray;
                 LblOutput.IsEnabled = false;
                 TxtOutputPath.IsEnabled = false;
-                BtnBrowseOutput.IsEnabled = false;
+                BtnClearOutput.IsEnabled = false;
                 UpdateBuildEnabled();
 
                 TxtResult.Text =
@@ -326,7 +341,7 @@ namespace IntercomFirmwareTool.App
             SetPathText(TxtFwzPath, chosen);
             LblOutput.IsEnabled = true;
             TxtOutputPath.IsEnabled = true;
-            BtnBrowseOutput.IsEnabled = true;
+            BtnClearOutput.IsEnabled = true;
             // Always re-suggest the output next to the NEW input, so switching
             // firmware can't leave the output pointing at the previous file's
             // name/location (the user can still Browse to change it).
@@ -357,13 +372,28 @@ namespace IntercomFirmwareTool.App
             TxtOutputPath.Foreground = Brushes.Gray;
             LblOutput.IsEnabled = false;
             TxtOutputPath.IsEnabled = false;
-            BtnBrowseOutput.IsEnabled = false;
+            BtnClearOutput.IsEnabled = false;
             UpdateBuildEnabled();
         }
 
-        /// <summary>Picks an existing OpenSSH public key and selects it for the build.</summary>
-        private void BtnChooseKey_Click(object sender, RoutedEventArgs e)
+        /// <summary>
+        /// The SSH key path box is click-to-browse (there is no separate folder
+        /// button): clicking it, or pressing Enter/Space while focused, picks an
+        /// existing OpenSSH public key. Generate / Clear are the two icon buttons.
+        /// </summary>
+        private void TxtKeyPath_MouseDown(object sender, MouseButtonEventArgs e) => ChooseKey();
+
+        private void TxtKeyPath_KeyDown(object sender, KeyEventArgs e)
         {
+            if (!IsActivationKey(e)) return;
+            e.Handled = true;
+            ChooseKey();
+        }
+
+        /// <summary>Picks an existing OpenSSH public key and selects it for the build.</summary>
+        private void ChooseKey()
+        {
+            if (!_uiEnabled) return; // ignored while an operation is running
             var dlg = new OpenFileDialog
             {
                 Title = "Choose your SSH public key (.pub)",
@@ -555,22 +585,51 @@ namespace IntercomFirmwareTool.App
             catch { return false; }
         }
 
-        /// <summary>Opens the Save dialog to choose the modified-firmware output path.</summary>
-        private void BtnBrowseOutput_Click(object sender, RoutedEventArgs e)
+        /// <summary>
+        /// The output path box is click-to-browse (there is no separate save
+        /// button — Grid.Column 2 is the clear button instead): clicking it, or
+        /// pressing Enter/Space while focused, opens the Save dialog. The box is
+        /// disabled until a firmware is chosen, so this only fires once usable.
+        /// </summary>
+        private void TxtOutputPath_MouseDown(object sender, MouseButtonEventArgs e) => ChooseOutput();
+
+        private void TxtOutputPath_KeyDown(object sender, KeyEventArgs e)
         {
+            if (!IsActivationKey(e)) return;
+            e.Handled = true;
+            ChooseOutput();
+        }
+
+        /// <summary>Opens the Save dialog to choose the modified-firmware output path.</summary>
+        private void ChooseOutput()
+        {
+            // The box is only enabled once a firmware is chosen and while no
+            // operation is running; guard defensively all the same.
+            if (!_uiEnabled || _fwzPath == null) return;
             var dlg = new SaveFileDialog
             {
                 Title = "Save the modified firmware as…",
                 Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*",
-                FileName = _fwzPath != null
-                    ? Path.GetFileNameWithoutExtension(_fwzPath) + "_ssh.fwz"
-                    : "modified.fwz",
-                InitialDirectory = (_fwzPath != null ? Path.GetDirectoryName(_fwzPath) : null) ?? ""
+                FileName = Path.GetFileNameWithoutExtension(_fwzPath) + "_ssh.fwz",
+                InitialDirectory = Path.GetDirectoryName(_fwzPath) ?? ""
             };
             if (dlg.ShowDialog(this) != true) return;
 
             _outputPath = dlg.FileName;
             SetPathText(TxtOutputPath, _outputPath);
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>
+        /// Clears the output location (the Grid.Column 2 button on the output row),
+        /// returning the box to its placeholder. The firmware stays selected, so the
+        /// row remains enabled and the box can be clicked to pick a new location.
+        /// </summary>
+        private void BtnClearOutput_Click(object sender, RoutedEventArgs e)
+        {
+            _outputPath = null;
+            TxtOutputPath.Text = "(where to write the modified .fwz)";
+            TxtOutputPath.Foreground = Brushes.Gray;
             UpdateBuildEnabled();
         }
 
@@ -791,7 +850,15 @@ namespace IntercomFirmwareTool.App
             if (needKey) missing.Add("an SSH key");
 
             string previousHint = TxtBuildHint.Text;
-            if (confirmMismatch)
+            if (!_uiEnabled)
+            {
+                // An operation (build / verify / self-test) is running and the whole
+                // form is locked, so the "still needed" / mismatch guidance isn't
+                // actionable right now — show progress for the duration instead.
+                TxtBuildHint.Text = "⏳ Working…";
+                TxtBuildHint.Foreground = Brushes.Gray;
+            }
+            else if (confirmMismatch)
             {
                 // A concrete error takes priority over the "still needed" list.
                 string prefix = missing.Count > 0 ? "Still needed: " + string.Join(", ", missing) + " — " : "";
@@ -800,10 +867,8 @@ namespace IntercomFirmwareTool.App
             }
             else if (missing.Count == 0)
             {
-                // Everything is set. While an operation is running the Build gate is
-                // closed, so show progress instead of claiming readiness.
-                TxtBuildHint.Text = _uiEnabled ? "✓ Ready to build." : "⏳ Working…";
-                TxtBuildHint.Foreground = _uiEnabled ? ReadyBrush : Brushes.Gray;
+                TxtBuildHint.Text = "✓ Ready to build.";
+                TxtBuildHint.Foreground = ReadyBrush;
             }
             else
             {
@@ -1196,12 +1261,18 @@ namespace IntercomFirmwareTool.App
             // whole operation.
             if (!enabled) SetReveal(false);
 
+            // The firmware and key path boxes are click-to-browse controls, so they
+            // must be disabled during an operation too — otherwise they would look
+            // active (hand cursor, focusable) while doing nothing.
+            TxtFwzPath.IsEnabled = enabled;
             BtnClearFwz.IsEnabled = enabled;
-            BtnChooseKey.IsEnabled = enabled;
+            TxtKeyPath.IsEnabled = enabled;
             BtnGenKey.IsEnabled = enabled;
             BtnClearKey.IsEnabled = enabled;
-            // The output row stays disabled until a firmware is chosen.
-            BtnBrowseOutput.IsEnabled = enabled && _fwzPath != null;
+            // The output row stays disabled until a firmware is chosen (box + clear).
+            TxtOutputPath.IsEnabled = enabled && _fwzPath != null;
+            BtnClearOutput.IsEnabled = enabled && _fwzPath != null;
+            LblOutput.IsEnabled = enabled && _fwzPath != null;
             BtnVerify.IsEnabled = enabled;
             BtnSelfTest.IsEnabled = enabled;
 
