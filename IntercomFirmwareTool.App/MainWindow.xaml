@@ -105,6 +105,28 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <!-- Brand icons, transcoded from Assets/Icons/PayPal.svg and Revolut.svg
+             into native WPF vectors (WPF can't render .svg directly; this keeps
+             the app dependency-free). The .svg files remain the design source. -->
+        <DrawingImage x:Key="PayPalIcon">
+            <DrawingImage.Drawing>
+                <DrawingGroup>
+                    <GeometryDrawing Brush="#002991" Geometry="F1 M38.914 13.35c0 5.574-5.144 12.15-12.927 12.15H18.49l-.368 2.322L16.373 39H7.056l5.605-36h15.095c5.083 0 9.082 2.833 10.555 6.77a9.687 9.687 0 0 1 .603 3.58z"/>
+                    <GeometryDrawing Brush="#60CDFF" Geometry="F1 M44.284 23.7A12.894 12.894 0 0 1 31.53 34.5h-5.206L24.157 48H14.89l1.483-9 1.75-11.178.367-2.322h7.497c7.773 0 12.927-6.576 12.927-12.15 3.825 1.974 6.055 5.963 5.37 10.35z"/>
+                    <GeometryDrawing Brush="#008CFF" Geometry="F1 M38.914 13.35C37.31 12.511 35.365 12 33.248 12h-12.64L18.49 25.5h7.497c7.773 0 12.927-6.576 12.927-12.15z"/>
+                </DrawingGroup>
+            </DrawingImage.Drawing>
+        </DrawingImage>
+
+        <DrawingImage x:Key="RevolutIcon">
+            <DrawingImage.Drawing>
+                <DrawingGroup>
+                    <GeometryDrawing Brush="#000000" Geometry="F1 M209.051 262.097h101.445v410.21H209.051z"/>
+                    <GeometryDrawing Brush="#000000" Geometry="F1 M628.623 285.554c0-87.043-70.882-157.86-158.011-157.86H209.051v87.603h249.125c39.43 0 72.093 30.978 72.814 69.051 0.361 19.064-6.794 37.056-20.146 50.66-13.357 13.61-31.204 21.109-50.251 21.109h-97.046c-3.446 0-6.25 2.8-6.25 6.245v77.859c0 1.324 0.409 2.59 1.179 3.656l164.655 228.43h120.53L478.623 443.253C561.736 439.08 628.623 369.248 628.623 285.554z"/>
+                </DrawingGroup>
+            </DrawingImage.Drawing>
+        </DrawingImage>
     </Window.Resources>
 
     <Grid Margin="14">
@@ -277,11 +299,11 @@
                             ToolTip="Support via PayPal — https://paypal.me/jorgeavlobo"
                             AutomationProperties.Name="Buy me a coffee via PayPal">
                         <StackPanel Orientation="Horizontal">
-                            <!-- Placeholder monogram badge; replaced by the PayPal.svg icon once added. -->
-                            <Border x:Name="IcoPayPal" Width="22" Height="22" CornerRadius="11"
-                                    Background="White" Margin="0,0,7,0">
-                                <TextBlock Text="P" FontWeight="Bold" FontSize="13" Foreground="#FF003087"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <!-- Brand icon on a white chip (the multi-blue PayPal mark
+                                 would be unreadable directly on the blue button). -->
+                            <Border x:Name="IcoPayPal" Width="24" Height="24" CornerRadius="5"
+                                    Background="White" Padding="3" Margin="0,0,7,0">
+                                <Image Source="{StaticResource PayPalIcon}" Stretch="Uniform"/>
                             </Border>
                             <TextBlock Text="PayPal" VerticalAlignment="Center"/>
                         </StackPanel>
@@ -293,11 +315,11 @@
                             ToolTip="Support via Revolut — https://revolut.me/jorgeavlobo"
                             AutomationProperties.Name="Buy me a coffee via Revolut">
                         <StackPanel Orientation="Horizontal">
-                            <!-- Placeholder monogram badge; replaced by the Revolut.svg icon once added. -->
-                            <Border x:Name="IcoRevolut" Width="22" Height="22" CornerRadius="11"
-                                    Background="White" Margin="0,0,7,0">
-                                <TextBlock Text="R" FontWeight="Bold" FontSize="13" Foreground="#FF191C1F"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <!-- Brand icon on a white chip (the dark Revolut mark would
+                                 be unreadable directly on the near-black button). -->
+                            <Border x:Name="IcoRevolut" Width="24" Height="24" CornerRadius="5"
+                                    Background="White" Padding="4" Margin="0,0,7,0">
+                                <Image Source="{StaticResource RevolutIcon}" Stretch="Uniform"/>
                             </Border>
                             <TextBlock Text="Revolut" VerticalAlignment="Center"/>
                         </StackPanel>
