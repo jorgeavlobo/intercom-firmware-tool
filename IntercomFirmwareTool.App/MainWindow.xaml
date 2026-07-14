@@ -285,12 +285,13 @@
                         Click="BtnClearKey_Click"/>
             </StackPanel>
 
-            <!-- The either/or credential rule, stated explicitly right below the two
-                 credential fields (reinforces the "(required)" password placeholders
-                 and the key box's optional/required placeholder text). -->
+            <!-- The credential rule, stated explicitly right below the two credential
+                 fields. Matches the actual Build gate: a root password is required in
+                 the default (password-login) mode; ticking "Disable" turns password
+                 login off and makes the SSH key the required credential instead. -->
             <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
                        Foreground="Gray" FontSize="11" TextWrapping="Wrap"
-                       Text="At least one credential is required — a root password or an SSH key."/>
+                       Text="A root password is required — or tick “Disable” to log in with an SSH key only."/>
 
             <!-- Output (disabled until a firmware is chosen) -->
             <TextBlock Grid.Row="5" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
