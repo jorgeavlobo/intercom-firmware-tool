@@ -335,7 +335,7 @@
                     <!-- PayPal -->
                     <Button x:Name="BtnPayPal" Style="{StaticResource DonateButton}"
                             Background="#FF003087" Click="BtnPayPal_Click"
-                            ToolTip="Support via PayPal — https://paypal.me/jorgeavlobo"
+                            ToolTip="Support via PayPal"
                             AutomationProperties.Name="Buy me a coffee via PayPal">
                         <StackPanel Orientation="Horizontal">
                             <!-- Brand icon on a white chip (the multi-blue PayPal mark
@@ -351,7 +351,7 @@
                     <!-- Revolut -->
                     <Button x:Name="BtnRevolut" Style="{StaticResource DonateButton}"
                             Background="#FF191C1F" Click="BtnRevolut_Click"
-                            ToolTip="Support via Revolut — https://revolut.me/jorgeavlobo"
+                            ToolTip="Support via Revolut"
                             AutomationProperties.Name="Buy me a coffee via Revolut">
                         <StackPanel Orientation="Horizontal">
                             <!-- Brand icon on a white chip (the dark Revolut mark would
