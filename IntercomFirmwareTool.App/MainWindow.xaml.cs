@@ -87,7 +87,7 @@ namespace IntercomFirmwareTool.App
             _scanCts = new CancellationTokenSource();
             var scanToken = _scanCts.Token;
             Task.Run(() => _fwScanner.Scan(scanToken), scanToken);
-            Closed += (_, _) => { _scanCts?.Cancel(); _scanCts?.Dispose(); };
+            Closed += (_, _) => StopFirmwareScan();
         }
 
         private readonly Random _shineRng = new();
@@ -359,7 +359,7 @@ namespace IntercomFirmwareTool.App
             // Accepted: record the path and enable the output row (BtnClearOutput is
             // driven by UpdateBuildEnabled once _outputPath is set, below).
             _fwzPath = chosen;
-            _scanCts?.Cancel(); // a firmware is chosen — stop scanning
+            StopFirmwareScan(); // a firmware is chosen — stop and release the scan
             SetPathText(TxtFwzPath, chosen);
             LblOutput.IsEnabled = true;
             TxtOutputPath.IsEnabled = true;
@@ -783,6 +783,20 @@ namespace IntercomFirmwareTool.App
             bool match = CurrentPassword() == CurrentConfirm();
             TxtPwdHint.Text = match ? "✓ match" : "✗ do not match";
             TxtPwdHint.Foreground = match ? Brushes.Green : Brushes.Firebrick;
+        }
+
+        /// <summary>
+        /// Cancels and disposes the background scan's token source, once. Idempotent:
+        /// called both when a firmware is chosen and when the window closes, so it
+        /// nulls the field to avoid touching (or disposing) it twice.
+        /// </summary>
+        private void StopFirmwareScan()
+        {
+            var cts = _scanCts;
+            if (cts == null) return;
+            _scanCts = null;
+            try { cts.Cancel(); } catch { /* nothing registered can throw; be safe */ }
+            cts.Dispose();
         }
 
         /// <summary>

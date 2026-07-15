@@ -64,14 +64,14 @@ namespace IntercomFirmwareTool.Core
         private static readonly HashSet<long> KnownSizes =
             FirmwareRegistry.Known.Select(k => k.SizeBytes).ToHashSet();
 
-        // Directory leaf names skipped during the whole-computer sweep — folders the
-        // user should NOT be writing files to (so a firmware they saved is never
-        // here), and descending them just wastes time (and hits access denials).
-        private static readonly HashSet<string> ExcludedDirs =
+        // System folders the user should NOT be writing files to — matched only when
+        // they sit directly at a DRIVE ROOT (e.g. C:\Windows), so a user folder that
+        // merely shares the name (D:\Projects\Windows) is not wrongly pruned.
+        private static readonly HashSet<string> RootSystemDirs =
             new(StringComparer.OrdinalIgnoreCase)
             {
                 "Windows", "Program Files", "Program Files (x86)", "ProgramData",
-                "AppData", "$Recycle.Bin", "System Volume Information", "Recovery",
+                "$Recycle.Bin", "System Volume Information", "Recovery",
                 "$WinREAgent", "Config.Msi", "Windows.old",
             };
 
@@ -105,6 +105,38 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
+        /// True for a directory to prune during the sweep because a firmware would
+        /// never be there: a system folder sitting directly at a drive root (matched
+        /// by position, not just leaf name, so a user folder that shares the name is
+        /// kept), or the current user's AppData tree (huge, no firmware). Other users'
+        /// AppData is already excluded via <see cref="IsOtherUserProfile"/>.
+        /// </summary>
+        private static bool IsPrunedSystemDir(string dir)
+        {
+            string? parent;
+            try { parent = Path.GetDirectoryName(dir); }
+            catch { return false; }
+            if (parent == null) return false;
+
+            // System folder directly at a drive root (e.g. C:\Windows).
+            string? root = Path.GetPathRoot(dir);
+            if (root != null &&
+                string.Equals(TrimSep(parent), TrimSep(root), StringComparison.OrdinalIgnoreCase) &&
+                RootSystemDirs.Contains(Path.GetFileName(dir)))
+                return true;
+
+            // The current user's AppData (…\<profile>\AppData).
+            if (string.Equals(Path.GetFileName(dir), "AppData", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(parent, CurrentProfile, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            return false;
+
+            static string TrimSep(string p) =>
+                p.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+
+        /// <summary>
         /// Runs the scan to completion (or until <paramref name="ct"/> is cancelled),
         /// updating <see cref="BestFolder"/> as better matches are found. Never throws
         /// for I/O or cancellation — it is meant to be fire-and-forget.
@@ -126,14 +158,14 @@ namespace IntercomFirmwareTool.Core
                     ScanTree(folder, _ => true, token);
 
                 // Phase 2 — the whole computer (fixed drives), skipping: the priority
-                // folders already covered above; system/noise dirs the user should not
-                // write to (ExcludedDirs); and other users' profiles the user cannot
-                // write to (IsOtherUserProfile).
+                // folders already covered above; system dirs the user should not write
+                // to (IsPrunedSystemDir, matched by position); and other users'
+                // profiles the user cannot write to (IsOtherUserProfile).
                 var prioritySet = new HashSet<string>(priority, StringComparer.OrdinalIgnoreCase);
                 foreach (var drive in FixedDriveRoots())
                     ScanTree(drive,
                         dir => !prioritySet.Contains(dir)
-                            && !ExcludedDirs.Contains(Path.GetFileName(dir))
+                            && !IsPrunedSystemDir(dir)
                             && !IsOtherUserProfile(dir),
                         token);
             }
