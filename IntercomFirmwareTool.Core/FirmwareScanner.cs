@@ -13,10 +13,12 @@ namespace IntercomFirmwareTool.Core
     ///
     /// <para>Strategy: scan the most-likely user folders first (Downloads, Desktop,
     /// Documents) so a good answer is ready almost immediately, then sweep the rest
-    /// of the fixed drives, skipping system/noise directories. A cheap size
-    /// pre-filter (against the registry's known sizes) rejects the vast majority of
-    /// files instantly; only an exact size match is hashed to confirm it is a
-    /// genuine unmodified original.</para>
+    /// of the fixed drives — skipping folders a firmware would never be saved in:
+    /// system/noise directories the user should not write to (Windows, Program Files,
+    /// …) and other users' profiles the user cannot write to. A cheap size pre-filter
+    /// (against the registry's known sizes) rejects the vast majority of files
+    /// instantly; only an exact size match is hashed to confirm it is a genuine
+    /// unmodified original.</para>
     ///
     /// <para>Best folder = the one holding the most recent verified original. If
     /// several folders tie on that exact same newest timestamp, the one containing
@@ -61,8 +63,9 @@ namespace IntercomFirmwareTool.Core
         private static readonly HashSet<long> KnownSizes =
             FirmwareRegistry.Known.Select(k => k.SizeBytes).ToHashSet();
 
-        // Directory leaf names skipped during the whole-computer sweep: firmware is
-        // never here and descending them just wastes time (and hits access denials).
+        // Directory leaf names skipped during the whole-computer sweep — folders the
+        // user should NOT be writing files to (so a firmware they saved is never
+        // here), and descending them just wastes time (and hits access denials).
         private static readonly HashSet<string> ExcludedDirs =
             new(StringComparer.OrdinalIgnoreCase)
             {
@@ -70,6 +73,35 @@ namespace IntercomFirmwareTool.Core
                 "AppData", "$Recycle.Bin", "System Volume Information", "Recovery",
                 "$WinREAgent", "Config.Msi", "Windows.old",
             };
+
+        // The current user's profile and its parent ("…\Users"), used to skip OTHER
+        // users' profiles during the sweep — folders this user cannot write to, so a
+        // firmware they saved is never there. "Public" is shared/writable, so keep it.
+        private static readonly string CurrentProfile =
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        private static readonly string? UsersRoot =
+            Directory.GetParent(CurrentProfile)?.FullName;
+        private static readonly HashSet<string> UsersRootKeep =
+            new(StringComparer.OrdinalIgnoreCase) { "Public" };
+
+        /// <summary>
+        /// True when <paramref name="dir"/> is another user's profile (a direct child
+        /// of the Users root that is neither this user's own profile nor the shared
+        /// "Public" folder) — a place this user cannot write to.
+        /// </summary>
+        private static bool IsOtherUserProfile(string dir)
+        {
+            if (UsersRoot == null) return false;
+            string? parent;
+            try { parent = Directory.GetParent(dir)?.FullName; }
+            catch { return false; }
+            if (parent == null ||
+                !string.Equals(parent, UsersRoot, StringComparison.OrdinalIgnoreCase))
+                return false; // not directly under "…\Users"
+            if (string.Equals(dir, CurrentProfile, StringComparison.OrdinalIgnoreCase))
+                return false; // our own profile — keep
+            return !UsersRootKeep.Contains(Path.GetFileName(dir));
+        }
 
         /// <summary>
         /// Runs the scan to completion (or until <paramref name="ct"/> is cancelled),
@@ -92,12 +124,16 @@ namespace IntercomFirmwareTool.Core
                 foreach (var folder in priority)
                     ScanTree(folder, _ => true, token);
 
-                // Phase 2 — the whole computer (fixed drives), skipping the noise
-                // directories and the priority folders already covered above.
+                // Phase 2 — the whole computer (fixed drives), skipping: the priority
+                // folders already covered above; system/noise dirs the user should not
+                // write to (ExcludedDirs); and other users' profiles the user cannot
+                // write to (IsOtherUserProfile).
                 var prioritySet = new HashSet<string>(priority, StringComparer.OrdinalIgnoreCase);
                 foreach (var drive in FixedDriveRoots())
                     ScanTree(drive,
-                        dir => !ExcludedDirs.Contains(Path.GetFileName(dir)) && !prioritySet.Contains(dir),
+                        dir => !prioritySet.Contains(dir)
+                            && !ExcludedDirs.Contains(Path.GetFileName(dir))
+                            && !IsOtherUserProfile(dir),
                         token);
             }
             catch (OperationCanceledException)
