@@ -33,6 +33,12 @@ namespace IntercomFirmwareTool.App
         private string? _keyPath;
         private string? _outputPath;
 
+        // Background locator for the newest unmodified original firmware on the
+        // machine, so the picker opens where it lives. Cancelled once a firmware is
+        // chosen or the window closes.
+        private readonly FirmwareScanner _fwScanner = new();
+        private CancellationTokenSource? _scanCts;
+
         // Masked password fields with reveal-last-char behaviour (see
         // MaskedPasswordField); the real values live in these, not in the TextBoxes.
         private readonly MaskedPasswordField _pw;
@@ -74,6 +80,13 @@ namespace IntercomFirmwareTool.App
                 _shineStarted = true;
                 StartDonateShine();
             };
+
+            // Kick off the silent firmware scan immediately (background thread), and
+            // make sure it stops when the window closes.
+            _scanCts = new CancellationTokenSource();
+            var scanToken = _scanCts.Token;
+            Task.Run(() => _fwScanner.Scan(scanToken), scanToken);
+            Closed += (_, _) => { _scanCts?.Cancel(); _scanCts?.Dispose(); };
         }
 
         private readonly Random _shineRng = new();
@@ -288,7 +301,10 @@ namespace IntercomFirmwareTool.App
             var dlg = new OpenFileDialog
             {
                 Title = "Choose the original firmware (.fwz)",
-                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*"
+                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*",
+                // Open where the background scan found the newest original (if any),
+                // else a sensible default (Downloads → Desktop → profile).
+                InitialDirectory = FirmwareStartDir()
             };
             if (dlg.ShowDialog(this) != true) return;
             string chosen = dlg.FileName;
@@ -338,6 +354,7 @@ namespace IntercomFirmwareTool.App
             // Accepted: record the path and enable the output row (BtnClearOutput is
             // driven by UpdateBuildEnabled once _outputPath is set, below).
             _fwzPath = chosen;
+            _scanCts?.Cancel(); // a firmware is chosen — stop scanning
             SetPathText(TxtFwzPath, chosen);
             LblOutput.IsEnabled = true;
             TxtOutputPath.IsEnabled = true;
@@ -739,6 +756,29 @@ namespace IntercomFirmwareTool.App
             bool match = CurrentPassword() == CurrentConfirm();
             TxtPwdHint.Text = match ? "✓ match" : "✗ do not match";
             TxtPwdHint.Foreground = match ? Brushes.Green : Brushes.Firebrick;
+        }
+
+        /// <summary>
+        /// Where the firmware picker should open: the folder of the newest unmodified
+        /// original the background scan has found, or a sensible default when the scan
+        /// hasn't found one yet (or found nothing).
+        /// </summary>
+        private string FirmwareStartDir()
+        {
+            string? best = _fwScanner.BestFolder;
+            if (best != null && Directory.Exists(best)) return best;
+            return FirmwareDefaultDir();
+        }
+
+        /// <summary>Default firmware folder: Downloads, else Desktop, else the profile.</summary>
+        private static string FirmwareDefaultDir()
+        {
+            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string downloads = Path.Combine(profile, "Downloads");
+            if (Directory.Exists(downloads)) return downloads;
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            if (Directory.Exists(desktop)) return desktop;
+            return profile;
         }
 
         /// <summary>The user's ~/.ssh folder if it exists, else the profile folder.</summary>
