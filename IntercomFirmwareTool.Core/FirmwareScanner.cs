@@ -15,9 +15,12 @@ namespace IntercomFirmwareTool.Core
     /// Documents) so a good answer is ready almost immediately, then sweep the rest
     /// of the fixed drives, skipping system/noise directories. A cheap size
     /// pre-filter (against the registry's known sizes) rejects the vast majority of
-    /// files instantly; only an exact size match is hashed — and only when it could
-    /// actually beat the most-recent verified file found so far, so once the newest
-    /// original is located, older candidates are skipped without hashing.</para>
+    /// files instantly; only an exact size match is hashed to confirm it is a
+    /// genuine unmodified original.</para>
+    ///
+    /// <para>Best folder = the one holding the most recent verified original. If
+    /// several folders tie on that exact same newest timestamp, the one containing
+    /// more unmodified originals wins (the likelier "firmware stash").</para>
     ///
     /// <para>Thread-safe and cancellable: run it on a background thread and cancel
     /// the token once a firmware is chosen or the window closes.</para>
@@ -25,12 +28,25 @@ namespace IntercomFirmwareTool.Core
     public sealed class FirmwareScanner
     {
         private readonly object _lock = new();
+
+        /// <summary>Running tally of verified originals per folder.</summary>
+        private sealed class FolderStat
+        {
+            public int Count;
+            public DateTime LatestUtc = DateTime.MinValue;
+        }
+
+        private readonly Dictionary<string, FolderStat> _folders =
+            new(StringComparer.OrdinalIgnoreCase);
+        // Paths already counted, so a file can never be tallied twice.
+        private readonly HashSet<string> _counted =
+            new(StringComparer.OrdinalIgnoreCase);
         private string? _bestFolder;
-        private DateTime _bestWriteUtc = DateTime.MinValue;
 
         /// <summary>
-        /// The folder holding the most recent verified original found so far, or
-        /// <c>null</c> until one is located. Safe to read from any thread.
+        /// The best folder found so far (newest verified original; ties broken by how
+        /// many originals the folder holds), or <c>null</c> until one is located.
+        /// Safe to read from any thread.
         /// </summary>
         public string? BestFolder { get { lock (_lock) return _bestFolder; } }
 
@@ -143,9 +159,9 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Considers one .fwz: rejects on size (cheap) and on being no newer than the
-        /// current best (so it can't win), then verifies (size + SHA-256) and, if it
-        /// is an unmodified original newer than the best, records its folder.
+        /// Considers one .fwz: rejects on size (cheap), then verifies (size + SHA-256)
+        /// and, if it is an unmodified original, tallies it against its folder and
+        /// recomputes the best folder.
         /// </summary>
         private void Consider(string path, CancellationToken ct)
         {
@@ -164,9 +180,6 @@ namespace IntercomFirmwareTool.Core
 
             if (!KnownSizes.Contains(size)) return; // not an original — no hashing
 
-            // Can't beat the most recent verified original we already have.
-            lock (_lock) { if (writeUtc <= _bestWriteUtc) return; }
-
             FirmwareCheckResult res;
             try { res = FirmwareRegistry.Verify(path); }
             catch { return; }
@@ -174,14 +187,39 @@ namespace IntercomFirmwareTool.Core
 
             string? folder = Path.GetDirectoryName(path);
             if (folder == null) return;
+
             lock (_lock)
             {
-                if (writeUtc > _bestWriteUtc)
+                if (!_counted.Add(path)) return; // already tallied this exact file
+                if (!_folders.TryGetValue(folder, out var stat))
+                    _folders[folder] = stat = new FolderStat();
+                stat.Count++;
+                if (writeUtc > stat.LatestUtc) stat.LatestUtc = writeUtc;
+                RecomputeBest();
+            }
+        }
+
+        /// <summary>
+        /// Picks the best folder under the lock: newest verified original wins; a tie
+        /// on that exact timestamp is broken by the number of originals in the folder.
+        /// The folder set is tiny (only folders that actually hold firmware).
+        /// </summary>
+        private void RecomputeBest()
+        {
+            string? best = null;
+            DateTime bestLatest = DateTime.MinValue;
+            int bestCount = 0;
+            foreach (var (folder, stat) in _folders)
+            {
+                if (stat.LatestUtc > bestLatest ||
+                    (stat.LatestUtc == bestLatest && stat.Count > bestCount))
                 {
-                    _bestWriteUtc = writeUtc;
-                    _bestFolder = folder;
+                    best = folder;
+                    bestLatest = stat.LatestUtc;
+                    bestCount = stat.Count;
                 }
             }
+            _bestFolder = best;
         }
 
         private static bool IsReparsePoint(string dir)
