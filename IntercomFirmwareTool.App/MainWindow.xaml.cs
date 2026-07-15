@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
@@ -6,6 +7,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -20,7 +22,8 @@ namespace IntercomFirmwareTool.App
     /// Interaction logic for MainWindow.xaml.
     ///
     /// One product flow: choose the original .fwz and an output path, set a root
-    /// password and/or an SSH public key (at least one), then Build a modified
+    /// password (or tick Disable for key-only, which requires an SSH public key),
+    /// then Build a modified
     /// .fwz that enables SSH/root login (the fquinto edits), verified by a full
     /// read-back round-trip. Two secondary actions verify an existing .fwz and
     /// run the MD5-crypt self-test. The input .fwz is never modified.
@@ -30,6 +33,12 @@ namespace IntercomFirmwareTool.App
         private string? _fwzPath;
         private string? _keyPath;
         private string? _outputPath;
+
+        // Background locator for the newest unmodified original firmware on the
+        // machine, so the picker opens where it lives. Cancelled once a firmware is
+        // chosen or the window closes.
+        private readonly FirmwareScanner _fwScanner = new();
+        private CancellationTokenSource? _scanCts;
 
         // Masked password fields with reveal-last-char behaviour (see
         // MaskedPasswordField); the real values live in these, not in the TextBoxes.
@@ -49,14 +58,19 @@ namespace IntercomFirmwareTool.App
             _pw.Changed += UpdatePasswordHint;
             _confirm.Changed += UpdatePasswordHint;
             // The password is a Build precondition (the key is optional), so
-            // re-evaluate the Build button as it changes.
+            // re-evaluate the Build button/cues as either the password OR its
+            // confirmation changes (a build needs them to match).
             _pw.Changed += UpdateBuildEnabled;
+            _confirm.Changed += UpdateBuildEnabled;
             WirePeekButton();
 
             // Password fields start EMPTY on purpose: the user must enter a root
             // password (or tick key-only), so a build can never ship the publicly
             // known fquinto default. The empty-password guard in Build enforces it.
             UpdatePasswordHint();
+            // Paint the initial required-field cues + "what's still needed" hint on
+            // the blank form (also sets the Build button's initial disabled state).
+            UpdateBuildEnabled();
 
             // Start the subtle "shine" on the donate buttons once the visual tree
             // (and their templates) are ready. Loaded can fire again on reparent, so
@@ -67,6 +81,13 @@ namespace IntercomFirmwareTool.App
                 _shineStarted = true;
                 StartDonateShine();
             };
+
+            // Kick off the silent firmware scan immediately (background thread), and
+            // make sure it stops when the window closes.
+            _scanCts = new CancellationTokenSource();
+            var scanToken = _scanCts.Token;
+            Task.Run(() => _fwScanner.Scan(scanToken), scanToken);
+            Closed += (_, _) => StopFirmwareScan();
         }
 
         private readonly Random _shineRng = new();
@@ -254,13 +275,41 @@ namespace IntercomFirmwareTool.App
 
         // ---- Input selection -------------------------------------------------
 
-        /// <summary>Picks the original firmware, verifies it against the whitelist (size + SHA-256), and selects it.</summary>
-        private async void BtnBrowseFwz_Click(object sender, RoutedEventArgs e)
+        /// <summary>True when a key event is Enter or Space — the keyboard activation
+        /// for the click-to-browse path fields (WCAG 2.1.1), so keyboard-only and
+        /// screen-reader users can open the pickers the mouse handlers open.</summary>
+        private static bool IsActivationKey(KeyEventArgs e) => e.Key == Key.Enter || e.Key == Key.Space;
+
+        /// <summary>
+        /// The firmware path box doubles as its own "browse" button (there is no
+        /// separate folder button — Grid.Column 2 is the clear button instead):
+        /// clicking it, or pressing Enter/Space while it has keyboard focus, opens
+        /// the picker, verifies the file against the whitelist (size + SHA-256), and
+        /// selects it.
+        /// </summary>
+        private async void TxtFwzPath_MouseDown(object sender, MouseButtonEventArgs e)
         {
+            e.Handled = true; // act purely as a browse button (no caret/selection)
+            await ChooseFirmwareAsync();
+        }
+
+        private async void TxtFwzPath_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (!IsActivationKey(e)) return;
+            e.Handled = true;
+            await ChooseFirmwareAsync();
+        }
+
+        private async Task ChooseFirmwareAsync()
+        {
+            if (!_uiEnabled) return; // ignored while an operation is running
             var dlg = new OpenFileDialog
             {
                 Title = "Choose the original firmware (.fwz)",
-                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*"
+                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*",
+                // Open where the background scan found the newest original (if any),
+                // else a sensible default (Downloads → Desktop → profile).
+                InitialDirectory = FirmwareStartDir()
             };
             if (dlg.ShowDialog(this) != true) return;
             string chosen = dlg.FileName;
@@ -292,7 +341,6 @@ namespace IntercomFirmwareTool.App
                 TxtOutputPath.Foreground = Brushes.Gray;
                 LblOutput.IsEnabled = false;
                 TxtOutputPath.IsEnabled = false;
-                BtnBrowseOutput.IsEnabled = false;
                 UpdateBuildEnabled();
 
                 TxtResult.Text =
@@ -308,12 +356,13 @@ namespace IntercomFirmwareTool.App
                 return;
             }
 
-            // Accepted: record the path and enable the output row.
+            // Accepted: record the path and enable the output row (BtnClearOutput is
+            // driven by UpdateBuildEnabled once _outputPath is set, below).
             _fwzPath = chosen;
+            StopFirmwareScan(); // a firmware is chosen — stop and release the scan
             SetPathText(TxtFwzPath, chosen);
             LblOutput.IsEnabled = true;
             TxtOutputPath.IsEnabled = true;
-            BtnBrowseOutput.IsEnabled = true;
             // Always re-suggest the output next to the NEW input, so switching
             // firmware can't leave the output pointing at the previous file's
             // name/location (the user can still Browse to change it).
@@ -326,12 +375,49 @@ namespace IntercomFirmwareTool.App
             TxtResult.Text =
                 "✅ " + check.Message + "\n\n" +
                 check.Match!.Describe() + "\n\n" +
-                "Set a root password and/or an SSH key (at least one), then Build.";
+                "Set a root password (or tick \"Disable\" to use an SSH key only), then Build.";
+        }
+
+        /// <summary>
+        /// Clears the firmware selection (the Grid.Column 2 button on the firmware
+        /// row), returning the box to its neutral placeholder and disabling the
+        /// output row again — mirrors the de-select branch of the picker above.
+        /// </summary>
+        private void BtnClearFwz_Click(object sender, RoutedEventArgs e)
+        {
+            _fwzPath = null;
+            _outputPath = null;
+            TxtFwzPath.Text = "(click to choose the original .fwz to modify)";
+            TxtFwzPath.Foreground = Brushes.Gray;
+            TxtOutputPath.Text = "(where to write the modified .fwz)";
+            TxtOutputPath.Foreground = Brushes.Gray;
+            LblOutput.IsEnabled = false;
+            TxtOutputPath.IsEnabled = false;
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>
+        /// The SSH key path box is click-to-browse (there is no separate folder
+        /// button): clicking it, or pressing Enter/Space while focused, picks an
+        /// existing OpenSSH public key. Generate / Clear are the two icon buttons.
+        /// </summary>
+        private void TxtKeyPath_MouseDown(object sender, MouseButtonEventArgs e)
+        {
+            e.Handled = true; // act purely as a browse button (no caret/selection)
+            ChooseKey();
+        }
+
+        private void TxtKeyPath_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (!IsActivationKey(e)) return;
+            e.Handled = true;
+            ChooseKey();
         }
 
         /// <summary>Picks an existing OpenSSH public key and selects it for the build.</summary>
-        private void BtnChooseKey_Click(object sender, RoutedEventArgs e)
+        private void ChooseKey()
         {
+            if (!_uiEnabled) return; // ignored while an operation is running
             var dlg = new OpenFileDialog
             {
                 Title = "Choose your SSH public key (.pub)",
@@ -523,22 +609,69 @@ namespace IntercomFirmwareTool.App
             catch { return false; }
         }
 
-        /// <summary>Opens the Save dialog to choose the modified-firmware output path.</summary>
-        private void BtnBrowseOutput_Click(object sender, RoutedEventArgs e)
+        /// <summary>
+        /// The output path box is click-to-browse (there is no separate save
+        /// button — Grid.Column 2 is the clear button instead): clicking it, or
+        /// pressing Enter/Space while focused, opens the Save dialog. The box is
+        /// disabled until a firmware is chosen, so this only fires once usable.
+        /// </summary>
+        private void TxtOutputPath_MouseDown(object sender, MouseButtonEventArgs e)
         {
+            e.Handled = true; // act purely as a browse button (no caret/selection)
+            ChooseOutput();
+        }
+
+        private void TxtOutputPath_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (!IsActivationKey(e)) return;
+            e.Handled = true;
+            ChooseOutput();
+        }
+
+        /// <summary>Opens the Save dialog to choose the modified-firmware output path.</summary>
+        private void ChooseOutput()
+        {
+            // The box is only enabled once a firmware is chosen and while no
+            // operation is running; guard defensively all the same.
+            if (!_uiEnabled || _fwzPath == null) return;
             var dlg = new SaveFileDialog
             {
                 Title = "Save the modified firmware as…",
                 Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*",
-                FileName = _fwzPath != null
-                    ? Path.GetFileNameWithoutExtension(_fwzPath) + "_ssh.fwz"
-                    : "modified.fwz",
-                InitialDirectory = (_fwzPath != null ? Path.GetDirectoryName(_fwzPath) : null) ?? ""
+                FileName = Path.GetFileNameWithoutExtension(_fwzPath) + "_ssh.fwz",
+                InitialDirectory = Path.GetDirectoryName(_fwzPath) ?? ""
             };
             if (dlg.ShowDialog(this) != true) return;
 
-            _outputPath = dlg.FileName;
+            string chosen = dlg.FileName;
+            // Never let the output overwrite the original firmware. Reject it here so
+            // the bad choice is caught at selection time (Build also refuses, but the
+            // user shouldn't have to get that far). SamePath resolves aliases and works
+            // for a not-yet-created file via its existing parent chain.
+            if (SamePath(chosen, _fwzPath))
+            {
+                MessageBox.Show(this,
+                    "The output must be a different file from the original firmware, so the " +
+                    "original .fwz is never overwritten.\n\nChoose a different name or folder.",
+                    "Cannot overwrite the original", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return; // keep the previous output selection unchanged
+            }
+
+            _outputPath = chosen;
             SetPathText(TxtOutputPath, _outputPath);
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>
+        /// Clears the output location (the Grid.Column 2 button on the output row),
+        /// returning the box to its placeholder. The firmware stays selected, so the
+        /// row remains enabled and the box can be clicked to pick a new location.
+        /// </summary>
+        private void BtnClearOutput_Click(object sender, RoutedEventArgs e)
+        {
+            _outputPath = null;
+            TxtOutputPath.Text = "(where to write the modified .fwz)";
+            TxtOutputPath.Foreground = Brushes.Gray;
             UpdateBuildEnabled();
         }
 
@@ -612,13 +745,12 @@ namespace IntercomFirmwareTool.App
 
             TxtPassword.IsEnabled = usePassword;
             TxtConfirm.IsEnabled = usePassword;
-            BtnToggleReveal.IsEnabled = usePassword;
-            BtnCopyPwd.IsEnabled = usePassword;
-            BtnRandomPwd.IsEnabled = usePassword;
+            // The reveal/copy/generate buttons are set centrally (content-aware) by
+            // UpdatePasswordButtonStates, reached via UpdateBuildEnabled below.
 
-            // With password login off, the key is the only credential, so mark it
-            // required (label + placeholder); with password on, it is optional again.
-            LblKey.Text = usePassword ? "SSH public key (optional):" : "SSH public key (required):";
+            // With password login off, the key is the only credential; the
+            // optional/required distinction is conveyed by the placeholder (the
+            // label stays the constant "SSH Public Key:").
             UpdateKeyPlaceholder();
 
             UpdatePasswordHint();
@@ -653,6 +785,43 @@ namespace IntercomFirmwareTool.App
             TxtPwdHint.Foreground = match ? Brushes.Green : Brushes.Firebrick;
         }
 
+        /// <summary>
+        /// Cancels and disposes the background scan's token source, once. Idempotent:
+        /// called both when a firmware is chosen and when the window closes, so it
+        /// nulls the field to avoid touching (or disposing) it twice.
+        /// </summary>
+        private void StopFirmwareScan()
+        {
+            var cts = _scanCts;
+            if (cts == null) return;
+            _scanCts = null;
+            try { cts.Cancel(); } catch { /* nothing registered can throw; be safe */ }
+            cts.Dispose();
+        }
+
+        /// <summary>
+        /// Where the firmware picker should open: the folder of the newest unmodified
+        /// original the background scan has found, or a sensible default when the scan
+        /// hasn't found one yet (or found nothing).
+        /// </summary>
+        private string FirmwareStartDir()
+        {
+            string? best = _fwScanner.BestFolder;
+            if (best != null && Directory.Exists(best)) return best;
+            return FirmwareDefaultDir();
+        }
+
+        /// <summary>Default firmware folder: Downloads, else Desktop, else the profile.</summary>
+        private static string FirmwareDefaultDir()
+        {
+            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            string downloads = Path.Combine(profile, "Downloads");
+            if (Directory.Exists(downloads)) return downloads;
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            if (Directory.Exists(desktop)) return desktop;
+            return profile;
+        }
+
         /// <summary>The user's ~/.ssh folder if it exists, else the profile folder.</summary>
         private static string DefaultSshDir()
         {
@@ -663,24 +832,167 @@ namespace IntercomFirmwareTool.App
 
         /// <summary>
         /// Whether a credential is currently available for Build: with password
-        /// login disabled a key is required; otherwise a non-empty password.
-        /// Single source of truth so the two enable-gates can't drift.
+        /// login disabled a key is required; otherwise a non-empty password that
+        /// matches its confirmation. Single source of truth so the gates can't drift.
         /// </summary>
         private bool HaveCredential()
         {
             bool passwordOff = ChkKeyOnly.IsChecked == true;
-            return passwordOff ? _keyPath != null : CurrentPassword().Length > 0;
+            if (passwordOff) return _keyPath != null;
+            // Password mode: a non-empty password that has been confirmed (matches).
+            // Read the value once so the two comparisons can't observe different state.
+            string pw = CurrentPassword();
+            return pw.Length > 0 && pw == CurrentConfirm();
         }
 
         /// <summary>
-        /// Enables the Build button when firmware and output are set and at least
-        /// one credential is available: with password login disabled a key is
-        /// required; otherwise a non-empty password is required (key optional).
+        /// Enables the Build button when firmware and output are set and a credential
+        /// is available: with password login disabled a key is required; otherwise a
+        /// non-empty root password that matches its confirmation (key optional).
         /// </summary>
         private void UpdateBuildEnabled()
         {
-            BtnBuild.IsEnabled =
-                _fwzPath != null && _outputPath != null && HaveCredential();
+            // _uiEnabled is false while a build/verify/self-test is running, so the
+            // Build button (and the hint below, via UpdateRequiredCues) stay disabled
+            // and off the "✓ Ready to build." message for the duration of the op.
+            BtnBuild.IsEnabled = _uiEnabled
+                && _fwzPath != null && _outputPath != null && HaveCredential();
+            UpdateRequiredCues();
+        }
+
+        // Amber cue for a required field that is still blank. Colour is never the
+        // ONLY signal: it is paired with the field labels and the textual
+        // "what's still needed" hint (WCAG 1.4.1).
+        private static readonly SolidColorBrush NeededBrush = MakeFrozen(Color.FromRgb(0xD9, 0x8A, 0x00));
+        private static readonly SolidColorBrush ReadyBrush = MakeFrozen(Color.FromRgb(0x2E, 0x7D, 0x32));
+        // Error cue (e.g. confirm doesn't match) — Firebrick, matching the ✗ text hint.
+        private static readonly Brush ErrorBrush = Brushes.Firebrick;
+
+        private static SolidColorBrush MakeFrozen(Color c)
+        {
+            var b = new SolidColorBrush(c);
+            b.Freeze();
+            return b;
+        }
+
+        /// <summary>
+        /// Highlights the fields still blocking a Build (blank + required) with an
+        /// amber border, and refreshes the "what's still needed" hint by the Build
+        /// button. Respects the password-OR-key rule — it flags whichever credential
+        /// is actually required for the current mode, never both. Driven from
+        /// UpdateBuildEnabled so it always matches the Build gate.
+        /// </summary>
+        private void UpdateRequiredCues()
+        {
+            bool passwordOff = ChkKeyOnly.IsChecked == true;
+            string pw = CurrentPassword();
+            string confirm = CurrentConfirm();
+
+            bool needFirmware = _fwzPath == null;
+            bool needOutput = _outputPath == null;
+            bool needPassword = !passwordOff && pw.Length == 0;
+            // Confirm becomes relevant only once a password is entered (password mode):
+            // amber while it is still blank, red while it is filled but doesn't match.
+            bool needConfirm = !passwordOff && pw.Length > 0 && confirm.Length == 0;
+            bool confirmMismatch = !passwordOff && pw.Length > 0 && confirm.Length > 0 && pw != confirm;
+            bool needKey = passwordOff && _keyPath == null;
+
+            SetFieldBorder(TxtFwzPath, needFirmware ? NeededBrush : null);
+            // Output is disabled until a firmware is chosen; only cue it once usable.
+            SetFieldBorder(TxtOutputPath, needOutput && _fwzPath != null ? NeededBrush : null);
+            SetFieldBorder(TxtPassword, needPassword ? NeededBrush : null);
+            SetFieldBorder(TxtConfirm, needConfirm ? NeededBrush : confirmMismatch ? ErrorBrush : null);
+            SetFieldBorder(TxtKeyPath, needKey ? NeededBrush : null);
+
+            // "(required)" placeholders: on the password while it is blank, and on
+            // confirm only once a password has been typed (mirrors needPassword/needConfirm).
+            PhPassword.Visibility = needPassword ? Visibility.Visible : Visibility.Collapsed;
+            PhConfirm.Visibility = needConfirm ? Visibility.Visible : Visibility.Collapsed;
+
+            // Mirror every visual cue into the accessibility tree so a screen reader
+            // announces the required / mismatch state when the field takes focus — the
+            // colour and "(required)" overlay are never the only signal (WCAG 1.4.1 /
+            // 1.3.1). The base names double as the (otherwise unassociated) field labels.
+            AutomationProperties.SetName(TxtFwzPath, needFirmware ? "Firmware, required" : "Firmware");
+            AutomationProperties.SetName(TxtOutputPath,
+                needOutput && _fwzPath != null ? "Save output as, required" : "Save output as");
+            AutomationProperties.SetName(TxtPassword, needPassword ? "Root Password, required" : "Root Password");
+            AutomationProperties.SetName(TxtConfirm,
+                needConfirm ? "Confirm Password, required"
+                : confirmMismatch ? "Confirm Password, does not match the password"
+                : "Confirm Password");
+            AutomationProperties.SetName(TxtKeyPath, needKey ? "SSH Public Key, required" : "SSH Public Key");
+
+            // Each clear/erase button is only useful when its field holds something to
+            // clear — disable it while the path is empty (and while an op is running).
+            BtnClearFwz.IsEnabled = _uiEnabled && _fwzPath != null;
+            BtnClearKey.IsEnabled = _uiEnabled && _keyPath != null;
+            BtnClearOutput.IsEnabled = _uiEnabled && _outputPath != null;
+
+            var missing = new List<string>();
+            if (needFirmware) missing.Add("firmware");
+            if (needOutput && _fwzPath != null) missing.Add("output path");
+            if (needPassword) missing.Add("a root password");
+            if (needConfirm) missing.Add("confirm the password");
+            if (needKey) missing.Add("an SSH key");
+
+            string previousHint = TxtBuildHint.Text;
+            if (!_uiEnabled)
+            {
+                // An operation (build / verify / self-test) is running and the whole
+                // form is locked, so the "still needed" / mismatch guidance isn't
+                // actionable right now — show progress for the duration instead.
+                TxtBuildHint.Text = "⏳ Working…";
+                TxtBuildHint.Foreground = Brushes.Gray;
+            }
+            else if (confirmMismatch)
+            {
+                // A concrete error takes priority over the "still needed" list.
+                string prefix = missing.Count > 0 ? "Still needed: " + string.Join(", ", missing) + " — " : "";
+                TxtBuildHint.Text = prefix + "passwords don't match.";
+                TxtBuildHint.Foreground = ErrorBrush;
+            }
+            else if (missing.Count == 0)
+            {
+                TxtBuildHint.Text = "✓ Ready to build.";
+                TxtBuildHint.Foreground = ReadyBrush;
+            }
+            else
+            {
+                TxtBuildHint.Text = "Still needed: " + string.Join(", ", missing) + ".";
+                TxtBuildHint.Foreground = Brushes.Gray;
+            }
+
+            // The hint is a Polite live region (XAML), but WPF still needs the peer to
+            // raise the change event for it to be announced. Only do this when an
+            // assistive client is actually listening (ListenerExists) — then get or,
+            // if the peer hasn't been created yet, create it, so a running screen
+            // reader still hears the change. Fire only on an actual text change.
+            if (!string.Equals(previousHint, TxtBuildHint.Text, StringComparison.Ordinal) &&
+                AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
+            {
+                var peer = FrameworkElementAutomationPeer.FromElement(TxtBuildHint)
+                    ?? FrameworkElementAutomationPeer.CreatePeerForElement(TxtBuildHint);
+                peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+            }
+
+            // Reveal/copy availability depends on the same password/confirm content.
+            UpdatePasswordButtonStates();
+        }
+
+        /// <summary>Sets (or clears, when <paramref name="brush"/> is null) a 2px cue border on a field.</summary>
+        private static void SetFieldBorder(Control field, Brush? brush)
+        {
+            if (brush != null)
+            {
+                field.BorderBrush = brush;
+                field.BorderThickness = new Thickness(2);
+            }
+            else
+            {
+                field.ClearValue(Control.BorderBrushProperty);
+                field.ClearValue(Control.BorderThicknessProperty);
+            }
         }
 
         // ---- Primary action: Build ------------------------------------------
@@ -1041,30 +1353,57 @@ namespace IntercomFirmwareTool.App
             // whole operation.
             if (!enabled) SetReveal(false);
 
-            BtnBrowseFwz.IsEnabled = enabled;
-            BtnChooseKey.IsEnabled = enabled;
+            // The firmware and key path boxes are click-to-browse controls, so they
+            // must be disabled during an operation too — otherwise they would look
+            // active (hand cursor, focusable) while doing nothing.
+            TxtFwzPath.IsEnabled = enabled;
+            TxtKeyPath.IsEnabled = enabled;
             BtnGenKey.IsEnabled = enabled;
-            BtnClearKey.IsEnabled = enabled;
             // The output row stays disabled until a firmware is chosen.
-            BtnBrowseOutput.IsEnabled = enabled && _fwzPath != null;
+            TxtOutputPath.IsEnabled = enabled && _fwzPath != null;
+            LblOutput.IsEnabled = enabled && _fwzPath != null;
             BtnVerify.IsEnabled = enabled;
             BtnSelfTest.IsEnabled = enabled;
-            // Build only re-enables when firmware + output + a credential are set
-            // (a password, or a key when password login is disabled).
-            bool passwordOff = ChkKeyOnly.IsChecked == true;
-            BtnBuild.IsEnabled = enabled
-                && _fwzPath != null && _outputPath != null && HaveCredential();
+            // The three clear buttons are content-aware (enabled only when their field
+            // has something to clear); UpdateBuildEnabled below drives them from the
+            // current paths + _uiEnabled, so they aren't set here.
 
             // Also lock the credential inputs during an operation so the visible UI
             // can't drift from the values snapshotted for the build. When
             // re-enabling, respect the Disable (key-only) state.
+            bool passwordOff = ChkKeyOnly.IsChecked == true;
             bool creds = enabled && !passwordOff;
             ChkKeyOnly.IsEnabled = enabled;
             TxtPassword.IsEnabled = creds;
             TxtConfirm.IsEnabled = creds;
-            BtnToggleReveal.IsEnabled = creds;
-            BtnCopyPwd.IsEnabled = creds;
-            BtnRandomPwd.IsEnabled = creds;
+            // Refresh the Build gate, the "still needed" hint/cues, and the content-
+            // aware reveal/copy/generate buttons so they all reflect the new op state
+            // (UpdateBuildEnabled gates Build on _uiEnabled and shows "⏳ Working…").
+            _uiEnabled = enabled;
+            UpdateBuildEnabled();
+        }
+
+        // Whether the UI is currently interactive (false during a build/verify op).
+        private bool _uiEnabled = true;
+
+        /// <summary>
+        /// Enables the password action buttons by what is actually present:
+        /// • Reveal (eye) needs at least one of the password/confirm fields to have
+        ///   text — nothing to reveal otherwise.
+        /// • Copy needs a confirmed, MATCHING password: blank → nothing to copy;
+        ///   mismatch → ambiguous which line the user means, so it must match first.
+        /// • Generate is always available while password login is on.
+        /// All gated by password-login mode and whether the UI is interactive.
+        /// </summary>
+        private void UpdatePasswordButtonStates()
+        {
+            bool active = _uiEnabled && ChkKeyOnly.IsChecked != true;
+            string pw = CurrentPassword();
+            string confirm = CurrentConfirm();
+
+            BtnRandomPwd.IsEnabled = active;
+            BtnToggleReveal.IsEnabled = active && (pw.Length > 0 || confirm.Length > 0);
+            BtnCopyPwd.IsEnabled = active && pw.Length > 0 && pw == confirm;
         }
     }
 }

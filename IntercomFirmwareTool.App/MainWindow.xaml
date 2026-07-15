@@ -73,6 +73,93 @@
             <Setter Property="Padding" Value="6,0"/>
         </Style>
 
+        <!-- Modern flat action buttons (Windows 11 / Fluent look): a filled accent
+             PRIMARY for the main call-to-action and a subtle bordered SECONDARY for
+             the rest. Flat fills (no 3-D gradient), 6px rounded corners, smooth
+             hover/press states, a visible keyboard-focus ring and a clear disabled
+             state. Shared 36px height so the row lines up. -->
+        <Style TargetType="Button" x:Key="PrimaryButton">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Background" Value="#FF0F6CBD"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Height" Value="36"/>
+            <Setter Property="Padding" Value="20,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" CornerRadius="6" Background="{TemplateBinding Background}"
+                                BorderThickness="2" BorderBrush="Transparent" SnapsToDevicePixels="True">
+                            <ContentPresenter Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FF1A79C9"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FF0B5C9E"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#FF00335A"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="bd" Property="Background" Value="#FFDCDCDC"/>
+                                <Setter Property="Foreground" Value="#FF9A9A9A"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="Button" x:Key="SecondaryButton">
+            <Setter Property="Foreground" Value="#FF1F1F1F"/>
+            <Setter Property="Background" Value="#FFFDFDFD"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Height" Value="36"/>
+            <Setter Property="Padding" Value="16,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" CornerRadius="6" Background="{TemplateBinding Background}"
+                                BorderThickness="1" BorderBrush="#FFD2D2D2" SnapsToDevicePixels="True">
+                            <ContentPresenter Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FFF3F3F3"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#FFC4C4C4"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FFE9E9E9"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#FF0F6CBD"/>
+                                <Setter TargetName="bd" Property="BorderThickness" Value="2"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="bd" Property="Background" Value="#FFF7F7F7"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#FFE8E8E8"/>
+                                <Setter Property="Foreground" Value="#FFAFAFAF"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Rounded, brand-coloured button for the "buy me a coffee" links.
              Background/Foreground are set per-button to each brand's colour. -->
         <Style TargetType="Button" x:Key="DonateButton">
@@ -191,33 +278,43 @@
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>   <!-- 0: firmware -->
+                <RowDefinition Height="Auto"/>   <!-- 1: root password -->
+                <RowDefinition Height="Auto"/>   <!-- 2: confirm -->
+                <RowDefinition Height="Auto"/>   <!-- 3: ssh key -->
+                <RowDefinition Height="Auto"/>   <!-- 4: credential rule -->
+                <RowDefinition Height="Auto"/>   <!-- 5: output -->
             </Grid.RowDefinitions>
 
             <!-- Firmware .fwz -->
             <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Firmware (.fwz):"/>
+                       Text="Firmware:"/>
             <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtFwzPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
-                     Text="(choose the original .fwz to modify)" Foreground="Gray"/>
-            <Button Grid.Row="0" Grid.Column="2" x:Name="BtnBrowseFwz"
-                    Style="{StaticResource RowIconButton}" Content="&#xE8B7;"
-                    ToolTip="Browse for the original firmware (.fwz)…"
-                    AutomationProperties.Name="Browse for the original firmware"
-                    Click="BtnBrowseFwz_Click"/>
+                     Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose the original firmware (.fwz)…"
+                     PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown" PreviewKeyDown="TxtFwzPath_PreviewKeyDown"
+                     Text="(click to choose the original .fwz to modify)" Foreground="Gray"/>
+            <Button Grid.Row="0" Grid.Column="2" x:Name="BtnClearFwz"
+                    Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
+                    ToolTip="Clear the selected firmware"
+                    AutomationProperties.Name="Clear the selected firmware"
+                    Click="BtnClearFwz_Click"/>
 
             <!-- Root password (masked) + reveal toggle + Disable (key-only). One of
                  the password or the key is required; ticking Disable turns password
                  login off, so a key becomes the credential. -->
             <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Root password:"/>
+                       Text="Root Password:"/>
             <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <TextBox x:Name="TxtPassword" Width="170" Style="{StaticResource InputField}"
-                         FontFamily="Consolas"/>
+                <Grid Width="170">
+                    <TextBox x:Name="TxtPassword" Style="{StaticResource InputField}"
+                             FontFamily="Consolas"/>
+                    <!-- Placeholder overlay: shown (by UpdateRequiredCues) only while
+                         the password is blank in password mode. -->
+                    <TextBlock x:Name="PhPassword" Text="(required)" Foreground="Gray"
+                               IsHitTestVisible="False" VerticalAlignment="Center"
+                               Margin="8,0,0,0"/>
+                </Grid>
                 <!-- Inline actions, in order: generate, reveal (hold-to-show eye),
                      copy. Reveal affects BOTH the password and confirm fields. -->
                 <Button x:Name="BtnRandomPwd" Style="{StaticResource IconButton}"
@@ -239,10 +336,17 @@
 
             <!-- Confirm password -->
             <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Confirm password:"/>
+                       Text="Confirm Password:"/>
             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
-                <TextBox x:Name="TxtConfirm" Width="170" Style="{StaticResource InputField}"
-                         FontFamily="Consolas"/>
+                <Grid Width="170">
+                    <TextBox x:Name="TxtConfirm" Style="{StaticResource InputField}"
+                             FontFamily="Consolas"/>
+                    <!-- Placeholder overlay: shown only after a password is typed and
+                         while confirm is still blank (UpdateRequiredCues). -->
+                    <TextBlock x:Name="PhConfirm" Text="(required)" Foreground="Gray"
+                               IsHitTestVisible="False" VerticalAlignment="Center"
+                               Margin="8,0,0,0" Visibility="Collapsed"/>
+                </Grid>
                 <TextBlock x:Name="TxtPwdHint" VerticalAlignment="Center" Margin="10,0,0,0"
                            Foreground="Gray"/>
             </StackPanel>
@@ -251,48 +355,87 @@
                  new pair. Without a key, login is by the root password above. -->
             <TextBlock Grid.Row="3" Grid.Column="0" x:Name="LblKey"
                        Style="{StaticResource FieldLabel}"
-                       Text="SSH public key (optional):"/>
+                       Text="SSH Public Key:"/>
             <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
+                     Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose an existing public key (.pub)…"
+                     PreviewMouseLeftButtonDown="TxtKeyPath_MouseDown" PreviewKeyDown="TxtKeyPath_PreviewKeyDown"
                      Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
             <StackPanel Grid.Row="3" Grid.Column="2" Orientation="Horizontal">
-                <Button x:Name="BtnChooseKey" Style="{StaticResource RowIconButton}"
-                        Content="&#xE8B7;" ToolTip="Choose an existing public key (.pub)…"
-                        AutomationProperties.Name="Choose an existing public key"
-                        Click="BtnChooseKey_Click"/>
                 <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
-                        Content="&#xE192;" ToolTip="Generate a new SSH key pair…"
+                        ToolTip="Generate a new SSH key pair…"
                         AutomationProperties.Name="Generate a new SSH key pair"
-                        Click="BtnGenKey_Click"/>
+                        Click="BtnGenKey_Click">
+                    <!-- Key glyph with a small green "＋" badge = generate a NEW key.
+                         The Segoe key points its shaft/teeth to the lower-right, so
+                         the badge sits in the empty TOP-RIGHT corner to avoid covering
+                         the key. The key inherits the button Foreground (greys when
+                         disabled); the plus is drawn as two rounded bars to stay crisp. -->
+                    <Grid Width="20" Height="18" SnapsToDevicePixels="True">
+                        <TextBlock Text="&#xE192;" FontFamily="Segoe MDL2 Assets" FontSize="16"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <Border Background="#FF107C10" CornerRadius="6" Width="12" Height="12"
+                                HorizontalAlignment="Right" VerticalAlignment="Top"
+                                Margin="0,-2,-3,0">
+                            <Grid>
+                                <Rectangle Fill="White" Width="6" Height="2" RadiusX="1" RadiusY="1"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <Rectangle Fill="White" Width="2" Height="6" RadiusX="1" RadiusY="1"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Grid>
+                        </Border>
+                    </Grid>
+                </Button>
                 <Button x:Name="BtnClearKey" Style="{StaticResource RowIconButton}"
-                        Content="&#xE711;" ToolTip="Clear the selected key (build with password only)"
+                        Content="&#xE711;" IsEnabled="False"
+                        ToolTip="Clear the selected key (build with password only)"
                         AutomationProperties.Name="Clear the selected SSH key"
                         Click="BtnClearKey_Click"/>
             </StackPanel>
 
+            <!-- The credential rule, stated explicitly right below the two credential
+                 fields. Matches the actual Build gate: a root password is required in
+                 the default (password-login) mode; ticking "Disable" turns password
+                 login off and makes the SSH key the required credential instead. -->
+            <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+                       Foreground="Gray" FontSize="11" TextWrapping="Wrap"
+                       Text="A root password is required — or tick “Disable” to log in with an SSH key only."/>
+
             <!-- Output (disabled until a firmware is chosen) -->
-            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
-                       Style="{StaticResource FieldLabel}" Text="Save output as:"/>
-            <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtOutputPath"
+            <TextBlock Grid.Row="5" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
+                       Style="{StaticResource FieldLabel}" Text="Save Output As:"/>
+            <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtOutputPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" IsEnabled="False"
+                     Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose where to save the modified .fwz…"
+                     PreviewMouseLeftButtonDown="TxtOutputPath_MouseDown" PreviewKeyDown="TxtOutputPath_PreviewKeyDown"
                      Text="(where to write the modified .fwz)" Foreground="Gray"/>
-            <Button Grid.Row="4" Grid.Column="2" x:Name="BtnBrowseOutput"
+            <Button Grid.Row="5" Grid.Column="2" x:Name="BtnClearOutput"
                     Style="{StaticResource RowIconButton}" IsEnabled="False"
-                    Content="&#xE74E;" ToolTip="Choose where to save the modified .fwz…"
-                    AutomationProperties.Name="Choose where to save the modified firmware"
-                    Click="BtnBrowseOutput_Click"/>
+                    Content="&#xE711;" ToolTip="Clear the output location"
+                    AutomationProperties.Name="Clear the output location"
+                    Click="BtnClearOutput_Click"/>
         </Grid>
 
-        <!-- Row 2: actions -->
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
-            <Button x:Name="BtnBuild" Padding="16,8" Margin="0,0,10,0"
-                    FontWeight="SemiBold" IsEnabled="False"
-                    Content="Build modified firmware" Click="BtnBuild_Click"/>
-            <Button x:Name="BtnVerify" Padding="12,8" Margin="0,0,10,0"
-                    Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
-            <Button x:Name="BtnSelfTest" Padding="12,8"
-                    Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
-        </StackPanel>
+        <!-- Row 2: actions. DockPanel so the hint fills the remaining width and
+             trims, instead of pushing the buttons off-screen at small widths. -->
+        <DockPanel Grid.Row="2" Margin="0,0,0,10" LastChildFill="True">
+            <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
+                <Button x:Name="BtnBuild" Style="{StaticResource PrimaryButton}"
+                        Margin="0,0,10,0" IsEnabled="False"
+                        Content="Build Modified Firmware" Click="BtnBuild_Click"/>
+                <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}"
+                        Margin="0,0,10,0"
+                        Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
+                <Button x:Name="BtnSelfTest" Style="{StaticResource SecondaryButton}"
+                        Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
+            </StackPanel>
+            <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled. -->
+            <!-- LiveSetting=Polite so a screen reader announces the changing
+                 "still needed" / "Ready to build" hint as the form is filled. -->
+            <TextBlock x:Name="TxtBuildHint" VerticalAlignment="Center" Margin="14,0,0,0"
+                       Foreground="Gray" TextTrimming="CharacterEllipsis"
+                       AutomationProperties.LiveSetting="Polite"/>
+        </DockPanel>
 
         <!-- Row 3: result label -->
         <TextBlock Grid.Row="3" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
@@ -303,7 +446,7 @@
                  VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Auto"
                  FontFamily="Consolas" FontSize="12"
-                 Text="Choose a firmware and an output path, set a root password and/or an SSH key (at least one), then click Build."/>
+                 Text="Choose a firmware and an output path, set a root password (or tick “Disable” to use an SSH key only), then click Build."/>
 
         <!-- Row 5: diagnostics -->
         <TextBlock Grid.Row="5" x:Name="TxtDiag" Margin="0,8,0,0"
