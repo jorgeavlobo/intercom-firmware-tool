@@ -446,7 +446,7 @@
                  VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Auto"
                  FontFamily="Consolas" FontSize="12"
-                 Text="Choose a firmware and an output path, set a root password and/or an SSH key (at least one), then click Build."/>
+                 Text="Choose a firmware and an output path, set a root password (or tick “Disable” to use an SSH key only), then click Build."/>
 
         <!-- Row 5: diagnostics -->
         <TextBlock Grid.Row="5" x:Name="TxtDiag" Margin="0,8,0,0"

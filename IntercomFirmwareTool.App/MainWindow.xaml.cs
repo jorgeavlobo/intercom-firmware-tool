@@ -22,7 +22,8 @@ namespace IntercomFirmwareTool.App
     /// Interaction logic for MainWindow.xaml.
     ///
     /// One product flow: choose the original .fwz and an output path, set a root
-    /// password and/or an SSH public key (at least one), then Build a modified
+    /// password (or tick Disable for key-only, which requires an SSH public key),
+    /// then Build a modified
     /// .fwz that enables SSH/root login (the fquinto edits), verified by a full
     /// read-back round-trip. Two secondary actions verify an existing .fwz and
     /// run the MD5-crypt self-test. The input .fwz is never modified.
@@ -286,7 +287,11 @@ namespace IntercomFirmwareTool.App
         /// the picker, verifies the file against the whitelist (size + SHA-256), and
         /// selects it.
         /// </summary>
-        private async void TxtFwzPath_MouseDown(object sender, MouseButtonEventArgs e) => await ChooseFirmwareAsync();
+        private async void TxtFwzPath_MouseDown(object sender, MouseButtonEventArgs e)
+        {
+            e.Handled = true; // act purely as a browse button (no caret/selection)
+            await ChooseFirmwareAsync();
+        }
 
         private async void TxtFwzPath_PreviewKeyDown(object sender, KeyEventArgs e)
         {
@@ -370,7 +375,7 @@ namespace IntercomFirmwareTool.App
             TxtResult.Text =
                 "✅ " + check.Message + "\n\n" +
                 check.Match!.Describe() + "\n\n" +
-                "Set a root password and/or an SSH key (at least one), then Build.";
+                "Set a root password (or tick \"Disable\" to use an SSH key only), then Build.";
         }
 
         /// <summary>
@@ -396,7 +401,11 @@ namespace IntercomFirmwareTool.App
         /// button): clicking it, or pressing Enter/Space while focused, picks an
         /// existing OpenSSH public key. Generate / Clear are the two icon buttons.
         /// </summary>
-        private void TxtKeyPath_MouseDown(object sender, MouseButtonEventArgs e) => ChooseKey();
+        private void TxtKeyPath_MouseDown(object sender, MouseButtonEventArgs e)
+        {
+            e.Handled = true; // act purely as a browse button (no caret/selection)
+            ChooseKey();
+        }
 
         private void TxtKeyPath_PreviewKeyDown(object sender, KeyEventArgs e)
         {
@@ -606,7 +615,11 @@ namespace IntercomFirmwareTool.App
         /// pressing Enter/Space while focused, opens the Save dialog. The box is
         /// disabled until a firmware is chosen, so this only fires once usable.
         /// </summary>
-        private void TxtOutputPath_MouseDown(object sender, MouseButtonEventArgs e) => ChooseOutput();
+        private void TxtOutputPath_MouseDown(object sender, MouseButtonEventArgs e)
+        {
+            e.Handled = true; // act purely as a browse button (no caret/selection)
+            ChooseOutput();
+        }
 
         private void TxtOutputPath_PreviewKeyDown(object sender, KeyEventArgs e)
         {
