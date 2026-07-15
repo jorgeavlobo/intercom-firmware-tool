@@ -23,10 +23,16 @@ namespace IntercomFirmwareTool.Core
     /// more unmodified originals wins (the likelier "firmware stash").</para>
     ///
     /// <para>Thread-safe and cancellable: run it on a background thread and cancel
-    /// the token once a firmware is chosen or the window closes.</para>
+    /// the token once a firmware is chosen or the window closes. It also caps itself
+    /// at <see cref="BudgetSeconds"/> seconds so the whole-drive sweep can never run
+    /// forever on a huge disk.</para>
     /// </summary>
     public sealed class FirmwareScanner
     {
+        /// <summary>Overall wall-clock cap for a scan (whichever comes first: this,
+        /// a chosen firmware, or the window closing).</summary>
+        private const int BudgetSeconds = 60;
+
         private readonly object _lock = new();
 
         /// <summary>Running tally of verified originals per folder.</summary>
@@ -72,13 +78,19 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         public void Scan(CancellationToken ct)
         {
+            // Cap the whole scan at BudgetSeconds so it can't run forever on a large
+            // disk. The linked token trips on whichever comes first: the caller's ct
+            // (a firmware was chosen / the window closed) or the budget timer.
+            using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            budget.CancelAfter(TimeSpan.FromSeconds(BudgetSeconds));
+            var token = budget.Token;
             try
             {
                 // Phase 1 — the folders a firmware download almost always lands in,
                 // in order of likelihood. Deduplicated and existing only.
                 var priority = PriorityFolders();
                 foreach (var folder in priority)
-                    ScanTree(folder, _ => true, ct);
+                    ScanTree(folder, _ => true, token);
 
                 // Phase 2 — the whole computer (fixed drives), skipping the noise
                 // directories and the priority folders already covered above.
@@ -86,11 +98,11 @@ namespace IntercomFirmwareTool.Core
                 foreach (var drive in FixedDriveRoots())
                     ScanTree(drive,
                         dir => !ExcludedDirs.Contains(Path.GetFileName(dir)) && !prioritySet.Contains(dir),
-                        ct);
+                        token);
             }
             catch (OperationCanceledException)
             {
-                // A firmware was chosen (or the window closed) — nothing more to do.
+                // A firmware was chosen, the window closed, or the time budget elapsed.
             }
             catch
             {
