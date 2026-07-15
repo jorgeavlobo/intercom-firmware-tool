@@ -643,7 +643,21 @@ namespace IntercomFirmwareTool.App
             };
             if (dlg.ShowDialog(this) != true) return;
 
-            _outputPath = dlg.FileName;
+            string chosen = dlg.FileName;
+            // Never let the output overwrite the original firmware. Reject it here so
+            // the bad choice is caught at selection time (Build also refuses, but the
+            // user shouldn't have to get that far). SamePath resolves aliases and works
+            // for a not-yet-created file via its existing parent chain.
+            if (SamePath(chosen, _fwzPath))
+            {
+                MessageBox.Show(this,
+                    "The output must be a different file from the original firmware, so the " +
+                    "original .fwz is never overwritten.\n\nChoose a different name or folder.",
+                    "Cannot overwrite the original", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return; // keep the previous output selection unchanged
+            }
+
+            _outputPath = chosen;
             SetPathText(TxtOutputPath, _outputPath);
             UpdateBuildEnabled();
         }
