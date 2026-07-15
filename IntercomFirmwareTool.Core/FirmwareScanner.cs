@@ -92,6 +92,12 @@ namespace IntercomFirmwareTool.Core
             {
                 // A firmware was chosen (or the window closed) — nothing more to do.
             }
+            catch
+            {
+                // Best-effort locator: an unexpected error (I/O, security, etc.) must
+                // never fault the fire-and-forget Task or the app. The picker simply
+                // falls back to its default start folder.
+            }
         }
 
         /// <summary>Existing, de-duplicated Downloads → Desktop → Documents folders.</summary>
