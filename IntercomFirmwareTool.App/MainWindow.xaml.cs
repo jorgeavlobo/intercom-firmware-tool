@@ -923,12 +923,17 @@ namespace IntercomFirmwareTool.App
             }
 
             // The hint is a Polite live region (XAML), but WPF still needs the peer to
-            // raise the change event for it to be announced. FromElement returns a peer
-            // only when an automation client is attached, so this is a no-op otherwise;
-            // fire only on an actual text change to avoid repeat announcements.
-            if (!string.Equals(previousHint, TxtBuildHint.Text, StringComparison.Ordinal))
-                FrameworkElementAutomationPeer.FromElement(TxtBuildHint)
-                    ?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+            // raise the change event for it to be announced. Only do this when an
+            // assistive client is actually listening (ListenerExists) — then get or,
+            // if the peer hasn't been created yet, create it, so a running screen
+            // reader still hears the change. Fire only on an actual text change.
+            if (!string.Equals(previousHint, TxtBuildHint.Text, StringComparison.Ordinal) &&
+                AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
+            {
+                var peer = FrameworkElementAutomationPeer.FromElement(TxtBuildHint)
+                    ?? FrameworkElementAutomationPeer.CreatePeerForElement(TxtBuildHint);
+                peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+            }
 
             // Reveal/copy availability depends on the same password/confirm content.
             UpdatePasswordButtonStates();

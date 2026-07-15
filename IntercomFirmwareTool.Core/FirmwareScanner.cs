@@ -138,6 +138,8 @@ namespace IntercomFirmwareTool.Core
         /// subtrees via <paramref name="descend"/>, skips reparse points (symlink/
         /// junction cycles), tolerates access errors, and checks cancellation often.
         /// </summary>
+        private int _dirsVisited;
+
         private void ScanTree(string root, Func<string, bool> descend, CancellationToken ct)
         {
             var stack = new Stack<string>();
@@ -145,6 +147,11 @@ namespace IntercomFirmwareTool.Core
             while (stack.Count > 0)
             {
                 ct.ThrowIfCancellationRequested();
+                // Politeness: briefly yield every 64 directories so this background
+                // sweep backs off under contention instead of monopolising the disk
+                // while the app is in use. Negligible effect on how quickly a good
+                // BestFolder becomes available (the priority folders come first).
+                if ((++_dirsVisited & 0x3F) == 0) Thread.Sleep(1);
                 string dir = stack.Pop();
 
                 string[] files;
