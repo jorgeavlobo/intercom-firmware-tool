@@ -11,9 +11,10 @@ namespace IntercomFirmwareTool.Core
     /// file picker can open where the most recent one lives instead of some stale
     /// last-used folder.
     ///
-    /// <para>Strategy: scan the most-likely user folders first (Downloads, Desktop,
-    /// Documents) so a good answer is ready almost immediately, then sweep the rest
-    /// of the fixed drives — skipping folders a firmware would never be saved in:
+    /// <para>Strategy: scan the most-likely folders first (the app's own folder,
+    /// Downloads, Desktop, Documents) so a good answer is ready almost immediately,
+    /// then sweep the rest of the fixed drives — skipping folders a firmware would
+    /// never be saved in:
     /// system/noise directories the user should not write to (Windows, Program Files,
     /// …) and other users' profiles the user cannot write to. A cheap size pre-filter
     /// (against the registry's known sizes) rejects the vast majority of files
@@ -148,12 +149,24 @@ namespace IntercomFirmwareTool.Core
             }
         }
 
-        /// <summary>Existing, de-duplicated Downloads → Desktop → Documents folders.</summary>
+        /// <summary>
+        /// Existing, de-duplicated priority folders in scan order: the app's own
+        /// folder → Downloads → Desktop → Documents.
+        /// </summary>
         private static List<string> PriorityFolders()
         {
             string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+            // The folder the app is running from: a firmware dropped next to the tool
+            // is a deliberate choice, so check it first (and it's tiny/fast to scan).
+            string? exeDir;
+            try { exeDir = Path.GetDirectoryName(Environment.ProcessPath); }
+            catch { exeDir = null; }
+            if (string.IsNullOrEmpty(exeDir)) exeDir = AppContext.BaseDirectory;
+
             var candidates = new[]
             {
+                exeDir,
                 Path.Combine(profile, "Downloads"), // no SpecialFolder for Downloads
                 Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
                 Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
