@@ -433,28 +433,36 @@
                     Click="BtnClearOutput_Click"/>
         </Grid>
 
-        <!-- Row 2: the primary action, horizontally centered. Three columns
-             ([*][Build][*]) keep the button dead-centre regardless of the hint
-             length; the hint sits in the right column, immediately beside the
-             button, and trims if long. -->
-        <Grid Grid.Row="2" Margin="0,0,0,10">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-            <!-- MinWidth keeps the button a stable size when its label is swapped for
-                 the busy hourglass, so it doesn't shrink to a tiny square. -->
-            <Button Grid.Column="1" x:Name="BtnBuild" Style="{StaticResource PrimaryButton}"
-                    MinWidth="210" IsEnabled="False"
-                    Content="Build Modified Firmware" Click="BtnBuild_Click"/>
-            <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled.
-                 LiveSetting=Polite so a screen reader announces the changing
-                 "still needed" / "Ready to build" text as the form is filled. -->
-            <TextBlock Grid.Column="2" x:Name="TxtBuildHint" VerticalAlignment="Center"
-                       HorizontalAlignment="Left" Margin="14,0,0,0" Foreground="Gray"
-                       TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite"/>
-        </Grid>
+        <!-- Row 2: the primary action (centered), then an always-visible one-line
+             status area for short simple-view messages (firmware verifying, password
+             copied, key errors) — the full log lives in Advanced → Result. -->
+        <StackPanel Grid.Row="2" Margin="0,0,0,10">
+            <!-- Three columns ([*][Build][*]) keep the button dead-centre regardless
+                 of the hint length; the hint sits in the right column, beside it. -->
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <!-- MinWidth keeps the button a stable size when its label is swapped
+                     for the busy "Building…" state, so it doesn't shrink. -->
+                <Button Grid.Column="1" x:Name="BtnBuild" Style="{StaticResource PrimaryButton}"
+                        MinWidth="210" IsEnabled="False"
+                        Content="Build Modified Firmware" Click="BtnBuild_Click"/>
+                <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled.
+                     LiveSetting=Polite so a screen reader announces the changing
+                     "still needed" / "Ready to build" text as the form is filled. -->
+                <TextBlock Grid.Column="2" x:Name="TxtBuildHint" VerticalAlignment="Center"
+                           HorizontalAlignment="Left" Margin="14,0,0,0" Foreground="Gray"
+                           TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite"/>
+            </Grid>
+            <!-- Transient status line (collapsed when empty). -->
+            <TextBlock x:Name="TxtStatus" Visibility="Collapsed" HorizontalAlignment="Center"
+                       Margin="0,7,0,0" Foreground="Gray" FontSize="11"
+                       TextAlignment="Center" TextWrapping="Wrap"
+                       AutomationProperties.LiveSetting="Polite"/>
+        </StackPanel>
 
         <!-- Row 3: Advanced options. A subtle divider + disclosure toggle keeps the
              default view simple; expanding reveals the SSH key row and the tool

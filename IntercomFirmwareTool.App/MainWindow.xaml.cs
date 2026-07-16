@@ -221,7 +221,7 @@ namespace IntercomFirmwareTool.App
             string pwd = _pw.Value;
             if (pwd.Length == 0)
             {
-                TxtResult.Text = "Nothing to copy — the password field is empty.";
+                SetStatus("Nothing to copy — the password field is empty.");
                 return;
             }
             try
@@ -229,11 +229,11 @@ namespace IntercomFirmwareTool.App
                 // Copy WITHOUT leaving the plaintext password in Windows Clipboard
                 // History or cloud clipboard sync (see SecureClipboard).
                 SecureClipboard.SetText(pwd);
-                TxtResult.Text = "Password copied (excluded from clipboard history / cloud sync).";
+                SetStatus("Password copied (excluded from clipboard history / cloud sync).");
             }
             catch (Exception ex)
             {
-                TxtResult.Text = "Could not copy to the clipboard:\n" + ex.Message;
+                SetStatus("Could not copy to the clipboard: " + ex.Message, error: true);
             }
         }
 
@@ -318,6 +318,7 @@ namespace IntercomFirmwareTool.App
             // modified. Verify by size + SHA-256 (may hash ~100 MB, so do it off
             // the UI thread) before accepting the file.
             SetButtonsEnabled(false);
+            SetStatus("Verifying firmware… (size + SHA-256)"); // visible while it hashes
             TxtResult.Text = $"Verifying firmware integrity (size + SHA-256)…\n{chosen}";
             FirmwareCheckResult check;
             try { check = await Task.Run(() => FirmwareRegistry.Verify(chosen)); }
@@ -349,6 +350,7 @@ namespace IntercomFirmwareTool.App
                     "Only known-good original firmware can be modified, so a corrupt or wrong\n" +
                     "download can't be turned into a broken image. The file's NAME does not matter —\n" +
                     "its content (size + SHA-256) must match a known original.";
+                SetStatus(""); // the popup below is the feedback; clear the "verifying…" line
                 MessageBox.Show(this,
                     "This file is not an accepted original firmware.\n\n" + check.Message +
                     "\n\nThe selection was cleared.",
@@ -376,6 +378,7 @@ namespace IntercomFirmwareTool.App
                 "✅ " + check.Message + "\n\n" +
                 check.Match!.Describe() + "\n\n" +
                 "Set a root password (or tick \"Disable\" to use an SSH key only), then Build.";
+            SetStatus("✓ Firmware verified."); // visible confirmation in the simple view
         }
 
         /// <summary>
@@ -899,6 +902,19 @@ namespace IntercomFirmwareTool.App
 
         private double? _heightBeforeAdvanced;
 
+        /// <summary>
+        /// Shows a short message in the always-visible status line under the Build
+        /// button (collapsed when empty). Used for simple-view feedback that would
+        /// otherwise only reach the result console, which is hidden in the simple view.
+        /// </summary>
+        private void SetStatus(string message, bool error = false)
+        {
+            TxtStatus.Text = message;
+            TxtStatus.Foreground = error ? ErrorBrush : Brushes.Gray;
+            TxtStatus.Visibility = string.IsNullOrEmpty(message)
+                ? Visibility.Collapsed : Visibility.Visible;
+        }
+
         /// <summary>Toggles the advanced surface (SSH key row + tool buttons + result).</summary>
         private void TglAdvanced_Changed(object sender, RoutedEventArgs e)
         {
@@ -1102,12 +1118,15 @@ namespace IntercomFirmwareTool.App
                 }
                 catch (Exception ex)
                 {
-                    TxtResult.Text = $"Could not read the public key:\n{ex.Message}";
+                    MessageBox.Show(this, "Could not read the public key:\n\n" + ex.Message,
+                        "Cannot read key", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 if (publicKey.Length == 0)
                 {
-                    TxtResult.Text = "The selected public key file is empty.";
+                    MessageBox.Show(this,
+                        "The selected public key file is empty.\n\nPick a valid .pub file, or generate a new pair.",
+                        "Empty key file", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 if (!SshKeyGen.IsLikelyPublicKey(publicKey))
@@ -1186,6 +1205,7 @@ namespace IntercomFirmwareTool.App
                 if (answer != MessageBoxResult.Yes) return;
             }
 
+            SetStatus(""); // clear any stale status; the build reports via its popup
             var opts = new EnableSshOptions(password, publicKey);
 
             // Non-null here: guarded above (and Build is only enabled with firmware,
