@@ -7,7 +7,7 @@
         mc:Ignorable="d"
         Title="Intercom Firmware Tool — SSH-enable (Classe 100X / 300X)"
         Icon="Assets/Icons/AppIcon.ico"
-        Height="760" Width="880" MinHeight="690" MinWidth="720"
+        Height="540" Width="760" MinHeight="480" MinWidth="640"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
         <Style TargetType="TextBlock" x:Key="FieldLabel">
@@ -187,11 +187,15 @@
                             <Trigger Property="IsChecked" Value="True">
                                 <Setter TargetName="chev" Property="Text" Value="&#xE70D;"/>
                             </Trigger>
+                            <!-- Hover fill only; it clears when the mouse leaves.
+                                 Keyboard focus is shown by the default OS focus visual
+                                 (only when tabbing), so no persistent fill lingers after
+                                 a mouse click. -->
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="bd" Property="Background" Value="#11000000"/>
                             </Trigger>
-                            <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="bd" Property="Background" Value="#16000000"/>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#1C000000"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -470,8 +474,11 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
+            <!-- MinWidth keeps the button a stable size when its label is swapped for
+                 the busy hourglass, so it doesn't shrink to a tiny square. -->
             <Button Grid.Column="1" x:Name="BtnBuild" Style="{StaticResource PrimaryButton}"
-                    IsEnabled="False" Content="Build Modified Firmware" Click="BtnBuild_Click"/>
+                    MinWidth="210" IsEnabled="False"
+                    Content="Build Modified Firmware" Click="BtnBuild_Click"/>
             <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled.
                  LiveSetting=Polite so a screen reader announces the changing
                  "still needed" / "Ready to build" text as the form is filled. -->
@@ -489,8 +496,8 @@
                           Checked="TglAdvanced_Changed" Unchecked="TglAdvanced_Changed"
                           AutomationProperties.Name="Advanced options"
                           ToolTip="Show advanced options: SSH public key, inspect and self-test"/>
-            <StackPanel x:Name="AdvancedTools" Orientation="Horizontal" Margin="2,10,0,0"
-                        Visibility="Collapsed">
+            <StackPanel x:Name="AdvancedTools" Orientation="Horizontal" Margin="0,10,0,0"
+                        HorizontalAlignment="Center" Visibility="Collapsed">
                 <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0"
                         Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
                 <Button x:Name="BtnSelfTest" Style="{StaticResource SecondaryButton}"

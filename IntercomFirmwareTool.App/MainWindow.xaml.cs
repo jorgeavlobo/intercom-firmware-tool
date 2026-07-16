@@ -891,8 +891,15 @@ namespace IntercomFirmwareTool.App
             RowSpacer.Height = advanced ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
         }
 
-        /// <summary>Toggles the advanced surface (SSH key row + tool buttons).</summary>
-        private void TglAdvanced_Changed(object sender, RoutedEventArgs e) => UpdateAdvancedVisibility();
+        /// <summary>Toggles the advanced surface (SSH key row + tool buttons + result).</summary>
+        private void TglAdvanced_Changed(object sender, RoutedEventArgs e)
+        {
+            UpdateAdvancedVisibility();
+            // The compact default window is too short for the result output, so give it
+            // room when Advanced opens. Grow only — never shrink back, to avoid fighting
+            // a manual resize.
+            if (TglAdvanced.IsChecked == true && Height < 720) Height = 720;
+        }
 
         // Amber cue for a required field that is still blank. Colour is never the
         // ONLY signal: it is paired with the field labels and the textual
@@ -1206,7 +1213,7 @@ namespace IntercomFirmwareTool.App
                     sb.AppendLine("   (any existing file there is NOT this build — do not flash it.)");
                     sb.AppendLine("   See the failing checks above.");
                 }
-            });
+            }, BtnBuild);
         }
 
         // ---- Secondary: Verify an existing .fwz -----------------------------
@@ -1319,12 +1326,13 @@ namespace IntercomFirmwareTool.App
         /// every button disabled, and shows the result — or the full error — in
         /// the box.
         /// </summary>
-        private async Task RunAndShow(StringBuilder sb, Action work)
+        private async Task RunAndShow(StringBuilder sb, Action work, Button? busyButton = null)
         {
             // Make sure the result output is visible for the run — it lives in the
             // Advanced surface, so reveal Advanced (a no-op if already open).
             TglAdvanced.IsChecked = true;
             SetButtonsEnabled(false);
+            if (busyButton != null) SetButtonBusy(busyButton, true);
             TxtResult.Text = sb.ToString() + "\nProcessing…";
             try
             {
@@ -1338,8 +1346,45 @@ namespace IntercomFirmwareTool.App
             finally
             {
                 SetButtonsEnabled(true);
+                if (busyButton != null) SetButtonBusy(busyButton, false);
             }
             TxtResult.Text = sb.ToString();
+        }
+
+        // Idle content of buttons currently showing the busy spinner, so it can be
+        // restored when the operation finishes.
+        private readonly Dictionary<Button, object?> _idleContent = new();
+
+        /// <summary>
+        /// While busy, replaces a button's label with a spinning hourglass; restores
+        /// the original label afterwards. The button is also disabled by
+        /// SetButtonsEnabled, so it can't be clicked during the operation.
+        /// </summary>
+        private void SetButtonBusy(Button button, bool busy)
+        {
+            if (busy)
+            {
+                if (!_idleContent.ContainsKey(button)) _idleContent[button] = button.Content;
+                var hourglass = new TextBlock
+                {
+                    Text = "⌛", // ⌛ hourglass
+                    FontSize = 16,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    RenderTransformOrigin = new Point(0.5, 0.5)
+                };
+                var rot = new RotateTransform(0);
+                hourglass.RenderTransform = rot;
+                button.Content = hourglass;
+                rot.BeginAnimation(RotateTransform.AngleProperty,
+                    new DoubleAnimation(0, 360, new Duration(TimeSpan.FromSeconds(1.2)))
+                    { RepeatBehavior = RepeatBehavior.Forever });
+            }
+            else if (_idleContent.TryGetValue(button, out var idle))
+            {
+                button.Content = idle;
+                _idleContent.Remove(button);
+            }
         }
 
         /// <summary>
