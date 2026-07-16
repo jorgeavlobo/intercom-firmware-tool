@@ -175,20 +175,17 @@
                         <Border x:Name="bd" Background="{TemplateBinding Background}"
                                 CornerRadius="4" Padding="6,4" SnapsToDevicePixels="True">
                             <StackPanel Orientation="Horizontal">
+                                <!-- ChevronRight (collapsed) / ChevronDown (expanded),
+                                     swapped by the IsChecked trigger below. -->
                                 <TextBlock x:Name="chev" Text="&#xE76C;" FontFamily="Segoe MDL2 Assets"
-                                           FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"
-                                           RenderTransformOrigin="0.5,0.5">
-                                    <TextBlock.RenderTransform>
-                                        <RotateTransform x:Name="chevRot" Angle="0"/>
-                                    </TextBlock.RenderTransform>
-                                </TextBlock>
+                                           FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"/>
                                 <TextBlock Text="Advanced options" VerticalAlignment="Center"
                                            FontWeight="SemiBold"/>
                             </StackPanel>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsChecked" Value="True">
-                                <Setter TargetName="chevRot" Property="Angle" Value="90"/>
+                                <Setter TargetName="chev" Property="Text" Value="&#xE70D;"/>
                             </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="bd" Property="Background" Value="#11000000"/>
