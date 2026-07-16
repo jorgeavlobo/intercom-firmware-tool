@@ -1428,12 +1428,12 @@ namespace IntercomFirmwareTool.App
                 button.IsHitTestVisible = false;
                 button.Focusable = false;
 
-                int dots = 1;
+                int dots = 0;
                 button.Content = "⏳ Building" + new string('.', dots);
                 _buildDots = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
                 _buildDots.Tick += (_, _) =>
                 {
-                    dots = dots % 3 + 1;   // 1 → 2 → 3 → 1 …
+                    dots = (dots + 1) % 4;   // 0 → 1 → 2 → 3 → 0 …  ("" . .. ...)
                     button.Content = "⏳ Building" + new string('.', dots);
                 };
                 _buildDots.Start();
