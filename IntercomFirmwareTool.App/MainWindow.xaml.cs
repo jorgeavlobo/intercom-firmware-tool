@@ -233,7 +233,7 @@ namespace IntercomFirmwareTool.App
             }
             catch (Exception ex)
             {
-                SetStatus("Could not copy to the clipboard: " + ex.Message, error: true);
+                SetStatus("Could not copy to the clipboard: " + SafeMessage(ex), error: true);
             }
         }
 
@@ -523,7 +523,8 @@ namespace IntercomFirmwareTool.App
 
             if (error != null || pubPath is null)
             {
-                TxtResult.Text = "Could not generate the key:\n" + error;
+                TxtResult.Text = "Could not generate the key:\n" +
+                    (error ?? "No public key was produced (unknown error).");
                 SetStatus(""); // the popup below is the feedback
                 MessageBox.Show(this,
                     "Could not generate the SSH key pair:\n\n" + (errorMsg ?? "Unknown error."),
@@ -1162,7 +1163,7 @@ namespace IntercomFirmwareTool.App
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show(this, "Could not read the public key:\n\n" + ex.Message,
+                    MessageBox.Show(this, "Could not read the public key:\n\n" + SafeMessage(ex),
                         "Cannot read key", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
