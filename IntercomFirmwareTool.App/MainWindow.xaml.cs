@@ -945,7 +945,11 @@ namespace IntercomFirmwareTool.App
         /// <summary>Toggles the advanced surface (SSH key row + tool buttons + result).</summary>
         private void TglAdvanced_Changed(object sender, RoutedEventArgs e)
         {
-            UpdateAdvancedVisibility();
+            // Refresh visibility AND the mode-dependent cues (build hint wording,
+            // AutomationProperties.Name) so toggling Advanced alone can't leave them
+            // stale. UpdateBuildEnabled runs both UpdateRequiredCues and
+            // UpdateAdvancedVisibility.
+            UpdateBuildEnabled();
             if (TglAdvanced.IsChecked == true)
             {
                 // Opening: remember the current size/position, then grow so the result
