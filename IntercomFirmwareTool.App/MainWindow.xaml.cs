@@ -514,7 +514,7 @@ namespace IntercomFirmwareTool.App
             catch (Exception ex)
             {
                 error = ex.ToString();
-                errorMsg = ex.Message;
+                errorMsg = SafeMessage(ex);
             }
             finally
             {
@@ -893,9 +893,13 @@ namespace IntercomFirmwareTool.App
             // "Password:" in the simple view; "Root Password:" in Advanced (the rule
             // line below mirrors the same wording).
             LblPassword.Text = advanced ? "Root Password:" : "Password:";
-            LblCredentialRule.Text = advanced
-                ? "A root password is required — or tick “Disable” to log in with an SSH key only."
-                : "A password is required — or tick “Disable” to log in with an SSH key only.";
+            // In key-only mode the password fields are disabled and the SSH key is the
+            // required credential, so the rule reflects that instead.
+            LblCredentialRule.Text = keyOnly
+                ? "An SSH key is required — password login is disabled."
+                : advanced
+                    ? "A root password is required — or tick “Disable” to log in with an SSH key only."
+                    : "A password is required — or tick “Disable” to log in with an SSH key only.";
 
             KeyRow.Visibility = (advanced || keyOnly || _keyPath != null)
                 ? Visibility.Visible : Visibility.Collapsed;
@@ -941,6 +945,12 @@ namespace IntercomFirmwareTool.App
                 ?? FrameworkElementAutomationPeer.CreatePeerForElement(element);
             peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
         }
+
+        /// <summary>A user-facing message for an exception: its Message, or the
+        /// exception type name when Message is empty (some exceptions have none), so a
+        /// popup is never blank.</summary>
+        private static string SafeMessage(Exception ex) =>
+            string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
 
         /// <summary>Toggles the advanced surface (SSH key row + tool buttons + result).</summary>
         private void TglAdvanced_Changed(object sender, RoutedEventArgs e)
@@ -1296,7 +1306,7 @@ namespace IntercomFirmwareTool.App
                 }
                 catch (Exception ex)
                 {
-                    buildError = ex.Message;   // for the popup
+                    buildError = SafeMessage(ex);   // for the popup
                     throw;                     // let RunAndShow log full details to the console
                 }
             }, BtnBuild);
