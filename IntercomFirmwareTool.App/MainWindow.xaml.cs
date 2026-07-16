@@ -1094,8 +1094,11 @@ namespace IntercomFirmwareTool.App
             }
 
             // The hint is a Polite live region (XAML); announce it, but only on an
-            // actual text change to avoid repeat announcements.
-            if (!string.Equals(previousHint, TxtBuildHint.Text, StringComparison.Ordinal))
+            // actual change to NON-empty text. Announcing "" (the hint is blanked
+            // while a build runs) makes some screen readers say "blank" — SetStatus
+            // follows the same rule.
+            if (!string.IsNullOrEmpty(TxtBuildHint.Text) &&
+                !string.Equals(previousHint, TxtBuildHint.Text, StringComparison.Ordinal))
                 AnnounceLiveRegion(TxtBuildHint);
 
             // Reveal/copy availability depends on the same password/confirm content.
