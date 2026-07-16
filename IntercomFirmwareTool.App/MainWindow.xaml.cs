@@ -866,20 +866,22 @@ namespace IntercomFirmwareTool.App
 
         /// <summary>
         /// Shows/hides the advanced surface. The two tool buttons follow the "Advanced
-        /// options" toggle. The SSH key row is shown when advanced is on, OR whenever a
-        /// key is the required credential (key-only mode) or one is already selected —
-        /// so a required/active credential is never hidden behind the toggle.
+        /// options" toggle. The SSH key row (which lives in the advanced section) is
+        /// shown when advanced is on, OR whenever a key is the required credential
+        /// (key-only mode) or one is already selected — so a required/active credential
+        /// is never hidden behind the toggle. The password label also loses its "Root"
+        /// qualifier in the simple view.
         /// </summary>
         private void UpdateAdvancedVisibility()
         {
             bool advanced = TglAdvanced.IsChecked == true;
             bool keyOnly = ChkKeyOnly.IsChecked == true;
 
-            var keyVis = (advanced || keyOnly || _keyPath != null)
+            // "Password:" in the simple view; "Root Password:" in Advanced.
+            LblPassword.Text = advanced ? "Root Password:" : "Password:";
+
+            KeyRow.Visibility = (advanced || keyOnly || _keyPath != null)
                 ? Visibility.Visible : Visibility.Collapsed;
-            LblKey.Visibility = keyVis;
-            TxtKeyPath.Visibility = keyVis;
-            KeyButtons.Visibility = keyVis;
 
             AdvancedTools.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
 

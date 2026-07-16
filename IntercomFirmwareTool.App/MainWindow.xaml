@@ -326,11 +326,10 @@
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>   <!-- 0: firmware -->
-                <RowDefinition Height="Auto"/>   <!-- 1: root password -->
+                <RowDefinition Height="Auto"/>   <!-- 1: password -->
                 <RowDefinition Height="Auto"/>   <!-- 2: confirm -->
-                <RowDefinition Height="Auto"/>   <!-- 3: ssh key -->
-                <RowDefinition Height="Auto"/>   <!-- 4: credential rule -->
-                <RowDefinition Height="Auto"/>   <!-- 5: output -->
+                <RowDefinition Height="Auto"/>   <!-- 3: credential rule -->
+                <RowDefinition Height="Auto"/>   <!-- 4: output -->
             </Grid.RowDefinitions>
 
             <!-- Firmware .fwz -->
@@ -350,8 +349,8 @@
             <!-- Root password (masked) + reveal toggle + Disable (key-only). One of
                  the password or the key is required; ticking Disable turns password
                  login off, so a key becomes the credential. -->
-            <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Root Password:"/>
+            <TextBlock Grid.Row="1" Grid.Column="0" x:Name="LblPassword"
+                       Style="{StaticResource FieldLabel}" Text="Password:"/>
             <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <Grid Width="170">
                     <TextBox x:Name="TxtPassword" Style="{StaticResource InputField}"
@@ -398,66 +397,23 @@
                            Foreground="Gray"/>
             </StackPanel>
 
-            <!-- SSH public key: OPTIONAL — choose an existing one or generate a
-                 new pair. Without a key, login is by the root password above. -->
-            <TextBlock Grid.Row="3" Grid.Column="0" x:Name="LblKey" Visibility="Collapsed"
-                       Style="{StaticResource FieldLabel}"
-                       Text="SSH Public Key:"/>
-            <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath" Visibility="Collapsed"
-                     Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
-                     Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose an existing public key (.pub)…"
-                     PreviewMouseLeftButtonDown="TxtKeyPath_MouseDown" PreviewKeyDown="TxtKeyPath_PreviewKeyDown"
-                     Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
-            <StackPanel x:Name="KeyButtons" Grid.Row="3" Grid.Column="2" Orientation="Horizontal"
-                        Visibility="Collapsed">
-                <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
-                        ToolTip="Generate a new SSH key pair…"
-                        AutomationProperties.Name="Generate a new SSH key pair"
-                        Click="BtnGenKey_Click">
-                    <!-- Key glyph with a small green "＋" badge = generate a NEW key.
-                         The Segoe key points its shaft/teeth to the lower-right, so
-                         the badge sits in the empty TOP-RIGHT corner to avoid covering
-                         the key. The key inherits the button Foreground (greys when
-                         disabled); the plus is drawn as two rounded bars to stay crisp. -->
-                    <Grid Width="20" Height="18" SnapsToDevicePixels="True">
-                        <TextBlock Text="&#xE192;" FontFamily="Segoe MDL2 Assets" FontSize="16"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        <Border Background="#FF107C10" CornerRadius="6" Width="12" Height="12"
-                                HorizontalAlignment="Right" VerticalAlignment="Top"
-                                Margin="0,-2,-3,0">
-                            <Grid>
-                                <Rectangle Fill="White" Width="6" Height="2" RadiusX="1" RadiusY="1"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <Rectangle Fill="White" Width="2" Height="6" RadiusX="1" RadiusY="1"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                            </Grid>
-                        </Border>
-                    </Grid>
-                </Button>
-                <Button x:Name="BtnClearKey" Style="{StaticResource RowIconButton}"
-                        Content="&#xE711;" IsEnabled="False"
-                        ToolTip="Clear the selected key (build with password only)"
-                        AutomationProperties.Name="Clear the selected SSH key"
-                        Click="BtnClearKey_Click"/>
-            </StackPanel>
-
-            <!-- The credential rule, stated explicitly right below the two credential
-                 fields. Matches the actual Build gate: a root password is required in
-                 the default (password-login) mode; ticking "Disable" turns password
-                 login off and makes the SSH key the required credential instead. -->
-            <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+            <!-- The credential rule. Matches the actual Build gate: a root password is
+                 required in the default (password-login) mode; ticking "Disable" turns
+                 password login off and makes the SSH key (in Advanced) the required
+                 credential instead. -->
+            <TextBlock Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
                        Foreground="Gray" FontSize="11" TextWrapping="Wrap"
                        Text="A root password is required — or tick “Disable” to log in with an SSH key only."/>
 
             <!-- Output (disabled until a firmware is chosen) -->
-            <TextBlock Grid.Row="5" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
+            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
                        Style="{StaticResource FieldLabel}" Text="Save Output As:"/>
-            <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtOutputPath"
+            <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtOutputPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" IsEnabled="False"
                      Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose where to save the modified .fwz…"
                      PreviewMouseLeftButtonDown="TxtOutputPath_MouseDown" PreviewKeyDown="TxtOutputPath_PreviewKeyDown"
                      Text="(where to write the modified .fwz)" Foreground="Gray"/>
-            <Button Grid.Row="5" Grid.Column="2" x:Name="BtnClearOutput"
+            <Button Grid.Row="4" Grid.Column="2" x:Name="BtnClearOutput"
                     Style="{StaticResource RowIconButton}" IsEnabled="False"
                     Content="&#xE711;" ToolTip="Clear the output location"
                     AutomationProperties.Name="Clear the output location"
@@ -488,15 +444,64 @@
         </Grid>
 
         <!-- Row 3: Advanced options. A subtle divider + disclosure toggle keeps the
-             default view simple; expanding reveals the tool buttons here AND the SSH
-             key row above (in the credentials block). -->
+             default view simple; expanding reveals the SSH key row and the tool
+             buttons below the toggle. -->
         <StackPanel Grid.Row="3" Margin="0,0,0,10">
             <Border Height="1" Background="#FFE7E7E7" Margin="0,0,0,8"/>
             <ToggleButton x:Name="TglAdvanced" Style="{StaticResource DisclosureToggle}"
                           Checked="TglAdvanced_Changed" Unchecked="TglAdvanced_Changed"
                           AutomationProperties.Name="Advanced options"
                           ToolTip="Show advanced options: SSH public key, inspect and self-test"/>
-            <StackPanel x:Name="AdvancedTools" Orientation="Horizontal" Margin="0,10,0,0"
+
+            <!-- SSH public key (advanced). Also shown in key-only mode, or once a key
+                 is selected, so a required/active credential is never hidden. -->
+            <Grid x:Name="KeyRow" Margin="0,12,0,0" Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" x:Name="LblKey" Style="{StaticResource FieldLabel}"
+                           Text="SSH Public Key:"/>
+                <TextBox Grid.Column="1" x:Name="TxtKeyPath"
+                         Style="{StaticResource InputField}" IsReadOnly="True"
+                         Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose an existing public key (.pub)…"
+                         PreviewMouseLeftButtonDown="TxtKeyPath_MouseDown" PreviewKeyDown="TxtKeyPath_PreviewKeyDown"
+                         Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
+                <StackPanel Grid.Column="2" x:Name="KeyButtons" Orientation="Horizontal">
+                    <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
+                            ToolTip="Generate a new SSH key pair…"
+                            AutomationProperties.Name="Generate a new SSH key pair"
+                            Click="BtnGenKey_Click">
+                        <!-- Key glyph with a small green "＋" badge = generate a NEW key.
+                             The Segoe key points its shaft/teeth to the lower-right, so
+                             the badge sits in the empty TOP-RIGHT corner to avoid covering
+                             the key. The key inherits the button Foreground (greys when
+                             disabled); the plus is drawn as two rounded bars to stay crisp. -->
+                        <Grid Width="20" Height="18" SnapsToDevicePixels="True">
+                            <TextBlock Text="&#xE192;" FontFamily="Segoe MDL2 Assets" FontSize="16"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Border Background="#FF107C10" CornerRadius="6" Width="12" Height="12"
+                                    HorizontalAlignment="Right" VerticalAlignment="Top"
+                                    Margin="0,-2,-3,0">
+                                <Grid>
+                                    <Rectangle Fill="White" Width="6" Height="2" RadiusX="1" RadiusY="1"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    <Rectangle Fill="White" Width="2" Height="6" RadiusX="1" RadiusY="1"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Grid>
+                            </Border>
+                        </Grid>
+                    </Button>
+                    <Button x:Name="BtnClearKey" Style="{StaticResource RowIconButton}"
+                            Content="&#xE711;" IsEnabled="False"
+                            ToolTip="Clear the selected key (build with password only)"
+                            AutomationProperties.Name="Clear the selected SSH key"
+                            Click="BtnClearKey_Click"/>
+                </StackPanel>
+            </Grid>
+
+            <StackPanel x:Name="AdvancedTools" Orientation="Horizontal" Margin="0,12,0,0"
                         HorizontalAlignment="Center" Visibility="Collapsed">
                 <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0"
                         Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
