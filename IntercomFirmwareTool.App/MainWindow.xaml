@@ -112,6 +112,18 @@
                                 <Setter Property="Foreground" Value="#FF9A9A9A"/>
                                 <Setter Property="Cursor" Value="Arrow"/>
                             </Trigger>
+                            <!-- "Loading" look: while a build runs the button is DISABLED
+                                 (so it can't be re-invoked, incl. via UI Automation) but
+                                 Tag="busy" keeps it full-colour and readable. This wins
+                                 over the disabled greying above. -->
+                            <MultiTrigger>
+                                <MultiTrigger.Conditions>
+                                    <Condition Property="IsEnabled" Value="False"/>
+                                    <Condition Property="Tag" Value="busy"/>
+                                </MultiTrigger.Conditions>
+                                <Setter TargetName="bd" Property="Background" Value="#FF0F6CBD"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </MultiTrigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>

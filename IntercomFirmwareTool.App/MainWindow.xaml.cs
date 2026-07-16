@@ -910,7 +910,10 @@ namespace IntercomFirmwareTool.App
                 if (_heightBeforeAdvanced == null)
                 {
                     _heightBeforeAdvanced = Height;
-                    if (Height < 720) Height = 720;
+                    // Grow for the result, but never beyond the screen's work area (a
+                    // small or DPI-scaled display could otherwise push it off-screen).
+                    double want = Math.Min(720, SystemParameters.WorkArea.Height);
+                    if (Height < want) Height = want;
                 }
             }
             else if (_heightBeforeAdvanced != null)
@@ -978,7 +981,8 @@ namespace IntercomFirmwareTool.App
             AutomationProperties.SetName(TxtOutputPath,
                 needOutput && _fwzPath != null ? "Save output as, required" : "Save output as");
             // Match the visible label, which drops "Root" in the simple view.
-            string pwLabel = TglAdvanced.IsChecked == true ? "Root Password" : "Password";
+            bool advanced = TglAdvanced.IsChecked == true;
+            string pwLabel = advanced ? "Root Password" : "Password";
             AutomationProperties.SetName(TxtPassword, needPassword ? pwLabel + ", required" : pwLabel);
             AutomationProperties.SetName(TxtConfirm,
                 needConfirm ? "Confirm Password, required"
@@ -995,7 +999,7 @@ namespace IntercomFirmwareTool.App
             var missing = new List<string>();
             if (needFirmware) missing.Add("firmware");
             if (needOutput && _fwzPath != null) missing.Add("output path");
-            if (needPassword) missing.Add("a root password");
+            if (needPassword) missing.Add(advanced ? "a root password" : "a password");
             if (needConfirm) missing.Add("confirm the password");
             if (needKey) missing.Add("an SSH key");
 
@@ -1414,10 +1418,11 @@ namespace IntercomFirmwareTool.App
         private DispatcherTimer? _buildDots;
 
         /// <summary>
-        /// While busy, turns the button into a non-interactive "loading" button: it
-        /// keeps its full colour so the label stays readable (unlike the greyed-out
-        /// disabled look), but can't be clicked or focused, and its label animates
-        /// "⏳ Building." → ".." → "..." once per second. Restored when the op finishes.
+        /// While busy, turns the button into a "loading" button. It stays DISABLED
+        /// (so it can't be re-invoked, including via UI Automation), but Tag="busy"
+        /// makes the style keep it full-colour and readable instead of greyed out,
+        /// and its label animates "⏳ Building." → ".." → "..." once per second.
+        /// Restored when the op finishes.
         /// </summary>
         private void SetButtonBusy(Button button, bool busy)
         {
@@ -1425,11 +1430,11 @@ namespace IntercomFirmwareTool.App
             {
                 _buildDots?.Stop(); // never leave a previous timer running (re-entrancy)
                 if (!_idleContent.ContainsKey(button)) _idleContent[button] = button.Content;
-                // Loading button: full colour + readable, but not clickable/focusable
-                // (SetButtonsEnabled disabled it a moment ago; re-enable the visuals).
-                button.IsEnabled = true;
-                button.IsHitTestVisible = false;
-                button.Focusable = false;
+                // The button stays DISABLED (SetButtonsEnabled disabled it), so it can't
+                // be re-invoked — including via UI Automation, which ignores
+                // IsHitTestVisible/Focusable. Tag="busy" makes the style keep it
+                // full-colour and readable instead of greyed out.
+                button.Tag = "busy";
 
                 // Keep the WORD "Building" centered in the button: it sits in the
                 // middle column, with the ⏳ emoji in an equal-width left column and
@@ -1467,8 +1472,7 @@ namespace IntercomFirmwareTool.App
             {
                 _buildDots?.Stop();
                 _buildDots = null;
-                button.IsHitTestVisible = true;
-                button.Focusable = true;
+                button.ClearValue(FrameworkElement.TagProperty);
                 if (_idleContent.TryGetValue(button, out var idle))
                 {
                     button.Content = idle;
