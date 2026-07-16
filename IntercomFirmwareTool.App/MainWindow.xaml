@@ -298,8 +298,11 @@
             <RowDefinition Height="Auto"/>   <!-- 1: input form -->
             <RowDefinition Height="Auto"/>   <!-- 2: Build (centered) + hint -->
             <RowDefinition Height="Auto"/>   <!-- 3: advanced options disclosure -->
-            <RowDefinition Height="Auto"/>   <!-- 4: result label -->
-            <RowDefinition Height="*"/>      <!-- 5: result box -->
+            <!-- 4: result output (part of Advanced). Fills when shown; when hidden the
+                 spacer row below takes the slack so the footer stays pinned. Starts
+                 collapsed (Auto=0), so the spacer starts as the star row. -->
+            <RowDefinition x:Name="RowResult" Height="Auto"/>
+            <RowDefinition x:Name="RowSpacer" Height="*"/>   <!-- 5: slack when result hidden -->
             <RowDefinition Height="Auto"/>   <!-- 6: diagnostics status -->
             <RowDefinition Height="Auto"/>   <!-- 7: support / buy me a coffee -->
         </Grid.RowDefinitions>
@@ -495,16 +498,18 @@
             </StackPanel>
         </StackPanel>
 
-        <!-- Row 4: result label -->
-        <TextBlock Grid.Row="4" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
-
-        <!-- Row 5: result box -->
-        <TextBox x:Name="TxtResult" Grid.Row="5"
-                 IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
-                 VerticalScrollBarVisibility="Auto"
-                 HorizontalScrollBarVisibility="Auto"
-                 FontFamily="Consolas" FontSize="12"
-                 Text="Choose a firmware and an output path, set a root password (or tick “Disable” to use an SSH key only), then click Build."/>
+        <!-- Row 4: result output — part of Advanced options. Hidden by default;
+             revealed with the toggle and auto-revealed when an operation runs
+             (RunAndShow), so Build/Inspect/Self-test output is never lost. -->
+        <DockPanel x:Name="ResultGroup" Grid.Row="4" Visibility="Collapsed">
+            <TextBlock DockPanel.Dock="Top" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
+            <TextBox x:Name="TxtResult"
+                     IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto"
+                     FontFamily="Consolas" FontSize="12"
+                     Text="Choose a firmware and an output path, set a root password (or tick “Disable” to use an SSH key only), then click Build."/>
+        </DockPanel>
 
         <!-- Row 6: diagnostics -->
         <TextBlock Grid.Row="6" x:Name="TxtDiag" Margin="0,8,0,0"

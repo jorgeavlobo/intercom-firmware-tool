@@ -882,6 +882,13 @@ namespace IntercomFirmwareTool.App
             KeyButtons.Visibility = keyVis;
 
             AdvancedTools.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
+
+            // The result output is part of Advanced. When shown, its row fills the
+            // window; when hidden, the spacer row takes the slack so the footer stays
+            // pinned to the bottom (no empty gap).
+            ResultGroup.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
+            RowResult.Height = advanced ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
+            RowSpacer.Height = advanced ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
         }
 
         /// <summary>Toggles the advanced surface (SSH key row + tool buttons).</summary>
@@ -1314,6 +1321,9 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private async Task RunAndShow(StringBuilder sb, Action work)
         {
+            // Make sure the result output is visible for the run — it lives in the
+            // Advanced surface, so reveal Advanced (a no-op if already open).
+            TglAdvanced.IsChecked = true;
             SetButtonsEnabled(false);
             TxtResult.Text = sb.ToString() + "\nProcessing…";
             try
