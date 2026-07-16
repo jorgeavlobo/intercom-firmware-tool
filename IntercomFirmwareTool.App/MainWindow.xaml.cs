@@ -1605,6 +1605,12 @@ namespace IntercomFirmwareTool.App
             LblOutput.IsEnabled = enabled && _fwzPath != null;
             BtnVerify.IsEnabled = enabled;
             BtnSelfTest.IsEnabled = enabled;
+            // Lock the Advanced disclosure while an operation runs. Inspect/Self-test
+            // report ONLY into the Result box (no popup), so if the user could collapse
+            // Advanced mid-run the outcome would land in a hidden TxtResult and look
+            // like nothing happened. Keeping the toggle disabled holds Advanced open
+            // (its IsChecked is untouched) so the Result stays visible until done.
+            TglAdvanced.IsEnabled = enabled;
             // The three clear buttons are content-aware (enabled only when their field
             // has something to clear); UpdateBuildEnabled below drives them from the
             // current paths + _uiEnabled, so they aren't set here.
