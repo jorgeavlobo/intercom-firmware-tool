@@ -858,7 +858,34 @@ namespace IntercomFirmwareTool.App
             BtnBuild.IsEnabled = _uiEnabled
                 && _fwzPath != null && _outputPath != null && HaveCredential();
             UpdateRequiredCues();
+            // Keep the SSH key row's visibility in step with key-only mode and whether
+            // a key is selected (both can change here); the advanced tools are toggled
+            // separately by TglAdvanced_Changed.
+            UpdateAdvancedVisibility();
         }
+
+        /// <summary>
+        /// Shows/hides the advanced surface. The two tool buttons follow the "Advanced
+        /// options" toggle. The SSH key row is shown when advanced is on, OR whenever a
+        /// key is the required credential (key-only mode) or one is already selected —
+        /// so a required/active credential is never hidden behind the toggle.
+        /// </summary>
+        private void UpdateAdvancedVisibility()
+        {
+            bool advanced = TglAdvanced.IsChecked == true;
+            bool keyOnly = ChkKeyOnly.IsChecked == true;
+
+            var keyVis = (advanced || keyOnly || _keyPath != null)
+                ? Visibility.Visible : Visibility.Collapsed;
+            LblKey.Visibility = keyVis;
+            TxtKeyPath.Visibility = keyVis;
+            KeyButtons.Visibility = keyVis;
+
+            AdvancedTools.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        /// <summary>Toggles the advanced surface (SSH key row + tool buttons).</summary>
+        private void TglAdvanced_Changed(object sender, RoutedEventArgs e) => UpdateAdvancedVisibility();
 
         // Amber cue for a required field that is still blank. Colour is never the
         // ONLY signal: it is paired with the field labels and the textual

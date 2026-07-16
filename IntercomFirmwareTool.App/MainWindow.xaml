@@ -160,6 +160,48 @@
             </Setter>
         </Style>
 
+        <!-- "Advanced options" disclosure toggle: a subtle, link-like ToggleButton
+             with a chevron that rotates from ▸ (collapsed) to ▾ (expanded). Keeps the
+             default view simple while advanced tools stay one click away. -->
+        <Style TargetType="ToggleButton" x:Key="DisclosureToggle">
+            <Setter Property="Foreground" Value="#FF3A3A3A"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                CornerRadius="4" Padding="6,4" SnapsToDevicePixels="True">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock x:Name="chev" Text="&#xE76C;" FontFamily="Segoe MDL2 Assets"
+                                           FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"
+                                           RenderTransformOrigin="0.5,0.5">
+                                    <TextBlock.RenderTransform>
+                                        <RotateTransform x:Name="chevRot" Angle="0"/>
+                                    </TextBlock.RenderTransform>
+                                </TextBlock>
+                                <TextBlock Text="Advanced options" VerticalAlignment="Center"
+                                           FontWeight="SemiBold"/>
+                            </StackPanel>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="chevRot" Property="Angle" Value="90"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#11000000"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#16000000"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Rounded, brand-coloured button for the "buy me a coffee" links.
              Background/Foreground are set per-button to each brand's colour. -->
         <Style TargetType="Button" x:Key="DonateButton">
@@ -257,11 +299,12 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>   <!-- 0: intro + safety -->
             <RowDefinition Height="Auto"/>   <!-- 1: input form -->
-            <RowDefinition Height="Auto"/>   <!-- 2: action buttons -->
-            <RowDefinition Height="Auto"/>   <!-- 3: result label -->
-            <RowDefinition Height="*"/>      <!-- 4: result box -->
-            <RowDefinition Height="Auto"/>   <!-- 5: diagnostics status -->
-            <RowDefinition Height="Auto"/>   <!-- 6: support / buy me a coffee -->
+            <RowDefinition Height="Auto"/>   <!-- 2: Build (centered) + hint -->
+            <RowDefinition Height="Auto"/>   <!-- 3: advanced options disclosure -->
+            <RowDefinition Height="Auto"/>   <!-- 4: result label -->
+            <RowDefinition Height="*"/>      <!-- 5: result box -->
+            <RowDefinition Height="Auto"/>   <!-- 6: diagnostics status -->
+            <RowDefinition Height="Auto"/>   <!-- 7: support / buy me a coffee -->
         </Grid.RowDefinitions>
 
         <!-- Row 0: what this does + safety note -->
@@ -353,15 +396,16 @@
 
             <!-- SSH public key: OPTIONAL — choose an existing one or generate a
                  new pair. Without a key, login is by the root password above. -->
-            <TextBlock Grid.Row="3" Grid.Column="0" x:Name="LblKey"
+            <TextBlock Grid.Row="3" Grid.Column="0" x:Name="LblKey" Visibility="Collapsed"
                        Style="{StaticResource FieldLabel}"
                        Text="SSH Public Key:"/>
-            <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath"
+            <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath" Visibility="Collapsed"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
                      Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose an existing public key (.pub)…"
                      PreviewMouseLeftButtonDown="TxtKeyPath_MouseDown" PreviewKeyDown="TxtKeyPath_PreviewKeyDown"
                      Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
-            <StackPanel Grid.Row="3" Grid.Column="2" Orientation="Horizontal">
+            <StackPanel x:Name="KeyButtons" Grid.Row="3" Grid.Column="2" Orientation="Horizontal"
+                        Visibility="Collapsed">
                 <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
                         ToolTip="Generate a new SSH key pair…"
                         AutomationProperties.Name="Generate a new SSH key pair"
@@ -416,44 +460,61 @@
                     Click="BtnClearOutput_Click"/>
         </Grid>
 
-        <!-- Row 2: actions. DockPanel so the hint fills the remaining width and
-             trims, instead of pushing the buttons off-screen at small widths. -->
-        <DockPanel Grid.Row="2" Margin="0,0,0,10" LastChildFill="True">
-            <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
-                <Button x:Name="BtnBuild" Style="{StaticResource PrimaryButton}"
-                        Margin="0,0,10,0" IsEnabled="False"
-                        Content="Build Modified Firmware" Click="BtnBuild_Click"/>
-                <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}"
-                        Margin="0,0,10,0"
+        <!-- Row 2: the primary action, horizontally centered. Three columns
+             ([*][Build][*]) keep the button dead-centre regardless of the hint
+             length; the hint sits in the right column, immediately beside the
+             button, and trims if long. -->
+        <Grid Grid.Row="2" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Button Grid.Column="1" x:Name="BtnBuild" Style="{StaticResource PrimaryButton}"
+                    IsEnabled="False" Content="Build Modified Firmware" Click="BtnBuild_Click"/>
+            <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled.
+                 LiveSetting=Polite so a screen reader announces the changing
+                 "still needed" / "Ready to build" text as the form is filled. -->
+            <TextBlock Grid.Column="2" x:Name="TxtBuildHint" VerticalAlignment="Center"
+                       HorizontalAlignment="Left" Margin="14,0,0,0" Foreground="Gray"
+                       TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite"/>
+        </Grid>
+
+        <!-- Row 3: Advanced options. A subtle divider + disclosure toggle keeps the
+             default view simple; expanding reveals the tool buttons here AND the SSH
+             key row above (in the credentials block). -->
+        <StackPanel Grid.Row="3" Margin="0,0,0,10">
+            <Border Height="1" Background="#FFE7E7E7" Margin="0,0,0,8"/>
+            <ToggleButton x:Name="TglAdvanced" Style="{StaticResource DisclosureToggle}"
+                          Checked="TglAdvanced_Changed" Unchecked="TglAdvanced_Changed"
+                          AutomationProperties.Name="Advanced options"
+                          ToolTip="Show advanced options: SSH public key, inspect and self-test"/>
+            <StackPanel x:Name="AdvancedTools" Orientation="Horizontal" Margin="2,10,0,0"
+                        Visibility="Collapsed">
+                <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0"
                         Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
                 <Button x:Name="BtnSelfTest" Style="{StaticResource SecondaryButton}"
                         Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
             </StackPanel>
-            <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled. -->
-            <!-- LiveSetting=Polite so a screen reader announces the changing
-                 "still needed" / "Ready to build" hint as the form is filled. -->
-            <TextBlock x:Name="TxtBuildHint" VerticalAlignment="Center" Margin="14,0,0,0"
-                       Foreground="Gray" TextTrimming="CharacterEllipsis"
-                       AutomationProperties.LiveSetting="Polite"/>
-        </DockPanel>
+        </StackPanel>
 
-        <!-- Row 3: result label -->
-        <TextBlock Grid.Row="3" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
+        <!-- Row 4: result label -->
+        <TextBlock Grid.Row="4" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
 
-        <!-- Row 4: result box -->
-        <TextBox x:Name="TxtResult" Grid.Row="4"
+        <!-- Row 5: result box -->
+        <TextBox x:Name="TxtResult" Grid.Row="5"
                  IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
                  VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Auto"
                  FontFamily="Consolas" FontSize="12"
                  Text="Choose a firmware and an output path, set a root password (or tick “Disable” to use an SSH key only), then click Build."/>
 
-        <!-- Row 5: diagnostics -->
-        <TextBlock Grid.Row="5" x:Name="TxtDiag" Margin="0,8,0,0"
+        <!-- Row 6: diagnostics -->
+        <TextBlock Grid.Row="6" x:Name="TxtDiag" Margin="0,8,0,0"
                    Foreground="Gray" FontFamily="Consolas" FontSize="11"/>
 
-        <!-- Row 6: support / buy me a coffee -->
-        <Border Grid.Row="6" Margin="0,10,0,0" Padding="12,9"
+        <!-- Row 7: support / buy me a coffee -->
+        <Border Grid.Row="7" Margin="0,10,0,0" Padding="12,9"
                 Background="#FFFBF7EF" BorderBrush="#FFE6D6AE" BorderThickness="1" CornerRadius="8">
             <Grid>
                 <Grid.ColumnDefinitions>
