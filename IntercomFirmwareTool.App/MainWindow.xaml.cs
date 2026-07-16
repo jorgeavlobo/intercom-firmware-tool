@@ -2,10 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
@@ -970,13 +972,17 @@ namespace IntercomFirmwareTool.App
                     _heightBeforeAdvanced = Height;
                     _topBeforeAdvanced = Top;
 
-                    var wa = SystemParameters.WorkArea;
+                    // Work area of the monitor THIS window is on (not the primary —
+                    // SystemParameters.WorkArea only ever reports the primary display,
+                    // which would push us off-screen on a secondary monitor offset
+                    // above/below it). Falls back to the primary work area if the
+                    // native query is unavailable.
+                    Rect wa = CurrentMonitorWorkArea();
                     double want = Math.Min(720, wa.Height);
                     if (Height < want) Height = want;
                     // The window's Top didn't change, so growing downward could push the
                     // footer off-screen. Nudge Top up so the whole window stays within
-                    // the work area. (WorkArea is the primary monitor — a reasonable
-                    // approximation for a single-window tool.)
+                    // this monitor's work area.
                     if (Top + Height > wa.Bottom) Top = Math.Max(wa.Top, wa.Bottom - Height);
                 }
             }
@@ -988,6 +994,63 @@ namespace IntercomFirmwareTool.App
                 _heightBeforeAdvanced = null;
                 _topBeforeAdvanced = null;
             }
+        }
+
+        /// <summary>
+        /// Work area (excluding the taskbar) of the monitor that currently contains
+        /// this window, in device-independent units so it can be compared to
+        /// Top/Left/Height/Width directly. Unlike <see cref="SystemParameters.WorkArea"/>
+        /// — which always describes the PRIMARY monitor — this follows the window to a
+        /// secondary display. Degrades to the primary work area if the window has no
+        /// HWND yet or the native query fails, so callers never get a worse answer.
+        /// </summary>
+        private Rect CurrentMonitorWorkArea()
+        {
+            try
+            {
+                IntPtr hwnd = new WindowInteropHelper(this).Handle;
+                if (hwnd == IntPtr.Zero) return SystemParameters.WorkArea;
+
+                IntPtr monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+                if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref mi))
+                    return SystemParameters.WorkArea;
+
+                // rcWork is in physical pixels (virtual-screen coords). Convert to DIPs
+                // with the window's own device transform — a pure scale, so applying it
+                // to screen coordinates yields the DIP space WPF uses for Top/Left.
+                Matrix fromDevice = PresentationSource.FromVisual(this)?.CompositionTarget?
+                    .TransformFromDevice ?? Matrix.Identity;
+                Point tl = fromDevice.Transform(new Point(mi.rcWork.left, mi.rcWork.top));
+                Point br = fromDevice.Transform(new Point(mi.rcWork.right, mi.rcWork.bottom));
+                return new Rect(tl, br);
+            }
+            catch
+            {
+                // Never let a layout tweak fault — fall back to the primary work area.
+                return SystemParameters.WorkArea;
+            }
+        }
+
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int left, top, right, bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MONITORINFO
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
         }
 
         // Amber cue for a required field that is still blank. Colour is never the
