@@ -502,9 +502,11 @@ namespace IntercomFirmwareTool.App
             string comment = $"{Environment.UserName}@{Environment.MachineName}";
 
             SetButtonsEnabled(false);
+            SetStatus("Generating a new SSH key pair…"); // visible (KeyRow can be shown without the console)
             TxtResult.Text = "Generating a new 4096-bit RSA key pair…";
             string? pubPath = null;
-            string? error = null;
+            string? error = null;    // full detail for the result log
+            string? errorMsg = null; // short message for the popup
             try
             {
                 pubPath = await Task.Run(() => SshKeyGen.Generate(privatePath, comment));
@@ -512,6 +514,7 @@ namespace IntercomFirmwareTool.App
             catch (Exception ex)
             {
                 error = ex.ToString();
+                errorMsg = ex.Message;
             }
             finally
             {
@@ -521,11 +524,16 @@ namespace IntercomFirmwareTool.App
             if (error != null || pubPath is null)
             {
                 TxtResult.Text = "Could not generate the key:\n" + error;
+                SetStatus(""); // the popup below is the feedback
+                MessageBox.Show(this,
+                    "Could not generate the SSH key pair:\n\n" + (errorMsg ?? "Unknown error."),
+                    "Key generation failed", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
             _keyPath = pubPath;
             SetPathText(TxtKeyPath, pubPath);
+            SetStatus("✓ SSH key pair generated."); // visible confirmation
             UpdateBuildEnabled();
 
             // Lock the private key to the current Windows account (best-effort):
@@ -683,6 +691,7 @@ namespace IntercomFirmwareTool.App
         private void BtnClearKey_Click(object sender, RoutedEventArgs e)
         {
             _keyPath = null;
+            SetStatus(""); // don't leave a "✓ SSH key…" message after clearing the key
             UpdateKeyPlaceholder();
             UpdateBuildEnabled();
         }
