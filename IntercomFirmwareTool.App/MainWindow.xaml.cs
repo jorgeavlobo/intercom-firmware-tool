@@ -877,8 +877,12 @@ namespace IntercomFirmwareTool.App
             bool advanced = TglAdvanced.IsChecked == true;
             bool keyOnly = ChkKeyOnly.IsChecked == true;
 
-            // "Password:" in the simple view; "Root Password:" in Advanced.
+            // "Password:" in the simple view; "Root Password:" in Advanced (the rule
+            // line below mirrors the same wording).
             LblPassword.Text = advanced ? "Root Password:" : "Password:";
+            LblCredentialRule.Text = advanced
+                ? "A root password is required — or tick “Disable” to log in with an SSH key only."
+                : "A password is required — or tick “Disable” to log in with an SSH key only.";
 
             KeyRow.Visibility = (advanced || keyOnly || _keyPath != null)
                 ? Visibility.Visible : Visibility.Collapsed;

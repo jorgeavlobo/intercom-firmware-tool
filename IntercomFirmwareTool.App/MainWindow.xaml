@@ -402,8 +402,9 @@
                  password login off and makes the SSH key (in Advanced) the required
                  credential instead. -->
             <TextBlock Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+                       x:Name="LblCredentialRule"
                        Foreground="Gray" FontSize="11" TextWrapping="Wrap"
-                       Text="A root password is required — or tick “Disable” to log in with an SSH key only."/>
+                       Text="A password is required — or tick “Disable” to log in with an SSH key only."/>
 
             <!-- Output (disabled until a firmware is chosen) -->
             <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
