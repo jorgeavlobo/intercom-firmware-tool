@@ -2,10 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
@@ -221,7 +223,7 @@ namespace IntercomFirmwareTool.App
             string pwd = _pw.Value;
             if (pwd.Length == 0)
             {
-                TxtResult.Text = "Nothing to copy — the password field is empty.";
+                SetStatus("Nothing to copy — the password field is empty.");
                 return;
             }
             try
@@ -229,11 +231,11 @@ namespace IntercomFirmwareTool.App
                 // Copy WITHOUT leaving the plaintext password in Windows Clipboard
                 // History or cloud clipboard sync (see SecureClipboard).
                 SecureClipboard.SetText(pwd);
-                TxtResult.Text = "Password copied (excluded from clipboard history / cloud sync).";
+                SetStatus("Password copied (excluded from clipboard history / cloud sync).");
             }
             catch (Exception ex)
             {
-                TxtResult.Text = "Could not copy to the clipboard:\n" + ex.Message;
+                SetStatus("Could not copy to the clipboard: " + SafeMessage(ex), error: true);
             }
         }
 
@@ -318,6 +320,7 @@ namespace IntercomFirmwareTool.App
             // modified. Verify by size + SHA-256 (may hash ~100 MB, so do it off
             // the UI thread) before accepting the file.
             SetButtonsEnabled(false);
+            SetStatus("Verifying firmware… (size + SHA-256)"); // visible while it hashes
             TxtResult.Text = $"Verifying firmware integrity (size + SHA-256)…\n{chosen}";
             FirmwareCheckResult check;
             try { check = await Task.Run(() => FirmwareRegistry.Verify(chosen)); }
@@ -349,6 +352,7 @@ namespace IntercomFirmwareTool.App
                     "Only known-good original firmware can be modified, so a corrupt or wrong\n" +
                     "download can't be turned into a broken image. The file's NAME does not matter —\n" +
                     "its content (size + SHA-256) must match a known original.";
+                SetStatus(""); // the popup below is the feedback; clear the "verifying…" line
                 MessageBox.Show(this,
                     "This file is not an accepted original firmware.\n\n" + check.Message +
                     "\n\nThe selection was cleared.",
@@ -376,6 +380,7 @@ namespace IntercomFirmwareTool.App
                 "✅ " + check.Message + "\n\n" +
                 check.Match!.Describe() + "\n\n" +
                 "Set a root password (or tick \"Disable\" to use an SSH key only), then Build.";
+            SetStatus("✓ Firmware verified."); // visible confirmation in the simple view
         }
 
         /// <summary>
@@ -393,6 +398,7 @@ namespace IntercomFirmwareTool.App
             TxtOutputPath.Foreground = Brushes.Gray;
             LblOutput.IsEnabled = false;
             TxtOutputPath.IsEnabled = false;
+            SetStatus(""); // don't leave "✓ Firmware verified." while nothing is selected
             UpdateBuildEnabled();
         }
 
@@ -498,9 +504,11 @@ namespace IntercomFirmwareTool.App
             string comment = $"{Environment.UserName}@{Environment.MachineName}";
 
             SetButtonsEnabled(false);
+            SetStatus("Generating a new SSH key pair…"); // visible (KeyRow can be shown without the console)
             TxtResult.Text = "Generating a new 4096-bit RSA key pair…";
             string? pubPath = null;
-            string? error = null;
+            string? error = null;    // full detail for the result log
+            string? errorMsg = null; // short message for the popup
             try
             {
                 pubPath = await Task.Run(() => SshKeyGen.Generate(privatePath, comment));
@@ -508,6 +516,7 @@ namespace IntercomFirmwareTool.App
             catch (Exception ex)
             {
                 error = ex.ToString();
+                errorMsg = SafeMessage(ex);
             }
             finally
             {
@@ -516,12 +525,18 @@ namespace IntercomFirmwareTool.App
 
             if (error != null || pubPath is null)
             {
-                TxtResult.Text = "Could not generate the key:\n" + error;
+                TxtResult.Text = "Could not generate the key:\n" +
+                    (error ?? "No public key was produced (unknown error).");
+                SetStatus(""); // the popup below is the feedback
+                MessageBox.Show(this,
+                    "Could not generate the SSH key pair:\n\n" + (errorMsg ?? "Unknown error."),
+                    "Key generation failed", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
             _keyPath = pubPath;
             SetPathText(TxtKeyPath, pubPath);
+            SetStatus("✓ SSH key pair generated."); // visible confirmation
             UpdateBuildEnabled();
 
             // Lock the private key to the current Windows account (best-effort):
@@ -679,6 +694,7 @@ namespace IntercomFirmwareTool.App
         private void BtnClearKey_Click(object sender, RoutedEventArgs e)
         {
             _keyPath = null;
+            SetStatus(""); // don't leave a "✓ SSH key…" message after clearing the key
             UpdateKeyPlaceholder();
             UpdateBuildEnabled();
         }
@@ -858,6 +874,183 @@ namespace IntercomFirmwareTool.App
             BtnBuild.IsEnabled = _uiEnabled
                 && _fwzPath != null && _outputPath != null && HaveCredential();
             UpdateRequiredCues();
+            // Keep the SSH key row's visibility in step with key-only mode and whether
+            // a key is selected (both can change here); the advanced tools are toggled
+            // separately by TglAdvanced_Changed.
+            UpdateAdvancedVisibility();
+        }
+
+        /// <summary>
+        /// Shows/hides the advanced surface. The two tool buttons follow the "Advanced
+        /// options" toggle. The SSH key row (which lives in the advanced section) is
+        /// shown when advanced is on, OR whenever a key is the required credential
+        /// (key-only mode) or one is already selected — so a required/active credential
+        /// is never hidden behind the toggle. The password label also loses its "Root"
+        /// qualifier in the simple view.
+        /// </summary>
+        private void UpdateAdvancedVisibility()
+        {
+            bool advanced = TglAdvanced.IsChecked == true;
+            bool keyOnly = ChkKeyOnly.IsChecked == true;
+
+            // "Password:" in the simple view; "Root Password:" in Advanced (the rule
+            // line below mirrors the same wording).
+            LblPassword.Text = advanced ? "Root Password:" : "Password:";
+            // In key-only mode the password fields are disabled and the SSH key is the
+            // required credential, so the rule reflects that instead.
+            LblCredentialRule.Text = keyOnly
+                ? "An SSH key is required — password login is disabled."
+                : advanced
+                    ? "A root password is required — or tick “Disable” to log in with an SSH key only."
+                    : "A password is required — or tick “Disable” to log in with an SSH key only.";
+
+            KeyRow.Visibility = (advanced || keyOnly || _keyPath != null)
+                ? Visibility.Visible : Visibility.Collapsed;
+
+            AdvancedTools.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
+
+            // The result output is part of Advanced. When shown, its row fills the
+            // window; when hidden, the spacer row takes the slack so the footer stays
+            // pinned to the bottom (no empty gap).
+            ResultGroup.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
+            RowResult.Height = advanced ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
+            RowSpacer.Height = advanced ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
+        }
+
+        private double? _heightBeforeAdvanced;
+        private double? _topBeforeAdvanced;
+
+        /// <summary>
+        /// Shows a short message in the always-visible status line under the Build
+        /// button (collapsed when empty). Used for simple-view feedback that would
+        /// otherwise only reach the result console, which is hidden in the simple view.
+        /// </summary>
+        private void SetStatus(string message, bool error = false)
+        {
+            TxtStatus.Text = message;
+            TxtStatus.Foreground = error ? ErrorBrush : Brushes.Gray;
+            TxtStatus.Visibility = string.IsNullOrEmpty(message)
+                ? Visibility.Collapsed : Visibility.Visible;
+            // The status line is a Polite live region (XAML); announce the change so a
+            // screen reader hears it (LiveSetting alone is inert — see AnnounceLiveRegion).
+            if (!string.IsNullOrEmpty(message)) AnnounceLiveRegion(TxtStatus);
+        }
+
+        /// <summary>
+        /// Raises LiveRegionChanged on a Polite live-region element so assistive tech
+        /// actually announces a text change (WPF needs the peer to raise it). No-op
+        /// unless an automation client is listening; creates the peer if needed.
+        /// </summary>
+        private static void AnnounceLiveRegion(FrameworkElement element)
+        {
+            if (!AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged)) return;
+            var peer = FrameworkElementAutomationPeer.FromElement(element)
+                ?? FrameworkElementAutomationPeer.CreatePeerForElement(element);
+            peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+        }
+
+        /// <summary>A user-facing message for an exception: its Message, or the
+        /// exception type name when Message is empty (some exceptions have none), so a
+        /// popup is never blank.</summary>
+        private static string SafeMessage(Exception ex) =>
+            string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+
+        /// <summary>Toggles the advanced surface (SSH key row + tool buttons + result).</summary>
+        private void TglAdvanced_Changed(object sender, RoutedEventArgs e)
+        {
+            // Refresh visibility AND the mode-dependent cues (build hint wording,
+            // AutomationProperties.Name) so toggling Advanced alone can't leave them
+            // stale. UpdateBuildEnabled runs both UpdateRequiredCues and
+            // UpdateAdvancedVisibility.
+            UpdateBuildEnabled();
+            if (TglAdvanced.IsChecked == true)
+            {
+                // Opening: remember the current size/position, then grow so the result
+                // output has room (only if we haven't already grown for this session).
+                if (_heightBeforeAdvanced == null)
+                {
+                    _heightBeforeAdvanced = Height;
+                    _topBeforeAdvanced = Top;
+
+                    // Work area of the monitor THIS window is on (not the primary —
+                    // SystemParameters.WorkArea only ever reports the primary display,
+                    // which would push us off-screen on a secondary monitor offset
+                    // above/below it). Falls back to the primary work area if the
+                    // native query is unavailable.
+                    Rect wa = CurrentMonitorWorkArea();
+                    double want = Math.Min(720, wa.Height);
+                    if (Height < want) Height = want;
+                    // The window's Top didn't change, so growing downward could push the
+                    // footer off-screen. Nudge Top up so the whole window stays within
+                    // this monitor's work area.
+                    if (Top + Height > wa.Bottom) Top = Math.Max(wa.Top, wa.Bottom - Height);
+                }
+            }
+            else if (_heightBeforeAdvanced != null)
+            {
+                // Closing: restore the size AND position from before Advanced was opened.
+                Height = _heightBeforeAdvanced.Value;
+                if (_topBeforeAdvanced != null) Top = _topBeforeAdvanced.Value;
+                _heightBeforeAdvanced = null;
+                _topBeforeAdvanced = null;
+            }
+        }
+
+        /// <summary>
+        /// Work area (excluding the taskbar) of the monitor that currently contains
+        /// this window, in device-independent units so it can be compared to
+        /// Top/Left/Height/Width directly. Unlike <see cref="SystemParameters.WorkArea"/>
+        /// — which always describes the PRIMARY monitor — this follows the window to a
+        /// secondary display. Degrades to the primary work area if the window has no
+        /// HWND yet or the native query fails, so callers never get a worse answer.
+        /// </summary>
+        private Rect CurrentMonitorWorkArea()
+        {
+            try
+            {
+                IntPtr hwnd = new WindowInteropHelper(this).Handle;
+                if (hwnd == IntPtr.Zero) return SystemParameters.WorkArea;
+
+                IntPtr monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                var mi = new MONITORINFO { cbSize = Marshal.SizeOf<MONITORINFO>() };
+                if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref mi))
+                    return SystemParameters.WorkArea;
+
+                // rcWork is in physical pixels (virtual-screen coords). Convert to DIPs
+                // with the window's own device transform — a pure scale, so applying it
+                // to screen coordinates yields the DIP space WPF uses for Top/Left.
+                Matrix fromDevice = PresentationSource.FromVisual(this)?.CompositionTarget?
+                    .TransformFromDevice ?? Matrix.Identity;
+                Point tl = fromDevice.Transform(new Point(mi.rcWork.left, mi.rcWork.top));
+                Point br = fromDevice.Transform(new Point(mi.rcWork.right, mi.rcWork.bottom));
+                return new Rect(tl, br);
+            }
+            catch
+            {
+                // Never let a layout tweak fault — fall back to the primary work area.
+                return SystemParameters.WorkArea;
+            }
+        }
+
+        private const uint MONITOR_DEFAULTTONEAREST = 2;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int left, top, right, bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MONITORINFO
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
         }
 
         // Amber cue for a required field that is still blank. Colour is never the
@@ -916,7 +1109,10 @@ namespace IntercomFirmwareTool.App
             AutomationProperties.SetName(TxtFwzPath, needFirmware ? "Firmware, required" : "Firmware");
             AutomationProperties.SetName(TxtOutputPath,
                 needOutput && _fwzPath != null ? "Save output as, required" : "Save output as");
-            AutomationProperties.SetName(TxtPassword, needPassword ? "Root Password, required" : "Root Password");
+            // Match the visible label, which drops "Root" in the simple view.
+            bool advanced = TglAdvanced.IsChecked == true;
+            string pwLabel = advanced ? "Root Password" : "Password";
+            AutomationProperties.SetName(TxtPassword, needPassword ? pwLabel + ", required" : pwLabel);
             AutomationProperties.SetName(TxtConfirm,
                 needConfirm ? "Confirm Password, required"
                 : confirmMismatch ? "Confirm Password, does not match the password"
@@ -932,18 +1128,16 @@ namespace IntercomFirmwareTool.App
             var missing = new List<string>();
             if (needFirmware) missing.Add("firmware");
             if (needOutput && _fwzPath != null) missing.Add("output path");
-            if (needPassword) missing.Add("a root password");
+            if (needPassword) missing.Add(advanced ? "a root password" : "a password");
             if (needConfirm) missing.Add("confirm the password");
             if (needKey) missing.Add("an SSH key");
 
             string previousHint = TxtBuildHint.Text;
             if (!_uiEnabled)
             {
-                // An operation (build / verify / self-test) is running and the whole
-                // form is locked, so the "still needed" / mismatch guidance isn't
-                // actionable right now — show progress for the duration instead.
-                TxtBuildHint.Text = "⏳ Working…";
-                TxtBuildHint.Foreground = Brushes.Gray;
+                // An operation is running. The Build button itself shows the progress
+                // ("⏳ Building…"), so keep the hint blank — no duplicated info.
+                TxtBuildHint.Text = "";
             }
             else if (confirmMismatch)
             {
@@ -963,18 +1157,13 @@ namespace IntercomFirmwareTool.App
                 TxtBuildHint.Foreground = Brushes.Gray;
             }
 
-            // The hint is a Polite live region (XAML), but WPF still needs the peer to
-            // raise the change event for it to be announced. Only do this when an
-            // assistive client is actually listening (ListenerExists) — then get or,
-            // if the peer hasn't been created yet, create it, so a running screen
-            // reader still hears the change. Fire only on an actual text change.
-            if (!string.Equals(previousHint, TxtBuildHint.Text, StringComparison.Ordinal) &&
-                AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
-            {
-                var peer = FrameworkElementAutomationPeer.FromElement(TxtBuildHint)
-                    ?? FrameworkElementAutomationPeer.CreatePeerForElement(TxtBuildHint);
-                peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
-            }
+            // The hint is a Polite live region (XAML); announce it, but only on an
+            // actual change to NON-empty text. Announcing "" (the hint is blanked
+            // while a build runs) makes some screen readers say "blank" — SetStatus
+            // follows the same rule.
+            if (!string.IsNullOrEmpty(TxtBuildHint.Text) &&
+                !string.Equals(previousHint, TxtBuildHint.Text, StringComparison.Ordinal))
+                AnnounceLiveRegion(TxtBuildHint);
 
             // Reveal/copy availability depends on the same password/confirm content.
             UpdatePasswordButtonStates();
@@ -1037,12 +1226,15 @@ namespace IntercomFirmwareTool.App
                 }
                 catch (Exception ex)
                 {
-                    TxtResult.Text = $"Could not read the public key:\n{ex.Message}";
+                    MessageBox.Show(this, "Could not read the public key:\n\n" + SafeMessage(ex),
+                        "Cannot read key", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 if (publicKey.Length == 0)
                 {
-                    TxtResult.Text = "The selected public key file is empty.";
+                    MessageBox.Show(this,
+                        "The selected public key file is empty.\n\nPick a valid .pub file, or generate a new pair.",
+                        "Empty key file", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 if (!SshKeyGen.IsLikelyPublicKey(publicKey))
@@ -1121,6 +1313,7 @@ namespace IntercomFirmwareTool.App
                 if (answer != MessageBoxResult.Yes) return;
             }
 
+            SetStatus(""); // clear any stale status; the build reports via its popup
             var opts = new EnableSshOptions(password, publicKey);
 
             // Non-null here: guarded above (and Build is only enabled with firmware,
@@ -1140,39 +1333,75 @@ namespace IntercomFirmwareTool.App
             sb.AppendLine($"  Output     : {output}");
             sb.AppendLine();
 
+            FwzBuildResult? built = null;
+            string? buildError = null;
             await RunAndShow(sb, () =>
             {
-                // No build-time re-hash here: BuildModifiedFwz performs the
-                // authoritative whitelist verification (size + SHA-256) itself,
-                // atomically under the input file lock — the TOCTOU-safe place to
-                // do it. A second ~100 MB hash here would only slow every build
-                // without adding safety. It throws a clear error if the input is
-                // not a recognized original, which RunAndShow surfaces.
-                FwzBuildResult r = FwzProbe.BuildModifiedFwz(fwz, opts, output);
-                sb.AppendLine($"Archive password : {r.PasswordUsed}  (ZipCrypto key, not the device model)");
-                sb.AppendLine($"Modified entry : {r.SelectedEntry}");
-                sb.AppendLine();
-                sb.AppendLine("Verification (reopened the OUTPUT .fwz and re-read every change):");
-                AppendChecks(sb, r.RoundTripChecks);
-                sb.AppendLine();
-                if (r.RoundTripAllPass)
+                try
                 {
-                    sb.AppendLine("✅ SUCCESS — the modified firmware was built and verified.");
-                    sb.AppendLine($"   Written to: {r.OutputPath}");
+                    // No build-time re-hash here: BuildModifiedFwz performs the
+                    // authoritative whitelist verification (size + SHA-256) itself,
+                    // atomically under the input file lock — the TOCTOU-safe place to
+                    // do it. A second ~100 MB hash here would only slow every build
+                    // without adding safety. It throws a clear error if the input is
+                    // not a recognized original, which RunAndShow surfaces.
+                    FwzBuildResult r = FwzProbe.BuildModifiedFwz(fwz, opts, output);
+                    built = r;
+                    sb.AppendLine($"Archive password : {r.PasswordUsed}  (ZipCrypto key, not the device model)");
+                    sb.AppendLine($"Modified entry : {r.SelectedEntry}");
                     sb.AppendLine();
-                    sb.AppendLine("Before flashing: keep the ORIGINAL firmware and be ready to re-flash it");
-                    sb.AppendLine("with My Home Suite over Mini-USB. These units use an i.MX SoC — there is");
-                    sb.AppendLine("no documented low-level un-brick (SAM-BA does not apply), so a bad flash");
-                    sb.AppendLine("may be unrecoverable. Your original .fwz was not modified.");
+                    sb.AppendLine("Verification (reopened the OUTPUT .fwz and re-read every change):");
+                    AppendChecks(sb, r.RoundTripChecks);
+                    sb.AppendLine();
+                    if (r.RoundTripAllPass)
+                    {
+                        sb.AppendLine("✅ SUCCESS — the modified firmware was built and verified.");
+                        sb.AppendLine($"   Written to: {r.OutputPath}");
+                        sb.AppendLine();
+                        sb.AppendLine("Before flashing: keep the ORIGINAL firmware and be ready to re-flash it");
+                        sb.AppendLine("with My Home Suite over Mini-USB. These units use an i.MX SoC — there is");
+                        sb.AppendLine("no documented low-level un-brick (SAM-BA does not apply), so a bad flash");
+                        sb.AppendLine("may be unrecoverable. Your original .fwz was not modified.");
+                    }
+                    else
+                    {
+                        sb.AppendLine("❌ Some checks FAILED — the verified build was NOT written.");
+                        sb.AppendLine($"   Your chosen output path was left unchanged: {output}");
+                        sb.AppendLine("   (any existing file there is NOT this build — do not flash it.)");
+                        sb.AppendLine("   See the failing checks above.");
+                    }
                 }
-                else
+                catch (Exception ex)
                 {
-                    sb.AppendLine("❌ Some checks FAILED — the verified build was NOT written.");
-                    sb.AppendLine($"   Your chosen output path was left unchanged: {output}");
-                    sb.AppendLine("   (any existing file there is NOT this build — do not flash it.)");
-                    sb.AppendLine("   See the failing checks above.");
+                    buildError = SafeMessage(ex);   // for the popup
+                    throw;                     // let RunAndShow log full details to the console
                 }
-            });
+            }, BtnBuild);
+
+            // Report the outcome in a popup. Advanced stays exactly as the user left
+            // it — a build never opens (or closes) it; the full log is in Advanced →
+            // Result if they want it.
+            if (buildError != null)
+            {
+                MessageBox.Show(this,
+                    "The build could not be completed:\n\n" + buildError +
+                    "\n\nOpen Advanced → Result for the full log.",
+                    "Build failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            else if (built?.RoundTripAllPass == true)
+            {
+                MessageBox.Show(this,
+                    "✅ The modified firmware was built and verified successfully.\n\n" +
+                    "Saved to:\n" + built.OutputPath + "\n\nThe process is finished.",
+                    "Build complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show(this,
+                    "Some verification checks did not pass, so the modified firmware was NOT written.\n\n" +
+                    "Open Advanced → Result to see which checks failed.",
+                    "Build not written", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
 
         // ---- Secondary: Verify an existing .fwz -----------------------------
@@ -1285,9 +1514,14 @@ namespace IntercomFirmwareTool.App
         /// every button disabled, and shows the result — or the full error — in
         /// the box.
         /// </summary>
-        private async Task RunAndShow(StringBuilder sb, Action work)
+        private async Task RunAndShow(StringBuilder sb, Action work, Button? busyButton = null)
         {
+            // Note: we deliberately do NOT open Advanced here. Verify/Self-test are
+            // launched from an already-open Advanced surface (their buttons live
+            // there), and Build must not force Advanced open — it reports its outcome
+            // in a popup instead.
             SetButtonsEnabled(false);
+            if (busyButton != null) SetButtonBusy(busyButton, true);
             TxtResult.Text = sb.ToString() + "\nProcessing…";
             try
             {
@@ -1301,8 +1535,80 @@ namespace IntercomFirmwareTool.App
             finally
             {
                 SetButtonsEnabled(true);
+                if (busyButton != null) SetButtonBusy(busyButton, false);
             }
             TxtResult.Text = sb.ToString();
+        }
+
+        // Idle content of a button currently showing the busy state, so it can be
+        // restored when the operation finishes; and the timer driving the dots.
+        private readonly Dictionary<Button, object?> _idleContent = new();
+        private DispatcherTimer? _buildDots;
+
+        /// <summary>
+        /// While busy, turns the button into a "loading" button. It stays DISABLED
+        /// (so it can't be re-invoked, including via UI Automation), but Tag="busy"
+        /// makes the style keep it full-colour and readable instead of greyed out.
+        /// The centered "⏳ Building" label keeps a growing dot suffix once per
+        /// second ("" → "." → ".." → "..." → repeat); the word stays put while the
+        /// dots grow to its right. Restored when the op finishes.
+        /// </summary>
+        private void SetButtonBusy(Button button, bool busy)
+        {
+            if (busy)
+            {
+                _buildDots?.Stop(); // never leave a previous timer running (re-entrancy)
+                if (!_idleContent.ContainsKey(button)) _idleContent[button] = button.Content;
+                // The button stays DISABLED (SetButtonsEnabled disabled it), so it can't
+                // be re-invoked — including via UI Automation, which ignores
+                // IsHitTestVisible/Focusable. Tag="busy" makes the style keep it
+                // full-colour and readable instead of greyed out.
+                button.Tag = "busy";
+
+                // Keep the WORD "Building" centered in the button: it sits in the
+                // middle column, with the ⏳ emoji in an equal-width left column and
+                // the dots in an equal-width right column. Equal side columns keep
+                // "Building" centered while the emoji stays left and the dots grow
+                // right, none of which shifts the word.
+                var emoji = new TextBlock { Text = "⏳", VerticalAlignment = VerticalAlignment.Center,
+                                            HorizontalAlignment = HorizontalAlignment.Right,
+                                            Margin = new Thickness(0, 0, 5, 0) };
+                var baseText = new TextBlock { Text = "Building", VerticalAlignment = VerticalAlignment.Center };
+                var dotsText = new TextBlock { VerticalAlignment = VerticalAlignment.Center,
+                                               HorizontalAlignment = HorizontalAlignment.Left };
+                var grid = new Grid();
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(26) }); // ⏳ (left)
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });    // "Building"
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(26) }); // dots (right)
+                Grid.SetColumn(emoji, 0);
+                Grid.SetColumn(baseText, 1);
+                Grid.SetColumn(dotsText, 2);
+                grid.Children.Add(emoji);
+                grid.Children.Add(baseText);
+                grid.Children.Add(dotsText);
+                button.Content = grid;
+
+                int dots = 0;
+                _buildDots = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+                _buildDots.Tick += (_, _) =>
+                {
+                    dots = (dots + 1) % 4;   // 0 → 1 → 2 → 3 → 0 …  ("" . .. ...)
+                    dotsText.Text = new string('.', dots);
+                };
+                _buildDots.Start();
+            }
+            else
+            {
+                _buildDots?.Stop();
+                _buildDots = null;
+                button.ClearValue(FrameworkElement.TagProperty);
+                if (_idleContent.TryGetValue(button, out var idle))
+                {
+                    button.Content = idle;
+                    _idleContent.Remove(button);
+                }
+                // IsEnabled is restored by SetButtonsEnabled/UpdateBuildEnabled next.
+            }
         }
 
         /// <summary>
@@ -1364,6 +1670,12 @@ namespace IntercomFirmwareTool.App
             LblOutput.IsEnabled = enabled && _fwzPath != null;
             BtnVerify.IsEnabled = enabled;
             BtnSelfTest.IsEnabled = enabled;
+            // Lock the Advanced disclosure while an operation runs. Inspect/Self-test
+            // report ONLY into the Result box (no popup), so if the user could collapse
+            // Advanced mid-run the outcome would land in a hidden TxtResult and look
+            // like nothing happened. Keeping the toggle disabled holds Advanced open
+            // (its IsChecked is untouched) so the Result stays visible until done.
+            TglAdvanced.IsEnabled = enabled;
             // The three clear buttons are content-aware (enabled only when their field
             // has something to clear); UpdateBuildEnabled below drives them from the
             // current paths + _uiEnabled, so they aren't set here.
@@ -1378,7 +1690,7 @@ namespace IntercomFirmwareTool.App
             TxtConfirm.IsEnabled = creds;
             // Refresh the Build gate, the "still needed" hint/cues, and the content-
             // aware reveal/copy/generate buttons so they all reflect the new op state
-            // (UpdateBuildEnabled gates Build on _uiEnabled and shows "⏳ Working…").
+            // (UpdateBuildEnabled gates Build on _uiEnabled; the hint blanks while busy).
             _uiEnabled = enabled;
             UpdateBuildEnabled();
         }

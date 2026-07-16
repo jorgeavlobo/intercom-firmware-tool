@@ -7,7 +7,7 @@
         mc:Ignorable="d"
         Title="Intercom Firmware Tool — SSH-enable (Classe 100X / 300X)"
         Icon="Assets/Icons/AppIcon.ico"
-        Height="760" Width="880" MinHeight="690" MinWidth="720"
+        Height="540" Width="760" MinHeight="480" MinWidth="640"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
         <Style TargetType="TextBlock" x:Key="FieldLabel">
@@ -112,6 +112,18 @@
                                 <Setter Property="Foreground" Value="#FF9A9A9A"/>
                                 <Setter Property="Cursor" Value="Arrow"/>
                             </Trigger>
+                            <!-- "Loading" look: while a build runs the button is DISABLED
+                                 (so it can't be re-invoked, incl. via UI Automation) but
+                                 Tag="busy" keeps it full-colour and readable. This wins
+                                 over the disabled greying above. -->
+                            <MultiTrigger>
+                                <MultiTrigger.Conditions>
+                                    <Condition Property="IsEnabled" Value="False"/>
+                                    <Condition Property="Tag" Value="busy"/>
+                                </MultiTrigger.Conditions>
+                                <Setter TargetName="bd" Property="Background" Value="#FF0F6CBD"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </MultiTrigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
@@ -153,6 +165,49 @@
                                 <Setter TargetName="bd" Property="BorderBrush" Value="#FFE8E8E8"/>
                                 <Setter Property="Foreground" Value="#FFAFAFAF"/>
                                 <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- "Advanced options" disclosure toggle: a subtle, link-like ToggleButton
+             with a chevron that rotates from ▸ (collapsed) to ▾ (expanded). Keeps the
+             default view simple while advanced tools stay one click away. -->
+        <Style TargetType="ToggleButton" x:Key="DisclosureToggle">
+            <Setter Property="Foreground" Value="#FF3A3A3A"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                CornerRadius="4" Padding="6,4" SnapsToDevicePixels="True">
+                            <StackPanel Orientation="Horizontal">
+                                <!-- ChevronRight (collapsed) / ChevronDown (expanded),
+                                     swapped by the IsChecked trigger below. -->
+                                <TextBlock x:Name="chev" Text="&#xE76C;" FontFamily="Segoe MDL2 Assets"
+                                           FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock Text="Advanced options" VerticalAlignment="Center"
+                                           FontWeight="SemiBold"/>
+                            </StackPanel>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="chev" Property="Text" Value="&#xE70D;"/>
+                            </Trigger>
+                            <!-- Hover fill only; it clears when the mouse leaves.
+                                 Keyboard focus is shown by the default OS focus visual
+                                 (only when tabbing), so no persistent fill lingers after
+                                 a mouse click. -->
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#11000000"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#1C000000"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -257,11 +312,15 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>   <!-- 0: intro + safety -->
             <RowDefinition Height="Auto"/>   <!-- 1: input form -->
-            <RowDefinition Height="Auto"/>   <!-- 2: action buttons -->
-            <RowDefinition Height="Auto"/>   <!-- 3: result label -->
-            <RowDefinition Height="*"/>      <!-- 4: result box -->
-            <RowDefinition Height="Auto"/>   <!-- 5: diagnostics status -->
-            <RowDefinition Height="Auto"/>   <!-- 6: support / buy me a coffee -->
+            <RowDefinition Height="Auto"/>   <!-- 2: Build (centered) + hint -->
+            <RowDefinition Height="Auto"/>   <!-- 3: advanced options disclosure -->
+            <!-- 4: result output (part of Advanced). Fills when shown; when hidden the
+                 spacer row below takes the slack so the footer stays pinned. Starts
+                 collapsed (Auto=0), so the spacer starts as the star row. -->
+            <RowDefinition x:Name="RowResult" Height="Auto"/>
+            <RowDefinition x:Name="RowSpacer" Height="*"/>   <!-- 5: slack when result hidden -->
+            <RowDefinition Height="Auto"/>   <!-- 6: diagnostics status -->
+            <RowDefinition Height="Auto"/>   <!-- 7: support / buy me a coffee -->
         </Grid.RowDefinitions>
 
         <!-- Row 0: what this does + safety note -->
@@ -279,11 +338,10 @@
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>   <!-- 0: firmware -->
-                <RowDefinition Height="Auto"/>   <!-- 1: root password -->
+                <RowDefinition Height="Auto"/>   <!-- 1: password -->
                 <RowDefinition Height="Auto"/>   <!-- 2: confirm -->
-                <RowDefinition Height="Auto"/>   <!-- 3: ssh key -->
-                <RowDefinition Height="Auto"/>   <!-- 4: credential rule -->
-                <RowDefinition Height="Auto"/>   <!-- 5: output -->
+                <RowDefinition Height="Auto"/>   <!-- 3: credential rule -->
+                <RowDefinition Height="Auto"/>   <!-- 4: output -->
             </Grid.RowDefinitions>
 
             <!-- Firmware .fwz -->
@@ -303,8 +361,8 @@
             <!-- Root password (masked) + reveal toggle + Disable (key-only). One of
                  the password or the key is required; ticking Disable turns password
                  login off, so a key becomes the credential. -->
-            <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Root Password:"/>
+            <TextBlock Grid.Row="1" Grid.Column="0" x:Name="LblPassword"
+                       Style="{StaticResource FieldLabel}" Text="Password:"/>
             <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <Grid Width="170">
                     <TextBox x:Name="TxtPassword" Style="{StaticResource InputField}"
@@ -351,109 +409,149 @@
                            Foreground="Gray"/>
             </StackPanel>
 
-            <!-- SSH public key: OPTIONAL — choose an existing one or generate a
-                 new pair. Without a key, login is by the root password above. -->
-            <TextBlock Grid.Row="3" Grid.Column="0" x:Name="LblKey"
-                       Style="{StaticResource FieldLabel}"
-                       Text="SSH Public Key:"/>
-            <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtKeyPath"
-                     Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
-                     Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose an existing public key (.pub)…"
-                     PreviewMouseLeftButtonDown="TxtKeyPath_MouseDown" PreviewKeyDown="TxtKeyPath_PreviewKeyDown"
-                     Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
-            <StackPanel Grid.Row="3" Grid.Column="2" Orientation="Horizontal">
-                <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
-                        ToolTip="Generate a new SSH key pair…"
-                        AutomationProperties.Name="Generate a new SSH key pair"
-                        Click="BtnGenKey_Click">
-                    <!-- Key glyph with a small green "＋" badge = generate a NEW key.
-                         The Segoe key points its shaft/teeth to the lower-right, so
-                         the badge sits in the empty TOP-RIGHT corner to avoid covering
-                         the key. The key inherits the button Foreground (greys when
-                         disabled); the plus is drawn as two rounded bars to stay crisp. -->
-                    <Grid Width="20" Height="18" SnapsToDevicePixels="True">
-                        <TextBlock Text="&#xE192;" FontFamily="Segoe MDL2 Assets" FontSize="16"
-                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        <Border Background="#FF107C10" CornerRadius="6" Width="12" Height="12"
-                                HorizontalAlignment="Right" VerticalAlignment="Top"
-                                Margin="0,-2,-3,0">
-                            <Grid>
-                                <Rectangle Fill="White" Width="6" Height="2" RadiusX="1" RadiusY="1"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                <Rectangle Fill="White" Width="2" Height="6" RadiusX="1" RadiusY="1"
-                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                            </Grid>
-                        </Border>
-                    </Grid>
-                </Button>
-                <Button x:Name="BtnClearKey" Style="{StaticResource RowIconButton}"
-                        Content="&#xE711;" IsEnabled="False"
-                        ToolTip="Clear the selected key (build with password only)"
-                        AutomationProperties.Name="Clear the selected SSH key"
-                        Click="BtnClearKey_Click"/>
-            </StackPanel>
-
-            <!-- The credential rule, stated explicitly right below the two credential
-                 fields. Matches the actual Build gate: a root password is required in
-                 the default (password-login) mode; ticking "Disable" turns password
-                 login off and makes the SSH key the required credential instead. -->
-            <TextBlock Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+            <!-- The credential rule. Matches the actual Build gate: a root password is
+                 required in the default (password-login) mode; ticking "Disable" turns
+                 password login off and makes the SSH key (in Advanced) the required
+                 credential instead. -->
+            <TextBlock Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
+                       x:Name="LblCredentialRule"
                        Foreground="Gray" FontSize="11" TextWrapping="Wrap"
-                       Text="A root password is required — or tick “Disable” to log in with an SSH key only."/>
+                       Text="A password is required — or tick “Disable” to log in with an SSH key only."/>
 
             <!-- Output (disabled until a firmware is chosen) -->
-            <TextBlock Grid.Row="5" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
+            <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
                        Style="{StaticResource FieldLabel}" Text="Save Output As:"/>
-            <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtOutputPath"
+            <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtOutputPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" IsEnabled="False"
                      Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose where to save the modified .fwz…"
                      PreviewMouseLeftButtonDown="TxtOutputPath_MouseDown" PreviewKeyDown="TxtOutputPath_PreviewKeyDown"
                      Text="(where to write the modified .fwz)" Foreground="Gray"/>
-            <Button Grid.Row="5" Grid.Column="2" x:Name="BtnClearOutput"
+            <Button Grid.Row="4" Grid.Column="2" x:Name="BtnClearOutput"
                     Style="{StaticResource RowIconButton}" IsEnabled="False"
                     Content="&#xE711;" ToolTip="Clear the output location"
                     AutomationProperties.Name="Clear the output location"
                     Click="BtnClearOutput_Click"/>
         </Grid>
 
-        <!-- Row 2: actions. DockPanel so the hint fills the remaining width and
-             trims, instead of pushing the buttons off-screen at small widths. -->
-        <DockPanel Grid.Row="2" Margin="0,0,0,10" LastChildFill="True">
-            <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
-                <Button x:Name="BtnBuild" Style="{StaticResource PrimaryButton}"
-                        Margin="0,0,10,0" IsEnabled="False"
+        <!-- Row 2: the primary action (centered), then an always-visible one-line
+             status area for short simple-view messages (firmware verifying, password
+             copied, key errors) — the full log lives in Advanced → Result. -->
+        <StackPanel Grid.Row="2" Margin="0,0,0,10">
+            <!-- Three columns ([*][Build][*]) keep the button dead-centre regardless
+                 of the hint length; the hint sits in the right column, beside it. -->
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <!-- MinWidth keeps the button a stable size when its label is swapped
+                     for the busy "Building…" state, so it doesn't shrink. -->
+                <Button Grid.Column="1" x:Name="BtnBuild" Style="{StaticResource PrimaryButton}"
+                        MinWidth="210" IsEnabled="False"
                         Content="Build Modified Firmware" Click="BtnBuild_Click"/>
-                <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}"
-                        Margin="0,0,10,0"
+                <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled.
+                     LiveSetting=Polite so a screen reader announces the changing
+                     "still needed" / "Ready to build" text as the form is filled. -->
+                <TextBlock Grid.Column="2" x:Name="TxtBuildHint" VerticalAlignment="Center"
+                           HorizontalAlignment="Left" Margin="14,0,0,0" Foreground="Gray"
+                           TextTrimming="CharacterEllipsis" AutomationProperties.LiveSetting="Polite"/>
+            </Grid>
+            <!-- Transient status line (collapsed when empty). -->
+            <TextBlock x:Name="TxtStatus" Visibility="Collapsed" HorizontalAlignment="Center"
+                       Margin="0,7,0,0" Foreground="Gray" FontSize="11"
+                       TextAlignment="Center" TextWrapping="Wrap"
+                       AutomationProperties.LiveSetting="Polite"/>
+        </StackPanel>
+
+        <!-- Row 3: Advanced options. A subtle divider + disclosure toggle keeps the
+             default view simple; expanding reveals the SSH key row and the tool
+             buttons below the toggle. -->
+        <StackPanel Grid.Row="3" Margin="0,0,0,10">
+            <Border Height="1" Background="#FFE7E7E7" Margin="0,0,0,8"/>
+            <ToggleButton x:Name="TglAdvanced" Style="{StaticResource DisclosureToggle}"
+                          Checked="TglAdvanced_Changed" Unchecked="TglAdvanced_Changed"
+                          AutomationProperties.Name="Advanced options"
+                          ToolTip="Show advanced options: SSH public key, inspect and self-test"/>
+
+            <!-- SSH public key (advanced). Also shown in key-only mode, or once a key
+                 is selected, so a required/active credential is never hidden. -->
+            <Grid x:Name="KeyRow" Margin="0,12,0,0" Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" x:Name="LblKey" Style="{StaticResource FieldLabel}"
+                           Text="SSH Public Key:"/>
+                <TextBox Grid.Column="1" x:Name="TxtKeyPath"
+                         Style="{StaticResource InputField}" IsReadOnly="True"
+                         Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose an existing public key (.pub)…"
+                         PreviewMouseLeftButtonDown="TxtKeyPath_MouseDown" PreviewKeyDown="TxtKeyPath_PreviewKeyDown"
+                         Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
+                <StackPanel Grid.Column="2" x:Name="KeyButtons" Orientation="Horizontal">
+                    <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
+                            ToolTip="Generate a new SSH key pair…"
+                            AutomationProperties.Name="Generate a new SSH key pair"
+                            Click="BtnGenKey_Click">
+                        <!-- Key glyph with a small green "＋" badge = generate a NEW key.
+                             The Segoe key points its shaft/teeth to the lower-right, so
+                             the badge sits in the empty TOP-RIGHT corner to avoid covering
+                             the key. The key inherits the button Foreground (greys when
+                             disabled); the plus is drawn as two rounded bars to stay crisp. -->
+                        <Grid Width="20" Height="18" SnapsToDevicePixels="True">
+                            <TextBlock Text="&#xE192;" FontFamily="Segoe MDL2 Assets" FontSize="16"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Border Background="#FF107C10" CornerRadius="6" Width="12" Height="12"
+                                    HorizontalAlignment="Right" VerticalAlignment="Top"
+                                    Margin="0,-2,-3,0">
+                                <Grid>
+                                    <Rectangle Fill="White" Width="6" Height="2" RadiusX="1" RadiusY="1"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    <Rectangle Fill="White" Width="2" Height="6" RadiusX="1" RadiusY="1"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Grid>
+                            </Border>
+                        </Grid>
+                    </Button>
+                    <Button x:Name="BtnClearKey" Style="{StaticResource RowIconButton}"
+                            Content="&#xE711;" IsEnabled="False"
+                            ToolTip="Clear the selected key (build with password only)"
+                            AutomationProperties.Name="Clear the selected SSH key"
+                            Click="BtnClearKey_Click"/>
+                </StackPanel>
+            </Grid>
+
+            <StackPanel x:Name="AdvancedTools" Orientation="Horizontal" Margin="0,12,0,0"
+                        HorizontalAlignment="Center" Visibility="Collapsed">
+                <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0"
                         Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
                 <Button x:Name="BtnSelfTest" Style="{StaticResource SecondaryButton}"
                         Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
             </StackPanel>
-            <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled. -->
-            <!-- LiveSetting=Polite so a screen reader announces the changing
-                 "still needed" / "Ready to build" hint as the form is filled. -->
-            <TextBlock x:Name="TxtBuildHint" VerticalAlignment="Center" Margin="14,0,0,0"
-                       Foreground="Gray" TextTrimming="CharacterEllipsis"
-                       AutomationProperties.LiveSetting="Polite"/>
+        </StackPanel>
+
+        <!-- Row 4: result output — part of Advanced options. Hidden by default and
+             shown only while Advanced is expanded (driven by TglAdvanced). Inspect /
+             Self-test are launched from an open Advanced, so their output is visible
+             here; Build reports its outcome in a popup and its full log lands here for
+             whenever Advanced is opened. -->
+        <DockPanel x:Name="ResultGroup" Grid.Row="4" Visibility="Collapsed">
+            <TextBlock DockPanel.Dock="Top" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
+            <TextBox x:Name="TxtResult"
+                     IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
+                     VerticalScrollBarVisibility="Auto"
+                     HorizontalScrollBarVisibility="Auto"
+                     FontFamily="Consolas" FontSize="12"
+                     Text="Choose a firmware and an output path, set a root password (or tick “Disable” to use an SSH key only), then click Build."/>
         </DockPanel>
 
-        <!-- Row 3: result label -->
-        <TextBlock Grid.Row="3" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
-
-        <!-- Row 4: result box -->
-        <TextBox x:Name="TxtResult" Grid.Row="4"
-                 IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
-                 VerticalScrollBarVisibility="Auto"
-                 HorizontalScrollBarVisibility="Auto"
-                 FontFamily="Consolas" FontSize="12"
-                 Text="Choose a firmware and an output path, set a root password (or tick “Disable” to use an SSH key only), then click Build."/>
-
-        <!-- Row 5: diagnostics -->
-        <TextBlock Grid.Row="5" x:Name="TxtDiag" Margin="0,8,0,0"
+        <!-- Row 6: diagnostics -->
+        <TextBlock Grid.Row="6" x:Name="TxtDiag" Margin="0,8,0,0"
                    Foreground="Gray" FontFamily="Consolas" FontSize="11"/>
 
-        <!-- Row 6: support / buy me a coffee -->
-        <Border Grid.Row="6" Margin="0,10,0,0" Padding="12,9"
+        <!-- Row 7: support / buy me a coffee -->
+        <Border Grid.Row="7" Margin="0,10,0,0" Padding="12,9"
                 Background="#FFFBF7EF" BorderBrush="#FFE6D6AE" BorderThickness="1" CornerRadius="8">
             <Grid>
                 <Grid.ColumnDefinitions>
