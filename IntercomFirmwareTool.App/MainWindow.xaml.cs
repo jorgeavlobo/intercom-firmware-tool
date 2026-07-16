@@ -1428,13 +1428,28 @@ namespace IntercomFirmwareTool.App
                 button.IsHitTestVisible = false;
                 button.Focusable = false;
 
+                // Keep "⏳ Building" centered in the button while the dots grow to its
+                // right: put the base in the middle column with a fixed dots slot on
+                // the right and an equal spacer on the left, so the base never shifts.
+                var baseText = new TextBlock { Text = "⏳ Building", VerticalAlignment = VerticalAlignment.Center };
+                var dotsText = new TextBlock { VerticalAlignment = VerticalAlignment.Center,
+                                               HorizontalAlignment = HorizontalAlignment.Left };
+                var grid = new Grid();
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) }); // left spacer
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });    // "⏳ Building"
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) }); // dots slot
+                Grid.SetColumn(baseText, 1);
+                Grid.SetColumn(dotsText, 2);
+                grid.Children.Add(baseText);
+                grid.Children.Add(dotsText);
+                button.Content = grid;
+
                 int dots = 0;
-                button.Content = "⏳ Building" + new string('.', dots);
                 _buildDots = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
                 _buildDots.Tick += (_, _) =>
                 {
                     dots = (dots + 1) % 4;   // 0 → 1 → 2 → 3 → 0 …  ("" . .. ...)
-                    button.Content = "⏳ Building" + new string('.', dots);
+                    dotsText.Text = new string('.', dots);
                 };
                 _buildDots.Start();
             }
