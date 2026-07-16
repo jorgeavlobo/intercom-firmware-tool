@@ -1485,9 +1485,10 @@ namespace IntercomFirmwareTool.App
         /// <summary>
         /// While busy, turns the button into a "loading" button. It stays DISABLED
         /// (so it can't be re-invoked, including via UI Automation), but Tag="busy"
-        /// makes the style keep it full-colour and readable instead of greyed out,
-        /// and its label animates "⏳ Building." → ".." → "..." once per second.
-        /// Restored when the op finishes.
+        /// makes the style keep it full-colour and readable instead of greyed out.
+        /// The centered "⏳ Building" label keeps a growing dot suffix once per
+        /// second ("" → "." → ".." → "..." → repeat); the word stays put while the
+        /// dots grow to its right. Restored when the op finishes.
         /// </summary>
         private void SetButtonBusy(Button button, bool busy)
         {
