@@ -891,14 +891,28 @@ namespace IntercomFirmwareTool.App
             RowSpacer.Height = advanced ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
         }
 
+        private double? _heightBeforeAdvanced;
+
         /// <summary>Toggles the advanced surface (SSH key row + tool buttons + result).</summary>
         private void TglAdvanced_Changed(object sender, RoutedEventArgs e)
         {
             UpdateAdvancedVisibility();
-            // The compact default window is too short for the result output, so give it
-            // room when Advanced opens. Grow only — never shrink back, to avoid fighting
-            // a manual resize.
-            if (TglAdvanced.IsChecked == true && Height < 720) Height = 720;
+            if (TglAdvanced.IsChecked == true)
+            {
+                // Opening: remember the current height, then grow so the result output
+                // has room (only if we haven't already grown for this open session).
+                if (_heightBeforeAdvanced == null)
+                {
+                    _heightBeforeAdvanced = Height;
+                    if (Height < 720) Height = 720;
+                }
+            }
+            else if (_heightBeforeAdvanced != null)
+            {
+                // Closing: restore the window to the size it had before opening Advanced.
+                Height = _heightBeforeAdvanced.Value;
+                _heightBeforeAdvanced = null;
+            }
         }
 
         // Amber cue for a required field that is still blank. Colour is never the
@@ -980,11 +994,9 @@ namespace IntercomFirmwareTool.App
             string previousHint = TxtBuildHint.Text;
             if (!_uiEnabled)
             {
-                // An operation (build / verify / self-test) is running and the whole
-                // form is locked, so the "still needed" / mismatch guidance isn't
-                // actionable right now — show progress for the duration instead.
-                TxtBuildHint.Text = "⏳ Working…";
-                TxtBuildHint.Foreground = Brushes.Gray;
+                // An operation is running. The Build button itself shows the progress
+                // ("⏳ Building…"), so keep the hint blank — no duplicated info.
+                TxtBuildHint.Text = "";
             }
             else if (confirmMismatch)
             {
@@ -1181,39 +1193,75 @@ namespace IntercomFirmwareTool.App
             sb.AppendLine($"  Output     : {output}");
             sb.AppendLine();
 
+            FwzBuildResult? built = null;
+            string? buildError = null;
             await RunAndShow(sb, () =>
             {
-                // No build-time re-hash here: BuildModifiedFwz performs the
-                // authoritative whitelist verification (size + SHA-256) itself,
-                // atomically under the input file lock — the TOCTOU-safe place to
-                // do it. A second ~100 MB hash here would only slow every build
-                // without adding safety. It throws a clear error if the input is
-                // not a recognized original, which RunAndShow surfaces.
-                FwzBuildResult r = FwzProbe.BuildModifiedFwz(fwz, opts, output);
-                sb.AppendLine($"Archive password : {r.PasswordUsed}  (ZipCrypto key, not the device model)");
-                sb.AppendLine($"Modified entry : {r.SelectedEntry}");
-                sb.AppendLine();
-                sb.AppendLine("Verification (reopened the OUTPUT .fwz and re-read every change):");
-                AppendChecks(sb, r.RoundTripChecks);
-                sb.AppendLine();
-                if (r.RoundTripAllPass)
+                try
                 {
-                    sb.AppendLine("✅ SUCCESS — the modified firmware was built and verified.");
-                    sb.AppendLine($"   Written to: {r.OutputPath}");
+                    // No build-time re-hash here: BuildModifiedFwz performs the
+                    // authoritative whitelist verification (size + SHA-256) itself,
+                    // atomically under the input file lock — the TOCTOU-safe place to
+                    // do it. A second ~100 MB hash here would only slow every build
+                    // without adding safety. It throws a clear error if the input is
+                    // not a recognized original, which RunAndShow surfaces.
+                    FwzBuildResult r = FwzProbe.BuildModifiedFwz(fwz, opts, output);
+                    built = r;
+                    sb.AppendLine($"Archive password : {r.PasswordUsed}  (ZipCrypto key, not the device model)");
+                    sb.AppendLine($"Modified entry : {r.SelectedEntry}");
                     sb.AppendLine();
-                    sb.AppendLine("Before flashing: keep the ORIGINAL firmware and be ready to re-flash it");
-                    sb.AppendLine("with My Home Suite over Mini-USB. These units use an i.MX SoC — there is");
-                    sb.AppendLine("no documented low-level un-brick (SAM-BA does not apply), so a bad flash");
-                    sb.AppendLine("may be unrecoverable. Your original .fwz was not modified.");
+                    sb.AppendLine("Verification (reopened the OUTPUT .fwz and re-read every change):");
+                    AppendChecks(sb, r.RoundTripChecks);
+                    sb.AppendLine();
+                    if (r.RoundTripAllPass)
+                    {
+                        sb.AppendLine("✅ SUCCESS — the modified firmware was built and verified.");
+                        sb.AppendLine($"   Written to: {r.OutputPath}");
+                        sb.AppendLine();
+                        sb.AppendLine("Before flashing: keep the ORIGINAL firmware and be ready to re-flash it");
+                        sb.AppendLine("with My Home Suite over Mini-USB. These units use an i.MX SoC — there is");
+                        sb.AppendLine("no documented low-level un-brick (SAM-BA does not apply), so a bad flash");
+                        sb.AppendLine("may be unrecoverable. Your original .fwz was not modified.");
+                    }
+                    else
+                    {
+                        sb.AppendLine("❌ Some checks FAILED — the verified build was NOT written.");
+                        sb.AppendLine($"   Your chosen output path was left unchanged: {output}");
+                        sb.AppendLine("   (any existing file there is NOT this build — do not flash it.)");
+                        sb.AppendLine("   See the failing checks above.");
+                    }
                 }
-                else
+                catch (Exception ex)
                 {
-                    sb.AppendLine("❌ Some checks FAILED — the verified build was NOT written.");
-                    sb.AppendLine($"   Your chosen output path was left unchanged: {output}");
-                    sb.AppendLine("   (any existing file there is NOT this build — do not flash it.)");
-                    sb.AppendLine("   See the failing checks above.");
+                    buildError = ex.Message;   // for the popup
+                    throw;                     // let RunAndShow log full details to the console
                 }
             }, BtnBuild);
+
+            // Report the outcome in a popup. Advanced stays exactly as the user left
+            // it — a build never opens (or closes) it; the full log is in Advanced →
+            // Result if they want it.
+            if (buildError != null)
+            {
+                MessageBox.Show(this,
+                    "The build could not be completed:\n\n" + buildError +
+                    "\n\nOpen Advanced → Result for the full log.",
+                    "Build failed", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            else if (built?.RoundTripAllPass == true)
+            {
+                MessageBox.Show(this,
+                    "✅ The modified firmware was built and verified successfully.\n\n" +
+                    "Saved to:\n" + built.OutputPath + "\n\nThe process is finished.",
+                    "Build complete", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            else
+            {
+                MessageBox.Show(this,
+                    "Some verification checks did not pass, so the modified firmware was NOT written.\n\n" +
+                    "Open Advanced → Result to see which checks failed.",
+                    "Build not written", MessageBoxButton.OK, MessageBoxImage.Warning);
+            }
         }
 
         // ---- Secondary: Verify an existing .fwz -----------------------------
@@ -1328,9 +1376,10 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private async Task RunAndShow(StringBuilder sb, Action work, Button? busyButton = null)
         {
-            // Make sure the result output is visible for the run — it lives in the
-            // Advanced surface, so reveal Advanced (a no-op if already open).
-            TglAdvanced.IsChecked = true;
+            // Note: we deliberately do NOT open Advanced here. Verify/Self-test are
+            // launched from an already-open Advanced surface (their buttons live
+            // there), and Build must not force Advanced open — it reports its outcome
+            // in a popup instead.
             SetButtonsEnabled(false);
             if (busyButton != null) SetButtonBusy(busyButton, true);
             TxtResult.Text = sb.ToString() + "\nProcessing…";
@@ -1351,39 +1400,50 @@ namespace IntercomFirmwareTool.App
             TxtResult.Text = sb.ToString();
         }
 
-        // Idle content of buttons currently showing the busy spinner, so it can be
-        // restored when the operation finishes.
+        // Idle content of a button currently showing the busy state, so it can be
+        // restored when the operation finishes; and the timer driving the dots.
         private readonly Dictionary<Button, object?> _idleContent = new();
+        private DispatcherTimer? _buildDots;
 
         /// <summary>
-        /// While busy, replaces a button's label with a spinning hourglass; restores
-        /// the original label afterwards. The button is also disabled by
-        /// SetButtonsEnabled, so it can't be clicked during the operation.
+        /// While busy, turns the button into a non-interactive "loading" button: it
+        /// keeps its full colour so the label stays readable (unlike the greyed-out
+        /// disabled look), but can't be clicked or focused, and its label animates
+        /// "⏳ Building." → ".." → "..." once per second. Restored when the op finishes.
         /// </summary>
         private void SetButtonBusy(Button button, bool busy)
         {
             if (busy)
             {
                 if (!_idleContent.ContainsKey(button)) _idleContent[button] = button.Content;
-                var hourglass = new TextBlock
+                // Loading button: full colour + readable, but not clickable/focusable
+                // (SetButtonsEnabled disabled it a moment ago; re-enable the visuals).
+                button.IsEnabled = true;
+                button.IsHitTestVisible = false;
+                button.Focusable = false;
+
+                int dots = 1;
+                button.Content = "⏳ Building" + new string('.', dots);
+                _buildDots = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+                _buildDots.Tick += (_, _) =>
                 {
-                    Text = "⌛", // ⌛ hourglass
-                    FontSize = 16,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    RenderTransformOrigin = new Point(0.5, 0.5)
+                    dots = dots % 3 + 1;   // 1 → 2 → 3 → 1 …
+                    button.Content = "⏳ Building" + new string('.', dots);
                 };
-                var rot = new RotateTransform(0);
-                hourglass.RenderTransform = rot;
-                button.Content = hourglass;
-                rot.BeginAnimation(RotateTransform.AngleProperty,
-                    new DoubleAnimation(0, 360, new Duration(TimeSpan.FromSeconds(1.2)))
-                    { RepeatBehavior = RepeatBehavior.Forever });
+                _buildDots.Start();
             }
-            else if (_idleContent.TryGetValue(button, out var idle))
+            else
             {
-                button.Content = idle;
-                _idleContent.Remove(button);
+                _buildDots?.Stop();
+                _buildDots = null;
+                button.IsHitTestVisible = true;
+                button.Focusable = true;
+                if (_idleContent.TryGetValue(button, out var idle))
+                {
+                    button.Content = idle;
+                    _idleContent.Remove(button);
+                }
+                // IsEnabled is restored by SetButtonsEnabled/UpdateBuildEnabled next.
             }
         }
 
@@ -1460,7 +1520,7 @@ namespace IntercomFirmwareTool.App
             TxtConfirm.IsEnabled = creds;
             // Refresh the Build gate, the "still needed" hint/cues, and the content-
             // aware reveal/copy/generate buttons so they all reflect the new op state
-            // (UpdateBuildEnabled gates Build on _uiEnabled and shows "⏳ Working…").
+            // (UpdateBuildEnabled gates Build on _uiEnabled; the hint blanks while busy).
             _uiEnabled = enabled;
             UpdateBuildEnabled();
         }
