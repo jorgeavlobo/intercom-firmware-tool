@@ -1428,18 +1428,25 @@ namespace IntercomFirmwareTool.App
                 button.IsHitTestVisible = false;
                 button.Focusable = false;
 
-                // Keep "⏳ Building" centered in the button while the dots grow to its
-                // right: put the base in the middle column with a fixed dots slot on
-                // the right and an equal spacer on the left, so the base never shifts.
-                var baseText = new TextBlock { Text = "⏳ Building", VerticalAlignment = VerticalAlignment.Center };
+                // Keep the WORD "Building" centered in the button: it sits in the
+                // middle column, with the ⏳ emoji in an equal-width left column and
+                // the dots in an equal-width right column. Equal side columns keep
+                // "Building" centered while the emoji stays left and the dots grow
+                // right, none of which shifts the word.
+                var emoji = new TextBlock { Text = "⏳", VerticalAlignment = VerticalAlignment.Center,
+                                            HorizontalAlignment = HorizontalAlignment.Right,
+                                            Margin = new Thickness(0, 0, 5, 0) };
+                var baseText = new TextBlock { Text = "Building", VerticalAlignment = VerticalAlignment.Center };
                 var dotsText = new TextBlock { VerticalAlignment = VerticalAlignment.Center,
                                                HorizontalAlignment = HorizontalAlignment.Left };
                 var grid = new Grid();
-                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) }); // left spacer
-                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });    // "⏳ Building"
-                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) }); // dots slot
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(26) }); // ⏳ (left)
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });    // "Building"
+                grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(26) }); // dots (right)
+                Grid.SetColumn(emoji, 0);
                 Grid.SetColumn(baseText, 1);
                 Grid.SetColumn(dotsText, 2);
+                grid.Children.Add(emoji);
                 grid.Children.Add(baseText);
                 grid.Children.Add(dotsText);
                 button.Content = grid;
