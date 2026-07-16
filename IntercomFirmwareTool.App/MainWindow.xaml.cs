@@ -396,6 +396,7 @@ namespace IntercomFirmwareTool.App
             TxtOutputPath.Foreground = Brushes.Gray;
             LblOutput.IsEnabled = false;
             TxtOutputPath.IsEnabled = false;
+            SetStatus(""); // don't leave "✓ Firmware verified." while nothing is selected
             UpdateBuildEnabled();
         }
 
@@ -901,6 +902,7 @@ namespace IntercomFirmwareTool.App
         }
 
         private double? _heightBeforeAdvanced;
+        private double? _topBeforeAdvanced;
 
         /// <summary>
         /// Shows a short message in the always-visible status line under the Build
@@ -913,6 +915,22 @@ namespace IntercomFirmwareTool.App
             TxtStatus.Foreground = error ? ErrorBrush : Brushes.Gray;
             TxtStatus.Visibility = string.IsNullOrEmpty(message)
                 ? Visibility.Collapsed : Visibility.Visible;
+            // The status line is a Polite live region (XAML); announce the change so a
+            // screen reader hears it (LiveSetting alone is inert — see AnnounceLiveRegion).
+            if (!string.IsNullOrEmpty(message)) AnnounceLiveRegion(TxtStatus);
+        }
+
+        /// <summary>
+        /// Raises LiveRegionChanged on a Polite live-region element so assistive tech
+        /// actually announces a text change (WPF needs the peer to raise it). No-op
+        /// unless an automation client is listening; creates the peer if needed.
+        /// </summary>
+        private static void AnnounceLiveRegion(FrameworkElement element)
+        {
+            if (!AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged)) return;
+            var peer = FrameworkElementAutomationPeer.FromElement(element)
+                ?? FrameworkElementAutomationPeer.CreatePeerForElement(element);
+            peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
         }
 
         /// <summary>Toggles the advanced surface (SSH key row + tool buttons + result).</summary>
@@ -921,22 +939,30 @@ namespace IntercomFirmwareTool.App
             UpdateAdvancedVisibility();
             if (TglAdvanced.IsChecked == true)
             {
-                // Opening: remember the current height, then grow so the result output
-                // has room (only if we haven't already grown for this open session).
+                // Opening: remember the current size/position, then grow so the result
+                // output has room (only if we haven't already grown for this session).
                 if (_heightBeforeAdvanced == null)
                 {
                     _heightBeforeAdvanced = Height;
-                    // Grow for the result, but never beyond the screen's work area (a
-                    // small or DPI-scaled display could otherwise push it off-screen).
-                    double want = Math.Min(720, SystemParameters.WorkArea.Height);
+                    _topBeforeAdvanced = Top;
+
+                    var wa = SystemParameters.WorkArea;
+                    double want = Math.Min(720, wa.Height);
                     if (Height < want) Height = want;
+                    // The window's Top didn't change, so growing downward could push the
+                    // footer off-screen. Nudge Top up so the whole window stays within
+                    // the work area. (WorkArea is the primary monitor — a reasonable
+                    // approximation for a single-window tool.)
+                    if (Top + Height > wa.Bottom) Top = Math.Max(wa.Top, wa.Bottom - Height);
                 }
             }
             else if (_heightBeforeAdvanced != null)
             {
-                // Closing: restore the window to the size it had before opening Advanced.
+                // Closing: restore the size AND position from before Advanced was opened.
                 Height = _heightBeforeAdvanced.Value;
+                if (_topBeforeAdvanced != null) Top = _topBeforeAdvanced.Value;
                 _heightBeforeAdvanced = null;
+                _topBeforeAdvanced = null;
             }
         }
 
@@ -1044,18 +1070,10 @@ namespace IntercomFirmwareTool.App
                 TxtBuildHint.Foreground = Brushes.Gray;
             }
 
-            // The hint is a Polite live region (XAML), but WPF still needs the peer to
-            // raise the change event for it to be announced. Only do this when an
-            // assistive client is actually listening (ListenerExists) — then get or,
-            // if the peer hasn't been created yet, create it, so a running screen
-            // reader still hears the change. Fire only on an actual text change.
-            if (!string.Equals(previousHint, TxtBuildHint.Text, StringComparison.Ordinal) &&
-                AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
-            {
-                var peer = FrameworkElementAutomationPeer.FromElement(TxtBuildHint)
-                    ?? FrameworkElementAutomationPeer.CreatePeerForElement(TxtBuildHint);
-                peer?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
-            }
+            // The hint is a Polite live region (XAML); announce it, but only on an
+            // actual text change to avoid repeat announcements.
+            if (!string.Equals(previousHint, TxtBuildHint.Text, StringComparison.Ordinal))
+                AnnounceLiveRegion(TxtBuildHint);
 
             // Reveal/copy availability depends on the same password/confirm content.
             UpdatePasswordButtonStates();
