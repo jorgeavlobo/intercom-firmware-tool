@@ -977,7 +977,9 @@ namespace IntercomFirmwareTool.App
             AutomationProperties.SetName(TxtFwzPath, needFirmware ? "Firmware, required" : "Firmware");
             AutomationProperties.SetName(TxtOutputPath,
                 needOutput && _fwzPath != null ? "Save output as, required" : "Save output as");
-            AutomationProperties.SetName(TxtPassword, needPassword ? "Root Password, required" : "Root Password");
+            // Match the visible label, which drops "Root" in the simple view.
+            string pwLabel = TglAdvanced.IsChecked == true ? "Root Password" : "Password";
+            AutomationProperties.SetName(TxtPassword, needPassword ? pwLabel + ", required" : pwLabel);
             AutomationProperties.SetName(TxtConfirm,
                 needConfirm ? "Confirm Password, required"
                 : confirmMismatch ? "Confirm Password, does not match the password"
@@ -1421,6 +1423,7 @@ namespace IntercomFirmwareTool.App
         {
             if (busy)
             {
+                _buildDots?.Stop(); // never leave a previous timer running (re-entrancy)
                 if (!_idleContent.ContainsKey(button)) _idleContent[button] = button.Content;
                 // Loading button: full colour + readable, but not clickable/focusable
                 // (SetButtonsEnabled disabled it a moment ago; re-enable the visuals).
