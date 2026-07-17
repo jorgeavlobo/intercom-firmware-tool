@@ -149,18 +149,6 @@ The verified build was kept here — move/rename it manually:
   <data name="Ext4_KeyInstalled" xml:space="preserve">
     <value>SSH key ({0}) : installed  {1}  {2}</value>
   </data>
-  <data name="Ext4_HowPasswordAndKey" xml:space="preserve">
-    <value>password + key</value>
-  </data>
-  <data name="Ext4_HowPassword" xml:space="preserve">
-    <value>password</value>
-  </data>
-  <data name="Ext4_HowKey" xml:space="preserve">
-    <value>key</value>
-  </data>
-  <data name="Ext4_HowNone" xml:space="preserve">
-    <value>none</value>
-  </data>
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} does not exist in the image; refusing to create it (it would get unknown mode/owner).</value>
   </data>

@@ -149,18 +149,6 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Ext4_KeyInstalled" xml:space="preserve">
     <value>Chave SSH ({0}) : instalada  {1}  {2}</value>
   </data>
-  <data name="Ext4_HowPasswordAndKey" xml:space="preserve">
-    <value>palavra-passe + chave</value>
-  </data>
-  <data name="Ext4_HowPassword" xml:space="preserve">
-    <value>palavra-passe</value>
-  </data>
-  <data name="Ext4_HowKey" xml:space="preserve">
-    <value>chave</value>
-  </data>
-  <data name="Ext4_HowNone" xml:space="preserve">
-    <value>nenhuma</value>
-  </data>
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} não existe na imagem; recusada a sua criação (obteria modo/proprietário desconhecidos).</value>
   </data>

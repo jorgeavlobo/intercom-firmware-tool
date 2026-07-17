@@ -149,18 +149,6 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Ext4_KeyInstalled" xml:space="preserve">
     <value>Chiave SSH ({0}) : installata  {1}  {2}</value>
   </data>
-  <data name="Ext4_HowPasswordAndKey" xml:space="preserve">
-    <value>password + chiave</value>
-  </data>
-  <data name="Ext4_HowPassword" xml:space="preserve">
-    <value>password</value>
-  </data>
-  <data name="Ext4_HowKey" xml:space="preserve">
-    <value>chiave</value>
-  </data>
-  <data name="Ext4_HowNone" xml:space="preserve">
-    <value>nessuna</value>
-  </data>
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} non esiste nell'immagine; creazione rifiutata (otterrebbe modo/proprietario sconosciuti).</value>
   </data>

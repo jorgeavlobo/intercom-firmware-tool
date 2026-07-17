@@ -704,9 +704,13 @@ namespace IntercomFirmwareTool.Core
                 checks.Add(new("/etc/init.d/dropbear exists (prerequisite)",
                     fs.FileExists("/etc/init.d/dropbear"), ""));
 
-                // A valid SSH-enable must leave at least one usable login.
-                string how = passwordLogin && keyInstalled ? CoreStrings.Get("Ext4_HowPasswordAndKey")
-                    : passwordLogin ? CoreStrings.Get("Ext4_HowPassword") : keyInstalled ? CoreStrings.Get("Ext4_HowKey") : CoreStrings.Get("Ext4_HowNone");
+                // A valid SSH-enable must leave at least one usable login. This is the
+                // terse DETAIL of a (kept-English) structural check, not prose, so it
+                // stays in English — otherwise it would be the one localized token in
+                // an English checklist and go stale on a language switch (checks are
+                // rendered from their stored Detail, unlike the re-localizable findings).
+                string how = passwordLogin && keyInstalled ? "password + key"
+                    : passwordLogin ? "password" : keyInstalled ? "key" : "none";
                 checks.Add(new("At least one login credential present (password or key)",
                     passwordLogin || keyInstalled, how));
 

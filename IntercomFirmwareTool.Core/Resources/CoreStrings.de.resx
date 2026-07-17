@@ -149,18 +149,6 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Ext4_KeyInstalled" xml:space="preserve">
     <value>SSH-Schlüssel ({0}) : installiert  {1}  {2}</value>
   </data>
-  <data name="Ext4_HowPasswordAndKey" xml:space="preserve">
-    <value>Passwort + Schlüssel</value>
-  </data>
-  <data name="Ext4_HowPassword" xml:space="preserve">
-    <value>Passwort</value>
-  </data>
-  <data name="Ext4_HowKey" xml:space="preserve">
-    <value>Schlüssel</value>
-  </data>
-  <data name="Ext4_HowNone" xml:space="preserve">
-    <value>keine</value>
-  </data>
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} existiert nicht im Image; Erstellung wird verweigert (es würde unbekannten Modus/Eigentümer erhalten).</value>
   </data>

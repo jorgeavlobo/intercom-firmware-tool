@@ -149,18 +149,6 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Ext4_KeyInstalled" xml:space="preserve">
     <value>Clave SSH ({0}) : instalada  {1}  {2}</value>
   </data>
-  <data name="Ext4_HowPasswordAndKey" xml:space="preserve">
-    <value>contraseña + clave</value>
-  </data>
-  <data name="Ext4_HowPassword" xml:space="preserve">
-    <value>contraseña</value>
-  </data>
-  <data name="Ext4_HowKey" xml:space="preserve">
-    <value>clave</value>
-  </data>
-  <data name="Ext4_HowNone" xml:space="preserve">
-    <value>ninguna</value>
-  </data>
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} no existe en la imagen; se rechaza crearlo (obtendría un modo/propietario desconocido).</value>
   </data>

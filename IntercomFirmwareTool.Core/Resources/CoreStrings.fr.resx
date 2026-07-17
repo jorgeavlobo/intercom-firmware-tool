@@ -149,18 +149,6 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Ext4_KeyInstalled" xml:space="preserve">
     <value>Clé SSH ({0}) : installée  {1}  {2}</value>
   </data>
-  <data name="Ext4_HowPasswordAndKey" xml:space="preserve">
-    <value>mot de passe + clé</value>
-  </data>
-  <data name="Ext4_HowPassword" xml:space="preserve">
-    <value>mot de passe</value>
-  </data>
-  <data name="Ext4_HowKey" xml:space="preserve">
-    <value>clé</value>
-  </data>
-  <data name="Ext4_HowNone" xml:space="preserve">
-    <value>aucun</value>
-  </data>
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} n'existe pas dans l'image ; refus de le créer (il obtiendrait un mode/propriétaire inconnu).</value>
   </data>
