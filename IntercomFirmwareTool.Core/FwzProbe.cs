@@ -241,9 +241,12 @@ namespace IntercomFirmwareTool.Core
             // firmware.
             var verified = FirmwareRegistry.Verify(realInput);
             if (!verified.Ok)
+                // Trim any trailing newline the resource may carry and insert exactly
+                // one, so a translation dropping/adding it can't run the two messages
+                // together (or leave a blank line).
                 throw new InvalidOperationException(
-                    CoreStrings.Get("Fwz_RefuseBuildUnrecognized") +
-                    verified.Message);
+                    CoreStrings.Get("Fwz_RefuseBuildUnrecognized").TrimEnd('\r', '\n') +
+                    "\n" + verified.Message);
 
             FwzExtractResult ex = ExtractBareImage(realInput);
             string? modifiedBare = null;
