@@ -49,17 +49,30 @@ namespace IntercomFirmwareTool.Core
         }
     }
 
-    /// <summary>Outcome of checking a file against the registry.</summary>
-    public sealed record FirmwareCheckResult(
-        bool Ok,
-        KnownFirmware? Match,
-        Func<string> MessageFactory)
+    /// <summary>
+    /// Outcome of checking a file against the registry. A plain class (not a record):
+    /// it carries a message <b>factory</b> so the outcome text re-localizes in the
+    /// current UI culture on each access, and a record's synthesized
+    /// equality/hashcode/ToString over a delegate would be meaningless.
+    /// </summary>
+    public sealed class FirmwareCheckResult
     {
+        public bool Ok { get; }
+        public KnownFirmware? Match { get; }
+        private readonly Func<string> _messageFactory;
+
+        public FirmwareCheckResult(bool ok, KnownFirmware? match, Func<string> messageFactory)
+        {
+            Ok = ok;
+            Match = match;
+            _messageFactory = messageFactory;
+        }
+
         /// <summary>
         /// The localized outcome message, regenerated in the current UI culture on
         /// each access — so it re-localizes when the app language changes at runtime.
         /// </summary>
-        public string Message => MessageFactory();
+        public string Message => _messageFactory();
     }
 
     /// <summary>

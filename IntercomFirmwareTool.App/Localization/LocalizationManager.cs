@@ -97,8 +97,11 @@ namespace IntercomFirmwareTool.App.Localization
             CultureInfo.DefaultThreadCurrentCulture = _culture;
             CultureInfo.DefaultThreadCurrentUICulture = _culture;
 
-            // Refresh every {loc:Loc} binding, then let views re-apply imperative text.
+            // Refresh every {loc:Loc} binding (indexer) and the culture properties (in
+            // case anything binds to them), then let views re-apply imperative text.
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs("Item[]"));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CurrentCulture)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CurrentCode)));
             LanguageChanged?.Invoke(this, EventArgs.Empty);
 
             if (persist) SaveCode(code);

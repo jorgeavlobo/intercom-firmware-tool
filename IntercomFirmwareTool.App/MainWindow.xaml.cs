@@ -38,6 +38,11 @@ namespace IntercomFirmwareTool.App
         private string? _keyPath;
         private string? _outputPath;
 
+        // True after a firmware was rejected (invalid): keeps the firebrick "(no valid
+        // firmware selected)" cue across a language switch instead of reverting to the
+        // neutral placeholder, which would make a rejected file look merely unselected.
+        private bool _fwzRejected;
+
         // Background locator for the newest unmodified original firmware on the
         // machine, so the picker opens where it lives. Cancelled once a firmware is
         // chosen or the window closes.
@@ -347,6 +352,7 @@ namespace IntercomFirmwareTool.App
                 // unmodifiable file.
                 _fwzPath = null;
                 _outputPath = null;
+                _fwzRejected = true;
                 TxtFwzPath.Text = L("Ph_Firmware_Invalid");
                 TxtFwzPath.Foreground = Brushes.Firebrick;
                 TxtOutputPath.Text = L("Ph_Output");
@@ -366,6 +372,7 @@ namespace IntercomFirmwareTool.App
             // Accepted: record the path and enable the output row (BtnClearOutput is
             // driven by UpdateBuildEnabled once _outputPath is set, below).
             _fwzPath = chosen;
+            _fwzRejected = false;
             StopFirmwareScan(); // a firmware is chosen — stop and release the scan
             SetPathText(TxtFwzPath, chosen);
             LblOutput.IsEnabled = true;
@@ -392,6 +399,7 @@ namespace IntercomFirmwareTool.App
         {
             _fwzPath = null;
             _outputPath = null;
+            _fwzRejected = false;
             TxtFwzPath.Text = L("Ph_Firmware");
             TxtFwzPath.Foreground = Brushes.Gray;
             TxtOutputPath.Text = L("Ph_Output");
@@ -990,7 +998,13 @@ namespace IntercomFirmwareTool.App
         /// <summary>Sets the neutral placeholder on any path box that has no selection.</summary>
         private void RefreshPlaceholders()
         {
-            if (_fwzPath == null) { TxtFwzPath.Text = L("Ph_Firmware"); TxtFwzPath.Foreground = Brushes.Gray; }
+            if (_fwzPath == null)
+            {
+                // Preserve the rejected-firmware cue (firebrick) across a language
+                // switch; otherwise show the neutral "click to choose" placeholder.
+                if (_fwzRejected) { TxtFwzPath.Text = L("Ph_Firmware_Invalid"); TxtFwzPath.Foreground = Brushes.Firebrick; }
+                else { TxtFwzPath.Text = L("Ph_Firmware"); TxtFwzPath.Foreground = Brushes.Gray; }
+            }
             if (_outputPath == null) { TxtOutputPath.Text = L("Ph_Output"); TxtOutputPath.Foreground = Brushes.Gray; }
             UpdateKeyPlaceholder();
         }
