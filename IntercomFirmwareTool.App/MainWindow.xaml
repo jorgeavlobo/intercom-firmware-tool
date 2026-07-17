@@ -4,8 +4,9 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:IntercomFirmwareTool.App"
+        xmlns:loc="clr-namespace:IntercomFirmwareTool.App.Localization"
         mc:Ignorable="d"
-        Title="Intercom Firmware Tool — SSH-enable (Classe 100X / 300X)"
+        Title="{loc:Loc Win_Title}"
         Icon="Assets/Icons/AppIcon.ico"
         Height="540" Width="760" MinHeight="480" MinWidth="640"
         WindowStartupLocation="CenterScreen">
@@ -191,7 +192,7 @@
                                      swapped by the IsChecked trigger below. -->
                                 <TextBlock x:Name="chev" Text="&#xE76C;" FontFamily="Segoe MDL2 Assets"
                                            FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                <TextBlock Text="Advanced options" VerticalAlignment="Center"
+                                <TextBlock Text="{loc:Loc Adv_Toggle}" VerticalAlignment="Center"
                                            FontWeight="SemiBold"/>
                             </StackPanel>
                         </Border>
@@ -310,7 +311,7 @@
 
     <Grid Margin="14">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>   <!-- 0: intro + safety -->
+            <RowDefinition Height="Auto"/>   <!-- 0: language menu + intro/safety -->
             <RowDefinition Height="Auto"/>   <!-- 1: input form -->
             <RowDefinition Height="Auto"/>   <!-- 2: Build (centered) + hint -->
             <RowDefinition Height="Auto"/>   <!-- 3: advanced options disclosure -->
@@ -323,11 +324,19 @@
             <RowDefinition Height="Auto"/>   <!-- 7: support / buy me a coffee -->
         </Grid.RowDefinitions>
 
-        <!-- Row 0: what this does + safety note -->
-        <Border Grid.Row="0" Background="#FFF7F2E8" BorderBrush="#FFE0C98A"
-                BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,0,0,12">
-            <TextBlock TextWrapping="Wrap" Foreground="#FF7A5B00"><Run Text="⚠ Flashing modified firmware can brick the device. "/><Run Text="Do it at your own risk!" FontWeight="Bold" TextDecorations="Underline"/><Run Text=" Use "/><Hyperlink NavigateUri="https://assets.legrand.com/pim/AUTRE/MyHOME_Suite_030538.exe" RequestNavigate="Hyperlink_RequestNavigate">MyHOME Suite</Hyperlink><Run Text="."/></TextBlock>
-        </Border>
+        <!-- Row 0: a discreet globe language menu (top-right), then the safety note -->
+        <StackPanel Grid.Row="0">
+            <Menu x:Name="LangMenu" HorizontalAlignment="Right" Background="Transparent"
+                  Margin="0,0,0,6" Padding="0"
+                  ToolTip="{loc:Loc Lang_MenuTooltip}"
+                  AutomationProperties.Name="{loc:Loc Lang_MenuTooltip}">
+                <MenuItem x:Name="LangMenuRoot"/>
+            </Menu>
+            <Border Background="#FFF7F2E8" BorderBrush="#FFE0C98A"
+                    BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,0,0,12">
+                <TextBlock TextWrapping="Wrap" Foreground="#FF7A5B00"><Run Text="{loc:Loc Banner_Risk_Pre}"/><Run Text="{loc:Loc Banner_Risk_Emph}" FontWeight="Bold" TextDecorations="Underline"/><Run Text="{loc:Loc Banner_Use_Pre}"/><Hyperlink NavigateUri="https://assets.legrand.com/pim/AUTRE/MyHOME_Suite_030538.exe" RequestNavigate="Hyperlink_RequestNavigate"><Run Text="{loc:Loc Banner_Link}"/></Hyperlink><Run Text="{loc:Loc Banner_Use_Post}"/></TextBlock>
+            </Border>
+        </StackPanel>
 
         <!-- Row 1: the input form -->
         <Grid Grid.Row="1" Margin="0,0,0,10">
@@ -346,62 +355,62 @@
 
             <!-- Firmware .fwz -->
             <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Firmware:"/>
+                       Text="{loc:Loc Field_Firmware}"/>
             <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtFwzPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
-                     Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose the original firmware (.fwz)…"
+                     Cursor="Hand" ToolTip="{loc:Loc Tip_Firmware}"
                      PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown" PreviewKeyDown="TxtFwzPath_PreviewKeyDown"
-                     Text="(click to choose the original .fwz to modify)" Foreground="Gray"/>
+                     Foreground="Gray"/>
             <Button Grid.Row="0" Grid.Column="2" x:Name="BtnClearFwz"
                     Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
-                    ToolTip="Clear the selected firmware"
-                    AutomationProperties.Name="Clear the selected firmware"
+                    ToolTip="{loc:Loc Tip_ClearFirmware}"
+                    AutomationProperties.Name="{loc:Loc Tip_ClearFirmware}"
                     Click="BtnClearFwz_Click"/>
 
             <!-- Root password (masked) + reveal toggle + Disable (key-only). One of
                  the password or the key is required; ticking Disable turns password
                  login off, so a key becomes the credential. -->
             <TextBlock Grid.Row="1" Grid.Column="0" x:Name="LblPassword"
-                       Style="{StaticResource FieldLabel}" Text="Password:"/>
+                       Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_Password_Simple}"/>
             <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <Grid Width="170">
                     <TextBox x:Name="TxtPassword" Style="{StaticResource InputField}"
                              FontFamily="Consolas"/>
                     <!-- Placeholder overlay: shown (by UpdateRequiredCues) only while
                          the password is blank in password mode. -->
-                    <TextBlock x:Name="PhPassword" Text="(required)" Foreground="Gray"
+                    <TextBlock x:Name="PhPassword" Text="{loc:Loc Ph_Required}" Foreground="Gray"
                                IsHitTestVisible="False" VerticalAlignment="Center"
                                Margin="8,0,0,0"/>
                 </Grid>
                 <!-- Inline actions, in order: generate, reveal (hold-to-show eye),
                      copy. Reveal affects BOTH the password and confirm fields. -->
                 <Button x:Name="BtnRandomPwd" Style="{StaticResource IconButton}"
-                        Content="&#xE8B1;" ToolTip="Generate a strong random password"
-                        AutomationProperties.Name="Generate a strong random password"
+                        Content="&#xE8B1;" ToolTip="{loc:Loc Tip_GenPassword}"
+                        AutomationProperties.Name="{loc:Loc Tip_GenPassword}"
                         Click="BtnRandomPwd_Click"/>
                 <Button x:Name="BtnToggleReveal" Style="{StaticResource IconButton}"
-                        Content="&#xE7B3;" ToolTip="Hold to show the password"
-                        AutomationProperties.Name="Hold to show the password"/>
+                        Content="&#xE7B3;" ToolTip="{loc:Loc Tip_RevealHold}"
+                        AutomationProperties.Name="{loc:Loc Tip_RevealHold}"/>
                 <Button x:Name="BtnCopyPwd" Style="{StaticResource IconButton}"
-                        Content="&#xE8C8;" ToolTip="Copy password to clipboard"
-                        AutomationProperties.Name="Copy password to clipboard"
+                        Content="&#xE8C8;" ToolTip="{loc:Loc Tip_CopyPassword}"
+                        AutomationProperties.Name="{loc:Loc Tip_CopyPassword}"
                         Click="BtnCopyPwd_Click"/>
                 <CheckBox x:Name="ChkKeyOnly" VerticalAlignment="Center" Margin="16,0,0,0"
-                          Content="Disable"
-                          ToolTip="Disable password login (key-only) — requires an SSH key"
+                          Content="{loc:Loc Chk_Disable}"
+                          ToolTip="{loc:Loc Tip_Disable}"
                           Checked="ChkKeyOnly_Toggled" Unchecked="ChkKeyOnly_Toggled"/>
             </StackPanel>
 
             <!-- Confirm password -->
             <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                       Text="Confirm Password:"/>
+                       Text="{loc:Loc Field_ConfirmPassword}"/>
             <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <Grid Width="170">
                     <TextBox x:Name="TxtConfirm" Style="{StaticResource InputField}"
                              FontFamily="Consolas"/>
                     <!-- Placeholder overlay: shown only after a password is typed and
                          while confirm is still blank (UpdateRequiredCues). -->
-                    <TextBlock x:Name="PhConfirm" Text="(required)" Foreground="Gray"
+                    <TextBlock x:Name="PhConfirm" Text="{loc:Loc Ph_Required}" Foreground="Gray"
                                IsHitTestVisible="False" VerticalAlignment="Center"
                                Margin="8,0,0,0" Visibility="Collapsed"/>
                 </Grid>
@@ -416,20 +425,20 @@
             <TextBlock Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
                        x:Name="LblCredentialRule"
                        Foreground="Gray" FontSize="11" TextWrapping="Wrap"
-                       Text="A password is required — or tick “Disable” to log in with an SSH key only."/>
+                       Text="{loc:Loc Rule_Simple}"/>
 
             <!-- Output (disabled until a firmware is chosen) -->
             <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
-                       Style="{StaticResource FieldLabel}" Text="Save Output As:"/>
+                       Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_SaveOutput}"/>
             <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtOutputPath"
                      Style="{StaticResource InputField}" IsReadOnly="True" IsEnabled="False"
-                     Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose where to save the modified .fwz…"
+                     Cursor="Hand" ToolTip="{loc:Loc Tip_Output}"
                      PreviewMouseLeftButtonDown="TxtOutputPath_MouseDown" PreviewKeyDown="TxtOutputPath_PreviewKeyDown"
-                     Text="(where to write the modified .fwz)" Foreground="Gray"/>
+                     Foreground="Gray"/>
             <Button Grid.Row="4" Grid.Column="2" x:Name="BtnClearOutput"
                     Style="{StaticResource RowIconButton}" IsEnabled="False"
-                    Content="&#xE711;" ToolTip="Clear the output location"
-                    AutomationProperties.Name="Clear the output location"
+                    Content="&#xE711;" ToolTip="{loc:Loc Tip_ClearOutput}"
+                    AutomationProperties.Name="{loc:Loc Tip_ClearOutput}"
                     Click="BtnClearOutput_Click"/>
         </Grid>
 
@@ -449,7 +458,7 @@
                      for the busy "Building…" state, so it doesn't shrink. -->
                 <Button Grid.Column="1" x:Name="BtnBuild" Style="{StaticResource PrimaryButton}"
                         MinWidth="210" IsEnabled="False"
-                        Content="Build Modified Firmware" Click="BtnBuild_Click"/>
+                        Content="{loc:Loc Btn_Build}" Click="BtnBuild_Click"/>
                 <!-- Live "what's still needed to Build" hint; updated by UpdateBuildEnabled.
                      LiveSetting=Polite so a screen reader announces the changing
                      "still needed" / "Ready to build" text as the form is filled. -->
@@ -471,8 +480,8 @@
             <Border Height="1" Background="#FFE7E7E7" Margin="0,0,0,8"/>
             <ToggleButton x:Name="TglAdvanced" Style="{StaticResource DisclosureToggle}"
                           Checked="TglAdvanced_Changed" Unchecked="TglAdvanced_Changed"
-                          AutomationProperties.Name="Advanced options"
-                          ToolTip="Show advanced options: SSH public key, inspect and self-test"/>
+                          AutomationProperties.Name="{loc:Loc Adv_Toggle}"
+                          ToolTip="{loc:Loc Tip_Advanced}"/>
 
             <!-- SSH public key (advanced). Also shown in key-only mode, or once a key
                  is selected, so a required/active credential is never hidden. -->
@@ -483,16 +492,16 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBlock Grid.Column="0" x:Name="LblKey" Style="{StaticResource FieldLabel}"
-                           Text="SSH Public Key:"/>
+                           Text="{loc:Loc Field_SshKey}"/>
                 <TextBox Grid.Column="1" x:Name="TxtKeyPath"
                          Style="{StaticResource InputField}" IsReadOnly="True"
-                         Cursor="Hand" ToolTip="Click (or press Enter/Space) to choose an existing public key (.pub)…"
+                         Cursor="Hand" ToolTip="{loc:Loc Tip_Key}"
                          PreviewMouseLeftButtonDown="TxtKeyPath_MouseDown" PreviewKeyDown="TxtKeyPath_PreviewKeyDown"
-                         Text="(optional: choose an existing .pub key, or generate a new pair)" Foreground="Gray"/>
+                         Foreground="Gray"/>
                 <StackPanel Grid.Column="2" x:Name="KeyButtons" Orientation="Horizontal">
                     <Button x:Name="BtnGenKey" Style="{StaticResource RowIconButton}"
-                            ToolTip="Generate a new SSH key pair…"
-                            AutomationProperties.Name="Generate a new SSH key pair"
+                            ToolTip="{loc:Loc Tip_GenKey}"
+                            AutomationProperties.Name="{loc:Loc Aria_GenKey}"
                             Click="BtnGenKey_Click">
                         <!-- Key glyph with a small green "＋" badge = generate a NEW key.
                              The Segoe key points its shaft/teeth to the lower-right, so
@@ -516,8 +525,8 @@
                     </Button>
                     <Button x:Name="BtnClearKey" Style="{StaticResource RowIconButton}"
                             Content="&#xE711;" IsEnabled="False"
-                            ToolTip="Clear the selected key (build with password only)"
-                            AutomationProperties.Name="Clear the selected SSH key"
+                            ToolTip="{loc:Loc Tip_ClearKey}"
+                            AutomationProperties.Name="{loc:Loc Aria_ClearKey}"
                             Click="BtnClearKey_Click"/>
                 </StackPanel>
             </Grid>
@@ -525,9 +534,9 @@
             <StackPanel x:Name="AdvancedTools" Orientation="Horizontal" Margin="0,12,0,0"
                         HorizontalAlignment="Center" Visibility="Collapsed">
                 <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0"
-                        Content="Inspect an existing .fwz…" Click="BtnVerify_Click"/>
+                        Content="{loc:Loc Btn_Inspect}" Click="BtnVerify_Click"/>
                 <Button x:Name="BtnSelfTest" Style="{StaticResource SecondaryButton}"
-                        Content="Self-test (MD5-crypt)" Click="BtnSelfTest_Click"/>
+                        Content="{loc:Loc Btn_SelfTest}" Click="BtnSelfTest_Click"/>
             </StackPanel>
         </StackPanel>
 
@@ -537,13 +546,13 @@
              here; Build reports its outcome in a popup and its full log lands here for
              whenever Advanced is opened. -->
         <DockPanel x:Name="ResultGroup" Grid.Row="4" Visibility="Collapsed">
-            <TextBlock DockPanel.Dock="Top" Text="Result:" Margin="0,0,0,4" FontWeight="SemiBold"/>
+            <TextBlock DockPanel.Dock="Top" Text="{loc:Loc Lbl_Result}" Margin="0,0,0,4" FontWeight="SemiBold"/>
             <TextBox x:Name="TxtResult"
                      IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
                      VerticalScrollBarVisibility="Auto"
                      HorizontalScrollBarVisibility="Auto"
                      FontFamily="Consolas" FontSize="12"
-                     Text="Choose a firmware and an output path, set a root password (or tick “Disable” to use an SSH key only), then click Build."/>
+                     Text="{loc:Loc Result_Default}"/>
         </DockPanel>
 
         <!-- Row 6: diagnostics -->
@@ -565,9 +574,7 @@
                 <DockPanel Grid.Column="0" VerticalAlignment="Center" LastChildFill="True" Margin="0,0,8,0">
                     <TextBlock DockPanel.Dock="Left" Text="&#x2615;" FontSize="20"
                                VerticalAlignment="Center" Margin="0,0,10,0"/>
-                    <TextBlock VerticalAlignment="Center" TextWrapping="Wrap" Foreground="#FF5B4A1E">
-                        <Run Text="Found this tool useful? "/><Run Text="Buy me a coffee" FontWeight="SemiBold"/><Run Text=". Thank you! ☺"/>
-                    </TextBlock>
+                    <TextBlock VerticalAlignment="Center" TextWrapping="Wrap" Foreground="#FF5B4A1E"><Run Text="{loc:Loc Donate_Pre}"/><Run Text="{loc:Loc Donate_Emph}" FontWeight="SemiBold"/><Run Text="{loc:Loc Donate_Post}"/></TextBlock>
                 </DockPanel>
 
                 <!-- UniformGrid: both cells take the width of the WIDER button, so
@@ -576,8 +583,8 @@
                     <!-- PayPal -->
                     <Button x:Name="BtnPayPal" Style="{StaticResource DonateButton}"
                             Background="#FF003087" Click="BtnPayPal_Click"
-                            ToolTip="Support via PayPal"
-                            AutomationProperties.Name="Buy me a coffee via PayPal">
+                            ToolTip="{loc:Loc Tip_PayPal}"
+                            AutomationProperties.Name="{loc:Loc Aria_PayPal}">
                         <StackPanel Orientation="Horizontal">
                             <!-- Brand icon on a white chip (the multi-blue PayPal mark
                                  would be unreadable directly on the blue button). -->
@@ -592,8 +599,8 @@
                     <!-- Revolut -->
                     <Button x:Name="BtnRevolut" Style="{StaticResource DonateButton}"
                             Background="#FF191C1F" Click="BtnRevolut_Click"
-                            ToolTip="Support via Revolut"
-                            AutomationProperties.Name="Buy me a coffee via Revolut">
+                            ToolTip="{loc:Loc Tip_Revolut}"
+                            AutomationProperties.Name="{loc:Loc Aria_Revolut}">
                         <StackPanel Orientation="Horizontal">
                             <!-- Brand icon on a white chip (the dark Revolut mark would
                                  be unreadable directly on the near-black button). -->

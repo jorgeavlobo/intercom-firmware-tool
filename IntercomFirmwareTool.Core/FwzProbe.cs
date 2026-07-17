@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using IntercomFirmwareTool.Core.Localization;
 using ICSharpCode.SharpZipLib.Zip;
 // Disambiguate: ZipFile exists in both System.IO.Compression and SharpZipLib.
 // Here "ZipFile" always means the SharpZipLib one (which supports ZipCrypto).
@@ -199,7 +200,7 @@ namespace IntercomFirmwareTool.Core
             // and the original archive is destroyed. Reject that up front.
             if (PathIdentity.SamePath(inputFwz, outputPath))
                 throw new InvalidOperationException(
-                    "The output .fwz must be a different file from the input .fwz.");
+                    CoreStrings.Get("Fwz_OutputSameAsInput"));
 
             // Validate the output folder up front, before the expensive extract/
             // repack, so a nonexistent target fails with a clear message instead of
@@ -207,7 +208,7 @@ namespace IntercomFirmwareTool.Core
             string outDir = Path.GetDirectoryName(Path.GetFullPath(outputPath)) ?? ".";
             if (!Directory.Exists(outDir))
                 throw new DirectoryNotFoundException(
-                    $"The output folder does not exist: {outDir}");
+                    CoreStrings.Format("Fwz_OutputFolderMissing", outDir));
 
             // Hold the input open for the WHOLE build with a share mode that denies
             // deletion/replacement (FileShare.Read allows our own re-reads and any
@@ -239,7 +240,7 @@ namespace IntercomFirmwareTool.Core
             var verified = FirmwareRegistry.Verify(realInput);
             if (!verified.Ok)
                 throw new InvalidOperationException(
-                    "Refusing to build: the input is not a recognized original firmware.\n" +
+                    CoreStrings.Get("Fwz_RefuseBuildUnrecognized") +
                     verified.Message);
 
             FwzExtractResult ex = ExtractBareImage(realInput);
@@ -310,9 +311,7 @@ namespace IntercomFirmwareTool.Core
                             // keep the temp file and point the user at it to recover.
                             preserveTemp = true;
                             throw new IOException(
-                                "The firmware was built and verified, but could not be written to:\n" +
-                                outputPath + "\n(" + moveEx.Message + ")\n\n" +
-                                "The verified build was kept here — move/rename it manually:\n" + tempOut,
+                                CoreStrings.Format("Fwz_BuiltButNotWritten", outputPath, moveEx.Message, tempOut),
                                 moveEx);
                         }
                     }
@@ -446,7 +445,7 @@ namespace IntercomFirmwareTool.Core
             }
             if (selected is null)
                 throw new InvalidOperationException(
-                    "No '.gz' (non-recovery) file found inside the .fwz.");
+                    CoreStrings.Get("Fwz_NoGzFound"));
 
             // The genuine firmware payload is traditional ZipCrypto. Reject an
             // entry that is unencrypted (then any password's gzip-header check
@@ -455,8 +454,7 @@ namespace IntercomFirmwareTool.Core
             // EntryEncryptedWith applies on the output-verification path.
             if (!selected.IsCrypted || selected.AESKeySize != 0)
                 throw new InvalidOperationException(
-                    "The '.gz' payload inside the .fwz is not ZipCrypto-encrypted " +
-                    "(expected traditional PKWARE encryption).");
+                    CoreStrings.Get("Fwz_PayloadNotZipCrypto"));
 
             // 2) Find which of the known passwords opens the entry.
             string? goodPassword = null;
@@ -470,7 +468,7 @@ namespace IntercomFirmwareTool.Core
             }
             if (goodPassword is null)
                 throw new InvalidOperationException(
-                    "None of the known passwords (C300X, C100X, SMARTDES) opened the .fwz.");
+                    CoreStrings.Get("Fwz_NoPasswordOpened"));
 
             zip.Password = goodPassword;
 
@@ -509,7 +507,7 @@ namespace IntercomFirmwareTool.Core
                 written += read;
                 if (written > maxBytes)
                     throw new NotSupportedException(
-                        $"Decompressed image exceeds the {maxBytes} byte limit; aborting.");
+                        CoreStrings.Format("Fwz_DecompressedExceeds", maxBytes));
                 destination.Write(buffer, 0, read);
             }
         }

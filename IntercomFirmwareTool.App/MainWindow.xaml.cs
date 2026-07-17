@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -15,6 +16,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
+using IntercomFirmwareTool.App.Localization;
 using IntercomFirmwareTool.Core;
 using Microsoft.Win32;
 
@@ -49,7 +51,14 @@ namespace IntercomFirmwareTool.App
 
         public MainWindow()
         {
+            // Pick the UI language (saved choice → system language → English) BEFORE the
+            // visual tree is built, so every {loc:Loc} binding resolves in that language.
+            LocalizationManager.Instance.Initialize();
             InitializeComponent();
+            // Re-apply imperatively-set localized text whenever the language changes.
+            LocalizationManager.Instance.LanguageChanged += (_, _) => ApplyLanguage();
+            BuildLanguageMenu();
+            RefreshPlaceholders();
             ShowStartupDiagnostics();
 
             // The key is chosen explicitly (Choose existing… / Generate new…), so
@@ -192,8 +201,9 @@ namespace IntercomFirmwareTool.App
             if (on) _flashTimer?.Stop();
             _pw.Peek = on;
             _confirm.Peek = on;
+            _revealOn = on;
             BtnToggleReveal.Content = on ? EyeHide : EyeShow;
-            string hint = on ? "Release to hide the password" : "Hold to show the password";
+            string hint = on ? L("Tip_RevealRelease") : L("Tip_RevealHold");
             BtnToggleReveal.ToolTip = hint;
             // Keep the screen-reader name in sync with the state, not just the
             // tooltip — otherwise it always announces the initial "Hold to show".
@@ -201,6 +211,7 @@ namespace IntercomFirmwareTool.App
         }
 
         private DispatcherTimer? _flashTimer;
+        private bool _revealOn;
 
         /// <summary>Briefly reveals both fields (~0.5 s), then re-masks — a visible
         /// cue that the password just changed (e.g. after generating one).</summary>
@@ -223,7 +234,7 @@ namespace IntercomFirmwareTool.App
             string pwd = _pw.Value;
             if (pwd.Length == 0)
             {
-                SetStatus("Nothing to copy — the password field is empty.");
+                SetStatus(L("Status_NothingToCopy"));
                 return;
             }
             try
@@ -231,11 +242,11 @@ namespace IntercomFirmwareTool.App
                 // Copy WITHOUT leaving the plaintext password in Windows Clipboard
                 // History or cloud clipboard sync (see SecureClipboard).
                 SecureClipboard.SetText(pwd);
-                SetStatus("Password copied (excluded from clipboard history / cloud sync).");
+                SetStatus(L("Status_Copied"));
             }
             catch (Exception ex)
             {
-                SetStatus("Could not copy to the clipboard: " + SafeMessage(ex), error: true);
+                SetStatus(LF("Fmt_CopyFailed", SafeMessage(ex)), error: true);
             }
         }
 
@@ -255,10 +266,7 @@ namespace IntercomFirmwareTool.App
             UpdatePasswordHint();
             FlashReveal();        // briefly show it as a visible "it changed" cue
 
-            TxtResult.Text =
-                "Generated a strong random password and filled both fields.\n" +
-                "Hold the eye to view it, or use the copy button — keep it safe, it is not " +
-                "stored and you'll need it to log in.";
+            TxtResult.Text = L("Result_RandomPwd");
         }
 
         /// <summary>A strong random password from an unambiguous character set.</summary>
@@ -307,8 +315,8 @@ namespace IntercomFirmwareTool.App
             if (!_uiEnabled) return; // ignored while an operation is running
             var dlg = new OpenFileDialog
             {
-                Title = "Choose the original firmware (.fwz)",
-                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*",
+                Title = L("Dlg_ChooseFirmware_Title"),
+                Filter = L("Dlg_FirmwareFilter"),
                 // Open where the background scan found the newest original (if any),
                 // else a sensible default (Downloads → Desktop → profile).
                 InitialDirectory = FirmwareStartDir()
@@ -320,15 +328,15 @@ namespace IntercomFirmwareTool.App
             // modified. Verify by size + SHA-256 (may hash ~100 MB, so do it off
             // the UI thread) before accepting the file.
             SetButtonsEnabled(false);
-            SetStatus("Verifying firmware… (size + SHA-256)"); // visible while it hashes
-            TxtResult.Text = $"Verifying firmware integrity (size + SHA-256)…\n{chosen}";
+            SetStatus(L("Status_Verifying")); // visible while it hashes
+            TxtResult.Text = LF("Fmt_Result_Verifying", chosen);
             FirmwareCheckResult check;
             try { check = await Task.Run(() => FirmwareRegistry.Verify(chosen)); }
             catch (Exception ex)
             {
                 // Never let an exception escape this async void handler (it would
                 // crash the dispatcher); turn it into a normal rejection below.
-                check = new FirmwareCheckResult(false, null, "Could not verify the firmware: " + ex.Message);
+                check = new FirmwareCheckResult(false, null, LF("Fmt_VerifyFailed", ex.Message));
             }
             finally { SetButtonsEnabled(true); }
 
@@ -338,25 +346,19 @@ namespace IntercomFirmwareTool.App
                 // unmodifiable file.
                 _fwzPath = null;
                 _outputPath = null;
-                TxtFwzPath.Text = "(no valid firmware selected)";
+                TxtFwzPath.Text = L("Ph_Firmware_Invalid");
                 TxtFwzPath.Foreground = Brushes.Firebrick;
-                TxtOutputPath.Text = "(where to write the modified .fwz)";
+                TxtOutputPath.Text = L("Ph_Output");
                 TxtOutputPath.Foreground = Brushes.Gray;
                 LblOutput.IsEnabled = false;
                 TxtOutputPath.IsEnabled = false;
                 UpdateBuildEnabled();
 
-                TxtResult.Text =
-                    "❌ This file was NOT accepted — selection cleared, Build stays disabled.\n\n" +
-                    check.Message + "\n\n" +
-                    "Only known-good original firmware can be modified, so a corrupt or wrong\n" +
-                    "download can't be turned into a broken image. The file's NAME does not matter —\n" +
-                    "its content (size + SHA-256) must match a known original.";
+                TxtResult.Text = LF("Fmt_Result_Rejected", check.Message);
                 SetStatus(""); // the popup below is the feedback; clear the "verifying…" line
                 MessageBox.Show(this,
-                    "This file is not an accepted original firmware.\n\n" + check.Message +
-                    "\n\nThe selection was cleared.",
-                    "Firmware not accepted", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    LF("Fmt_Msg_FirmwareNotAccepted", check.Message),
+                    L("Cap_FirmwareNotAccepted"), MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -376,11 +378,8 @@ namespace IntercomFirmwareTool.App
             SetPathText(TxtOutputPath, _outputPath);
             UpdateBuildEnabled();
 
-            TxtResult.Text =
-                "✅ " + check.Message + "\n\n" +
-                check.Match!.Describe() + "\n\n" +
-                "Set a root password (or tick \"Disable\" to use an SSH key only), then Build.";
-            SetStatus("✓ Firmware verified."); // visible confirmation in the simple view
+            TxtResult.Text = LF("Fmt_Result_Accepted", check.Message, check.Match!.Describe());
+            SetStatus(L("Status_FirmwareVerified")); // visible confirmation in the simple view
         }
 
         /// <summary>
@@ -392,9 +391,9 @@ namespace IntercomFirmwareTool.App
         {
             _fwzPath = null;
             _outputPath = null;
-            TxtFwzPath.Text = "(click to choose the original .fwz to modify)";
+            TxtFwzPath.Text = L("Ph_Firmware");
             TxtFwzPath.Foreground = Brushes.Gray;
-            TxtOutputPath.Text = "(where to write the modified .fwz)";
+            TxtOutputPath.Text = L("Ph_Output");
             TxtOutputPath.Foreground = Brushes.Gray;
             LblOutput.IsEnabled = false;
             TxtOutputPath.IsEnabled = false;
@@ -426,8 +425,8 @@ namespace IntercomFirmwareTool.App
             if (!_uiEnabled) return; // ignored while an operation is running
             var dlg = new OpenFileDialog
             {
-                Title = "Choose your SSH public key (.pub)",
-                Filter = "Public key (*.pub)|*.pub|All files (*.*)|*.*",
+                Title = L("Dlg_ChooseKey_Title"),
+                Filter = L("Dlg_KeyFilter"),
                 InitialDirectory = DefaultSshDir()
             };
             if (dlg.ShowDialog(this) != true) return;
@@ -438,16 +437,15 @@ namespace IntercomFirmwareTool.App
             try { content = File.ReadAllText(chosen).Trim(); }
             catch (Exception ex)
             {
-                MessageBox.Show(this, $"Could not read the key file:\n{ex.Message}",
-                    "Cannot read key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(this, LF("Fmt_Msg_ReadKeyFailed", ex.Message),
+                    L("Cap_CannotReadKey"), MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
             if (content.Length == 0 || !SshKeyGen.IsLikelyPublicKey(content))
             {
                 MessageBox.Show(this,
-                    "That file does not look like an OpenSSH public key\n" +
-                    "(expected a line like \"ssh-rsa AAAA… comment\"). Pick the .pub file.",
-                    "Not a public key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    L("Msg_NotPublicKey_Choose"),
+                    L("Cap_NotPublicKey"), MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -466,8 +464,8 @@ namespace IntercomFirmwareTool.App
         {
             var dlg = new SaveFileDialog
             {
-                Title = "Save the NEW private key as… (the public .pub is written beside it)",
-                Filter = "SSH private key (all files)|*.*",
+                Title = L("Dlg_SaveKey_Title"),
+                Filter = L("Dlg_SaveKeyFilter"),
                 InitialDirectory = DefaultSshDir(),
                 FileName = "intercom_id_rsa",
                 OverwritePrompt = true
@@ -479,14 +477,13 @@ namespace IntercomFirmwareTool.App
             // Never write the key pair over a selected firmware / output / key —
             // that would violate "the input is never modified" (and destroy the
             // output or the chosen key).
-            foreach (var (label, p) in new[] { ("input firmware", _fwzPath), ("output firmware", _outputPath), ("selected public key", _keyPath) })
+            foreach (var (label, p) in new[] { (L("CollisionLabel_Input"), _fwzPath), (L("CollisionLabel_Output"), _outputPath), (L("CollisionLabel_Key"), _keyPath) })
             {
                 if (p != null && (SamePath(privatePath, p) || SamePath(pubDest, p)))
                 {
                     MessageBox.Show(this,
-                        $"The key would be written over the {label}:\n\n{p}\n\n" +
-                        "Choose a different location for the new key.",
-                        "Path collision", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        LF("Fmt_Msg_KeyCollision", label, p),
+                        L("Cap_PathCollision"), MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
             }
@@ -496,16 +493,16 @@ namespace IntercomFirmwareTool.App
             if (File.Exists(pubDest))
             {
                 var ans = MessageBox.Show(this,
-                    $"A public key already exists and will be overwritten:\n\n{pubDest}\n\nContinue?",
-                    "Public key exists", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                    LF("Fmt_Msg_PubExists", pubDest),
+                    L("Cap_PubExists"), MessageBoxButton.YesNo, MessageBoxImage.Question);
                 if (ans != MessageBoxResult.Yes) return;
             }
 
             string comment = $"{Environment.UserName}@{Environment.MachineName}";
 
             SetButtonsEnabled(false);
-            SetStatus("Generating a new SSH key pair…"); // visible (KeyRow can be shown without the console)
-            TxtResult.Text = "Generating a new 4096-bit RSA key pair…";
+            SetStatus(L("Status_GenKey")); // visible (KeyRow can be shown without the console)
+            TxtResult.Text = L("Result_GeneratingKey");
             string? pubPath = null;
             string? error = null;    // full detail for the result log
             string? errorMsg = null; // short message for the popup
@@ -525,18 +522,18 @@ namespace IntercomFirmwareTool.App
 
             if (error != null || pubPath is null)
             {
-                TxtResult.Text = "Could not generate the key:\n" +
-                    (error ?? "No public key was produced (unknown error).");
+                TxtResult.Text = LF("Fmt_Result_GenKeyFailed",
+                    error ?? L("Result_GenKeyFailed_Unknown"));
                 SetStatus(""); // the popup below is the feedback
                 MessageBox.Show(this,
-                    "Could not generate the SSH key pair:\n\n" + (errorMsg ?? "Unknown error."),
-                    "Key generation failed", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    LF("Fmt_Msg_GenKeyFailed", errorMsg ?? L("Msg_GenKeyFailed_Unknown")),
+                    L("Cap_GenKeyFailed"), MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
             _keyPath = pubPath;
             SetPathText(TxtKeyPath, pubPath);
-            SetStatus("✓ SSH key pair generated."); // visible confirmation
+            SetStatus(L("Status_KeyGenerated")); // visible confirmation
             UpdateBuildEnabled();
 
             // Lock the private key to the current Windows account (best-effort):
@@ -552,33 +549,27 @@ namespace IntercomFirmwareTool.App
             {
                 var info = SshKeyGen.DescribePublicKey(File.ReadAllText(pubPath));
                 if (info != null)
-                    keyDetails =
-                        $"  Key type    : {info.Label}\n" +
-                        $"  Fingerprint : {info.Sha256Fingerprint}\n";
+                    keyDetails = LF("Fmt_Result_KeyDetails", info.Label, info.Sha256Fingerprint);
             }
             catch { /* details are informational; never block on them */ }
 
-            TxtResult.Text =
-                "New SSH key pair created.\n\n" +
-                $"  Private key : {privatePath}\n" +
-                $"  Public key  : {pubPath}\n" +
-                keyDetails + "\n" +
-                "The public key is now selected for the build. KEEP THE PRIVATE KEY SAFE —\n" +
-                "it is what you will use to log in. This build adds a root2 account (uid 0),\n" +
-                "so connect as root2:  ssh -i \"" + privatePath + "\" root2@<device>\n" +
-                "It has no passphrase; add one later with:  ssh-keygen -p -f \"" + privatePath + "\"\n\n" +
-                (restricted
-                    ? "The private key was restricted to your Windows account (other users locked\n" +
-                      "out), so OpenSSH will accept it."
-                    : "If Windows OpenSSH reports the key is too open (\"UNPROTECTED PRIVATE KEY\n" +
-                      "FILE\"), restrict it to your account with:\n" +
-                      "  icacls \"" + privatePath + "\" /inheritance:r /grant:r \"%USERNAME%:F\"\n" +
-                      "(Full control for you only — OpenSSH just needs other users locked out.)");
+            var sbKey = new StringBuilder();
+            sbKey.AppendLine(L("Result_KeyCreated_Header"));
+            sbKey.AppendLine();
+            sbKey.AppendLine(LF("Fmt_Result_KeyCreated_Priv", privatePath));
+            sbKey.AppendLine(LF("Fmt_Result_KeyCreated_Pub", pubPath));
+            if (keyDetails.Length > 0) sbKey.Append(keyDetails);
+            sbKey.AppendLine();
+            sbKey.AppendLine(LF("Fmt_Result_KeyCreated_Body", privatePath));
+            sbKey.AppendLine();
+            sbKey.Append(restricted
+                ? L("Result_KeyCreated_Restricted")
+                : LF("Fmt_Result_KeyCreated_NotRestricted", privatePath));
+            TxtResult.Text = sbKey.ToString();
 
             MessageBox.Show(this,
-                $"Key pair created.\n\nPrivate key:\n{privatePath}\n\nPublic key:\n{pubPath}\n\n" +
-                "Keep the private key safe — it has no passphrase.",
-                "New SSH key", MessageBoxButton.OK, MessageBoxImage.Information);
+                LF("Fmt_Msg_KeyCreated", privatePath, pubPath),
+                L("Cap_NewSshKey"), MessageBoxButton.OK, MessageBoxImage.Information);
         }
 
         /// <summary>
@@ -651,8 +642,8 @@ namespace IntercomFirmwareTool.App
             if (!_uiEnabled || _fwzPath == null) return;
             var dlg = new SaveFileDialog
             {
-                Title = "Save the modified firmware as…",
-                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*",
+                Title = L("Dlg_SaveOutput_Title"),
+                Filter = L("Dlg_FirmwareFilter"),
                 FileName = Path.GetFileNameWithoutExtension(_fwzPath) + "_ssh.fwz",
                 InitialDirectory = Path.GetDirectoryName(_fwzPath) ?? ""
             };
@@ -666,9 +657,8 @@ namespace IntercomFirmwareTool.App
             if (SamePath(chosen, _fwzPath))
             {
                 MessageBox.Show(this,
-                    "The output must be a different file from the original firmware, so the " +
-                    "original .fwz is never overwritten.\n\nChoose a different name or folder.",
-                    "Cannot overwrite the original", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    L("Msg_CannotOverwriteInput"),
+                    L("Cap_CannotOverwriteInput"), MessageBoxButton.OK, MessageBoxImage.Warning);
                 return; // keep the previous output selection unchanged
             }
 
@@ -685,7 +675,7 @@ namespace IntercomFirmwareTool.App
         private void BtnClearOutput_Click(object sender, RoutedEventArgs e)
         {
             _outputPath = null;
-            TxtOutputPath.Text = "(where to write the modified .fwz)";
+            TxtOutputPath.Text = L("Ph_Output");
             TxtOutputPath.Foreground = Brushes.Gray;
             UpdateBuildEnabled();
         }
@@ -745,8 +735,8 @@ namespace IntercomFirmwareTool.App
             if (_keyPath != null) return;
             bool required = ChkKeyOnly.IsChecked == true;
             TxtKeyPath.Text = required
-                ? "(required: choose an existing .pub key, or generate a new pair)"
-                : "(optional: choose an existing .pub key, or generate a new pair)";
+                ? L("Ph_Key_Required")
+                : L("Ph_Key_Optional");
             TxtKeyPath.Foreground = Brushes.Gray;
         }
 
@@ -787,7 +777,7 @@ namespace IntercomFirmwareTool.App
 
             if (ChkKeyOnly.IsChecked == true)
             {
-                TxtPwdHint.Text = "(password login disabled)";
+                TxtPwdHint.Text = L("PwdHint_Disabled");
                 TxtPwdHint.Foreground = Brushes.Gray;
                 return;
             }
@@ -797,7 +787,7 @@ namespace IntercomFirmwareTool.App
                 return;
             }
             bool match = CurrentPassword() == CurrentConfirm();
-            TxtPwdHint.Text = match ? "✓ match" : "✗ do not match";
+            TxtPwdHint.Text = match ? L("PwdHint_Match") : L("PwdHint_Mismatch");
             TxtPwdHint.Foreground = match ? Brushes.Green : Brushes.Firebrick;
         }
 
@@ -895,14 +885,14 @@ namespace IntercomFirmwareTool.App
 
             // "Password:" in the simple view; "Root Password:" in Advanced (the rule
             // line below mirrors the same wording).
-            LblPassword.Text = advanced ? "Root Password:" : "Password:";
+            LblPassword.Text = advanced ? L("Field_Password_Advanced") : L("Field_Password_Simple");
             // In key-only mode the password fields are disabled and the SSH key is the
             // required credential, so the rule reflects that instead.
             LblCredentialRule.Text = keyOnly
-                ? "An SSH key is required — password login is disabled."
+                ? L("Rule_KeyOnly")
                 : advanced
-                    ? "A root password is required — or tick “Disable” to log in with an SSH key only."
-                    : "A password is required — or tick “Disable” to log in with an SSH key only.";
+                    ? L("Rule_Advanced")
+                    : L("Rule_Simple");
 
             KeyRow.Visibility = (advanced || keyOnly || _keyPath != null)
                 ? Visibility.Visible : Visibility.Collapsed;
@@ -954,6 +944,88 @@ namespace IntercomFirmwareTool.App
         /// popup is never blank.</summary>
         private static string SafeMessage(Exception ex) =>
             string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
+
+        // ---- Localization ----------------------------------------------------
+
+        /// <summary>Look up a localized string by key.</summary>
+        private static string L(string key) => LocalizationManager.Instance.Get(key);
+
+        /// <summary>Look up a localized format string by key and fill it in the current culture.</summary>
+        private static string LF(string key, params object?[] args) => LocalizationManager.Instance.Format(key, args);
+
+        /// <summary>
+        /// Re-applies every imperatively-set localized string after a runtime language
+        /// change. XAML {loc:Loc} bindings update themselves; this covers the text set
+        /// from code (placeholders, hints, credential rule, password label, a11y names).
+        /// </summary>
+        private void ApplyLanguage()
+        {
+            RefreshPlaceholders();
+            RefreshRevealTooltip();
+            UpdatePasswordHint();
+            UpdateBuildEnabled();       // password label, credential rule, cues, hint, a11y names
+            UpdateLanguageMenuHeader();
+        }
+
+        /// <summary>Sets the neutral placeholder on any path box that has no selection.</summary>
+        private void RefreshPlaceholders()
+        {
+            if (_fwzPath == null) { TxtFwzPath.Text = L("Ph_Firmware"); TxtFwzPath.Foreground = Brushes.Gray; }
+            if (_outputPath == null) { TxtOutputPath.Text = L("Ph_Output"); TxtOutputPath.Foreground = Brushes.Gray; }
+            UpdateKeyPlaceholder();
+        }
+
+        /// <summary>Re-applies the hold/release reveal tooltip + a11y name in the current language.</summary>
+        private void RefreshRevealTooltip()
+        {
+            string hint = _revealOn ? L("Tip_RevealRelease") : L("Tip_RevealHold");
+            BtnToggleReveal.ToolTip = hint;
+            AutomationProperties.SetName(BtnToggleReveal, hint);
+        }
+
+        // ---- Language menu (globe, top-right) --------------------------------
+
+        /// <summary>Populates the globe menu with one item per shipped language.</summary>
+        private void BuildLanguageMenu()
+        {
+            foreach (var lang in LocalizationManager.Languages)
+            {
+                var item = new MenuItem { Header = lang.NativeName, IsCheckable = true, Tag = lang.Code };
+                item.Click += LangItem_Click;
+                LangMenuRoot.Items.Add(item);
+            }
+            UpdateLanguageMenuHeader();
+        }
+
+        private void LangItem_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is MenuItem mi && mi.Tag is string code)
+                LocalizationManager.Instance.SetLanguage(code);
+        }
+
+        /// <summary>Refreshes the globe header (current native name) and the tick on the active language.</summary>
+        private void UpdateLanguageMenuHeader()
+        {
+            string current = LocalizationManager.Instance.CurrentCode;
+            string nativeName = LocalizationManager.Languages
+                .FirstOrDefault(l => l.Code == current)?.NativeName ?? "English";
+
+            var header = new StackPanel { Orientation = Orientation.Horizontal };
+            header.Children.Add(new TextBlock
+            {
+                Text = "", // Segoe MDL2 Assets: Globe
+                FontFamily = new FontFamily("Segoe MDL2 Assets"),
+                FontSize = 14,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 6, 0)
+            });
+            header.Children.Add(new TextBlock { Text = nativeName, VerticalAlignment = VerticalAlignment.Center });
+            LangMenuRoot.Header = header;
+
+            foreach (var obj in LangMenuRoot.Items)
+                if (obj is MenuItem mi && mi.Tag is string code)
+                    mi.IsChecked = code == current;
+        }
 
         /// <summary>Toggles the advanced surface (SSH key row + tool buttons + result).</summary>
         private void TglAdvanced_Changed(object sender, RoutedEventArgs e)
@@ -1106,18 +1178,18 @@ namespace IntercomFirmwareTool.App
             // announces the required / mismatch state when the field takes focus — the
             // colour and "(required)" overlay are never the only signal (WCAG 1.4.1 /
             // 1.3.1). The base names double as the (otherwise unassociated) field labels.
-            AutomationProperties.SetName(TxtFwzPath, needFirmware ? "Firmware, required" : "Firmware");
+            AutomationProperties.SetName(TxtFwzPath, needFirmware ? LF("Fmt_Required", L("Name_Firmware")) : L("Name_Firmware"));
             AutomationProperties.SetName(TxtOutputPath,
-                needOutput && _fwzPath != null ? "Save output as, required" : "Save output as");
+                needOutput && _fwzPath != null ? LF("Fmt_Required", L("Name_Output")) : L("Name_Output"));
             // Match the visible label, which drops "Root" in the simple view.
             bool advanced = TglAdvanced.IsChecked == true;
-            string pwLabel = advanced ? "Root Password" : "Password";
-            AutomationProperties.SetName(TxtPassword, needPassword ? pwLabel + ", required" : pwLabel);
+            string pwLabel = advanced ? L("Name_Password_Advanced") : L("Name_Password_Simple");
+            AutomationProperties.SetName(TxtPassword, needPassword ? LF("Fmt_Required", pwLabel) : pwLabel);
             AutomationProperties.SetName(TxtConfirm,
-                needConfirm ? "Confirm Password, required"
-                : confirmMismatch ? "Confirm Password, does not match the password"
-                : "Confirm Password");
-            AutomationProperties.SetName(TxtKeyPath, needKey ? "SSH Public Key, required" : "SSH Public Key");
+                needConfirm ? LF("Fmt_Required", L("Name_Confirm"))
+                : confirmMismatch ? L("Name_Confirm_Mismatch")
+                : L("Name_Confirm"));
+            AutomationProperties.SetName(TxtKeyPath, needKey ? LF("Fmt_Required", L("Name_Key")) : L("Name_Key"));
 
             // Each clear/erase button is only useful when its field holds something to
             // clear — disable it while the path is empty (and while an op is running).
@@ -1126,11 +1198,11 @@ namespace IntercomFirmwareTool.App
             BtnClearOutput.IsEnabled = _uiEnabled && _outputPath != null;
 
             var missing = new List<string>();
-            if (needFirmware) missing.Add("firmware");
-            if (needOutput && _fwzPath != null) missing.Add("output path");
-            if (needPassword) missing.Add(advanced ? "a root password" : "a password");
-            if (needConfirm) missing.Add("confirm the password");
-            if (needKey) missing.Add("an SSH key");
+            if (needFirmware) missing.Add(L("Miss_Firmware"));
+            if (needOutput && _fwzPath != null) missing.Add(L("Miss_Output"));
+            if (needPassword) missing.Add(advanced ? L("Miss_Password_Advanced") : L("Miss_Password_Simple"));
+            if (needConfirm) missing.Add(L("Miss_Confirm"));
+            if (needKey) missing.Add(L("Miss_Key"));
 
             string previousHint = TxtBuildHint.Text;
             if (!_uiEnabled)
@@ -1142,18 +1214,18 @@ namespace IntercomFirmwareTool.App
             else if (confirmMismatch)
             {
                 // A concrete error takes priority over the "still needed" list.
-                string prefix = missing.Count > 0 ? "Still needed: " + string.Join(", ", missing) + " — " : "";
-                TxtBuildHint.Text = prefix + "passwords don't match.";
+                string prefix = missing.Count > 0 ? LF("Fmt_StillNeeded_Prefix", string.Join(", ", missing)) : "";
+                TxtBuildHint.Text = prefix + L("Hint_Mismatch");
                 TxtBuildHint.Foreground = ErrorBrush;
             }
             else if (missing.Count == 0)
             {
-                TxtBuildHint.Text = "✓ Ready to build.";
+                TxtBuildHint.Text = L("Hint_Ready");
                 TxtBuildHint.Foreground = ReadyBrush;
             }
             else
             {
-                TxtBuildHint.Text = "Still needed: " + string.Join(", ", missing) + ".";
+                TxtBuildHint.Text = LF("Fmt_StillNeeded", string.Join(", ", missing));
                 TxtBuildHint.Foreground = Brushes.Gray;
             }
 
@@ -1201,16 +1273,15 @@ namespace IntercomFirmwareTool.App
                 if (password.Length == 0)
                 {
                     MessageBox.Show(this,
-                        "Enter a root password, or tick \"Disable\" to build a key-only\n" +
-                        "firmware (which then requires an SSH key).",
-                        "Password required", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        L("Msg_PasswordRequired"),
+                        L("Cap_PasswordRequired"), MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 if (password != CurrentConfirm())
                 {
                     MessageBox.Show(this,
-                        "The password and its confirmation do not match.",
-                        "Password mismatch", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        L("Msg_PasswordMismatch"),
+                        L("Cap_PasswordMismatch"), MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
             }
@@ -1226,24 +1297,22 @@ namespace IntercomFirmwareTool.App
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show(this, "Could not read the public key:\n\n" + SafeMessage(ex),
-                        "Cannot read key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    MessageBox.Show(this, LF("Fmt_Msg_CannotReadPubKey", SafeMessage(ex)),
+                        L("Cap_CannotReadKey"), MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 if (publicKey.Length == 0)
                 {
                     MessageBox.Show(this,
-                        "The selected public key file is empty.\n\nPick a valid .pub file, or generate a new pair.",
-                        "Empty key file", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        L("Msg_EmptyKey"),
+                        L("Cap_EmptyKey"), MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 if (!SshKeyGen.IsLikelyPublicKey(publicKey))
                 {
                     MessageBox.Show(this,
-                        "The selected file does not look like an OpenSSH public key\n" +
-                        "(expected a line like \"ssh-rsa AAAA… comment\" or \"ssh-ed25519 AAAA…\").\n\n" +
-                        "Pick a valid .pub file, or generate a new pair.",
-                        "Not a public key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        L("Msg_NotPublicKey_Build"),
+                        L("Cap_NotPublicKey"), MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
 
@@ -1255,9 +1324,8 @@ namespace IntercomFirmwareTool.App
                     (privKey != null && SamePath(_outputPath!, privKey)))
                 {
                     MessageBox.Show(this,
-                        "The output path is the same file as the selected SSH key (public or\n" +
-                        "private). Choose a different output so the key isn't overwritten.",
-                        "Output collides with the key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        L("Msg_OutputCollidesKey"),
+                        L("Cap_OutputCollidesKey"), MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
             }
@@ -1270,20 +1338,15 @@ namespace IntercomFirmwareTool.App
                 if (publicKey is null)
                 {
                     MessageBox.Show(this,
-                        "Password login is disabled, so an SSH key is required.\n\n" +
-                        "Choose or generate a key, or untick \"Disable\" and set a password.",
-                        "Key required", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        L("Msg_KeyRequired"),
+                        L("Cap_KeyRequired"), MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
                 if (SshKeyGen.KeyType(publicKey) != "ssh-rsa")
                 {
                     MessageBox.Show(this,
-                        "Key-only login requires an RSA public key.\n\n" +
-                        "RSA is the only key type verified to authenticate on this firmware's\n" +
-                        "dropbear, so a key-only build with another type could leave the device\n" +
-                        "with no way to log in. Use an RSA key, or untick \"Disable\" and set a\n" +
-                        "root password as a fallback.",
-                        "RSA key required for key-only", MessageBoxButton.OK, MessageBoxImage.Warning);
+                        L("Msg_RsaRequired"),
+                        L("Cap_RsaRequired"), MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
                 }
             }
@@ -1297,9 +1360,8 @@ namespace IntercomFirmwareTool.App
             if (File.Exists(_outputPath) && LooksLikePrivateKeyFile(_outputPath!))
             {
                 MessageBox.Show(this,
-                    "The output path is an SSH PRIVATE KEY file:\n\n" + _outputPath + "\n\n" +
-                    "Building there would overwrite and destroy the key. Choose a different output.",
-                    "Output is a private key", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    LF("Fmt_Msg_OutputIsPrivateKey", _outputPath),
+                    L("Cap_OutputIsPrivateKey"), MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -1308,8 +1370,8 @@ namespace IntercomFirmwareTool.App
             if (File.Exists(_outputPath))
             {
                 var answer = MessageBox.Show(this,
-                    $"The file already exists:\n\n{_outputPath}\n\nOverwrite it?",
-                    "File exists", MessageBoxButton.YesNo, MessageBoxImage.Question);
+                    LF("Fmt_Msg_FileExists", _outputPath),
+                    L("Cap_FileExists"), MessageBoxButton.YesNo, MessageBoxImage.Question);
                 if (answer != MessageBoxResult.Yes) return;
             }
 
@@ -1322,15 +1384,15 @@ namespace IntercomFirmwareTool.App
             string fwz = _fwzPath!, output = _outputPath!;
 
             var sb = new StringBuilder();
-            sb.AppendLine("Building modified firmware…");
-            sb.AppendLine($"  Input      : {fwz}");
+            sb.AppendLine(L("Result_Build_Head"));
+            sb.AppendLine(LF("Fmt_Result_Build_Input", fwz));
             sb.AppendLine(opts.HasPassword
-                ? "  Root pw    : (set — stored as MD5-crypt $1$root$…)"
-                : "  Root pw    : (disabled — key-only login)");
+                ? L("Result_Build_RootPw_Set")
+                : L("Result_Build_RootPw_Disabled"));
             sb.AppendLine(opts.HasKey
-                ? $"  Public key : {_keyPath}"
-                : "  Public key : (none — password login only)");
-            sb.AppendLine($"  Output     : {output}");
+                ? LF("Fmt_Result_Build_PubKey", _keyPath)
+                : L("Result_Build_PubKey_None"));
+            sb.AppendLine(LF("Fmt_Result_Build_Output", output));
             sb.AppendLine();
 
             FwzBuildResult? built = null;
@@ -1347,28 +1409,25 @@ namespace IntercomFirmwareTool.App
                     // not a recognized original, which RunAndShow surfaces.
                     FwzBuildResult r = FwzProbe.BuildModifiedFwz(fwz, opts, output);
                     built = r;
-                    sb.AppendLine($"Archive password : {r.PasswordUsed}  (ZipCrypto key, not the device model)");
-                    sb.AppendLine($"Modified entry : {r.SelectedEntry}");
+                    sb.AppendLine(LF("Fmt_Result_ArchivePw", r.PasswordUsed));
+                    sb.AppendLine(LF("Fmt_Result_Build_ModifiedEntry", r.SelectedEntry));
                     sb.AppendLine();
-                    sb.AppendLine("Verification (reopened the OUTPUT .fwz and re-read every change):");
+                    sb.AppendLine(L("Result_Build_VerifyHeader"));
                     AppendChecks(sb, r.RoundTripChecks);
                     sb.AppendLine();
                     if (r.RoundTripAllPass)
                     {
-                        sb.AppendLine("✅ SUCCESS — the modified firmware was built and verified.");
-                        sb.AppendLine($"   Written to: {r.OutputPath}");
+                        sb.AppendLine(L("Result_Build_Success"));
+                        sb.AppendLine(LF("Fmt_Result_Build_WrittenTo", r.OutputPath));
                         sb.AppendLine();
-                        sb.AppendLine("Before flashing: keep the ORIGINAL firmware and be ready to re-flash it");
-                        sb.AppendLine("with My Home Suite over Mini-USB. These units use an i.MX SoC — there is");
-                        sb.AppendLine("no documented low-level un-brick (SAM-BA does not apply), so a bad flash");
-                        sb.AppendLine("may be unrecoverable. Your original .fwz was not modified.");
+                        sb.AppendLine(L("Result_Build_FlashAdvisory"));
                     }
                     else
                     {
-                        sb.AppendLine("❌ Some checks FAILED — the verified build was NOT written.");
-                        sb.AppendLine($"   Your chosen output path was left unchanged: {output}");
-                        sb.AppendLine("   (any existing file there is NOT this build — do not flash it.)");
-                        sb.AppendLine("   See the failing checks above.");
+                        sb.AppendLine(L("Result_Build_FailChecks"));
+                        sb.AppendLine(LF("Fmt_Result_Build_FailUnchanged", output));
+                        sb.AppendLine(L("Result_Build_FailNoFlash"));
+                        sb.AppendLine(L("Result_Build_FailSeeAbove"));
                     }
                 }
                 catch (Exception ex)
@@ -1384,23 +1443,20 @@ namespace IntercomFirmwareTool.App
             if (buildError != null)
             {
                 MessageBox.Show(this,
-                    "The build could not be completed:\n\n" + buildError +
-                    "\n\nOpen Advanced → Result for the full log.",
-                    "Build failed", MessageBoxButton.OK, MessageBoxImage.Error);
+                    LF("Fmt_Msg_BuildFailed", buildError),
+                    L("Cap_BuildFailed"), MessageBoxButton.OK, MessageBoxImage.Error);
             }
             else if (built?.RoundTripAllPass == true)
             {
                 MessageBox.Show(this,
-                    "✅ The modified firmware was built and verified successfully.\n\n" +
-                    "Saved to:\n" + built.OutputPath + "\n\nThe process is finished.",
-                    "Build complete", MessageBoxButton.OK, MessageBoxImage.Information);
+                    LF("Fmt_Msg_BuildComplete", built.OutputPath),
+                    L("Cap_BuildComplete"), MessageBoxButton.OK, MessageBoxImage.Information);
             }
             else
             {
                 MessageBox.Show(this,
-                    "Some verification checks did not pass, so the modified firmware was NOT written.\n\n" +
-                    "Open Advanced → Result to see which checks failed.",
-                    "Build not written", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    L("Msg_BuildNotWritten"),
+                    L("Cap_BuildNotWritten"), MessageBoxButton.OK, MessageBoxImage.Warning);
             }
         }
 
@@ -1418,32 +1474,32 @@ namespace IntercomFirmwareTool.App
         {
             var fwzDlg = new OpenFileDialog
             {
-                Title = "Choose a modified .fwz to inspect (e.g. this tool's or fquinto's output)",
-                Filter = "Bticino firmware (*.fwz)|*.fwz|All files (*.*)|*.*"
+                Title = L("Dlg_Inspect_Title"),
+                Filter = L("Dlg_FirmwareFilter")
             };
             if (fwzDlg.ShowDialog(this) != true) return;
             string fwzPath = fwzDlg.FileName;
 
             var sb = new StringBuilder();
-            sb.AppendLine("Inspecting an existing firmware (read-only, the .fwz is not modified)…");
-            sb.AppendLine($"  .fwz       : {fwzPath}");
+            sb.AppendLine(L("Result_Inspect_Head"));
+            sb.AppendLine(LF("Fmt_Result_Inspect_File", fwzPath));
             sb.AppendLine();
 
             await RunAndShow(sb, () =>
             {
                 SshInspectionReport r = FwzProbe.InspectSshInFwz(fwzPath);
-                sb.AppendLine($"Archive password : {r.PasswordUsed}  (ZipCrypto key, not the device model)");
-                sb.AppendLine($"Inner entry    : {r.SelectedEntry}");
+                sb.AppendLine(LF("Fmt_Result_ArchivePw", r.PasswordUsed));
+                sb.AppendLine(LF("Fmt_Result_Inspect_InnerEntry", r.SelectedEntry));
                 sb.AppendLine();
-                sb.AppendLine("What's inside:");
+                sb.AppendLine(L("Result_Inspect_WhatsInside"));
                 foreach (var f in r.Findings) sb.AppendLine("  " + f);
                 sb.AppendLine();
-                sb.AppendLine("Checklist:");
+                sb.AppendLine(L("Result_Inspect_Checklist"));
                 AppendChecks(sb, r.Checks);
                 sb.AppendLine();
                 sb.AppendLine(r.AllPass
-                    ? "✅ ALL PASS — a valid, complete SSH-enable with at least one working login."
-                    : "❌ SOME FAILED — this .fwz is missing or differs on the checks above.");
+                    ? L("Result_Inspect_AllPass")
+                    : L("Result_Inspect_SomeFailed"));
             });
         }
 
@@ -1453,7 +1509,7 @@ namespace IntercomFirmwareTool.App
         private async void BtnSelfTest_Click(object sender, RoutedEventArgs e)
         {
             var sb = new StringBuilder();
-            sb.AppendLine("MD5-crypt ($1$) self-test — vectors verified against `openssl passwd -1`.");
+            sb.AppendLine(L("Result_SelfTest_Head"));
             sb.AppendLine();
 
             await RunAndShow(sb, () =>
@@ -1462,8 +1518,8 @@ namespace IntercomFirmwareTool.App
                 sb.Append(report);
                 sb.AppendLine();
                 sb.AppendLine(allPass
-                    ? "✅ ALL PASS — the C# MD5-crypt matches openssl byte-for-byte."
-                    : "❌ SOME FAILED — the implementation does not match; do not use it.");
+                    ? L("Result_SelfTest_AllPass")
+                    : L("Result_SelfTest_SomeFailed"));
             });
         }
 
@@ -1522,7 +1578,7 @@ namespace IntercomFirmwareTool.App
             // in a popup instead.
             SetButtonsEnabled(false);
             if (busyButton != null) SetButtonBusy(busyButton, true);
-            TxtResult.Text = sb.ToString() + "\nProcessing…";
+            TxtResult.Text = sb.ToString() + "\n" + L("Result_Processing");
             try
             {
                 await Task.Run(work);
@@ -1573,7 +1629,7 @@ namespace IntercomFirmwareTool.App
                 var emoji = new TextBlock { Text = "⏳", VerticalAlignment = VerticalAlignment.Center,
                                             HorizontalAlignment = HorizontalAlignment.Right,
                                             Margin = new Thickness(0, 0, 5, 0) };
-                var baseText = new TextBlock { Text = "Building", VerticalAlignment = VerticalAlignment.Center };
+                var baseText = new TextBlock { Text = L("Btn_Build_Busy"), VerticalAlignment = VerticalAlignment.Center };
                 var dotsText = new TextBlock { VerticalAlignment = VerticalAlignment.Center,
                                                HorizontalAlignment = HorizontalAlignment.Left };
                 var grid = new Grid();

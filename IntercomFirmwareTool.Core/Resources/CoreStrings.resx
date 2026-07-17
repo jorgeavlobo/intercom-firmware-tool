@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- ================= FirmwareRegistry (FR_) ================= -->
+  <data name="FR_LabelLine" xml:space="preserve">
+    <value>  Line     : BTicino {0}</value>
+  </data>
+  <data name="FR_LabelEdition" xml:space="preserve">
+    <value>  Edition  : {0}</value>
+  </data>
+  <data name="FR_LabelVersion" xml:space="preserve">
+    <value>  Version  : {0}</value>
+  </data>
+  <data name="FR_LabelModel" xml:space="preserve">
+    <value>  Model    : {0} — {1}</value>
+  </data>
+  <data name="FR_LabelModels" xml:space="preserve">
+    <value>  Models   :</value>
+  </data>
+  <data name="FR_LabelModelItem" xml:space="preserve">
+    <value>    • {0} — {1}</value>
+  </data>
+  <data name="FR_CannotReadFile" xml:space="preserve">
+    <value>Cannot read the file: {0}</value>
+  </data>
+  <data name="FR_UnrecognizedBySize" xml:space="preserve">
+    <value>Unrecognized firmware: size {0:N0} bytes does not match any known original.</value>
+  </data>
+  <data name="FR_CannotReadWhileHashing" xml:space="preserve">
+    <value>Cannot read the file while hashing: {0}</value>
+  </data>
+  <data name="FR_UnrecognizedBySha" xml:space="preserve">
+    <value>Unrecognized firmware: the SHA-256 does not match any known original.
+  size   : {0:N0} bytes
+  sha256 : {1}</value>
+  </data>
+  <data name="FR_RecognizedNotFwz" xml:space="preserve">
+    <value>Recognized as {0}, but it is not a .fwz container this tool can unpack. It cannot be modified here.</value>
+  </data>
+  <data name="FR_VerifiedOriginal" xml:space="preserve">
+    <value>Verified original: {0} — SHA-256 matches, {1:N0} bytes.</value>
+  </data>
+
+  <!-- ================= FwzProbe (Fwz_) ================= -->
+  <data name="Fwz_OutputSameAsInput" xml:space="preserve">
+    <value>The output .fwz must be a different file from the input .fwz.</value>
+  </data>
+  <data name="Fwz_OutputFolderMissing" xml:space="preserve">
+    <value>The output folder does not exist: {0}</value>
+  </data>
+  <data name="Fwz_RefuseBuildUnrecognized" xml:space="preserve">
+    <value>Refusing to build: the input is not a recognized original firmware.
+</value>
+  </data>
+  <data name="Fwz_BuiltButNotWritten" xml:space="preserve">
+    <value>The firmware was built and verified, but could not be written to:
+{0}
+({1})
+
+The verified build was kept here — move/rename it manually:
+{2}</value>
+  </data>
+  <data name="Fwz_DecompressedExceeds" xml:space="preserve">
+    <value>Decompressed image exceeds the {0} byte limit; aborting.</value>
+  </data>
+  <data name="Fwz_NoGzFound" xml:space="preserve">
+    <value>No '.gz' (non-recovery) file found inside the .fwz.</value>
+  </data>
+  <data name="Fwz_PayloadNotZipCrypto" xml:space="preserve">
+    <value>The '.gz' payload inside the .fwz is not ZipCrypto-encrypted (expected traditional PKWARE encryption).</value>
+  </data>
+  <data name="Fwz_NoPasswordOpened" xml:space="preserve">
+    <value>None of the known passwords (C300X, C100X, SMARTDES) opened the .fwz.</value>
+  </data>
+
+  <!-- ================= Ext4Probe (Ext4_) ================= -->
+  <data name="Ext4_NoPartitions" xml:space="preserve">
+    <value>The image has no recognizable partitions (MBR without valid entries).</value>
+  </data>
+  <data name="Ext4_FileTooLarge" xml:space="preserve">
+    <value>File too large for this test: {0} bytes (limit {1} bytes).</value>
+  </data>
+  <data name="Ext4_IncompleteRead" xml:space="preserve">
+    <value>Incomplete read: expected {0} bytes, got {1}.</value>
+  </data>
+  <data name="Ext4_WrapperEndedEarly" xml:space="preserve">
+    <value>Wrapper disk ended early: {0} of {1} bytes unread; the sliced ext4 would be truncated.</value>
+  </data>
+  <data name="Ext4_ExpectedBareExt4" xml:space="preserve">
+    <value>Expected a bare ext4 image (no partition table, ext4 superblock magic 0xEF53 at offset 0x438). This method operates on the raw ext4 payload, not a .fwz container or an already-partitioned disk image.</value>
+  </data>
+  <data name="Ext4_ImageTooLargeToWrap" xml:space="preserve">
+    <value>Image too large to wrap with an MBR (&gt;2TB).</value>
+  </data>
+  <data name="Ext4_MountedReadOnly" xml:space="preserve">
+    <value>The filesystem mounted READ-ONLY (CanWrite=false); cannot write.</value>
+  </data>
+  <data name="Ext4_AtLeastOneCredential" xml:space="preserve">
+    <value>At least one credential is required: a root password and/or an SSH public key.</value>
+  </data>
+  <data name="Ext4_KeyMustBeSingleLine" xml:space="preserve">
+    <value>The SSH public key must be a single valid OpenSSH public-key line (e.g. "ssh-rsa AAAA… comment").</value>
+  </data>
+  <data name="Ext4_KeyOnlyRequiresRsa" xml:space="preserve">
+    <value>Key-only login (no password) requires an RSA public key — the only key type verified to authenticate on the target firmware. Add a password, or use an RSA key.</value>
+  </data>
+  <data name="Ext4_AlreadyHasRoot2" xml:space="preserve">
+    <value>This firmware already contains a 'root2' account — it appears to be already SSH-enabled. Run the tool on the ORIGINAL, unmodified firmware.</value>
+  </data>
+  <data name="Ext4_InitDropbearMissing" xml:space="preserve">
+    <value>/etc/init.d/dropbear is missing in the image; cannot enable dropbear at boot.</value>
+  </data>
+  <data name="Ext4_Rc5dMissing" xml:space="preserve">
+    <value>/etc/rc5.d is missing in the image; cannot create the S98dropbear symlink.</value>
+  </data>
+  <data name="Ext4_SymlinkWrongTarget" xml:space="preserve">
+    <value>{0} already exists but points to '{1}', not '{2}'.</value>
+  </data>
+  <data name="Ext4_SymlinkNotSymlink" xml:space="preserve">
+    <value>{0} already exists but is not a symlink; refusing to overwrite it.</value>
+  </data>
+  <data name="Ext4_FindingPwEnabled" xml:space="preserve">
+    <value>Password login : ENABLED  (root2 has an MD5-crypt $1$ hash in /etc/shadow)</value>
+  </data>
+  <data name="Ext4_FindingPwDisabled" xml:space="preserve">
+    <value>Password login : disabled  (root2 shadow field is "{0}" — key-only)</value>
+  </data>
+  <data name="Ext4_FindingPwNa" xml:space="preserve">
+    <value>Password login : n/a  (no root2 entry in /etc/shadow)</value>
+  </data>
+  <data name="Ext4_KeyNotInstalled" xml:space="preserve">
+    <value>SSH key ({0}) : not installed  ({1} absent)</value>
+  </data>
+  <data name="Ext4_KeyInvalid" xml:space="preserve">
+    <value>SSH key ({0}) : present but INVALID — not a usable OpenSSH public key ({1})</value>
+  </data>
+  <data name="Ext4_KeyInstalled" xml:space="preserve">
+    <value>SSH key ({0}) : installed  {1}  {2}</value>
+  </data>
+  <data name="Ext4_HowPasswordAndKey" xml:space="preserve">
+    <value>password + key</value>
+  </data>
+  <data name="Ext4_HowPassword" xml:space="preserve">
+    <value>password</value>
+  </data>
+  <data name="Ext4_HowKey" xml:space="preserve">
+    <value>key</value>
+  </data>
+  <data name="Ext4_HowNone" xml:space="preserve">
+    <value>none</value>
+  </data>
+  <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
+    <value>{0} does not exist in the image; refusing to create it (it would get unknown mode/owner).</value>
+  </data>
+</root>
