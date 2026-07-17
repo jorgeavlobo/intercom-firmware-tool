@@ -42,6 +42,9 @@ namespace IntercomFirmwareTool.App.Localization
             new LanguageOption("es", "Español"),
             new LanguageOption("fr", "Français"),
             new LanguageOption("de", "Deutsch"),
+            // Neutral "pt" on purpose: the text is European Portuguese, but a neutral
+            // culture also serves pt-BR (and any Portuguese UI) — Portuguese beats
+            // falling back to English for those users.
             new LanguageOption("pt", "Português"),
         };
 

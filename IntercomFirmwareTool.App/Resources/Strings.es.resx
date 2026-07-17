@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <root>
   <!--
-    Default (English) UI strings. Culture-specific values live in the sibling
-    Strings.<culture>.resx files (it, es, fr, de, pt), which the .NET SDK compiles
-    into satellite assemblies. Accessed at runtime through LocalizationManager
+    Spanish (es) translation of the UI strings. The authoritative English source
+    is Strings.resx; every culture (it, es, fr, de, pt) compiles into a satellite
+    assembly, accessed at runtime through LocalizationManager
     (XAML: {loc:Loc Key}) and, in code-behind, via the L()/LF() helpers.
 
     {0}, {1}, … are string.Format placeholders — keep them, and their order, in
