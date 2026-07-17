@@ -341,7 +341,7 @@ namespace IntercomFirmwareTool.App
             {
                 // Never let an exception escape this async void handler (it would
                 // crash the dispatcher); turn it into a normal rejection below.
-                string em = ex.Message;
+                string em = SafeMessage(ex);
                 check = new FirmwareCheckResult(false, null, () => LF("Fmt_VerifyFailed", em));
             }
             finally { SetButtonsEnabled(true); }
@@ -446,7 +446,7 @@ namespace IntercomFirmwareTool.App
             try { content = File.ReadAllText(chosen).Trim(); }
             catch (Exception ex)
             {
-                MessageBox.Show(this, LF("Fmt_Msg_ReadKeyFailed", ex.Message),
+                MessageBox.Show(this, LF("Fmt_Msg_ReadKeyFailed", SafeMessage(ex)),
                     L("Cap_CannotReadKey"), MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
