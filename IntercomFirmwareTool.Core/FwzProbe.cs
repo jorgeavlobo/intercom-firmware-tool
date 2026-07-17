@@ -42,14 +42,28 @@ namespace IntercomFirmwareTool.Core
     /// informational findings (password-login mode, installed key fingerprint)
     /// and the objective structural checks.
     /// </summary>
-    public sealed record SshInspectionReport(
-        string PasswordUsed,
-        string SelectedEntry,
-        // Findings are factories so their localized text regenerates in the current
-        // UI culture when the app language changes (see the app's inspect renderer).
-        IReadOnlyList<Func<string>> Findings,
-        IReadOnlyList<Ext4Check> Checks,
-        bool AllPass);
+    // A plain class (not a record): Findings are delegate factories (so their
+    // localized text regenerates in the current UI culture on a language switch),
+    // and a record's synthesized equality/hashcode/ToString over delegates would be
+    // meaningless — consistent with FirmwareCheckResult.
+    public sealed class SshInspectionReport
+    {
+        public string PasswordUsed { get; }
+        public string SelectedEntry { get; }
+        public IReadOnlyList<Func<string>> Findings { get; }
+        public IReadOnlyList<Ext4Check> Checks { get; }
+        public bool AllPass { get; }
+
+        public SshInspectionReport(string passwordUsed, string selectedEntry,
+            IReadOnlyList<Func<string>> findings, IReadOnlyList<Ext4Check> checks, bool allPass)
+        {
+            PasswordUsed = passwordUsed;
+            SelectedEntry = selectedEntry;
+            Findings = findings;
+            Checks = checks;
+            AllPass = allPass;
+        }
+    }
 
     /// <summary>Result of building a modified .fwz and round-tripping it.</summary>
     public sealed record FwzBuildResult(

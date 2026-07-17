@@ -41,13 +41,25 @@ namespace IntercomFirmwareTool.Core
     /// ownership, dropbear autostart), and <see cref="AllPass"/> is true when
     /// every structural check passed.
     /// </summary>
-    public sealed record SshInspection(
+    public sealed class SshInspection
+    {
         // Findings are stored as factories, not strings, so their localized text can
         // be regenerated in the current UI culture (the app re-renders them when the
         // language changes at runtime).
-        IReadOnlyList<Func<string>> Findings,
-        IReadOnlyList<Ext4Check> Checks,
-        bool AllPass);
+        public IReadOnlyList<Func<string>> Findings { get; }
+        public IReadOnlyList<Ext4Check> Checks { get; }
+        public bool AllPass { get; }
+
+        public SshInspection(
+            IReadOnlyList<Func<string>> findings,
+            IReadOnlyList<Ext4Check> checks,
+            bool allPass)
+        {
+            Findings = findings;
+            Checks = checks;
+            AllPass = allPass;
+        }
+    }
 
     public static class Ext4Probe
     {
