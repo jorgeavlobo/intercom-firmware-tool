@@ -103,11 +103,15 @@ namespace IntercomFirmwareTool.App.Localization
 
         private static string SystemDefaultCode()
         {
-            string sys = CultureInfo.InstalledUICulture.TwoLetterISOLanguageName;
-            if (Languages.Any(l => l.Code == sys)) return sys;
-            // Also honour the current UI culture (e.g. a per-user override) if we ship it.
-            sys = CultureInfo.CurrentUICulture.TwoLetterISOLanguageName;
-            return Languages.Any(l => l.Code == sys) ? sys : "en";
+            // Prefer the user's current display/UI language over the OS install
+            // language — e.g. a French display on English-installed Windows should
+            // start in French. Fall back to the installed language, then English.
+            foreach (var culture in new[] { CultureInfo.CurrentUICulture, CultureInfo.InstalledUICulture })
+            {
+                string code = culture.TwoLetterISOLanguageName;
+                if (Languages.Any(l => l.Code == code)) return code;
+            }
+            return "en";
         }
 
         // Persistence: %AppData%\IntercomFirmwareTool\settings.json

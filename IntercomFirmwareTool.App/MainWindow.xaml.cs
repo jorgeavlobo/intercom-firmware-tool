@@ -965,6 +965,11 @@ namespace IntercomFirmwareTool.App
             UpdatePasswordHint();
             UpdateBuildEnabled();       // password label, credential rule, cues, hint, a11y names
             UpdateLanguageMenuHeader();
+            // SetButtonBusy swaps BtnBuild.Content for the busy visual, dropping its
+            // {loc:Loc} binding; re-apply the label so a language change after a build
+            // still updates it (skip while a build is running — the busy visual owns it).
+            if (!string.Equals(BtnBuild.Tag as string, "busy", StringComparison.Ordinal))
+                BtnBuild.Content = L("Btn_Build");
         }
 
         /// <summary>Sets the neutral placeholder on any path box that has no selection.</summary>
