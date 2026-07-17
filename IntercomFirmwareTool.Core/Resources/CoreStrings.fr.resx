@@ -1,0 +1,167 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- ================= FirmwareRegistry (FR_) ================= -->
+  <data name="FR_LabelLine" xml:space="preserve">
+    <value>  Ligne    : BTicino {0}</value>
+  </data>
+  <data name="FR_LabelEdition" xml:space="preserve">
+    <value>  Édition  : {0}</value>
+  </data>
+  <data name="FR_LabelVersion" xml:space="preserve">
+    <value>  Version  : {0}</value>
+  </data>
+  <data name="FR_LabelModel" xml:space="preserve">
+    <value>  Modèle   : {0} — {1}</value>
+  </data>
+  <data name="FR_LabelModels" xml:space="preserve">
+    <value>  Modèles  :</value>
+  </data>
+  <data name="FR_LabelModelItem" xml:space="preserve">
+    <value>    • {0} — {1}</value>
+  </data>
+  <data name="FR_CannotReadFile" xml:space="preserve">
+    <value>Impossible de lire le fichier : {0}</value>
+  </data>
+  <data name="FR_UnrecognizedBySize" xml:space="preserve">
+    <value>Firmware non reconnu : la taille de {0:N0} octets ne correspond à aucun original connu.</value>
+  </data>
+  <data name="FR_CannotReadWhileHashing" xml:space="preserve">
+    <value>Impossible de lire le fichier pendant le calcul de l'empreinte : {0}</value>
+  </data>
+  <data name="FR_UnrecognizedBySha" xml:space="preserve">
+    <value>Firmware non reconnu : le SHA-256 ne correspond à aucun original connu.
+  taille : {0:N0} octets
+  sha256 : {1}</value>
+  </data>
+  <data name="FR_RecognizedNotFwz" xml:space="preserve">
+    <value>Reconnu comme {0}, mais ce n'est pas un conteneur .fwz que cet outil peut décompresser. Il ne peut pas être modifié ici.</value>
+  </data>
+  <data name="FR_VerifiedOriginal" xml:space="preserve">
+    <value>Original vérifié : {0} — le SHA-256 correspond, {1:N0} octets.</value>
+  </data>
+
+  <!-- ================= FwzProbe (Fwz_) ================= -->
+  <data name="Fwz_OutputSameAsInput" xml:space="preserve">
+    <value>Le .fwz de sortie doit être un fichier différent du .fwz d'entrée.</value>
+  </data>
+  <data name="Fwz_OutputFolderMissing" xml:space="preserve">
+    <value>Le dossier de sortie n'existe pas : {0}</value>
+  </data>
+  <data name="Fwz_RefuseBuildUnrecognized" xml:space="preserve">
+    <value>Génération refusée : l'entrée n'est pas un firmware d'origine reconnu.
+</value>
+  </data>
+  <data name="Fwz_BuiltButNotWritten" xml:space="preserve">
+    <value>Le firmware a été généré et vérifié, mais n'a pas pu être écrit dans :
+{0}
+({1})
+
+La génération vérifiée a été conservée ici — déplacez-la/renommez-la manuellement :
+{2}</value>
+  </data>
+  <data name="Fwz_DecompressedExceeds" xml:space="preserve">
+    <value>L'image décompressée dépasse la limite de {0} octets ; abandon.</value>
+  </data>
+  <data name="Fwz_NoGzFound" xml:space="preserve">
+    <value>Aucun fichier '.gz' (hors récupération) trouvé à l'intérieur du .fwz.</value>
+  </data>
+  <data name="Fwz_PayloadNotZipCrypto" xml:space="preserve">
+    <value>La charge utile '.gz' à l'intérieur du .fwz n'est pas chiffrée en ZipCrypto (chiffrement PKWARE traditionnel attendu).</value>
+  </data>
+  <data name="Fwz_NoPasswordOpened" xml:space="preserve">
+    <value>Aucun des mots de passe connus (C300X, C100X, SMARTDES) n'a ouvert le .fwz.</value>
+  </data>
+
+  <!-- ================= Ext4Probe (Ext4_) ================= -->
+  <data name="Ext4_NoPartitions" xml:space="preserve">
+    <value>L'image n'a aucune partition reconnaissable (MBR sans entrées valides).</value>
+  </data>
+  <data name="Ext4_FileTooLarge" xml:space="preserve">
+    <value>Fichier trop volumineux pour ce test : {0} octets (limite {1} octets).</value>
+  </data>
+  <data name="Ext4_IncompleteRead" xml:space="preserve">
+    <value>Lecture incomplète : {0} octets attendus, {1} obtenus.</value>
+  </data>
+  <data name="Ext4_WrapperEndedEarly" xml:space="preserve">
+    <value>Le disque d'encapsulation s'est terminé prématurément : {0} sur {1} octets non lus ; l'ext4 extrait serait tronqué.</value>
+  </data>
+  <data name="Ext4_ExpectedBareExt4" xml:space="preserve">
+    <value>Une image ext4 brute est attendue (sans table de partition, magie du superbloc ext4 0xEF53 à l'offset 0x438). Cette méthode opère sur la charge utile ext4 brute, pas sur un conteneur .fwz ni sur une image de disque déjà partitionnée.</value>
+  </data>
+  <data name="Ext4_ImageTooLargeToWrap" xml:space="preserve">
+    <value>Image trop volumineuse pour être encapsulée avec un MBR (&gt;2 To).</value>
+  </data>
+  <data name="Ext4_MountedReadOnly" xml:space="preserve">
+    <value>Le système de fichiers a été monté en LECTURE SEULE (CanWrite=false) ; écriture impossible.</value>
+  </data>
+  <data name="Ext4_AtLeastOneCredential" xml:space="preserve">
+    <value>Au moins un identifiant est requis : un mot de passe root et/ou une clé publique SSH.</value>
+  </data>
+  <data name="Ext4_KeyMustBeSingleLine" xml:space="preserve">
+    <value>La clé publique SSH doit être une seule ligne de clé publique OpenSSH valide (par ex. "ssh-rsa AAAA… commentaire").</value>
+  </data>
+  <data name="Ext4_KeyOnlyRequiresRsa" xml:space="preserve">
+    <value>La connexion par clé uniquement (sans mot de passe) nécessite une clé publique RSA — le seul type de clé dont l'authentification est vérifiée sur le firmware cible. Ajoutez un mot de passe, ou utilisez une clé RSA.</value>
+  </data>
+  <data name="Ext4_AlreadyHasRoot2" xml:space="preserve">
+    <value>Ce firmware contient déjà un compte 'root2' — il semble déjà avoir SSH activé. Exécutez l'outil sur le firmware d'ORIGINE, non modifié.</value>
+  </data>
+  <data name="Ext4_InitDropbearMissing" xml:space="preserve">
+    <value>/etc/init.d/dropbear est absent de l'image ; impossible d'activer dropbear au démarrage.</value>
+  </data>
+  <data name="Ext4_Rc5dMissing" xml:space="preserve">
+    <value>/etc/rc5.d est absent de l'image ; impossible de créer le lien symbolique S98dropbear.</value>
+  </data>
+  <data name="Ext4_SymlinkWrongTarget" xml:space="preserve">
+    <value>{0} existe déjà mais pointe vers '{1}', et non '{2}'.</value>
+  </data>
+  <data name="Ext4_SymlinkNotSymlink" xml:space="preserve">
+    <value>{0} existe déjà mais n'est pas un lien symbolique ; refus de l'écraser.</value>
+  </data>
+  <data name="Ext4_FindingPwEnabled" xml:space="preserve">
+    <value>Connexion par mot de passe : ACTIVÉE  (root2 a une empreinte MD5-crypt $1$ dans /etc/shadow)</value>
+  </data>
+  <data name="Ext4_FindingPwDisabled" xml:space="preserve">
+    <value>Connexion par mot de passe : désactivée  (le champ shadow de root2 est "{0}" — clé uniquement)</value>
+  </data>
+  <data name="Ext4_FindingPwNa" xml:space="preserve">
+    <value>Connexion par mot de passe : s.o.  (aucune entrée root2 dans /etc/shadow)</value>
+  </data>
+  <data name="Ext4_KeyNotInstalled" xml:space="preserve">
+    <value>Clé SSH ({0}) : non installée  ({1} absent)</value>
+  </data>
+  <data name="Ext4_KeyInvalid" xml:space="preserve">
+    <value>Clé SSH ({0}) : présente mais INVALIDE — pas une clé publique OpenSSH utilisable ({1})</value>
+  </data>
+  <data name="Ext4_KeyInstalled" xml:space="preserve">
+    <value>Clé SSH ({0}) : installée  {1}  {2}</value>
+  </data>
+  <data name="Ext4_HowPasswordAndKey" xml:space="preserve">
+    <value>mot de passe + clé</value>
+  </data>
+  <data name="Ext4_HowPassword" xml:space="preserve">
+    <value>mot de passe</value>
+  </data>
+  <data name="Ext4_HowKey" xml:space="preserve">
+    <value>clé</value>
+  </data>
+  <data name="Ext4_HowNone" xml:space="preserve">
+    <value>aucun</value>
+  </data>
+  <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
+    <value>{0} n'existe pas dans l'image ; refus de le créer (il obtiendrait un mode/propriétaire inconnu).</value>
+  </data>
+</root>

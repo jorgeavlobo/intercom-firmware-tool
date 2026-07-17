@@ -1,0 +1,333 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <!--
+    Default (English) UI strings. Culture-specific values live in the sibling
+    Strings.<culture>.resx files (it, es, fr, de, pt), which the .NET SDK compiles
+    into satellite assemblies. Accessed at runtime through LocalizationManager
+    (XAML: {loc:Loc Key}) and, in code-behind, via the L()/LF() helpers.
+
+    {0}, {1}, … are string.Format placeholders — keep them, and their order, in
+    every translation. Keep technical tokens verbatim (.fwz, .pub, SSH, RSA, root2,
+    MD5-crypt, SHA-256, ssh-rsa, dropbear, file paths, and commands like icacls /
+    ssh-keygen). In file-dialog filters keep the "|"-separated pattern parts and the
+    (*.ext) tokens; translate only the human descriptions.
+  -->
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- ================= Window / chrome ================= -->
+  <data name="Win_Title" xml:space="preserve"><value>Intercom Firmware Tool — SSH-enable (Classe 100X / 300X)</value></data>
+  <data name="Adv_Toggle" xml:space="preserve"><value>Opzioni avanzate</value></data>
+  <data name="Tip_Advanced" xml:space="preserve"><value>Mostra le opzioni avanzate: chiave pubblica SSH, ispezione e auto-test</value></data>
+  <data name="Lang_MenuTooltip" xml:space="preserve"><value>Cambia lingua</value></data>
+
+  <!-- ================= Safety banner (kept as separate runs so the bold/underline
+       emphasis and the mid-sentence hyperlink survive; keep this word order) ===== -->
+  <data name="Banner_Risk_Pre" xml:space="preserve"><value>⚠ Il flashing di firmware modificato può rendere inutilizzabile il dispositivo. </value></data>
+  <data name="Banner_Risk_Emph" xml:space="preserve"><value>Fallo a tuo rischio!</value></data>
+  <data name="Banner_Use_Pre" xml:space="preserve"><value> Usa </value></data>
+  <data name="Banner_Link" xml:space="preserve"><value>MyHOME Suite</value></data>
+  <data name="Banner_Use_Post" xml:space="preserve"><value>.</value></data>
+
+  <!-- ================= Form field labels ================= -->
+  <data name="Field_Firmware" xml:space="preserve"><value>Firmware:</value></data>
+  <data name="Field_Password_Simple" xml:space="preserve"><value>Password:</value></data>
+  <data name="Field_Password_Advanced" xml:space="preserve"><value>Password di root:</value></data>
+  <data name="Field_ConfirmPassword" xml:space="preserve"><value>Conferma password:</value></data>
+  <data name="Field_SaveOutput" xml:space="preserve"><value>Salva output come:</value></data>
+  <data name="Field_SshKey" xml:space="preserve"><value>Chiave pubblica SSH:</value></data>
+
+  <!-- ================= Placeholders (shown when nothing is selected/typed) ====== -->
+  <data name="Ph_Firmware" xml:space="preserve"><value>(clicca per scegliere il .fwz originale da modificare)</value></data>
+  <data name="Ph_Firmware_Invalid" xml:space="preserve"><value>(nessun firmware valido selezionato)</value></data>
+  <data name="Ph_Required" xml:space="preserve"><value>(obbligatorio)</value></data>
+  <data name="Ph_Output" xml:space="preserve"><value>(dove scrivere il .fwz modificato)</value></data>
+  <data name="Ph_Key_Optional" xml:space="preserve"><value>(facoltativo: scegli una chiave .pub esistente o generane una nuova coppia)</value></data>
+  <data name="Ph_Key_Required" xml:space="preserve"><value>(obbligatorio: scegli una chiave .pub esistente o generane una nuova coppia)</value></data>
+
+  <!-- ================= Tooltips ================= -->
+  <data name="Tip_Firmware" xml:space="preserve"><value>Clicca (o premi Invio/Spazio) per scegliere il firmware originale (.fwz)…</value></data>
+  <data name="Tip_ClearFirmware" xml:space="preserve"><value>Cancella il firmware selezionato</value></data>
+  <data name="Tip_GenPassword" xml:space="preserve"><value>Genera una password casuale robusta</value></data>
+  <data name="Tip_RevealHold" xml:space="preserve"><value>Tieni premuto per mostrare la password</value></data>
+  <data name="Tip_RevealRelease" xml:space="preserve"><value>Rilascia per nascondere la password</value></data>
+  <data name="Tip_CopyPassword" xml:space="preserve"><value>Copia la password negli appunti</value></data>
+  <data name="Tip_Disable" xml:space="preserve"><value>Disabilita l'accesso con password (solo chiave) — richiede una chiave SSH</value></data>
+  <data name="Tip_Output" xml:space="preserve"><value>Clicca (o premi Invio/Spazio) per scegliere dove salvare il .fwz modificato…</value></data>
+  <data name="Tip_ClearOutput" xml:space="preserve"><value>Cancella la posizione di output</value></data>
+  <data name="Tip_Key" xml:space="preserve"><value>Clicca (o premi Invio/Spazio) per scegliere una chiave pubblica esistente (.pub)…</value></data>
+  <data name="Tip_GenKey" xml:space="preserve"><value>Genera una nuova coppia di chiavi SSH…</value></data>
+  <data name="Tip_ClearKey" xml:space="preserve"><value>Cancella la chiave selezionata (compila solo con password)</value></data>
+  <data name="Tip_PayPal" xml:space="preserve"><value>Sostieni tramite PayPal</value></data>
+  <data name="Tip_Revolut" xml:space="preserve"><value>Sostieni tramite Revolut</value></data>
+
+  <!-- ================= Accessibility (screen-reader) names ================= -->
+  <data name="Fmt_Required" xml:space="preserve"><value>{0}, obbligatorio</value></data>
+  <data name="Name_Firmware" xml:space="preserve"><value>Firmware</value></data>
+  <data name="Name_Output" xml:space="preserve"><value>Salva output come</value></data>
+  <data name="Name_Password_Simple" xml:space="preserve"><value>Password</value></data>
+  <data name="Name_Password_Advanced" xml:space="preserve"><value>Password di root</value></data>
+  <data name="Name_Confirm" xml:space="preserve"><value>Conferma password</value></data>
+  <data name="Name_Confirm_Mismatch" xml:space="preserve"><value>Conferma password, non corrisponde alla password</value></data>
+  <data name="Name_Key" xml:space="preserve"><value>Chiave pubblica SSH</value></data>
+  <data name="Aria_GenKey" xml:space="preserve"><value>Genera una nuova coppia di chiavi SSH</value></data>
+  <data name="Aria_ClearKey" xml:space="preserve"><value>Cancella la chiave SSH selezionata</value></data>
+  <data name="Aria_PayPal" xml:space="preserve"><value>Offrimi un caffè tramite PayPal</value></data>
+  <data name="Aria_Revolut" xml:space="preserve"><value>Offrimi un caffè tramite Revolut</value></data>
+
+  <!-- ================= Buttons / checkbox ================= -->
+  <data name="Chk_Disable" xml:space="preserve"><value>Disabilita</value></data>
+  <data name="Btn_Build" xml:space="preserve"><value>Compila il firmware modificato</value></data>
+  <data name="Btn_Build_Busy" xml:space="preserve"><value>Compilazione in corso</value></data>
+  <data name="Btn_Inspect" xml:space="preserve"><value>Ispeziona un .fwz esistente…</value></data>
+  <data name="Btn_SelfTest" xml:space="preserve"><value>Auto-test (MD5-crypt)</value></data>
+  <data name="Lbl_Result" xml:space="preserve"><value>Risultato:</value></data>
+
+  <!-- ================= Credential rule line ================= -->
+  <data name="Rule_KeyOnly" xml:space="preserve"><value>È richiesta una chiave SSH — l'accesso con password è disabilitato.</value></data>
+  <data name="Rule_Advanced" xml:space="preserve"><value>È richiesta una password di root — oppure spunta «Disabilita» per accedere solo con una chiave SSH.</value></data>
+  <data name="Rule_Simple" xml:space="preserve"><value>È richiesta una password — oppure spunta «Disabilita» per accedere solo con una chiave SSH.</value></data>
+
+  <!-- ================= Password match hint ================= -->
+  <data name="PwdHint_Disabled" xml:space="preserve"><value>(accesso con password disabilitato)</value></data>
+  <data name="PwdHint_Match" xml:space="preserve"><value>✓ corrispondono</value></data>
+  <data name="PwdHint_Mismatch" xml:space="preserve"><value>✗ non corrispondono</value></data>
+
+  <!-- ================= Build "what's still needed" hint ================= -->
+  <data name="Hint_Ready" xml:space="preserve"><value>✓ Pronto per la compilazione.</value></data>
+  <data name="Fmt_StillNeeded" xml:space="preserve"><value>Ancora necessario: {0}.</value></data>
+  <data name="Fmt_StillNeeded_Prefix" xml:space="preserve"><value>Ancora necessario: {0} — </value></data>
+  <data name="Hint_Mismatch" xml:space="preserve"><value>le password non corrispondono.</value></data>
+  <data name="Miss_Firmware" xml:space="preserve"><value>firmware</value></data>
+  <data name="Miss_Output" xml:space="preserve"><value>percorso di output</value></data>
+  <data name="Miss_Password_Simple" xml:space="preserve"><value>una password</value></data>
+  <data name="Miss_Password_Advanced" xml:space="preserve"><value>una password di root</value></data>
+  <data name="Miss_Confirm" xml:space="preserve"><value>conferma la password</value></data>
+  <data name="Miss_Key" xml:space="preserve"><value>una chiave SSH</value></data>
+
+  <!-- ================= Status line (under the Build button) ================= -->
+  <data name="Status_NothingToCopy" xml:space="preserve"><value>Niente da copiare — il campo della password è vuoto.</value></data>
+  <data name="Status_Copied" xml:space="preserve"><value>Password copiata (esclusa dalla cronologia degli appunti / sincronizzazione cloud).</value></data>
+  <data name="Fmt_CopyFailed" xml:space="preserve"><value>Impossibile copiare negli appunti: {0}</value></data>
+  <data name="Status_Verifying" xml:space="preserve"><value>Verifica del firmware in corso… (dimensione + SHA-256)</value></data>
+  <data name="Status_FirmwareVerified" xml:space="preserve"><value>✓ Firmware verificato.</value></data>
+  <data name="Status_GenKey" xml:space="preserve"><value>Generazione di una nuova coppia di chiavi SSH…</value></data>
+  <data name="Status_KeyGenerated" xml:space="preserve"><value>✓ Coppia di chiavi SSH generata.</value></data>
+
+  <!-- ================= Result box: default + password/verify narratives ======== -->
+  <data name="Result_Default" xml:space="preserve"><value>Scegli un firmware e un percorso di output, imposta una password di root (oppure spunta «Disabilita» per usare solo una chiave SSH), poi clicca Compila.</value></data>
+  <data name="Result_RandomPwd" xml:space="preserve"><value>Generata una password casuale robusta e compilati entrambi i campi.
+Tieni premuto l'occhio per visualizzarla, o usa il pulsante di copia — conservala al sicuro, non viene memorizzata e ti servirà per accedere.</value></data>
+  <data name="Fmt_Result_Verifying" xml:space="preserve"><value>Verifica dell'integrità del firmware in corso (dimensione + SHA-256)…
+{0}</value></data>
+  <data name="Fmt_Result_Rejected" xml:space="preserve"><value>❌ Questo file NON è stato accettato — selezione cancellata, Compila resta disabilitato.
+
+{0}
+
+Solo firmware originale riconosciuto come valido può essere modificato, così un download corrotto o
+errato non può essere trasformato in un'immagine danneggiata. Il NOME del file non conta —
+il suo contenuto (dimensione + SHA-256) deve corrispondere a un originale noto.</value></data>
+  <data name="Fmt_Result_Accepted" xml:space="preserve"><value>✅ {0}
+
+{1}
+
+Imposta una password di root (oppure spunta «Disabilita» per usare solo una chiave SSH), poi Compila.</value></data>
+
+  <!-- ================= Firmware picker dialog ================= -->
+  <data name="Dlg_ChooseFirmware_Title" xml:space="preserve"><value>Scegli il firmware originale (.fwz)</value></data>
+  <data name="Dlg_FirmwareFilter" xml:space="preserve"><value>Firmware Bticino (*.fwz)|*.fwz|Tutti i file (*.*)|*.*</value></data>
+  <data name="Fmt_VerifyFailed" xml:space="preserve"><value>Impossibile verificare il firmware: {0}</value></data>
+  <data name="Fmt_Msg_FirmwareNotAccepted" xml:space="preserve"><value>Questo file non è un firmware originale accettato.
+
+{0}
+
+La selezione è stata cancellata.</value></data>
+  <data name="Cap_FirmwareNotAccepted" xml:space="preserve"><value>Firmware non accettato</value></data>
+
+  <!-- ================= SSH key picker dialog ================= -->
+  <data name="Dlg_ChooseKey_Title" xml:space="preserve"><value>Scegli la tua chiave pubblica SSH (.pub)</value></data>
+  <data name="Dlg_KeyFilter" xml:space="preserve"><value>Chiave pubblica (*.pub)|*.pub|Tutti i file (*.*)|*.*</value></data>
+  <data name="Fmt_Msg_ReadKeyFailed" xml:space="preserve"><value>Impossibile leggere il file della chiave:
+{0}</value></data>
+  <data name="Cap_CannotReadKey" xml:space="preserve"><value>Impossibile leggere la chiave</value></data>
+  <data name="Msg_NotPublicKey_Choose" xml:space="preserve"><value>Quel file non sembra una chiave pubblica OpenSSH
+(attesa una riga come "ssh-rsa AAAA… comment"). Scegli il file .pub.</value></data>
+  <data name="Cap_NotPublicKey" xml:space="preserve"><value>Non è una chiave pubblica</value></data>
+
+  <!-- ================= Generate SSH key ================= -->
+  <data name="Dlg_SaveKey_Title" xml:space="preserve"><value>Salva la NUOVA chiave privata come… (la .pub pubblica viene scritta accanto ad essa)</value></data>
+  <data name="Dlg_SaveKeyFilter" xml:space="preserve"><value>Chiave privata SSH (tutti i file)|*.*</value></data>
+  <data name="CollisionLabel_Input" xml:space="preserve"><value>firmware di input</value></data>
+  <data name="CollisionLabel_Output" xml:space="preserve"><value>firmware di output</value></data>
+  <data name="CollisionLabel_Key" xml:space="preserve"><value>chiave pubblica selezionata</value></data>
+  <data name="Fmt_Msg_KeyCollision" xml:space="preserve"><value>La chiave verrebbe scritta sopra {0}:
+
+{1}
+
+Scegli una posizione diversa per la nuova chiave.</value></data>
+  <data name="Cap_PathCollision" xml:space="preserve"><value>Collisione di percorso</value></data>
+  <data name="Fmt_Msg_PubExists" xml:space="preserve"><value>Esiste già una chiave pubblica e verrà sovrascritta:
+
+{0}
+
+Continuare?</value></data>
+  <data name="Cap_PubExists" xml:space="preserve"><value>La chiave pubblica esiste</value></data>
+  <data name="Result_GeneratingKey" xml:space="preserve"><value>Generazione di una nuova coppia di chiavi RSA a 4096 bit…</value></data>
+  <data name="Fmt_Result_GenKeyFailed" xml:space="preserve"><value>Impossibile generare la chiave:
+{0}</value></data>
+  <data name="Result_GenKeyFailed_Unknown" xml:space="preserve"><value>Nessuna chiave pubblica è stata prodotta (errore sconosciuto).</value></data>
+  <data name="Fmt_Msg_GenKeyFailed" xml:space="preserve"><value>Impossibile generare la coppia di chiavi SSH:
+
+{0}</value></data>
+  <data name="Msg_GenKeyFailed_Unknown" xml:space="preserve"><value>Errore sconosciuto.</value></data>
+  <data name="Cap_GenKeyFailed" xml:space="preserve"><value>Generazione della chiave non riuscita</value></data>
+  <data name="Fmt_Result_KeyDetails" xml:space="preserve"><value>  Tipo chiave : {0}
+  Impronta    : {1}
+</value></data>
+  <data name="Result_KeyCreated_Header" xml:space="preserve"><value>Nuova coppia di chiavi SSH creata.</value></data>
+  <data name="Fmt_Result_KeyCreated_Priv" xml:space="preserve"><value>  Chiave privata : {0}</value></data>
+  <data name="Fmt_Result_KeyCreated_Pub" xml:space="preserve"><value>  Chiave pubblica  : {0}</value></data>
+  <data name="Fmt_Result_KeyCreated_Body" xml:space="preserve"><value>La chiave pubblica è ora selezionata per la compilazione. CONSERVA LA CHIAVE PRIVATA AL SICURO —
+è ciò che userai per accedere. Questa build aggiunge un account root2 (uid 0),
+quindi connettiti come root2:  ssh -i "{0}" root2@&lt;device&gt;
+Non ha passphrase; aggiungine una in seguito con:  ssh-keygen -p -f "{0}"</value></data>
+  <data name="Result_KeyCreated_Restricted" xml:space="preserve"><value>La chiave privata è stata limitata al tuo account Windows (gli altri utenti sono
+esclusi), così OpenSSH la accetterà.</value></data>
+  <data name="Fmt_Result_KeyCreated_NotRestricted" xml:space="preserve"><value>Se Windows OpenSSH segnala che la chiave è troppo aperta ("UNPROTECTED PRIVATE KEY
+FILE"), limitala al tuo account con:
+  icacls "{0}" /inheritance:r /grant:r "%USERNAME%:F"
+(Controllo completo solo per te — a OpenSSH basta che gli altri utenti siano esclusi.)</value></data>
+  <data name="Fmt_Msg_KeyCreated" xml:space="preserve"><value>Coppia di chiavi creata.
+
+Chiave privata:
+{0}
+
+Chiave pubblica:
+{1}
+
+Conserva la chiave privata al sicuro — non ha passphrase.</value></data>
+  <data name="Cap_NewSshKey" xml:space="preserve"><value>Nuova chiave SSH</value></data>
+
+  <!-- ================= Output picker ================= -->
+  <data name="Dlg_SaveOutput_Title" xml:space="preserve"><value>Salva il firmware modificato come…</value></data>
+  <data name="Msg_CannotOverwriteInput" xml:space="preserve"><value>L'output deve essere un file diverso dal firmware originale, così il .fwz originale non viene mai sovrascritto.
+
+Scegli un nome o una cartella diversi.</value></data>
+  <data name="Cap_CannotOverwriteInput" xml:space="preserve"><value>Impossibile sovrascrivere l'originale</value></data>
+
+  <!-- ================= Build validation dialogs ================= -->
+  <data name="Msg_PasswordRequired" xml:space="preserve"><value>Inserisci una password di root, oppure spunta «Disabilita» per compilare un
+firmware solo-chiave (che poi richiede una chiave SSH).</value></data>
+  <data name="Cap_PasswordRequired" xml:space="preserve"><value>Password richiesta</value></data>
+  <data name="Msg_PasswordMismatch" xml:space="preserve"><value>La password e la sua conferma non corrispondono.</value></data>
+  <data name="Cap_PasswordMismatch" xml:space="preserve"><value>Password non corrispondenti</value></data>
+  <data name="Fmt_Msg_CannotReadPubKey" xml:space="preserve"><value>Impossibile leggere la chiave pubblica:
+
+{0}</value></data>
+  <data name="Msg_EmptyKey" xml:space="preserve"><value>Il file della chiave pubblica selezionato è vuoto.
+
+Scegli un file .pub valido, o genera una nuova coppia.</value></data>
+  <data name="Cap_EmptyKey" xml:space="preserve"><value>File di chiave vuoto</value></data>
+  <data name="Msg_NotPublicKey_Build" xml:space="preserve"><value>Il file selezionato non sembra una chiave pubblica OpenSSH
+(attesa una riga come "ssh-rsa AAAA… comment" o "ssh-ed25519 AAAA…").
+
+Scegli un file .pub valido, o genera una nuova coppia.</value></data>
+  <data name="Msg_OutputCollidesKey" xml:space="preserve"><value>Il percorso di output è lo stesso file della chiave SSH selezionata (pubblica o
+privata). Scegli un output diverso così la chiave non viene sovrascritta.</value></data>
+  <data name="Cap_OutputCollidesKey" xml:space="preserve"><value>L'output collide con la chiave</value></data>
+  <data name="Msg_KeyRequired" xml:space="preserve"><value>L'accesso con password è disabilitato, quindi è richiesta una chiave SSH.
+
+Scegli o genera una chiave, oppure deseleziona «Disabilita» e imposta una password.</value></data>
+  <data name="Cap_KeyRequired" xml:space="preserve"><value>Chiave richiesta</value></data>
+  <data name="Msg_RsaRequired" xml:space="preserve"><value>L'accesso solo-chiave richiede una chiave pubblica RSA.
+
+RSA è l'unico tipo di chiave verificato per autenticarsi sul dropbear di questo
+firmware, quindi una build solo-chiave con un altro tipo potrebbe lasciare il dispositivo
+senza alcun modo di accedere. Usa una chiave RSA, oppure deseleziona «Disabilita» e imposta una
+password di root come ripiego.</value></data>
+  <data name="Cap_RsaRequired" xml:space="preserve"><value>Chiave RSA richiesta per solo-chiave</value></data>
+  <data name="Fmt_Msg_OutputIsPrivateKey" xml:space="preserve"><value>Il percorso di output è un file di CHIAVE PRIVATA SSH:
+
+{0}
+
+Compilare lì sovrascriverebbe e distruggerebbe la chiave. Scegli un output diverso.</value></data>
+  <data name="Cap_OutputIsPrivateKey" xml:space="preserve"><value>L'output è una chiave privata</value></data>
+  <data name="Fmt_Msg_FileExists" xml:space="preserve"><value>Il file esiste già:
+
+{0}
+
+Sovrascriverlo?</value></data>
+  <data name="Cap_FileExists" xml:space="preserve"><value>Il file esiste</value></data>
+
+  <!-- ================= Build result log ================= -->
+  <data name="Result_Build_Head" xml:space="preserve"><value>Compilazione del firmware modificato in corso…</value></data>
+  <data name="Fmt_Result_Build_Input" xml:space="preserve"><value>  Input      : {0}</value></data>
+  <data name="Result_Build_RootPw_Set" xml:space="preserve"><value>  Pw root    : (impostata — memorizzata come MD5-crypt $1$root$…)</value></data>
+  <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Pw root    : (disabilitata — accesso solo-chiave)</value></data>
+  <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Chiave pub : {0}</value></data>
+  <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Chiave pub : (nessuna — solo accesso con password)</value></data>
+  <data name="Fmt_Result_Build_Output" xml:space="preserve"><value>  Output     : {0}</value></data>
+  <data name="Fmt_Result_ArchivePw" xml:space="preserve"><value>Password archivio : {0}  (chiave ZipCrypto, non il modello del dispositivo)</value></data>
+  <data name="Fmt_Result_Build_ModifiedEntry" xml:space="preserve"><value>Voce modificata : {0}</value></data>
+  <data name="Result_Build_VerifyHeader" xml:space="preserve"><value>Verifica (riaperto il .fwz di OUTPUT e riletta ogni modifica):</value></data>
+  <data name="Result_Build_Success" xml:space="preserve"><value>✅ SUCCESSO — il firmware modificato è stato compilato e verificato.</value></data>
+  <data name="Fmt_Result_Build_WrittenTo" xml:space="preserve"><value>   Scritto in: {0}</value></data>
+  <data name="Result_Build_FlashAdvisory" xml:space="preserve"><value>Prima del flashing: conserva il firmware ORIGINALE e sii pronto a ri-flasharlo
+con My Home Suite tramite Mini-USB. Queste unità usano un SoC i.MX — non esiste
+un un-brick documentato di basso livello (SAM-BA non si applica), quindi un flash difettoso
+potrebbe essere irrecuperabile. Il tuo .fwz originale non è stato modificato.</value></data>
+  <data name="Result_Build_FailChecks" xml:space="preserve"><value>❌ Alcuni controlli FALLITI — la build verificata NON è stata scritta.</value></data>
+  <data name="Fmt_Result_Build_FailUnchanged" xml:space="preserve"><value>   Il percorso di output scelto è stato lasciato invariato: {0}</value></data>
+  <data name="Result_Build_FailNoFlash" xml:space="preserve"><value>   (qualsiasi file esistente lì NON è questa build — non flasharlo.)</value></data>
+  <data name="Result_Build_FailSeeAbove" xml:space="preserve"><value>   Vedi i controlli falliti sopra.</value></data>
+  <data name="Fmt_Msg_BuildFailed" xml:space="preserve"><value>Impossibile completare la compilazione:
+
+{0}
+
+Apri Avanzate → Risultato per il log completo.</value></data>
+  <data name="Cap_BuildFailed" xml:space="preserve"><value>Compilazione non riuscita</value></data>
+  <data name="Fmt_Msg_BuildComplete" xml:space="preserve"><value>✅ Il firmware modificato è stato compilato e verificato con successo.
+
+Salvato in:
+{0}
+
+Il processo è terminato.</value></data>
+  <data name="Cap_BuildComplete" xml:space="preserve"><value>Compilazione completata</value></data>
+  <data name="Msg_BuildNotWritten" xml:space="preserve"><value>Alcuni controlli di verifica non sono stati superati, quindi il firmware modificato NON è stato scritto.
+
+Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></data>
+  <data name="Cap_BuildNotWritten" xml:space="preserve"><value>Build non scritta</value></data>
+
+  <!-- ================= Inspect an existing .fwz ================= -->
+  <data name="Dlg_Inspect_Title" xml:space="preserve"><value>Scegli un .fwz modificato da ispezionare (es. l'output di questo strumento o di fquinto)</value></data>
+  <data name="Result_Inspect_Head" xml:space="preserve"><value>Ispezione di un firmware esistente (sola lettura, il .fwz non viene modificato)…</value></data>
+  <data name="Fmt_Result_Inspect_File" xml:space="preserve"><value>  .fwz       : {0}</value></data>
+  <data name="Fmt_Result_Inspect_InnerEntry" xml:space="preserve"><value>Voce interna    : {0}</value></data>
+  <data name="Result_Inspect_WhatsInside" xml:space="preserve"><value>Cosa c'è dentro:</value></data>
+  <data name="Result_Inspect_Checklist" xml:space="preserve"><value>Lista di controllo:</value></data>
+  <data name="Result_Inspect_AllPass" xml:space="preserve"><value>✅ TUTTO SUPERATO — un SSH-enable valido e completo con almeno un accesso funzionante.</value></data>
+  <data name="Result_Inspect_SomeFailed" xml:space="preserve"><value>❌ ALCUNI FALLITI — a questo .fwz mancano o differiscono i controlli sopra.</value></data>
+
+  <!-- ================= MD5-crypt self-test ================= -->
+  <data name="Result_SelfTest_Head" xml:space="preserve"><value>Auto-test MD5-crypt ($1$) — vettori verificati con `openssl passwd -1`.</value></data>
+  <data name="Result_SelfTest_AllPass" xml:space="preserve"><value>✅ TUTTO SUPERATO — l'MD5-crypt in C# corrisponde a openssl byte per byte.</value></data>
+  <data name="Result_SelfTest_SomeFailed" xml:space="preserve"><value>❌ ALCUNI FALLITI — l'implementazione non corrisponde; non usarla.</value></data>
+
+  <!-- ================= Shared ================= -->
+  <data name="Result_Processing" xml:space="preserve"><value>Elaborazione in corso…</value></data>
+
+  <!-- ================= Donate banner ================= -->
+  <data name="Donate_Pre" xml:space="preserve"><value>Trovi utile questo strumento? </value></data>
+  <data name="Donate_Emph" xml:space="preserve"><value>Offrimi un caffè</value></data>
+  <data name="Donate_Post" xml:space="preserve"><value>. Grazie! ☺</value></data>
+</root>
