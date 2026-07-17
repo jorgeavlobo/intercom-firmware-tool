@@ -234,7 +234,7 @@ namespace IntercomFirmwareTool.App
             string pwd = _pw.Value;
             if (pwd.Length == 0)
             {
-                SetStatus(L("Status_NothingToCopy"));
+                SetStatus(() => L("Status_NothingToCopy"));
                 return;
             }
             try
@@ -242,11 +242,11 @@ namespace IntercomFirmwareTool.App
                 // Copy WITHOUT leaving the plaintext password in Windows Clipboard
                 // History or cloud clipboard sync (see SecureClipboard).
                 SecureClipboard.SetText(pwd);
-                SetStatus(L("Status_Copied"));
+                SetStatus(() => L("Status_Copied"));
             }
             catch (Exception ex)
             {
-                SetStatus(LF("Fmt_CopyFailed", SafeMessage(ex)), error: true);
+                SetStatus(() => LF("Fmt_CopyFailed", SafeMessage(ex)), error: true);
             }
         }
 
@@ -328,7 +328,7 @@ namespace IntercomFirmwareTool.App
             // modified. Verify by size + SHA-256 (may hash ~100 MB, so do it off
             // the UI thread) before accepting the file.
             SetButtonsEnabled(false);
-            SetStatus(L("Status_Verifying")); // visible while it hashes
+            SetStatus(() => L("Status_Verifying")); // visible while it hashes
             TxtResult.Text = LF("Fmt_Result_Verifying", chosen);
             FirmwareCheckResult check;
             try { check = await Task.Run(() => FirmwareRegistry.Verify(chosen)); }
@@ -336,7 +336,8 @@ namespace IntercomFirmwareTool.App
             {
                 // Never let an exception escape this async void handler (it would
                 // crash the dispatcher); turn it into a normal rejection below.
-                check = new FirmwareCheckResult(false, null, LF("Fmt_VerifyFailed", ex.Message));
+                string em = ex.Message;
+                check = new FirmwareCheckResult(false, null, () => LF("Fmt_VerifyFailed", em));
             }
             finally { SetButtonsEnabled(true); }
 
@@ -379,7 +380,7 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
 
             SetResult(() => LF("Fmt_Result_Accepted", check.Message, check.Match!.Describe()));
-            SetStatus(L("Status_FirmwareVerified")); // visible confirmation in the simple view
+            SetStatus(() => L("Status_FirmwareVerified")); // visible confirmation in the simple view
         }
 
         /// <summary>
@@ -501,7 +502,7 @@ namespace IntercomFirmwareTool.App
             string comment = $"{Environment.UserName}@{Environment.MachineName}";
 
             SetButtonsEnabled(false);
-            SetStatus(L("Status_GenKey")); // visible (KeyRow can be shown without the console)
+            SetStatus(() => L("Status_GenKey")); // visible (KeyRow can be shown without the console)
             TxtResult.Text = L("Result_GeneratingKey");
             string? pubPath = null;
             string? error = null;    // full detail for the result log
@@ -533,7 +534,7 @@ namespace IntercomFirmwareTool.App
 
             _keyPath = pubPath;
             SetPathText(TxtKeyPath, pubPath);
-            SetStatus(L("Status_KeyGenerated")); // visible confirmation
+            SetStatus(() => L("Status_KeyGenerated")); // visible confirmation
             UpdateBuildEnabled();
 
             // Lock the private key to the current Windows account (best-effort):
@@ -902,10 +903,32 @@ namespace IntercomFirmwareTool.App
         /// button (collapsed when empty). Used for simple-view feedback that would
         /// otherwise only reach the result console, which is hidden in the simple view.
         /// </summary>
+        // The status line is rebuildable in any language: a render closure regenerates
+        // it (null = cleared), so ApplyLanguage re-renders it after a switch.
+        private Func<string>? _statusRender;
+        private bool _statusError;
+
+        /// <summary>Sets a fixed status message (empty string clears/hides the line).</summary>
         private void SetStatus(string message, bool error = false)
+            => SetStatus(string.IsNullOrEmpty(message) ? null : () => message, error);
+
+        /// <summary>
+        /// Shows a localized status message that re-renders on a language switch. Pass
+        /// a closure that produces the message in the current language.
+        /// </summary>
+        private void SetStatus(Func<string>? render, bool error = false)
         {
+            _statusRender = render;
+            _statusError = error;
+            RenderStatus();
+        }
+
+        /// <summary>(Re)draws the status line from the current render closure.</summary>
+        private void RenderStatus()
+        {
+            string message = _statusRender?.Invoke() ?? "";
             TxtStatus.Text = message;
-            TxtStatus.Foreground = error ? ErrorBrush : Brushes.Gray;
+            TxtStatus.Foreground = _statusError ? ErrorBrush : Brushes.Gray;
             TxtStatus.Visibility = string.IsNullOrEmpty(message)
                 ? Visibility.Collapsed : Visibility.Visible;
             // The status line is a Polite live region (XAML); announce the change so a
@@ -960,6 +983,8 @@ namespace IntercomFirmwareTool.App
             // Re-render the Result console from the active operation's render closure
             // (or the localized default when no operation output is showing).
             TxtResult.Text = _resultRender != null ? _resultRender() : L("Result_Default");
+            // The always-visible status line re-renders too.
+            RenderStatus();
         }
 
         /// <summary>Sets the neutral placeholder on any path box that has no selection.</summary>

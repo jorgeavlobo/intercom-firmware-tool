@@ -53,7 +53,14 @@ namespace IntercomFirmwareTool.Core
     public sealed record FirmwareCheckResult(
         bool Ok,
         KnownFirmware? Match,
-        string Message);
+        Func<string> MessageFactory)
+    {
+        /// <summary>
+        /// The localized outcome message, regenerated in the current UI culture on
+        /// each access — so it re-localizes when the app language changes at runtime.
+        /// </summary>
+        public string Message => MessageFactory();
+    }
 
     /// <summary>
     /// Whitelist of known-good original firmware images and the gate that
@@ -138,13 +145,13 @@ namespace IntercomFirmwareTool.Core
         {
             long size;
             try { size = new FileInfo(path).Length; }
-            catch (Exception ex) { return new(false, null, CoreStrings.Format("FR_CannotReadFile", ex.Message)); }
+            catch (Exception ex) { string em = ex.Message; return new(false, null, () => CoreStrings.Format("FR_CannotReadFile", em)); }
 
             // Fast pre-filter: no known original has this exact byte size.
             var bySize = Known.Where(k => k.SizeBytes == size).ToList();
             if (bySize.Count == 0)
                 return new(false, null,
-                    CoreStrings.Format("FR_UnrecognizedBySize", size));
+                    () => CoreStrings.Format("FR_UnrecognizedBySize", size));
 
             string sha;
             try { sha = Sha256Hex(path); }
@@ -152,20 +159,21 @@ namespace IntercomFirmwareTool.Core
             {
                 // Deleted/locked/unreadable after the size check: reject through
                 // the normal flow instead of faulting the (uncaught) caller.
-                return new(false, null, CoreStrings.Format("FR_CannotReadWhileHashing", ex.Message));
+                string em = ex.Message;
+                return new(false, null, () => CoreStrings.Format("FR_CannotReadWhileHashing", em));
             }
             var match = bySize.FirstOrDefault(
                 k => string.Equals(k.Sha256, sha, StringComparison.OrdinalIgnoreCase));
             if (match is null)
                 return new(false, null,
-                    CoreStrings.Format("FR_UnrecognizedBySha", size, sha));
+                    () => CoreStrings.Format("FR_UnrecognizedBySha", size, sha));
 
             if (!match.IsFwzContainer)
                 return new(false, match,
-                    CoreStrings.Format("FR_RecognizedNotFwz", match.OriginalName));
+                    () => CoreStrings.Format("FR_RecognizedNotFwz", match.OriginalName));
 
             return new(true, match,
-                CoreStrings.Format("FR_VerifiedOriginal", match.OriginalName, size));
+                () => CoreStrings.Format("FR_VerifiedOriginal", match.OriginalName, size));
         }
 
         private static string Sha256Hex(string path)
