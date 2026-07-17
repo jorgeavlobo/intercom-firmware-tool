@@ -370,8 +370,12 @@
             <!-- Root password (masked) + reveal toggle + Disable (key-only). One of
                  the password or the key is required; ticking Disable turns password
                  login off, so a key becomes the credential. -->
+            <!-- Text is set in code (UpdateAdvancedVisibility): "Password:" in the
+                 simple view, "Root Password:" in Advanced — and re-localized on a
+                 language switch. No {loc:Loc} binding here, so the imperative value is
+                 the single source of truth (a binding + imperative set would fight). -->
             <TextBlock Grid.Row="1" Grid.Column="0" x:Name="LblPassword"
-                       Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_Password_Simple}"/>
+                       Style="{StaticResource FieldLabel}"/>
             <StackPanel Grid.Row="1" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,6">
                 <Grid Width="170">
                     <TextBox x:Name="TxtPassword" Style="{StaticResource InputField}"
@@ -424,8 +428,9 @@
                  credential instead. -->
             <TextBlock Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,0,0,8"
                        x:Name="LblCredentialRule"
-                       Foreground="Gray" FontSize="11" TextWrapping="Wrap"
-                       Text="{loc:Loc Rule_Simple}"/>
+                       Foreground="Gray" FontSize="11" TextWrapping="Wrap"/>
+                       <!-- Text set in code (UpdateAdvancedVisibility): simple / advanced /
+                            key-only wording, re-localized on a language switch. -->
 
             <!-- Output (disabled until a firmware is chosen) -->
             <TextBlock Grid.Row="4" Grid.Column="0" x:Name="LblOutput" IsEnabled="False"
