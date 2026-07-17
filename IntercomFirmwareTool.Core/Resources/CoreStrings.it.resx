@@ -43,8 +43,8 @@
   </data>
   <data name="FR_UnrecognizedBySha" xml:space="preserve">
     <value>Firmware non riconosciuto: lo SHA-256 non corrisponde ad alcun originale noto.
-  size   : {0:N0} byte
-  sha256 : {1}</value>
+  dimensione : {0:N0} byte
+  sha256     : {1}</value>
   </data>
   <data name="FR_RecognizedNotFwz" xml:space="preserve">
     <value>Riconosciuto come {0}, ma non è un contenitore .fwz che questo strumento può decomprimere. Non può essere modificato qui.</value>

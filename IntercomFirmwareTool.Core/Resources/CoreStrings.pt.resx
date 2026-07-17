@@ -76,7 +76,7 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
     <value>A imagem descomprimida excede o limite de {0} bytes; a abortar.</value>
   </data>
   <data name="Fwz_NoGzFound" xml:space="preserve">
-    <value>Não foi encontrado nenhum ficheiro '.gz' (não recuperação) dentro do .fwz.</value>
+    <value>Não foi encontrado nenhum ficheiro '.gz' (que não seja de recuperação) dentro do .fwz.</value>
   </data>
   <data name="Fwz_PayloadNotZipCrypto" xml:space="preserve">
     <value>O conteúdo '.gz' dentro do .fwz não está cifrado com ZipCrypto (esperava-se a cifra tradicional PKWARE).</value>
