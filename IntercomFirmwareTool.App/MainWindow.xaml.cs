@@ -266,7 +266,7 @@ namespace IntercomFirmwareTool.App
             UpdatePasswordHint();
             FlashReveal();        // briefly show it as a visible "it changed" cue
 
-            TxtResult.Text = L("Result_RandomPwd");
+            SetResult(() => L("Result_RandomPwd"));
         }
 
         /// <summary>A strong random password from an unambiguous character set.</summary>
@@ -354,7 +354,7 @@ namespace IntercomFirmwareTool.App
                 TxtOutputPath.IsEnabled = false;
                 UpdateBuildEnabled();
 
-                TxtResult.Text = LF("Fmt_Result_Rejected", check.Message);
+                SetResult(() => LF("Fmt_Result_Rejected", check.Message));
                 SetStatus(""); // the popup below is the feedback; clear the "verifying…" line
                 MessageBox.Show(this,
                     LF("Fmt_Msg_FirmwareNotAccepted", check.Message),
@@ -378,7 +378,7 @@ namespace IntercomFirmwareTool.App
             SetPathText(TxtOutputPath, _outputPath);
             UpdateBuildEnabled();
 
-            TxtResult.Text = LF("Fmt_Result_Accepted", check.Message, check.Match!.Describe());
+            SetResult(() => LF("Fmt_Result_Accepted", check.Message, check.Match!.Describe()));
             SetStatus(L("Status_FirmwareVerified")); // visible confirmation in the simple view
         }
 
@@ -522,8 +522,8 @@ namespace IntercomFirmwareTool.App
 
             if (error != null || pubPath is null)
             {
-                TxtResult.Text = LF("Fmt_Result_GenKeyFailed",
-                    error ?? L("Result_GenKeyFailed_Unknown"));
+                SetResult(() => LF("Fmt_Result_GenKeyFailed",
+                    error ?? L("Result_GenKeyFailed_Unknown")));
                 SetStatus(""); // the popup below is the feedback
                 MessageBox.Show(this,
                     LF("Fmt_Msg_GenKeyFailed", errorMsg ?? L("Msg_GenKeyFailed_Unknown")),
@@ -544,28 +544,15 @@ namespace IntercomFirmwareTool.App
             // Report exactly what was generated so the user can see and verify it:
             // the key type/size and the SHA-256 fingerprint (same value that
             // `ssh-keygen -lf <file>.pub` prints).
-            string keyDetails = "";
+            string? keyLabel = null, keyFingerprint = null;
             try
             {
                 var info = SshKeyGen.DescribePublicKey(File.ReadAllText(pubPath));
-                if (info != null)
-                    keyDetails = LF("Fmt_Result_KeyDetails", info.Label, info.Sha256Fingerprint);
+                if (info != null) { keyLabel = info.Label; keyFingerprint = info.Sha256Fingerprint; }
             }
             catch { /* details are informational; never block on them */ }
 
-            var sbKey = new StringBuilder();
-            sbKey.AppendLine(L("Result_KeyCreated_Header"));
-            sbKey.AppendLine();
-            sbKey.AppendLine(LF("Fmt_Result_KeyCreated_Priv", privatePath));
-            sbKey.AppendLine(LF("Fmt_Result_KeyCreated_Pub", pubPath));
-            if (keyDetails.Length > 0) sbKey.Append(keyDetails);
-            sbKey.AppendLine();
-            sbKey.AppendLine(LF("Fmt_Result_KeyCreated_Body", privatePath));
-            sbKey.AppendLine();
-            sbKey.Append(restricted
-                ? L("Result_KeyCreated_Restricted")
-                : LF("Fmt_Result_KeyCreated_NotRestricted", privatePath));
-            TxtResult.Text = sbKey.ToString();
+            SetResult(() => BuildKeyCreatedResult(privatePath, pubPath, keyLabel, keyFingerprint, restricted));
 
             MessageBox.Show(this,
                 LF("Fmt_Msg_KeyCreated", privatePath, pubPath),
@@ -970,6 +957,9 @@ namespace IntercomFirmwareTool.App
             // still updates it (skip while a build is running — the busy visual owns it).
             if (!string.Equals(BtnBuild.Tag as string, "busy", StringComparison.Ordinal))
                 BtnBuild.Content = L("Btn_Build");
+            // Re-render the Result console from the active operation's render closure
+            // (or the localized default when no operation output is showing).
+            TxtResult.Text = _resultRender != null ? _resultRender() : L("Result_Default");
         }
 
         /// <summary>Sets the neutral placeholder on any path box that has no selection.</summary>
@@ -1387,60 +1377,31 @@ namespace IntercomFirmwareTool.App
             // output and a credential set). They are fields, so the compiler re-widens
             // them to maybe-null after the intervening calls — assert with '!'.
             string fwz = _fwzPath!, output = _outputPath!;
-
-            var sb = new StringBuilder();
-            sb.AppendLine(L("Result_Build_Head"));
-            sb.AppendLine(LF("Fmt_Result_Build_Input", fwz));
-            sb.AppendLine(opts.HasPassword
-                ? L("Result_Build_RootPw_Set")
-                : L("Result_Build_RootPw_Disabled"));
-            sb.AppendLine(opts.HasKey
-                ? LF("Fmt_Result_Build_PubKey", _keyPath)
-                : L("Result_Build_PubKey_None"));
-            sb.AppendLine(LF("Fmt_Result_Build_Output", output));
-            sb.AppendLine();
+            string? keyForLog = opts.HasKey ? _keyPath : null;
 
             FwzBuildResult? built = null;
             string? buildError = null;
-            await RunAndShow(sb, () =>
-            {
-                try
+            await RunAndShow(
+                () =>
                 {
                     // No build-time re-hash here: BuildModifiedFwz performs the
                     // authoritative whitelist verification (size + SHA-256) itself,
                     // atomically under the input file lock — the TOCTOU-safe place to
-                    // do it. A second ~100 MB hash here would only slow every build
-                    // without adding safety. It throws a clear error if the input is
-                    // not a recognized original, which RunAndShow surfaces.
-                    FwzBuildResult r = FwzProbe.BuildModifiedFwz(fwz, opts, output);
-                    built = r;
-                    sb.AppendLine(LF("Fmt_Result_ArchivePw", r.PasswordUsed));
-                    sb.AppendLine(LF("Fmt_Result_Build_ModifiedEntry", r.SelectedEntry));
-                    sb.AppendLine();
-                    sb.AppendLine(L("Result_Build_VerifyHeader"));
-                    AppendChecks(sb, r.RoundTripChecks);
-                    sb.AppendLine();
-                    if (r.RoundTripAllPass)
+                    // do it. It throws a clear error if the input is not a recognized
+                    // original, which RunAndShow surfaces.
+                    try
                     {
-                        sb.AppendLine(L("Result_Build_Success"));
-                        sb.AppendLine(LF("Fmt_Result_Build_WrittenTo", r.OutputPath));
-                        sb.AppendLine();
-                        sb.AppendLine(L("Result_Build_FlashAdvisory"));
+                        built = FwzProbe.BuildModifiedFwz(fwz, opts, output);
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        sb.AppendLine(L("Result_Build_FailChecks"));
-                        sb.AppendLine(LF("Fmt_Result_Build_FailUnchanged", output));
-                        sb.AppendLine(L("Result_Build_FailNoFlash"));
-                        sb.AppendLine(L("Result_Build_FailSeeAbove"));
+                        buildError = SafeMessage(ex);   // for the popup
+                        throw;                          // let RunAndShow log full details
                     }
-                }
-                catch (Exception ex)
-                {
-                    buildError = SafeMessage(ex);   // for the popup
-                    throw;                     // let RunAndShow log full details to the console
-                }
-            }, BtnBuild);
+                },
+                () => BuildBuildLog(fwz, output, opts, keyForLog, built!),
+                () => BuildBuildHeaderText(fwz, output, opts, keyForLog),
+                BtnBuild);
 
             // Report the outcome in a popup. Advanced stays exactly as the user left
             // it — a build never opens (or closes) it; the full log is in Advanced →
@@ -1485,27 +1446,11 @@ namespace IntercomFirmwareTool.App
             if (fwzDlg.ShowDialog(this) != true) return;
             string fwzPath = fwzDlg.FileName;
 
-            var sb = new StringBuilder();
-            sb.AppendLine(L("Result_Inspect_Head"));
-            sb.AppendLine(LF("Fmt_Result_Inspect_File", fwzPath));
-            sb.AppendLine();
-
-            await RunAndShow(sb, () =>
-            {
-                SshInspectionReport r = FwzProbe.InspectSshInFwz(fwzPath);
-                sb.AppendLine(LF("Fmt_Result_ArchivePw", r.PasswordUsed));
-                sb.AppendLine(LF("Fmt_Result_Inspect_InnerEntry", r.SelectedEntry));
-                sb.AppendLine();
-                sb.AppendLine(L("Result_Inspect_WhatsInside"));
-                foreach (var f in r.Findings) sb.AppendLine("  " + f);
-                sb.AppendLine();
-                sb.AppendLine(L("Result_Inspect_Checklist"));
-                AppendChecks(sb, r.Checks);
-                sb.AppendLine();
-                sb.AppendLine(r.AllPass
-                    ? L("Result_Inspect_AllPass")
-                    : L("Result_Inspect_SomeFailed"));
-            });
+            SshInspectionReport? report = null;
+            await RunAndShow(
+                () => report = FwzProbe.InspectSshInFwz(fwzPath),
+                () => BuildInspectLog(fwzPath, report!),
+                () => BuildInspectHeaderText(fwzPath));
         }
 
         // ---- Secondary: MD5-crypt self-test ---------------------------------
@@ -1513,19 +1458,12 @@ namespace IntercomFirmwareTool.App
         /// <summary>Runs the MD5-crypt self-test and shows the pass/fail result.</summary>
         private async void BtnSelfTest_Click(object sender, RoutedEventArgs e)
         {
-            var sb = new StringBuilder();
-            sb.AppendLine(L("Result_SelfTest_Head"));
-            sb.AppendLine();
-
-            await RunAndShow(sb, () =>
-            {
-                (bool allPass, string report) = Md5Crypt.SelfTest();
-                sb.Append(report);
-                sb.AppendLine();
-                sb.AppendLine(allPass
-                    ? L("Result_SelfTest_AllPass")
-                    : L("Result_SelfTest_SomeFailed"));
-            });
+            bool stAllPass = false;
+            string stReport = "";
+            await RunAndShow(
+                () => { (stAllPass, stReport) = Md5Crypt.SelfTest(); },
+                () => BuildSelfTestLog(stAllPass, stReport),
+                () => L("Result_SelfTest_Head"));
         }
 
         // ---- Shared helpers --------------------------------------------------
@@ -1537,6 +1475,112 @@ namespace IntercomFirmwareTool.App
                 string detail = string.IsNullOrEmpty(c.Detail) ? "" : $"   [{c.Detail}]";
                 sb.AppendLine($"  {(c.Pass ? "PASS" : "FAIL")}  {c.Name}{detail}");
             }
+        }
+
+        // ---- Localized result renderers (re-run on a language switch) ---------
+        // Each builds a result's full console text from captured data + the current
+        // language's templates, so ApplyLanguage can re-render it after a switch.
+
+        private static void AppendBuildHeader(StringBuilder sb, string fwz, string output, EnableSshOptions opts, string? keyPath)
+        {
+            sb.AppendLine(L("Result_Build_Head"));
+            sb.AppendLine(LF("Fmt_Result_Build_Input", fwz));
+            sb.AppendLine(opts.HasPassword ? L("Result_Build_RootPw_Set") : L("Result_Build_RootPw_Disabled"));
+            sb.AppendLine(opts.HasKey ? LF("Fmt_Result_Build_PubKey", keyPath) : L("Result_Build_PubKey_None"));
+            sb.AppendLine(LF("Fmt_Result_Build_Output", output));
+        }
+
+        private static string BuildBuildHeaderText(string fwz, string output, EnableSshOptions opts, string? keyPath)
+        {
+            var sb = new StringBuilder();
+            AppendBuildHeader(sb, fwz, output, opts, keyPath);
+            return sb.ToString();
+        }
+
+        private static string BuildBuildLog(string fwz, string output, EnableSshOptions opts, string? keyPath, FwzBuildResult r)
+        {
+            var sb = new StringBuilder();
+            AppendBuildHeader(sb, fwz, output, opts, keyPath);
+            sb.AppendLine();
+            sb.AppendLine(LF("Fmt_Result_ArchivePw", r.PasswordUsed));
+            sb.AppendLine(LF("Fmt_Result_Build_ModifiedEntry", r.SelectedEntry));
+            sb.AppendLine();
+            sb.AppendLine(L("Result_Build_VerifyHeader"));
+            AppendChecks(sb, r.RoundTripChecks);
+            sb.AppendLine();
+            if (r.RoundTripAllPass)
+            {
+                sb.AppendLine(L("Result_Build_Success"));
+                sb.AppendLine(LF("Fmt_Result_Build_WrittenTo", r.OutputPath));
+                sb.AppendLine();
+                sb.AppendLine(L("Result_Build_FlashAdvisory"));
+            }
+            else
+            {
+                sb.AppendLine(L("Result_Build_FailChecks"));
+                sb.AppendLine(LF("Fmt_Result_Build_FailUnchanged", output));
+                sb.AppendLine(L("Result_Build_FailNoFlash"));
+                sb.AppendLine(L("Result_Build_FailSeeAbove"));
+            }
+            return sb.ToString();
+        }
+
+        private static string BuildInspectHeaderText(string fwzPath)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine(L("Result_Inspect_Head"));
+            sb.AppendLine(LF("Fmt_Result_Inspect_File", fwzPath));
+            return sb.ToString();
+        }
+
+        private static string BuildInspectLog(string fwzPath, SshInspectionReport r)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine(L("Result_Inspect_Head"));
+            sb.AppendLine(LF("Fmt_Result_Inspect_File", fwzPath));
+            sb.AppendLine();
+            sb.AppendLine(LF("Fmt_Result_ArchivePw", r.PasswordUsed));
+            sb.AppendLine(LF("Fmt_Result_Inspect_InnerEntry", r.SelectedEntry));
+            sb.AppendLine();
+            sb.AppendLine(L("Result_Inspect_WhatsInside"));
+            // Findings are Core-localized prose captured at inspect time; they stay in
+            // that language on a switch (the surrounding scaffolding re-renders).
+            foreach (var f in r.Findings) sb.AppendLine("  " + f);
+            sb.AppendLine();
+            sb.AppendLine(L("Result_Inspect_Checklist"));
+            AppendChecks(sb, r.Checks);
+            sb.AppendLine();
+            sb.AppendLine(r.AllPass ? L("Result_Inspect_AllPass") : L("Result_Inspect_SomeFailed"));
+            return sb.ToString();
+        }
+
+        private static string BuildSelfTestLog(bool allPass, string report)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine(L("Result_SelfTest_Head"));
+            sb.AppendLine();
+            sb.Append(report);
+            sb.AppendLine();
+            sb.AppendLine(allPass ? L("Result_SelfTest_AllPass") : L("Result_SelfTest_SomeFailed"));
+            return sb.ToString();
+        }
+
+        private static string BuildKeyCreatedResult(string privatePath, string pubPath, string? keyLabel, string? keyFingerprint, bool restricted)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine(L("Result_KeyCreated_Header"));
+            sb.AppendLine();
+            sb.AppendLine(LF("Fmt_Result_KeyCreated_Priv", privatePath));
+            sb.AppendLine(LF("Fmt_Result_KeyCreated_Pub", pubPath));
+            if (keyLabel != null && keyFingerprint != null)
+                sb.Append(LF("Fmt_Result_KeyDetails", keyLabel, keyFingerprint));
+            sb.AppendLine();
+            sb.AppendLine(LF("Fmt_Result_KeyCreated_Body", privatePath));
+            sb.AppendLine();
+            sb.Append(restricted
+                ? L("Result_KeyCreated_Restricted")
+                : LF("Fmt_Result_KeyCreated_NotRestricted", privatePath));
+            return sb.ToString();
         }
 
         /// <summary>Puts a real path in the box in normal (non-placeholder) colour.</summary>
@@ -1570,12 +1614,26 @@ namespace IntercomFirmwareTool.App
                   $" · {AppContext.BaseDirectory}";
         }
 
+        // The Result console is rebuildable in any language: each operation stores a
+        // render closure that regenerates its localized text from captured data, so a
+        // language switch re-renders it (see ApplyLanguage). Null = show the default.
+        private Func<string>? _resultRender;
+
+        /// <summary>Records a result's render closure and shows it now.</summary>
+        private void SetResult(Func<string> render)
+        {
+            _resultRender = render;
+            TxtResult.Text = render();
+        }
+
         /// <summary>
-        /// Runs the work off the UI thread (so the window stays responsive), with
-        /// every button disabled, and shows the result — or the full error — in
-        /// the box.
+        /// Runs the work off the UI thread (so the window stays responsive) with the
+        /// buttons disabled, then shows the localized result — or, on failure, the
+        /// header plus the raw error. <paramref name="renderResult"/> and
+        /// <paramref name="renderHeader"/> rebuild their text from captured data, so a
+        /// later language switch re-renders the console.
         /// </summary>
-        private async Task RunAndShow(StringBuilder sb, Action work, Button? busyButton = null)
+        private async Task RunAndShow(Action work, Func<string> renderResult, Func<string> renderHeader, Button? busyButton = null)
         {
             // Note: we deliberately do NOT open Advanced here. Verify/Self-test are
             // launched from an already-open Advanced surface (their buttons live
@@ -1583,22 +1641,32 @@ namespace IntercomFirmwareTool.App
             // in a popup instead.
             SetButtonsEnabled(false);
             if (busyButton != null) SetButtonBusy(busyButton, true);
-            TxtResult.Text = sb.ToString() + "\n" + L("Result_Processing");
+            TxtResult.Text = renderHeader() + "\n" + L("Result_Processing");
+            string? errorDump = null;
             try
             {
                 await Task.Run(work);
             }
             catch (Exception ex)
             {
-                sb.AppendLine("ERROR:");
-                sb.AppendLine(ex.ToString());
+                errorDump = ex.ToString();
             }
             finally
             {
                 SetButtonsEnabled(true);
                 if (busyButton != null) SetButtonBusy(busyButton, false);
             }
-            TxtResult.Text = sb.ToString();
+            if (errorDump != null)
+            {
+                // Re-render the header on a language switch; keep the raw diagnostic
+                // dump (a stack trace — English) exactly as captured.
+                string dump = errorDump;
+                SetResult(() => renderHeader() + "\nERROR:\n" + dump);
+            }
+            else
+            {
+                SetResult(renderResult);
+            }
         }
 
         // Idle content of a button currently showing the busy state, so it can be
@@ -1737,6 +1805,9 @@ namespace IntercomFirmwareTool.App
             // like nothing happened. Keeping the toggle disabled holds Advanced open
             // (its IsChecked is untouched) so the Result stays visible until done.
             TglAdvanced.IsEnabled = enabled;
+            // Lock the language menu during an operation too, so the culture can't
+            // change while a result is mid-write (it re-renders freely once idle).
+            LangMenu.IsEnabled = enabled;
             // The three clear buttons are content-aware (enabled only when their field
             // has something to clear); UpdateBuildEnabled below drives them from the
             // current paths + _uiEnabled, so they aren't set here.
