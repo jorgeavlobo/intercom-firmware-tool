@@ -1582,9 +1582,8 @@ namespace IntercomFirmwareTool.App
             sb.AppendLine(LF("Fmt_Result_Inspect_InnerEntry", r.SelectedEntry));
             sb.AppendLine();
             sb.AppendLine(L("Result_Inspect_WhatsInside"));
-            // Findings are Core-localized prose captured at inspect time; they stay in
-            // that language on a switch (the surrounding scaffolding re-renders).
-            foreach (var f in r.Findings) sb.AppendLine("  " + f);
+            // Findings are factories, so they re-localize in the current culture too.
+            foreach (var f in r.Findings) sb.AppendLine("  " + f());
             sb.AppendLine();
             sb.AppendLine(L("Result_Inspect_Checklist"));
             AppendChecks(sb, r.Checks);

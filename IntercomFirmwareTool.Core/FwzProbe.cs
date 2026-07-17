@@ -45,7 +45,9 @@ namespace IntercomFirmwareTool.Core
     public sealed record SshInspectionReport(
         string PasswordUsed,
         string SelectedEntry,
-        IReadOnlyList<string> Findings,
+        // Findings are factories so their localized text regenerates in the current
+        // UI culture when the app language changes (see the app's inspect renderer).
+        IReadOnlyList<Func<string>> Findings,
         IReadOnlyList<Ext4Check> Checks,
         bool AllPass);
 

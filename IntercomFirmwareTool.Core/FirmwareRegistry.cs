@@ -158,7 +158,7 @@ namespace IntercomFirmwareTool.Core
         {
             long size;
             try { size = new FileInfo(path).Length; }
-            catch (Exception ex) { string em = ex.Message; return new(false, null, () => CoreStrings.Format("FR_CannotReadFile", em)); }
+            catch (Exception ex) { string em = SafeMsg(ex); return new(false, null, () => CoreStrings.Format("FR_CannotReadFile", em)); }
 
             // Fast pre-filter: no known original has this exact byte size.
             var bySize = Known.Where(k => k.SizeBytes == size).ToList();
@@ -172,7 +172,7 @@ namespace IntercomFirmwareTool.Core
             {
                 // Deleted/locked/unreadable after the size check: reject through
                 // the normal flow instead of faulting the (uncaught) caller.
-                string em = ex.Message;
+                string em = SafeMsg(ex);
                 return new(false, null, () => CoreStrings.Format("FR_CannotReadWhileHashing", em));
             }
             var match = bySize.FirstOrDefault(
@@ -188,6 +188,12 @@ namespace IntercomFirmwareTool.Core
             return new(true, match,
                 () => CoreStrings.Format("FR_VerifiedOriginal", match.OriginalName, size));
         }
+
+        // A user-facing detail for an exception: its Message, or the exception type
+        // name when Message is blank (some exceptions have none), so a localized
+        // "Cannot read the file: {0}" is never left dangling with no detail.
+        private static string SafeMsg(Exception ex) =>
+            string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
 
         private static string Sha256Hex(string path)
         {

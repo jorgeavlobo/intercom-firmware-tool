@@ -42,7 +42,10 @@ namespace IntercomFirmwareTool.Core
     /// every structural check passed.
     /// </summary>
     public sealed record SshInspection(
-        IReadOnlyList<string> Findings,
+        // Findings are stored as factories, not strings, so their localized text can
+        // be regenerated in the current UI culture (the app re-renders them when the
+        // language changes at runtime).
+        IReadOnlyList<Func<string>> Findings,
         IReadOnlyList<Ext4Check> Checks,
         bool AllPass);
 
@@ -624,7 +627,7 @@ namespace IntercomFirmwareTool.Core
         {
             EnsureBareExt4(bareImagePath);
             var checks = new List<Ext4Check>();
-            var findings = new List<string>();
+            var findings = new List<Func<string>>();
             string disk = WrapBareFilesystem(bareImagePath);
             try
             {
@@ -657,11 +660,11 @@ namespace IntercomFirmwareTool.Core
 
                 bool passwordLogin = IsMd5CryptHash(root2Secret);
                 if (passwordLogin)
-                    findings.Add(CoreStrings.Get("Ext4_FindingPwEnabled"));
+                    findings.Add(() => CoreStrings.Get("Ext4_FindingPwEnabled"));
                 else if (root2Present)
-                    findings.Add(CoreStrings.Format("Ext4_FindingPwDisabled", root2Secret));
+                    findings.Add(() => CoreStrings.Format("Ext4_FindingPwDisabled", root2Secret));
                 else
-                    findings.Add(CoreStrings.Get("Ext4_FindingPwNa"));
+                    findings.Add(() => CoreStrings.Get("Ext4_FindingPwNa"));
 
                 // fquinto sets root2 and bticino2 to the same secret; a mismatch
                 // means the image was not built the expected way.
@@ -742,11 +745,11 @@ namespace IntercomFirmwareTool.Core
         /// like it has a working key-based login (it cannot authenticate).
         /// </summary>
         private static string? InspectAuthKeys(
-            ExtFileSystem fs, List<Ext4Check> checks, List<string> findings, string path, string label)
+            ExtFileSystem fs, List<Ext4Check> checks, List<Func<string>> findings, string path, string label)
         {
             if (!fs.FileExists(path))
             {
-                findings.Add(CoreStrings.Format("Ext4_KeyNotInstalled", label, path));
+                findings.Add(() => CoreStrings.Format("Ext4_KeyNotInstalled", label, path));
                 return null;
             }
 
@@ -766,11 +769,11 @@ namespace IntercomFirmwareTool.Core
             {
                 // Present but not a usable key: report it and flag a FAILING
                 // check, and return null so it is not counted as a credential.
-                findings.Add(CoreStrings.Format("Ext4_KeyInvalid", label, path));
+                findings.Add(() => CoreStrings.Format("Ext4_KeyInvalid", label, path));
                 checks.Add(new($"{path} is a valid OpenSSH public key", false, ""));
                 return null;
             }
-            findings.Add(CoreStrings.Format("Ext4_KeyInstalled", label, info.Label, info.Sha256Fingerprint));
+            findings.Add(() => CoreStrings.Format("Ext4_KeyInstalled", label, info.Label, info.Sha256Fingerprint));
             return content;
         }
 
