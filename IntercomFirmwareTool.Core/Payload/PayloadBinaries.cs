@@ -12,8 +12,12 @@ namespace IntercomFirmwareTool.Core
     /// <param name="Length">Expected byte length of the embedded resource.</param>
     /// <param name="Sha256Hex">Lower-case hex SHA-256 of the exact bytes.</param>
     /// <param name="ResourceName">Manifest resource (LogicalName) in this assembly.</param>
-    /// <param name="LicenseResourceName">Manifest resource of the license text.</param>
-    /// <param name="LicenseSpdx">SPDX identifier of the governing license.</param>
+    /// <param name="LicenseResourceName">Manifest resource of the primary license text.</param>
+    /// <param name="LicenseSpdx">SPDX license expression for the binary as a whole.</param>
+    /// <param name="AdditionalLicenseResourceNames">
+    /// Manifest resources of further license texts a statically-linked binary
+    /// bundles (e.g. Oniguruma, glibc), beyond <paramref name="LicenseResourceName"/>.
+    /// </param>
     public sealed record ArmBinary(
         string Name,
         string InstallPath,
@@ -21,7 +25,8 @@ namespace IntercomFirmwareTool.Core
         string Sha256Hex,
         string ResourceName,
         string LicenseResourceName,
-        string LicenseSpdx);
+        string LicenseSpdx,
+        IReadOnlyList<string>? AdditionalLicenseResourceNames = null);
 
     /// <summary>
     /// Access to the third-party ARM binaries (jq, evtest) and their license
@@ -38,18 +43,27 @@ namespace IntercomFirmwareTool.Core
     public static class PayloadBinaries
     {
         /// <summary>
-        /// <c>jq</c> 1.7 — statically-linked armv7-hardfloat ELF (MIT). Used by
-        /// <c>StartMqttReceive</c> (parse the JSON command) and <c>keypress.sh</c>
-        /// (build the key-press JSON). Installed <c>0775 root:root</c>.
+        /// <c>jq</c> 1.8.1 — statically-linked armv7-hardfloat ELF. jq itself is
+        /// MIT, but the static binary also bundles Oniguruma (BSD-2-Clause) and
+        /// glibc (LGPL-2.1-or-later); see <c>Payload/vendor/THIRD_PARTY.md</c>.
+        /// 1.8.1 (not the reference unit's 1.7) fixes the decNumber CVEs
+        /// (CVE-2023-50268 / CVE-2024-53427). Used by <c>StartMqttReceive</c>
+        /// (parse the JSON command) and <c>keypress.sh</c> (build the key-press
+        /// JSON). Installed <c>0775 root:root</c>.
         /// </summary>
         public static readonly ArmBinary Jq = new(
             Name: "jq",
             InstallPath: "/usr/bin/jq",
-            Length: 1_324_676,
-            Sha256Hex: "dd9786221a3a0f250ed227706b7300a69579529ac4a059c874c35a9efead68b1",
+            Length: 1_331_968,
+            Sha256Hex: "ac304e50cf7cd24933d83dc7d0e4f79892a71a92fb02336d4ecaffa8933760bd",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.jq",
             LicenseResourceName: "IntercomFirmwareTool.Core.Payload.vendor.licenses.jq-COPYING",
-            LicenseSpdx: "MIT");
+            LicenseSpdx: "MIT AND BSD-2-Clause AND LGPL-2.1-or-later",
+            AdditionalLicenseResourceNames: new[]
+            {
+                "IntercomFirmwareTool.Core.Payload.vendor.licenses.oniguruma-COPYING",
+                "IntercomFirmwareTool.Core.Payload.vendor.licenses.glibc-LGPL-2.1.txt",
+            });
 
         /// <summary>
         /// <c>evtest</c> 1.35 — dynamically-linked armv7-hardfloat ELF
@@ -107,12 +121,33 @@ namespace IntercomFirmwareTool.Core
             return bytes;
         }
 
-        /// <summary>The license text (UTF-8) that governs <paramref name="binary"/>.</summary>
+        /// <summary>The primary license text (UTF-8) for <paramref name="binary"/>.</summary>
         public static string LicenseText(ArmBinary binary)
         {
             ArgumentNullException.ThrowIfNull(binary);
             return Encoding.UTF8.GetString(ReadResource(binary.LicenseResourceName));
         }
+
+        /// <summary>
+        /// Every license resource name that applies to <paramref name="binary"/> —
+        /// the primary plus any licenses a statically-linked binary bundles
+        /// (Oniguruma, glibc for the static <c>jq</c>). Read each with
+        /// <see cref="LicenseTextByResource"/>.
+        /// </summary>
+        public static IReadOnlyList<string> LicenseResourceNames(ArmBinary binary)
+        {
+            ArgumentNullException.ThrowIfNull(binary);
+            var names = new List<string> { binary.LicenseResourceName };
+            if (binary.AdditionalLicenseResourceNames is { } extra)
+            {
+                names.AddRange(extra);
+            }
+            return names;
+        }
+
+        /// <summary>Read a license text (UTF-8) by its manifest resource name.</summary>
+        public static string LicenseTextByResource(string resourceName) =>
+            Encoding.UTF8.GetString(ReadResource(resourceName));
 
         /// <summary>The aggregate third-party notice (Markdown, UTF-8).</summary>
         public static string ThirdPartyNotice() =>

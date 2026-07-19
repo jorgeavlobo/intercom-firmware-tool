@@ -21,10 +21,11 @@ that has to match for compatibility is reproduced: the file layout under
 `/etc/tcpdump2mqtt`, the MQTT topic names, the OpenWebNet gateway port `30006`,
 and the `TcpDump2Mqtt.conf` variable names.
 
-The two ARM binaries the bridge needs (`jq`, MIT; `evtest`, GPL-2.0-or-later)
-are **not** in this folder — they live under
-[`../vendor/`](../vendor/THIRD_PARTY.md) with their own license notices, SHA-256
-provenance and the GPL written offer for source (Phase 1b, #9). `evtest` keeps
+The two ARM binaries the bridge needs (`jq` — MIT, but the static build bundles
+Oniguruma BSD and glibc LGPL-2.1; `evtest` — GPL-2.0-or-later) are **not** in
+this folder — they live under [`../vendor/`](../vendor/THIRD_PARTY.md) with their
+own license notices, SHA-256 provenance and the written source offers (Phase 1b,
+#9). `evtest` keeps
 its GPL-2.0-or-later license when shipped, so a firmware image built **with** the
 bridge enabled must satisfy the GPL obligations **for `evtest`** (its notice plus
 the written offer for source). Bundling it alongside the otherwise-MIT tooling is
@@ -145,6 +146,7 @@ read-back check (#10) will flag any that are missing before a build is accepted.
 
 Both are installed to `/usr/bin` (`0775 root:root`) by the planned installer
 (#10), so on a correctly-installed image they are always present; the fail-fast
-checks guard against a partial or manual deployment. The exact bytes are the
-ones confirmed running on a live C100X (glibc 2.27, armv7-hardfloat) and are
-integrity-checked (SHA-256) before use.
+checks guard against a partial or manual deployment. Both were smoke-tested on a
+live C100X (kernel 4.9.11, armv7-hardfloat): `evtest` 1.35 is the exact binary
+seen on that unit, and the patched `jq` 1.8.1 was confirmed to run there too.
+Both are integrity-checked (SHA-256) before use.
