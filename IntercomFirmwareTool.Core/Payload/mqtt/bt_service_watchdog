@@ -1,0 +1,96 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          bt-service-watchdog
+# Required-Start:    $network dropbear mosquitto
+# Required-Stop:     $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: BTicino service watchdog
+# Description:       Monitors dropbear, scsserver, mosquitto and TcpDump2Mqtt and
+#                    restarts any that die. Runs independently of the MQTT bridge
+#                    so SSH and gate/intercom commands survive an MQTT failure.
+### END INIT INFO
+#
+# MIT-licensed reimplementation of fquinto's mqtt_scripts/bt_service_watchdog
+# (GPL-2.0) for IntercomFirmwareTool.
+PATH=/sbin:/usr/sbin:/usr/bin:/bin
+PIDFILE=/var/run/bt_service_watchdog.pid
+LOGFILE=/tmp/bt_watchdog.log
+INTERVAL=60
+
+log() { echo "$(date): $1" >> "$LOGFILE"; }
+
+ensure() {
+	# ensure <pgrep-name> <start-command...>
+	name="$1"; shift
+	if ! /usr/bin/pgrep -x "$name" > /dev/null 2>&1; then
+		log "$name not running - restarting"
+		"$@" >> "$LOGFILE" 2>&1
+	fi
+}
+
+watchdog_loop() {
+	log "BTicino service watchdog started (PID $$)"
+	while : ; do
+		ensure dropbear  /etc/init.d/dropbear start
+		ensure scsserver /etc/init.d/bt_daemon-apps.sh start
+		ensure mosquitto /etc/init.d/mosquitto start
+
+		if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/TcpDump2Mqtt$" > /dev/null 2>&1; then
+			log "TcpDump2Mqtt not running - restarting"
+			/etc/tcpdump2mqtt/TcpDump2Mqtt >> /tmp/tcp_log.txt 2>&1 &
+		fi
+
+		# Keep the log from filling /tmp: trim to 50 KB once it passes 100 KB.
+		if [ -f "$LOGFILE" ]; then
+			size=$(wc -c < "$LOGFILE" 2>/dev/null || echo 0)
+			if [ "$size" -gt 102400 ]; then
+				tail -c 51200 "$LOGFILE" > "${LOGFILE}.tmp" && mv "${LOGFILE}.tmp" "$LOGFILE"
+			fi
+		fi
+
+		sleep "$INTERVAL"
+	done
+}
+
+case "$1" in
+	start)
+		if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+			echo "BTicino service watchdog already running (PID $(cat "$PIDFILE"))"
+			exit 0
+		fi
+		echo -n "Starting BTicino service watchdog... "
+		watchdog_loop &
+		echo $! > "$PIDFILE"
+		echo "done (PID $!)"
+		;;
+	stop)
+		echo -n "Stopping BTicino service watchdog... "
+		if [ -f "$PIDFILE" ]; then
+			kill "$(cat "$PIDFILE")" 2>/dev/null
+			rm -f "$PIDFILE"
+			echo "done"
+		else
+			echo "not running"
+		fi
+		;;
+	status)
+		if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+			echo "BTicino service watchdog is running (PID $(cat "$PIDFILE"))"
+		else
+			echo "BTicino service watchdog is NOT running"
+			exit 1
+		fi
+		;;
+	restart)
+		"$0" stop
+		sleep 1
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|status|restart}"
+		exit 1
+		;;
+esac
+
+exit 0

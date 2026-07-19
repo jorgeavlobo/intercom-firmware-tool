@@ -1,0 +1,42 @@
+#!/bin/sh
+# StartMqttSend - publish every OpenWebNet frame the unit emits to MQTT.
+#
+# Sniffs the loopback interface (the SCS/OpenWebNet gateway speaks on lo),
+# extracts frames with filter.py, and publishes them to $TOPIC_DUMP.
+#
+# MIT-licensed reimplementation of fquinto's mqtt_scripts/StartMqttSend (GPL-2.0)
+# for IntercomFirmwareTool. Fixes over the original: sources its own config when
+# started standalone, and factors the broker auth/TLS variants into one helper.
+PATH=/sbin:/usr/sbin:/usr/bin:/bin
+CFGFILE=/etc/tcpdump2mqtt/TcpDump2Mqtt.conf
+
+# Load config if we were not started with the environment already exported.
+if [ -z "${MQTT_HOST}" ] && [ -f "$CFGFILE" ]; then
+	set -a
+	. "$CFGFILE"
+	set +a
+fi
+
+# mosquitto_pub with whichever auth the config selects. Extra args passed through.
+mpub() {
+	if [ -n "${MQTT_USER}" ]; then
+		/usr/bin/mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" \
+			-u "${MQTT_USER}" -P "${MQTT_PASS}" "$@"
+	elif [ -n "${MQTT_CAFILE}" ]; then
+		/usr/bin/mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" \
+			--cafile "${MQTT_CAFILE}" --cert "${MQTT_CERTFILE}" --key "${MQTT_KEYFILE}" "$@"
+	else
+		/usr/bin/mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" "$@"
+	fi
+}
+
+# Prefer python, fall back to python3.
+PYTHON="$( [ -x /usr/bin/python ] && echo /usr/bin/python || echo /usr/bin/python3 )"
+
+# tcpdump filter: only the local OpenWebNet chatter, dropping SIP/RTP and the
+# command-injection port (30006) so we do not echo our own writes back out.
+TCPDUMP_FILTER='not udp and not icmp and not port 5007 and not port 5060 and not port 20000 and not dst port 30006'
+
+/usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER 2>&1 \
+	| "${PYTHON}" /home/root/filter.py \
+	| mpub -l -t "${TOPIC_DUMP}"

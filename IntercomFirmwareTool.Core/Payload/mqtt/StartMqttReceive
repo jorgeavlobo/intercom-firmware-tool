@@ -1,0 +1,115 @@
+#!/bin/sh
+# StartMqttReceive - apply commands received over MQTT to the unit.
+#
+# Subscribes to $TOPIC_RX. A raw OpenWebNet frame ("*...##") is forwarded to the
+# local gateway (nc 0 30006). Anything else is treated as a JSON command, but the
+# JSON command channel (read_file / write_file / execute_command) is a root-level
+# remote-control surface and is DISABLED unless the operator explicitly opted in
+# AND the broker is authenticated or TLS-protected (see remote_shell_allowed).
+#
+# MIT-licensed reimplementation of fquinto's mqtt_scripts/StartMqttReceive
+# (GPL-2.0) for IntercomFirmwareTool. Fixes over the original:
+#   * the arbitrary read_file/write_file/execute_command backdoor is gated and
+#     refused on an unauthenticated broker (it was unconditionally exposed);
+#   * a reconnect backoff replaces the tight loop that pegged the CPU whenever
+#     the broker was unreachable;
+#   * sources its own config when started standalone.
+PATH=/sbin:/usr/sbin:/usr/bin:/bin
+CFGFILE=/etc/tcpdump2mqtt/TcpDump2Mqtt.conf
+
+if [ -z "${MQTT_HOST}" ] && [ -f "$CFGFILE" ]; then
+	set -a
+	. "$CFGFILE"
+	set +a
+fi
+
+OWN_PORT=30006
+
+# subscribe for exactly one message, with the configured auth/TLS and last will.
+msub_one() {
+	if [ -n "${MQTT_USER}" ]; then
+		/usr/bin/mosquitto_sub -C 1 --will-topic "${TOPIC_LASTWILL}" --will-payload offline \
+			-h "${MQTT_HOST}" -p "${MQTT_PORT}" -t "${TOPIC_RX}" \
+			-u "${MQTT_USER}" -P "${MQTT_PASS}"
+	elif [ -n "${MQTT_CAFILE}" ]; then
+		/usr/bin/mosquitto_sub -C 1 --will-topic "${TOPIC_LASTWILL}" --will-payload offline \
+			-h "${MQTT_HOST}" -p "${MQTT_PORT}" -t "${TOPIC_RX}" \
+			--cafile "${MQTT_CAFILE}" --cert "${MQTT_CERTFILE}" --key "${MQTT_KEYFILE}"
+	else
+		/usr/bin/mosquitto_sub -C 1 --will-topic "${TOPIC_LASTWILL}" --will-payload offline \
+			-h "${MQTT_HOST}" -p "${MQTT_PORT}" -t "${TOPIC_RX}"
+	fi
+}
+
+mpub() {
+	if [ -n "${MQTT_USER}" ]; then
+		/usr/bin/mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" \
+			-u "${MQTT_USER}" -P "${MQTT_PASS}" "$@"
+	elif [ -n "${MQTT_CAFILE}" ]; then
+		/usr/bin/mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" \
+			--cafile "${MQTT_CAFILE}" --cert "${MQTT_CERTFILE}" --key "${MQTT_KEYFILE}" "$@"
+	else
+		/usr/bin/mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" "$@"
+	fi
+}
+
+# The JSON command channel is honoured only when explicitly enabled AND the
+# broker is authenticated (user) or TLS-protected (CA file). Otherwise an
+# attacker who can reach the broker would get root on the unit.
+remote_shell_allowed() {
+	[ "${ALLOW_REMOTE_SHELL:-0}" = "1" ] || return 1
+	[ -n "${MQTT_USER}" ] || [ -n "${MQTT_CAFILE}" ] || return 1
+	return 0
+}
+
+handle_json() {
+	msg="$1"
+	if ! remote_shell_allowed; then
+		echo "Ignored JSON command: remote command channel is disabled (needs ALLOW_REMOTE_SHELL=1 and an authenticated/TLS broker)."
+		return
+	fi
+	command=$(printf '%s' "$msg" | jq -r '.command // empty' 2>/dev/null)
+	file_path=$(printf '%s' "$msg" | jq -r '.file_path // empty' 2>/dev/null)
+	data=$(printf '%s' "$msg" | jq -r '.data // empty' 2>/dev/null)
+	case "$command" in
+		read_file)
+			[ -n "$file_path" ] || { echo "read_file: missing file_path"; return; }
+			content=$(cat "$file_path" 2>/dev/null)
+			mpub -t "Bticino/file_content_topic" -m "$content"
+			;;
+		write_file)
+			[ -n "$file_path" ] || { echo "write_file: missing file_path"; return; }
+			printf '%s' "$data" > "$file_path"
+			;;
+		execute_command)
+			result=$(sh -c "$data" 2>&1)
+			mpub -t "Bticino/command_result_topic" -m "$result"
+			;;
+		*)
+			echo "Unsupported command: $command"
+			;;
+	esac
+}
+
+fail=0
+while : ; do
+	rxcmd=$(msub_one)
+	status=$?
+
+	if [ $status -ne 0 ] || [ -z "$rxcmd" ]; then
+		# Broker unreachable or empty read - back off (capped) instead of
+		# spinning, then retry.
+		fail=$((fail + 1))
+		[ $fail -gt 6 ] && fail=6
+		sleep $((fail * 5))
+		continue
+	fi
+	fail=0
+
+	if echo "$rxcmd" | grep -qE '^\*.*##$'; then
+		# Raw OpenWebNet frame - forward to the local gateway.
+		echo "$rxcmd" | nc 0 "$OWN_PORT"
+	else
+		handle_json "$rxcmd"
+	fi
+done
