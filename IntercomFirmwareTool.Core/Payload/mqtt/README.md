@@ -81,8 +81,12 @@ path.
 13. **Symlink-safe logs.** Logs go to the root-only `/var/log/tcpdump2mqtt/`
     (created 0700), with a symlink guard, instead of a predictable `/tmp` path a
     local user could pre-seed.
-14. **Robust evtest parsing.** Key events are parsed by `type`/`code`/`value`
-    labels rather than fixed awk columns (auto-repeat, value 2, is ignored).
+14. **Robust, model-agnostic keypad handling.** Key events are parsed by
+    `type`/`code`/`value` labels (auto-repeat, value 2, ignored), and **every**
+    key is published using the `KEY_` name evtest prints — not a hard-coded 4-key
+    map. Upstream mapped only KEY_1..KEY_4 (the C300X layout); the C100X keypad
+    has 7 keys (KEY_1..KEY_7, confirmed on-device), which the old map dropped.
+    Payload is `{key, code, value}`.
 15. **Retained commands ignored.** The receiver subscribes with `-R`, so a
     command left RETAINED on `TOPIC_RX` is not replayed on every reconnect —
     commands must be published non-retained.
