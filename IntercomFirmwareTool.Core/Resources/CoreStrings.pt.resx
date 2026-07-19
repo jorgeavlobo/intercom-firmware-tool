@@ -152,4 +152,64 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} não existe na imagem; recusada a sua criação (obteria modo/proprietário desconhecidos).</value>
   </data>
+  <data name="Mqtt_AlreadyInstalled" xml:space="preserve">
+    <value>A ponte MQTT já está instalada nesta imagem ({0} existe); recusada a instalação por cima.</value>
+  </data>
+  <data name="Mqtt_WatchdogMissingAfterInstall" xml:space="preserve">
+    <value>/etc/init.d/bt_service_watchdog não existe após a instalação; não é possível criar o seu symlink de arranque.</value>
+  </data>
+  <data name="Mqtt_Rc5dMissing" xml:space="preserve">
+    <value>/etc/rc5.d não existe na imagem; não é possível ativar a ponte MQTT no arranque.</value>
+  </data>
+  <data name="Mqtt_InvalidHost" xml:space="preserve">
+    <value>O host do broker MQTT não é um endereço IP nem um nome de anfitrião válido.</value>
+  </data>
+  <data name="Mqtt_InvalidPort" xml:space="preserve">
+    <value>A porta do broker MQTT tem de estar entre 1 e 65535.</value>
+  </data>
+  <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
+    <value>O utilizador e a palavra-passe MQTT têm de ser definidos em conjunto (ambos ou nenhum).</value>
+  </data>
+  <data name="Mqtt_CertKeyBothOrNeither" xml:space="preserve">
+    <value>O certificado de cliente TLS e a chave privada têm de ser fornecidos em conjunto (ambos ou nenhum).</value>
+  </data>
+  <data name="Mqtt_MutualTlsNeedsCa" xml:space="preserve">
+    <value>O TLS mútuo (certificado e chave de cliente) exige também um certificado de CA.</value>
+  </data>
+  <data name="Mqtt_RemoteShellNeedsAuth" xml:space="preserve">
+    <value>O canal de comandos remoto exige autenticação de cliente: utilizador e palavra-passe, ou TLS mútuo (certificado e chave de cliente). O TLS unidirecional (só CA) não é suficiente.</value>
+  </data>
+  <data name="Mqtt_CredentialNewline" xml:space="preserve">
+    <value>O utilizador ou a palavra-passe MQTT contém uma quebra de linha; as credenciais têm de ser uma única linha.</value>
+  </data>
+  <data name="Mqtt_InvalidTopic" xml:space="preserve">
+    <value>Um tópico MQTT está vazio ou contém uma quebra de linha.</value>
+  </data>
+  <data name="Mqtt_FileMissing" xml:space="preserve">
+    <value>{0} não existe na imagem; não é possível aplicar o patch da ponte MQTT.</value>
+  </data>
+  <data name="Mqtt_AnchorMissing" xml:space="preserve">
+    <value>Não foi encontrada a âncora esperada em {0} (à procura de: {1}); recusado o patch.</value>
+  </data>
+  <data name="Mqtt_InvalidHostIp" xml:space="preserve">
+    <value>O IP do broker fornecido (para o mapeamento de hosts no dispositivo) não é um endereço IPv4 válido.</value>
+  </data>
+  <data name="Mqtt_HostUnresolved" xml:space="preserve">
+    <value>Não foi possível resolver o nome do broker "{0}" para um IP para o mapeamento de hosts no dispositivo; forneça o IP ou use um endereço IP como host.</value>
+  </data>
+  <data name="Mqtt_ResourceMissing" xml:space="preserve">
+    <value>Recurso de payload MQTT embebido "{0}" não encontrado no assembly.</value>
+  </data>
+  <data name="Mqtt_FileTooLarge" xml:space="preserve">
+    <value>{0} tem {1} bytes, mais do que o limite de {2} bytes para um script de init editável; recusada a leitura.</value>
+  </data>
+  <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
+    <value>Um tópico MQTT de publicação (todos exceto o tópico de receção) não pode conter os wildcards '+' ou '#'.</value>
+  </data>
+  <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
+    <value>O tópico de receção MQTT não é um filtro de subscrição válido: '+' tem de ocupar um nível inteiro e '#' tem de ser o último nível inteiro.</value>
+  </data>
+  <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
+    <value>O tópico de receção MQTT não pode corresponder a nenhum tópico de publicação; caso contrário, a ponte subscreveria a sua própria saída e repetiria as tramas do barramento em ciclo.</value>
+  </data>
 </root>

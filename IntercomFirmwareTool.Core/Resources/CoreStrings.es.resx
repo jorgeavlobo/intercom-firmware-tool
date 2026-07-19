@@ -152,4 +152,64 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} no existe en la imagen; se rechaza crearlo (obtendría un modo/propietario desconocido).</value>
   </data>
+  <data name="Mqtt_AlreadyInstalled" xml:space="preserve">
+    <value>El puente MQTT ya está instalado en esta imagen ({0} existe); se rechaza instalar encima.</value>
+  </data>
+  <data name="Mqtt_WatchdogMissingAfterInstall" xml:space="preserve">
+    <value>/etc/init.d/bt_service_watchdog no está presente tras la instalación; no se puede crear su enlace simbólico de arranque.</value>
+  </data>
+  <data name="Mqtt_Rc5dMissing" xml:space="preserve">
+    <value>/etc/rc5.d no existe en la imagen; no se puede activar el puente MQTT en el arranque.</value>
+  </data>
+  <data name="Mqtt_InvalidHost" xml:space="preserve">
+    <value>El host del broker MQTT no es una dirección IP ni un nombre de host válido.</value>
+  </data>
+  <data name="Mqtt_InvalidPort" xml:space="preserve">
+    <value>El puerto del broker MQTT debe estar entre 1 y 65535.</value>
+  </data>
+  <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
+    <value>El usuario y la contraseña MQTT deben establecerse juntos (ambos o ninguno).</value>
+  </data>
+  <data name="Mqtt_CertKeyBothOrNeither" xml:space="preserve">
+    <value>El certificado de cliente TLS y la clave privada deben proporcionarse juntos (ambos o ninguno).</value>
+  </data>
+  <data name="Mqtt_MutualTlsNeedsCa" xml:space="preserve">
+    <value>El TLS mutuo (certificado y clave de cliente) también requiere un certificado de CA.</value>
+  </data>
+  <data name="Mqtt_RemoteShellNeedsAuth" xml:space="preserve">
+    <value>El canal de comandos remoto requiere autenticación de cliente: usuario y contraseña, o TLS mutuo (certificado y clave de cliente). El TLS unidireccional (solo CA) no es suficiente.</value>
+  </data>
+  <data name="Mqtt_CredentialNewline" xml:space="preserve">
+    <value>El usuario o la contraseña MQTT contiene un salto de línea; las credenciales deben ser de una sola línea.</value>
+  </data>
+  <data name="Mqtt_InvalidTopic" xml:space="preserve">
+    <value>Un tema MQTT está vacío o contiene un salto de línea.</value>
+  </data>
+  <data name="Mqtt_FileMissing" xml:space="preserve">
+    <value>{0} no existe en la imagen; no se puede aplicar el parche del puente MQTT.</value>
+  </data>
+  <data name="Mqtt_AnchorMissing" xml:space="preserve">
+    <value>No se encontró el ancla esperada en {0} (buscando: {1}); parche rechazado.</value>
+  </data>
+  <data name="Mqtt_InvalidHostIp" xml:space="preserve">
+    <value>La IP del broker proporcionada (para el mapeo de hosts en el dispositivo) no es una dirección IPv4 válida.</value>
+  </data>
+  <data name="Mqtt_HostUnresolved" xml:space="preserve">
+    <value>No se pudo resolver el nombre de host del broker "{0}" a una IP para el mapeo de hosts en el dispositivo; proporcione la IP o use una dirección IP como host.</value>
+  </data>
+  <data name="Mqtt_ResourceMissing" xml:space="preserve">
+    <value>Recurso de payload MQTT incorporado "{0}" no encontrado en el ensamblado.</value>
+  </data>
+  <data name="Mqtt_FileTooLarge" xml:space="preserve">
+    <value>{0} tiene {1} bytes, más que el límite de {2} bytes para un script de init editable; lectura rechazada.</value>
+  </data>
+  <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
+    <value>Un tema MQTT de publicación (todos excepto el tema de recepción) no puede contener los comodines '+' o '#'.</value>
+  </data>
+  <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
+    <value>El tema de recepción MQTT no es un filtro de suscripción válido: '+' debe ocupar un nivel completo y '#' debe ser el último nivel completo.</value>
+  </data>
+  <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
+    <value>El tema de recepción MQTT no debe coincidir con ningún tema de publicación; de lo contrario, el puente se suscribiría a su propia salida y repetiría las tramas del bus en bucle.</value>
+  </data>
 </root>

@@ -152,4 +152,64 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} existiert nicht im Image; Erstellung wird verweigert (es würde unbekannten Modus/Eigentümer erhalten).</value>
   </data>
+  <data name="Mqtt_AlreadyInstalled" xml:space="preserve">
+    <value>Die MQTT-Brücke ist in diesem Abbild bereits installiert ({0} vorhanden); Installation darüber wird abgelehnt.</value>
+  </data>
+  <data name="Mqtt_WatchdogMissingAfterInstall" xml:space="preserve">
+    <value>/etc/init.d/bt_service_watchdog fehlt nach der Installation; der Boot-Symlink kann nicht erstellt werden.</value>
+  </data>
+  <data name="Mqtt_Rc5dMissing" xml:space="preserve">
+    <value>/etc/rc5.d existiert im Abbild nicht; die MQTT-Brücke kann beim Booten nicht aktiviert werden.</value>
+  </data>
+  <data name="Mqtt_InvalidHost" xml:space="preserve">
+    <value>Der MQTT-Broker-Host ist keine gültige IP-Adresse und kein gültiger Hostname.</value>
+  </data>
+  <data name="Mqtt_InvalidPort" xml:space="preserve">
+    <value>Der MQTT-Broker-Port muss zwischen 1 und 65535 liegen.</value>
+  </data>
+  <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
+    <value>MQTT-Benutzername und -Passwort müssen zusammen gesetzt werden (beide oder keines).</value>
+  </data>
+  <data name="Mqtt_CertKeyBothOrNeither" xml:space="preserve">
+    <value>Das TLS-Client-Zertifikat und der private Schlüssel müssen zusammen angegeben werden (beide oder keines).</value>
+  </data>
+  <data name="Mqtt_MutualTlsNeedsCa" xml:space="preserve">
+    <value>Gegenseitiges TLS (Client-Zertifikat und -Schlüssel) erfordert zusätzlich ein CA-Zertifikat.</value>
+  </data>
+  <data name="Mqtt_RemoteShellNeedsAuth" xml:space="preserve">
+    <value>Der Fernbefehlskanal erfordert eine Client-Authentifizierung: Benutzername und Passwort oder gegenseitiges TLS (Client-Zertifikat und -Schlüssel). Einseitiges TLS (nur CA) reicht nicht aus.</value>
+  </data>
+  <data name="Mqtt_CredentialNewline" xml:space="preserve">
+    <value>Der MQTT-Benutzername oder das -Passwort enthält einen Zeilenumbruch; Anmeldedaten müssen einzeilig sein.</value>
+  </data>
+  <data name="Mqtt_InvalidTopic" xml:space="preserve">
+    <value>Ein MQTT-Topic ist leer oder enthält einen Zeilenumbruch.</value>
+  </data>
+  <data name="Mqtt_FileMissing" xml:space="preserve">
+    <value>{0} existiert im Abbild nicht; der MQTT-Brücken-Patch kann nicht angewendet werden.</value>
+  </data>
+  <data name="Mqtt_AnchorMissing" xml:space="preserve">
+    <value>Der erwartete Anker in {0} wurde nicht gefunden (gesucht: {1}); Patch abgelehnt.</value>
+  </data>
+  <data name="Mqtt_InvalidHostIp" xml:space="preserve">
+    <value>Die angegebene Broker-IP (für die Hosts-Zuordnung auf dem Gerät) ist keine gültige IPv4-Adresse.</value>
+  </data>
+  <data name="Mqtt_HostUnresolved" xml:space="preserve">
+    <value>Der Broker-Hostname "{0}" konnte nicht zu einer IP für die Hosts-Zuordnung auf dem Gerät aufgelöst werden; geben Sie die IP an oder verwenden Sie eine IP-Adresse als Host.</value>
+  </data>
+  <data name="Mqtt_ResourceMissing" xml:space="preserve">
+    <value>Eingebettete MQTT-Payload-Ressource "{0}" wurde in der Assembly nicht gefunden.</value>
+  </data>
+  <data name="Mqtt_FileTooLarge" xml:space="preserve">
+    <value>{0} ist {1} Bytes groß, mehr als das Limit von {2} Bytes für ein editierbares Init-Skript; Lesen abgelehnt.</value>
+  </data>
+  <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
+    <value>Ein MQTT-Veröffentlichungs-Topic (alle außer dem Empfangs-Topic) darf die Platzhalter „+“ oder „#“ nicht enthalten.</value>
+  </data>
+  <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
+    <value>Das MQTT-Empfangs-Topic ist kein gültiger Abonnementfilter: '+' muss eine ganze Ebene belegen und '#' muss die letzte ganze Ebene sein.</value>
+  </data>
+  <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
+    <value>Das MQTT-Empfangs-Topic darf mit keinem Veröffentlichungs-Topic übereinstimmen; andernfalls würde die Brücke ihre eigene Ausgabe abonnieren und Bus-Frames in einer Schleife wiederholen.</value>
+  </data>
 </root>

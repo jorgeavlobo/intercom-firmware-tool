@@ -209,7 +209,8 @@ namespace IntercomFirmwareTool.Core
         /// with our own read chain and re-validate every SSH change. The input
         /// .fwz is never modified; the output is for validation, not flashing.
         /// </summary>
-        public static FwzBuildResult BuildModifiedFwz(string inputFwz, EnableSshOptions opts, string outputPath)
+        public static FwzBuildResult BuildModifiedFwz(string inputFwz, EnableSshOptions opts, string outputPath,
+            MqttOptions? mqttOpts = null)
         {
             // Repack opens the output with FileMode.Create while still reading the
             // input; if they are the same file the source is truncated mid-read
@@ -267,8 +268,9 @@ namespace IntercomFirmwareTool.Core
             string? modifiedGz = null;
             try
             {
-                // 1) Apply Phase A–D to a modified raw ext4.
-                modifiedBare = Ext4Probe.EnableSsh(ex.BareImagePath, opts);
+                // 1) Apply Phase A–D (and, when requested, install the MQTT bridge
+                //    in the same fs session) to a modified raw ext4.
+                modifiedBare = Ext4Probe.EnableSsh(ex.BareImagePath, opts, mqttOpts);
 
                 // 2) Re-gzip the modified ext4 into a temp .gz.
                 modifiedGz = NewTempPath(".gz");
@@ -295,6 +297,10 @@ namespace IntercomFirmwareTool.Core
                     try
                     {
                         checkList.AddRange(Ext4Probe.ValidateSsh(rt.BareImagePath, opts));
+                        // When the bridge was installed, re-validate it on the same
+                        // round-tripped image so a bad MQTT write also fails the build.
+                        if (mqttOpts != null)
+                            checkList.AddRange(Ext4Probe.ValidateMqtt(rt.BareImagePath, mqttOpts));
                     }
                     finally
                     {

@@ -1,14 +1,15 @@
 # MQTT bridge payload (clean-room, MIT)
 
-These scripts are the payload that a **planned** installer (Phase 1c, issue #10)
-*will* write into the firmware image when the user ticks the optional **Install
-MQTT bridge** box in Advanced options (off by default). The payload scripts
-(Phase 1a) and the embedded ARM binaries with SHA-256 integrity verification
-(Phase 1b, see [`../vendor/`](../vendor/THIRD_PARTY.md)) are in the repository;
-**nothing is wired into the build yet** — the installer, the UI checkbox, and the
-read-back validation referenced below are still the planned Phase 1c/1d. The
-bridge exposes the BTicino OpenWebNet/SCS bus and the front-panel keys over MQTT,
-for Home Assistant-style integration.
+These scripts are the payload that the installer (`MqttInstaller`, Phase 1c,
+issue `#10`) writes into the firmware image when the MQTT bridge is enabled (off
+by default). The payload scripts (Phase 1a) and the embedded ARM binaries with
+SHA-256 integrity verification (Phase 1b, see
+[`../vendor/`](../vendor/THIRD_PARTY.md)) are in the repository, and the installer
+plus its read-back validation (`ValidateMqtt`, referenced below) are now wired
+into the Core build pipeline (Phase 1c). The Advanced-options checkbox that
+enables the bridge is the remaining piece (Phase 1d, `#11`). The bridge exposes
+the BTicino OpenWebNet/SCS bus and the front-panel keys over MQTT, for Home
+Assistant-style integration.
 
 ## Provenance & licensing
 
@@ -132,8 +133,12 @@ path.
 
 **Base (factory firmware, confirmed present on a C100X):** `mosquitto_pub`,
 `mosquitto_sub`, a local `mosquitto` broker, `tcpdump`, `nc`, `route`, `ping`,
-`pgrep`, and `python` (2.7). Upstream relies on these; the planned installer's
-read-back check (#10) will flag any that are missing before a build is accepted.
+`pgrep`, and `python` (2.7). The installer's read-back check (`ValidateMqtt`,
+issue `#10`) flags any that are missing before a build is accepted. Most are
+invoked directly by our scripts and are validated at the exact path the script uses;
+`route` and `ping` are not invoked by this bridge (`TcpDump2Mqtt` deliberately
+does not gate startup on a gateway ping) but are checked for presence anyway, as
+a sanity check that the target is the expected firmware.
 
 **Feature-specific (shipped by us as ARM binaries — Phase 1b / #9, embedded in
 `IntercomFirmwareTool.Core`; see [`../vendor/THIRD_PARTY.md`](../vendor/THIRD_PARTY.md)):**
@@ -144,12 +149,12 @@ read-back check (#10) will flag any that are missing before a build is accepted.
 - `evtest` — required by `keypress.sh` only. If absent: `keypress.sh` exits early
   with a clear message; the rest of the bridge is unaffected.
 
-Both are installed to `/usr/bin` (`0775 root:root`) by the planned installer
-(issue #10), so on a correctly-installed image they are always present; the
-fail-fast checks guard against a partial or manual deployment. Both were
-smoke-tested on a live C100X (kernel 4.9.11, armv7-hardfloat): `evtest` 1.35 is
-the exact binary seen on that unit, and the patched `jq` 1.8.2 was confirmed to
-run there too. The **embedded** payload bytes are SHA-256-verified by
-`PayloadBinaries` before packaging/use; reading back and hashing the files
-*after* they are written to the device's `/usr/bin` is the installer's job
-(planned Phase 1c/1d, #10), not something this phase does yet.
+Both are installed to `/usr/bin` (`0775 root:root`) by the installer
+(`MqttInstaller`, issue `#10`), so on a correctly-installed image they are always
+present; the fail-fast checks guard against a partial or manual deployment. Both
+were smoke-tested on a live C100X (kernel 4.9.11, armv7-hardfloat): `evtest` 1.35
+is the exact binary seen on that unit, and the patched `jq` 1.8.2 was confirmed
+to run there too. The **embedded** payload bytes are SHA-256-verified by
+`PayloadBinaries` before packaging; after they are written to the device's
+`/usr/bin`, `ValidateMqtt` reads them back and re-verifies length + SHA-256 (see
+`CheckBinaryBytes`), so a truncated or corrupted install is caught at build time.

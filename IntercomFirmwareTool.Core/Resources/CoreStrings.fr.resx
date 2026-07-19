@@ -152,4 +152,64 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} n'existe pas dans l'image ; refus de le créer (il obtiendrait un mode/propriétaire inconnu).</value>
   </data>
+  <data name="Mqtt_AlreadyInstalled" xml:space="preserve">
+    <value>Le pont MQTT est déjà installé dans cette image ({0} existe) ; installation par-dessus refusée.</value>
+  </data>
+  <data name="Mqtt_WatchdogMissingAfterInstall" xml:space="preserve">
+    <value>/etc/init.d/bt_service_watchdog est absent après l'installation ; impossible de créer son lien symbolique de démarrage.</value>
+  </data>
+  <data name="Mqtt_Rc5dMissing" xml:space="preserve">
+    <value>/etc/rc5.d n'existe pas dans l'image ; impossible d'activer le pont MQTT au démarrage.</value>
+  </data>
+  <data name="Mqtt_InvalidHost" xml:space="preserve">
+    <value>L'hôte du broker MQTT n'est pas une adresse IP ni un nom d'hôte valide.</value>
+  </data>
+  <data name="Mqtt_InvalidPort" xml:space="preserve">
+    <value>Le port du broker MQTT doit être compris entre 1 et 65535.</value>
+  </data>
+  <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
+    <value>Le nom d'utilisateur et le mot de passe MQTT doivent être définis ensemble (les deux ou aucun).</value>
+  </data>
+  <data name="Mqtt_CertKeyBothOrNeither" xml:space="preserve">
+    <value>Le certificat client TLS et la clé privée doivent être fournis ensemble (les deux ou aucun).</value>
+  </data>
+  <data name="Mqtt_MutualTlsNeedsCa" xml:space="preserve">
+    <value>Le TLS mutuel (certificat et clé client) requiert aussi un certificat d'autorité (CA).</value>
+  </data>
+  <data name="Mqtt_RemoteShellNeedsAuth" xml:space="preserve">
+    <value>Le canal de commandes à distance requiert l'authentification du client : un nom d'utilisateur et un mot de passe, ou un TLS mutuel (certificat et clé client). Le TLS unidirectionnel (CA seule) ne suffit pas.</value>
+  </data>
+  <data name="Mqtt_CredentialNewline" xml:space="preserve">
+    <value>Le nom d'utilisateur ou le mot de passe MQTT contient un saut de ligne ; les identifiants doivent tenir sur une seule ligne.</value>
+  </data>
+  <data name="Mqtt_InvalidTopic" xml:space="preserve">
+    <value>Un sujet MQTT est vide ou contient un saut de ligne.</value>
+  </data>
+  <data name="Mqtt_FileMissing" xml:space="preserve">
+    <value>{0} n'existe pas dans l'image ; impossible d'appliquer le correctif du pont MQTT.</value>
+  </data>
+  <data name="Mqtt_AnchorMissing" xml:space="preserve">
+    <value>Ancre attendue introuvable dans {0} (recherche de : {1}) ; correctif refusé.</value>
+  </data>
+  <data name="Mqtt_InvalidHostIp" xml:space="preserve">
+    <value>L'IP du broker fournie (pour le mappage d'hôtes sur l'appareil) n'est pas une adresse IPv4 valide.</value>
+  </data>
+  <data name="Mqtt_HostUnresolved" xml:space="preserve">
+    <value>Impossible de résoudre le nom d'hôte du broker « {0} » en une IP pour le mappage d'hôtes sur l'appareil ; fournissez l'IP ou utilisez une adresse IP comme hôte.</value>
+  </data>
+  <data name="Mqtt_ResourceMissing" xml:space="preserve">
+    <value>Ressource de charge utile MQTT intégrée « {0} » introuvable dans l'assembly.</value>
+  </data>
+  <data name="Mqtt_FileTooLarge" xml:space="preserve">
+    <value>{0} fait {1} octets, au-delà de la limite de {2} octets pour un script d'init modifiable ; lecture refusée.</value>
+  </data>
+  <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
+    <value>Un sujet MQTT de publication (tous sauf le sujet de réception) ne peut pas contenir les jokers « + » ou « # ».</value>
+  </data>
+  <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
+    <value>Le sujet de réception MQTT n'est pas un filtre d'abonnement valide : « + » doit occuper un niveau entier et « # » doit être le dernier niveau entier.</value>
+  </data>
+  <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
+    <value>Le sujet de réception MQTT ne doit correspondre à aucun sujet de publication ; sinon, le pont s'abonnerait à sa propre sortie et rejouerait les trames du bus en boucle.</value>
+  </data>
 </root>

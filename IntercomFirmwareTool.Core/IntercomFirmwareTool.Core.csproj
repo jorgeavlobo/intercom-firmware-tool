@@ -61,6 +61,47 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- MQTT bridge (Phase 1c): the payload scripts MqttInstaller writes into the
+         firmware image, embedded (LF-pinned via .gitattributes; MqttInstaller also
+         normalizes to LF defensively). TcpDump2Mqtt.conf is NOT embedded — it is
+         generated from MqttOptions; README.md is docs, not payload. Same
+         Remove-then-EmbeddedResource + explicit LogicalName pattern as the
+         vendor binaries above. -->
+    <None Remove="Payload\mqtt\TcpDump2Mqtt" />
+    <None Remove="Payload\mqtt\TcpDump2Mqtt.sh" />
+    <None Remove="Payload\mqtt\StartMqttSend" />
+    <None Remove="Payload\mqtt\StartMqttReceive" />
+    <None Remove="Payload\mqtt\keypress.sh" />
+    <None Remove="Payload\mqtt\filter.py" />
+    <None Remove="Payload\mqtt\mqtt_common.sh" />
+    <None Remove="Payload\mqtt\bt_service_watchdog" />
+    <EmbeddedResource Include="Payload\mqtt\TcpDump2Mqtt">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.TcpDump2Mqtt</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Payload\mqtt\TcpDump2Mqtt.sh">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.TcpDump2Mqtt.sh</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Payload\mqtt\StartMqttSend">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.StartMqttSend</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Payload\mqtt\StartMqttReceive">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.StartMqttReceive</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Payload\mqtt\keypress.sh">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.keypress.sh</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Payload\mqtt\filter.py">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.filter.py</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Payload\mqtt\mqtt_common.sh">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.mqtt_common.sh</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Payload\mqtt\bt_service_watchdog">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.bt_service_watchdog</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- TargetPath flattens the path: the DLLs go to the output ROOT (next to
          the .exe), not to bin\...\lib\SharpExt4\. The native Ijwhost.dll is
          only found by the loader if it sits next to the executable. -->
