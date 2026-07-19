@@ -2,11 +2,13 @@
 
 These scripts are the payload that a **planned** installer (Phase 1c, issue #10)
 *will* write into the firmware image when the user ticks the optional **Install
-MQTT bridge** box in Advanced options (off by default). **Phase 1a (this PR) is
-the payload scripts only — nothing here is wired into the build yet;** the
-installer, the UI checkbox, and the read-back validation referenced below are
-future phases. The bridge exposes the BTicino OpenWebNet/SCS bus and the
-front-panel keys over MQTT, for Home Assistant-style integration.
+MQTT bridge** box in Advanced options (off by default). The payload scripts
+(Phase 1a) and the embedded ARM binaries with SHA-256 integrity verification
+(Phase 1b, see [`../vendor/`](../vendor/THIRD_PARTY.md)) are in the repository;
+**nothing is wired into the build yet** — the installer, the UI checkbox, and the
+read-back validation referenced below are still the planned Phase 1c/1d. The
+bridge exposes the BTicino OpenWebNet/SCS bus and the front-panel keys over MQTT,
+for Home Assistant-style integration.
 
 ## Provenance & licensing
 
