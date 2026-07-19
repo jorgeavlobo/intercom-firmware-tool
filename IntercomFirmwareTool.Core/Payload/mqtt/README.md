@@ -22,9 +22,11 @@ and the `TcpDump2Mqtt.conf` variable names.
 The two ARM binaries the bridge needs (`jq`, MIT; `evtest`, GPL-2.0-or-later)
 are **not** in this folder — they live under
 [`../vendor/`](../vendor/THIRD_PARTY.md) with their own license notices, SHA-256
-provenance and the GPL written offer for source (Phase 1b, #9). Because
-`evtest` is GPL-2.0-or-later, a firmware image built **with** the bridge enabled
-is an aggregate that, as a whole, is distributed under the GPL — see that notice.
+provenance and the GPL written offer for source (Phase 1b, #9). `evtest` keeps
+its GPL-2.0-or-later license when shipped, so a firmware image built **with** the
+bridge enabled must satisfy the GPL obligations **for `evtest`** (its notice plus
+the written offer for source). Bundling it alongside the otherwise-MIT tooling is
+*mere aggregation* — it does not relicense the other components — see that notice.
 
 ## Files
 

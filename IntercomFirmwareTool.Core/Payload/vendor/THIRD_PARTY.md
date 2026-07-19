@@ -11,11 +11,14 @@ the factory BTicino C300X/C100X firmware and the bridge scripts need them:
 
 These are **verbatim, unmodified** third-party binaries. They are redistributed
 here under their own licenses (below), independently of the MIT license that
-covers IntercomFirmwareTool's own code. **Bundling them does not relicense them,
-and it does not make the resulting firmware image "MIT":** because `evtest` is
-GPL-2.0-or-later, any firmware image that includes it is an *aggregate* that, as
-a whole, must be distributed in accordance with the GPL (see the written offer
-for source below). `jq` is permissively licensed (MIT and compatible notices).
+covers IntercomFirmwareTool's own code. **Bundling them does not relicense
+them** — each keeps its own license, unchanged. In particular, `evtest` stays
+**GPL-2.0-or-later**: any firmware image that includes it must satisfy the GPL's
+obligations **for `evtest`** — ship its license notice and honour the written
+offer for corresponding source (below). Placing it on the same image as the
+otherwise-MIT tooling is *mere aggregation* (GPL v2 §2): that does not extend the
+GPL to the other components, but it also does not make the image "MIT as a
+whole". `jq` is permissively licensed (MIT and compatible notices).
 
 The exact bytes committed here were confirmed **byte-for-byte identical** to the
 copies observed running on a live C100X ("shark", Poky/Yocto 2.5.3 sumo, kernel
