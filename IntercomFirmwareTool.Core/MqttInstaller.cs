@@ -1,6 +1,7 @@
 using SharpExt4;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using IntercomFirmwareTool.Core.Localization;
 
@@ -281,11 +282,17 @@ namespace IntercomFirmwareTool.Core
             Validate(opts);
             var checks = new List<Ext4Check>();
             {
-                // Scripts + binaries: presence, mode, owner.
+                // Scripts + binaries: presence, mode, owner. The ARM binaries also
+                // get a byte-level read-back (length + SHA-256) so a partial or
+                // corrupted write is caught — presence+mode+owner alone would pass
+                // a truncated file.
                 foreach (var s in Scripts)
                     CheckFile(fs, checks, s.Path, s.Mode);
                 foreach (var bin in PayloadBinaries.All)
+                {
                     CheckFile(fs, checks, bin.InstallPath, 775);
+                    CheckBinaryBytes(fs, checks, bin);
+                }
 
                 // Config: 0600, and its CONTENT byte-for-byte equals what these
                 // exact options generate — a true read-back. Checking only that
@@ -676,6 +683,37 @@ namespace IntercomFirmwareTool.Core
             checks.Add(new($"{path} owner 0:0",
                 owner != null && owner.Item1 == 0 && owner.Item2 == 0,
                 owner != null ? $"{owner.Item1}:{owner.Item2}" : "null"));
+        }
+
+        /// <summary>
+        /// Read-back integrity check for an installed ARM binary: its on-image
+        /// bytes must match the embedded resource's recorded length and SHA-256.
+        /// Catches a partial/truncated/corrupted write that presence+mode+owner
+        /// would miss. Skips silently if the file is absent (existence is already
+        /// reported by <see cref="CheckFile"/>).
+        /// </summary>
+        private static void CheckBinaryBytes(ExtFileSystem fs, List<Ext4Check> checks, ArmBinary bin)
+        {
+            if (!fs.FileExists(bin.InstallPath)) return;
+            using var file = fs.OpenFile(bin.InstallPath, FileMode.Open, FileAccess.Read);
+            long length = file.Length;
+            bool lenOk = length == bin.Length;
+            checks.Add(new($"{bin.InstallPath} length {bin.Length} bytes",
+                lenOk, $"actual {length}"));
+            // A wrong length is already a failure; don't hash a mismatched buffer.
+            if (!lenOk) return;
+            var buf = new byte[bin.Length];
+            int total = 0;
+            while (total < buf.Length)
+            {
+                int n = file.Read(buf, total, buf.Length - total);
+                if (n <= 0) break;
+                total += n;
+            }
+            string sha = total == buf.Length
+                ? Convert.ToHexStringLower(SHA256.HashData(buf)) : "";
+            checks.Add(new($"{bin.InstallPath} SHA-256 matches embedded {bin.Name}",
+                string.Equals(sha, bin.Sha256Hex, StringComparison.Ordinal), sha));
         }
 
         private static int CountOccurrences(string haystack, string needle)
