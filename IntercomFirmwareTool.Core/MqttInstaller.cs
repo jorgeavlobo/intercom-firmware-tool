@@ -321,8 +321,10 @@ namespace IntercomFirmwareTool.Core
                     ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive -> nc 0 30006
                 };
                 foreach (var (name, paths) in deps)
+                    // File only: these are executables / init scripts, so a
+                    // directory at the path is not a satisfied dependency.
                     checks.Add(new($"runtime dep {name} present",
-                        paths.Any(p => fs.FileExists(p) || fs.DirectoryExists(p)),
+                        paths.Any(fs.FileExists),
                         string.Join(" | ", paths)));
             }
             return checks;
