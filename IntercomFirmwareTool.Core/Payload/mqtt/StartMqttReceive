@@ -1,0 +1,105 @@
+#!/bin/sh
+# StartMqttReceive - apply commands received over MQTT to the unit.
+#
+# Subscribes to $TOPIC_RX. A raw OpenWebNet frame ("*...##") is forwarded to the
+# local gateway (nc 0 30006). Anything else is treated as a JSON command, but the
+# JSON command channel (read_file / write_file / execute_command) is a root-level
+# remote-control surface and is DISABLED unless the operator opted in AND the
+# client is authenticated (see remote_shell_allowed in mqtt_common.sh).
+#
+# MIT-licensed reimplementation of fquinto's mqtt_scripts/StartMqttReceive
+# (GPL-2.0) for IntercomFirmwareTool. Fixes over the original: the arbitrary
+# command channel is gated and refused on an unauthenticated broker, and a
+# reconnect backoff replaces the tight loop that pegged the CPU when the broker
+# was unreachable.
+PATH=/sbin:/usr/sbin:/usr/bin:/bin
+. /etc/tcpdump2mqtt/mqtt_common.sh
+
+OWN_PORT=30006
+
+handle_json() {
+	msg="$1"
+	if ! remote_shell_allowed; then
+		echo "Ignored JSON command: remote command channel is disabled (needs ALLOW_REMOTE_SHELL=1 and an authenticated broker: user/pass or mutual TLS)."
+		return
+	fi
+	if ! command -v jq > /dev/null 2>&1; then
+		echo "JSON command ignored: jq is not installed."
+		return
+	fi
+	command=$(printf '%s' "$msg" | jq -r '.command // empty' 2>/dev/null)
+	file_path=$(printf '%s' "$msg" | jq -r '.file_path // empty' 2>/dev/null)
+	data=$(printf '%s' "$msg" | jq -r '.data // empty' 2>/dev/null)
+	case "$command" in
+		read_file)
+			[ -n "$file_path" ] || { echo "read_file: missing file_path"; return; }
+			# Cap the payload (256 KB): a huge or special file (e.g. under /proc)
+			# must not balloon memory or the MQTT message and wedge the device.
+			# `--` so a path beginning with '-' is not taken as a head option.
+			content=$(head -c 262144 -- "$file_path" 2>/dev/null)
+			mqtt_pub -t "${TOPIC_FILE_CONTENT}" -m "$content"
+			;;
+		write_file)
+			[ -n "$file_path" ] || { echo "write_file: missing file_path"; return; }
+			# Cap the write (256 KB, same as read_file) so an oversized message
+			# can't fill flash. Write to a temp file in the same directory and
+			# rename, so a crash mid-write can't leave a partial (e.g. a config).
+			tmp="${file_path}.tmp.$$"
+			# `--` throughout: file_path (and thus tmp) comes from the MQTT
+			# payload and could begin with '-'. umask 077 so the temp is never
+			# briefly world-readable; then match the existing file's mode so
+			# replacing e.g. the 0600 config does not loosen its permissions
+			# (chmod is best-effort — on failure the temp stays 0600, which is
+			# restrictive, not a loosening).
+			if ( umask 077; printf '%s' "$data" | head -c 262144 > "$tmp" ); then
+				if [ -e "$file_path" ]; then
+					# Preserve the target's mode AND owner/group, so replacing a
+					# file owned by e.g. bticino under /home/bticino doesn't
+					# silently reassign it to root (both best-effort).
+					mode=$(stat -c '%a' "$file_path" 2>/dev/null)
+					[ -n "$mode" ] && chmod "$mode" -- "$tmp" 2>/dev/null
+					own=$(stat -c '%u:%g' "$file_path" 2>/dev/null)
+					[ -n "$own" ] && chown "$own" -- "$tmp" 2>/dev/null
+				fi
+				mv -- "$tmp" "$file_path"
+			else
+				rm -f -- "$tmp"
+			fi
+			;;
+		execute_command)
+			# Cap captured output at 256 KB: closing the pipe also SIGPIPEs a
+			# runaway/never-ending command, so it can't exhaust memory or blow
+			# past the broker's message limit.
+			result=$(sh -c "$data" 2>&1 | head -c 262144)
+			mqtt_pub -t "${TOPIC_CMD_RESULT}" -m "$result"
+			;;
+		*)
+			echo "Unsupported command: $command"
+			;;
+	esac
+}
+
+fail=0
+while : ; do
+	rxcmd=$(mqtt_sub_one)
+	status=$?
+
+	if [ $status -ne 0 ] || [ -z "$rxcmd" ]; then
+		# Broker unreachable or empty read - back off (capped) instead of
+		# spinning, then retry.
+		fail=$((fail + 1))
+		[ $fail -gt 6 ] && fail=6
+		sleep $((fail * 5))
+		continue
+	fi
+	fail=0
+
+	# printf, not echo: an MQTT payload starting with -n or containing backslashes
+	# would be mangled by some echo implementations.
+	if printf '%s\n' "$rxcmd" | grep -qE '^\*.*##$'; then
+		# Raw OpenWebNet frame - forward to the local gateway.
+		printf '%s\n' "$rxcmd" | nc 0 "$OWN_PORT"
+	else
+		handle_json "$rxcmd"
+	fi
+done

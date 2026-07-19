@@ -1,0 +1,122 @@
+#!/bin/sh
+# TcpDump2Mqtt - orchestrator for the BTicino MQTT bridge.
+#
+# Keeps the sender (bus -> MQTT), receiver (MQTT -> bus) and key-press publisher
+# running (respawning any that die) and publishes online/start status. Startup
+# is not gated on a gateway ping — the services handle broker connectivity.
+#
+# MIT-licensed reimplementation of fquinto's mqtt_scripts/TcpDump2Mqtt (GPL-2.0)
+# for IntercomFirmwareTool. Fixes over the original: POSIX sh (no bash-only
+# "function"); children tracked with pgrep -f on explicit paths; keypress.sh is
+# actually installed; auth/TLS composition and validation shared via
+# mqtt_common.sh (auth+TLS combine, one-way "CA only" TLS allowed).
+PATH=/sbin:/usr/sbin:/usr/bin:/bin
+. /etc/tcpdump2mqtt/mqtt_common.sh
+
+kill_by() {
+	pids=$(/usr/bin/pgrep -f "$1" 2>/dev/null)
+	if [ -n "$pids" ]; then
+		# shellcheck disable=SC2086
+		kill $pids > /dev/null 2>&1
+		echo "Stopped: $1 (PID $pids)"
+	fi
+}
+
+# Escape regex metacharacters so a topic containing them can't broaden the
+# pgrep -f match (killing unrelated processes) or fail to match ours.
+re_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'; }
+
+kill_childs() {
+	kill_by "/etc/tcpdump2mqtt/StartMqttSend"
+	kill_by "/etc/tcpdump2mqtt/StartMqttReceive"
+	kill_by "/etc/tcpdump2mqtt/keypress.sh"
+	# keypress.sh owns its evtest child and kills it via a trap on termination,
+	# so we don't match "evtest" here (that could hit unrelated evtest sessions).
+	kill_by "/etc/tcpdump2mqtt/filter.py"
+	# Our own pipeline children, matched specifically (by our port/topics) so a
+	# manual tcpdump or an unrelated mosquitto session on the box is left alone,
+	# and so the mosquitto_sub reparented out of the receiver's command
+	# substitution does not linger as an orphan across outages.
+	kill_by "tcpdump.*dst port 30006"
+	kill_by "mosquitto_sub.*$(re_escape "${TOPIC_RX}")"
+	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_DUMP}")"
+}
+
+exit_handler() {
+	echo "TcpDump2Mqtt shutting down."
+	kill_childs
+	exit 0
+}
+trap exit_handler INT TERM
+
+# --- Config validation ------------------------------------------------------
+# mqtt_common.sh already sourced the config. Check the essentials are coherent.
+tls_bad=0
+if [ -n "${MQTT_CERTFILE}" ] || [ -n "${MQTT_KEYFILE}" ]; then
+	# Mutual TLS: need BOTH the client cert and key, plus a CA to verify the broker.
+	{ [ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && [ -n "${MQTT_CAFILE}" ]; } || tls_bad=1
+fi
+
+# Port must be numeric (empty or non-digits would only fail later, deep inside a
+# mosquitto retry loop).
+case "${MQTT_PORT}" in
+	'' | *[!0-9]*) port_bad=1 ;;
+	*) if [ "${MQTT_PORT}" -ge 1 ] && [ "${MQTT_PORT}" -le 65535 ]; then
+		port_bad=0
+	   else
+		port_bad=1
+	   fi ;;
+esac
+
+if [ -z "${MQTT_HOST}" ] || [ "$port_bad" -ne 0 ] || \
+   { [ -n "${MQTT_USER}" ] && [ -z "${MQTT_PASS}" ]; } || \
+   { [ -n "${MQTT_PASS}" ] && [ -z "${MQTT_USER}" ]; } || \
+   [ -z "${TOPIC_RX}" ] || [ -z "${TOPIC_DUMP}" ] || [ -z "${TOPIC_STARTD}" ] || \
+   [ -z "${TOPIC_LASTWILL}" ] || [ "$tls_bad" -ne 0 ]; then
+	echo "Wrong or missing configuration, please check ${MQTT_CFGFILE}!"
+	exit 1
+fi
+
+# --- Default gateway (network liveness target) ------------------------------
+echo "MQTT host ${MQTT_HOST}:${MQTT_PORT}"
+echo "Checking for stale processes..."
+kill_childs
+
+# Keep the bridge services running. Deliberately NOT gated on any gateway/ICMP
+# probe: a gateway that blocks ICMP — or an unreachable gateway with a reachable
+# local/same-subnet broker — must not stop the bridge from starting. Broker
+# connectivity is handled by the services themselves: the receiver backs off,
+# and a sender pipeline that loses the broker exits and is respawned here.
+while : ; do
+	# The flexisipsh patch drops this marker when the SIP stack restarts; the
+	# MQTT link is independent of SIP, so just clear it and note it.
+	if [ -f /tmp/flexisip_restarted ]; then
+		/bin/rm -f /tmp/flexisip_restarted
+		echo "Flexisip restarted - MQTT services left running"
+	fi
+
+	# Liveness by our OWN scripts (specific paths), not any tcpdump/mosquitto.
+	if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttSend" > /dev/null 2>&1; then
+		echo "Starting MQTT sender..."
+		/etc/tcpdump2mqtt/StartMqttSend &
+		/bin/sleep 5
+		# Backgrounded so a broker/DNS/TCP stall in the publish can't block this
+		# watchdog loop and delay the liveness checks.
+		{ /bin/date +"%Y-%m-%dT%H:%M:%S" | mqtt_pub -l -r -t "${TOPIC_STARTD}"; } &
+	fi
+
+	if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttReceive" > /dev/null 2>&1; then
+		echo "Starting MQTT receiver..."
+		/etc/tcpdump2mqtt/StartMqttReceive &
+		/bin/sleep 5
+		# Backgrounded (see above) so a stalled publish can't block the loop.
+		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online &
+	fi
+
+	if [ -x /etc/tcpdump2mqtt/keypress.sh ] && \
+	   ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/keypress.sh" > /dev/null 2>&1; then
+		/etc/tcpdump2mqtt/keypress.sh &
+	fi
+
+	/bin/sleep 30
+done

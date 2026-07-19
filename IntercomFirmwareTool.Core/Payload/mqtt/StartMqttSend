@@ -1,0 +1,35 @@
+#!/bin/sh
+# StartMqttSend - publish every OpenWebNet frame the unit emits to MQTT.
+#
+# Sniffs the loopback interface (the SCS/OpenWebNet gateway speaks on lo),
+# extracts frames with filter.py, and publishes them to $TOPIC_DUMP.
+#
+# MIT-licensed reimplementation of fquinto's mqtt_scripts/StartMqttSend (GPL-2.0)
+# for IntercomFirmwareTool.
+PATH=/sbin:/usr/sbin:/usr/bin:/bin
+. /etc/tcpdump2mqtt/mqtt_common.sh
+
+# Prefer python, fall back to python3; fail fast if neither is present.
+PYTHON="$( [ -x /usr/bin/python ] && echo /usr/bin/python || echo /usr/bin/python3 )"
+if [ ! -x "$PYTHON" ]; then
+	echo "StartMqttSend: no python interpreter (/usr/bin/python or /usr/bin/python3) found." >&2
+	exit 1
+fi
+
+# tcpdump filter: only the local OpenWebNet chatter, dropping SIP/RTP and the
+# command-injection port (30006) so we do not echo our own writes back out.
+TCPDUMP_FILTER='not udp and not icmp and not port 5007 and not port 5060 and not port 20000 and not dst port 30006'
+# Self-amplification guard, but ONLY for a LOCAL broker: its mosquitto_pub
+# PUBLISH packets travel over lo carrying the *...## payload, which tcpdump would
+# re-capture, filter.py would re-extract and we'd republish — a loop. A REMOTE
+# broker has no such traffic on lo, and excluding its port unconditionally could
+# clobber a needed bus port (pcap `port` matches src OR dst; e.g. a broker on
+# 30006 would drop the gateway's source-30006 frames). So scope it to local.
+case "${MQTT_HOST}" in
+	127.0.0.1 | localhost | ::1 | 0.0.0.0)
+		[ -n "${MQTT_PORT}" ] && TCPDUMP_FILTER="${TCPDUMP_FILTER} and not port ${MQTT_PORT}" ;;
+esac
+
+/usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER 2>&1 \
+	| "${PYTHON}" /etc/tcpdump2mqtt/filter.py \
+	| mqtt_pub -l -t "${TOPIC_DUMP}"
