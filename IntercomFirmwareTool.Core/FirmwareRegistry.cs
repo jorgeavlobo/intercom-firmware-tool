@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using IntercomFirmwareTool.Core.Localization;
 
 namespace IntercomFirmwareTool.Core
 {
@@ -30,29 +31,49 @@ namespace IntercomFirmwareTool.Core
         public string Describe()
         {
             var sb = new StringBuilder();
-            sb.AppendLine($"  Line     : BTicino {Line}");
+            sb.AppendLine(CoreStrings.Format("FR_LabelLine", Line));
             if (!string.IsNullOrEmpty(Edition))
-                sb.AppendLine($"  Edition  : {Edition}");
-            sb.AppendLine($"  Version  : {Version}");
+                sb.AppendLine(CoreStrings.Format("FR_LabelEdition", Edition));
+            sb.AppendLine(CoreStrings.Format("FR_LabelVersion", Version));
             if (Models.Count == 1)
             {
-                sb.AppendLine($"  Model    : {Models[0].Reference} — {Models[0].Name}");
+                sb.AppendLine(CoreStrings.Format("FR_LabelModel", Models[0].Reference, Models[0].Name));
             }
             else
             {
-                sb.AppendLine("  Models   :");
+                sb.AppendLine(CoreStrings.Get("FR_LabelModels"));
                 foreach (var m in Models)
-                    sb.AppendLine($"    • {m.Reference} — {m.Name}");
+                    sb.AppendLine(CoreStrings.Format("FR_LabelModelItem", m.Reference, m.Name));
             }
             return sb.ToString().TrimEnd('\r', '\n');
         }
     }
 
-    /// <summary>Outcome of checking a file against the registry.</summary>
-    public sealed record FirmwareCheckResult(
-        bool Ok,
-        KnownFirmware? Match,
-        string Message);
+    /// <summary>
+    /// Outcome of checking a file against the registry. A plain class (not a record):
+    /// it carries a message <b>factory</b> so the outcome text re-localizes in the
+    /// current UI culture on each access, and a record's synthesized
+    /// equality/hashcode/ToString over a delegate would be meaningless.
+    /// </summary>
+    public sealed class FirmwareCheckResult
+    {
+        public bool Ok { get; }
+        public KnownFirmware? Match { get; }
+        private readonly Func<string> _messageFactory;
+
+        public FirmwareCheckResult(bool ok, KnownFirmware? match, Func<string> messageFactory)
+        {
+            Ok = ok;
+            Match = match;
+            _messageFactory = messageFactory;
+        }
+
+        /// <summary>
+        /// The localized outcome message, regenerated in the current UI culture on
+        /// each access — so it re-localizes when the app language changes at runtime.
+        /// </summary>
+        public string Message => _messageFactory();
+    }
 
     /// <summary>
     /// Whitelist of known-good original firmware images and the gate that
@@ -137,13 +158,13 @@ namespace IntercomFirmwareTool.Core
         {
             long size;
             try { size = new FileInfo(path).Length; }
-            catch (Exception ex) { return new(false, null, $"Cannot read the file: {ex.Message}"); }
+            catch (Exception ex) { string em = SafeMsg(ex); return new(false, null, () => CoreStrings.Format("FR_CannotReadFile", em)); }
 
             // Fast pre-filter: no known original has this exact byte size.
             var bySize = Known.Where(k => k.SizeBytes == size).ToList();
             if (bySize.Count == 0)
                 return new(false, null,
-                    $"Unrecognized firmware: size {size:N0} bytes does not match any known original.");
+                    () => CoreStrings.Format("FR_UnrecognizedBySize", size));
 
             string sha;
             try { sha = Sha256Hex(path); }
@@ -151,24 +172,28 @@ namespace IntercomFirmwareTool.Core
             {
                 // Deleted/locked/unreadable after the size check: reject through
                 // the normal flow instead of faulting the (uncaught) caller.
-                return new(false, null, $"Cannot read the file while hashing: {ex.Message}");
+                string em = SafeMsg(ex);
+                return new(false, null, () => CoreStrings.Format("FR_CannotReadWhileHashing", em));
             }
             var match = bySize.FirstOrDefault(
                 k => string.Equals(k.Sha256, sha, StringComparison.OrdinalIgnoreCase));
             if (match is null)
                 return new(false, null,
-                    $"Unrecognized firmware: the SHA-256 does not match any known original.\n" +
-                    $"  size   : {size:N0} bytes\n" +
-                    $"  sha256 : {sha}");
+                    () => CoreStrings.Format("FR_UnrecognizedBySha", size, sha));
 
             if (!match.IsFwzContainer)
                 return new(false, match,
-                    $"Recognized as {match.OriginalName}, but it is not a .fwz container this tool " +
-                    $"can unpack. It cannot be modified here.");
+                    () => CoreStrings.Format("FR_RecognizedNotFwz", match.OriginalName));
 
             return new(true, match,
-                $"Verified original: {match.OriginalName} — SHA-256 matches, {size:N0} bytes.");
+                () => CoreStrings.Format("FR_VerifiedOriginal", match.OriginalName, size));
         }
+
+        // A user-facing detail for an exception: its Message, or the exception type
+        // name when Message is blank (some exceptions have none), so a localized
+        // "Cannot read the file: {0}" is never left dangling with no detail.
+        private static string SafeMsg(Exception ex) =>
+            string.IsNullOrWhiteSpace(ex.Message) ? ex.GetType().Name : ex.Message;
 
         private static string Sha256Hex(string path)
         {

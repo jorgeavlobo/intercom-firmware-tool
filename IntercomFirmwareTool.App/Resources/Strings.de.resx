@@ -1,0 +1,333 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <!--
+    German (de) translation of the UI strings. The authoritative English source
+    is Strings.resx; every culture (it, es, fr, de, pt) compiles into a satellite
+    assembly, accessed at runtime through LocalizationManager
+    (XAML: {loc:Loc Key}) and, in code-behind, via the L()/LF() helpers.
+
+    {0}, {1}, … are string.Format placeholders — keep them, and their order, in
+    every translation. Keep technical tokens verbatim (.fwz, .pub, SSH, RSA, root2,
+    MD5-crypt, SHA-256, ssh-rsa, dropbear, file paths, and commands like icacls /
+    ssh-keygen). In file-dialog filters keep the "|"-separated pattern parts and the
+    (*.ext) tokens; translate only the human descriptions.
+  -->
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- ================= Window / chrome ================= -->
+  <data name="Win_Title" xml:space="preserve"><value>Intercom Firmware Tool — SSH-enable (Classe 100X / 300X)</value></data>
+  <data name="Adv_Toggle" xml:space="preserve"><value>Erweiterte Optionen</value></data>
+  <data name="Tip_Advanced" xml:space="preserve"><value>Erweiterte Optionen anzeigen: öffentlicher SSH-Schlüssel, prüfen und Selbsttest</value></data>
+  <data name="Lang_MenuTooltip" xml:space="preserve"><value>Sprache ändern</value></data>
+
+  <!-- ================= Safety banner (kept as separate runs so the bold/underline
+       emphasis and the mid-sentence hyperlink survive; keep this word order) ===== -->
+  <data name="Banner_Risk_Pre" xml:space="preserve"><value>⚠ Das Flashen modifizierter Firmware kann das Gerät unbrauchbar machen. </value></data>
+  <data name="Banner_Risk_Emph" xml:space="preserve"><value>Nutzung auf eigene Gefahr!</value></data>
+  <data name="Banner_Use_Pre" xml:space="preserve"><value> Verwenden Sie </value></data>
+  <data name="Banner_Link" xml:space="preserve"><value>MyHOME Suite</value></data>
+  <data name="Banner_Use_Post" xml:space="preserve"><value>.</value></data>
+
+  <!-- ================= Form field labels ================= -->
+  <data name="Field_Firmware" xml:space="preserve"><value>Firmware:</value></data>
+  <data name="Field_Password_Simple" xml:space="preserve"><value>Passwort:</value></data>
+  <data name="Field_Password_Advanced" xml:space="preserve"><value>Root-Passwort:</value></data>
+  <data name="Field_ConfirmPassword" xml:space="preserve"><value>Passwort bestätigen:</value></data>
+  <data name="Field_SaveOutput" xml:space="preserve"><value>Ausgabe speichern unter:</value></data>
+  <data name="Field_SshKey" xml:space="preserve"><value>Öffentlicher SSH-Schlüssel:</value></data>
+
+  <!-- ================= Placeholders (shown when nothing is selected/typed) ====== -->
+  <data name="Ph_Firmware" xml:space="preserve"><value>(klicken, um die zu modifizierende Original-.fwz auszuwählen)</value></data>
+  <data name="Ph_Firmware_Invalid" xml:space="preserve"><value>(keine gültige Firmware ausgewählt)</value></data>
+  <data name="Ph_Required" xml:space="preserve"><value>(erforderlich)</value></data>
+  <data name="Ph_Output" xml:space="preserve"><value>(wohin die modifizierte .fwz geschrieben wird)</value></data>
+  <data name="Ph_Key_Optional" xml:space="preserve"><value>(optional: einen vorhandenen .pub-Schlüssel wählen oder ein neues Paar erzeugen)</value></data>
+  <data name="Ph_Key_Required" xml:space="preserve"><value>(erforderlich: einen vorhandenen .pub-Schlüssel wählen oder ein neues Paar erzeugen)</value></data>
+
+  <!-- ================= Tooltips ================= -->
+  <data name="Tip_Firmware" xml:space="preserve"><value>Klicken (oder Eingabe/Leertaste drücken), um die Original-Firmware (.fwz) auszuwählen…</value></data>
+  <data name="Tip_ClearFirmware" xml:space="preserve"><value>Ausgewählte Firmware entfernen</value></data>
+  <data name="Tip_GenPassword" xml:space="preserve"><value>Ein starkes zufälliges Passwort erzeugen</value></data>
+  <data name="Tip_RevealHold" xml:space="preserve"><value>Gedrückt halten, um das Passwort anzuzeigen</value></data>
+  <data name="Tip_RevealRelease" xml:space="preserve"><value>Loslassen, um das Passwort zu verbergen</value></data>
+  <data name="Tip_CopyPassword" xml:space="preserve"><value>Passwort in die Zwischenablage kopieren</value></data>
+  <data name="Tip_Disable" xml:space="preserve"><value>Passwort-Anmeldung deaktivieren (nur Schlüssel) — erfordert einen SSH-Schlüssel</value></data>
+  <data name="Tip_Output" xml:space="preserve"><value>Klicken (oder Eingabe/Leertaste drücken), um den Speicherort der modifizierten .fwz zu wählen…</value></data>
+  <data name="Tip_ClearOutput" xml:space="preserve"><value>Ausgabeort entfernen</value></data>
+  <data name="Tip_Key" xml:space="preserve"><value>Klicken (oder Eingabe/Leertaste drücken), um einen vorhandenen öffentlichen Schlüssel (.pub) zu wählen…</value></data>
+  <data name="Tip_GenKey" xml:space="preserve"><value>Ein neues SSH-Schlüsselpaar erzeugen…</value></data>
+  <data name="Tip_ClearKey" xml:space="preserve"><value>Ausgewählten Schlüssel entfernen (nur mit Passwort erstellen)</value></data>
+  <data name="Tip_PayPal" xml:space="preserve"><value>Unterstützung über PayPal</value></data>
+  <data name="Tip_Revolut" xml:space="preserve"><value>Unterstützung über Revolut</value></data>
+
+  <!-- ================= Accessibility (screen-reader) names ================= -->
+  <data name="Fmt_Required" xml:space="preserve"><value>{0}, erforderlich</value></data>
+  <data name="Name_Firmware" xml:space="preserve"><value>Firmware</value></data>
+  <data name="Name_Output" xml:space="preserve"><value>Ausgabe speichern unter</value></data>
+  <data name="Name_Password_Simple" xml:space="preserve"><value>Passwort</value></data>
+  <data name="Name_Password_Advanced" xml:space="preserve"><value>Root-Passwort</value></data>
+  <data name="Name_Confirm" xml:space="preserve"><value>Passwort bestätigen</value></data>
+  <data name="Name_Confirm_Mismatch" xml:space="preserve"><value>Passwort bestätigen, stimmt nicht mit dem Passwort überein</value></data>
+  <data name="Name_Key" xml:space="preserve"><value>Öffentlicher SSH-Schlüssel</value></data>
+  <data name="Aria_GenKey" xml:space="preserve"><value>Ein neues SSH-Schlüsselpaar erzeugen</value></data>
+  <data name="Aria_ClearKey" xml:space="preserve"><value>Ausgewählten SSH-Schlüssel entfernen</value></data>
+  <data name="Aria_PayPal" xml:space="preserve"><value>Spendiere mir einen Kaffee über PayPal</value></data>
+  <data name="Aria_Revolut" xml:space="preserve"><value>Spendiere mir einen Kaffee über Revolut</value></data>
+
+  <!-- ================= Buttons / checkbox ================= -->
+  <data name="Chk_Disable" xml:space="preserve"><value>Deaktivieren</value></data>
+  <data name="Btn_Build" xml:space="preserve"><value>Modifizierte Firmware erstellen</value></data>
+  <data name="Btn_Build_Busy" xml:space="preserve"><value>Wird erstellt</value></data>
+  <data name="Btn_Inspect" xml:space="preserve"><value>Eine vorhandene .fwz prüfen…</value></data>
+  <data name="Btn_SelfTest" xml:space="preserve"><value>Selbsttest (MD5-crypt)</value></data>
+  <data name="Lbl_Result" xml:space="preserve"><value>Ergebnis:</value></data>
+
+  <!-- ================= Credential rule line ================= -->
+  <data name="Rule_KeyOnly" xml:space="preserve"><value>Ein SSH-Schlüssel ist erforderlich — die Passwort-Anmeldung ist deaktiviert.</value></data>
+  <data name="Rule_Advanced" xml:space="preserve"><value>Ein Root-Passwort ist erforderlich — oder aktivieren Sie „Deaktivieren“, um sich nur mit einem SSH-Schlüssel anzumelden.</value></data>
+  <data name="Rule_Simple" xml:space="preserve"><value>Ein Passwort ist erforderlich — oder aktivieren Sie „Deaktivieren“, um sich nur mit einem SSH-Schlüssel anzumelden.</value></data>
+
+  <!-- ================= Password match hint ================= -->
+  <data name="PwdHint_Disabled" xml:space="preserve"><value>(Passwort-Anmeldung deaktiviert)</value></data>
+  <data name="PwdHint_Match" xml:space="preserve"><value>✓ stimmt überein</value></data>
+  <data name="PwdHint_Mismatch" xml:space="preserve"><value>✗ stimmt nicht überein</value></data>
+
+  <!-- ================= Build "what's still needed" hint ================= -->
+  <data name="Hint_Ready" xml:space="preserve"><value>✓ Bereit zum Erstellen.</value></data>
+  <data name="Fmt_StillNeeded" xml:space="preserve"><value>Noch erforderlich: {0}.</value></data>
+  <data name="Fmt_StillNeeded_Prefix" xml:space="preserve"><value>Noch erforderlich: {0} — </value></data>
+  <data name="Hint_Mismatch" xml:space="preserve"><value>Passwörter stimmen nicht überein.</value></data>
+  <data name="Miss_Firmware" xml:space="preserve"><value>Firmware</value></data>
+  <data name="Miss_Output" xml:space="preserve"><value>Ausgabepfad</value></data>
+  <data name="Miss_Password_Simple" xml:space="preserve"><value>ein Passwort</value></data>
+  <data name="Miss_Password_Advanced" xml:space="preserve"><value>ein Root-Passwort</value></data>
+  <data name="Miss_Confirm" xml:space="preserve"><value>das Passwort bestätigen</value></data>
+  <data name="Miss_Key" xml:space="preserve"><value>ein SSH-Schlüssel</value></data>
+
+  <!-- ================= Status line (under the Build button) ================= -->
+  <data name="Status_NothingToCopy" xml:space="preserve"><value>Nichts zu kopieren — das Passwortfeld ist leer.</value></data>
+  <data name="Status_Copied" xml:space="preserve"><value>Passwort kopiert (vom Zwischenablageverlauf / der Cloud-Synchronisierung ausgeschlossen).</value></data>
+  <data name="Fmt_CopyFailed" xml:space="preserve"><value>Kopieren in die Zwischenablage nicht möglich: {0}</value></data>
+  <data name="Status_Verifying" xml:space="preserve"><value>Firmware wird überprüft… (Größe + SHA-256)</value></data>
+  <data name="Status_FirmwareVerified" xml:space="preserve"><value>✓ Firmware überprüft.</value></data>
+  <data name="Status_GenKey" xml:space="preserve"><value>Ein neues SSH-Schlüsselpaar wird erzeugt…</value></data>
+  <data name="Status_KeyGenerated" xml:space="preserve"><value>✓ SSH-Schlüsselpaar erzeugt.</value></data>
+
+  <!-- ================= Result box: default + password/verify narratives ======== -->
+  <data name="Result_Default" xml:space="preserve"><value>Wählen Sie eine Firmware und einen Ausgabepfad, legen Sie ein Root-Passwort fest (oder aktivieren Sie „Deaktivieren“, um nur einen SSH-Schlüssel zu verwenden), und klicken Sie dann auf Erstellen.</value></data>
+  <data name="Result_RandomPwd" xml:space="preserve"><value>Ein starkes zufälliges Passwort wurde erzeugt und in beide Felder eingetragen.
+Halten Sie das Auge gedrückt, um es anzuzeigen, oder nutzen Sie die Kopieren-Schaltfläche — bewahren Sie es sicher auf, es wird nicht gespeichert und Sie benötigen es zur Anmeldung.</value></data>
+  <data name="Fmt_Result_Verifying" xml:space="preserve"><value>Firmware-Integrität wird überprüft (Größe + SHA-256)…
+{0}</value></data>
+  <data name="Fmt_Result_Rejected" xml:space="preserve"><value>❌ Diese Datei wurde NICHT akzeptiert — Auswahl aufgehoben, Erstellen bleibt deaktiviert.
+
+{0}
+
+Nur bekannte, einwandfreie Original-Firmware kann modifiziert werden, sodass ein beschädigter oder falscher
+Download nicht in ein defektes Image verwandelt werden kann. Der NAME der Datei spielt keine Rolle —
+ihr Inhalt (Größe + SHA-256) muss mit einem bekannten Original übereinstimmen.</value></data>
+  <data name="Fmt_Result_Accepted" xml:space="preserve"><value>✅ {0}
+
+{1}
+
+Legen Sie ein Root-Passwort fest (oder aktivieren Sie „Deaktivieren“, um nur einen SSH-Schlüssel zu verwenden), und klicken Sie dann auf Erstellen.</value></data>
+
+  <!-- ================= Firmware picker dialog ================= -->
+  <data name="Dlg_ChooseFirmware_Title" xml:space="preserve"><value>Wählen Sie die Original-Firmware (.fwz)</value></data>
+  <data name="Dlg_FirmwareFilter" xml:space="preserve"><value>Bticino-Firmware (*.fwz)|*.fwz|Alle Dateien (*.*)|*.*</value></data>
+  <data name="Fmt_VerifyFailed" xml:space="preserve"><value>Firmware konnte nicht überprüft werden: {0}</value></data>
+  <data name="Fmt_Msg_FirmwareNotAccepted" xml:space="preserve"><value>Diese Datei ist keine akzeptierte Original-Firmware.
+
+{0}
+
+Die Auswahl wurde aufgehoben.</value></data>
+  <data name="Cap_FirmwareNotAccepted" xml:space="preserve"><value>Firmware nicht akzeptiert</value></data>
+
+  <!-- ================= SSH key picker dialog ================= -->
+  <data name="Dlg_ChooseKey_Title" xml:space="preserve"><value>Wählen Sie Ihren öffentlichen SSH-Schlüssel (.pub)</value></data>
+  <data name="Dlg_KeyFilter" xml:space="preserve"><value>Öffentlicher Schlüssel (*.pub)|*.pub|Alle Dateien (*.*)|*.*</value></data>
+  <data name="Fmt_Msg_ReadKeyFailed" xml:space="preserve"><value>Die Schlüsseldatei konnte nicht gelesen werden:
+{0}</value></data>
+  <data name="Cap_CannotReadKey" xml:space="preserve"><value>Schlüssel kann nicht gelesen werden</value></data>
+  <data name="Msg_NotPublicKey_Choose" xml:space="preserve"><value>Diese Datei sieht nicht wie ein öffentlicher OpenSSH-Schlüssel aus
+(erwartet wurde eine Zeile wie "ssh-rsa AAAA… comment"). Wählen Sie die .pub-Datei.</value></data>
+  <data name="Cap_NotPublicKey" xml:space="preserve"><value>Kein öffentlicher Schlüssel</value></data>
+
+  <!-- ================= Generate SSH key ================= -->
+  <data name="Dlg_SaveKey_Title" xml:space="preserve"><value>Speichern Sie den NEUEN privaten Schlüssel unter… (die öffentliche .pub wird daneben geschrieben)</value></data>
+  <data name="Dlg_SaveKeyFilter" xml:space="preserve"><value>Privater SSH-Schlüssel (alle Dateien)|*.*</value></data>
+  <data name="CollisionLabel_Input" xml:space="preserve"><value>Eingabe-Firmware</value></data>
+  <data name="CollisionLabel_Output" xml:space="preserve"><value>Ausgabe-Firmware</value></data>
+  <data name="CollisionLabel_Key" xml:space="preserve"><value>ausgewählter öffentlicher Schlüssel</value></data>
+  <data name="Fmt_Msg_KeyCollision" xml:space="preserve"><value>Der Schlüssel würde über die {0} geschrieben:
+
+{1}
+
+Wählen Sie einen anderen Speicherort für den neuen Schlüssel.</value></data>
+  <data name="Cap_PathCollision" xml:space="preserve"><value>Pfadkollision</value></data>
+  <data name="Fmt_Msg_PubExists" xml:space="preserve"><value>Ein öffentlicher Schlüssel existiert bereits und wird überschrieben:
+
+{0}
+
+Fortfahren?</value></data>
+  <data name="Cap_PubExists" xml:space="preserve"><value>Öffentlicher Schlüssel existiert</value></data>
+  <data name="Result_GeneratingKey" xml:space="preserve"><value>Ein neues 4096-Bit-RSA-Schlüsselpaar wird erzeugt…</value></data>
+  <data name="Fmt_Result_GenKeyFailed" xml:space="preserve"><value>Der Schlüssel konnte nicht erzeugt werden:
+{0}</value></data>
+  <data name="Result_GenKeyFailed_Unknown" xml:space="preserve"><value>Es wurde kein öffentlicher Schlüssel erzeugt (unbekannter Fehler).</value></data>
+  <data name="Fmt_Msg_GenKeyFailed" xml:space="preserve"><value>Das SSH-Schlüsselpaar konnte nicht erzeugt werden:
+
+{0}</value></data>
+  <data name="Msg_GenKeyFailed_Unknown" xml:space="preserve"><value>Unbekannter Fehler.</value></data>
+  <data name="Cap_GenKeyFailed" xml:space="preserve"><value>Schlüsselerzeugung fehlgeschlagen</value></data>
+  <data name="Fmt_Result_KeyDetails" xml:space="preserve"><value>  Schlüsseltyp : {0}
+  Fingerprint : {1}
+</value></data>
+  <data name="Result_KeyCreated_Header" xml:space="preserve"><value>Neues SSH-Schlüsselpaar erstellt.</value></data>
+  <data name="Fmt_Result_KeyCreated_Priv" xml:space="preserve"><value>  Privater Schlüssel : {0}</value></data>
+  <data name="Fmt_Result_KeyCreated_Pub" xml:space="preserve"><value>  Öffentlicher Schlüssel : {0}</value></data>
+  <data name="Fmt_Result_KeyCreated_Body" xml:space="preserve"><value>Der öffentliche Schlüssel ist jetzt für die Erstellung ausgewählt. BEWAHREN SIE DEN PRIVATEN SCHLÜSSEL SICHER AUF —
+mit ihm werden Sie sich anmelden. Diese Erstellung fügt ein root2-Konto (uid 0) hinzu,
+verbinden Sie sich also als root2:  ssh -i "{0}" root2@&lt;device&gt;
+Er hat keine Passphrase; fügen Sie später eine hinzu mit:  ssh-keygen -p -f "{0}"</value></data>
+  <data name="Result_KeyCreated_Restricted" xml:space="preserve"><value>Der private Schlüssel wurde auf Ihr Windows-Konto beschränkt (andere Benutzer ausgesperrt),
+sodass OpenSSH ihn akzeptiert.</value></data>
+  <data name="Fmt_Result_KeyCreated_NotRestricted" xml:space="preserve"><value>Wenn Windows OpenSSH meldet, dass der Schlüssel zu offen ist ("UNPROTECTED PRIVATE KEY
+FILE"), beschränken Sie ihn mit folgendem Befehl auf Ihr Konto:
+  icacls "{0}" /inheritance:r /grant:r "%USERNAME%:F"
+(Vollzugriff nur für Sie — OpenSSH benötigt lediglich, dass andere Benutzer ausgesperrt sind.)</value></data>
+  <data name="Fmt_Msg_KeyCreated" xml:space="preserve"><value>Schlüsselpaar erstellt.
+
+Privater Schlüssel:
+{0}
+
+Öffentlicher Schlüssel:
+{1}
+
+Bewahren Sie den privaten Schlüssel sicher auf — er hat keine Passphrase.</value></data>
+  <data name="Cap_NewSshKey" xml:space="preserve"><value>Neuer SSH-Schlüssel</value></data>
+
+  <!-- ================= Output picker ================= -->
+  <data name="Dlg_SaveOutput_Title" xml:space="preserve"><value>Speichern Sie die modifizierte Firmware unter…</value></data>
+  <data name="Msg_CannotOverwriteInput" xml:space="preserve"><value>Die Ausgabe muss eine andere Datei als die Original-Firmware sein, damit die Original-.fwz nie überschrieben wird.
+
+Wählen Sie einen anderen Namen oder Ordner.</value></data>
+  <data name="Cap_CannotOverwriteInput" xml:space="preserve"><value>Original kann nicht überschrieben werden</value></data>
+
+  <!-- ================= Build validation dialogs ================= -->
+  <data name="Msg_PasswordRequired" xml:space="preserve"><value>Geben Sie ein Root-Passwort ein oder aktivieren Sie „Deaktivieren“, um eine Firmware nur mit Schlüssel
+zu erstellen (die dann einen SSH-Schlüssel erfordert).</value></data>
+  <data name="Cap_PasswordRequired" xml:space="preserve"><value>Passwort erforderlich</value></data>
+  <data name="Msg_PasswordMismatch" xml:space="preserve"><value>Das Passwort und seine Bestätigung stimmen nicht überein.</value></data>
+  <data name="Cap_PasswordMismatch" xml:space="preserve"><value>Passwörter stimmen nicht überein</value></data>
+  <data name="Fmt_Msg_CannotReadPubKey" xml:space="preserve"><value>Der öffentliche Schlüssel konnte nicht gelesen werden:
+
+{0}</value></data>
+  <data name="Msg_EmptyKey" xml:space="preserve"><value>Die ausgewählte öffentliche Schlüsseldatei ist leer.
+
+Wählen Sie eine gültige .pub-Datei oder erzeugen Sie ein neues Paar.</value></data>
+  <data name="Cap_EmptyKey" xml:space="preserve"><value>Leere Schlüsseldatei</value></data>
+  <data name="Msg_NotPublicKey_Build" xml:space="preserve"><value>Die ausgewählte Datei sieht nicht wie ein öffentlicher OpenSSH-Schlüssel aus
+(erwartet wurde eine Zeile wie "ssh-rsa AAAA… comment" oder "ssh-ed25519 AAAA…").
+
+Wählen Sie eine gültige .pub-Datei oder erzeugen Sie ein neues Paar.</value></data>
+  <data name="Msg_OutputCollidesKey" xml:space="preserve"><value>Der Ausgabepfad ist dieselbe Datei wie der ausgewählte SSH-Schlüssel (öffentlich oder
+privat). Wählen Sie eine andere Ausgabe, damit der Schlüssel nicht überschrieben wird.</value></data>
+  <data name="Cap_OutputCollidesKey" xml:space="preserve"><value>Ausgabe kollidiert mit dem Schlüssel</value></data>
+  <data name="Msg_KeyRequired" xml:space="preserve"><value>Die Passwort-Anmeldung ist deaktiviert, daher ist ein SSH-Schlüssel erforderlich.
+
+Wählen oder erzeugen Sie einen Schlüssel, oder deaktivieren Sie „Deaktivieren“ und legen Sie ein Passwort fest.</value></data>
+  <data name="Cap_KeyRequired" xml:space="preserve"><value>Schlüssel erforderlich</value></data>
+  <data name="Msg_RsaRequired" xml:space="preserve"><value>Die Anmeldung nur mit Schlüssel erfordert einen öffentlichen RSA-Schlüssel.
+
+RSA ist der einzige Schlüsseltyp, dessen Authentifizierung auf dem dropbear dieser
+Firmware verifiziert ist, sodass eine Erstellung nur mit Schlüssel bei einem anderen Typ das Gerät
+ohne Anmeldemöglichkeit zurücklassen könnte. Verwenden Sie einen RSA-Schlüssel oder deaktivieren Sie „Deaktivieren“ und legen Sie ein
+Root-Passwort als Rückfalloption fest.</value></data>
+  <data name="Cap_RsaRequired" xml:space="preserve"><value>RSA-Schlüssel erforderlich für nur-Schlüssel</value></data>
+  <data name="Fmt_Msg_OutputIsPrivateKey" xml:space="preserve"><value>Der Ausgabepfad ist eine SSH-PRIVATSCHLÜSSEL-Datei:
+
+{0}
+
+Eine Erstellung dort würde den Schlüssel überschreiben und zerstören. Wählen Sie eine andere Ausgabe.</value></data>
+  <data name="Cap_OutputIsPrivateKey" xml:space="preserve"><value>Ausgabe ist ein privater Schlüssel</value></data>
+  <data name="Fmt_Msg_FileExists" xml:space="preserve"><value>Die Datei existiert bereits:
+
+{0}
+
+Überschreiben?</value></data>
+  <data name="Cap_FileExists" xml:space="preserve"><value>Datei existiert</value></data>
+
+  <!-- ================= Build result log ================= -->
+  <data name="Result_Build_Head" xml:space="preserve"><value>Modifizierte Firmware wird erstellt…</value></data>
+  <data name="Fmt_Result_Build_Input" xml:space="preserve"><value>  Eingabe    : {0}</value></data>
+  <data name="Result_Build_RootPw_Set" xml:space="preserve"><value>  Root-Pw    : (gesetzt — gespeichert als MD5-crypt $1$root$…)</value></data>
+  <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Root-Pw    : (deaktiviert — Anmeldung nur mit Schlüssel)</value></data>
+  <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Öff. Schlüssel : {0}</value></data>
+  <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Öff. Schlüssel : (keiner — nur Passwort-Anmeldung)</value></data>
+  <data name="Fmt_Result_Build_Output" xml:space="preserve"><value>  Ausgabe    : {0}</value></data>
+  <data name="Fmt_Result_ArchivePw" xml:space="preserve"><value>Archiv-Passwort : {0}  (ZipCrypto-Schlüssel, nicht das Gerätemodell)</value></data>
+  <data name="Fmt_Result_Build_ModifiedEntry" xml:space="preserve"><value>Modifizierter Eintrag : {0}</value></data>
+  <data name="Result_Build_VerifyHeader" xml:space="preserve"><value>Verifizierung (die AUSGABE-.fwz erneut geöffnet und jede Änderung erneut gelesen):</value></data>
+  <data name="Result_Build_Success" xml:space="preserve"><value>✅ ERFOLG — die modifizierte Firmware wurde erstellt und verifiziert.</value></data>
+  <data name="Fmt_Result_Build_WrittenTo" xml:space="preserve"><value>   Geschrieben nach: {0}</value></data>
+  <data name="Result_Build_FlashAdvisory" xml:space="preserve"><value>Vor dem Flashen: Behalten Sie die ORIGINAL-Firmware und seien Sie bereit, sie
+mit My Home Suite über Mini-USB erneut zu flashen. Diese Geräte verwenden ein i.MX-SoC — es gibt
+keine dokumentierte Low-Level-Wiederherstellung (SAM-BA ist nicht anwendbar), sodass ein fehlerhaftes Flashen
+möglicherweise nicht behoben werden kann. Ihre Original-.fwz wurde nicht modifiziert.</value></data>
+  <data name="Result_Build_FailChecks" xml:space="preserve"><value>❌ Einige Prüfungen sind FEHLGESCHLAGEN — die verifizierte Erstellung wurde NICHT geschrieben.</value></data>
+  <data name="Fmt_Result_Build_FailUnchanged" xml:space="preserve"><value>   Ihr gewählter Ausgabepfad wurde unverändert gelassen: {0}</value></data>
+  <data name="Result_Build_FailNoFlash" xml:space="preserve"><value>   (eine dort vorhandene Datei ist NICHT diese Erstellung — flashen Sie sie nicht.)</value></data>
+  <data name="Result_Build_FailSeeAbove" xml:space="preserve"><value>   Siehe die fehlgeschlagenen Prüfungen oben.</value></data>
+  <data name="Fmt_Msg_BuildFailed" xml:space="preserve"><value>Die Erstellung konnte nicht abgeschlossen werden:
+
+{0}
+
+Öffnen Sie Erweitert → Ergebnis für das vollständige Protokoll.</value></data>
+  <data name="Cap_BuildFailed" xml:space="preserve"><value>Erstellung fehlgeschlagen</value></data>
+  <data name="Fmt_Msg_BuildComplete" xml:space="preserve"><value>✅ Die modifizierte Firmware wurde erfolgreich erstellt und verifiziert.
+
+Gespeichert unter:
+{0}
+
+Der Vorgang ist abgeschlossen.</value></data>
+  <data name="Cap_BuildComplete" xml:space="preserve"><value>Erstellung abgeschlossen</value></data>
+  <data name="Msg_BuildNotWritten" xml:space="preserve"><value>Einige Verifizierungsprüfungen sind nicht bestanden worden, daher wurde die modifizierte Firmware NICHT geschrieben.
+
+Öffnen Sie Erweitert → Ergebnis, um zu sehen, welche Prüfungen fehlgeschlagen sind.</value></data>
+  <data name="Cap_BuildNotWritten" xml:space="preserve"><value>Erstellung nicht geschrieben</value></data>
+
+  <!-- ================= Inspect an existing .fwz ================= -->
+  <data name="Dlg_Inspect_Title" xml:space="preserve"><value>Wählen Sie eine modifizierte .fwz zur Prüfung (z. B. die Ausgabe dieses Tools oder von fquinto)</value></data>
+  <data name="Result_Inspect_Head" xml:space="preserve"><value>Eine vorhandene Firmware wird geprüft (schreibgeschützt, die .fwz wird nicht modifiziert)…</value></data>
+  <data name="Fmt_Result_Inspect_File" xml:space="preserve"><value>  .fwz       : {0}</value></data>
+  <data name="Fmt_Result_Inspect_InnerEntry" xml:space="preserve"><value>Innerer Eintrag : {0}</value></data>
+  <data name="Result_Inspect_WhatsInside" xml:space="preserve"><value>Was enthalten ist:</value></data>
+  <data name="Result_Inspect_Checklist" xml:space="preserve"><value>Prüfliste:</value></data>
+  <data name="Result_Inspect_AllPass" xml:space="preserve"><value>✅ ALLE BESTANDEN — ein gültiges, vollständiges SSH-enable mit mindestens einer funktionierenden Anmeldung.</value></data>
+  <data name="Result_Inspect_SomeFailed" xml:space="preserve"><value>❌ EINIGE FEHLGESCHLAGEN — dieser .fwz fehlt etwas oder sie weicht bei den obigen Prüfungen ab.</value></data>
+
+  <!-- ================= MD5-crypt self-test ================= -->
+  <data name="Result_SelfTest_Head" xml:space="preserve"><value>MD5-crypt-($1$)-Selbsttest — Vektoren gegen `openssl passwd -1` verifiziert.</value></data>
+  <data name="Result_SelfTest_AllPass" xml:space="preserve"><value>✅ ALLE BESTANDEN — das C#-MD5-crypt stimmt Byte für Byte mit openssl überein.</value></data>
+  <data name="Result_SelfTest_SomeFailed" xml:space="preserve"><value>❌ EINIGE FEHLGESCHLAGEN — die Implementierung stimmt nicht überein; verwenden Sie sie nicht.</value></data>
+
+  <!-- ================= Shared ================= -->
+  <data name="Result_Processing" xml:space="preserve"><value>Wird verarbeitet…</value></data>
+
+  <!-- ================= Donate banner ================= -->
+  <data name="Donate_Pre" xml:space="preserve"><value>Fanden Sie dieses Tool nützlich? </value></data>
+  <data name="Donate_Emph" xml:space="preserve"><value>Spendiere mir einen Kaffee</value></data>
+  <data name="Donate_Post" xml:space="preserve"><value>. Vielen Dank! ☺</value></data>
+</root>

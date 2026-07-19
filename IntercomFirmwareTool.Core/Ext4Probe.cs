@@ -1,5 +1,6 @@
 using SharpExt4;
 using System.Text;
+using IntercomFirmwareTool.Core.Localization;
 
 namespace IntercomFirmwareTool.Core
 {
@@ -40,10 +41,25 @@ namespace IntercomFirmwareTool.Core
     /// ownership, dropbear autostart), and <see cref="AllPass"/> is true when
     /// every structural check passed.
     /// </summary>
-    public sealed record SshInspection(
-        IReadOnlyList<string> Findings,
-        IReadOnlyList<Ext4Check> Checks,
-        bool AllPass);
+    public sealed class SshInspection
+    {
+        // Findings are stored as factories, not strings, so their localized text can
+        // be regenerated in the current UI culture (the app re-renders them when the
+        // language changes at runtime).
+        public IReadOnlyList<Func<string>> Findings { get; }
+        public IReadOnlyList<Ext4Check> Checks { get; }
+        public bool AllPass { get; }
+
+        public SshInspection(
+            IReadOnlyList<Func<string>> findings,
+            IReadOnlyList<Ext4Check> checks,
+            bool allPass)
+        {
+            Findings = findings;
+            Checks = checks;
+            AllPass = allPass;
+        }
+    }
 
     public static class Ext4Probe
     {
@@ -96,7 +112,7 @@ namespace IntercomFirmwareTool.Core
             using var disk = ExtDisk.Open(diskImagePath);
             if (disk.Partitions.Count == 0)
                 throw new InvalidOperationException(
-                    "The image has no recognizable partitions (MBR without valid entries).");
+                    CoreStrings.Get("Ext4_NoPartitions"));
 
             // The real API is Open(ExtDisk, Partition) — two arguments.
             // (The SharpExt4 README shows only one, but it's wrong.)
@@ -116,7 +132,7 @@ namespace IntercomFirmwareTool.Core
             long length = file.Length;
             if (length > maxBytes)
                 throw new NotSupportedException(
-                    $"File too large for this test: {length} bytes (limit {maxBytes} bytes).");
+                    CoreStrings.Format("Ext4_FileTooLarge", length, maxBytes));
 
             int len = (int)length;
             var buf = new byte[len];
@@ -126,7 +142,7 @@ namespace IntercomFirmwareTool.Core
                 int n = file.Read(buf, total, len - total);
                 if (n <= 0)
                     throw new EndOfStreamException(
-                        $"Incomplete read: expected {len} bytes, got {total}.");
+                        CoreStrings.Format("Ext4_IncompleteRead", len, total));
                 total += n;
             }
             return Encoding.UTF8.GetString(buf, 0, total);
@@ -225,8 +241,7 @@ namespace IntercomFirmwareTool.Core
                     // bareSize; if it ends early we would emit a truncated ext4 —
                     // fail loudly rather than write a corrupt image.
                     throw new EndOfStreamException(
-                        $"Wrapper disk ended early: {remaining} of {bareSize} bytes unread; " +
-                        "the sliced ext4 would be truncated.");
+                        CoreStrings.Format("Ext4_WrapperEndedEarly", remaining, bareSize));
                 outFs.Write(buffer, 0, n);
                 remaining -= n;
             }
@@ -295,9 +310,7 @@ namespace IntercomFirmwareTool.Core
             // decision ReadFile uses (!HasValidMbr && IsBareExt4), failing closed.
             if (HasValidMbr(bareImagePath) || !IsBareExt4(bareImagePath))
                 throw new ArgumentException(
-                    "Expected a bare ext4 image (no partition table, ext4 superblock magic " +
-                    "0xEF53 at offset 0x438). This method operates on the raw ext4 payload, " +
-                    "not a .fwz container or an already-partitioned disk image.",
+                    CoreStrings.Get("Ext4_ExpectedBareExt4"),
                     nameof(bareImagePath));
         }
 
@@ -312,7 +325,7 @@ namespace IntercomFirmwareTool.Core
             long sectorCount = (fsSize + SectorSize - 1) / SectorSize;
             if (sectorCount > uint.MaxValue)
                 throw new NotSupportedException(
-                    "Image too large to wrap with an MBR (>2TB).");
+                    CoreStrings.Get("Ext4_ImageTooLargeToWrap"));
 
             string tempPath = Path.Combine(
                 Path.GetTempPath(),
@@ -377,7 +390,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     if (!fs.CanWrite)
                         throw new InvalidOperationException(
-                            "The filesystem mounted READ-ONLY (CanWrite=false); cannot write.");
+                            CoreStrings.Get("Ext4_MountedReadOnly"));
                     ApplySshEnable(fs, opts);
                 }
                 // fs/disk disposed above => flushed + unmounted; now recut to raw.
@@ -407,7 +420,7 @@ namespace IntercomFirmwareTool.Core
         {
             if (!opts.HasPassword && !opts.HasKey)
                 throw new ArgumentException(
-                    "At least one credential is required: a root password and/or an SSH public key.",
+                    CoreStrings.Get("Ext4_AtLeastOneCredential"),
                     nameof(opts));
             // A supplied key is written into authorized_keys, so it must be a SINGLE
             // valid OpenSSH public-key line — reject multi-line/garbage here too (the
@@ -415,15 +428,13 @@ namespace IntercomFirmwareTool.Core
             // silently authorizes extra keys.
             if (opts.HasKey && !SshKeyGen.IsLikelyPublicKey(opts.PublicKey!))
                 throw new ArgumentException(
-                    "The SSH public key must be a single valid OpenSSH public-key line " +
-                    "(e.g. \"ssh-rsa AAAA… comment\").", nameof(opts));
+                    CoreStrings.Get("Ext4_KeyMustBeSingleLine"), nameof(opts));
             // Key-only login has NO password fallback, so the key must be RSA — the
             // only algorithm verified to authenticate on the target firmware's
             // dropbear; a non-RSA key-only build could yield no usable login.
             if (!opts.HasPassword && opts.HasKey && SshKeyGen.KeyType(opts.PublicKey!) != "ssh-rsa")
                 throw new ArgumentException(
-                    "Key-only login (no password) requires an RSA public key — the only key type " +
-                    "verified to authenticate on the target firmware. Add a password, or use an RSA key.",
+                    CoreStrings.Get("Ext4_KeyOnlyRequiresRsa"),
                     nameof(opts));
         }
 
@@ -439,8 +450,7 @@ namespace IntercomFirmwareTool.Core
                 .Any(l => l.StartsWith("root2:", StringComparison.Ordinal));
             if (alreadyModified)
                 throw new InvalidOperationException(
-                    "This firmware already contains a 'root2' account — it appears to be already " +
-                    "SSH-enabled. Run the tool on the ORIGINAL, unmodified firmware.");
+                    CoreStrings.Get("Ext4_AlreadyHasRoot2"));
 
             // Phase A — accounts. Password set via MD5-crypt (salt "root") when
             // one was given; otherwise the shadow field is "*" (password login
@@ -512,10 +522,10 @@ namespace IntercomFirmwareTool.Core
             // dangling link or an opaque native failure.
             if (!fs.FileExists("/etc/init.d/dropbear"))
                 throw new InvalidOperationException(
-                    "/etc/init.d/dropbear is missing in the image; cannot enable dropbear at boot.");
+                    CoreStrings.Get("Ext4_InitDropbearMissing"));
             if (!fs.DirectoryExists("/etc/rc5.d"))
                 throw new InvalidOperationException(
-                    "/etc/rc5.d is missing in the image; cannot create the S98dropbear symlink.");
+                    CoreStrings.Get("Ext4_Rc5dMissing"));
 
             // Create the symlink, but tolerate one that is already correct and
             // fail clearly on one that points elsewhere (rather than letting the
@@ -530,14 +540,14 @@ namespace IntercomFirmwareTool.Core
                 // otherwise fail clearly rather than overwriting it.
                 if (existingTarget != linkTarget)
                     throw new InvalidOperationException(
-                        $"{linkPath} already exists but points to '{existingTarget}', not '{linkTarget}'.");
+                        CoreStrings.Format("Ext4_SymlinkWrongTarget", linkPath, existingTarget, linkTarget));
             }
             else if (fs.FileExists(linkPath) || fs.DirectoryExists(linkPath))
             {
                 // The path is occupied by a non-symlink (regular file or dir);
                 // give a clear error instead of an opaque native "exists" throw.
                 throw new InvalidOperationException(
-                    $"{linkPath} already exists but is not a symlink; refusing to overwrite it.");
+                    CoreStrings.Format("Ext4_SymlinkNotSymlink", linkPath));
             }
             else
             {
@@ -629,7 +639,7 @@ namespace IntercomFirmwareTool.Core
         {
             EnsureBareExt4(bareImagePath);
             var checks = new List<Ext4Check>();
-            var findings = new List<string>();
+            var findings = new List<Func<string>>();
             string disk = WrapBareFilesystem(bareImagePath);
             try
             {
@@ -662,11 +672,11 @@ namespace IntercomFirmwareTool.Core
 
                 bool passwordLogin = IsMd5CryptHash(root2Secret);
                 if (passwordLogin)
-                    findings.Add("Password login : ENABLED  (root2 has an MD5-crypt $1$ hash in /etc/shadow)");
+                    findings.Add(() => CoreStrings.Get("Ext4_FindingPwEnabled"));
                 else if (root2Present)
-                    findings.Add($"Password login : disabled  (root2 shadow field is \"{root2Secret}\" — key-only)");
+                    findings.Add(() => CoreStrings.Format("Ext4_FindingPwDisabled", root2Secret));
                 else
-                    findings.Add("Password login : n/a  (no root2 entry in /etc/shadow)");
+                    findings.Add(() => CoreStrings.Get("Ext4_FindingPwNa"));
 
                 // fquinto sets root2 and bticino2 to the same secret; a mismatch
                 // means the image was not built the expected way.
@@ -706,7 +716,11 @@ namespace IntercomFirmwareTool.Core
                 checks.Add(new("/etc/init.d/dropbear exists (prerequisite)",
                     fs.FileExists("/etc/init.d/dropbear"), ""));
 
-                // A valid SSH-enable must leave at least one usable login.
+                // A valid SSH-enable must leave at least one usable login. This is the
+                // terse DETAIL of a (kept-English) structural check, not prose, so it
+                // stays in English — otherwise it would be the one localized token in
+                // an English checklist and go stale on a language switch (checks are
+                // rendered from their stored Detail, unlike the re-localizable findings).
                 string how = passwordLogin && keyInstalled ? "password + key"
                     : passwordLogin ? "password" : keyInstalled ? "key" : "none";
                 checks.Add(new("At least one login credential present (password or key)",
@@ -747,11 +761,11 @@ namespace IntercomFirmwareTool.Core
         /// like it has a working key-based login (it cannot authenticate).
         /// </summary>
         private static string? InspectAuthKeys(
-            ExtFileSystem fs, List<Ext4Check> checks, List<string> findings, string path, string label)
+            ExtFileSystem fs, List<Ext4Check> checks, List<Func<string>> findings, string path, string label)
         {
             if (!fs.FileExists(path))
             {
-                findings.Add($"SSH key ({label}) : not installed  ({path} absent)");
+                findings.Add(() => CoreStrings.Format("Ext4_KeyNotInstalled", label, path));
                 return null;
             }
 
@@ -771,11 +785,11 @@ namespace IntercomFirmwareTool.Core
             {
                 // Present but not a usable key: report it and flag a FAILING
                 // check, and return null so it is not counted as a credential.
-                findings.Add($"SSH key ({label}) : present but INVALID — not a usable OpenSSH public key ({path})");
+                findings.Add(() => CoreStrings.Format("Ext4_KeyInvalid", label, path));
                 checks.Add(new($"{path} is a valid OpenSSH public key", false, ""));
                 return null;
             }
-            findings.Add($"SSH key ({label}) : installed  {info.Label}  {info.Sha256Fingerprint}");
+            findings.Add(() => CoreStrings.Format("Ext4_KeyInstalled", label, info.Label, info.Sha256Fingerprint));
             return content;
         }
 
@@ -879,7 +893,7 @@ namespace IntercomFirmwareTool.Core
             // would give them unknown metadata, so refuse if they are missing.
             if (!fs.FileExists(path))
                 throw new InvalidOperationException(
-                    $"{path} does not exist in the image; refusing to create it (it would get unknown mode/owner).");
+                    CoreStrings.Format("Ext4_FileMissingRefuseCreate", path));
             string current = ReadAllTextFromFs(fs, path);
             var sb = new StringBuilder(current);
             // Correction #3: don't glue the new line onto the last existing one.

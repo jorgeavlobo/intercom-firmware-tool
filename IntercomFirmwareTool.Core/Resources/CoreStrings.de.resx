@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+
+  <!-- ================= FirmwareRegistry (FR_) ================= -->
+  <data name="FR_LabelLine" xml:space="preserve">
+    <value>  Reihe    : BTicino {0}</value>
+  </data>
+  <data name="FR_LabelEdition" xml:space="preserve">
+    <value>  Edition  : {0}</value>
+  </data>
+  <data name="FR_LabelVersion" xml:space="preserve">
+    <value>  Version  : {0}</value>
+  </data>
+  <data name="FR_LabelModel" xml:space="preserve">
+    <value>  Modell   : {0} — {1}</value>
+  </data>
+  <data name="FR_LabelModels" xml:space="preserve">
+    <value>  Modelle  :</value>
+  </data>
+  <data name="FR_LabelModelItem" xml:space="preserve">
+    <value>    • {0} — {1}</value>
+  </data>
+  <data name="FR_CannotReadFile" xml:space="preserve">
+    <value>Datei kann nicht gelesen werden: {0}</value>
+  </data>
+  <data name="FR_UnrecognizedBySize" xml:space="preserve">
+    <value>Unbekannte Firmware: Größe {0:N0} Bytes stimmt mit keinem bekannten Original überein.</value>
+  </data>
+  <data name="FR_CannotReadWhileHashing" xml:space="preserve">
+    <value>Datei kann beim Hashen nicht gelesen werden: {0}</value>
+  </data>
+  <data name="FR_UnrecognizedBySha" xml:space="preserve">
+    <value>Unbekannte Firmware: der SHA-256 stimmt mit keinem bekannten Original überein.
+  Größe  : {0:N0} Bytes
+  sha256 : {1}</value>
+  </data>
+  <data name="FR_RecognizedNotFwz" xml:space="preserve">
+    <value>Erkannt als {0}, aber es ist kein .fwz-Container, den dieses Tool entpacken kann. Er kann hier nicht modifiziert werden.</value>
+  </data>
+  <data name="FR_VerifiedOriginal" xml:space="preserve">
+    <value>Verifiziertes Original: {0} — SHA-256 stimmt überein, {1:N0} Bytes.</value>
+  </data>
+
+  <!-- ================= FwzProbe (Fwz_) ================= -->
+  <data name="Fwz_OutputSameAsInput" xml:space="preserve">
+    <value>Die Ausgabe-.fwz muss eine andere Datei als die Eingabe-.fwz sein.</value>
+  </data>
+  <data name="Fwz_OutputFolderMissing" xml:space="preserve">
+    <value>Der Ausgabeordner existiert nicht: {0}</value>
+  </data>
+  <data name="Fwz_RefuseBuildUnrecognized" xml:space="preserve">
+    <value>Erstellung wird verweigert: die Eingabe ist keine erkannte Original-Firmware.
+</value>
+  </data>
+  <data name="Fwz_BuiltButNotWritten" xml:space="preserve">
+    <value>Die Firmware wurde erstellt und verifiziert, konnte aber nicht geschrieben werden nach:
+{0}
+({1})
+
+Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie sie manuell:
+{2}</value>
+  </data>
+  <data name="Fwz_DecompressedExceeds" xml:space="preserve">
+    <value>Das dekomprimierte Image überschreitet das Limit von {0} Bytes; wird abgebrochen.</value>
+  </data>
+  <data name="Fwz_NoGzFound" xml:space="preserve">
+    <value>Keine '.gz'-Datei (Nicht-Recovery) in der .fwz gefunden.</value>
+  </data>
+  <data name="Fwz_PayloadNotZipCrypto" xml:space="preserve">
+    <value>Die '.gz'-Nutzlast in der .fwz ist nicht ZipCrypto-verschlüsselt (erwartet wurde die traditionelle PKWARE-Verschlüsselung).</value>
+  </data>
+  <data name="Fwz_NoPasswordOpened" xml:space="preserve">
+    <value>Keines der bekannten Passwörter (C300X, C100X, SMARTDES) öffnete die .fwz.</value>
+  </data>
+
+  <!-- ================= Ext4Probe (Ext4_) ================= -->
+  <data name="Ext4_NoPartitions" xml:space="preserve">
+    <value>Das Image hat keine erkennbaren Partitionen (MBR ohne gültige Einträge).</value>
+  </data>
+  <data name="Ext4_FileTooLarge" xml:space="preserve">
+    <value>Datei zu groß für diesen Test: {0} Bytes (Limit {1} Bytes).</value>
+  </data>
+  <data name="Ext4_IncompleteRead" xml:space="preserve">
+    <value>Unvollständiges Lesen: {0} Bytes erwartet, {1} erhalten.</value>
+  </data>
+  <data name="Ext4_WrapperEndedEarly" xml:space="preserve">
+    <value>Wrapper-Datenträger endete vorzeitig: {0} von {1} Bytes ungelesen; die herausgetrennte ext4 wäre abgeschnitten.</value>
+  </data>
+  <data name="Ext4_ExpectedBareExt4" xml:space="preserve">
+    <value>Erwartet wurde ein reines ext4-Image (keine Partitionstabelle, ext4-Superblock-Magic 0xEF53 bei Offset 0x438). Diese Methode arbeitet mit der rohen ext4-Nutzlast, nicht mit einem .fwz-Container oder einem bereits partitionierten Datenträger-Image.</value>
+  </data>
+  <data name="Ext4_ImageTooLargeToWrap" xml:space="preserve">
+    <value>Image zu groß, um es mit einem MBR zu umschließen (&gt;2TB).</value>
+  </data>
+  <data name="Ext4_MountedReadOnly" xml:space="preserve">
+    <value>Das Dateisystem wurde SCHREIBGESCHÜTZT eingehängt (CanWrite=false); Schreiben nicht möglich.</value>
+  </data>
+  <data name="Ext4_AtLeastOneCredential" xml:space="preserve">
+    <value>Mindestens eine Anmeldeinformation ist erforderlich: ein Root-Passwort und/oder ein öffentlicher SSH-Schlüssel.</value>
+  </data>
+  <data name="Ext4_KeyMustBeSingleLine" xml:space="preserve">
+    <value>Der öffentliche SSH-Schlüssel muss eine einzelne gültige öffentliche OpenSSH-Schlüsselzeile sein (z. B. "ssh-rsa AAAA… comment").</value>
+  </data>
+  <data name="Ext4_KeyOnlyRequiresRsa" xml:space="preserve">
+    <value>Die Anmeldung nur mit Schlüssel (kein Passwort) erfordert einen öffentlichen RSA-Schlüssel — den einzigen Schlüsseltyp, dessen Authentifizierung auf der Ziel-Firmware verifiziert ist. Fügen Sie ein Passwort hinzu oder verwenden Sie einen RSA-Schlüssel.</value>
+  </data>
+  <data name="Ext4_AlreadyHasRoot2" xml:space="preserve">
+    <value>Diese Firmware enthält bereits ein 'root2'-Konto — sie scheint bereits SSH-aktiviert zu sein. Führen Sie das Tool mit der ORIGINALEN, unmodifizierten Firmware aus.</value>
+  </data>
+  <data name="Ext4_InitDropbearMissing" xml:space="preserve">
+    <value>/etc/init.d/dropbear fehlt im Image; dropbear kann beim Booten nicht aktiviert werden.</value>
+  </data>
+  <data name="Ext4_Rc5dMissing" xml:space="preserve">
+    <value>/etc/rc5.d fehlt im Image; der S98dropbear-Symlink kann nicht erstellt werden.</value>
+  </data>
+  <data name="Ext4_SymlinkWrongTarget" xml:space="preserve">
+    <value>{0} existiert bereits, verweist aber auf '{1}', nicht auf '{2}'.</value>
+  </data>
+  <data name="Ext4_SymlinkNotSymlink" xml:space="preserve">
+    <value>{0} existiert bereits, ist aber kein Symlink; Überschreiben wird verweigert.</value>
+  </data>
+  <data name="Ext4_FindingPwEnabled" xml:space="preserve">
+    <value>Passwort-Anmeldung : AKTIVIERT  (root2 hat einen MD5-crypt-$1$-Hash in /etc/shadow)</value>
+  </data>
+  <data name="Ext4_FindingPwDisabled" xml:space="preserve">
+    <value>Passwort-Anmeldung : deaktiviert  (root2-shadow-Feld ist "{0}" — nur Schlüssel)</value>
+  </data>
+  <data name="Ext4_FindingPwNa" xml:space="preserve">
+    <value>Passwort-Anmeldung : n. v.  (kein root2-Eintrag in /etc/shadow)</value>
+  </data>
+  <data name="Ext4_KeyNotInstalled" xml:space="preserve">
+    <value>SSH-Schlüssel ({0}) : nicht installiert  ({1} fehlt)</value>
+  </data>
+  <data name="Ext4_KeyInvalid" xml:space="preserve">
+    <value>SSH-Schlüssel ({0}) : vorhanden, aber UNGÜLTIG — kein verwendbarer öffentlicher OpenSSH-Schlüssel ({1})</value>
+  </data>
+  <data name="Ext4_KeyInstalled" xml:space="preserve">
+    <value>SSH-Schlüssel ({0}) : installiert  {1}  {2}</value>
+  </data>
+  <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
+    <value>{0} existiert nicht im Image; Erstellung wird verweigert (es würde unbekannten Modus/Eigentümer erhalten).</value>
+  </data>
+</root>
