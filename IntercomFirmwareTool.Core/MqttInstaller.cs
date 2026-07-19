@@ -39,6 +39,15 @@ namespace IntercomFirmwareTool.Core
         string? HostIpForHosts = null,
         bool AllowRemoteShell = false)
     {
+        // A record's synthesized ToString() prints EVERY property — which would
+        // leak MqttPass and the TLS private key (ClientKeyPem) into any log line
+        // or exception that interpolates the options. Redact: expose only
+        // non-sensitive fields (booleans for the presence of secrets).
+        public override string ToString() =>
+            $"MqttOptions {{ MqttHost = {MqttHost}, MqttPort = {MqttPort}, " +
+            $"HasAuth = {HasAuth}, HasTls = {HasTls}, HasMutualTls = {HasMutualTls}, " +
+            $"AllowRemoteShell = {AllowRemoteShell} }}";
+
         public string TopicRx { get; init; } = "Bticino/rx";
         public string TopicDump { get; init; } = "Bticino/tx";
         public string TopicStartDate { get; init; } = "Bticino/start_date";
@@ -185,6 +194,13 @@ namespace IntercomFirmwareTool.Core
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidHost"), nameof(opts));
             if (opts.MqttPort < 1 || opts.MqttPort > 65535)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidPort"), nameof(opts));
+
+            // A hosts-mapping IP override (used when the broker is given by name)
+            // must itself be a valid IP — checked here so a malformed override
+            // fails fast, before any write session, not deep inside ResolveHostIp.
+            if (!string.IsNullOrWhiteSpace(opts.HostIpForHosts) &&
+                !IPAddress.TryParse(opts.HostIpForHosts, out _))
+                throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidHostIp"), nameof(opts));
 
             // user/pass are both-or-neither.
             bool hasUser = !string.IsNullOrEmpty(opts.MqttUser);
@@ -428,19 +444,23 @@ namespace IntercomFirmwareTool.Core
         /// <summary>Resolves the broker hostname to an IPv4 for the hosts edit.</summary>
         private static string ResolveHostIp(MqttOptions opts)
         {
+            // An explicit override wins (its format was already checked in Validate).
             if (!string.IsNullOrWhiteSpace(opts.HostIpForHosts))
-            {
-                if (!IPAddress.TryParse(opts.HostIpForHosts, out _))
-                    throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidHostIp"), nameof(opts));
                 return opts.HostIpForHosts!;
-            }
             try
             {
-                var addr = Dns.GetHostAddresses(opts.MqttHost)
-                    .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
-                if (addr != null) return addr.ToString();
+                // This runs inside the open-fs write session — which, on the .fwz
+                // build path, holds the input file lock — so a slow/unreachable
+                // resolver must not stall it indefinitely. Bound the lookup to 5 s
+                // via a CancellationToken. (Core work runs off the UI thread, so
+                // blocking on the async call here is safe.)
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                IPAddress[] addrs = Dns.GetHostAddressesAsync(opts.MqttHost, cts.Token)
+                    .GetAwaiter().GetResult();
+                var v4 = addrs.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+                if (v4 != null) return v4.ToString();
             }
-            catch { /* fall through to a clear error */ }
+            catch { /* resolution failed or timed out — fall through to a clear error */ }
             throw new InvalidOperationException(
                 CoreStrings.Format("Mqtt_HostUnresolved", opts.MqttHost));
         }

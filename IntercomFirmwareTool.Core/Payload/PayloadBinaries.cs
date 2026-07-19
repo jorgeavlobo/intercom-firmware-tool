@@ -70,11 +70,13 @@ namespace IntercomFirmwareTool.Core
             // in jq-COPYING; Oniguruma (BSD-2-Clause) and glibc (LGPL-2.1-or-later).
             LicenseSpdx: "MIT AND ICU AND LicenseRef-dtoa AND BSD-2-Clause AND LGPL-2.1-or-later")
         {
-            AdditionalLicenseResourceNames = new[]
+            // Array.AsReadOnly so this nested collection can't be cast back to
+            // string[] and mutated (completes the immutability of the metadata).
+            AdditionalLicenseResourceNames = Array.AsReadOnly(new[]
             {
                 "IntercomFirmwareTool.Core.Payload.vendor.licenses.oniguruma-COPYING",
                 "IntercomFirmwareTool.Core.Payload.vendor.licenses.glibc-LGPL-2.1.txt",
-            },
+            }),
         };
 
         /// <summary>
