@@ -76,8 +76,10 @@ complete text of all of these, exactly as shipped with jq, is in
 [`licenses/jq-COPYING`](licenses/jq-COPYING).
 
 Source: <https://github.com/jqlang/jq> (tag `jq-1.8.2`). The `jq-linux-armhf`
-release asset is built by the project's public CI, which is the reproducible
-build recipe for this exact static binary.
+release asset is built by the project's public CI (workflow at that tag), which
+serves as the **build reference** for this static binary — not a byte-exact
+reproducible recipe, since that CI pulls its cross toolchain via a non-pinned
+`apt-get` (see the LGPL §6 note below for the glibc version and source).
 
 Because the shipped binary is **statically linked** (`--enable-all-static`), it
 also contains two further projects, whose notices must travel with it:
