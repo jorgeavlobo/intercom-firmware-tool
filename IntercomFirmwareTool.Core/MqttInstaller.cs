@@ -204,10 +204,13 @@ namespace IntercomFirmwareTool.Core
             if (opts.MqttPort < 1 || opts.MqttPort > 65535)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidPort"), nameof(opts));
 
-            // A hosts-mapping IP override (used when the broker is given by name)
-            // must itself be a valid IP — checked here so a malformed override
-            // fails fast, before any write session, not deep inside ResolveHostIp.
-            if (!string.IsNullOrWhiteSpace(opts.HostIpForHosts) &&
+            // A hosts-mapping IP override is only USED when the broker is given by
+            // name (when the host is already an IP, PatchHosts is skipped and this
+            // field is ignored). So only validate it in the hostname case — a stale
+            // override left over from a previous hostname configuration must not
+            // fail an otherwise-valid IP-based build. When it IS used, a malformed
+            // value fails fast here, before any write session.
+            if (!opts.HostIsIp && !string.IsNullOrWhiteSpace(opts.HostIpForHosts) &&
                 !IPAddress.TryParse(opts.HostIpForHosts, out _))
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidHostIp"), nameof(opts));
 
