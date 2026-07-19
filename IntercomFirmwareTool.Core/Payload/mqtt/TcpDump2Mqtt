@@ -30,10 +30,8 @@ kill_childs() {
 	kill_by "/etc/tcpdump2mqtt/StartMqttSend"
 	kill_by "/etc/tcpdump2mqtt/StartMqttReceive"
 	kill_by "/etc/tcpdump2mqtt/keypress.sh"
-	# evtest is the left side of keypress.sh's pipeline and can stay blocked on
-	# the input device after keypress.sh is killed (no SIGPIPE until a key press),
-	# so reap it explicitly or stale evtest processes accumulate across restarts.
-	kill_by "evtest /dev/input"
+	# keypress.sh owns its evtest child and kills it via a trap on termination,
+	# so we don't match "evtest" here (that could hit unrelated evtest sessions).
 	kill_by "/etc/tcpdump2mqtt/filter.py"
 	# Our own pipeline children, matched specifically (by our port/topics) so a
 	# manual tcpdump or an unrelated mosquitto session on the box is left alone,
@@ -63,7 +61,11 @@ fi
 # mosquitto retry loop).
 case "${MQTT_PORT}" in
 	'' | *[!0-9]*) port_bad=1 ;;
-	*) port_bad=0 ;;
+	*) if [ "${MQTT_PORT}" -ge 1 ] && [ "${MQTT_PORT}" -le 65535 ]; then
+		port_bad=0
+	   else
+		port_bad=1
+	   fi ;;
 esac
 
 if [ -z "${MQTT_HOST}" ] || [ "$port_bad" -ne 0 ] || \
@@ -98,14 +100,17 @@ while : ; do
 		echo "Starting MQTT sender..."
 		/etc/tcpdump2mqtt/StartMqttSend &
 		/bin/sleep 5
-		/bin/date +"%Y-%m-%dT%H:%M:%S" | mqtt_pub -l -r -t "${TOPIC_STARTD}"
+		# Backgrounded so a broker/DNS/TCP stall in the publish can't block this
+		# watchdog loop and delay the liveness checks.
+		{ /bin/date +"%Y-%m-%dT%H:%M:%S" | mqtt_pub -l -r -t "${TOPIC_STARTD}"; } &
 	fi
 
 	if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttReceive" > /dev/null 2>&1; then
 		echo "Starting MQTT receiver..."
 		/etc/tcpdump2mqtt/StartMqttReceive &
 		/bin/sleep 5
-		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online
+		# Backgrounded (see above) so a stalled publish can't block the loop.
+		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online &
 	fi
 
 	if [ -x /etc/tcpdump2mqtt/keypress.sh ] && \

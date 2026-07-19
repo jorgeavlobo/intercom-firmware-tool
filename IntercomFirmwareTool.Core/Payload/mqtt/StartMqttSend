@@ -19,12 +19,16 @@ fi
 # tcpdump filter: only the local OpenWebNet chatter, dropping SIP/RTP and the
 # command-injection port (30006) so we do not echo our own writes back out.
 TCPDUMP_FILTER='not udp and not icmp and not port 5007 and not port 5060 and not port 20000 and not dst port 30006'
-# Also exclude our own MQTT traffic: if MQTT_HOST is the LOCAL broker, our
-# mosquitto_pub PUBLISH packets travel over lo and carry the *...## payload, so
-# tcpdump would re-capture them, filter.py would re-extract the frame, and we
-# would republish it — a self-amplifying loop. Excluding the MQTT port is
-# harmless for a remote broker (no such traffic on lo).
-[ -n "${MQTT_PORT}" ] && TCPDUMP_FILTER="${TCPDUMP_FILTER} and not port ${MQTT_PORT}"
+# Self-amplification guard, but ONLY for a LOCAL broker: its mosquitto_pub
+# PUBLISH packets travel over lo carrying the *...## payload, which tcpdump would
+# re-capture, filter.py would re-extract and we'd republish — a loop. A REMOTE
+# broker has no such traffic on lo, and excluding its port unconditionally could
+# clobber a needed bus port (pcap `port` matches src OR dst; e.g. a broker on
+# 30006 would drop the gateway's source-30006 frames). So scope it to local.
+case "${MQTT_HOST}" in
+	127.0.0.1 | localhost | ::1 | 0.0.0.0)
+		[ -n "${MQTT_PORT}" ] && TCPDUMP_FILTER="${TCPDUMP_FILTER} and not port ${MQTT_PORT}" ;;
+esac
 
 /usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER 2>&1 \
 	| "${PYTHON}" /etc/tcpdump2mqtt/filter.py \

@@ -42,8 +42,22 @@ for dep in evtest jq; do
 	fi
 done
 
+# Own the evtest child explicitly. A plain `evtest | while ...` pipeline leaves
+# evtest as a separate process the orchestrator can't reliably reap on its own
+# (it isn't keypress.sh), so route evtest through a FIFO we control: we know its
+# PID and a trap kills it (and removes the FIFO) when keypress.sh is stopped.
+FIFO="/tmp/keypress-$$.fifo"
+rm -f "$FIFO"
+if ! mkfifo "$FIFO" 2>/dev/null; then
+	echo "keypress.sh: could not create FIFO $FIFO."
+	exit 1
+fi
+trap 'kill "$EVPID" 2>/dev/null; rm -f "$FIFO"' INT TERM EXIT
+evtest "$INPUT_DEVICE" > "$FIFO" 2>/dev/null &
+EVPID=$!
+
 # evtest lines look like: "Event: time 1700000000.000000, type 1 (EV_KEY), code 2 (KEY_1), value 1"
-evtest "$INPUT_DEVICE" | while read -r line; do
+while read -r line; do
 	event_type=$(echo "$line" | sed -n 's/.*type \([0-9][0-9]*\).*/\1/p')
 	event_code=$(echo "$line" | sed -n 's/.*code \([0-9][0-9]*\).*/\1/p')
 	event_value=$(echo "$line" | sed -n 's/.*value \([0-9][0-9]*\).*/\1/p')
@@ -63,4 +77,4 @@ evtest "$INPUT_DEVICE" | while read -r line; do
 	json=$(jq -cn --arg key "$key_name" --argjson code "$event_code" --arg value "$value" \
 		'{key:$key,code:$code,value:$value}')
 	mqtt_pub -t "$TOPIC_KEY" -m "$json"
-done
+done < "$FIFO"
