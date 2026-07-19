@@ -82,7 +82,10 @@ path.
     (created 0700), with a symlink guard, instead of a predictable `/tmp` path a
     local user could pre-seed.
 14. **Robust evtest parsing.** Key events are parsed by `type`/`code`/`value`
-    labels rather than fixed awk columns.
+    labels rather than fixed awk columns (auto-repeat, value 2, is ignored).
+15. **Retained commands ignored.** The receiver subscribes with `-R`, so a
+    command left RETAINED on `TOPIC_RX` is not replayed on every reconnect —
+    commands must be published non-retained.
 
 ## Runtime dependencies (expected present in the firmware)
 

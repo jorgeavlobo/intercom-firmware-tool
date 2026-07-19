@@ -36,7 +36,10 @@ mqtt_pub() {
 # mosquitto_sub for exactly one message on TOPIC_RX, same auth/TLS composition,
 # with the offline last will.
 mqtt_sub_one() {
-	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -C 1 \
+	# -R ignores RETAINED messages: TOPIC_RX is a live command channel, and each
+	# -C 1 reconnect would otherwise re-receive a retained command and replay it
+	# forever until it is cleared. Commands must be published non-retained.
+	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -C 1 -R \
 		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain -t "${TOPIC_RX}"
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
 	if [ -n "${MQTT_CAFILE}" ]; then
