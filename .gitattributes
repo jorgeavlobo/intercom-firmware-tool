@@ -67,3 +67,10 @@
 # executed as `/bin/sh\r` and the init/MQTT entrypoints would fail to start on
 # the Linux rootfs. (The ARM binaries in Phase 1b live outside this directory.)
 IntercomFirmwareTool.Core/Payload/mqtt/** text eol=lf
+
+# MQTT bridge ARM binaries (Phase 1b) — verbatim third-party ELF executables.
+# Force binary handling so `* text=auto` never line-ending-normalizes them
+# (which would corrupt the bytes and break the SHA-256 verification).
+# NB: the folder is `Payload/vendor/`, not `Payload/bin/`, because the standard
+# .NET .gitignore ignores every `bin/` directory.
+IntercomFirmwareTool.Core/Payload/vendor/armhf/** binary

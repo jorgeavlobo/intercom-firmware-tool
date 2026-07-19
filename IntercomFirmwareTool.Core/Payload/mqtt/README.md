@@ -2,11 +2,13 @@
 
 These scripts are the payload that a **planned** installer (Phase 1c, issue #10)
 *will* write into the firmware image when the user ticks the optional **Install
-MQTT bridge** box in Advanced options (off by default). **Phase 1a (this PR) is
-the payload scripts only — nothing here is wired into the build yet;** the
-installer, the UI checkbox, and the read-back validation referenced below are
-future phases. The bridge exposes the BTicino OpenWebNet/SCS bus and the
-front-panel keys over MQTT, for Home Assistant-style integration.
+MQTT bridge** box in Advanced options (off by default). The payload scripts
+(Phase 1a) and the embedded ARM binaries with SHA-256 integrity verification
+(Phase 1b, see [`../vendor/`](../vendor/THIRD_PARTY.md)) are in the repository;
+**nothing is wired into the build yet** — the installer, the UI checkbox, and the
+read-back validation referenced below are still the planned Phase 1c/1d. The
+bridge exposes the BTicino OpenWebNet/SCS bus and the front-panel keys over MQTT,
+for Home Assistant-style integration.
 
 ## Provenance & licensing
 
@@ -19,9 +21,15 @@ that has to match for compatibility is reproduced: the file layout under
 `/etc/tcpdump2mqtt`, the MQTT topic names, the OpenWebNet gateway port `30006`,
 and the `TcpDump2Mqtt.conf` variable names.
 
-The two ARM binaries the bridge needs (`jq`, MIT; `evtest`, GPL-2.0) are **not**
-in this folder — they are handled separately by the installer with their own
-license notices (see the installer's `THIRD_PARTY` notice).
+The two ARM binaries the bridge needs (`jq` — MIT, but the static build bundles
+Oniguruma BSD and glibc LGPL-2.1; `evtest` — GPL-2.0-or-later) are **not** in
+this folder — they live under [`../vendor/`](../vendor/THIRD_PARTY.md) with their
+own license notices, SHA-256 provenance and the written source offers (Phase 1b,
+issue #9). `evtest` keeps its GPL-2.0-or-later license when shipped, so a
+firmware image built **with** the
+bridge enabled must satisfy the GPL obligations **for `evtest`** (its notice plus
+the written offer for source). Bundling it alongside the otherwise-MIT tooling is
+*mere aggregation* — it does not relicense the other components — see that notice.
 
 ## Files
 
@@ -127,7 +135,8 @@ path.
 `pgrep`, and `python` (2.7). Upstream relies on these; the planned installer's
 read-back check (#10) will flag any that are missing before a build is accepted.
 
-**Feature-specific (installed by us, Phase 1b / #9):**
+**Feature-specific (shipped by us as ARM binaries — Phase 1b / #9, embedded in
+`IntercomFirmwareTool.Core`; see [`../vendor/THIRD_PARTY.md`](../vendor/THIRD_PARTY.md)):**
 - `jq` — required by the gated JSON command channel (`StartMqttReceive`) and by
   `keypress.sh`. If absent: `keypress.sh` exits early with a clear message, and
   the JSON command channel logs "jq is not installed" and ignores the command
@@ -135,6 +144,12 @@ read-back check (#10) will flag any that are missing before a build is accepted.
 - `evtest` — required by `keypress.sh` only. If absent: `keypress.sh` exits early
   with a clear message; the rest of the bridge is unaffected.
 
-Both are shipped as ARM binaries by the installer, so on a correctly-installed
-image they are always present; the fail-fast checks guard against a partial or
-manual deployment.
+Both are installed to `/usr/bin` (`0775 root:root`) by the planned installer
+(issue #10), so on a correctly-installed image they are always present; the
+fail-fast checks guard against a partial or manual deployment. Both were
+smoke-tested on a live C100X (kernel 4.9.11, armv7-hardfloat): `evtest` 1.35 is
+the exact binary seen on that unit, and the patched `jq` 1.8.2 was confirmed to
+run there too. The **embedded** payload bytes are SHA-256-verified by
+`PayloadBinaries` before packaging/use; reading back and hashing the files
+*after* they are written to the device's `/usr/bin` is the installer's job
+(planned Phase 1c/1d, #10), not something this phase does yet.
