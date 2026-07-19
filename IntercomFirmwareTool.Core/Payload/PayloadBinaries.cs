@@ -14,10 +14,6 @@ namespace IntercomFirmwareTool.Core
     /// <param name="ResourceName">Manifest resource (LogicalName) in this assembly.</param>
     /// <param name="LicenseResourceName">Manifest resource of the primary license text.</param>
     /// <param name="LicenseSpdx">SPDX license expression for the binary as a whole.</param>
-    /// <param name="AdditionalLicenseResourceNames">
-    /// Manifest resources of further license texts a statically-linked binary
-    /// bundles (e.g. Oniguruma, glibc), beyond <paramref name="LicenseResourceName"/>.
-    /// </param>
     public sealed record ArmBinary(
         string Name,
         string InstallPath,
@@ -25,8 +21,16 @@ namespace IntercomFirmwareTool.Core
         string Sha256Hex,
         string ResourceName,
         string LicenseResourceName,
-        string LicenseSpdx,
-        IReadOnlyList<string>? AdditionalLicenseResourceNames = null);
+        string LicenseSpdx)
+    {
+        /// <summary>
+        /// Manifest resources of further license texts a statically-linked binary
+        /// bundles (e.g. Oniguruma, glibc), beyond <see cref="LicenseResourceName"/>.
+        /// Declared as an init-only property (not a positional parameter) so the
+        /// record's primary constructor and Deconstruct signature stay stable.
+        /// </summary>
+        public IReadOnlyList<string>? AdditionalLicenseResourceNames { get; init; }
+    }
 
     /// <summary>
     /// Access to the third-party ARM binaries (jq, evtest) and their license
@@ -43,31 +47,35 @@ namespace IntercomFirmwareTool.Core
     public static class PayloadBinaries
     {
         /// <summary>
-        /// <c>jq</c> 1.8.1 — statically-linked armv7-hardfloat ELF. jq itself is
+        /// <c>jq</c> 1.8.2 — statically-linked armv7-hardfloat ELF. jq itself is
         /// MIT, but the static binary also bundles Oniguruma (BSD-2-Clause) and
         /// glibc (LGPL-2.1-or-later); see <c>Payload/vendor/THIRD_PARTY.md</c>.
-        /// 1.8.1 (not the reference unit's 1.7) fixes the decNumber CVEs
-        /// (CVE-2023-50268 / CVE-2024-53427). Used by <c>StartMqttReceive</c>
-        /// (parse the JSON command) and <c>keypress.sh</c> (build the key-press
-        /// JSON). Installed <c>0775 root:root</c>.
+        /// 1.8.2 is a security release (over the reference unit's 1.7): it fixes
+        /// the decNumber overflows (CVE-2023-50268 / CVE-2024-53427) plus the jq
+        /// 1.8.2 batch — parser memory-corruption and a hash-collision DoS
+        /// (CVE-2026-40164) — all reachable via the untrusted JSON parsed in
+        /// <c>StartMqttReceive</c>. Also used by <c>keypress.sh</c> (build the
+        /// key-press JSON). Installed <c>0775 root:root</c>.
         /// </summary>
         public static readonly ArmBinary Jq = new(
             Name: "jq",
             InstallPath: "/usr/bin/jq",
-            Length: 1_331_968,
-            Sha256Hex: "ac304e50cf7cd24933d83dc7d0e4f79892a71a92fb02336d4ecaffa8933760bd",
+            Length: 1_340_000,
+            Sha256Hex: "78458244fb546469b4042e9e07cf78714ef6848895eb9515df76b4eb0b1dc992",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.jq",
             LicenseResourceName: "IntercomFirmwareTool.Core.Payload.vendor.licenses.jq-COPYING",
             // Full set carried by the static binary: jq (MIT); its bundled
             // dtoa/g_fmt (David M. Gay's Lucent permissive notice — no standard
             // SPDX id, so LicenseRef-dtoa) and decNumber (ICU), both documented
             // in jq-COPYING; Oniguruma (BSD-2-Clause) and glibc (LGPL-2.1-or-later).
-            LicenseSpdx: "MIT AND ICU AND LicenseRef-dtoa AND BSD-2-Clause AND LGPL-2.1-or-later",
-            AdditionalLicenseResourceNames: new[]
+            LicenseSpdx: "MIT AND ICU AND LicenseRef-dtoa AND BSD-2-Clause AND LGPL-2.1-or-later")
+        {
+            AdditionalLicenseResourceNames = new[]
             {
                 "IntercomFirmwareTool.Core.Payload.vendor.licenses.oniguruma-COPYING",
                 "IntercomFirmwareTool.Core.Payload.vendor.licenses.glibc-LGPL-2.1.txt",
-            });
+            },
+        };
 
         /// <summary>
         /// <c>evtest</c> 1.35 — dynamically-linked armv7-hardfloat ELF

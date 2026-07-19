@@ -26,31 +26,38 @@ them** — each keeps its own license, unchanged.
   (LGPL-2.1-or-later). The LGPL adds a relink/source obligation for the glibc
   portion — see the `jq` section below.
 
-## Why `jq` 1.8.1 (not the version on the reference unit)
+## Why `jq` 1.8.2 (not the version on the reference unit)
 
 The reference C100X was running fquinto's older static **jq 1.7**, which is
-affected by decNumber stack-buffer-overflow vulnerabilities
-(**CVE-2023-50268**, **CVE-2024-53427**, present through jq 1.7.1) that are
-reachable via the JSON parsed in `StartMqttReceive`. We therefore ship the
-patched upstream release **jq 1.8.1** instead. It is the official jqlang
-`jq-linux-armhf` asset, integrity-checked against the project's published
-`sha256sum.txt`, and **smoke-tested on a live C100X** (kernel 4.9.11): despite
-being built with a newer glibc toolchain (it uses `DT_RELR` relocations), the
-fully-static binary runs correctly on that unit (`jq --version`, a `.command`
-parse, and a `jq -cn` build all succeed). `evtest` is unchanged and remains
-byte-for-byte identical to the copy observed on that unit.
+affected by decNumber stack-buffer-overflow vulnerabilities (**CVE-2023-50268**,
+**CVE-2024-53427**, through jq 1.7.1). We ship the current patched upstream
+release **jq 1.8.2** — a jq *security release* that, over 1.7/1.8.1, fixes a
+large batch of issues, several reachable via the untrusted JSON parsed in
+`StartMqttReceive`: parser memory-corruption (e.g. **CVE-2026-32316** heap
+overflow, **CVE-2026-39979** out-of-bounds read, **CVE-2026-33948** NUL
+truncation) and a hash-collision denial of service (**CVE-2026-40164**). (In our
+layout that parse only runs behind the opt-in, authenticated command channel;
+`keypress.sh` uses jq only to *build* JSON from trusted values. We still ship the
+patched build rather than rely on that gating.)
+
+It is the official jqlang `jq-linux-armhf` asset, integrity-checked against the
+project's published `sha256sum.txt`, and **smoke-tested on a live C100X** (kernel
+4.9.11): despite being built with a newer glibc toolchain (it uses `DT_RELR`
+relocations), the fully-static binary runs correctly on that unit (`jq
+--version`, a `.command` parse, and a `jq -cn` build all succeed). `evtest` is
+unchanged and remains byte-for-byte identical to the copy observed on that unit.
 
 ## Provenance & integrity
 
 | Field | `jq` | `evtest` |
 |---|---|---|
 | File | `armhf/jq` | `armhf/evtest` |
-| Size | 1,331,968 bytes | 34,264 bytes |
-| SHA-256 | `ac304e50cf7cd24933d83dc7d0e4f79892a71a92fb02336d4ecaffa8933760bd` | `96e3c20fb1742fc57b9b9efbc716cb4c7ae5a1faebe5621a14c1b3053d0d08c0` |
+| Size | 1,340,000 bytes | 34,264 bytes |
+| SHA-256 | `78458244fb546469b4042e9e07cf78714ef6848895eb9515df76b4eb0b1dc992` | `96e3c20fb1742fc57b9b9efbc716cb4c7ae5a1faebe5621a14c1b3053d0d08c0` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked**, stripped | 32-bit LSB PIE, ARM EABI5, **dynamically linked** (`/lib/ld-linux-armhf.so.3`), stripped |
-| Build ID (SHA-1) | `1047040cbcda08213e9c23c51e59396af5e2d8f8` | `0b6cfc5075b98021a854b5d4519ed3e1c6fa808e` |
+| Build ID (SHA-1) | `55019f17610f57bc2ae9817d7f1cc56a3b30fbd1` | `0b6cfc5075b98021a854b5d4519ed3e1c6fa808e` |
 | Target triple | `arm-linux-gnueabihf` (armv7 hardfloat) | `arm-linux-gnueabihf` (armv7 hardfloat), glibc 2.27 |
-| Upstream version | jq **1.8.1** (build: `--with-oniguruma=builtin --enable-all-static`) | evtest **1.35** |
+| Upstream version | jq **1.8.2** (build: `--with-oniguruma=builtin --enable-all-static`) | evtest **1.35** |
 | Statically bundles | Oniguruma (BSD-2-Clause), glibc (LGPL-2.1-or-later) | — (dynamic; links the device's own glibc) |
 | License | **MIT** (jq) + ICU (decNumber) + Lucent/dtoa + BSD-2-Clause (Oniguruma) + LGPL-2.1-or-later (glibc) | **GPL-2.0-or-later** |
 | SPDX expression | `MIT AND ICU AND LicenseRef-dtoa AND BSD-2-Clause AND LGPL-2.1-or-later` | `GPL-2.0-or-later` |
@@ -68,7 +75,7 @@ under the MIT license. It also incorporates David M. Gay's `dtoa.c`/`g_fmt.c`
 complete text of all of these, exactly as shipped with jq, is in
 [`licenses/jq-COPYING`](licenses/jq-COPYING).
 
-Source: <https://github.com/jqlang/jq> (tag `jq-1.8.1`). The `jq-linux-armhf`
+Source: <https://github.com/jqlang/jq> (tag `jq-1.8.2`). The `jq-linux-armhf`
 release asset is built by the project's public CI, which is the reproducible
 build recipe for this exact static binary.
 
@@ -94,12 +101,29 @@ glibc.
 
 **How that obligation is met here (LGPL §6):** everything needed to produce a
 functionally-equivalent `jq` with a different glibc is publicly available and
-buildable — jq's own source is MIT (link above), and glibc's complete
-corresponding source is available from the GNU project
-(<https://sourceware.org/git/glibc.git>) and, **on request from the distributor
-of this software** for at least three years, for no more than the cost of the
-distribution. Rebuilding the official `jq-linux-armhf` asset from jq's public CI
-against a chosen glibc yields the equivalent statically-linked binary.
+buildable. The **immutable reference for this exact binary** is the jqlang
+release tag **`jq-1.8.2`** together with the build workflow committed at that tag
+(<https://github.com/jqlang/jq/tree/jq-1.8.2/.github/workflows>): it pins the
+cross toolchain — and therefore the exact glibc version — used to link the
+`jq-linux-armhf` asset. glibc's complete corresponding source for whichever
+version that toolchain uses is published by the GNU project at
+<https://sourceware.org/git/glibc.git> and mirrored under
+<https://ftp.gnu.org/gnu/glibc/> (each release is an immutable tarball). jq's own
+source is MIT (link above). Because both sources are public and the build is
+reproducible from the pinned `jq-1.8.2` workflow, a recipient can relink `jq`
+against a modified glibc. The corresponding source is **also available on request
+from the distributor** — open an issue at
+<https://github.com/jorgeavlobo/intercom-firmware-tool/issues> — for at least
+three years, for no more than the cost of the distribution.
+
+> **Note (dormant runtime plugins).** Even `--enable-all-static`, glibc keeps a
+> few subsystems plugin-based at runtime (NSS name resolution, `iconv`/`gconv`
+> converters, the locale archive). jq's use here — parse a small JSON object,
+> build a small one, both UTF-8 — does **not** call `setlocale`, `iconv`, or
+> hostname resolution, and the on-device smoke test exercised exactly those
+> paths, so this dormant dependency is not reached on the C100X's minimal rootfs.
+> The pinned glibc version above is the reference should any such path ever be
+> needed.
 
 ## `evtest` — GPL-2.0-or-later
 
@@ -117,9 +141,10 @@ version 1.35:
 - Upstream project: <https://gitlab.freedesktop.org/libevdev/evtest>
 - The corresponding source for this exact binary — evtest **1.35** for
   `arm-linux-gnueabihf` (glibc 2.27) — can be obtained from the upstream
-  project above, or **on request from the distributor of this software** for a
-  period of at least three years, for no more than the cost of physically
-  performing the source distribution.
+  project above, or **on request from the distributor** — open an issue at
+  <https://github.com/jorgeavlobo/intercom-firmware-tool/issues> — for a period
+  of at least three years, for no more than the cost of physically performing
+  the source distribution.
 - Build recipe (matches the shipped ELF target): cross-compile the unmodified
   evtest 1.35 source with an `arm-linux-gnueabihf` glibc 2.27 toolchain, e.g.
 
@@ -129,8 +154,13 @@ version 1.35:
 
   (evtest is a single translation unit; no configure step is required.)
 
-Because `evtest` is GPL-2.0-or-later (and the static `jq` carries LGPL-2.1
-glibc), redistributors of any firmware image built **with the MQTT bridge
-enabled** must pass these offers (or the source itself) along to their
-recipients. Images built **without** the MQTT bridge (the default) contain
-neither `evtest` nor `jq` and carry no such obligation.
+**Scope of these obligations.** The binaries are embedded **unconditionally** in
+`IntercomFirmwareTool.Core` (they are compiled-in resources), so any distribution
+of that assembly/package — regardless of the bridge toggle — redistributes `jq`
+and `evtest` and must therefore carry these notices and honour the source offers.
+This file travels with them for that reason. What the bridge toggle changes is
+the **generated firmware image**: an image built **with** the MQTT bridge enabled
+installs `jq` and `evtest` onto the device, so whoever redistributes that image
+must likewise pass these offers along; an image built **without** the bridge (the
+default) contains neither binary and carries no such obligation *for the image*.
+The obligation on the tool's own assembly/package is unaffected either way.
