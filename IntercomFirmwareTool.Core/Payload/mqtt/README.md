@@ -131,12 +131,13 @@ path.
 ## Runtime dependencies
 
 **Base (factory firmware, confirmed present on a C100X):** `mosquitto_pub`,
-`mosquitto_sub`, a local `mosquitto` broker, `tcpdump`, `nc`, `pgrep`, and
-`python` (2.7). These are the tools our scripts actually invoke, and the
-installer's read-back check (`ValidateMqtt`, #10) flags any that are missing
-before a build is accepted. (Upstream fquinto additionally uses `route`/`ping`;
-this bridge does not — `TcpDump2Mqtt` deliberately does not gate startup on a
-gateway ping — so they are not part of the dependency checklist.)
+`mosquitto_sub`, a local `mosquitto` broker, `tcpdump`, `nc`, `route`, `ping`,
+`pgrep`, and `python` (2.7). The installer's read-back check (`ValidateMqtt`,
+#10) flags any that are missing before a build is accepted. Most are invoked
+directly by our scripts and are validated at the exact path the script uses;
+`route` and `ping` are not invoked by this bridge (`TcpDump2Mqtt` deliberately
+does not gate startup on a gateway ping) but are checked for presence anyway, as
+a sanity check that the target is the expected firmware.
 
 **Feature-specific (shipped by us as ARM binaries — Phase 1b / #9, embedded in
 `IntercomFirmwareTool.Core`; see [`../vendor/THIRD_PARTY.md`](../vendor/THIRD_PARTY.md)):**

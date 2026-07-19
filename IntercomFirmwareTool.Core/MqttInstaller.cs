@@ -365,18 +365,20 @@ namespace IntercomFirmwareTool.Core
                     checks.Add(new($"{link} -> {target}", ok, got));
                 }
 
-                // Runtime deps the bridge actually invokes (base tools; all
-                // confirmed present on a factory C100X). jq/evtest are installed
-                // above, so not here. Each is checked against candidate paths
-                // (any present = pass), since a couple live in more than one bin
-                // dir across builds.
-                // Validate the EXACT paths the scripts invoke — not just "a
-                // tcpdump/pgrep somewhere" — otherwise an image with the tool at a
-                // different path would pass here but fail to boot the bridge.
-                // Candidates are used ONLY where the script itself tolerates more
-                // than one path: python (StartMqttSend tries /usr/bin/python then
-                // /usr/bin/python3) and nc (StartMqttReceive calls bare `nc` via
-                // PATH). tcpdump/pgrep/mosquitto_* are hard-coded absolute paths.
+                // Runtime-dependency presence checks (issue #10 §F: base tools
+                // "confirmed present on a factory C100X"). jq/evtest are installed
+                // above, so not here. Two categories:
+                //  - Tools our scripts INVOKE: validate the EXACT path the script
+                //    uses — not just "a tcpdump/pgrep somewhere" — so an image with
+                //    the tool at a different path fails here rather than at boot.
+                //    Candidates are used ONLY where the script itself tolerates more
+                //    than one path: python (StartMqttSend tries /usr/bin/python then
+                //    /usr/bin/python3) and nc (StartMqttReceive calls bare `nc` via
+                //    PATH). tcpdump/pgrep/mosquitto_* are hard-coded absolute paths.
+                //  - Base tools our scripts do NOT invoke (route, ping): a plain
+                //    presence check against common locations. These confirm the
+                //    target is the expected firmware (per #10), not that a script
+                //    will find them, so multiple candidate paths are correct here.
                 var deps = new (string Name, string[] Paths)[]
                 {
                     ("mosquitto_pub", new[] { "/usr/bin/mosquitto_pub" }),        // mqtt_common.sh
@@ -386,6 +388,8 @@ namespace IntercomFirmwareTool.Core
                     ("python", new[] { "/usr/bin/python", "/usr/bin/python3" }),  // StartMqttSend tries both
                     ("pgrep", new[] { "/usr/bin/pgrep" }),                        // TcpDump2Mqtt/watchdog hard-code this
                     ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive: bare `nc` via PATH
+                    ("route", new[] { "/sbin/route", "/usr/sbin/route", "/bin/route" }), // #10 base tool (not invoked by us)
+                    ("ping", new[] { "/bin/ping", "/usr/bin/ping" }),            // #10 base tool (not invoked by us)
                 };
                 foreach (var (name, paths) in deps)
                     // File only: these are executables / init scripts, so a
