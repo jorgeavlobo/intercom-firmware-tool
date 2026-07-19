@@ -13,7 +13,7 @@ PATH=/sbin:/usr/sbin:/usr/bin:/bin
 . /etc/tcpdump2mqtt/mqtt_common.sh
 
 INPUT_DEVICE="/dev/input/event0"
-TOPIC_KEY="${TOPIC_KEY:-Bticino/key}"
+# TOPIC_KEY default comes from mqtt_common.sh (centralised topic defaults).
 
 if [ ! -e "$INPUT_DEVICE" ]; then
 	echo "Input device $INPUT_DEVICE not found."

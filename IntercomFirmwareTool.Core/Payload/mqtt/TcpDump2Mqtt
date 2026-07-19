@@ -69,10 +69,13 @@ fi
 # --- Default gateway (network liveness target) ------------------------------
 GWADDR=$(route -n 2>/dev/null | awk '/^0.0.0.0/ && $4 ~ /G/ {print $2; exit}')
 if [ -z "$GWADDR" ]; then
-	echo "ERROR: Default gateway not found!"
-	exit 1
+	# No default route (e.g. isolated VLAN / static setup). Don't exit — that
+	# would just have the watchdog restart us in a loop. Run without the
+	# network-liveness probe and keep the services alive by process check.
+	echo "No default gateway found; running without the network-liveness probe."
+else
+	echo "Default gateway resolved as: $GWADDR"
 fi
-echo "Default gateway resolved as: $GWADDR"
 echo "MQTT host ${MQTT_HOST}:${MQTT_PORT}"
 
 echo "Checking for stale processes..."
@@ -83,8 +86,13 @@ PING_FAIL_THRESHOLD=3
 
 while : ; do
 	# 2 pings, 3s timeout, tolerate brief spikes before declaring the net down.
-	ping -s 1 -c 2 -W 3 "${GWADDR}" > /dev/null 2>&1
-	ping_ok=$?
+	# With no gateway to probe, assume up and rely on the process-liveness checks.
+	if [ -n "$GWADDR" ]; then
+		ping -s 1 -c 2 -W 3 "${GWADDR}" > /dev/null 2>&1
+		ping_ok=$?
+	else
+		ping_ok=0
+	fi
 
 	# The flexisipsh patch drops this marker when the SIP stack restarts. The
 	# MQTT link is independent of SIP, so just clear it and note it.

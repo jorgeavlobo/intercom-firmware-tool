@@ -22,7 +22,11 @@ FRAME = re.compile(r"\*.*?##")
 
 
 def main():
-    for line in sys.stdin:
+    # iter(readline, "") instead of "for line in sys.stdin": on CPython 2 the
+    # latter uses an internal read-ahead buffer that withholds lines on a pipe,
+    # which would defeat the low-latency (line-buffered) goal. readline is prompt
+    # on both Python 2 and 3.
+    for line in iter(sys.stdin.readline, ""):
         for match in FRAME.finditer(line):
             print(match.group(0))
             sys.stdout.flush()

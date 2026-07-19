@@ -15,7 +15,8 @@ if [ -z "${MQTT_HOST}" ] && [ -f "$MQTT_CFGFILE" ]; then
 	set +a
 fi
 
-# Result topics for the (optional, gated) command channel — default if unset.
+# Topic defaults, centralised here (used by the sender/receiver/keypress).
+: "${TOPIC_KEY:=Bticino/key}"
 : "${TOPIC_FILE_CONTENT:=Bticino/file_content_topic}"
 : "${TOPIC_CMD_RESULT:=Bticino/command_result_topic}"
 

@@ -101,6 +101,10 @@ path.
   disconnects cleanly each cycle, so the retained `offline` last will rarely
   fires and the topic can stay `online`. Reliable online/offline needs a
   persistent subscription — tracked in #12 (Phase 2).
+- **Cross-line frame splitting.** `filter.py` splits multiple frames coalesced
+  on one `tcpdump` line, but a single frame split ACROSS lines is not
+  reassembled (text scraping is line-oriented). Rare for small OpenWebNet frames;
+  the proper fix is reading the gateway socket directly (#12, Phase 2).
 - **Command-publisher authorization.** `ALLOW_REMOTE_SHELL` gates on THIS bridge
   authenticating to the broker; MQTT does not tell us whether the *publisher* of
   a `TOPIC_RX` command is authorized. On a shared broker, restrict publishing to

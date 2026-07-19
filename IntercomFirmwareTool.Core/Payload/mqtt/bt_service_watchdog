@@ -73,13 +73,13 @@ case "$1" in
 			echo "BTicino service watchdog already running (PID $(cat "$PIDFILE"))"
 			exit 0
 		fi
-		echo -n "Starting BTicino service watchdog... "
+		printf '%s' "Starting BTicino service watchdog... "
 		watchdog_loop &
 		echo $! > "$PIDFILE"
 		echo "done (PID $!)"
 		;;
 	stop)
-		echo -n "Stopping BTicino service watchdog... "
+		printf '%s' "Stopping BTicino service watchdog... "
 		if [ -f "$PIDFILE" ]; then
 			kill "$(cat "$PIDFILE")" 2>/dev/null
 			rm -f "$PIDFILE"

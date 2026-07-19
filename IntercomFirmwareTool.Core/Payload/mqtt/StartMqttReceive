@@ -42,8 +42,14 @@ handle_json() {
 		write_file)
 			[ -n "$file_path" ] || { echo "write_file: missing file_path"; return; }
 			# Cap the write (256 KB, same as read_file) so an oversized message
-			# can't fill flash or wedge the device even with the channel enabled.
-			printf '%s' "$data" | head -c 262144 > "$file_path"
+			# can't fill flash. Write to a temp file in the same directory and
+			# rename, so a crash mid-write can't leave a partial (e.g. a config).
+			tmp="${file_path}.tmp.$$"
+			if printf '%s' "$data" | head -c 262144 > "$tmp"; then
+				mv "$tmp" "$file_path"
+			else
+				rm -f "$tmp"
+			fi
 			;;
 		execute_command)
 			# Cap captured output at 256 KB: closing the pipe also SIGPIPEs a
