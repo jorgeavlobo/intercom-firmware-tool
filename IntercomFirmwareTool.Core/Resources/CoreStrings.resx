@@ -188,6 +188,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
     <value>An MQTT publish topic (every topic except the receive topic) must not contain the wildcards '+' or '#'.</value>
   </data>
+  <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
+    <value>The MQTT receive topic is not a valid subscription filter: '+' must occupy a whole level and '#' must be the final whole level.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} does not exist in the image; cannot apply the MQTT bridge patch.</value>
   </data>

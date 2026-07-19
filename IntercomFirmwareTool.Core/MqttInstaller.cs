@@ -177,7 +177,20 @@ namespace IntercomFirmwareTool.Core
             // --- idempotent init-script patches ---------------------------------
             PatchFlexisip(fs);
             if (!opts.HostIsIp)
-                PatchHosts(fs, opts.MqttHost, ResolveHostIp(opts));
+            {
+                // If the broker name is already resolvable via the device's hosts
+                // file (the built-in "openserver" → 127.0.0.1 alias, or a mapping
+                // from a prior run) and the caller gave no explicit IP override,
+                // keep that mapping: don't DNS-resolve — which would fail for
+                // device-only names — and don't append a duplicate line. An
+                // explicit HostIpForHosts override is always honored (ValidateMqtt
+                // then asserts that exact mapping).
+                bool alreadyMapped = fs.FileExists("/etc/init.d/bt_daemon-apps.sh") &&
+                    ReadAllText(fs, "/etc/init.d/bt_daemon-apps.sh")
+                        .Contains("/bin/bt_hosts.sh add " + opts.MqttHost + " ");
+                if (!(alreadyMapped && string.IsNullOrWhiteSpace(opts.HostIpForHosts)))
+                    PatchHosts(fs, opts.MqttHost, ResolveHostIp(opts));
+            }
 
             // --- boot symlinks --------------------------------------------------
             if (!fs.FileExists("/etc/init.d/bt_service_watchdog"))
@@ -264,6 +277,36 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent })
                 if (t.IndexOfAny(new[] { '+', '#' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
+
+            // TopicRx is the only SUBSCRIBE filter (mosquitto_sub -t). It MAY use
+            // the wildcards '+'/'#', but they must follow MQTT subscription-filter
+            // rules: '+' occupies a whole level and '#' is the final whole level.
+            // An invalid filter (e.g. "Bticino/rx#" or "Bticino/+rx") would build
+            // but be rejected by the broker at subscribe time.
+            if (opts.TopicRx.IndexOfAny(new[] { '+', '#' }) >= 0 &&
+                !IsValidSubscriptionFilter(opts.TopicRx))
+                throw new ArgumentException(
+                    CoreStrings.Get("Mqtt_InvalidSubscriptionFilter"), nameof(opts));
+        }
+
+        /// <summary>
+        /// True if <paramref name="topic"/> is a valid MQTT subscription filter:
+        /// a level containing <c>+</c> must be exactly <c>+</c> (a whole level),
+        /// and a level containing <c>#</c> must be exactly <c>#</c> and the final
+        /// level. (Callers only invoke this when a wildcard is actually present.)
+        /// </summary>
+        private static bool IsValidSubscriptionFilter(string topic)
+        {
+            string[] levels = topic.Split('/');
+            for (int i = 0; i < levels.Length; i++)
+            {
+                string lvl = levels[i];
+                if (lvl.IndexOf('#') >= 0 && (lvl != "#" || i != levels.Length - 1))
+                    return false;
+                if (lvl.IndexOf('+') >= 0 && lvl != "+")
+                    return false;
+            }
+            return true;
         }
 
         /// <summary>

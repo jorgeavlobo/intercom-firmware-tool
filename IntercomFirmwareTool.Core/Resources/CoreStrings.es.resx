@@ -206,4 +206,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
     <value>Un tema MQTT de publicación (todos excepto el tema de recepción) no puede contener los comodines '+' o '#'.</value>
   </data>
+  <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
+    <value>El tema de recepción MQTT no es un filtro de suscripción válido: '+' debe ocupar un nivel completo y '#' debe ser el último nivel completo.</value>
+  </data>
 </root>
