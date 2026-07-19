@@ -209,4 +209,7 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>Das MQTT-Empfangs-Topic ist kein gültiger Abonnementfilter: '+' muss eine ganze Ebene belegen und '#' muss die letzte ganze Ebene sein.</value>
   </data>
+  <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
+    <value>Das MQTT-Empfangs-Topic darf mit keinem Veröffentlichungs-Topic übereinstimmen; andernfalls würde die Brücke ihre eigene Ausgabe abonnieren und Bus-Frames in einer Schleife wiederholen.</value>
+  </data>
 </root>

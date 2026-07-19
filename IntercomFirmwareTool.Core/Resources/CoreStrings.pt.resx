@@ -209,4 +209,7 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>O tópico de receção MQTT não é um filtro de subscrição válido: '+' tem de ocupar um nível inteiro e '#' tem de ser o último nível inteiro.</value>
   </data>
+  <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
+    <value>O tópico de receção MQTT não pode corresponder a nenhum tópico de publicação; caso contrário, a ponte subscreveria a sua própria saída e repetiria as tramas do barramento em ciclo.</value>
+  </data>
 </root>

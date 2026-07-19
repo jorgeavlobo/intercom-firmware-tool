@@ -191,6 +191,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>The MQTT receive topic is not a valid subscription filter: '+' must occupy a whole level and '#' must be the final whole level.</value>
   </data>
+  <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
+    <value>The MQTT receive topic must not match any publish topic; otherwise the bridge would subscribe to its own output and replay bus frames in a loop.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} does not exist in the image; cannot apply the MQTT bridge patch.</value>
   </data>

@@ -287,6 +287,39 @@ namespace IntercomFirmwareTool.Core
                 !IsValidSubscriptionFilter(opts.TopicRx))
                 throw new ArgumentException(
                     CoreStrings.Get("Mqtt_InvalidSubscriptionFilter"), nameof(opts));
+
+            // TopicRx must not match any PUBLISH topic (equal, or a wildcard that
+            // matches one). If it did, the bridge would subscribe to its own
+            // output: StartMqttSend publishes bus frames to TopicDump, the
+            // TopicRx subscriber (StartMqttReceive) would then receive them and
+            // replay them to the gateway — a feedback loop that floods the bus.
+            foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
+                                        opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent })
+                if (TopicFilterMatches(opts.TopicRx, pub))
+                    throw new ArgumentException(
+                        CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
+        }
+
+        /// <summary>
+        /// MQTT topic-filter match: does subscription filter <paramref name="filter"/>
+        /// match the concrete topic name <paramref name="topic"/>? <c>+</c> matches
+        /// exactly one level; <c>#</c> matches the remaining levels (including zero)
+        /// and is terminal; other levels must be equal. A filter with no wildcards
+        /// matches only its exact equal.
+        /// </summary>
+        private static bool TopicFilterMatches(string filter, string topic)
+        {
+            string[] f = filter.Split('/');
+            string[] t = topic.Split('/');
+            int i = 0;
+            for (; i < f.Length; i++)
+            {
+                if (f[i] == "#") return true;      // matches the rest, incl. zero levels
+                if (i >= t.Length) return false;   // filter deeper than topic (and not '#')
+                if (f[i] == "+") continue;         // matches this single level
+                if (!string.Equals(f[i], t[i], StringComparison.Ordinal)) return false;
+            }
+            return i == t.Length;                  // all filter levels consumed the topic exactly
         }
 
         /// <summary>

@@ -209,4 +209,7 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>Le sujet de réception MQTT n'est pas un filtre d'abonnement valide : « + » doit occuper un niveau entier et « # » doit être le dernier niveau entier.</value>
   </data>
+  <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
+    <value>Le sujet de réception MQTT ne doit correspondre à aucun sujet de publication ; sinon, le pont s'abonnerait à sa propre sortie et rejouerait les trames du bus en boucle.</value>
+  </data>
 </root>

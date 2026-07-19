@@ -209,4 +209,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>El tema de recepción MQTT no es un filtro de suscripción válido: '+' debe ocupar un nivel completo y '#' debe ser el último nivel completo.</value>
   </data>
+  <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
+    <value>El tema de recepción MQTT no debe coincidir con ningún tema de publicación; de lo contrario, el puente se suscribiría a su propia salida y repetiría las tramas del bus en bucle.</value>
+  </data>
 </root>

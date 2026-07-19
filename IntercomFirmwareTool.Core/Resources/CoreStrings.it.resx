@@ -209,4 +209,7 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>Il topic di ricezione MQTT non è un filtro di sottoscrizione valido: '+' deve occupare un intero livello e '#' deve essere l'ultimo livello intero.</value>
   </data>
+  <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
+    <value>Il topic di ricezione MQTT non deve corrispondere ad alcun topic di pubblicazione; altrimenti il bridge si iscriverebbe al proprio output e ripeterebbe i frame del bus in loop.</value>
+  </data>
 </root>
