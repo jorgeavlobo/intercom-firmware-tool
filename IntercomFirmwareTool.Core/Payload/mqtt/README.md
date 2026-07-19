@@ -91,6 +91,9 @@ path.
     checks `evtest`+`jq`; and both `read_file` and `write_file` cap at 256 KB.
 17. **LF line endings pinned.** `.gitattributes` forces LF on this payload so a
     Windows checkout can't introduce a CRLF shebang that would fail on the rootfs.
+18. **One frame per message.** `filter.py` splits coalesced OpenWebNet frames
+    (e.g. `*1##*2##` on one `tcpdump` line) so each `*…##` frame is published as
+    its own MQTT message rather than a combined/garbled payload.
 
 ## Known limitations (addressed in later phases)
 
