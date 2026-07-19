@@ -2,7 +2,8 @@
 # TcpDump2Mqtt - orchestrator for the BTicino MQTT bridge.
 #
 # Keeps the sender (bus -> MQTT), receiver (MQTT -> bus) and key-press publisher
-# running, publishes online/start status, and recovers after a network outage.
+# running (respawning any that die) and publishes online/start status. Startup
+# is not gated on a gateway ping — the services handle broker connectivity.
 #
 # MIT-licensed reimplementation of fquinto's mqtt_scripts/TcpDump2Mqtt (GPL-2.0)
 # for IntercomFirmwareTool. Fixes over the original: POSIX sh (no bash-only
@@ -29,6 +30,10 @@ kill_childs() {
 	kill_by "/etc/tcpdump2mqtt/StartMqttSend"
 	kill_by "/etc/tcpdump2mqtt/StartMqttReceive"
 	kill_by "/etc/tcpdump2mqtt/keypress.sh"
+	# evtest is the left side of keypress.sh's pipeline and can stay blocked on
+	# the input device after keypress.sh is killed (no SIGPIPE until a key press),
+	# so reap it explicitly or stale evtest processes accumulate across restarts.
+	kill_by "evtest /dev/input"
 	kill_by "/etc/tcpdump2mqtt/filter.py"
 	# Our own pipeline children, matched specifically (by our port/topics) so a
 	# manual tcpdump or an unrelated mosquitto session on the box is left alone,
@@ -71,70 +76,41 @@ if [ -z "${MQTT_HOST}" ] || [ "$port_bad" -ne 0 ] || \
 fi
 
 # --- Default gateway (network liveness target) ------------------------------
-GWADDR=$(route -n 2>/dev/null | awk '/^0.0.0.0/ && $4 ~ /G/ {print $2; exit}')
-if [ -z "$GWADDR" ]; then
-	# No default route (e.g. isolated VLAN / static setup). Don't exit — that
-	# would just have the watchdog restart us in a loop. Run without the
-	# network-liveness probe and keep the services alive by process check.
-	echo "No default gateway found; running without the network-liveness probe."
-else
-	echo "Default gateway resolved as: $GWADDR"
-fi
 echo "MQTT host ${MQTT_HOST}:${MQTT_PORT}"
-
 echo "Checking for stale processes..."
 kill_childs
 
-PING_FAIL_COUNT=0
-PING_FAIL_THRESHOLD=3
-
+# Keep the bridge services running. Deliberately NOT gated on any gateway/ICMP
+# probe: a gateway that blocks ICMP — or an unreachable gateway with a reachable
+# local/same-subnet broker — must not stop the bridge from starting. Broker
+# connectivity is handled by the services themselves: the receiver backs off,
+# and a sender pipeline that loses the broker exits and is respawned here.
 while : ; do
-	# 2 pings, 3s timeout, tolerate brief spikes before declaring the net down.
-	# With no gateway to probe, assume up and rely on the process-liveness checks.
-	if [ -n "$GWADDR" ]; then
-		ping -s 1 -c 2 -W 3 "${GWADDR}" > /dev/null 2>&1
-		ping_ok=$?
-	else
-		ping_ok=0
-	fi
-
-	# The flexisipsh patch drops this marker when the SIP stack restarts. The
+	# The flexisipsh patch drops this marker when the SIP stack restarts; the
 	# MQTT link is independent of SIP, so just clear it and note it.
 	if [ -f /tmp/flexisip_restarted ]; then
 		/bin/rm -f /tmp/flexisip_restarted
 		echo "Flexisip restarted - MQTT services left running"
 	fi
 
-	if [ $ping_ok -ne 0 ]; then
-		PING_FAIL_COUNT=$((PING_FAIL_COUNT + 1))
-		echo "Network ping failed (${PING_FAIL_COUNT}/${PING_FAIL_THRESHOLD})"
-		if [ $PING_FAIL_COUNT -ge $PING_FAIL_THRESHOLD ]; then
-			echo "Network confirmed down, restarting MQTT services..."
-			PING_FAIL_COUNT=0
-			kill_childs
-		fi
-	else
-		PING_FAIL_COUNT=0
+	# Liveness by our OWN scripts (specific paths), not any tcpdump/mosquitto.
+	if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttSend" > /dev/null 2>&1; then
+		echo "Starting MQTT sender..."
+		/etc/tcpdump2mqtt/StartMqttSend &
+		/bin/sleep 5
+		/bin/date +"%Y-%m-%dT%H:%M:%S" | mqtt_pub -l -r -t "${TOPIC_STARTD}"
+	fi
 
-		# Liveness by our OWN sender script, not any tcpdump on the box.
-		if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttSend" > /dev/null 2>&1; then
-			echo "Starting MQTT sender..."
-			/etc/tcpdump2mqtt/StartMqttSend &
-			/bin/sleep 5
-			/bin/date +"%Y-%m-%dT%H:%M:%S" | mqtt_pub -l -r -t "${TOPIC_STARTD}"
-		fi
+	if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttReceive" > /dev/null 2>&1; then
+		echo "Starting MQTT receiver..."
+		/etc/tcpdump2mqtt/StartMqttReceive &
+		/bin/sleep 5
+		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online
+	fi
 
-		if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttReceive" > /dev/null 2>&1; then
-			echo "Starting MQTT receiver..."
-			/etc/tcpdump2mqtt/StartMqttReceive &
-			/bin/sleep 5
-			mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online
-		fi
-
-		if [ -x /etc/tcpdump2mqtt/keypress.sh ] && \
-		   ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/keypress.sh" > /dev/null 2>&1; then
-			/etc/tcpdump2mqtt/keypress.sh &
-		fi
+	if [ -x /etc/tcpdump2mqtt/keypress.sh ] && \
+	   ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/keypress.sh" > /dev/null 2>&1; then
+		/etc/tcpdump2mqtt/keypress.sh &
 	fi
 
 	/bin/sleep 30
