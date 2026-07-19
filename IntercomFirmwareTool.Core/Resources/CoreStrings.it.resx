@@ -152,4 +152,52 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} non esiste nell'immagine; creazione rifiutata (otterrebbe modo/proprietario sconosciuti).</value>
   </data>
+  <data name="Mqtt_AlreadyInstalled" xml:space="preserve">
+    <value>Il bridge MQTT è già installato in questa immagine ({0} esiste); rifiuto di installarci sopra.</value>
+  </data>
+  <data name="Mqtt_WatchdogMissingAfterInstall" xml:space="preserve">
+    <value>/etc/init.d/bt_service_watchdog è assente dopo l'installazione; impossibile creare il suo symlink di avvio.</value>
+  </data>
+  <data name="Mqtt_Rc5dMissing" xml:space="preserve">
+    <value>/etc/rc5.d non esiste nell'immagine; impossibile attivare il bridge MQTT all'avvio.</value>
+  </data>
+  <data name="Mqtt_InvalidHost" xml:space="preserve">
+    <value>L'host del broker MQTT non è un indirizzo IP né un nome host valido.</value>
+  </data>
+  <data name="Mqtt_InvalidPort" xml:space="preserve">
+    <value>La porta del broker MQTT deve essere compresa tra 1 e 65535.</value>
+  </data>
+  <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
+    <value>Nome utente e password MQTT devono essere impostati insieme (entrambi o nessuno).</value>
+  </data>
+  <data name="Mqtt_CertKeyBothOrNeither" xml:space="preserve">
+    <value>Il certificato client TLS e la chiave privata devono essere forniti insieme (entrambi o nessuno).</value>
+  </data>
+  <data name="Mqtt_MutualTlsNeedsCa" xml:space="preserve">
+    <value>Il TLS reciproco (certificato e chiave client) richiede anche un certificato CA.</value>
+  </data>
+  <data name="Mqtt_RemoteShellNeedsAuth" xml:space="preserve">
+    <value>Il canale dei comandi remoti richiede l'autenticazione del client: nome utente e password, oppure TLS reciproco (certificato e chiave client). Il TLS unidirezionale (solo CA) non è sufficiente.</value>
+  </data>
+  <data name="Mqtt_InvalidTopic" xml:space="preserve">
+    <value>Un topic MQTT è vuoto o contiene un'interruzione di riga.</value>
+  </data>
+  <data name="Mqtt_FileMissing" xml:space="preserve">
+    <value>{0} non esiste nell'immagine; impossibile applicare la patch del bridge MQTT.</value>
+  </data>
+  <data name="Mqtt_AnchorMissing" xml:space="preserve">
+    <value>Impossibile trovare l'ancora prevista in {0} (ricerca di: {1}); patch rifiutata.</value>
+  </data>
+  <data name="Mqtt_InvalidHostIp" xml:space="preserve">
+    <value>L'IP del broker fornito (per la mappatura host sul dispositivo) non è un indirizzo IP valido.</value>
+  </data>
+  <data name="Mqtt_HostUnresolved" xml:space="preserve">
+    <value>Impossibile risolvere il nome host del broker "{0}" in un IP per la mappatura host sul dispositivo; fornire l'IP o usare un indirizzo IP come host.</value>
+  </data>
+  <data name="Mqtt_ResourceMissing" xml:space="preserve">
+    <value>Risorsa payload MQTT incorporata "{0}" non trovata nell'assembly.</value>
+  </data>
+  <data name="Mqtt_FileTooLarge" xml:space="preserve">
+    <value>{0} è di {1} byte, oltre il limite di {2} byte per uno script di init modificabile; lettura rifiutata.</value>
+  </data>
 </root>

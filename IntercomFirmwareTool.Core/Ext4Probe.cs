@@ -374,10 +374,17 @@ namespace IntercomFirmwareTool.Core
         /// image and returns the path of a NEW modified bare ext4 (same format
         /// and size). The input image is never modified. Throws if the
         /// filesystem mounts read-only.
+        ///
+        /// When <paramref name="mqttOpts"/> is non-null, the optional MQTT bridge
+        /// is installed in the SAME open-fs session, right after the SSH edits and
+        /// before the recut — so a single build produces one image with both
+        /// changes (Phase 1c). A null value leaves the bridge out (the default).
         /// </summary>
-        public static string EnableSsh(string bareImagePath, EnableSshOptions opts)
+        public static string EnableSsh(string bareImagePath, EnableSshOptions opts,
+            MqttOptions? mqttOpts = null)
         {
             ValidateOptions(opts);
+            if (mqttOpts != null) MqttInstaller.Validate(mqttOpts); // fail fast, before the wrap
             EnsureBareExt4(bareImagePath);
             long bareSize = new FileInfo(bareImagePath).Length;
             string disk = WrapBareFilesystem(bareImagePath);
@@ -392,6 +399,8 @@ namespace IntercomFirmwareTool.Core
                         throw new InvalidOperationException(
                             CoreStrings.Get("Ext4_MountedReadOnly"));
                     ApplySshEnable(fs, opts);
+                    // MQTT bridge (optional) in the same session, after SSH.
+                    if (mqttOpts != null) MqttInstaller.InstallMqtt(fs, mqttOpts);
                 }
                 // fs/disk disposed above => flushed + unmounted; now recut to raw.
                 SlicePartitionToBare(disk, modifiedBare, bareSize);
@@ -623,6 +632,29 @@ namespace IntercomFirmwareTool.Core
                 TryDelete(disk);
             }
             return checks;
+        }
+
+        /// <summary>
+        /// Reopens a modified bare ext4 and re-checks the MQTT-bridge install
+        /// (delegating to <see cref="MqttInstaller.ValidateMqtt(ExtFileSystem, MqttOptions)"/>).
+        /// Wraps the bare image the same way <see cref="ValidateSsh"/> does, so the
+        /// MBR-wrap lives only here and <c>MqttInstaller</c> stays fs-based.
+        /// </summary>
+        public static IReadOnlyList<Ext4Check> ValidateMqtt(string bareImagePath, MqttOptions opts)
+        {
+            MqttInstaller.Validate(opts);
+            EnsureBareExt4(bareImagePath);
+            string disk = WrapBareFilesystem(bareImagePath);
+            try
+            {
+                using var d = ExtDisk.Open(disk);
+                using var fs = ExtFileSystem.Open(d, d.Partitions[0]);
+                return MqttInstaller.ValidateMqtt(fs, opts);
+            }
+            finally
+            {
+                TryDelete(disk);
+            }
         }
 
         /// <summary>
