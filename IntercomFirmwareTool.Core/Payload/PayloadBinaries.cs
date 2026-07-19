@@ -97,7 +97,10 @@ namespace IntercomFirmwareTool.Core
             "IntercomFirmwareTool.Core.Payload.vendor.THIRD_PARTY.md";
 
         /// <summary>All ARM binaries the MQTT bridge ships, in install order.</summary>
-        public static readonly IReadOnlyList<ArmBinary> All = new[] { Jq, Evtest };
+        // Array.AsReadOnly so the exposed IReadOnlyList can't be cast back to
+        // ArmBinary[] and mutated (matching FirmwareRegistry.Known's convention).
+        public static readonly IReadOnlyList<ArmBinary> All =
+            Array.AsReadOnly(new[] { Jq, Evtest });
 
         /// <summary>
         /// Return the exact bytes of <paramref name="binary"/>, after verifying
@@ -154,7 +157,9 @@ namespace IntercomFirmwareTool.Core
             {
                 names.AddRange(extra);
             }
-            return names;
+            // AsReadOnly so a caller can't downcast the result to List<string>
+            // and mutate this metadata.
+            return names.AsReadOnly();
         }
 
         /// <summary>Read a license text (UTF-8) by its manifest resource name.</summary>

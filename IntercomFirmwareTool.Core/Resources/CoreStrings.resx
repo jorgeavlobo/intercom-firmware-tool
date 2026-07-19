@@ -152,4 +152,52 @@ The verified build was kept here — move/rename it manually:
   <data name="Ext4_FileMissingRefuseCreate" xml:space="preserve">
     <value>{0} does not exist in the image; refusing to create it (it would get unknown mode/owner).</value>
   </data>
+  <data name="Mqtt_AlreadyInstalled" xml:space="preserve">
+    <value>The MQTT bridge is already installed in this image ({0} exists); refusing to install over it.</value>
+  </data>
+  <data name="Mqtt_WatchdogMissingAfterInstall" xml:space="preserve">
+    <value>/etc/init.d/bt_service_watchdog is missing after install; cannot create its boot symlink.</value>
+  </data>
+  <data name="Mqtt_Rc5dMissing" xml:space="preserve">
+    <value>/etc/rc5.d does not exist in the image; cannot activate the MQTT bridge at boot.</value>
+  </data>
+  <data name="Mqtt_InvalidHost" xml:space="preserve">
+    <value>The MQTT broker host is not a valid IP address or hostname.</value>
+  </data>
+  <data name="Mqtt_InvalidPort" xml:space="preserve">
+    <value>The MQTT broker port must be between 1 and 65535.</value>
+  </data>
+  <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
+    <value>MQTT username and password must be set together (both or neither).</value>
+  </data>
+  <data name="Mqtt_CertKeyBothOrNeither" xml:space="preserve">
+    <value>The TLS client certificate and private key must be provided together (both or neither).</value>
+  </data>
+  <data name="Mqtt_MutualTlsNeedsCa" xml:space="preserve">
+    <value>Mutual TLS (client certificate and key) also requires a CA certificate.</value>
+  </data>
+  <data name="Mqtt_RemoteShellNeedsAuth" xml:space="preserve">
+    <value>The remote command channel requires client authentication: a username and password, or mutual TLS (client certificate and key). One-way TLS (CA only) is not enough.</value>
+  </data>
+  <data name="Mqtt_InvalidTopic" xml:space="preserve">
+    <value>An MQTT topic is empty or contains a line break.</value>
+  </data>
+  <data name="Mqtt_FileMissing" xml:space="preserve">
+    <value>{0} does not exist in the image; cannot apply the MQTT bridge patch.</value>
+  </data>
+  <data name="Mqtt_AnchorMissing" xml:space="preserve">
+    <value>Could not find the expected anchor in {0} (looking for: {1}); refusing to patch it.</value>
+  </data>
+  <data name="Mqtt_InvalidHostIp" xml:space="preserve">
+    <value>The supplied broker IP (for the on-device hosts mapping) is not a valid IP address.</value>
+  </data>
+  <data name="Mqtt_HostUnresolved" xml:space="preserve">
+    <value>Could not resolve the broker hostname "{0}" to an IP for the on-device hosts mapping; supply the IP, or use an IP address as the host.</value>
+  </data>
+  <data name="Mqtt_ResourceMissing" xml:space="preserve">
+    <value>Embedded MQTT payload resource "{0}" not found in the assembly.</value>
+  </data>
+  <data name="Mqtt_FileTooLarge" xml:space="preserve">
+    <value>{0} is {1} bytes, larger than the {2}-byte limit for an editable init script; refusing to read it.</value>
+  </data>
 </root>
