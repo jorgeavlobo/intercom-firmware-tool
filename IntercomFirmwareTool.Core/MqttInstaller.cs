@@ -125,7 +125,16 @@ namespace IntercomFirmwareTool.Core
             // Idempotency guard: refuse an image that already carries the bridge,
             // rather than half-overwriting a previous install (the init-script
             // patches are the only idempotent parts; the rest is a fresh layout).
-            if (fs.DirectoryExists(EtcDir))
+            // Refuse if ANYTHING already occupies the path: a directory (a prior
+            // install) or an unexpected regular file/symlink — which would
+            // otherwise slip past and fail later with an opaque CreateDirectory
+            // error instead of this clear message.
+            bool occupied = fs.DirectoryExists(EtcDir) || fs.FileExists(EtcDir);
+            if (!occupied)
+            {
+                try { fs.ReadSymLink(EtcDir); occupied = true; } catch { /* not a symlink */ }
+            }
+            if (occupied)
                 throw new InvalidOperationException(
                     CoreStrings.Format("Mqtt_AlreadyInstalled", EtcDir));
 
@@ -418,11 +427,29 @@ namespace IntercomFirmwareTool.Core
 
             if (content.Contains(marker)) return; // already patched (by us or upstream)
 
+            // Insert specifically inside the `start)` case: find that case label,
+            // then the first `start-stop-daemon --start` before the block ends
+            // (`;;`). Searching the whole file could match a start-stop-daemon line
+            // in another case/function and patch the wrong place.
             string[] lines = content.Replace("\r\n", "\n").Split('\n');
-            int anchor = Array.FindIndex(lines, l => l.Contains("start-stop-daemon --start"));
+            int startCase = Array.FindIndex(lines, l =>
+            {
+                string t = l.Trim();
+                return t == "start)" || t.StartsWith("start)", StringComparison.Ordinal);
+            });
+            if (startCase < 0)
+                throw new InvalidOperationException(
+                    CoreStrings.Format("Mqtt_AnchorMissing", path, "start) case"));
+
+            int anchor = -1;
+            for (int i = startCase + 1; i < lines.Length; i++)
+            {
+                if (lines[i].Trim() == ";;") break;   // end of the start) block
+                if (lines[i].Contains("start-stop-daemon --start")) { anchor = i; break; }
+            }
             if (anchor < 0)
                 throw new InvalidOperationException(CoreStrings.Format("Mqtt_AnchorMissing", path,
-                    "start-stop-daemon --start"));
+                    "start-stop-daemon --start (in the start) case)"));
 
             var patched = new List<string>(lines);
             patched.Insert(anchor + 1, "\t" + marker);
