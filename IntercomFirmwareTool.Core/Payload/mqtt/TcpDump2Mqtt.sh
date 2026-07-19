@@ -10,9 +10,11 @@
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
 
 LOGDIR=/var/log/tcpdump2mqtt
-# Drop a pre-seeded symlink at the dir or log file so root's writes can't be
-# redirected to an attacker-chosen target.
-[ -L "$LOGDIR" ] && rm -f "$LOGDIR"
+# Drop a pre-seeded symlink OR a stray non-directory at the log dir, so root's
+# writes can't be redirected and mkdir doesn't fail on an existing file.
+if [ -L "$LOGDIR" ] || { [ -e "$LOGDIR" ] && [ ! -d "$LOGDIR" ]; }; then
+	rm -f "$LOGDIR"
+fi
 mkdir -p "$LOGDIR" 2>/dev/null
 chmod 700 "$LOGDIR" 2>/dev/null
 [ -L "$LOGDIR/tcp_log.txt" ] && rm -f "$LOGDIR/tcp_log.txt"

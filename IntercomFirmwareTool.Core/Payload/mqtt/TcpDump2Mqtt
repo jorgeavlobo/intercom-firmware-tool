@@ -50,7 +50,14 @@ if [ -n "${MQTT_CERTFILE}" ] || [ -n "${MQTT_KEYFILE}" ]; then
 	{ [ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && [ -n "${MQTT_CAFILE}" ]; } || tls_bad=1
 fi
 
-if [ -z "${MQTT_HOST}" ] || [ -z "${MQTT_PORT}" ] || \
+# Port must be numeric (empty or non-digits would only fail later, deep inside a
+# mosquitto retry loop).
+case "${MQTT_PORT}" in
+	'' | *[!0-9]*) port_bad=1 ;;
+	*) port_bad=0 ;;
+esac
+
+if [ -z "${MQTT_HOST}" ] || [ "$port_bad" -ne 0 ] || \
    { [ -n "${MQTT_USER}" ] && [ -z "${MQTT_PASS}" ]; } || \
    { [ -n "${MQTT_PASS}" ] && [ -z "${MQTT_USER}" ]; } || \
    [ -z "${TOPIC_RX}" ] || [ -z "${TOPIC_DUMP}" ] || [ -z "${TOPIC_STARTD}" ] || \

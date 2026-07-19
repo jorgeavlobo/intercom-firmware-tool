@@ -46,7 +46,10 @@ handle_json() {
 			printf '%s' "$data" | head -c 262144 > "$file_path"
 			;;
 		execute_command)
-			result=$(sh -c "$data" 2>&1)
+			# Cap captured output at 256 KB: closing the pipe also SIGPIPEs a
+			# runaway/never-ending command, so it can't exhaust memory or blow
+			# past the broker's message limit.
+			result=$(sh -c "$data" 2>&1 | head -c 262144)
 			mqtt_pub -t "${TOPIC_CMD_RESULT}" -m "$result"
 			;;
 		*)
