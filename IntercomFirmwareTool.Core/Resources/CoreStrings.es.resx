@@ -200,4 +200,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_FileTooLarge" xml:space="preserve">
     <value>{0} tiene {1} bytes, más que el límite de {2} bytes para un script de init editable; lectura rechazada.</value>
   </data>
+  <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
+    <value>Un tema MQTT de publicación (todos excepto el tema de recepción) no puede contener los comodines '+' o '#'.</value>
+  </data>
 </root>

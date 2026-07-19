@@ -213,6 +213,16 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicFileContent })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
+
+            // The PUBLISH topics (everything except TopicRx, which is only ever
+            // subscribed) must not contain the MQTT wildcards '+'/'#': those are
+            // subscription filters and are rejected by mosquitto_pub -t /
+            // --will-topic, so a wildcard here would build an image that cannot
+            // publish at runtime. TopicRx may keep them (a valid subscription).
+            foreach (var t in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
+                                      opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent })
+                if (t.IndexOfAny(new[] { '+', '#' }) >= 0)
+                    throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
         }
 
         /// <summary>

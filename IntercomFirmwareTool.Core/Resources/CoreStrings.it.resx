@@ -200,4 +200,7 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Mqtt_FileTooLarge" xml:space="preserve">
     <value>{0} è di {1} byte, oltre il limite di {2} byte per uno script di init modificabile; lettura rifiutata.</value>
   </data>
+  <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
+    <value>Un topic MQTT di pubblicazione (tutti tranne il topic di ricezione) non può contenere i wildcard '+' o '#'.</value>
+  </data>
 </root>

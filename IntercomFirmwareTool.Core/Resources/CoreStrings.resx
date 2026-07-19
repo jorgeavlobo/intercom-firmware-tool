@@ -182,6 +182,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_InvalidTopic" xml:space="preserve">
     <value>An MQTT topic is empty or contains a line break.</value>
   </data>
+  <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
+    <value>An MQTT publish topic (every topic except the receive topic) must not contain the wildcards '+' or '#'.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} does not exist in the image; cannot apply the MQTT bridge patch.</value>
   </data>

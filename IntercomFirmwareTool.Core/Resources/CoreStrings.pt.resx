@@ -200,4 +200,7 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_FileTooLarge" xml:space="preserve">
     <value>{0} tem {1} bytes, mais do que o limite de {2} bytes para um script de init editável; recusada a leitura.</value>
   </data>
+  <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
+    <value>Um tópico MQTT de publicação (todos exceto o tópico de receção) não pode conter os wildcards '+' ou '#'.</value>
+  </data>
 </root>

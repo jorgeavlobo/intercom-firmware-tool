@@ -200,4 +200,7 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_FileTooLarge" xml:space="preserve">
     <value>{0} fait {1} octets, au-delà de la limite de {2} octets pour un script d'init modifiable ; lecture refusée.</value>
   </data>
+  <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
+    <value>Un sujet MQTT de publication (tous sauf le sujet de réception) ne peut pas contenir les jokers « + » ou « # ».</value>
+  </data>
 </root>
