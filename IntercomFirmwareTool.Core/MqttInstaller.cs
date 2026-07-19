@@ -317,15 +317,22 @@ namespace IntercomFirmwareTool.Core
                 // above, so not here. Each is checked against candidate paths
                 // (any present = pass), since a couple live in more than one bin
                 // dir across builds.
+                // Validate the EXACT paths the scripts invoke — not just "a
+                // tcpdump/pgrep somewhere" — otherwise an image with the tool at a
+                // different path would pass here but fail to boot the bridge.
+                // Candidates are used ONLY where the script itself tolerates more
+                // than one path: python (StartMqttSend tries /usr/bin/python then
+                // /usr/bin/python3) and nc (StartMqttReceive calls bare `nc` via
+                // PATH). tcpdump/pgrep/mosquitto_* are hard-coded absolute paths.
                 var deps = new (string Name, string[] Paths)[]
                 {
-                    ("mosquitto_pub", new[] { "/usr/bin/mosquitto_pub" }),
-                    ("mosquitto_sub", new[] { "/usr/bin/mosquitto_sub" }),
+                    ("mosquitto_pub", new[] { "/usr/bin/mosquitto_pub" }),        // mqtt_common.sh
+                    ("mosquitto_sub", new[] { "/usr/bin/mosquitto_sub" }),        // mqtt_common.sh
                     ("mosquitto (broker init)", new[] { "/etc/init.d/mosquitto" }),
-                    ("tcpdump", new[] { "/usr/sbin/tcpdump", "/usr/bin/tcpdump" }),
-                    ("python", new[] { "/usr/bin/python", "/usr/bin/python3" }),
-                    ("pgrep", new[] { "/usr/bin/pgrep", "/bin/pgrep" }),          // TcpDump2Mqtt/watchdog
-                    ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive -> nc 0 30006
+                    ("tcpdump", new[] { "/usr/sbin/tcpdump" }),                   // StartMqttSend hard-codes this
+                    ("python", new[] { "/usr/bin/python", "/usr/bin/python3" }),  // StartMqttSend tries both
+                    ("pgrep", new[] { "/usr/bin/pgrep" }),                        // TcpDump2Mqtt/watchdog hard-code this
+                    ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive: bare `nc` via PATH
                 };
                 foreach (var (name, paths) in deps)
                     // File only: these are executables / init scripts, so a
