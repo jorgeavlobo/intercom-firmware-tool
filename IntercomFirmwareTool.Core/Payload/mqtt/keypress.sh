@@ -43,11 +43,12 @@ evtest "$INPUT_DEVICE" | while read -r line; do
 
 	key_info=${label% *}
 	draw=${label#* }
-	if [ "$event_value" = "1" ]; then
-		value="pressed"
-	else
-		value="released"
-	fi
+	# 1 = press, 0 = release; ignore 2 (auto-repeat) and anything unexpected.
+	case "$event_value" in
+		1) value="pressed" ;;
+		0) value="released" ;;
+		*) continue ;;
+	esac
 
 	json=$(jq -n --arg key_info "$key_info" --arg draw "$draw" --arg value "$value" \
 		'{key_info:$key_info,draw:$draw,value:$value}')

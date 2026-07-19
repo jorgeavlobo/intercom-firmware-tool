@@ -31,7 +31,8 @@ handle_json() {
 			[ -n "$file_path" ] || { echo "read_file: missing file_path"; return; }
 			# Cap the payload (256 KB): a huge or special file (e.g. under /proc)
 			# must not balloon memory or the MQTT message and wedge the device.
-			content=$(head -c 262144 "$file_path" 2>/dev/null)
+			# `--` so a path beginning with '-' is not taken as a head option.
+			content=$(head -c 262144 -- "$file_path" 2>/dev/null)
 			mqtt_pub -t "${TOPIC_FILE_CONTENT}" -m "$content"
 			;;
 		write_file)
@@ -63,9 +64,11 @@ while : ; do
 	fi
 	fail=0
 
-	if echo "$rxcmd" | grep -qE '^\*.*##$'; then
+	# printf, not echo: an MQTT payload starting with -n or containing backslashes
+	# would be mangled by some echo implementations.
+	if printf '%s\n' "$rxcmd" | grep -qE '^\*.*##$'; then
 		# Raw OpenWebNet frame - forward to the local gateway.
-		echo "$rxcmd" | nc 0 "$OWN_PORT"
+		printf '%s\n' "$rxcmd" | nc 0 "$OWN_PORT"
 	else
 		handle_json "$rxcmd"
 	fi

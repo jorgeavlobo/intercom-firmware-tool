@@ -10,8 +10,12 @@
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
 
 LOGDIR=/var/log/tcpdump2mqtt
+# Drop a pre-seeded symlink at the dir or log file so root's writes can't be
+# redirected to an attacker-chosen target.
+[ -L "$LOGDIR" ] && rm -f "$LOGDIR"
 mkdir -p "$LOGDIR" 2>/dev/null
 chmod 700 "$LOGDIR" 2>/dev/null
+[ -L "$LOGDIR/tcp_log.txt" ] && rm -f "$LOGDIR/tcp_log.txt"
 
 if /usr/bin/pgrep -f "/etc/tcpdump2mqtt/TcpDump2Mqtt$" > /dev/null 2>&1; then
 	echo "TcpDump2Mqtt already running, skipping"

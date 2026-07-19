@@ -33,8 +33,10 @@ ensure() {
 }
 
 watchdog_loop() {
-	# Root-only log dir; drop any pre-existing symlink at the log paths so a
-	# world-writable-/tmp style symlink attack cannot redirect root's writes.
+	# Root-only log dir; drop any pre-existing symlink at the dir OR the log
+	# paths (before mkdir/chmod) so a symlink attack cannot redirect root's
+	# writes or have chmod affect a symlink target.
+	[ -L "$LOGDIR" ] && rm -f "$LOGDIR"
 	mkdir -p "$LOGDIR" 2>/dev/null
 	chmod 700 "$LOGDIR" 2>/dev/null
 	[ -L "$LOGFILE" ] && rm -f "$LOGFILE"
