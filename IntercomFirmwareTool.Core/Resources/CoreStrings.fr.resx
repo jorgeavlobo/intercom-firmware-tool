@@ -179,6 +179,9 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_RemoteShellNeedsAuth" xml:space="preserve">
     <value>Le canal de commandes à distance requiert l'authentification du client : un nom d'utilisateur et un mot de passe, ou un TLS mutuel (certificat et clé client). Le TLS unidirectionnel (CA seule) ne suffit pas.</value>
   </data>
+  <data name="Mqtt_CredentialNewline" xml:space="preserve">
+    <value>Le nom d'utilisateur ou le mot de passe MQTT contient un saut de ligne ; les identifiants doivent tenir sur une seule ligne.</value>
+  </data>
   <data name="Mqtt_InvalidTopic" xml:space="preserve">
     <value>Un sujet MQTT est vide ou contient un saut de ligne.</value>
   </data>

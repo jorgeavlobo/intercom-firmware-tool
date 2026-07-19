@@ -220,6 +220,14 @@ namespace IntercomFirmwareTool.Core
             if (hasUser != hasPass)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_UserPassBothOrNeither"), nameof(opts));
 
+            // Credentials are written into the sourced .conf; a CR/LF would make a
+            // multi-line shell-quoted value and break mosquitto auth. Require them
+            // single-line. (The TLS PEM fields legitimately contain newlines but
+            // go into separate files, not the .conf, so they are not checked here.)
+            var nl = new[] { '\r', '\n' };
+            if ((opts.MqttUser?.IndexOfAny(nl) ?? -1) >= 0 || (opts.MqttPass?.IndexOfAny(nl) ?? -1) >= 0)
+                throw new ArgumentException(CoreStrings.Get("Mqtt_CredentialNewline"), nameof(opts));
+
             // client cert and key are both-or-neither, and need a CA (mutual TLS).
             bool hasCert = !string.IsNullOrEmpty(opts.ClientCertPem);
             bool hasKey = !string.IsNullOrEmpty(opts.ClientKeyPem);
@@ -311,7 +319,13 @@ namespace IntercomFirmwareTool.Core
                     fs.FileExists("/etc/init.d/bt_daemon-apps.sh"), ""));
                 string hosts = fs.FileExists("/etc/init.d/bt_daemon-apps.sh")
                     ? ReadAllText(fs, "/etc/init.d/bt_daemon-apps.sh") : "";
-                bool hostLine = hosts.Contains("/bin/bt_hosts.sh add " + opts.MqttHost + " ");
+                // When the broker IP was pinned explicitly (HostIpForHosts, hostname
+                // case), assert the exact mapping — otherwise a patch that wrote the
+                // wrong IP would still pass. When the IP was DNS-resolved at install
+                // time it isn't known here, so fall back to the host-prefix check.
+                bool hostLine = (!opts.HostIsIp && !string.IsNullOrWhiteSpace(opts.HostIpForHosts))
+                    ? hosts.Contains($"/bin/bt_hosts.sh add {opts.MqttHost} {opts.HostIpForHosts}")
+                    : hosts.Contains("/bin/bt_hosts.sh add " + opts.MqttHost + " ");
                 checks.Add(new("bt_daemon-apps.sh host line present iff hostname",
                     opts.HostIsIp ? !hostLine : hostLine, ""));
 

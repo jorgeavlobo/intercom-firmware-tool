@@ -179,6 +179,9 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_RemoteShellNeedsAuth" xml:space="preserve">
     <value>El canal de comandos remoto requiere autenticación de cliente: usuario y contraseña, o TLS mutuo (certificado y clave de cliente). El TLS unidireccional (solo CA) no es suficiente.</value>
   </data>
+  <data name="Mqtt_CredentialNewline" xml:space="preserve">
+    <value>El usuario o la contraseña MQTT contiene un salto de línea; las credenciales deben ser de una sola línea.</value>
+  </data>
   <data name="Mqtt_InvalidTopic" xml:space="preserve">
     <value>Un tema MQTT está vacío o contiene un salto de línea.</value>
   </data>

@@ -179,6 +179,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_RemoteShellNeedsAuth" xml:space="preserve">
     <value>O canal de comandos remoto exige autenticação de cliente: utilizador e palavra-passe, ou TLS mútuo (certificado e chave de cliente). O TLS unidirecional (só CA) não é suficiente.</value>
   </data>
+  <data name="Mqtt_CredentialNewline" xml:space="preserve">
+    <value>O utilizador ou a palavra-passe MQTT contém uma quebra de linha; as credenciais têm de ser uma única linha.</value>
+  </data>
   <data name="Mqtt_InvalidTopic" xml:space="preserve">
     <value>Um tópico MQTT está vazio ou contém uma quebra de linha.</value>
   </data>
