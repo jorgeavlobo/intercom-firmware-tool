@@ -86,6 +86,23 @@ path.
 15. **Retained commands ignored.** The receiver subscribes with `-R`, so a
     command left RETAINED on `TOPIC_RX` is not replayed on every reconnect —
     commands must be published non-retained.
+16. **Fail fast on missing deps + capped file ops.** `StartMqttSend` errors if
+    no `python` is present; the JSON channel reports a missing `jq`; `keypress.sh`
+    checks `evtest`+`jq`; and both `read_file` and `write_file` cap at 256 KB.
+17. **LF line endings pinned.** `.gitattributes` forces LF on this payload so a
+    Windows checkout can't introduce a CRLF shebang that would fail on the rootfs.
+
+## Known limitations (addressed in later phases)
+
+- **Availability (`TOPIC_LASTWILL`).** The `-C 1` one-shot subscription
+  disconnects cleanly each cycle, so the retained `offline` last will rarely
+  fires and the topic can stay `online`. Reliable online/offline needs a
+  persistent subscription — tracked in #12 (Phase 2).
+- **Command-publisher authorization.** `ALLOW_REMOTE_SHELL` gates on THIS bridge
+  authenticating to the broker; MQTT does not tell us whether the *publisher* of
+  a `TOPIC_RX` command is authorized. On a shared broker, restrict publishing to
+  `TOPIC_RX` with broker-side ACLs. A per-command shared secret is a possible
+  future control (to be decided with the UI phase, #11).
 
 ## Runtime dependencies (expected present in the firmware)
 

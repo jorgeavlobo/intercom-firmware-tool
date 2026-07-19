@@ -61,3 +61,9 @@
 #*.PDF   diff=astextplain
 #*.rtf   diff=astextplain
 #*.RTF   diff=astextplain
+
+# MQTT bridge payload — these on-device shell/Python scripts (and the config
+# they source) MUST stay LF regardless of the host OS: a CRLF shebang would be
+# executed as `/bin/sh\r` and the init/MQTT entrypoints would fail to start on
+# the Linux rootfs. (The ARM binaries in Phase 1b live outside this directory.)
+IntercomFirmwareTool.Core/Payload/mqtt/** text eol=lf

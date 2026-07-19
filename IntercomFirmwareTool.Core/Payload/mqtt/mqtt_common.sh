@@ -39,6 +39,11 @@ mqtt_sub_one() {
 	# -R ignores RETAINED messages: TOPIC_RX is a live command channel, and each
 	# -C 1 reconnect would otherwise re-receive a retained command and replay it
 	# forever until it is cleared. Commands must be published non-retained.
+	#
+	# NOTE: the retained 'offline' last will only fires on an UNCLEAN drop. With
+	# the -C 1 one-shot subscription each cycle ends in a clean disconnect, so
+	# the will rarely triggers and TOPIC_LASTWILL can stay 'online'. Reliable
+	# online/offline availability needs a persistent subscription (Phase 2, #12).
 	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -C 1 -R \
 		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain -t "${TOPIC_RX}"
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"

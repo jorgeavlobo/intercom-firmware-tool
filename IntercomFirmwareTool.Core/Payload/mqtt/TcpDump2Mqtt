@@ -52,6 +52,7 @@ fi
 
 if [ -z "${MQTT_HOST}" ] || [ -z "${MQTT_PORT}" ] || \
    { [ -n "${MQTT_USER}" ] && [ -z "${MQTT_PASS}" ]; } || \
+   { [ -n "${MQTT_PASS}" ] && [ -z "${MQTT_USER}" ]; } || \
    [ -z "${TOPIC_RX}" ] || [ -z "${TOPIC_DUMP}" ] || [ -z "${TOPIC_STARTD}" ] || \
    [ -z "${TOPIC_LASTWILL}" ] || [ "$tls_bad" -ne 0 ]; then
 	echo "Wrong or missing configuration, please check ${MQTT_CFGFILE}!"
