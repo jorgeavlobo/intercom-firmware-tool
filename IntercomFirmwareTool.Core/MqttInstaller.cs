@@ -281,7 +281,11 @@ namespace IntercomFirmwareTool.Core
                     CheckFile(fs, checks, EtcDir + "/client.key", 600);
                 }
 
-                // flexisipsh patch: touch line exactly once + backup present.
+                // flexisipsh patch: file present (explicit, so an absent patch
+                // target is its own clear check, not a confusing "touch line"
+                // failure), touch line exactly once, backup present.
+                checks.Add(new("/etc/init.d/flexisipsh exists (patch target)",
+                    fs.FileExists("/etc/init.d/flexisipsh"), ""));
                 string flexi = fs.FileExists("/etc/init.d/flexisipsh")
                     ? ReadAllText(fs, "/etc/init.d/flexisipsh") : "";
                 checks.Add(new("flexisipsh has the touch line exactly once",
@@ -289,7 +293,10 @@ namespace IntercomFirmwareTool.Core
                 checks.Add(new("flexisipsh_bak exists",
                     fs.FileExists("/etc/init.d/flexisipsh_bak"), ""));
 
-                // hosts patch present iff host is a name.
+                // hosts patch: file present (explicit), and the host line present
+                // iff the broker is a name.
+                checks.Add(new("/etc/init.d/bt_daemon-apps.sh exists (hosts patch target)",
+                    fs.FileExists("/etc/init.d/bt_daemon-apps.sh"), ""));
                 string hosts = fs.FileExists("/etc/init.d/bt_daemon-apps.sh")
                     ? ReadAllText(fs, "/etc/init.d/bt_daemon-apps.sh") : "";
                 bool hostLine = hosts.Contains("/bin/bt_hosts.sh add " + opts.MqttHost + " ");
