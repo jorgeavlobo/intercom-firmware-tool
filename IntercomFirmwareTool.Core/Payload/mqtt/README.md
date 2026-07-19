@@ -19,9 +19,12 @@ that has to match for compatibility is reproduced: the file layout under
 `/etc/tcpdump2mqtt`, the MQTT topic names, the OpenWebNet gateway port `30006`,
 and the `TcpDump2Mqtt.conf` variable names.
 
-The two ARM binaries the bridge needs (`jq`, MIT; `evtest`, GPL-2.0) are **not**
-in this folder — they are handled separately by the installer with their own
-license notices (see the installer's `THIRD_PARTY` notice).
+The two ARM binaries the bridge needs (`jq`, MIT; `evtest`, GPL-2.0-or-later)
+are **not** in this folder — they live under
+[`../vendor/`](../vendor/THIRD_PARTY.md) with their own license notices, SHA-256
+provenance and the GPL written offer for source (Phase 1b, #9). Because
+`evtest` is GPL-2.0-or-later, a firmware image built **with** the bridge enabled
+is an aggregate that, as a whole, is distributed under the GPL — see that notice.
 
 ## Files
 
@@ -127,7 +130,8 @@ path.
 `pgrep`, and `python` (2.7). Upstream relies on these; the planned installer's
 read-back check (#10) will flag any that are missing before a build is accepted.
 
-**Feature-specific (installed by us, Phase 1b / #9):**
+**Feature-specific (shipped by us as ARM binaries — Phase 1b / #9, embedded in
+`IntercomFirmwareTool.Core`; see [`../vendor/THIRD_PARTY.md`](../vendor/THIRD_PARTY.md)):**
 - `jq` — required by the gated JSON command channel (`StartMqttReceive`) and by
   `keypress.sh`. If absent: `keypress.sh` exits early with a clear message, and
   the JSON command channel logs "jq is not installed" and ignores the command
@@ -135,6 +139,8 @@ read-back check (#10) will flag any that are missing before a build is accepted.
 - `evtest` — required by `keypress.sh` only. If absent: `keypress.sh` exits early
   with a clear message; the rest of the bridge is unaffected.
 
-Both are shipped as ARM binaries by the installer, so on a correctly-installed
-image they are always present; the fail-fast checks guard against a partial or
-manual deployment.
+Both are installed to `/usr/bin` (`0775 root:root`) by the planned installer
+(#10), so on a correctly-installed image they are always present; the fail-fast
+checks guard against a partial or manual deployment. The exact bytes are the
+ones confirmed running on a live C100X (glibc 2.27, armv7-hardfloat) and are
+integrity-checked (SHA-256) before use.

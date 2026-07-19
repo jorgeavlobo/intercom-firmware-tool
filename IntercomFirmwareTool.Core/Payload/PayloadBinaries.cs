@@ -1,0 +1,137 @@
+using System.Security.Cryptography;
+using System.Text;
+
+namespace IntercomFirmwareTool.Core
+{
+    /// <summary>
+    /// Metadata for a verbatim third-party ARM binary that the optional MQTT
+    /// bridge installs into the firmware image.
+    /// </summary>
+    /// <param name="Name">Short tool name, e.g. "jq".</param>
+    /// <param name="InstallPath">Absolute path on the device rootfs.</param>
+    /// <param name="Length">Expected byte length of the embedded resource.</param>
+    /// <param name="Sha256Hex">Lower-case hex SHA-256 of the exact bytes.</param>
+    /// <param name="ResourceName">Manifest resource (LogicalName) in this assembly.</param>
+    /// <param name="LicenseResourceName">Manifest resource of the license text.</param>
+    /// <param name="LicenseSpdx">SPDX identifier of the governing license.</param>
+    public sealed record ArmBinary(
+        string Name,
+        string InstallPath,
+        int Length,
+        string Sha256Hex,
+        string ResourceName,
+        string LicenseResourceName,
+        string LicenseSpdx);
+
+    /// <summary>
+    /// Access to the third-party ARM binaries (jq, evtest) and their license
+    /// notices, embedded in this assembly, that the MQTT bridge installer writes
+    /// into the firmware image. Every <see cref="Read"/> re-verifies the bytes
+    /// against their recorded length and SHA-256, so a corrupted or swapped
+    /// resource can never be silently installed onto a device.
+    ///
+    /// These binaries are NOT in the factory firmware and are shipped under
+    /// their own licenses (jq: MIT; evtest: GPL-2.0-or-later). See
+    /// <c>Payload/vendor/THIRD_PARTY.md</c> for provenance, integrity data and the
+    /// GPL written offer for source.
+    /// </summary>
+    public static class PayloadBinaries
+    {
+        /// <summary>
+        /// <c>jq</c> 1.7 — statically-linked armv7-hardfloat ELF (MIT). Used by
+        /// <c>StartMqttReceive</c> (parse the JSON command) and <c>keypress.sh</c>
+        /// (build the key-press JSON). Installed <c>0775 root:root</c>.
+        /// </summary>
+        public static readonly ArmBinary Jq = new(
+            Name: "jq",
+            InstallPath: "/usr/bin/jq",
+            Length: 1_324_676,
+            Sha256Hex: "dd9786221a3a0f250ed227706b7300a69579529ac4a059c874c35a9efead68b1",
+            ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.jq",
+            LicenseResourceName: "IntercomFirmwareTool.Core.Payload.vendor.licenses.jq-COPYING",
+            LicenseSpdx: "MIT");
+
+        /// <summary>
+        /// <c>evtest</c> 1.35 — dynamically-linked armv7-hardfloat ELF
+        /// (GPL-2.0-or-later; needs glibc's <c>/lib/ld-linux-armhf.so.3</c>,
+        /// present on the C100X/C300X). Used by <c>keypress.sh</c> to read the
+        /// front-panel keypad. Installed <c>0775 root:root</c>.
+        /// </summary>
+        public static readonly ArmBinary Evtest = new(
+            Name: "evtest",
+            InstallPath: "/usr/bin/evtest",
+            Length: 34_264,
+            Sha256Hex: "96e3c20fb1742fc57b9b9efbc716cb4c7ae5a1faebe5621a14c1b3053d0d08c0",
+            ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.evtest",
+            LicenseResourceName: "IntercomFirmwareTool.Core.Payload.vendor.licenses.evtest-COPYING",
+            LicenseSpdx: "GPL-2.0-or-later");
+
+        /// <summary>The complete third-party notice (Markdown).</summary>
+        public const string ThirdPartyNoticeResourceName =
+            "IntercomFirmwareTool.Core.Payload.vendor.THIRD_PARTY.md";
+
+        /// <summary>All ARM binaries the MQTT bridge ships, in install order.</summary>
+        public static readonly IReadOnlyList<ArmBinary> All = new[] { Jq, Evtest };
+
+        /// <summary>
+        /// Return the exact bytes of <paramref name="binary"/>, after verifying
+        /// they match its recorded length and SHA-256.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">
+        /// The resource is missing, or its length or SHA-256 does not match — a
+        /// build/packaging error we refuse to write onto a device.
+        /// </exception>
+        public static byte[] Read(ArmBinary binary)
+        {
+            ArgumentNullException.ThrowIfNull(binary);
+
+            byte[] bytes = ReadResource(binary.ResourceName);
+
+            if (bytes.Length != binary.Length)
+            {
+                throw new InvalidOperationException(
+                    $"Embedded binary '{binary.Name}' is {bytes.Length} bytes, " +
+                    $"expected {binary.Length}. The assembly is corrupt or the " +
+                    $"wrong file was embedded.");
+            }
+
+            string actual = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            if (!string.Equals(actual, binary.Sha256Hex, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"Embedded binary '{binary.Name}' SHA-256 {actual} does not " +
+                    $"match the expected {binary.Sha256Hex}. Refusing to install " +
+                    $"an unverified binary.");
+            }
+
+            return bytes;
+        }
+
+        /// <summary>The license text (UTF-8) that governs <paramref name="binary"/>.</summary>
+        public static string LicenseText(ArmBinary binary)
+        {
+            ArgumentNullException.ThrowIfNull(binary);
+            return Encoding.UTF8.GetString(ReadResource(binary.LicenseResourceName));
+        }
+
+        /// <summary>The aggregate third-party notice (Markdown, UTF-8).</summary>
+        public static string ThirdPartyNotice() =>
+            Encoding.UTF8.GetString(ReadResource(ThirdPartyNoticeResourceName));
+
+        private static byte[] ReadResource(string name)
+        {
+            var assembly = typeof(PayloadBinaries).Assembly;
+            using Stream? stream = assembly.GetManifestResourceStream(name);
+            if (stream is null)
+            {
+                throw new InvalidOperationException(
+                    $"Embedded resource '{name}' not found in {assembly.GetName().Name}. " +
+                    $"Check the <EmbeddedResource> LogicalName in the .csproj.");
+            }
+
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            return buffer.ToArray();
+        }
+    }
+}
