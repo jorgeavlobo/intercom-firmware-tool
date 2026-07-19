@@ -69,8 +69,12 @@ namespace IntercomFirmwareTool.App.Localization
         /// <summary>Look up a string by key (code-behind convenience).</summary>
         public string Get(string key) => this[key];
 
-        /// <summary>Look up a format string by key and fill it in the current culture.</summary>
-        public string Format(string key, params object?[] args) => string.Format(_culture, this[key], args);
+        /// <summary>
+        /// Look up a format string by key (in the chosen UI language) and fill it using
+        /// the user's regional number/date format — CurrentCulture, not the UI language.
+        /// </summary>
+        public string Format(string key, params object?[] args) =>
+            string.Format(CultureInfo.CurrentCulture, this[key], args);
 
         /// <summary>
         /// Picks the initial language on startup: the saved choice if any, otherwise the
@@ -90,11 +94,13 @@ namespace IntercomFirmwareTool.App.Localization
             if (!Languages.Any(l => l.Code == code)) code = "en";
             _culture = CultureInfo.GetCultureInfo(code);
 
-            // Current thread + the default for every other thread (so Task.Run work and
-            // the Core library, which read CurrentUICulture, use the chosen language).
-            Thread.CurrentThread.CurrentCulture = _culture;
+            // Switch ONLY the UI culture (current thread + the default for every other
+            // thread, so Task.Run work and the Core library — both read CurrentUICulture
+            // — localize to the chosen language). CurrentCulture is deliberately left
+            // untouched: number/date formatting follows the user's Windows regional
+            // format, which is independent of the display language on Windows. Selecting
+            // a language localizes text, not the user's regional number/date conventions.
             Thread.CurrentThread.CurrentUICulture = _culture;
-            CultureInfo.DefaultThreadCurrentCulture = _culture;
             CultureInfo.DefaultThreadCurrentUICulture = _culture;
 
             // Refresh every {loc:Loc} binding (indexer) and the culture properties (in

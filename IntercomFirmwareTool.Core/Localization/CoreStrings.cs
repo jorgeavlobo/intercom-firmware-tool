@@ -24,7 +24,10 @@ namespace IntercomFirmwareTool.Core.Localization
         public static string Get(string key) =>
             Rm.GetString(key, CultureInfo.CurrentUICulture) ?? key;
 
+        // The string is looked up in the UI language (CurrentUICulture, via Get), but
+        // filled using the ambient CurrentCulture so numbers/dates follow the user's
+        // Windows regional format rather than the chosen display language.
         public static string Format(string key, params object?[] args) =>
-            string.Format(CultureInfo.CurrentUICulture, Get(key), args);
+            string.Format(CultureInfo.CurrentCulture, Get(key), args);
     }
 }
