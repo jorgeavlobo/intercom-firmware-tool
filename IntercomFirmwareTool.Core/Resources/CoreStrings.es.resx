@@ -192,7 +192,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
     <value>No se encontró el ancla esperada en {0} (buscando: {1}); parche rechazado.</value>
   </data>
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
-    <value>La IP del broker proporcionada (para el mapeo de hosts en el dispositivo) no es una dirección IP válida.</value>
+    <value>La IP del broker proporcionada (para el mapeo de hosts en el dispositivo) no es una dirección IPv4 válida.</value>
   </data>
   <data name="Mqtt_HostUnresolved" xml:space="preserve">
     <value>No se pudo resolver el nombre de host del broker "{0}" a una IP para el mapeo de hosts en el dispositivo; proporcione la IP o use una dirección IP como host.</value>

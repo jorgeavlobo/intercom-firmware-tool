@@ -209,9 +209,13 @@ namespace IntercomFirmwareTool.Core
             // field is ignored). So only validate it in the hostname case — a stale
             // override left over from a previous hostname configuration must not
             // fail an otherwise-valid IP-based build. When it IS used, a malformed
-            // value fails fast here, before any write session.
+            // value fails fast here, before any write session. It must be IPv4:
+            // ResolveHostIp() selects an IPv4 address and the bt_hosts.sh mapping
+            // in bt_daemon-apps.sh assumes an IPv4 literal, so an IPv6 override
+            // would write a value the device path cannot use.
             if (!opts.HostIsIp && !string.IsNullOrWhiteSpace(opts.HostIpForHosts) &&
-                !IPAddress.TryParse(opts.HostIpForHosts, out _))
+                !(IPAddress.TryParse(opts.HostIpForHosts, out var hostIp) &&
+                  hostIp.AddressFamily == AddressFamily.InterNetwork))
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidHostIp"), nameof(opts));
 
             // user/pass are both-or-neither.
@@ -310,8 +314,24 @@ namespace IntercomFirmwareTool.Core
                     ? ReadAllText(fs, "/etc/init.d/flexisipsh") : "";
                 checks.Add(new("flexisipsh has the touch line exactly once",
                     CountOccurrences(flexi, "/bin/touch /tmp/flexisip_restarted") == 1, ""));
-                checks.Add(new("flexisipsh_bak exists",
-                    fs.FileExists("/etc/init.d/flexisipsh_bak"), ""));
+                bool bakExists = fs.FileExists("/etc/init.d/flexisipsh_bak");
+                checks.Add(new("flexisipsh_bak exists", bakExists, ""));
+                // The patch must preserve the script's original mode/owner. The
+                // backup captured them before the edit, so the patched flexisipsh
+                // must still match it — a divergence means RewritePreservingMeta
+                // dropped metadata.
+                bool metaPreserved = false;
+                if (fs.FileExists("/etc/init.d/flexisipsh") && bakExists)
+                {
+                    uint m1 = fs.GetMode("/etc/init.d/flexisipsh") & 0xFFF;
+                    uint m2 = fs.GetMode("/etc/init.d/flexisipsh_bak") & 0xFFF;
+                    var o1 = fs.GetOwner("/etc/init.d/flexisipsh");
+                    var o2 = fs.GetOwner("/etc/init.d/flexisipsh_bak");
+                    metaPreserved = m1 == m2 && o1 != null && o2 != null &&
+                        o1.Item1 == o2.Item1 && o1.Item2 == o2.Item2;
+                }
+                checks.Add(new("flexisipsh mode/owner preserved (matches backup)",
+                    metaPreserved, ""));
 
                 // hosts patch: file present (explicit), and the host line present
                 // iff the broker is a name.

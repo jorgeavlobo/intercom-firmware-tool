@@ -195,7 +195,7 @@ The verified build was kept here — move/rename it manually:
     <value>Could not find the expected anchor in {0} (looking for: {1}); refusing to patch it.</value>
   </data>
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
-    <value>The supplied broker IP (for the on-device hosts mapping) is not a valid IP address.</value>
+    <value>The supplied broker IP (for the on-device hosts mapping) is not a valid IPv4 address.</value>
   </data>
   <data name="Mqtt_HostUnresolved" xml:space="preserve">
     <value>Could not resolve the broker hostname "{0}" to an IP for the on-device hosts mapping; supply the IP, or use an IP address as the host.</value>

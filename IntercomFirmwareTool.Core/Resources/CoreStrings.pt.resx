@@ -192,7 +192,7 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
     <value>Não foi encontrada a âncora esperada em {0} (à procura de: {1}); recusado o patch.</value>
   </data>
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
-    <value>O IP do broker fornecido (para o mapeamento de hosts no dispositivo) não é um endereço IP válido.</value>
+    <value>O IP do broker fornecido (para o mapeamento de hosts no dispositivo) não é um endereço IPv4 válido.</value>
   </data>
   <data name="Mqtt_HostUnresolved" xml:space="preserve">
     <value>Não foi possível resolver o nome do broker "{0}" para um IP para o mapeamento de hosts no dispositivo; forneça o IP ou use um endereço IP como host.</value>
