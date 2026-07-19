@@ -58,7 +58,11 @@ namespace IntercomFirmwareTool.Core
             Sha256Hex: "ac304e50cf7cd24933d83dc7d0e4f79892a71a92fb02336d4ecaffa8933760bd",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.jq",
             LicenseResourceName: "IntercomFirmwareTool.Core.Payload.vendor.licenses.jq-COPYING",
-            LicenseSpdx: "MIT AND BSD-2-Clause AND LGPL-2.1-or-later",
+            // Full set carried by the static binary: jq (MIT); its bundled
+            // dtoa/g_fmt (David M. Gay's Lucent permissive notice — no standard
+            // SPDX id, so LicenseRef-dtoa) and decNumber (ICU), both documented
+            // in jq-COPYING; Oniguruma (BSD-2-Clause) and glibc (LGPL-2.1-or-later).
+            LicenseSpdx: "MIT AND ICU AND LicenseRef-dtoa AND BSD-2-Clause AND LGPL-2.1-or-later",
             AdditionalLicenseResourceNames: new[]
             {
                 "IntercomFirmwareTool.Core.Payload.vendor.licenses.oniguruma-COPYING",

@@ -52,7 +52,8 @@ byte-for-byte identical to the copy observed on that unit.
 | Target triple | `arm-linux-gnueabihf` (armv7 hardfloat) | `arm-linux-gnueabihf` (armv7 hardfloat), glibc 2.27 |
 | Upstream version | jq **1.8.1** (build: `--with-oniguruma=builtin --enable-all-static`) | evtest **1.35** |
 | Statically bundles | Oniguruma (BSD-2-Clause), glibc (LGPL-2.1-or-later) | — (dynamic; links the device's own glibc) |
-| License | **MIT** (jq) + BSD-2-Clause (Oniguruma) + LGPL-2.1-or-later (glibc) | **GPL-2.0-or-later** |
+| License | **MIT** (jq) + ICU (decNumber) + Lucent/dtoa + BSD-2-Clause (Oniguruma) + LGPL-2.1-or-later (glibc) | **GPL-2.0-or-later** |
+| SPDX expression | `MIT AND ICU AND LicenseRef-dtoa AND BSD-2-Clause AND LGPL-2.1-or-later` | `GPL-2.0-or-later` |
 | License texts | [`licenses/jq-COPYING`](licenses/jq-COPYING), [`licenses/oniguruma-COPYING`](licenses/oniguruma-COPYING), [`licenses/glibc-LGPL-2.1.txt`](licenses/glibc-LGPL-2.1.txt) | [`licenses/evtest-COPYING`](licenses/evtest-COPYING) |
 
 The SHA-256 values above are also enforced at load time by
