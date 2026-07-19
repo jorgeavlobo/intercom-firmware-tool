@@ -672,6 +672,11 @@ namespace IntercomFirmwareTool.Core
                 if (n <= 0) break;
                 total += n;
             }
+            // A short read must fail loudly, not silently return a truncated
+            // string — patching/validation on partial content could rewrite an
+            // init script incorrectly. (Mirrors Ext4Probe's read helper.)
+            if (total != len)
+                throw new IOException(CoreStrings.Format("Ext4_IncompleteRead", len, total));
             return Encoding.UTF8.GetString(buf, 0, total);
         }
 
