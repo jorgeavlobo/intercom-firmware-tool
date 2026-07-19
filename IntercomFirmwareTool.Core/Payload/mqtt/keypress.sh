@@ -16,7 +16,17 @@
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
 . /etc/tcpdump2mqtt/mqtt_common.sh
 
-INPUT_DEVICE="/dev/input/event0"
+# Auto-detect the keypad's event node (the device whose Name contains "keypad"),
+# falling back to event0. The node is not the same across models — it is event0
+# on the C100X, but hard-coding it would break on a unit where it differs.
+INPUT_DEVICE=$(awk '
+	/^N: Name=/ { name=$0 }
+	/^H: Handlers=/ {
+		if (tolower(name) ~ /keypad/) {
+			for (i = 1; i <= NF; i++) if ($i ~ /^event[0-9]+$/) { print "/dev/input/" $i; exit }
+		}
+	}' /proc/bus/input/devices 2>/dev/null)
+[ -n "$INPUT_DEVICE" ] || INPUT_DEVICE=/dev/input/event0
 # TOPIC_KEY default comes from mqtt_common.sh (centralised topic defaults).
 
 if [ ! -e "$INPUT_DEVICE" ]; then

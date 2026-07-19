@@ -86,7 +86,9 @@ path.
     key is published using the `KEY_` name evtest prints — not a hard-coded 4-key
     map. Upstream mapped only KEY_1..KEY_4 (the C300X layout); the C100X keypad
     has 7 keys (KEY_1..KEY_7, confirmed on-device), which the old map dropped.
-    Payload is `{key, code, value}`.
+    Payload is `{key, code, value}`. The keypad's input node is auto-detected from
+    `/proc/bus/input/devices` (Name contains "keypad"), falling back to `event0`,
+    so it isn't tied to a fixed `eventN` across models.
 15. **Retained commands ignored.** The receiver subscribes with `-R`, so a
     command left RETAINED on `TOPIC_RX` is not replayed on every reconnect —
     commands must be published non-retained.
