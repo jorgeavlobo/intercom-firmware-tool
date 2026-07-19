@@ -461,7 +461,7 @@ namespace IntercomFirmwareTool.Core
             int anchor = -1;
             for (int i = startCase + 1; i < lines.Length; i++)
             {
-                if (lines[i].Trim() == ";;") break;   // end of the start) block
+                if (IsCaseTerminator(lines[i])) break;   // end of the start) block
                 if (lines[i].Contains("start-stop-daemon --start")) { anchor = i; break; }
             }
             if (anchor < 0)
@@ -471,6 +471,29 @@ namespace IntercomFirmwareTool.Core
             var patched = new List<string>(lines);
             patched.Insert(anchor + 1, "\t" + marker);
             RewritePreservingMeta(fs, path, string.Join("\n", patched));
+        }
+
+        /// <summary>
+        /// True when <paramref name="line"/> ends a shell <c>case</c> branch
+        /// (<c>;;</c>): standalone, following a command on the same line
+        /// (<c>foo ;;</c> or <c>foo;;</c>), or with a trailing comment
+        /// (<c>;; # done</c>). Used to bound the <c>start)</c> block scan so the
+        /// flexisip marker is never inserted into a later case. Not a full shell
+        /// parser — a heuristic that strips a trailing <c>#</c> comment (one at
+        /// line start or preceded by whitespace) before testing for <c>;;</c>.
+        /// </summary>
+        private static bool IsCaseTerminator(string line)
+        {
+            string t = line.Trim();
+            for (int i = 0; i < t.Length; i++)
+            {
+                if (t[i] == '#' && (i == 0 || char.IsWhiteSpace(t[i - 1])))
+                {
+                    t = t.Substring(0, i).TrimEnd();
+                    break;
+                }
+            }
+            return t.EndsWith(";;", StringComparison.Ordinal);
         }
 
         /// <summary>
