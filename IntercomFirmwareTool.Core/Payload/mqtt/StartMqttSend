@@ -9,8 +9,12 @@
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
 . /etc/tcpdump2mqtt/mqtt_common.sh
 
-# Prefer python, fall back to python3.
+# Prefer python, fall back to python3; fail fast if neither is present.
 PYTHON="$( [ -x /usr/bin/python ] && echo /usr/bin/python || echo /usr/bin/python3 )"
+if [ ! -x "$PYTHON" ]; then
+	echo "StartMqttSend: no python interpreter (/usr/bin/python or /usr/bin/python3) found." >&2
+	exit 1
+fi
 
 # tcpdump filter: only the local OpenWebNet chatter, dropping SIP/RTP and the
 # command-injection port (30006) so we do not echo our own writes back out.

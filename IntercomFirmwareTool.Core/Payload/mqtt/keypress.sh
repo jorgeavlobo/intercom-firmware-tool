@@ -20,6 +20,14 @@ if [ ! -e "$INPUT_DEVICE" ]; then
 	exit 1
 fi
 
+# Needs evtest (read keys) and jq (build the JSON payload).
+for dep in evtest jq; do
+	if ! command -v "$dep" > /dev/null 2>&1; then
+		echo "keypress.sh: required tool '$dep' not found."
+		exit 1
+	fi
+done
+
 # Map the four front keys (event type 1 = EV_KEY; codes 2..5) to labels.
 key_label() {
 	case "$1" in

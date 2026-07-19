@@ -23,6 +23,10 @@ handle_json() {
 		echo "Ignored JSON command: remote command channel is disabled (needs ALLOW_REMOTE_SHELL=1 and an authenticated broker: user/pass or mutual TLS)."
 		return
 	fi
+	if ! command -v jq > /dev/null 2>&1; then
+		echo "JSON command ignored: jq is not installed."
+		return
+	fi
 	command=$(printf '%s' "$msg" | jq -r '.command // empty' 2>/dev/null)
 	file_path=$(printf '%s' "$msg" | jq -r '.file_path // empty' 2>/dev/null)
 	data=$(printf '%s' "$msg" | jq -r '.data // empty' 2>/dev/null)
