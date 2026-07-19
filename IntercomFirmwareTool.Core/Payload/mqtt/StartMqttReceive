@@ -45,10 +45,12 @@ handle_json() {
 			# can't fill flash. Write to a temp file in the same directory and
 			# rename, so a crash mid-write can't leave a partial (e.g. a config).
 			tmp="${file_path}.tmp.$$"
+			# `--` throughout: file_path (and thus tmp) comes from the MQTT
+			# payload and could begin with '-'.
 			if printf '%s' "$data" | head -c 262144 > "$tmp"; then
-				mv "$tmp" "$file_path"
+				mv -- "$tmp" "$file_path"
 			else
-				rm -f "$tmp"
+				rm -f -- "$tmp"
 			fi
 			;;
 		execute_command)

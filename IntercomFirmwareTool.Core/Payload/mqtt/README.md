@@ -1,9 +1,12 @@
 # MQTT bridge payload (clean-room, MIT)
 
-These scripts are installed into the firmware image when the user ticks the
-optional **Install MQTT bridge** box in Advanced options (off by default). They
-expose the BTicino OpenWebNet/SCS bus and the front-panel keys over MQTT, for
-Home Assistant-style integration.
+These scripts are the payload that a **planned** installer (Phase 1c, issue #10)
+*will* write into the firmware image when the user ticks the optional **Install
+MQTT bridge** box in Advanced options (off by default). **Phase 1a (this PR) is
+the payload scripts only — nothing here is wired into the build yet;** the
+installer, the UI checkbox, and the read-back validation referenced below are
+future phases. The bridge exposes the BTicino OpenWebNet/SCS bus and the
+front-panel keys over MQTT, for Home Assistant-style integration.
 
 ## Provenance & licensing
 
@@ -117,9 +120,21 @@ path.
   `TOPIC_RX` with broker-side ACLs. A per-command shared secret is a possible
   future control (to be decided with the UI phase, #11).
 
-## Runtime dependencies (expected present in the firmware)
+## Runtime dependencies
 
-`mosquitto_pub`, `mosquitto_sub`, a local `mosquitto` broker, `tcpdump`, `nc`,
-`route`, `ping`, `pgrep`, and `python`/`python3`. These ship in the C300X/C100X
-firmware (upstream relies on them); the installer's read-back check flags any
-that are missing before the build is accepted.
+**Base (factory firmware, confirmed present on a C100X):** `mosquitto_pub`,
+`mosquitto_sub`, a local `mosquitto` broker, `tcpdump`, `nc`, `route`, `ping`,
+`pgrep`, and `python` (2.7). Upstream relies on these; the planned installer's
+read-back check (#10) will flag any that are missing before a build is accepted.
+
+**Feature-specific (installed by us, Phase 1b / #9):**
+- `jq` — required by the gated JSON command channel (`StartMqttReceive`) and by
+  `keypress.sh`. If absent: `keypress.sh` exits early with a clear message, and
+  the JSON command channel logs "jq is not installed" and ignores the command
+  (the OpenWebNet passthrough is unaffected).
+- `evtest` — required by `keypress.sh` only. If absent: `keypress.sh` exits early
+  with a clear message; the rest of the bridge is unaffected.
+
+Both are shipped as ARM binaries by the installer, so on a correctly-installed
+image they are always present; the fail-fast checks guard against a partial or
+manual deployment.

@@ -60,7 +60,7 @@ evtest "$INPUT_DEVICE" | while read -r line; do
 		*) continue ;;
 	esac
 
-	json=$(jq -n --arg key "$key_name" --argjson code "$event_code" --arg value "$value" \
+	json=$(jq -cn --arg key "$key_name" --argjson code "$event_code" --arg value "$value" \
 		'{key:$key,code:$code,value:$value}')
 	mqtt_pub -t "$TOPIC_KEY" -m "$json"
 done

@@ -21,6 +21,10 @@ kill_by() {
 	fi
 }
 
+# Escape regex metacharacters so a topic containing them can't broaden the
+# pgrep -f match (killing unrelated processes) or fail to match ours.
+re_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'; }
+
 kill_childs() {
 	kill_by "/etc/tcpdump2mqtt/StartMqttSend"
 	kill_by "/etc/tcpdump2mqtt/StartMqttReceive"
@@ -31,8 +35,8 @@ kill_childs() {
 	# and so the mosquitto_sub reparented out of the receiver's command
 	# substitution does not linger as an orphan across outages.
 	kill_by "tcpdump.*dst port 30006"
-	kill_by "mosquitto_sub.*${TOPIC_RX}"
-	kill_by "mosquitto_pub.*${TOPIC_DUMP}"
+	kill_by "mosquitto_sub.*$(re_escape "${TOPIC_RX}")"
+	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_DUMP}")"
 }
 
 exit_handler() {
