@@ -56,7 +56,7 @@ unchanged and remains byte-for-byte identical to the copy observed on that unit.
 | SHA-256 | `78458244fb546469b4042e9e07cf78714ef6848895eb9515df76b4eb0b1dc992` | `96e3c20fb1742fc57b9b9efbc716cb4c7ae5a1faebe5621a14c1b3053d0d08c0` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked**, stripped | 32-bit LSB PIE, ARM EABI5, **dynamically linked** (`/lib/ld-linux-armhf.so.3`), stripped |
 | Build ID (SHA-1) | `55019f17610f57bc2ae9817d7f1cc56a3b30fbd1` | `0b6cfc5075b98021a854b5d4519ed3e1c6fa808e` |
-| Target triple | `arm-linux-gnueabihf` (armv7 hardfloat) | `arm-linux-gnueabihf` (armv7 hardfloat), glibc 2.27 |
+| Target triple | `arm-linux-gnueabihf` (armv7 hardfloat), statically links glibc 2.39 (jqlang CI on ubuntu-24.04) | `arm-linux-gnueabihf` (armv7 hardfloat), glibc 2.27 |
 | Upstream version | jq **1.8.2** (build: `--with-oniguruma=builtin --enable-all-static`) | evtest **1.35** |
 | Statically bundles | Oniguruma (BSD-2-Clause), glibc (LGPL-2.1-or-later) | — (dynamic; links the device's own glibc) |
 | License | **MIT** (jq) + ICU (decNumber) + Lucent/dtoa + BSD-2-Clause (Oniguruma) + LGPL-2.1-or-later (glibc) | **GPL-2.0-or-later** |
@@ -99,20 +99,23 @@ licensed **LGPL-2.1-or-later**; the full text is in
 triggers LGPL §6: recipients must be able to relink `jq` against a modified
 glibc.
 
-**How that obligation is met here (LGPL §6):** everything needed to produce a
-functionally-equivalent `jq` with a different glibc is publicly available and
-buildable. The **immutable reference for this exact binary** is the jqlang
-release tag **`jq-1.8.2`** together with the build workflow committed at that tag
-(<https://github.com/jqlang/jq/tree/jq-1.8.2/.github/workflows>): it pins the
-cross toolchain — and therefore the exact glibc version — used to link the
-`jq-linux-armhf` asset. glibc's complete corresponding source for whichever
-version that toolchain uses is published by the GNU project at
-<https://sourceware.org/git/glibc.git> and mirrored under
-<https://ftp.gnu.org/gnu/glibc/> (each release is an immutable tarball). jq's own
-source is MIT (link above). Because both sources are public and the build is
-reproducible from the pinned `jq-1.8.2` workflow, a recipient can relink `jq`
-against a modified glibc. The corresponding source is **also available on request
-from the distributor** — open an issue at
+**How that obligation is met here (LGPL §6).** The shipped `jq-linux-armhf` is
+built by the jqlang CI (workflow at tag `jq-1.8.2`,
+<https://github.com/jqlang/jq/blob/jq-1.8.2/.github/workflows/ci.yml>) on
+`ubuntu-24.04`, statically linking the armhf glibc from the distro package
+`crossbuild-essential-armhf` — i.e. **glibc 2.39**, Ubuntu 24.04's system glibc.
+The CI installs that toolchain with a non-pinned `apt-get`, so it fixes the glibc
+**version (2.39)** rather than a byte-exact toolchain image; we therefore record
+the version and its corresponding source rather than claiming a byte-reproducible
+build. glibc 2.39's complete corresponding source is available as an immutable
+upstream release — tag **`glibc-2.39`**
+(<https://sourceware.org/git/?p=glibc.git;a=tag;h=refs/tags/glibc-2.39>, tarball
+<https://ftp.gnu.org/gnu/glibc/glibc-2.39.tar.xz>) — and as the exact Ubuntu
+source package `glibc 2.39-0ubuntu*` from Launchpad
+(<https://launchpad.net/ubuntu/+source/glibc>). jq's own source is MIT (link
+above). With both public, a recipient can rebuild and relink `jq` against a
+modified glibc. The exact corresponding-source materials for this binary are
+**also available on request from the distributor** — open an issue at
 <https://github.com/jorgeavlobo/intercom-firmware-tool/issues> — for at least
 three years, for no more than the cost of the distribution.
 
@@ -158,9 +161,11 @@ version 1.35:
 `IntercomFirmwareTool.Core` (they are compiled-in resources), so any distribution
 of that assembly/package — regardless of the bridge toggle — redistributes `jq`
 and `evtest` and must therefore carry these notices and honour the source offers.
-This file travels with them for that reason. What the bridge toggle changes is
-the **generated firmware image**: an image built **with** the MQTT bridge enabled
-installs `jq` and `evtest` onto the device, so whoever redistributes that image
-must likewise pass these offers along; an image built **without** the bridge (the
-default) contains neither binary and carries no such obligation *for the image*.
+This file travels with them for that reason. What the bridge toggle affects is
+the **generated firmware image**: the *planned* installer (Phase 1c, #10) *will*
+write `jq` and `evtest` into an image only when the bridge is enabled, so whoever
+redistributes such an image must likewise pass these offers along; an image built
+**without** the bridge (the default) will contain neither binary and carry no
+such obligation *for the image*. (No installer path exists yet — this phase only
+embeds the binaries; the image-side behaviour above is what Phase 1c will do.)
 The obligation on the tool's own assembly/package is unaffected either way.
