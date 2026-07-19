@@ -53,8 +53,13 @@ handle_json() {
 			# restrictive, not a loosening).
 			if ( umask 077; printf '%s' "$data" | head -c 262144 > "$tmp" ); then
 				if [ -e "$file_path" ]; then
+					# Preserve the target's mode AND owner/group, so replacing a
+					# file owned by e.g. bticino under /home/bticino doesn't
+					# silently reassign it to root (both best-effort).
 					mode=$(stat -c '%a' "$file_path" 2>/dev/null)
 					[ -n "$mode" ] && chmod "$mode" -- "$tmp" 2>/dev/null
+					own=$(stat -c '%u:%g' "$file_path" 2>/dev/null)
+					[ -n "$own" ] && chown "$own" -- "$tmp" 2>/dev/null
 				fi
 				mv -- "$tmp" "$file_path"
 			else
