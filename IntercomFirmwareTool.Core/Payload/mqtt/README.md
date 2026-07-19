@@ -45,8 +45,11 @@ path.
    unconditionally honoured JSON `read_file` / `write_file` / `execute_command`
    on an unauthenticated broker — root-equivalent control to anyone who could
    publish. Here that channel is **off unless** `ALLOW_REMOTE_SHELL=1` **and** the
-   broker is authenticated (`MQTT_USER`) or TLS-protected (`MQTT_CAFILE`); the
-   OpenWebNet passthrough (the real automation feature) is unaffected.
+   client is authenticated — either `MQTT_USER`/`MQTT_PASS`, or mutual TLS (a
+   client certificate and key, `MQTT_CERTFILE`+`MQTT_KEYFILE`, with `MQTT_CAFILE`).
+   One-way TLS (CA only) verifies the broker but not the client, so it does not
+   unlock it. The OpenWebNet passthrough (the real automation feature) is
+   unaffected.
 2. **`keypress.sh` is actually installed.** Upstream `main.py` never copied it,
    so the key-press feature was dead and `TcpDump2Mqtt` spawned a missing file
    every 30 s.

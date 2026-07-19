@@ -37,7 +37,7 @@ mqtt_pub() {
 # with the offline last will.
 mqtt_sub_one() {
 	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -C 1 \
-		--will-topic "${TOPIC_LASTWILL}" --will-payload offline -t "${TOPIC_RX}"
+		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain -t "${TOPIC_RX}"
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
 	if [ -n "${MQTT_CAFILE}" ]; then
 		set -- "$@" --cafile "${MQTT_CAFILE}"
@@ -53,7 +53,10 @@ mqtt_sub_one() {
 # unlock this channel.
 remote_shell_allowed() {
 	[ "${ALLOW_REMOTE_SHELL:-0}" = "1" ] || return 1
-	[ -n "${MQTT_USER}" ] && return 0
-	[ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && return 0
+	# Password auth: BOTH username and password.
+	[ -n "${MQTT_USER}" ] && [ -n "${MQTT_PASS}" ] && return 0
+	# Mutual TLS: CA + client cert + key — exactly what mqtt_pub/mqtt_sub_one
+	# actually send (they only add --cert/--key when MQTT_CAFILE is set).
+	[ -n "${MQTT_CAFILE}" ] && [ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && return 0
 	return 1
 }

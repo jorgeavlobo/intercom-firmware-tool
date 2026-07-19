@@ -29,7 +29,9 @@ handle_json() {
 	case "$command" in
 		read_file)
 			[ -n "$file_path" ] || { echo "read_file: missing file_path"; return; }
-			content=$(cat "$file_path" 2>/dev/null)
+			# Cap the payload (256 KB): a huge or special file (e.g. under /proc)
+			# must not balloon memory or the MQTT message and wedge the device.
+			content=$(head -c 262144 "$file_path" 2>/dev/null)
 			mqtt_pub -t "${TOPIC_FILE_CONTENT}" -m "$content"
 			;;
 		write_file)
