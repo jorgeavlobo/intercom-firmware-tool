@@ -22,14 +22,20 @@ license notices (see the installer's `THIRD_PARTY` notice).
 
 ## Files
 
+All of these install under `/etc/tcpdump2mqtt/` except `bt_service_watchdog`
+(which goes to `/etc/init.d/`). Runtime logs are written to the root-only
+directory `/var/log/tcpdump2mqtt/`, never a predictable world-writable `/tmp`
+path.
+
 | File | Role |
 |---|---|
 | `TcpDump2Mqtt` | Orchestrator: keeps sender/receiver/keypress alive, publishes status, recovers from network outages. |
 | `TcpDump2Mqtt.sh` | Init launcher (symlinked from `/etc/rc5.d/S99TcpDump2Mqtt`). |
+| `mqtt_common.sh` | Shared helper sourced by the four scripts below: config load + `mqtt_pub`/`mqtt_sub_one` (auth+TLS) + the `remote_shell_allowed` gate. |
 | `StartMqttSend` | `tcpdump` on `lo` → `filter.py` → publish frames to `TOPIC_DUMP`. |
 | `StartMqttReceive` | Subscribe `TOPIC_RX` → OpenWebNet passthrough to the unit; gated JSON command channel. |
 | `keypress.sh` | `evtest` front-panel keys → publish to `TOPIC_KEY`. |
-| `filter.py` | Extract `*…##` OpenWebNet frames from the `tcpdump -A` text stream. |
+| `filter.py` | Extract `*…##` OpenWebNet frames from the `tcpdump -A` text stream (installed at `/etc/tcpdump2mqtt/filter.py`). |
 | `bt_service_watchdog` | Independent init service: restarts dropbear/scsserver/mosquitto/TcpDump2Mqtt if they die. |
 | `TcpDump2Mqtt.conf` | Configuration template; the installer fills in broker/topics from the UI. |
 
@@ -54,6 +60,26 @@ license notices (see the installer's `THIRD_PARTY` notice).
    started without the environment already exported.
 7. **filter.py throughput.** Removed the fixed `sleep(0.2)` per frame that
    capped the bus feed to ~5 frames/s.
+8. **Auth and TLS compose.** Username/password and TLS are applied independently
+   (upstream's if/elif picked one, so user/pass *over* TLS silently dropped the
+   TLS flags). One-way "CA only" TLS is allowed; client cert+key = mutual TLS.
+9. **Command gate needs client auth.** `remote_shell_allowed` requires user/pass
+   or mutual TLS (client cert+key) — one-way TLS (CA only) verifies the broker,
+   not the client, so it no longer unlocks the command channel.
+10. **Single self-contained layout.** `filter.py` installs under
+    `/etc/tcpdump2mqtt/` with the rest (upstream split it to `/home/root`); the
+    broker helper is factored into one `mqtt_common.sh` instead of copy-pasted
+    into four scripts.
+11. **Specific sender liveness.** The orchestrator checks its own
+    `StartMqttSend`, not any `tcpdump` on the box, so an unrelated `tcpdump`
+    can't block the sender from starting.
+12. **Configurable reply topics.** `TOPIC_CMD_RESULT`/`TOPIC_FILE_CONTENT`
+    replace the previously hard-coded result topics.
+13. **Symlink-safe logs.** Logs go to the root-only `/var/log/tcpdump2mqtt/`
+    (created 0700), with a symlink guard, instead of a predictable `/tmp` path a
+    local user could pre-seed.
+14. **Robust evtest parsing.** Key events are parsed by `type`/`code`/`value`
+    labels rather than fixed awk columns.
 
 ## Runtime dependencies (expected present in the firmware)
 

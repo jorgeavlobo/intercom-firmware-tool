@@ -1,0 +1,59 @@
+#!/bin/sh
+# mqtt_common.sh - shared config loader and MQTT helpers for the bridge.
+#
+# Sourced by TcpDump2Mqtt, StartMqttSend, StartMqttReceive and keypress.sh so the
+# broker auth/TLS logic and the remote-command gate live in exactly one place.
+# MIT-licensed, part of IntercomFirmwareTool's MQTT bridge payload.
+
+MQTT_CFGFILE=/etc/tcpdump2mqtt/TcpDump2Mqtt.conf
+
+# Load the config when the caller was started without the environment exported
+# (functions are not inherited across exec, so every child sources this).
+if [ -z "${MQTT_HOST}" ] && [ -f "$MQTT_CFGFILE" ]; then
+	set -a
+	. "$MQTT_CFGFILE"
+	set +a
+fi
+
+# Result topics for the (optional, gated) command channel — default if unset.
+: "${TOPIC_FILE_CONTENT:=Bticino/file_content_topic}"
+: "${TOPIC_CMD_RESULT:=Bticino/command_result_topic}"
+
+# mosquitto_pub with auth AND TLS applied independently (compose, do not choose
+# one or the other). Extra args (topic, -l, -r, -m ...) pass through; mosquitto
+# accepts options in any order.
+mqtt_pub() {
+	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" "$@"
+	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
+	if [ -n "${MQTT_CAFILE}" ]; then
+		set -- "$@" --cafile "${MQTT_CAFILE}"
+		[ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && \
+			set -- "$@" --cert "${MQTT_CERTFILE}" --key "${MQTT_KEYFILE}"
+	fi
+	/usr/bin/mosquitto_pub "$@"
+}
+
+# mosquitto_sub for exactly one message on TOPIC_RX, same auth/TLS composition,
+# with the offline last will.
+mqtt_sub_one() {
+	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -C 1 \
+		--will-topic "${TOPIC_LASTWILL}" --will-payload offline -t "${TOPIC_RX}"
+	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
+	if [ -n "${MQTT_CAFILE}" ]; then
+		set -- "$@" --cafile "${MQTT_CAFILE}"
+		[ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && \
+			set -- "$@" --cert "${MQTT_CERTFILE}" --key "${MQTT_KEYFILE}"
+	fi
+	/usr/bin/mosquitto_sub "$@"
+}
+
+# The JSON remote-command channel is honoured only when explicitly enabled AND
+# the CLIENT is authenticated: username/password, or mutual TLS (client cert+key).
+# One-way TLS (CA only) verifies the broker but NOT the client, so it does not
+# unlock this channel.
+remote_shell_allowed() {
+	[ "${ALLOW_REMOTE_SHELL:-0}" = "1" ] || return 1
+	[ -n "${MQTT_USER}" ] && return 0
+	[ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && return 0
+	return 1
+}

@@ -12,10 +12,13 @@
 ### END INIT INFO
 #
 # MIT-licensed reimplementation of fquinto's mqtt_scripts/bt_service_watchdog
-# (GPL-2.0) for IntercomFirmwareTool.
+# (GPL-2.0) for IntercomFirmwareTool. Logs live in a root-only directory rather
+# than a predictable world-writable /tmp path (symlink-attack safe).
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
 PIDFILE=/var/run/bt_service_watchdog.pid
-LOGFILE=/tmp/bt_watchdog.log
+LOGDIR=/var/log/tcpdump2mqtt
+LOGFILE=$LOGDIR/bt_watchdog.log
+TCPLOG=$LOGDIR/tcp_log.txt
 INTERVAL=60
 
 log() { echo "$(date): $1" >> "$LOGFILE"; }
@@ -30,6 +33,13 @@ ensure() {
 }
 
 watchdog_loop() {
+	# Root-only log dir; drop any pre-existing symlink at the log paths so a
+	# world-writable-/tmp style symlink attack cannot redirect root's writes.
+	mkdir -p "$LOGDIR" 2>/dev/null
+	chmod 700 "$LOGDIR" 2>/dev/null
+	[ -L "$LOGFILE" ] && rm -f "$LOGFILE"
+	[ -L "$TCPLOG" ] && rm -f "$TCPLOG"
+
 	log "BTicino service watchdog started (PID $$)"
 	while : ; do
 		ensure dropbear  /etc/init.d/dropbear start
@@ -38,10 +48,10 @@ watchdog_loop() {
 
 		if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/TcpDump2Mqtt$" > /dev/null 2>&1; then
 			log "TcpDump2Mqtt not running - restarting"
-			/etc/tcpdump2mqtt/TcpDump2Mqtt >> /tmp/tcp_log.txt 2>&1 &
+			/etc/tcpdump2mqtt/TcpDump2Mqtt >> "$TCPLOG" 2>&1 &
 		fi
 
-		# Keep the log from filling /tmp: trim to 50 KB once it passes 100 KB.
+		# Keep the log from growing without bound: trim to 50 KB past 100 KB.
 		if [ -f "$LOGFILE" ]; then
 			size=$(wc -c < "$LOGFILE" 2>/dev/null || echo 0)
 			if [ "$size" -gt 102400 ]; then

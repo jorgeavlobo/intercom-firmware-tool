@@ -5,15 +5,14 @@
 # running, publishes online/start status, and recovers after a network outage.
 #
 # MIT-licensed reimplementation of fquinto's mqtt_scripts/TcpDump2Mqtt (GPL-2.0)
-# for IntercomFirmwareTool. Fixes over the original:
-#   * POSIX sh (no bash-only "function" keyword);
-#   * child processes are tracked with pgrep -f instead of fragile ps|grep|grep;
-#   * keypress.sh is actually installed, so the key feature works.
+# for IntercomFirmwareTool. Fixes over the original: POSIX sh (no bash-only
+# "function"); children tracked with pgrep -f on explicit paths; keypress.sh is
+# actually installed; auth/TLS composition and validation shared via
+# mqtt_common.sh (auth+TLS combine, one-way "CA only" TLS allowed).
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
-CFGFILE=/etc/tcpdump2mqtt/TcpDump2Mqtt.conf
+. /etc/tcpdump2mqtt/mqtt_common.sh
 
 kill_by() {
-	# kill processes matched by a pgrep -f pattern, quietly.
 	pids=$(/usr/bin/pgrep -f "$1" 2>/dev/null)
 	if [ -n "$pids" ]; then
 		# shellcheck disable=SC2086
@@ -27,7 +26,6 @@ kill_childs() {
 	kill_by "/etc/tcpdump2mqtt/StartMqttReceive"
 	kill_by "/etc/tcpdump2mqtt/keypress.sh"
 	kill_by "tcpdump -i lo"
-	kill_by "mosquitto_sub -C 1 --will-topic ${TOPIC_LASTWILL}"
 }
 
 exit_handler() {
@@ -37,37 +35,21 @@ exit_handler() {
 }
 trap exit_handler INT TERM
 
-# --- Config -----------------------------------------------------------------
-if ! { [ -f "$CFGFILE" ] && [ -s "$CFGFILE" ]; }; then
-	echo "Configuration file missing or empty!"
-	exit 1
+# --- Config validation ------------------------------------------------------
+# mqtt_common.sh already sourced the config. Check the essentials are coherent.
+tls_bad=0
+if [ -n "${MQTT_CERTFILE}" ] || [ -n "${MQTT_KEYFILE}" ]; then
+	# Mutual TLS: need BOTH the client cert and key, plus a CA to verify the broker.
+	{ [ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && [ -n "${MQTT_CAFILE}" ]; } || tls_bad=1
 fi
-set -a
-. "$CFGFILE"
-set +a
 
-# Minimum required config. If MQTT_USER is set, MQTT_PASS must be too; if a CA
-# file is set, so must the client cert and key.
 if [ -z "${MQTT_HOST}" ] || [ -z "${MQTT_PORT}" ] || \
    { [ -n "${MQTT_USER}" ] && [ -z "${MQTT_PASS}" ]; } || \
    [ -z "${TOPIC_RX}" ] || [ -z "${TOPIC_DUMP}" ] || [ -z "${TOPIC_STARTD}" ] || \
-   [ -z "${TOPIC_LASTWILL}" ] || \
-   { [ -n "${MQTT_CAFILE}" ] && { [ -z "${MQTT_CERTFILE}" ] || [ -z "${MQTT_KEYFILE}" ]; }; }; then
-	echo "Wrong configuration, please check config file!"
+   [ -z "${TOPIC_LASTWILL}" ] || [ "$tls_bad" -ne 0 ]; then
+	echo "Wrong or missing configuration, please check ${MQTT_CFGFILE}!"
 	exit 1
 fi
-
-mpub() {
-	if [ -n "${MQTT_USER}" ]; then
-		/usr/bin/mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" \
-			-u "${MQTT_USER}" -P "${MQTT_PASS}" "$@"
-	elif [ -n "${MQTT_CAFILE}" ]; then
-		/usr/bin/mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" \
-			--cafile "${MQTT_CAFILE}" --cert "${MQTT_CERTFILE}" --key "${MQTT_KEYFILE}" "$@"
-	else
-		/usr/bin/mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" "$@"
-	fi
-}
 
 # --- Default gateway (network liveness target) ------------------------------
 GWADDR=$(route -n 2>/dev/null | awk '/^0.0.0.0/ && $4 ~ /G/ {print $2; exit}')
@@ -107,18 +89,19 @@ while : ; do
 	else
 		PING_FAIL_COUNT=0
 
-		if ! /usr/bin/pgrep -x tcpdump > /dev/null 2>&1; then
+		# Liveness by our OWN sender script, not any tcpdump on the box.
+		if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttSend" > /dev/null 2>&1; then
 			echo "Starting MQTT sender..."
 			/etc/tcpdump2mqtt/StartMqttSend &
 			/bin/sleep 5
-			/bin/date +"%Y-%m-%dT%H:%M:%S" | mpub -l -r -t "${TOPIC_STARTD}"
+			/bin/date +"%Y-%m-%dT%H:%M:%S" | mqtt_pub -l -r -t "${TOPIC_STARTD}"
 		fi
 
 		if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttReceive" > /dev/null 2>&1; then
 			echo "Starting MQTT receiver..."
 			/etc/tcpdump2mqtt/StartMqttReceive &
 			/bin/sleep 5
-			mpub -r -t "${TOPIC_LASTWILL}" -m online
+			mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online
 		fi
 
 		if [ -x /etc/tcpdump2mqtt/keypress.sh ] && \
