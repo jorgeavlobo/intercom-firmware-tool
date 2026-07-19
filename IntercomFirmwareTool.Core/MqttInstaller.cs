@@ -395,8 +395,16 @@ namespace IntercomFirmwareTool.Core
                     fs.FileExists("/etc/init.d/flexisipsh"), ""));
                 string flexi = fs.FileExists("/etc/init.d/flexisipsh")
                     ? ReadAllText(fs, "/etc/init.d/flexisipsh") : "";
-                checks.Add(new("flexisipsh has the touch line exactly once",
-                    CountOccurrences(flexi, "/bin/touch /tmp/flexisip_restarted") == 1, ""));
+                // Verify the marker sits inside the start) case exactly once and
+                // immediately after the start-stop-daemon --start line — not merely
+                // present somewhere in the file (a comment or another case).
+                const string flexiMarker = "/bin/touch /tmp/flexisip_restarted";
+                string[] flexiLines = flexi.Replace("\r\n", "\n").Split('\n');
+                var (fxBlock, fxAnchor, fxCount) = ScanFlexisipStartCase(flexiLines, flexiMarker);
+                bool fxPlaced = fxAnchor >= 0 && fxAnchor + 1 < flexiLines.Length &&
+                    flexiLines[fxAnchor + 1].Contains(flexiMarker);
+                checks.Add(new("flexisipsh touch line once, right after start-stop-daemon in start)",
+                    fxBlock && fxCount == 1 && fxPlaced, ""));
                 bool bakExists = fs.FileExists("/etc/init.d/flexisipsh_bak");
                 checks.Add(new("flexisipsh_bak exists", bakExists, ""));
                 // The patch must preserve the script's original mode/owner. The
@@ -549,28 +557,17 @@ namespace IntercomFirmwareTool.Core
                 if (bowner != null) fs.SetOwner(path + "_bak", bowner.Item1, bowner.Item2);
             }
 
-            if (content.Contains(marker)) return; // already patched (by us or upstream)
-
-            // Insert specifically inside the `start)` case: find that case label,
-            // then the first `start-stop-daemon --start` before the block ends
-            // (`;;`). Searching the whole file could match a start-stop-daemon line
-            // in another case/function and patch the wrong place.
+            // Idempotency AND the insert point are both scoped to the `start)`
+            // case — the marker only "counts" where we put it. A stray occurrence
+            // elsewhere (a comment, another case) must neither suppress the patch
+            // nor be mistaken for it, and searching the whole file could match a
+            // start-stop-daemon line in another case and patch the wrong place.
             string[] lines = content.Replace("\r\n", "\n").Split('\n');
-            int startCase = Array.FindIndex(lines, l =>
-            {
-                string t = l.Trim();
-                return t == "start)" || t.StartsWith("start)", StringComparison.Ordinal);
-            });
-            if (startCase < 0)
+            var (blockFound, anchor, markerCount) = ScanFlexisipStartCase(lines, marker);
+            if (!blockFound)
                 throw new InvalidOperationException(
                     CoreStrings.Format("Mqtt_AnchorMissing", path, "start) case"));
-
-            int anchor = -1;
-            for (int i = startCase + 1; i < lines.Length; i++)
-            {
-                if (IsCaseTerminator(lines[i])) break;   // end of the start) block
-                if (lines[i].Contains("start-stop-daemon --start")) { anchor = i; break; }
-            }
+            if (markerCount > 0) return;   // already patched inside the start) case
             if (anchor < 0)
                 throw new InvalidOperationException(CoreStrings.Format("Mqtt_AnchorMissing", path,
                     "start-stop-daemon --start (in the start) case)"));
@@ -578,6 +575,35 @@ namespace IntercomFirmwareTool.Core
             var patched = new List<string>(lines);
             patched.Insert(anchor + 1, "\t" + marker);
             RewritePreservingMeta(fs, path, string.Join("\n", patched));
+        }
+
+        /// <summary>
+        /// Parses flexisipsh's <c>start)</c> case. Returns whether that case
+        /// exists, the index of its <c>start-stop-daemon --start</c> line (the
+        /// insert anchor, or -1), and how many lines INSIDE the case contain
+        /// <paramref name="marker"/>. Bounding to <c>start)</c> (via
+        /// <see cref="IsCaseTerminator"/>) mirrors where the marker is inserted,
+        /// so a stray occurrence in a comment or another case is ignored by both
+        /// the idempotency check and the read-back validation.
+        /// </summary>
+        private static (bool blockFound, int anchor, int markerCount) ScanFlexisipStartCase(
+            string[] lines, string marker)
+        {
+            int startCase = Array.FindIndex(lines, l =>
+            {
+                string t = l.Trim();
+                return t == "start)" || t.StartsWith("start)", StringComparison.Ordinal);
+            });
+            if (startCase < 0) return (false, -1, 0);
+
+            int anchor = -1, count = 0;
+            for (int i = startCase + 1; i < lines.Length; i++)
+            {
+                if (IsCaseTerminator(lines[i])) break;   // end of the start) block
+                if (anchor < 0 && lines[i].Contains("start-stop-daemon --start")) anchor = i;
+                if (lines[i].Contains(marker)) count++;
+            }
+            return (true, anchor, count);
         }
 
         /// <summary>
@@ -799,18 +825,6 @@ namespace IntercomFirmwareTool.Core
                 ? Convert.ToHexStringLower(SHA256.HashData(buf)) : "";
             checks.Add(new($"{bin.InstallPath} SHA-256 matches embedded {bin.Name}",
                 string.Equals(sha, bin.Sha256Hex, StringComparison.Ordinal), sha));
-        }
-
-        private static int CountOccurrences(string haystack, string needle)
-        {
-            if (needle.Length == 0) return 0;
-            int count = 0, i = 0;
-            while ((i = haystack.IndexOf(needle, i, StringComparison.Ordinal)) >= 0)
-            {
-                count++;
-                i += needle.Length;
-            }
-            return count;
         }
 
         private static bool IsValidHost(string host)
