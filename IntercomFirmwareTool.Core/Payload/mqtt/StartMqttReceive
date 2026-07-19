@@ -46,8 +46,16 @@ handle_json() {
 			# rename, so a crash mid-write can't leave a partial (e.g. a config).
 			tmp="${file_path}.tmp.$$"
 			# `--` throughout: file_path (and thus tmp) comes from the MQTT
-			# payload and could begin with '-'.
-			if printf '%s' "$data" | head -c 262144 > "$tmp"; then
+			# payload and could begin with '-'. umask 077 so the temp is never
+			# briefly world-readable; then match the existing file's mode so
+			# replacing e.g. the 0600 config does not loosen its permissions
+			# (chmod is best-effort — on failure the temp stays 0600, which is
+			# restrictive, not a loosening).
+			if ( umask 077; printf '%s' "$data" | head -c 262144 > "$tmp" ); then
+				if [ -e "$file_path" ]; then
+					mode=$(stat -c '%a' "$file_path" 2>/dev/null)
+					[ -n "$mode" ] && chmod "$mode" -- "$tmp" 2>/dev/null
+				fi
 				mv -- "$tmp" "$file_path"
 			else
 				rm -f -- "$tmp"
