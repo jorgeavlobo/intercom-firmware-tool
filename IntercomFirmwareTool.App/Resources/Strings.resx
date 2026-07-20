@@ -408,7 +408,7 @@ Key: {1}</value></data>
   <data name="Hint_MqttTcpdump" xml:space="preserve"><value>Default: a direct OpenWebNet monitor socket, lighter on the device. The tcpdump path is used automatically as a fallback if the gateway is unreachable.</value></data>
   <data name="Chk_MqttHaDiscovery" xml:space="preserve"><value>Home Assistant auto-discovery</value></data>
   <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Publish retained MQTT discovery configs so the bridge's entities (connectivity, bus dump, last key) appear in Home Assistant automatically, with no manual YAML. Read-only — no command entity is created.</value></data>
-  <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>On by default: the bridge's entities (connectivity, bus, last key) appear in Home Assistant automatically, as one device. Untick to skip it; unticking a later firmware build also removes them from the broker.</value></data>
+  <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>On by default: the bridge's entities (connectivity, bus, last key) appear in Home Assistant automatically, as one device. Untick to skip it; a later build with the same device id then clears them from the broker.</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Device id:</value></data>
   <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identifier for the Home Assistant device and its entities. Use a distinct value per unit so several bridges can coexist on one broker. Letters, digits, '_' or '-' only.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receive (commands):</value></data>
