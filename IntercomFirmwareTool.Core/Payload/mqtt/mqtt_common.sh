@@ -27,6 +27,12 @@ fi
 : "${OWN_HOST:=127.0.0.1}"
 : "${OWN_PORT_MON:=20000}"
 
+# Home Assistant discovery success marker. ha_discovery.sh writes it once the
+# retained configs are reconciled; the orchestrator re-launches ha_discovery.sh
+# from its watchdog loop until this file exists, so a broker that is still down
+# at boot can't leave discovery unpublished. On tmpfs, so a reboot re-reconciles.
+: "${HA_MARKER:=/tmp/tcpdump2mqtt_ha_done}"
+
 # mosquitto_pub with auth AND TLS applied independently (compose, do not choose
 # one or the other). Extra args (topic, -l, -r, -m ...) pass through; mosquitto
 # accepts options in any order.

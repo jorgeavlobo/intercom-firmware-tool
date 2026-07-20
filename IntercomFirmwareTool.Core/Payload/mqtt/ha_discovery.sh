@@ -6,13 +6,15 @@
 # RETAINED, so Home Assistant auto-creates the bridge's entities (connectivity,
 # bus dump, last key) with no manual YAML.
 #
-# Run once at startup by TcpDump2Mqtt. When HA_DISCOVERY=1 it PUBLISHES each config
-# retained (so HA auto-creates the entities); when HA_DISCOVERY=0 it CLEARS the
-# retained configs (empty payload) so an opt-out actually removes the entities
-# from a broker that already saw them. Retained state only needs to land ONCE, so
-# this retries a few times if the broker isn't up yet, then gives up (a reboot
-# retries). Read-only: it publishes nothing to the OpenWebNet bus and creates no
-# command entity.
+# Launched by TcpDump2Mqtt. When HA_DISCOVERY=1 it PUBLISHES each config retained
+# (so HA auto-creates the entities); when HA_DISCOVERY=0 it CLEARS the retained
+# configs (empty payload) so an opt-out actually removes the entities from a broker
+# that already saw them. Retained state only needs to land ONCE, so this retries a
+# few times if the broker isn't up yet; on success it writes HA_MARKER and exits.
+# The orchestrator watchdog re-launches this script until HA_MARKER exists, so a
+# broker that is still down after these retries is picked up on the next loop (no
+# reboot needed). Read-only: it publishes nothing to the OpenWebNet bus and creates
+# no command entity.
 #
 # MIT-licensed, part of IntercomFirmwareTool's MQTT bridge payload.
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
@@ -85,6 +87,8 @@ i=0
 while [ "$i" -lt 6 ]; do
 	if apply_all; then
 		echo "ha_discovery: ${action}ed Home Assistant discovery configs"
+		# Signal convergence so the orchestrator stops re-launching us.
+		: > "$HA_MARKER" 2>/dev/null
 		exit 0
 	fi
 	i=$((i + 1))

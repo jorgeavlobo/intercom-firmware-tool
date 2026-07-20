@@ -762,6 +762,14 @@ namespace IntercomFirmwareTool.Core
             string Topic(string component, string objectId) =>
                 $"{prefix}/{component}/{node}/{objectId}/config";
 
+            // NOTE on availability: the last-will (TopicLastWill) is the ONLY
+            // online/offline signal today, and with the current one-shot -C 1
+            // subscription (mqtt_sub_one) the will fires only on an UNCLEAN drop —
+            // clean disconnects leave it 'online', so "unavailable" is best-effort,
+            // not reliable. This is by design for Phase 2 item 1: a persistent
+            // subscription (item 2, #12) will keep the will accurate and make the
+            // connectivity sensor and the per-entity availability blocks below
+            // trustworthy. Kept intentionally so the entities exist now.
             var entities = new List<HaEntity>();
 
             // Connectivity: reports online/offline itself, so it carries NO

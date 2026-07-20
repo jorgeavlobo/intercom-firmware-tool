@@ -93,15 +93,6 @@ echo "MQTT host ${MQTT_HOST}:${MQTT_PORT}"
 echo "Checking for stale processes..."
 kill_childs
 
-# Home Assistant auto-discovery: reconcile the retained discovery configs once —
-# ha_discovery.sh PUBLISHES them when HA_DISCOVERY=1, or CLEARS them when 0 (so an
-# opt-out removes the entities). Always run it (it self-selects the action);
-# backgrounded and self-retrying, so a broker that isn't up yet can't block this
-# watchdog loop, and it exits on its own once done (or after its retries).
-if [ -x /etc/tcpdump2mqtt/ha_discovery.sh ]; then
-	/etc/tcpdump2mqtt/ha_discovery.sh &
-fi
-
 # Keep the bridge services running. Deliberately NOT gated on any gateway/ICMP
 # probe: a gateway that blocks ICMP — or an unreachable gateway with a reachable
 # local/same-subnet broker — must not stop the bridge from starting. Broker
@@ -136,6 +127,20 @@ while : ; do
 	if [ -x /etc/tcpdump2mqtt/keypress.sh ] && \
 	   ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/keypress.sh" > /dev/null 2>&1; then
 		/etc/tcpdump2mqtt/keypress.sh &
+	fi
+
+	# Home Assistant auto-discovery: reconcile the retained discovery configs —
+	# ha_discovery.sh PUBLISHES them when HA_DISCOVERY=1, or CLEARS them when 0 (so
+	# an opt-out removes the entities), and writes HA_MARKER once it succeeds.
+	# Re-launch it from the loop until that marker exists: retained state only needs
+	# to land ONCE, but a broker that is still down after the script's own retries
+	# would, with a one-shot launch, never get discovery published/cleared until a
+	# reboot. Gated on HA_MARKER (done) and on it not already running (pgrep, path
+	# re_escaped so the '.sh' dots can't over-match). Backgrounded so its retry
+	# sleeps can't block this watchdog loop.
+	if [ -x /etc/tcpdump2mqtt/ha_discovery.sh ] && [ ! -e "$HA_MARKER" ] && \
+	   ! /usr/bin/pgrep -f "$(re_escape "/etc/tcpdump2mqtt/ha_discovery.sh")" > /dev/null 2>&1; then
+		/etc/tcpdump2mqtt/ha_discovery.sh &
 	fi
 
 	/bin/sleep 30
