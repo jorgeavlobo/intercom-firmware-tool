@@ -356,6 +356,7 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Der Fernbefehlskanal kann Befehle auf dem Gerät ausführen. Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>MQTT-Broker</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>Der MQTT-Port muss zwischen 1 und 65535 liegen.</value></data>
+  <data name="MqttHint_Host" xml:space="preserve"><value>Der Broker-Host muss eine gültige IP-Adresse oder ein gültiger Hostname sein.</value></data>
   <data name="MqttHint_HostIp" xml:space="preserve"><value>Die Broker-Host-IP muss eine gültige IPv4-Adresse sein oder für die automatische Auflösung leer gelassen werden.</value></data>
   <data name="MqttHint_UserPass" xml:space="preserve"><value>Legen Sie MQTT-Benutzername und -Passwort zusammen fest oder lassen Sie beide leer.</value></data>
   <data name="MqttHint_CertKey" xml:space="preserve"><value>Geben Sie das TLS-Client-Zertifikat und den Schlüssel zusammen an oder keines von beiden.</value></data>

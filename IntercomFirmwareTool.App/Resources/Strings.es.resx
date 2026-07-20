@@ -356,6 +356,7 @@ Abra Avanzado → Resultado para ver qué comprobaciones fallaron.</value></data
   <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>El canal de comandos remoto puede ejecutar comandos en el dispositivo. Actívelo solo con un broker autenticado y de confianza.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>broker MQTT</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>El puerto MQTT debe estar entre 1 y 65535.</value></data>
+  <data name="MqttHint_Host" xml:space="preserve"><value>El host del broker debe ser una dirección IP o un nombre de host válido.</value></data>
   <data name="MqttHint_HostIp" xml:space="preserve"><value>La IP del host del broker debe ser una dirección IPv4 válida, o dejarse en blanco para resolverse automáticamente.</value></data>
   <data name="MqttHint_UserPass" xml:space="preserve"><value>Configure el usuario y la contraseña MQTT juntos, o deje ambos vacíos.</value></data>
   <data name="MqttHint_CertKey" xml:space="preserve"><value>Proporcione el certificado y la clave de cliente TLS juntos, o ninguno.</value></data>

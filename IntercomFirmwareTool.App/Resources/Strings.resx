@@ -356,6 +356,7 @@ Open Advanced → Result to see which checks failed.</value></data>
   <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>The remote command channel can run commands on the device. Enable it only with an authenticated, trusted broker.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>MQTT broker</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>The MQTT port must be between 1 and 65535.</value></data>
+  <data name="MqttHint_Host" xml:space="preserve"><value>The broker host must be a valid IP address or hostname.</value></data>
   <data name="MqttHint_HostIp" xml:space="preserve"><value>The broker host IP must be a valid IPv4 address, or left blank to auto-resolve.</value></data>
   <data name="MqttHint_UserPass" xml:space="preserve"><value>Set the MQTT username and password together, or leave both empty.</value></data>
   <data name="MqttHint_CertKey" xml:space="preserve"><value>Provide the TLS client certificate and key together, or neither.</value></data>

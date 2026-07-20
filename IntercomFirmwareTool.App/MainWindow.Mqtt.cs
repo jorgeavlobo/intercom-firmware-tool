@@ -91,7 +91,14 @@ namespace IntercomFirmwareTool.App
         // ---- Enable toggle + field-change plumbing --------------------------
 
         /// <summary>Show/hide the config panel with the enable box, then re-gate.</summary>
-        private void ChkMqtt_Toggled(object sender, RoutedEventArgs e) => UpdateBuildEnabled();
+        private void ChkMqtt_Toggled(object sender, RoutedEventArgs e)
+        {
+            // Toggling the bridge on/off is a config change: invalidate any in-flight
+            // test (via the generation bump) and hide a prior result, so a stale ✓/✗
+            // can't linger for a config that is no longer enabled.
+            ClearMqttTestStatus();
+            UpdateBuildEnabled();
+        }
 
         /// <summary>Any MQTT text field changed — clear a stale test result and
         /// re-evaluate the Build gate/cues. (Also refreshes the host-IP row and
@@ -499,6 +506,24 @@ namespace IntercomFirmwareTool.App
         private static bool IsValidPortText(string s) =>
             int.TryParse(s.Trim(), out int p) && p >= 1 && p <= 65535;
 
+        /// <summary>A valid broker host: an IP address, or a hostname of 1..253 chars
+        /// whose dot-separated labels are 1..63 chars of [A-Za-z0-9-] and don't start
+        /// or end with '-'. Kept in lockstep with MqttInstaller.IsValidHost so the
+        /// inline gate never enables Build for a host Core would reject.</summary>
+        private static bool IsValidMqttHost(string host)
+        {
+            if (IPAddress.TryParse(host, out _)) return true;
+            if (host.Length == 0 || host.Length > 253) return false;
+            foreach (var label in host.Split('.'))
+            {
+                if (label.Length == 0 || label.Length > 63) return false;
+                if (label[0] == '-' || label[^1] == '-') return false;
+                foreach (char c in label)
+                    if (!(char.IsAsciiLetterOrDigit(c) || c == '-')) return false;
+            }
+            return true;
+        }
+
         /// <summary>True when the MQTT config is acceptable to build (or the bridge
         /// is off). Host presence is required; the rest is delegated to
         /// <see cref="MqttStructuralError"/>.</summary>
@@ -517,10 +542,15 @@ namespace IntercomFirmwareTool.App
             if (!MqttEnabled) return null;
             if (!IsValidPortText(TxtMqttPort.Text)) return L("MqttHint_Port");
 
+            // Broker host must be a valid IP or hostname (mirror MqttInstaller's
+            // IsValidHost) — otherwise Build would enable and then abort with a Core
+            // validation popup. The empty-host case is the "still needed" list's job.
+            string hostTrim = TxtMqttHost.Text.Trim();
+            if (hostTrim.Length > 0 && !IsValidMqttHost(hostTrim)) return L("MqttHint_Host");
+
             // Host-IP override (only used when the broker is a hostname) must be a
             // valid IPv4 if supplied — Core requires it, so mirror that here rather
             // than let Build enable and then abort with a validation popup.
-            string hostTrim = TxtMqttHost.Text.Trim();
             if (hostTrim.Length > 0 && !IPAddress.TryParse(hostTrim, out _))
             {
                 string hip = TxtMqttHostIp.Text.Trim();

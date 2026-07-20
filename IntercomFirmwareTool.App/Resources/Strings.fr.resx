@@ -356,6 +356,7 @@ Ouvrez Avancé → Résultat pour voir quelles vérifications ont échoué.</val
   <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Le canal de commandes à distance peut exécuter des commandes sur l'appareil. Ne l'activez qu'avec un broker authentifié et de confiance.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>broker MQTT</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>Le port MQTT doit être compris entre 1 et 65535.</value></data>
+  <data name="MqttHint_Host" xml:space="preserve"><value>L'hôte du broker doit être une adresse IP ou un nom d'hôte valide.</value></data>
   <data name="MqttHint_HostIp" xml:space="preserve"><value>L'IP de l'hôte du broker doit être une adresse IPv4 valide, ou laissée vide pour une résolution automatique.</value></data>
   <data name="MqttHint_UserPass" xml:space="preserve"><value>Définissez le nom d'utilisateur et le mot de passe MQTT ensemble, ou laissez les deux vides.</value></data>
   <data name="MqttHint_CertKey" xml:space="preserve"><value>Fournissez le certificat et la clé client TLS ensemble, ou aucun des deux.</value></data>
