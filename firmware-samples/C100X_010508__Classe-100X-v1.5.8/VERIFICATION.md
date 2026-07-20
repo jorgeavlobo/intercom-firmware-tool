@@ -17,9 +17,12 @@ build.
 
 ## Method
 
-```
+```shell
 gunzip -kc btweb_only.ext4.gz > btweb_only.ext4      # ext4, 1 GiB, UUID dcf98ad1-…
-mount -o loop,ro btweb_only.ext4 mnt                  # the device's real rootfs
+mkdir -p mnt
+sudo mount -o loop,ro btweb_only.ext4 mnt            # the device's real rootfs (needs root)
+# … verification steps below, all read-only …
+sudo umount mnt                                      # when done
 ```
 
 Each `MqttInstaller` path/assumption was then replicated against `mnt/…`. The
