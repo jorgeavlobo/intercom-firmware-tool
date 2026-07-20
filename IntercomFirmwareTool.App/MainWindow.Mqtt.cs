@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Net;
 using System.Net.Security;
+using System.Net.Sockets;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
@@ -58,6 +59,7 @@ namespace IntercomFirmwareTool.App
         private void InitMqttUi()
         {
             _mqttPass = new MaskedPasswordField(TxtMqttPass);
+            _mqttPass.Changed += ClearMqttTestStatus;   // a changed password invalidates a prior test
             _mqttPass.Changed += UpdateBuildEnabled;
             // Default the port here (not in XAML) so its TextChanged handler — which
             // calls UpdateBuildEnabled — can never fire during InitializeComponent,
@@ -82,10 +84,15 @@ namespace IntercomFirmwareTool.App
         /// <summary>Show/hide the config panel with the enable box, then re-gate.</summary>
         private void ChkMqtt_Toggled(object sender, RoutedEventArgs e) => UpdateBuildEnabled();
 
-        /// <summary>Any MQTT text field changed — re-evaluate the Build gate/cues.
-        /// (Also refreshes the host-IP row and remote-shell enablement via the
-        /// UpdateBuildEnabled → UpdateMqttVisibility cascade.)</summary>
-        private void MqttField_TextChanged(object sender, TextChangedEventArgs e) => UpdateBuildEnabled();
+        /// <summary>Any MQTT text field changed — clear a stale test result and
+        /// re-evaluate the Build gate/cues. (Also refreshes the host-IP row and
+        /// remote-shell enablement via the UpdateBuildEnabled → UpdateMqttVisibility
+        /// cascade.)</summary>
+        private void MqttField_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            ClearMqttTestStatus();
+            UpdateBuildEnabled();
+        }
 
         /// <summary>The remote-shell DANGER toggle changed. Turning it ON asks for an
         /// explicit confirmation (it can run commands on the device, cleartext without
@@ -150,6 +157,7 @@ namespace IntercomFirmwareTool.App
             else if (box == TxtMqttCertPath) _mqttCertPath = chosen;
             else _mqttKeyPath = chosen;
             SetPathText(box, chosen);
+            ClearMqttTestStatus();   // TLS material changed → prior test no longer valid
             UpdateBuildEnabled();
         }
 
@@ -159,6 +167,7 @@ namespace IntercomFirmwareTool.App
             else if (sender == BtnClearMqttCert) _mqttCertPath = null;
             else _mqttKeyPath = null;
             RefreshMqttPlaceholders();
+            ClearMqttTestStatus();
             UpdateBuildEnabled();
         }
 
@@ -188,6 +197,12 @@ namespace IntercomFirmwareTool.App
             MqttSection.Visibility = (advanced || MqttEnabled)
                 ? Visibility.Visible : Visibility.Collapsed;
             MqttPanel.Visibility = MqttEnabled ? Visibility.Visible : Visibility.Collapsed;
+
+            // Lock the whole MQTT section during a build/verify op (like the other
+            // build inputs) so the visible config can't drift from the mqttOpts
+            // snapshot captured for the running build.
+            ChkMqtt.IsEnabled = _uiEnabled;
+            MqttPanel.IsEnabled = _uiEnabled;
 
             BtnClearMqttCa.IsEnabled = _uiEnabled && _mqttCaPath != null;
             BtnClearMqttCert.IsEnabled = _uiEnabled && _mqttCertPath != null;
@@ -289,77 +304,90 @@ namespace IntercomFirmwareTool.App
             var factory = new MqttFactory();
             using var client = factory.CreateMqttClient();
 
-            var builder = new MqttClientOptionsBuilder()
-                .WithTcpServer(host, port)
-                // Unique per test so two app instances testing the same broker don't
-                // collide on client ID (which would disconnect one another).
-                .WithClientId("intercom-fw-tool-conn-test-" + Guid.NewGuid().ToString("N"))
-                .WithCleanSession(true)
-                .WithTimeout(TimeSpan.FromSeconds(6));
-
-            if (user != null && pass != null)
-                builder = builder.WithCredentials(user, pass);
-
-            bool wantTls = caPem != null || (certPem != null && keyPem != null);
-            if (wantTls)
+            // The mutual-TLS client cert must stay alive through ConnectAsync (the
+            // handshake uses it) and be disposed afterwards — X509Certificate2 holds
+            // a native key handle. Tracked here, disposed in the finally below.
+            X509Certificate2? clientCert = null;
+            try
             {
-                var tls = new MqttClientTlsOptionsBuilder().UseTls(true);
+                var builder = new MqttClientOptionsBuilder()
+                    .WithTcpServer(host, port)
+                    // Unique per test so two app instances testing the same broker
+                    // don't collide on client ID (which would disconnect one another).
+                    .WithClientId("intercom-fw-tool-conn-test-" + Guid.NewGuid().ToString("N"))
+                    .WithCleanSession(true)
+                    .WithTimeout(TimeSpan.FromSeconds(6));
 
-                if (caPem != null)
+                if (user != null && pass != null)
+                    builder = builder.WithCredentials(user, pass);
+
+                bool wantTls = caPem != null || (certPem != null && keyPem != null);
+                if (wantTls)
                 {
-                    // Validate the broker certificate against the supplied CA as a
-                    // custom trust root (the CA is provided precisely because it is
-                    // not in the machine store). Everything is built and disposed
-                    // inside the handler (per handshake) so no certificate handle
-                    // leaks across repeated tests.
-                    tls = tls.WithCertificateValidationHandler(ctx =>
+                    var tls = new MqttClientTlsOptionsBuilder().UseTls(true);
+
+                    if (caPem != null)
                     {
-                        // A missing or name-mismatched server cert is a TLS failure
-                        // that chain building does NOT cover — reject it outright so
-                        // the test is a meaningful TLS check, then require the chain
-                        // to build to the supplied CA.
-                        if ((ctx.SslPolicyErrors & (SslPolicyErrors.RemoteCertificateNotAvailable
-                                | SslPolicyErrors.RemoteCertificateNameMismatch)) != 0)
-                            return false;
-                        using var ca = X509Certificate2.CreateFromPem(caPem);
-                        using var chain = new X509Chain();
-                        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
-                        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
-                        chain.ChainPolicy.CustomTrustStore.Add(ca);
-                        using var server = new X509Certificate2(ctx.Certificate);
-                        return chain.Build(server);
-                    });
+                        // Validate the broker certificate against the supplied CA as a
+                        // custom trust root (the CA is provided precisely because it is
+                        // not in the machine store). Everything is built and disposed
+                        // inside the handler (per handshake) so no certificate handle
+                        // leaks across repeated tests.
+                        tls = tls.WithCertificateValidationHandler(ctx =>
+                        {
+                            // A missing or name-mismatched server cert is a TLS failure
+                            // that chain building does NOT cover — reject it outright so
+                            // the test is a meaningful TLS check, then require the chain
+                            // to build to the supplied CA.
+                            if ((ctx.SslPolicyErrors & (SslPolicyErrors.RemoteCertificateNotAvailable
+                                    | SslPolicyErrors.RemoteCertificateNameMismatch)) != 0)
+                                return false;
+                            using var ca = X509Certificate2.CreateFromPem(caPem);
+                            using var chain = new X509Chain();
+                            chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                            chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                            chain.ChainPolicy.CustomTrustStore.Add(ca);
+                            using var server = new X509Certificate2(ctx.Certificate);
+                            return chain.Build(server);
+                        });
+                    }
+
+                    if (certPem != null && keyPem != null)
+                    {
+                        // A PEM-loaded cert must be round-tripped through PKCS#12 or the
+                        // private key is unusable for the handshake on Windows SChannel.
+                        using var ephemeral = X509Certificate2.CreateFromPem(certPem, keyPem);
+                        clientCert = new X509Certificate2(ephemeral.Export(X509ContentType.Pkcs12));
+                        tls = tls.WithClientCertificates(new X509Certificate2Collection { clientCert });
+                    }
+
+                    builder = builder.WithTlsOptions(tls.Build());
                 }
 
-                if (certPem != null && keyPem != null)
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+                MqttClientConnectResult res = await client.ConnectAsync(builder.Build(), cts.Token);
+                bool ok = res.ResultCode == MqttClientConnectResultCode.Success;
+
+                if (client.IsConnected)
                 {
-                    // A PEM-loaded cert must be round-tripped through PKCS#12 or the
-                    // private key is unusable for the handshake on Windows SChannel.
-                    using var ephemeral = X509Certificate2.CreateFromPem(certPem, keyPem);
-                    var clientCert = new X509Certificate2(ephemeral.Export(X509ContentType.Pkcs12));
-                    tls = tls.WithClientCertificates(new X509Certificate2Collection { clientCert });
+                    try { await client.DisconnectAsync(); } catch { /* best-effort close */ }
                 }
 
-                builder = builder.WithTlsOptions(tls.Build());
+                if (!ok)
+                {
+                    string reason = string.IsNullOrEmpty(res.ReasonString)
+                        ? res.ResultCode.ToString()
+                        : $"{res.ResultCode}: {res.ReasonString}";
+                    throw new Exception(reason);
+                }
+                return true;
             }
-
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
-            MqttClientConnectResult res = await client.ConnectAsync(builder.Build(), cts.Token);
-            bool ok = res.ResultCode == MqttClientConnectResultCode.Success;
-
-            if (client.IsConnected)
+            finally
             {
-                try { await client.DisconnectAsync(); } catch { /* best-effort close */ }
+                // The client cert outlives the handshake; release its native key
+                // handle now that ConnectAsync has returned (success or throw).
+                clientCert?.Dispose();
             }
-
-            if (!ok)
-            {
-                string reason = string.IsNullOrEmpty(res.ReasonString)
-                    ? res.ResultCode.ToString()
-                    : $"{res.ResultCode}: {res.ReasonString}";
-                throw new Exception(reason);
-            }
-            return true;
         }
 
         private void SetMqttTestStatus(string text, bool error)
@@ -367,6 +395,18 @@ namespace IntercomFirmwareTool.App
             TxtMqttTestStatus.Text = text;
             TxtMqttTestStatus.Foreground = error ? ErrorBrush : ReadyBrush;
             TxtMqttTestStatus.Visibility = Visibility.Visible;
+            // LiveSetting alone is inert in WPF; raise the notification so screen
+            // readers actually announce the test result (mirrors RenderStatus).
+            AnnounceLiveRegion(TxtMqttTestStatus);
+        }
+
+        /// <summary>Hide a stale test result. Called when a connection-affecting field
+        /// changes, so a green "Connected" from a previous config can't be mistaken
+        /// for validation of the current (untested) one.</summary>
+        private void ClearMqttTestStatus()
+        {
+            TxtMqttTestStatus.Text = "";
+            TxtMqttTestStatus.Visibility = Visibility.Collapsed;
         }
 
         // ---- Validation (mirror of MqttInstaller.Validate for inline cues) --
@@ -391,6 +431,18 @@ namespace IntercomFirmwareTool.App
         {
             if (!MqttEnabled) return null;
             if (!IsValidPortText(TxtMqttPort.Text)) return L("MqttHint_Port");
+
+            // Host-IP override (only used when the broker is a hostname) must be a
+            // valid IPv4 if supplied — Core requires it, so mirror that here rather
+            // than let Build enable and then abort with a validation popup.
+            string hostTrim = TxtMqttHost.Text.Trim();
+            if (hostTrim.Length > 0 && !IPAddress.TryParse(hostTrim, out _))
+            {
+                string hip = TxtMqttHostIp.Text.Trim();
+                if (hip.Length > 0 &&
+                    !(IPAddress.TryParse(hip, out var ip) && ip.AddressFamily == AddressFamily.InterNetwork))
+                    return L("MqttHint_HostIp");
+            }
 
             bool hasUser = TxtMqttUser.Text.Trim().Length > 0;
             bool hasPass = (_mqttPass?.Value.Length ?? 0) > 0;
