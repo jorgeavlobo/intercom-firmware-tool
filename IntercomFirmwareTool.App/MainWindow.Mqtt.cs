@@ -672,8 +672,9 @@ namespace IntercomFirmwareTool.App
                 // Unchecked (default) = the low-footprint OpenWebNet socket monitor;
                 // checked = force the faithful tcpdump + filter.py capture back-end.
                 UseTcpdumpCapture: ChkMqttTcpdump.IsChecked == true,
-                // Publish HA discovery configs so entities appear automatically.
-                // Opt-in (off by default, per #12); read-only entities.
+                // Publish HA discovery configs so entities appear automatically. ON
+                // by default when the bridge is installed (plug-and-play); read-only
+                // entities, so secure-by-default holds.
                 EnableHaDiscovery: ChkMqttHaDiscovery.IsChecked == true)
             {
                 // Topics are prefilled with the record's defaults, so an untouched
