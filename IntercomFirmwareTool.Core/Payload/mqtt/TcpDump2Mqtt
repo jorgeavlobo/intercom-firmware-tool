@@ -90,11 +90,12 @@ echo "MQTT host ${MQTT_HOST}:${MQTT_PORT}"
 echo "Checking for stale processes..."
 kill_childs
 
-# Home Assistant auto-discovery (optional): publish the retained discovery configs
-# once. Backgrounded and self-retrying, so a broker that isn't up yet can't block
-# this watchdog loop; it exits on its own once published (or after its retries).
-if [ "${HA_DISCOVERY:-0}" = "1" ] && [ -x /etc/tcpdump2mqtt/ha_discovery.sh ]; then
-	echo "Publishing Home Assistant discovery configs..."
+# Home Assistant auto-discovery: reconcile the retained discovery configs once —
+# ha_discovery.sh PUBLISHES them when HA_DISCOVERY=1, or CLEARS them when 0 (so an
+# opt-out removes the entities). Always run it (it self-selects the action);
+# backgrounded and self-retrying, so a broker that isn't up yet can't block this
+# watchdog loop, and it exits on its own once done (or after its retries).
+if [ -x /etc/tcpdump2mqtt/ha_discovery.sh ]; then
 	/etc/tcpdump2mqtt/ha_discovery.sh &
 fi
 

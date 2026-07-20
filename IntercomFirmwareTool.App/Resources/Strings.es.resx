@@ -408,7 +408,9 @@ Clave: {1}</value></data>
   <data name="Hint_MqttTcpdump" xml:space="preserve"><value>Predeterminado: un socket de monitorización OpenWebNet directo, más ligero para el dispositivo. La vía tcpdump se usa automáticamente como alternativa si el gateway no es accesible.</value></data>
   <data name="Chk_MqttHaDiscovery" xml:space="preserve"><value>Descubrimiento automático de Home Assistant</value></data>
   <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Publica configuraciones de descubrimiento MQTT retenidas para que las entidades del puente (conectividad, volcado del bus, última tecla) aparezcan automáticamente en Home Assistant, sin YAML manual. Solo lectura — no se crea ninguna entidad de comando.</value></data>
-  <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Activado de forma predeterminada. Crea un dispositivo de Home Assistant con tres entidades de diagnóstico. Desmárcalo si prefieres configurar las entidades manualmente.</value></data>
+  <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Desactivado de forma predeterminada. Cuando se marca, crea un dispositivo de Home Assistant con tres entidades de diagnóstico; desmarcarlo en una compilación de firmware posterior las elimina del broker.</value></data>
+  <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Id del dispositivo:</value></data>
+  <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identificador del dispositivo de Home Assistant y sus entidades. Usa un valor distinto por unidad para que varios puentes coexistan en un mismo broker. Sin espacios, '/', '+' ni '#'.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Recepción (comandos):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Volcado del bus:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Fecha de inicio:</value></data>

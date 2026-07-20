@@ -672,8 +672,8 @@ namespace IntercomFirmwareTool.App
                 // Unchecked (default) = the low-footprint OpenWebNet socket monitor;
                 // checked = force the faithful tcpdump + filter.py capture back-end.
                 UseTcpdumpCapture: ChkMqttTcpdump.IsChecked == true,
-                // Publish HA discovery configs so entities appear automatically. On
-                // by default in the UI (plug-and-play, read-only entities).
+                // Publish HA discovery configs so entities appear automatically.
+                // Opt-in (off by default, per #12); read-only entities.
                 EnableHaDiscovery: ChkMqttHaDiscovery.IsChecked == true)
             {
                 // Topics are prefilled with the record's defaults, so an untouched
@@ -689,6 +689,10 @@ namespace IntercomFirmwareTool.App
                 TopicKey = TxtMqttTopicKey.Text,
                 TopicCmdResult = TxtMqttTopicCmdResult.Text,
                 TopicFileContent = TxtMqttTopicFileContent.Text,
+                // HA device/node id — distinct per unit lets several bridges coexist
+                // on one broker. Fall back to the record default if the field was
+                // cleared, so an empty box doesn't force a validation error.
+                HaNodeId = NullIfEmpty(TxtMqttHaNodeId.Text.Trim()) ?? new MqttOptions("x").HaNodeId,
             };
 
             // Surface the Core validator's exact (localized) message as a clean

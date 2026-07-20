@@ -171,7 +171,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
     <value>El host del monitor OpenWebNet debe ser válido y su puerto debe estar entre 1 y 65535.</value>
   </data>
   <data name="Mqtt_InvalidHaDiscovery" xml:space="preserve">
-    <value>El prefijo y el node id de discovery de Home Assistant deben ser no vacíos y sin espacios ni comodines MQTT (+ #).</value>
+    <value>El prefijo y el node id de discovery de Home Assistant deben ser no vacíos y sin espacios ni comodines MQTT (+ #); el node id no puede contener '/', y el prefijo no puede empezar ni terminar con '/' ni contener '//'.</value>
   </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>El usuario y la contraseña MQTT deben establecerse juntos (ambos o ninguno).</value>

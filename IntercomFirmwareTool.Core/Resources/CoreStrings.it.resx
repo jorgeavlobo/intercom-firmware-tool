@@ -171,7 +171,7 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
     <value>L'host del monitor OpenWebNet deve essere valido e la porta deve essere compresa tra 1 e 65535.</value>
   </data>
   <data name="Mqtt_InvalidHaDiscovery" xml:space="preserve">
-    <value>Il prefisso e il node id di discovery di Home Assistant devono essere non vuoti e privi di spazi e wildcard MQTT (+ #).</value>
+    <value>Il prefisso e il node id di discovery di Home Assistant devono essere non vuoti e privi di spazi e wildcard MQTT (+ #); il node id non può contenere '/', e il prefisso non può iniziare o terminare con '/' né contenere '//'.</value>
   </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>Nome utente e password MQTT devono essere impostati insieme (entrambi o nessuno).</value>

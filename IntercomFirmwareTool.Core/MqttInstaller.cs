@@ -213,10 +213,13 @@ namespace IntercomFirmwareTool.Core
             // --- generated config (0600 — holds MQTT_PASS) ----------------------
             WriteConfigFile(fs, EtcDir + "/TcpDump2Mqtt.conf", GenerateConf(opts), 600);
 
-            // --- Home Assistant discovery configs (optional) --------------------
+            // --- Home Assistant discovery configs -------------------------------
             // One retained-config JSON per entity + a manifest of
-            // "config-topic<TAB>filename" that ha_discovery.sh publishes at startup.
-            if (opts.EnableHaDiscovery)
+            // "config-topic<TAB>filename". Written ALWAYS (not only when enabled):
+            // ha_discovery.sh publishes them retained when HA_DISCOVERY=1, and
+            // CLEARS the retained configs (empty payload) when HA_DISCOVERY=0 — so a
+            // rebuild that unticks discovery actually removes the HA entities from a
+            // broker that already saw them, instead of leaving them orphaned.
             {
                 EnsureDir(fs, HaDir);
                 fs.SetMode(HaDir, ToMode(755));
@@ -285,12 +288,17 @@ namespace IntercomFirmwareTool.Core
             // When HA discovery is on, the prefix and node id become MQTT topic
             // levels ("<prefix>/<component>/<node>/<obj>/config"), so they must be
             // non-empty and free of whitespace and the topic wildcards + and #; the
-            // node is a single level, so it also cannot contain '/'.
+            // node is a single level, so it also cannot contain '/'. The prefix MAY
+            // contain '/' (a multi-level prefix), but not a leading/trailing/double
+            // slash — those would emit an empty topic level and HA would silently
+            // skip the entity.
             if (opts.EnableHaDiscovery)
             {
                 bool BadLevel(string s, bool allowSlash) =>
                     string.IsNullOrWhiteSpace(s) || s.IndexOfAny(new[] { '+', '#' }) >= 0 ||
-                    s.Any(char.IsWhiteSpace) || (!allowSlash && s.Contains('/'));
+                    s.Any(char.IsWhiteSpace) ||
+                    (!allowSlash && s.Contains('/')) ||
+                    (allowSlash && (s.StartsWith('/') || s.EndsWith('/') || s.Contains("//")));
                 if (BadLevel(opts.HaDiscoveryPrefix, allowSlash: true) ||
                     BadLevel(opts.HaNodeId, allowSlash: false))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidHaDiscovery"), nameof(opts));
@@ -458,10 +466,11 @@ namespace IntercomFirmwareTool.Core
                 checks.Add(new(".conf matches the generated config for these options",
                     conf == GenerateConf(opts), ""));
 
-                // HA discovery configs present and byte-exact iff enabled: read back
-                // the manifest and each JSON, comparing to what these options
-                // generate (a true read-back, like the .conf check above).
-                if (opts.EnableHaDiscovery)
+                // HA discovery configs: always present and byte-exact (they are
+                // written regardless of the enable flag, so ha_discovery.sh can
+                // publish OR clear them). Read back the manifest and each JSON,
+                // comparing to what these options generate (a true read-back, like
+                // the .conf check above).
                 {
                     var expected = GenerateHaDiscovery(opts);
                     var expectedManifest = new StringBuilder();

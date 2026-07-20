@@ -171,7 +171,7 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
     <value>L'hôte du moniteur OpenWebNet doit être valide et son port doit être compris entre 1 et 65535.</value>
   </data>
   <data name="Mqtt_InvalidHaDiscovery" xml:space="preserve">
-    <value>Le préfixe et le node id de découverte Home Assistant doivent être non vides et sans espaces ni caractères génériques MQTT (+ #).</value>
+    <value>Le préfixe et le node id de découverte Home Assistant doivent être non vides et sans espaces ni caractères génériques MQTT (+ #) ; le node id ne peut pas contenir « / », et le préfixe ne peut pas commencer ou finir par « / » ni contenir « // ».</value>
   </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>Le nom d'utilisateur et le mot de passe MQTT doivent être définis ensemble (les deux ou aucun).</value>

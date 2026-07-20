@@ -408,7 +408,9 @@ Clé : {1}</value></data>
   <data name="Hint_MqttTcpdump" xml:space="preserve"><value>Par défaut : un socket de supervision OpenWebNet direct, plus léger pour l'appareil. La voie tcpdump sert de repli automatique si la passerelle est injoignable.</value></data>
   <data name="Chk_MqttHaDiscovery" xml:space="preserve"><value>Découverte automatique Home Assistant</value></data>
   <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Publie des configs de découverte MQTT persistantes pour que les entités du pont (connectivité, trames du bus, dernière touche) apparaissent automatiquement dans Home Assistant, sans YAML manuel. Lecture seule — aucune entité de commande n'est créée.</value></data>
-  <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Activé par défaut. Crée un appareil Home Assistant avec trois entités de diagnostic. Décochez si vous préférez configurer les entités manuellement.</value></data>
+  <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Désactivé par défaut. Une fois coché, crée un appareil Home Assistant avec trois entités de diagnostic ; le décocher dans une build de firmware ultérieure les supprime du broker.</value></data>
+  <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Id de l'appareil :</value></data>
+  <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identifiant de l'appareil Home Assistant et de ses entités. Utilisez une valeur distincte par unité pour que plusieurs ponts coexistent sur un même broker. Sans espaces, « / », « + » ni « # ».</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Réception (commandes) :</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Vidage du bus :</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Date de début :</value></data>

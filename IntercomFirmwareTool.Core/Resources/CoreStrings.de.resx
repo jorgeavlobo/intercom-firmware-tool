@@ -171,7 +171,7 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
     <value>Der OpenWebNet-Monitor-Host muss gültig sein und sein Port muss zwischen 1 und 65535 liegen.</value>
   </data>
   <data name="Mqtt_InvalidHaDiscovery" xml:space="preserve">
-    <value>Das Home-Assistant-Discovery-Präfix und die Node-ID dürfen nicht leer sein und keine Leerzeichen oder MQTT-Wildcards (+ #) enthalten.</value>
+    <value>Das Home-Assistant-Discovery-Präfix und die Node-ID dürfen nicht leer sein und keine Leerzeichen oder MQTT-Wildcards (+ #) enthalten; die Node-ID darf kein '/' enthalten, und das Präfix darf nicht mit '/' beginnen oder enden und kein '//' enthalten.</value>
   </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>MQTT-Benutzername und -Passwort müssen zusammen gesetzt werden (beide oder keines).</value>

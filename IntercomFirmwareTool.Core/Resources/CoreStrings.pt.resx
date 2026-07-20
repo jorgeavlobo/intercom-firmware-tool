@@ -171,7 +171,7 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
     <value>O host do monitor OpenWebNet tem de ser válido e a porta tem de estar entre 1 e 65535.</value>
   </data>
   <data name="Mqtt_InvalidHaDiscovery" xml:space="preserve">
-    <value>O prefixo e o node id de discovery do Home Assistant têm de ser não vazios e sem espaços nem wildcards MQTT (+ #).</value>
+    <value>O prefixo e o node id de discovery do Home Assistant têm de ser não vazios e sem espaços nem wildcards MQTT (+ #); o node id não pode conter '/', e o prefixo não pode começar nem terminar com '/' nem conter '//'.</value>
   </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>O utilizador e a palavra-passe MQTT têm de ser definidos em conjunto (ambos ou nenhum).</value>
