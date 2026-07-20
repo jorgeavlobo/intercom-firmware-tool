@@ -279,6 +279,7 @@ Sovrascriverlo?</value></data>
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Pw root    : (disabilitata — accesso solo-chiave)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Chiave pub : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Chiave pub : (nessuna — solo accesso con password)</value></data>
+  <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Aggiornamento : (bloccato — server di aggiornamento Legrand reindirizzati a 127.0.0.1)</value></data>
   <data name="Fmt_Result_Build_Output" xml:space="preserve"><value>  Output     : {0}</value></data>
   <data name="Fmt_Result_ArchivePw" xml:space="preserve"><value>Password archivio : {0}  (chiave ZipCrypto, non il modello del dispositivo)</value></data>
   <data name="Fmt_Result_Build_ModifiedEntry" xml:space="preserve"><value>Voce modificata : {0}</value></data>
@@ -335,6 +336,9 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="Donate_Post" xml:space="preserve"><value>. Grazie! ☺</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d) ================= -->
+  <data name="Chk_BlockUpdates" xml:space="preserve"><value>Blocca gli aggiornamenti automatici del firmware</value></data>
+  <data name="Tip_BlockUpdates" xml:space="preserve"><value>Reindirizza i server di aggiornamento firmware di Legrand a 127.0.0.1 così l'unità non può scaricare e installare in modo silenzioso un aggiornamento OTA che cancellerebbe queste modifiche. Disattivato per impostazione predefinita; reversibile riflashando il firmware di fabbrica.</value></data>
+  <data name="Hint_BlockUpdates" xml:space="preserve"><value>Protegge la modifica dalla cancellazione da parte di un aggiornamento ufficiale, ma l'unità non riceverà più aggiornamenti o correzioni di sicurezza finché è bloccata.</value></data>
   <data name="Chk_Mqtt" xml:space="preserve"><value>Installa il bridge MQTT (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Installa un bridge MQTT opzionale che espone il bus OpenWebNet e i tasti del pannello frontale tramite MQTT. Disattivato per impostazione predefinita.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>Broker MQTT:</value></data>

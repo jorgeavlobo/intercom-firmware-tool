@@ -191,6 +191,15 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_AnchorMissing" xml:space="preserve">
     <value>Não foi encontrada a âncora esperada em {0} (à procura de: {1}); recusado o patch.</value>
   </data>
+  <data name="Hosts_FileMissing" xml:space="preserve">
+    <value>{0} não existe na imagem; não é possível adicionar o mapeamento de host de arranque.</value>
+  </data>
+  <data name="Hosts_AnchorMissing" xml:space="preserve">
+    <value>Não foi possível encontrar a âncora esperada em {0} (à procura de: {1}); a recusar adicionar o mapeamento de host.</value>
+  </data>
+  <data name="Hosts_FileTooLarge" xml:space="preserve">
+    <value>{0} tem {1} bytes, acima do limite de {2} bytes para o script de init editável; a recusar lê-lo.</value>
+  </data>
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
     <value>O IP do broker fornecido (para o mapeamento de hosts no dispositivo) não é um endereço IPv4 válido.</value>
   </data>

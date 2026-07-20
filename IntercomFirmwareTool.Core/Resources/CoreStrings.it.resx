@@ -191,6 +191,15 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Mqtt_AnchorMissing" xml:space="preserve">
     <value>Impossibile trovare l'ancora prevista in {0} (ricerca di: {1}); patch rifiutata.</value>
   </data>
+  <data name="Hosts_FileMissing" xml:space="preserve">
+    <value>{0} non esiste nell'immagine; impossibile aggiungere la mappatura host all'avvio.</value>
+  </data>
+  <data name="Hosts_AnchorMissing" xml:space="preserve">
+    <value>Impossibile trovare l'ancora prevista in {0} (in cerca di: {1}); rifiuto di aggiungere la mappatura host.</value>
+  </data>
+  <data name="Hosts_FileTooLarge" xml:space="preserve">
+    <value>{0} è di {1} byte, oltre il limite di {2} byte per lo script di init modificabile; rifiuto di leggerlo.</value>
+  </data>
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
     <value>L'IP del broker fornito (per la mappatura host sul dispositivo) non è un indirizzo IPv4 valido.</value>
   </data>

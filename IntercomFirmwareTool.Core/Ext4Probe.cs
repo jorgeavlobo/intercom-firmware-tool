@@ -22,7 +22,8 @@ namespace IntercomFirmwareTool.Core
     /// </summary>
     public sealed record EnableSshOptions(
         string? RootPassword = null,
-        string? PublicKey = null)
+        string? PublicKey = null,
+        bool BlockFirmwareUpdates = false)
     {
         /// <summary>True when a non-empty root password is set (else login is key-only).</summary>
         public bool HasPassword => !string.IsNullOrEmpty(RootPassword);
@@ -67,6 +68,26 @@ namespace IntercomFirmwareTool.Core
         // Default first-partition offset: 1 MiB = 2048 sectors.
         private const long PartitionStartSector = 2048;
         private const long PartitionOffsetBytes = PartitionStartSector * SectorSize;
+
+        // ---- Firmware-update (OTA) block ---------------------------------------
+        // Legrand/BTicino OTA firmware-download endpoints (Azure Blob Storage). The
+        // device's Eliot cloud connector (/home/bticino/bin/bt_eliot, via Azure IoT
+        // Hub) receives a *dynamic* firmwareUri pointing at one of these and pulls the
+        // image, which fw_manager/dedrifupdater then flash — wiping any modification.
+        // The URI is not a static string on the image (so it can't be matched
+        // directly), so the robust chokepoint is name resolution: map these hosts to
+        // 127.0.0.1 via the device's own bt_hosts.sh (re-applied at every boot from
+        // bt_daemon-apps.sh). Verified against the C100X v1.5.8 rootfs; same host list
+        // as fquinto's disable_notify_new_firmware. One of these (prodlegrand…) is also
+        // the host FirmwareRegistry downloads from, confirming it is the OTA endpoint.
+        // The host→127.0.0.1 mappings are written by the shared BtDaemonAppsHosts
+        // patcher (which owns the anchor, whole-line matching, idempotency and
+        // metadata preservation — shared with MqttInstaller's broker mapping).
+        private static readonly string[] FirmwareUpdateHosts =
+        {
+            "prodlegrandressourcespkg.blob.core.windows.net",
+            "blob.ams25prdstr02a.store.core.windows.net",
+        };
 
         /// <summary>
         /// Opens an ext4 image and reads (read-only) the contents of a file
@@ -562,7 +583,30 @@ namespace IntercomFirmwareTool.Core
             {
                 fs.CreateSymLink(linkTarget, linkPath);
             }
+
+            // Optional, independent of SSH/MQTT: stop the unit from silently
+            // OTA-updating (which would reflash stock firmware and wipe every edit
+            // above). This is the final step of ApplySshEnable; when the MQTT bridge
+            // is also installed, InstallMqtt runs AFTER this (later in the same
+            // EnableSsh session) and patches the same file after the same openserver
+            // anchor. Both are idempotent and anchor-based, so they compose
+            // regardless of order.
+            if (opts.BlockFirmwareUpdates)
+                BlockFirmwareUpdates(fs);
         }
+
+        /// <summary>
+        /// Blocks over-the-air firmware updates by mapping the Legrand OTA blob
+        /// hosts (<see cref="FirmwareUpdateHosts"/>) to <c>127.0.0.1</c> — so even
+        /// when the cloud hands the unit a firmware URI, the download host can't
+        /// resolve. Delegates the actual edit to <see cref="BtDaemonAppsHosts"/>
+        /// (the shared, idempotent, metadata-preserving, whole-line-matching hosts
+        /// patcher), so this stays a thin domain wrapper. Mirrors fquinto's
+        /// <c>disable_notify_new_firmware</c>.
+        /// </summary>
+        private static void BlockFirmwareUpdates(ExtFileSystem fs) =>
+            BtDaemonAppsHosts.AddMappings(fs,
+                FirmwareUpdateHosts.Select(h => (h, "127.0.0.1")).ToList());
 
         /// <summary>
         /// Reopens a modified bare ext4 and re-reads every expected change,
@@ -626,6 +670,16 @@ namespace IntercomFirmwareTool.Core
                     fs.DirectoryExists("/etc/rc5.d"), ""));
                 checks.Add(new("/etc/init.d/dropbear exists (prerequisite)",
                     fs.FileExists("/etc/init.d/dropbear"), ""));
+
+                // OTA-block: only asserted when the option was requested (a normal
+                // build simply never patches, leaving bt_daemon-apps.sh stock — so
+                // there is nothing to assert when it is off, and asserting "absent"
+                // would wrongly fail cross-validation of an image that happens to
+                // carry other host mappings).
+                if (opts.BlockFirmwareUpdates)
+                    foreach (var host in FirmwareUpdateHosts)
+                        checks.Add(new($"firmware-update host {host} -> 127.0.0.1 (OTA blocked)",
+                            BtDaemonAppsHosts.HasMapping(fs, host, "127.0.0.1"), ""));
             }
             finally
             {

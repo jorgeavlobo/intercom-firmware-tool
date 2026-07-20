@@ -541,6 +541,19 @@
                 </StackPanel>
             </Grid>
 
+            <!-- Block firmware auto-updates (advanced, optional). Maps the Legrand
+                 OTA blob hosts to 127.0.0.1 so an over-the-air update can't silently
+                 reflash the unit and wipe the mod. Off by default (matches fquinto);
+                 shown while Advanced is open, or kept visible while ticked so an
+                 active build option isn't hidden behind the toggle. -->
+            <StackPanel x:Name="BlockUpdatesSection" Margin="0,12,0,0" Visibility="Collapsed">
+                <CheckBox x:Name="ChkBlockUpdates" Content="{loc:Loc Chk_BlockUpdates}"
+                          ToolTip="{loc:Loc Tip_BlockUpdates}"
+                          Checked="ChkBlockUpdates_Toggled" Unchecked="ChkBlockUpdates_Toggled"/>
+                <TextBlock Margin="22,4,0,0" Foreground="Gray" FontSize="11" TextWrapping="Wrap"
+                           Text="{loc:Loc Hint_BlockUpdates}"/>
+            </StackPanel>
+
             <!-- MQTT bridge (advanced, optional). Off by default: ticking the box
                  reveals the config panel. The section is shown while Advanced is open,
                  or kept visible while enabled so an active build option is never

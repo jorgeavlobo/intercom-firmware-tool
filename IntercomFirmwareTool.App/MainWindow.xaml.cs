@@ -764,6 +764,13 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
+        // Toggling the OTA-block option just recomputes visibility, so an unticked
+        // box doesn't linger visible after Advanced is collapsed (it stays visible
+        // while ticked, like the MQTT/key rows). No build-enable impact — the option
+        // is independent and never gates Build.
+        private void ChkBlockUpdates_Toggled(object sender, RoutedEventArgs e)
+            => UpdateAdvancedVisibility();
+
         /// <summary>The current password value (real text, held by the masked field).</summary>
         private string CurrentPassword() => _pw.Value;
 
@@ -900,6 +907,13 @@ namespace IntercomFirmwareTool.App
                 ? Visibility.Visible : Visibility.Collapsed;
 
             AdvancedTools.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
+
+            // The OTA-block option lives in Advanced too; like the MQTT/key rows it
+            // stays visible while ticked so an active build option isn't hidden by the
+            // toggle, and locks with the other inputs during a build.
+            BlockUpdatesSection.Visibility = (advanced || ChkBlockUpdates.IsChecked == true)
+                ? Visibility.Visible : Visibility.Collapsed;
+            ChkBlockUpdates.IsEnabled = _uiEnabled;
 
             // The optional MQTT bridge section lives in Advanced too; it stays visible
             // while enabled so an active build option isn't hidden by the toggle.
@@ -1453,7 +1467,8 @@ namespace IntercomFirmwareTool.App
             }
 
             SetStatus(""); // clear any stale status; the build reports via its popup
-            var opts = new EnableSshOptions(password, publicKey);
+            var opts = new EnableSshOptions(password, publicKey,
+                BlockFirmwareUpdates: ChkBlockUpdates.IsChecked == true);
 
             // Optional MQTT bridge: collect + validate its options (null when the
             // bridge is off). A file-read failure or invalid config shows a popup and
@@ -1574,6 +1589,8 @@ namespace IntercomFirmwareTool.App
             sb.AppendLine(LF("Fmt_Result_Build_Input", fwz));
             sb.AppendLine(opts.HasPassword ? L("Result_Build_RootPw_Set") : L("Result_Build_RootPw_Disabled"));
             sb.AppendLine(opts.HasKey ? LF("Fmt_Result_Build_PubKey", keyPath) : L("Result_Build_PubKey_None"));
+            if (opts.BlockFirmwareUpdates)
+                sb.AppendLine(L("Result_Build_BlockUpdates_On"));
             sb.AppendLine(LF("Fmt_Result_Build_Output", output));
         }
 

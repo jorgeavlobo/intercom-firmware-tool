@@ -279,6 +279,7 @@ Eine Erstellung dort würde den Schlüssel überschreiben und zerstören. Wähle
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Root-Pw    : (deaktiviert — Anmeldung nur mit Schlüssel)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Öff. Schlüssel : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Öff. Schlüssel : (keiner — nur Passwort-Anmeldung)</value></data>
+  <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Auto-Update : (blockiert — Legrand-Update-Server auf 127.0.0.1 umgeleitet)</value></data>
   <data name="Fmt_Result_Build_Output" xml:space="preserve"><value>  Ausgabe    : {0}</value></data>
   <data name="Fmt_Result_ArchivePw" xml:space="preserve"><value>Archiv-Passwort : {0}  (ZipCrypto-Schlüssel, nicht das Gerätemodell)</value></data>
   <data name="Fmt_Result_Build_ModifiedEntry" xml:space="preserve"><value>Modifizierter Eintrag : {0}</value></data>
@@ -335,6 +336,9 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="Donate_Post" xml:space="preserve"><value>. Vielen Dank! ☺</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d) ================= -->
+  <data name="Chk_BlockUpdates" xml:space="preserve"><value>Firmware-Auto-Updates blockieren</value></data>
+  <data name="Tip_BlockUpdates" xml:space="preserve"><value>Leitet die Legrand-Firmware-Update-Server auf 127.0.0.1 um, damit das Gerät kein OTA-Update im Hintergrund herunterladen und einspielen kann, das diese Änderungen überschreiben würde. Standardmäßig aus; umkehrbar durch erneutes Flashen der Werksfirmware.</value></data>
+  <data name="Hint_BlockUpdates" xml:space="preserve"><value>Schützt die Modifikation davor, von einem offiziellen Update überschrieben zu werden – aber das Gerät erhält keine Updates oder Sicherheitskorrekturen mehr, solange es blockiert ist.</value></data>
   <data name="Chk_Mqtt" xml:space="preserve"><value>MQTT-Brücke installieren (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Installiert eine optionale MQTT-Brücke, die den OpenWebNet-Bus und die Tasten des Frontpanels über MQTT bereitstellt. Standardmäßig deaktiviert.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>MQTT-Broker:</value></data>
