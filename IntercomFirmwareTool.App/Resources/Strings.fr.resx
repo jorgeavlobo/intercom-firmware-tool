@@ -377,6 +377,8 @@ Ouvrez Avancé → Résultat pour voir quelles vérifications ont échoué.</val
   <data name="Fmt_Msg_MqttBadCertKey" xml:space="preserve"><value>Le certificat et la clé du client ne forment pas une paire valide (mal formés ou non concordants).
 Certificat : {0}
 Clé : {1}</value></data>
+  <data name="Fmt_Msg_MqttKeyInCert" xml:space="preserve"><value>Ce champ ne doit contenir qu'un certificat, mais le fichier sélectionné inclut une clé privée. Placez la clé privée dans le champ de la clé client :
+{0}</value></data>
   <data name="Cap_MqttReadPem" xml:space="preserve"><value>Lecture du fichier impossible</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d, round 2) ================= -->

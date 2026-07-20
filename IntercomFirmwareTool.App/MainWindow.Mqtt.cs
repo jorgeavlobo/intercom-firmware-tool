@@ -733,6 +733,16 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private bool TryValidatePems(string? caPem, string? certPem, string? keyPem)
         {
+            // The CA and client-CERTIFICATE fields are installed as WORLD-READABLE
+            // files on the device (ca.crt / client.crt, mode 0644). A private key in
+            // either — e.g. an accidentally-picked combined cert+key bundle — would be
+            // copied there in the clear, leaking it. Reject it up front; the private
+            // key belongs only in the client-key field (installed 0600).
+            if (caPem != null && ContainsPrivateKey(caPem))
+                return PemInvalid(LF("Fmt_Msg_MqttKeyInCert", _mqttCaPath ?? ""));
+            if (certPem != null && ContainsPrivateKey(certPem))
+                return PemInvalid(LF("Fmt_Msg_MqttKeyInCert", _mqttCertPath ?? ""));
+
             if (caPem != null)
             {
                 bool ok = false;
@@ -757,6 +767,11 @@ namespace IntercomFirmwareTool.App
             }
             return true;
         }
+
+        // Any PEM private-key block: -----BEGIN [RSA|EC|ENCRYPTED] PRIVATE KEY----- all
+        // end in "PRIVATE KEY-----", and a certificate's base64 body never does.
+        private static bool ContainsPrivateKey(string pem) =>
+            pem.Contains("PRIVATE KEY-----", StringComparison.Ordinal);
 
         private bool PemInvalid(string message)
         {

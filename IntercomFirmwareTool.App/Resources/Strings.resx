@@ -377,6 +377,8 @@ Open Advanced → Result to see which checks failed.</value></data>
   <data name="Fmt_Msg_MqttBadCertKey" xml:space="preserve"><value>The client certificate and key do not form a valid pair (malformed or mismatched).
 Certificate: {0}
 Key: {1}</value></data>
+  <data name="Fmt_Msg_MqttKeyInCert" xml:space="preserve"><value>This field must contain a certificate only, but the selected file includes a private key. Put the private key in the client key field instead:
+{0}</value></data>
   <data name="Cap_MqttReadPem" xml:space="preserve"><value>Cannot read file</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d, round 2) ================= -->

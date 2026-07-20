@@ -377,6 +377,8 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="Fmt_Msg_MqttBadCertKey" xml:space="preserve"><value>Client-Zertifikat und -Schlüssel bilden kein gültiges Paar (fehlerhaft oder nicht übereinstimmend).
 Zertifikat: {0}
 Schlüssel: {1}</value></data>
+  <data name="Fmt_Msg_MqttKeyInCert" xml:space="preserve"><value>Dieses Feld darf nur ein Zertifikat enthalten, aber die ausgewählte Datei enthält einen privaten Schlüssel. Tragen Sie den privaten Schlüssel stattdessen im Client-Schlüssel-Feld ein:
+{0}</value></data>
   <data name="Cap_MqttReadPem" xml:space="preserve"><value>Datei kann nicht gelesen werden</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d, round 2) ================= -->
