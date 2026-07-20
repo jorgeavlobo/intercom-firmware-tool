@@ -191,6 +191,15 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_AnchorMissing" xml:space="preserve">
     <value>Ancre attendue introuvable dans {0} (recherche de : {1}) ; correctif refusé.</value>
   </data>
+  <data name="Hosts_FileMissing" xml:space="preserve">
+    <value>{0} n'existe pas dans l'image ; impossible de modifier le fichier hosts de l'appareil.</value>
+  </data>
+  <data name="Hosts_AnchorMissing" xml:space="preserve">
+    <value>Impossible de trouver l'ancre attendue dans {0} (recherche de : {1}) ; modification du fichier hosts refusée.</value>
+  </data>
+  <data name="Hosts_FileTooLarge" xml:space="preserve">
+    <value>{0} fait {1} octets, au-delà de la limite de {2} octets pour le script d'init modifiable ; lecture refusée.</value>
+  </data>
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
     <value>L'IP du broker fournie (pour le mappage d'hôtes sur l'appareil) n'est pas une adresse IPv4 valide.</value>
   </data>

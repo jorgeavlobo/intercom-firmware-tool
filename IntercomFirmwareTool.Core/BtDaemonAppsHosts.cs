@@ -59,7 +59,7 @@ namespace IntercomFirmwareTool.Core
         internal static void AddMappings(ExtFileSystem fs, IReadOnlyList<(string Host, string Ip)> mappings)
         {
             if (!fs.FileExists(Path))
-                throw new InvalidOperationException(CoreStrings.Format("Mqtt_FileMissing", Path));
+                throw new InvalidOperationException(CoreStrings.Format("Hosts_FileMissing", Path));
 
             var patched = new List<string>(SplitLines(ReadAllText(fs, Path)));
             int anchor = -1, insertAt = -1;
@@ -79,7 +79,7 @@ namespace IntercomFirmwareTool.Core
                     anchor = patched.FindIndex(l => l.Trim() == OpenserverAnchor);
                     if (anchor < 0)
                         throw new InvalidOperationException(
-                            CoreStrings.Format("Mqtt_AnchorMissing", Path, OpenserverAnchor));
+                            CoreStrings.Format("Hosts_AnchorMissing", Path, OpenserverAnchor));
                     insertAt = anchor + 1;
                 }
                 patched.Insert(insertAt, "\t" + addLine);
@@ -100,7 +100,7 @@ namespace IntercomFirmwareTool.Core
             long length = file.Length;
             if (length > MaxEditFileBytes)
                 throw new NotSupportedException(
-                    CoreStrings.Format("Mqtt_FileTooLarge", path, length, MaxEditFileBytes));
+                    CoreStrings.Format("Hosts_FileTooLarge", path, length, MaxEditFileBytes));
             int len = (int)length;
             var buf = new byte[len];
             int total = 0;

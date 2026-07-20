@@ -200,6 +200,15 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_AnchorMissing" xml:space="preserve">
     <value>Could not find the expected anchor in {0} (looking for: {1}); refusing to patch it.</value>
   </data>
+  <data name="Hosts_FileMissing" xml:space="preserve">
+    <value>{0} does not exist in the image; cannot patch the device hosts file.</value>
+  </data>
+  <data name="Hosts_AnchorMissing" xml:space="preserve">
+    <value>Could not find the expected anchor in {0} (looking for: {1}); refusing to patch the hosts file.</value>
+  </data>
+  <data name="Hosts_FileTooLarge" xml:space="preserve">
+    <value>{0} is {1} bytes, larger than the {2}-byte limit for the editable init script; refusing to read it.</value>
+  </data>
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
     <value>The supplied broker IP (for the on-device hosts mapping) is not a valid IPv4 address.</value>
   </data>
