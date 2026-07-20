@@ -29,6 +29,9 @@ namespace IntercomFirmwareTool.Core
 
         // The stock line every image carries; we insert new mappings right after it.
         private const string OpenserverAnchor = "/bin/bt_hosts.sh add openserver 127.0.0.1";
+        // The reserved host in that anchor. This component never repoints it (see
+        // AddMappings): the anchor is the single source of truth for openserver.
+        private const string AnchorHost = "openserver";
 
         private const long MaxEditFileBytes = 4L * 1024 * 1024; // the init script is tiny
 
@@ -83,12 +86,14 @@ namespace IntercomFirmwareTool.Core
             bool changed = false;
             foreach (var (host, ip) in mappings)
             {
-                string desired = MappingLine(host, ip);
-                // The stock openserver→127.0.0.1 mapping IS the anchor line; it is
-                // always present, so a request for it is already satisfied and must
-                // never lead to removing or duplicating the anchor.
-                if (string.Equals(desired, OpenserverAnchor, StringComparison.OrdinalIgnoreCase))
+                // "openserver" is reserved: it is the stock loopback alias AND our
+                // anchor. Never repoint it — mapping it to 127.0.0.1 is redundant (the
+                // anchor already does it), and mapping it to anything else would break
+                // the device's own SCS alias and leave two conflicting openserver
+                // lines. The anchor stays the single source of truth for openserver.
+                if (string.Equals(host, AnchorHost, StringComparison.OrdinalIgnoreCase))
                     continue;
+                string desired = MappingLine(host, ip);
 
                 // Every existing mapping for this host (any IP), by whole line, but
                 // NEVER the openserver anchor. A commented line (trimmed, starts with
