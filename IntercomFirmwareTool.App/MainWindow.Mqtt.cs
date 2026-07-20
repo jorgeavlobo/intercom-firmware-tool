@@ -402,9 +402,7 @@ namespace IntercomFirmwareTool.App
 
                             // The CA PEM may be a bundle (root + intermediates), not a
                             // single cert — CreateFromPem would read only the first and
-                            // reject a broker whose chain needs the intermediates. Import
-                            // them all: self-issued certs are the trust anchor(s), the
-                            // rest go to ExtraStore so the chain can be completed.
+                            // reject a broker whose chain needs the intermediates.
                             var caCerts = new X509Certificate2Collection();
                             caCerts.ImportFromPem(caPem);
                             using var chain = new X509Chain();
@@ -417,13 +415,14 @@ namespace IntercomFirmwareTool.App
                             // mosquitto client would reject during certificate-purpose
                             // validation.
                             chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1")); // id-kp-serverAuth
+                            // Every cert in the user's CA PEM is a trust anchor — matching
+                            // mosquitto/OpenSSL `--cafile`, which trusts each cert in the
+                            // file directly, self-signed or not. (Anchoring only the
+                            // self-issued ones would false-negative a broker whose --cafile
+                            // is an intermediate.) CustomRootTrust terminates the chain at
+                            // the first of these it reaches.
                             foreach (var c in caCerts)
-                            {
-                                bool selfIssued = c.SubjectName.RawData.AsSpan()
-                                    .SequenceEqual(c.IssuerName.RawData);
-                                if (selfIssued) chain.ChainPolicy.CustomTrustStore.Add(c);
-                                else chain.ChainPolicy.ExtraStore.Add(c);
-                            }
+                                chain.ChainPolicy.CustomTrustStore.Add(c);
                             // Also offer the intermediates the broker sent in its own
                             // handshake (on ctx.Chain): with a root-only CA file, a
                             // leaf+intermediate chain must still build — exactly as the
@@ -632,7 +631,10 @@ namespace IntercomFirmwareTool.App
             if (!TryReadPem(_mqttCertPath, out certPem)) return false;
             if (!TryReadPem(_mqttKeyPath, out keyPem)) return false;
 
-            int port = int.TryParse(TxtMqttPort.Text.Trim(), out int p) ? p : 1883;
+            // The gate blocks an invalid port before Build; if we somehow reach here
+            // with unparseable text, fail closed with 0 so Core's Validate rejects it
+            // (a clean popup) rather than silently installing the 1883 default.
+            int port = int.TryParse(TxtMqttPort.Text.Trim(), out int p) ? p : 0;
             // The host-IP override only applies to a hostname broker; ignore any stale
             // value when the host is an IP (matches MqttInstaller's own handling).
             string hostTrim = TxtMqttHost.Text.Trim();
