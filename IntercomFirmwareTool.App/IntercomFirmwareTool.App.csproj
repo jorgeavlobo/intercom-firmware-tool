@@ -24,11 +24,14 @@
   <ItemGroup>
     <!-- The only third-party runtime dependency: MQTTnet powers the Advanced-tab
          "Test connection" button (a real MQTT CONNECT that also exercises the
-         configured auth + TLS). Pinned to the 4.3.x line so the client/TLS API this
-         code targets stays stable (v5 renamed several of these types). Pinned to
-         an exact patch version for reproducible restores, matching the repo's
-         convention (e.g. SharpZipLib); bump deliberately when needed. -->
-    <PackageReference Include="MQTTnet" Version="4.3.7.1207" />
+         configured auth + TLS). On the 5.x line: the client types moved into the
+         root MQTTnet namespace (MQTTnet.Client is gone), the factory is now
+         MqttClientFactory, and the CONNECT default flipped to MQTT 5.0 (a
+         documented breaking change) — the test code pins 3.1.1 explicitly to keep
+         mirroring the device's mosquitto client. Pinned to an exact patch version for reproducible
+         restores, matching the repo's convention (e.g. SharpZipLib); bump
+         deliberately when needed. -->
+    <PackageReference Include="MQTTnet" Version="5.0.1.1416" />
   </ItemGroup>
 
 </Project>

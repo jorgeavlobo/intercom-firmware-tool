@@ -15,7 +15,7 @@ using System.Windows.Media;
 using IntercomFirmwareTool.Core;
 using Microsoft.Win32;
 using MQTTnet;
-using MQTTnet.Client;
+using MQTTnet.Formatter;             // MqttProtocolVersion.V311 (pin the test to the device's 3.1.1)
 
 namespace IntercomFirmwareTool.App
 {
@@ -357,7 +357,7 @@ namespace IntercomFirmwareTool.App
             string host, string tlsHost, int port, string? user, string? pass,
             string? caPem, string? certPem, string? keyPem)
         {
-            var factory = new MqttFactory();
+            var factory = new MqttClientFactory();
             using var client = factory.CreateMqttClient();
 
             // The mutual-TLS client cert must stay alive through ConnectAsync (the
@@ -368,6 +368,14 @@ namespace IntercomFirmwareTool.App
             {
                 var builder = new MqttClientOptionsBuilder()
                     .WithTcpServer(host, port)
+                    // Mirror the on-device bridge, which speaks MQTT 3.1.1 through the
+                    // bundled mosquitto_pub/_sub. MQTTnet 5.x flipped its CONNECT default
+                    // to 5.0 (a documented breaking change vs the 4.3.x this replaced, which
+                    // defaulted to 3.1.1), so pin 3.1.1 explicitly: otherwise this pre-flight
+                    // test could fail against an older broker that accepts the device's 3.1.1
+                    // client but not a 5.0 CONNECT — a false negative for a broker the device
+                    // would actually reach. Keeps the test a faithful proxy for the device.
+                    .WithProtocolVersion(MqttProtocolVersion.V311)
                     // Unique per test so two app instances testing the same broker
                     // don't collide on client ID (which would disconnect one another).
                     .WithClientId("intercom-fw-tool-conn-test-" + Guid.NewGuid().ToString("N"))
