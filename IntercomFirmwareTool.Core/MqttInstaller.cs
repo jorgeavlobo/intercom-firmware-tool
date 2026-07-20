@@ -3,7 +3,6 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Encodings.Web;
 using System.Text.Json;
 using IntercomFirmwareTool.Core.Localization;
 
@@ -728,11 +727,15 @@ namespace IntercomFirmwareTool.Core
         /// JSON filename (under <see cref="HaDir"/>), and the JSON payload.</summary>
         private readonly record struct HaEntity(string FileName, string ConfigTopic, string Json);
 
-        // Relaxed encoder so template braces / '+' etc. aren't over-escaped; the
-        // output is still valid JSON. WriteIndented for a readable on-device file.
+        // Default STJ encoder: it does NOT escape the '{'/'}' of value_template
+        // (only '<' '>' '&' '+' and non-ASCII, none of which appear in the default
+        // payloads), so the discovery JSON stays valid and readable for Home
+        // Assistant. Preferred over UnsafeRelaxedJsonEscaping — the relaxed encoder
+        // buys nothing here (no chars need it) and gets flagged by security tooling;
+        // the default even escapes '&'/'<'/'>' should a user set an exotic topic.
+        // WriteIndented for a readable on-device file.
         private static readonly JsonSerializerOptions HaJson = new()
         {
-            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
             WriteIndented = true,
         };
 
