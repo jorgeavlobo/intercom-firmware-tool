@@ -691,32 +691,14 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Adds a <c>bt_hosts.sh add &lt;host&gt; &lt;ip&gt;</c> line after the
-        /// existing <c>openserver</c> mapping in bt_daemon-apps.sh, so the device
-        /// can resolve a broker given by name. Preserves owner+mode (on-device
-        /// 0700 root:root). Idempotent.
+        /// Adds a <c>bt_hosts.sh add &lt;host&gt; &lt;ip&gt;</c> mapping so the device
+        /// can resolve a broker given by name. Delegates to the shared
+        /// <see cref="BtDaemonAppsHosts"/> patcher — the same anchor, whole-line
+        /// idempotency and owner/mode preservation the OTA-update block uses, so the
+        /// two paths cannot drift.
         /// </summary>
-        private static void PatchHosts(ExtFileSystem fs, string host, string ip)
-        {
-            const string path = "/etc/init.d/bt_daemon-apps.sh";
-            if (!fs.FileExists(path))
-                throw new InvalidOperationException(CoreStrings.Format("Mqtt_FileMissing", path));
-
-            string content = ReadAllText(fs, path);
-            string addLine = $"/bin/bt_hosts.sh add {host} {ip}";
-            if (content.Contains(addLine)) return; // already patched
-
-            string[] lines = content.Replace("\r\n", "\n").Split('\n');
-            int anchor = Array.FindIndex(lines,
-                l => l.Contains("/bin/bt_hosts.sh add openserver 127.0.0.1"));
-            if (anchor < 0)
-                throw new InvalidOperationException(CoreStrings.Format("Mqtt_AnchorMissing", path,
-                    "/bin/bt_hosts.sh add openserver 127.0.0.1"));
-
-            var patched = new List<string>(lines);
-            patched.Insert(anchor + 1, "\t" + addLine);
-            RewritePreservingMeta(fs, path, string.Join("\n", patched));
-        }
+        private static void PatchHosts(ExtFileSystem fs, string host, string ip) =>
+            BtDaemonAppsHosts.AddMappings(fs, new[] { (host, ip) });
 
         /// <summary>Resolves the broker hostname to an IPv4 for the hosts edit.</summary>
         private static string ResolveHostIp(MqttOptions opts)
