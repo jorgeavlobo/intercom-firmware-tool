@@ -45,7 +45,7 @@ namespace IntercomFirmwareTool.Core
         {
             if (!fs.FileExists(Path)) return false;
             string expected = MappingLine(host, ip);
-            return SplitLines(ReadAllText(fs)).Any(l => l.Trim() == expected);
+            return SplitLines(ReadAllText(fs)).Any(l => LineIs(l, expected));
         }
 
         /// <summary>
@@ -58,8 +58,7 @@ namespace IntercomFirmwareTool.Core
         {
             if (!fs.FileExists(Path)) return false;
             string prefix = $"/bin/bt_hosts.sh add {host} ";
-            return SplitLines(ReadAllText(fs))
-                .Any(l => l.Trim().StartsWith(prefix, StringComparison.Ordinal));
+            return SplitLines(ReadAllText(fs)).Any(l => LineStarts(l, prefix));
         }
 
         /// <summary>
@@ -88,28 +87,25 @@ namespace IntercomFirmwareTool.Core
                 // The stock openserver→127.0.0.1 mapping IS the anchor line; it is
                 // always present, so a request for it is already satisfied and must
                 // never lead to removing or duplicating the anchor.
-                if (desired == OpenserverAnchor) continue;
+                if (string.Equals(desired, OpenserverAnchor, StringComparison.OrdinalIgnoreCase))
+                    continue;
 
                 // Every existing mapping for this host (any IP), by whole line, but
                 // NEVER the openserver anchor. A commented line (trimmed, starts with
                 // '#') does not match the command prefix.
                 string prefix = $"/bin/bt_hosts.sh add {host} ";
-                bool IsHostMapping(string l)
-                {
-                    string t = l.Trim();
-                    return t != OpenserverAnchor && t.StartsWith(prefix, StringComparison.Ordinal);
-                }
+                bool IsHostMapping(string l) => !LineIs(l, OpenserverAnchor) && LineStarts(l, prefix);
 
                 int existing = lines.Count(IsHostMapping);
                 // Already exactly right: one mapping for this host and it is the
                 // desired one → nothing to do.
-                if (existing == 1 && lines.Any(l => l.Trim() == desired)) continue;
+                if (existing == 1 && lines.Any(l => LineIs(l, desired))) continue;
 
                 // Otherwise enforce uniqueness: drop every existing mapping for this
                 // host (wrong IP and/or duplicates), then insert the desired one.
                 if (existing > 0) { lines.RemoveAll(IsHostMapping); changed = true; }
 
-                int anchor = lines.FindIndex(l => l.Trim() == OpenserverAnchor);
+                int anchor = lines.FindIndex(l => LineIs(l, OpenserverAnchor));
                 if (anchor < 0)
                     throw new InvalidOperationException(
                         CoreStrings.Format("Hosts_AnchorMissing", Path, OpenserverAnchor));
@@ -123,6 +119,18 @@ namespace IntercomFirmwareTool.Core
 
         private static string[] SplitLines(string content) =>
             content.Replace("\r\n", "\n").Split('\n');
+
+        // Line comparisons are case-INSENSITIVE: a bt_hosts.sh line's variable part is
+        // the hostname, and hostnames are case-insensitive (RFC 4343), so the same
+        // broker entered as "Broker.EXAMPLE.com" and "broker.example.com" must be
+        // recognized as the same mapping — otherwise idempotency/dedup would miss it.
+        // The fixed command text is always lowercase as we write it, so ignoring case
+        // there is harmless.
+        private static bool LineIs(string line, string exact) =>
+            string.Equals(line.Trim(), exact, StringComparison.OrdinalIgnoreCase);
+
+        private static bool LineStarts(string line, string prefix) =>
+            line.Trim().StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
 
         private static string ReadAllText(ExtFileSystem fs)
         {
