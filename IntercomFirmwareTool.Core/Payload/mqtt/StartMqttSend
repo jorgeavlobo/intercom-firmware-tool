@@ -93,11 +93,13 @@ probe_socket() {
 	: > "$ptmp"
 
 	# Same connection semantics as run_socket, held for the probe's lifetime: nc
-	# opens the read end, we hold the write end on fd 9 in this shell (no sleeper)
-	# so a half-closing nc does not tear the socket down before the ACK arrives.
+	# opens the read end, we hold pfifo open on fd 9 in this shell (no sleeper) so
+	# a half-closing nc does not tear the socket down before the ACK arrives. Open
+	# READ+WRITE (9<>) so the open never blocks even if nc hasn't opened its end
+	# yet; we only ever write to fd 9.
 	( nc "$OWN_HOST" "$OWN_PORT_MON" < "$pfifo" > "$ptmp" 2>/dev/null ) &
 	npid=$!
-	exec 9>"$pfifo"
+	exec 9<>"$pfifo"
 	( printf '*99*1##' >&9 ) 2>/dev/null
 
 	rc=1
@@ -130,18 +132,20 @@ run_socket() {
 	mkfifo -m 600 "$cfifo" 2>/dev/null && mkfifo -m 600 "$rfifo" 2>/dev/null \
 		&& mkfifo -m 600 "$ffifo" 2>/dev/null || { rm -f "$cfifo" "$rfifo" "$ffifo"; return 1; }
 
-	# Start nc first (it opens the read end of cfifo), then open the WRITE end on
-	# fd 9 in THIS shell and send the monitor-session request ("*99*1##").
-	# Holding fd 9 open for the lifetime of run_socket keeps nc's stdin open
-	# (some nc builds tear the socket down on stdin EOF) WITHOUT a separate
-	# sleeper process — so there is no long-lived `sleep` for the orchestrator to
-	# kill by a broad, collision-prone pattern. fd 9 closes when run_socket
-	# returns (or when this StartMqttSend process is killed), signalling nc to
-	# stop. The handshake write runs in a subshell so a SIGPIPE (nc already gone)
-	# dies with the subshell, not with StartMqttSend.
+	# Start nc first (it opens the read end of cfifo), then open cfifo on fd 9 in
+	# THIS shell and send the monitor-session request ("*99*1##"). Open READ+WRITE
+	# (9<>): a write-only FIFO open BLOCKS until a reader exists, which would hang
+	# StartMqttSend if nc never opened the read end (fork failure) instead of
+	# falling back — 9<> never blocks. We only ever write to fd 9. Holding it open
+	# for the lifetime of run_socket keeps nc's stdin open (some nc builds tear the
+	# socket down on stdin EOF) WITHOUT a separate sleeper process, so there is no
+	# long-lived `sleep` for the orchestrator to kill by a broad pattern. fd 9
+	# closes when run_socket returns (or this StartMqttSend is killed), signalling
+	# nc to stop. The handshake write runs in a subshell so a SIGPIPE (nc already
+	# gone) dies with the subshell, not with StartMqttSend.
 	nc "$OWN_HOST" "$OWN_PORT_MON" < "$cfifo" > "$rfifo" &
 	ncpid=$!
-	exec 9>"$cfifo"
+	exec 9<>"$cfifo"
 	( printf '*99*1##' >&9 ) 2>/dev/null
 
 	# Run the framer and publisher as SEPARATE background processes (not one
