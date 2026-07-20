@@ -245,6 +245,9 @@ Wählen Sie eine gültige .pub-Datei oder erzeugen Sie ein neues Paar.</value></
   <data name="Msg_OutputCollidesKey" xml:space="preserve"><value>Der Ausgabepfad ist dieselbe Datei wie der ausgewählte SSH-Schlüssel (öffentlich oder
 privat). Wählen Sie eine andere Ausgabe, damit der Schlüssel nicht überschrieben wird.</value></data>
   <data name="Cap_OutputCollidesKey" xml:space="preserve"><value>Ausgabe kollidiert mit dem Schlüssel</value></data>
+  <data name="Fmt_Msg_OutputCollidesMqtt" xml:space="preserve"><value>Der Ausgabepfad ist die ausgewählte MQTT-TLS-Datei. Der Build würde sie überschreiben — wählen Sie einen anderen Ausgabepfad:
+{0}</value></data>
+  <data name="Cap_OutputCollidesMqtt" xml:space="preserve"><value>Ausgabe kollidiert mit einer TLS-Datei</value></data>
   <data name="Msg_KeyRequired" xml:space="preserve"><value>Die Passwort-Anmeldung ist deaktiviert, daher ist ein SSH-Schlüssel erforderlich.
 
 Wählen oder erzeugen Sie einen Schlüssel, oder deaktivieren Sie „Deaktivieren“ und legen Sie ein Passwort fest.</value></data>
@@ -330,4 +333,80 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="Donate_Pre" xml:space="preserve"><value>Fanden Sie dieses Tool nützlich? </value></data>
   <data name="Donate_Emph" xml:space="preserve"><value>Spendiere mir einen Kaffee</value></data>
   <data name="Donate_Post" xml:space="preserve"><value>. Vielen Dank! ☺</value></data>
+
+  <!-- ================= MQTT bridge (Phase 1d) ================= -->
+  <data name="Chk_Mqtt" xml:space="preserve"><value>MQTT-Brücke installieren (Home Assistant)</value></data>
+  <data name="Tip_Mqtt" xml:space="preserve"><value>Installiert eine optionale MQTT-Brücke, die den OpenWebNet-Bus und die Tasten des Frontpanels über MQTT bereitstellt. Standardmäßig deaktiviert.</value></data>
+  <data name="Field_MqttBroker" xml:space="preserve"><value>MQTT-Broker:</value></data>
+  <data name="Tip_MqttBroker" xml:space="preserve"><value>Hostname oder IP-Adresse des Brokers.</value></data>
+  <data name="Field_MqttPort" xml:space="preserve"><value>Port:</value></data>
+  <data name="Tip_MqttPort" xml:space="preserve"><value>TCP-Port des Brokers (1–65535; Standard 1883).</value></data>
+  <data name="Field_MqttUser" xml:space="preserve"><value>Benutzername:</value></data>
+  <data name="Tip_MqttUser" xml:space="preserve"><value>Broker-Benutzername (optional; zusammen mit einem Passwort festlegen).</value></data>
+  <data name="Field_MqttPass" xml:space="preserve"><value>Passwort:</value></data>
+  <data name="Tip_MqttReveal" xml:space="preserve"><value>MQTT-Passwort ein- oder ausblenden</value></data>
+  <data name="Field_MqttCa" xml:space="preserve"><value>TLS-CA-Zert.:</value></data>
+  <data name="Tip_MqttCa" xml:space="preserve"><value>Optionales CA-Zertifikat (PEM) zur Überprüfung des Brokers (einseitiges TLS).</value></data>
+  <data name="Field_MqttClientCert" xml:space="preserve"><value>Client-Zert.:</value></data>
+  <data name="Tip_MqttClientCert" xml:space="preserve"><value>Optionales Client-Zertifikat (PEM) für gegenseitiges TLS.</value></data>
+  <data name="Field_MqttClientKey" xml:space="preserve"><value>Client-Schlüssel:</value></data>
+  <data name="Tip_MqttClientKey" xml:space="preserve"><value>Optionaler privater Client-Schlüssel (PEM) für gegenseitiges TLS.</value></data>
+  <data name="Tip_MqttClearFile" xml:space="preserve"><value>Ausgewählte Datei löschen</value></data>
+  <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Datei {0} löschen</value></data>
+  <data name="Ph_MqttPem" xml:space="preserve"><value>(optional: eine PEM-Datei wählen)</value></data>
+  <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal zulassen</value></data>
+  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Aktiviert den geschützten MQTT-Befehlskanal. Erfordert eine Broker-Authentifizierung (Benutzername und Passwort oder gegenseitiges TLS).</value></data>
+  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Der Fernbefehlskanal kann Befehle auf dem Gerät ausführen. Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker.</value></data>
+  <data name="Miss_Mqtt" xml:space="preserve"><value>MQTT-Broker</value></data>
+  <data name="MqttHint_Port" xml:space="preserve"><value>Der MQTT-Port muss zwischen 1 und 65535 liegen.</value></data>
+  <data name="MqttHint_Host" xml:space="preserve"><value>Der Broker-Host muss eine gültige IP-Adresse oder ein gültiger Hostname sein.</value></data>
+  <data name="MqttHint_HostIp" xml:space="preserve"><value>Die Broker-Host-IP muss eine gültige IPv4-Adresse sein oder für die automatische Auflösung leer gelassen werden.</value></data>
+  <data name="MqttHint_UserPass" xml:space="preserve"><value>Legen Sie MQTT-Benutzername und -Passwort zusammen fest oder lassen Sie beide leer.</value></data>
+  <data name="MqttHint_CredentialNewline" xml:space="preserve"><value>MQTT-Benutzername und -Passwort müssen jeweils einzeilig sein.</value></data>
+  <data name="MqttHint_CertKey" xml:space="preserve"><value>Geben Sie das TLS-Client-Zertifikat und den Schlüssel zusammen an oder keines von beiden.</value></data>
+  <data name="MqttHint_MutualCa" xml:space="preserve"><value>Gegenseitiges TLS erfordert außerdem ein CA-Zertifikat.</value></data>
+  <data name="MqttHint_ShellAuth" xml:space="preserve"><value>Der Fernbefehlskanal erfordert eine Authentifizierung (Benutzername/Passwort oder gegenseitiges TLS).</value></data>
+  <data name="Dlg_MqttCa_Title" xml:space="preserve"><value>CA-Zertifikat (PEM) wählen</value></data>
+  <data name="Dlg_MqttCert_Title" xml:space="preserve"><value>Client-Zertifikat (PEM) wählen</value></data>
+  <data name="Dlg_MqttKey_Title" xml:space="preserve"><value>Privaten Client-Schlüssel (PEM) wählen</value></data>
+  <data name="Dlg_MqttPemFilter" xml:space="preserve"><value>Zertifikat-/Schlüsseldateien|*.pem;*.crt;*.cer;*.key|Alle Dateien|*.*</value></data>
+  <data name="Cap_MqttInvalid" xml:space="preserve"><value>MQTT-Konfiguration</value></data>
+  <data name="Fmt_Msg_MqttReadPem" xml:space="preserve"><value>Die TLS-Datei konnte nicht gelesen werden:
+{0}
+
+{1}</value></data>
+  <data name="Fmt_Msg_MqttEmptyPem" xml:space="preserve"><value>Die ausgewählte TLS-Datei ist leer: {0}</value></data>
+  <data name="Fmt_Msg_MqttBadPem" xml:space="preserve"><value>Die ausgewählte TLS-Datei ist kein gültiges Zertifikat und kein gültiger Schlüssel: {0}</value></data>
+  <data name="Fmt_Msg_MqttBadCertKey" xml:space="preserve"><value>Client-Zertifikat und -Schlüssel bilden kein gültiges Paar (fehlerhaft oder nicht übereinstimmend).
+Zertifikat: {0}
+Schlüssel: {1}</value></data>
+  <data name="Fmt_Msg_MqttKeyInCert" xml:space="preserve"><value>Dieses Feld darf nur ein Zertifikat enthalten, aber die ausgewählte Datei enthält einen privaten Schlüssel. Tragen Sie den privaten Schlüssel stattdessen im Client-Schlüssel-Feld ein:
+{0}</value></data>
+  <data name="Cap_MqttReadPem" xml:space="preserve"><value>Datei kann nicht gelesen werden</value></data>
+
+  <!-- ================= MQTT bridge (Phase 1d, round 2) ================= -->
+  <data name="Field_MqttHostIp" xml:space="preserve"><value>Host-IP:</value></data>
+  <data name="Tip_MqttHostIp" xml:space="preserve"><value>IPv4-Adresse, auf die der Broker-Hostname auf dem Gerät abgebildet wird (optional — wird automatisch aufgelöst, wenn leer gelassen).</value></data>
+  <data name="Btn_MqttTest" xml:space="preserve"><value>Verbindung testen</value></data>
+  <data name="Tip_MqttTest" xml:space="preserve"><value>Öffnet eine echte MQTT-Verbindung mit den konfigurierten Anmeldedaten und TLS und trennt dann.</value></data>
+  <data name="MqttTest_Testing" xml:space="preserve"><value>Verbindung wird getestet…</value></data>
+  <data name="MqttTest_NeedHostPort" xml:space="preserve"><value>Geben Sie zuerst einen Broker-Host und einen gültigen Port ein.</value></data>
+  <data name="MqttTest_Timeout" xml:space="preserve"><value>Zeitüberschreitung</value></data>
+  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Verbunden mit {0}:{1}.</value></data>
+  <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ Verbindung fehlgeschlagen: {0}</value></data>
+  <data name="Chk_MqttTopics" xml:space="preserve"><value>Topics anpassen (erweitert)</value></data>
+  <data name="Tip_MqttTopics" xml:space="preserve"><value>Überschreibt die standardmäßigen MQTT-Topic-Namen. Für die Home-Assistant-Standardwerte unverändert lassen.</value></data>
+  <data name="Field_MqttTopicRx" xml:space="preserve"><value>Empfang (Befehle):</value></data>
+  <data name="Field_MqttTopicDump" xml:space="preserve"><value>Bus-Dump:</value></data>
+  <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Startdatum:</value></data>
+  <data name="Field_MqttTopicLastWill" xml:space="preserve"><value>Letzter Wille:</value></data>
+  <data name="Field_MqttTopicKey" xml:space="preserve"><value>Tastenfeld:</value></data>
+  <data name="Field_MqttTopicCmdResult" xml:space="preserve"><value>Befehlsergebnis:</value></data>
+  <data name="Field_MqttTopicFileContent" xml:space="preserve"><value>Dateiinhalt:</value></data>
+  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>Der Fernbefehlskanal erlaubt es jedem, der im Empfangs-Topic veröffentlichen kann, Befehle auf dem Gerät auszuführen. Antworten werden im Klartext gesendet, wenn kein TLS konfiguriert ist.
+
+Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. Fernbefehlskanal aktivieren?</value></data>
+  <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>Ein Topic ist leer, umfasst mehrere Zeilen oder ein Veröffentlichungs-Topic enthält einen MQTT-Platzhalter ('+' oder '#').</value></data>
+  <data name="MqttTest_Refused" xml:space="preserve"><value>Verbindung abgelehnt oder keine Antwort.</value></data>
 </root>

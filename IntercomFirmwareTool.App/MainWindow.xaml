@@ -311,17 +311,22 @@
 
     <Grid Margin="14">
         <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>      <!-- scrollable body -->
+            <RowDefinition Height="Auto"/>   <!-- pinned footer (diagnostics + support) -->
+        </Grid.RowDefinitions>
+
+        <!-- Scrollable body: everything above the footer. The optional MQTT panel can
+             make the form taller than the window, so a ScrollViewer keeps the lower
+             fields reachable instead of clipped, while the footer below stays pinned. -->
+        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+        <Grid>
+        <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>   <!-- 0: language menu + intro/safety -->
             <RowDefinition Height="Auto"/>   <!-- 1: input form -->
             <RowDefinition Height="Auto"/>   <!-- 2: Build (centered) + hint -->
             <RowDefinition Height="Auto"/>   <!-- 3: advanced options disclosure -->
-            <!-- 4: result output (part of Advanced). Fills when shown; when hidden the
-                 spacer row below takes the slack so the footer stays pinned. Starts
-                 collapsed (Auto=0), so the spacer starts as the star row. -->
-            <RowDefinition x:Name="RowResult" Height="Auto"/>
-            <RowDefinition x:Name="RowSpacer" Height="*"/>   <!-- 5: slack when result hidden -->
-            <RowDefinition Height="Auto"/>   <!-- 6: diagnostics status -->
-            <RowDefinition Height="Auto"/>   <!-- 7: support / buy me a coffee -->
+            <RowDefinition Height="Auto"/>   <!-- 4: result output (part of Advanced) -->
         </Grid.RowDefinitions>
 
         <!-- Row 0: a discreet globe language menu (top-right), then the safety note -->
@@ -536,6 +541,180 @@
                 </StackPanel>
             </Grid>
 
+            <!-- MQTT bridge (advanced, optional). Off by default: ticking the box
+                 reveals the config panel. The section is shown while Advanced is open,
+                 or kept visible while enabled so an active build option is never
+                 hidden behind the toggle (mirrors the SSH key row). -->
+            <StackPanel x:Name="MqttSection" Margin="0,12,0,0" Visibility="Collapsed">
+                <CheckBox x:Name="ChkMqtt" Content="{loc:Loc Chk_Mqtt}"
+                          ToolTip="{loc:Loc Tip_Mqtt}"
+                          Checked="ChkMqtt_Toggled" Unchecked="ChkMqtt_Toggled"/>
+                <StackPanel x:Name="MqttPanel" Margin="22,8,0,0" Visibility="Collapsed">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>   <!-- 0: broker host + port + test -->
+                            <RowDefinition Height="Auto"/>   <!-- 1: host IP (hostname only) -->
+                            <RowDefinition Height="Auto"/>   <!-- 2: username -->
+                            <RowDefinition Height="Auto"/>   <!-- 3: password -->
+                            <RowDefinition Height="Auto"/>   <!-- 4: TLS CA cert -->
+                            <RowDefinition Height="Auto"/>   <!-- 5: TLS client cert -->
+                            <RowDefinition Height="Auto"/>   <!-- 6: TLS client key -->
+                            <RowDefinition Height="Auto"/>   <!-- 7: allow remote shell -->
+                            <RowDefinition Height="Auto"/>   <!-- 8: remote shell warning -->
+                        </Grid.RowDefinitions>
+
+                        <!-- Broker host + port + Test connection -->
+                        <TextBlock x:Name="LblMqttBroker" Grid.Row="0" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttBroker}"/>
+                        <StackPanel Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2"
+                                    Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBox x:Name="TxtMqttHost" Style="{StaticResource InputField}" Width="200"
+                                     AutomationProperties.LabeledBy="{Binding ElementName=LblMqttBroker}"
+                                     ToolTip="{loc:Loc Tip_MqttBroker}" TextChanged="MqttField_TextChanged"/>
+                            <TextBlock x:Name="LblMqttPort" Style="{StaticResource FieldLabel}" Margin="12,0,8,0"
+                                       Text="{loc:Loc Field_MqttPort}"/>
+                            <TextBox x:Name="TxtMqttPort" Style="{StaticResource InputField}" Width="70"
+                                     AutomationProperties.LabeledBy="{Binding ElementName=LblMqttPort}"
+                                     ToolTip="{loc:Loc Tip_MqttPort}" TextChanged="MqttField_TextChanged"/>
+                            <Button x:Name="BtnMqttTest" Style="{StaticResource SecondaryButton}"
+                                    Height="28" Margin="12,0,0,0" Padding="12,0"
+                                    Content="{loc:Loc Btn_MqttTest}" ToolTip="{loc:Loc Tip_MqttTest}"
+                                    Click="BtnMqttTest_Click"/>
+                        </StackPanel>
+
+                        <!-- Host IP mapping — shown only when the broker is a hostname.
+                             The device resolves broker names via bt_hosts.sh, so a name
+                             needs an IPv4 for the bt_daemon-apps.sh edit. Blank = resolve
+                             it automatically at build time. -->
+                        <TextBlock Grid.Row="1" Grid.Column="0" x:Name="LblMqttHostIp"
+                                   Style="{StaticResource FieldLabel}" Visibility="Collapsed"
+                                   Text="{loc:Loc Field_MqttHostIp}"/>
+                        <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" x:Name="TxtMqttHostIp"
+                                 Style="{StaticResource InputField}" Margin="0,0,0,6"
+                                 HorizontalAlignment="Left" Width="200" Visibility="Collapsed"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttHostIp}"
+                                 ToolTip="{loc:Loc Tip_MqttHostIp}" TextChanged="MqttField_TextChanged"/>
+
+                        <!-- Username (optional; set with a password) -->
+                        <TextBlock x:Name="LblMqttUser" Grid.Row="2" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttUser}"/>
+                        <TextBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" x:Name="TxtMqttUser"
+                                 Style="{StaticResource InputField}" Margin="0,0,0,6"
+                                 HorizontalAlignment="Left" Width="200"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttUser}"
+                                 ToolTip="{loc:Loc Tip_MqttUser}" TextChanged="MqttField_TextChanged"
+                                 LostFocus="MqttUser_LostFocus"/>
+
+                        <!-- Password (masked) + reveal -->
+                        <TextBlock x:Name="LblMqttPass" Grid.Row="3" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttPass}"/>
+                        <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
+                                    Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBox x:Name="TxtMqttPass" Style="{StaticResource InputField}"
+                                     Width="200" FontFamily="Consolas"
+                                     AutomationProperties.LabeledBy="{Binding ElementName=LblMqttPass}"/>
+                            <Button x:Name="BtnMqttReveal" Style="{StaticResource IconButton}"
+                                    Content="&#xE7B3;" ToolTip="{loc:Loc Tip_MqttReveal}"
+                                    AutomationProperties.Name="{loc:Loc Tip_MqttReveal}"
+                                    Click="BtnMqttReveal_Click"/>
+                        </StackPanel>
+
+                        <!-- TLS CA certificate (optional; enables one-way TLS) -->
+                        <TextBlock x:Name="LblMqttCa" Grid.Row="4" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttCa}"/>
+                        <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtMqttCaPath"
+                                 Style="{StaticResource InputField}" IsReadOnly="True" Cursor="Hand"
+                                 Margin="0,0,0,6" Foreground="Gray" ToolTip="{loc:Loc Tip_MqttCa}"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttCa}"
+                                 PreviewMouseLeftButtonDown="MqttPem_MouseDown" PreviewKeyDown="MqttPem_PreviewKeyDown"/>
+                        <Button Grid.Row="4" Grid.Column="2" x:Name="BtnClearMqttCa"
+                                Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
+                                ToolTip="{loc:Loc Tip_MqttClearFile}"
+                                Click="MqttPemClear_Click"/>
+
+                        <!-- TLS client certificate (optional; with the key = mutual TLS) -->
+                        <TextBlock x:Name="LblMqttClientCert" Grid.Row="5" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttClientCert}"/>
+                        <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtMqttCertPath"
+                                 Style="{StaticResource InputField}" IsReadOnly="True" Cursor="Hand"
+                                 Margin="0,0,0,6" Foreground="Gray" ToolTip="{loc:Loc Tip_MqttClientCert}"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttClientCert}"
+                                 PreviewMouseLeftButtonDown="MqttPem_MouseDown" PreviewKeyDown="MqttPem_PreviewKeyDown"/>
+                        <Button Grid.Row="5" Grid.Column="2" x:Name="BtnClearMqttCert"
+                                Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
+                                ToolTip="{loc:Loc Tip_MqttClearFile}"
+                                Click="MqttPemClear_Click"/>
+
+                        <!-- TLS client private key (optional; with the cert = mutual TLS) -->
+                        <TextBlock x:Name="LblMqttClientKey" Grid.Row="6" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttClientKey}"/>
+                        <TextBox Grid.Row="6" Grid.Column="1" x:Name="TxtMqttKeyPath"
+                                 Style="{StaticResource InputField}" IsReadOnly="True" Cursor="Hand"
+                                 Margin="0,0,0,6" Foreground="Gray" ToolTip="{loc:Loc Tip_MqttClientKey}"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttClientKey}"
+                                 PreviewMouseLeftButtonDown="MqttPem_MouseDown" PreviewKeyDown="MqttPem_PreviewKeyDown"/>
+                        <Button Grid.Row="6" Grid.Column="2" x:Name="BtnClearMqttKey"
+                                Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
+                                ToolTip="{loc:Loc Tip_MqttClearFile}"
+                                Click="MqttPemClear_Click"/>
+
+                        <!-- Gated remote command channel — disabled until client auth is
+                             configured; toggling it on asks for confirmation (code-behind). -->
+                        <CheckBox Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="2" x:Name="ChkMqttRemoteShell"
+                                  Margin="0,4,0,0" IsEnabled="False" Content="{loc:Loc Chk_MqttRemoteShell}"
+                                  ToolTip="{loc:Loc Tip_MqttRemoteShell}"
+                                  Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
+                        <TextBlock Grid.Row="8" Grid.Column="1" Grid.ColumnSpan="2"
+                                   Margin="0,3,0,0" Foreground="#FF9A6A00" FontSize="11" TextWrapping="Wrap"
+                                   Text="{loc:Loc Warn_MqttRemoteShell}"/>
+                    </Grid>
+
+                    <!-- Test-connection result (transient) -->
+                    <TextBlock x:Name="TxtMqttTestStatus" Margin="0,4,0,0" FontSize="11"
+                               TextWrapping="Wrap" Visibility="Collapsed"
+                               AutomationProperties.LiveSetting="Polite"/>
+
+                    <!-- Topics (collapsible, prefilled with the Home Assistant defaults) -->
+                    <CheckBox x:Name="ChkMqttTopics" Margin="0,10,0,0"
+                              Content="{loc:Loc Chk_MqttTopics}" ToolTip="{loc:Loc Tip_MqttTopics}"
+                              Checked="ChkMqttTopics_Toggled" Unchecked="ChkMqttTopics_Toggled"/>
+                    <Grid x:Name="MqttTopicsPanel" Margin="22,6,0,0" Visibility="Collapsed">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <TextBlock x:Name="LblMqttTopicRx" Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicRx}"/>
+                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtMqttTopicRx" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicRx}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicDump" Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicDump}"/>
+                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtMqttTopicDump" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicDump}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicStartDate" Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicStartDate}"/>
+                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="TxtMqttTopicStartDate" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicStartDate}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicLastWill" Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicLastWill}"/>
+                        <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtMqttTopicLastWill" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicLastWill}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicKey" Grid.Row="4" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicKey}"/>
+                        <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtMqttTopicKey" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicKey}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicCmdResult" Grid.Row="5" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicCmdResult}"/>
+                        <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtMqttTopicCmdResult" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicCmdResult}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicFileContent" Grid.Row="6" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicFileContent}"/>
+                        <TextBox Grid.Row="6" Grid.Column="1" x:Name="TxtMqttTopicFileContent" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicFileContent}" TextChanged="MqttField_TextChanged"/>
+                    </Grid>
+                </StackPanel>
+            </StackPanel>
+
             <StackPanel x:Name="AdvancedTools" Orientation="Horizontal" Margin="0,12,0,0"
                         HorizontalAlignment="Center" Visibility="Collapsed">
                 <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0"
@@ -552,20 +731,28 @@
              whenever Advanced is opened. -->
         <DockPanel x:Name="ResultGroup" Grid.Row="4" Visibility="Collapsed">
             <TextBlock DockPanel.Dock="Top" Text="{loc:Loc Lbl_Result}" Margin="0,0,0,4" FontWeight="SemiBold"/>
-            <TextBox x:Name="TxtResult"
+            <!-- Bounded height with its own scrollbar: inside the page ScrollViewer a
+                 star-fill box can't work (the viewer offers infinite height), so a long
+                 build log scrolls within this box while the page scrolls around it. -->
+            <TextBox x:Name="TxtResult" MaxHeight="320"
                      IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
                      VerticalScrollBarVisibility="Auto"
                      HorizontalScrollBarVisibility="Auto"
                      FontFamily="Consolas" FontSize="12"
                      Text="{loc:Loc Result_Default}"/>
         </DockPanel>
+        </Grid>
+        </ScrollViewer>
 
-        <!-- Row 6: diagnostics -->
-        <TextBlock Grid.Row="6" x:Name="TxtDiag" Margin="0,8,0,0"
+        <!-- Pinned footer: diagnostics + support. Outside the ScrollViewer so it stays
+             visible however tall the scrollable body grows. -->
+        <StackPanel Grid.Row="1">
+        <!-- diagnostics -->
+        <TextBlock x:Name="TxtDiag" Margin="0,8,0,0"
                    Foreground="Gray" FontFamily="Consolas" FontSize="11"/>
 
-        <!-- Row 7: support / buy me a coffee -->
-        <Border Grid.Row="7" Margin="0,10,0,0" Padding="12,9"
+        <!-- support / buy me a coffee -->
+        <Border Margin="0,10,0,0" Padding="12,9"
                 Background="#FFFBF7EF" BorderBrush="#FFE6D6AE" BorderThickness="1" CornerRadius="8">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -619,5 +806,6 @@
                 </UniformGrid>
             </Grid>
         </Border>
+        </StackPanel>
     </Grid>
 </Window>

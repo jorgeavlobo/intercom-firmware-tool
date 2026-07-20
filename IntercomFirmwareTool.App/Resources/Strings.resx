@@ -245,6 +245,9 @@ Pick a valid .pub file, or generate a new pair.</value></data>
   <data name="Msg_OutputCollidesKey" xml:space="preserve"><value>The output path is the same file as the selected SSH key (public or
 private). Choose a different output so the key isn't overwritten.</value></data>
   <data name="Cap_OutputCollidesKey" xml:space="preserve"><value>Output collides with the key</value></data>
+  <data name="Fmt_Msg_OutputCollidesMqtt" xml:space="preserve"><value>The output path is the selected MQTT TLS file. Building would overwrite it — choose a different output:
+{0}</value></data>
+  <data name="Cap_OutputCollidesMqtt" xml:space="preserve"><value>Output collides with a TLS file</value></data>
   <data name="Msg_KeyRequired" xml:space="preserve"><value>Password login is disabled, so an SSH key is required.
 
 Choose or generate a key, or untick “Disable” and set a password.</value></data>
@@ -330,4 +333,80 @@ Open Advanced → Result to see which checks failed.</value></data>
   <data name="Donate_Pre" xml:space="preserve"><value>Found this tool useful? </value></data>
   <data name="Donate_Emph" xml:space="preserve"><value>Buy me a coffee</value></data>
   <data name="Donate_Post" xml:space="preserve"><value>. Thank you! ☺</value></data>
+
+  <!-- ================= MQTT bridge (Phase 1d) ================= -->
+  <data name="Chk_Mqtt" xml:space="preserve"><value>Install MQTT bridge (Home Assistant)</value></data>
+  <data name="Tip_Mqtt" xml:space="preserve"><value>Install an optional MQTT bridge that exposes the OpenWebNet bus and the front-panel keys over MQTT. Off by default.</value></data>
+  <data name="Field_MqttBroker" xml:space="preserve"><value>MQTT Broker:</value></data>
+  <data name="Tip_MqttBroker" xml:space="preserve"><value>Broker hostname or IP address.</value></data>
+  <data name="Field_MqttPort" xml:space="preserve"><value>Port:</value></data>
+  <data name="Tip_MqttPort" xml:space="preserve"><value>Broker TCP port (1–65535; default 1883).</value></data>
+  <data name="Field_MqttUser" xml:space="preserve"><value>Username:</value></data>
+  <data name="Tip_MqttUser" xml:space="preserve"><value>Optional broker username (set together with a password).</value></data>
+  <data name="Field_MqttPass" xml:space="preserve"><value>Password:</value></data>
+  <data name="Tip_MqttReveal" xml:space="preserve"><value>Show or hide the MQTT password</value></data>
+  <data name="Field_MqttCa" xml:space="preserve"><value>TLS CA Cert:</value></data>
+  <data name="Tip_MqttCa" xml:space="preserve"><value>Optional CA certificate (PEM) to verify the broker (one-way TLS).</value></data>
+  <data name="Field_MqttClientCert" xml:space="preserve"><value>Client Cert:</value></data>
+  <data name="Tip_MqttClientCert" xml:space="preserve"><value>Optional client certificate (PEM) for mutual TLS.</value></data>
+  <data name="Field_MqttClientKey" xml:space="preserve"><value>Client Key:</value></data>
+  <data name="Tip_MqttClientKey" xml:space="preserve"><value>Optional client private key (PEM) for mutual TLS.</value></data>
+  <data name="Tip_MqttClearFile" xml:space="preserve"><value>Clear the selected file</value></data>
+  <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Clear the {0} file</value></data>
+  <data name="Ph_MqttPem" xml:space="preserve"><value>(optional: choose a PEM file)</value></data>
+  <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Allow remote command channel</value></data>
+  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Enable the gated MQTT command channel. Requires broker authentication (username and password, or mutual TLS).</value></data>
+  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>The remote command channel can run commands on the device. Enable it only with an authenticated, trusted broker.</value></data>
+  <data name="Miss_Mqtt" xml:space="preserve"><value>MQTT broker</value></data>
+  <data name="MqttHint_Port" xml:space="preserve"><value>The MQTT port must be between 1 and 65535.</value></data>
+  <data name="MqttHint_Host" xml:space="preserve"><value>The broker host must be a valid IP address or hostname.</value></data>
+  <data name="MqttHint_HostIp" xml:space="preserve"><value>The broker host IP must be a valid IPv4 address, or left blank to auto-resolve.</value></data>
+  <data name="MqttHint_UserPass" xml:space="preserve"><value>Set the MQTT username and password together, or leave both empty.</value></data>
+  <data name="MqttHint_CredentialNewline" xml:space="preserve"><value>The MQTT username and password must each be a single line.</value></data>
+  <data name="MqttHint_CertKey" xml:space="preserve"><value>Provide the TLS client certificate and key together, or neither.</value></data>
+  <data name="MqttHint_MutualCa" xml:space="preserve"><value>Mutual TLS also needs a CA certificate.</value></data>
+  <data name="MqttHint_ShellAuth" xml:space="preserve"><value>The remote command channel needs authentication (username/password or mutual TLS).</value></data>
+  <data name="Dlg_MqttCa_Title" xml:space="preserve"><value>Choose the CA certificate (PEM)</value></data>
+  <data name="Dlg_MqttCert_Title" xml:space="preserve"><value>Choose the client certificate (PEM)</value></data>
+  <data name="Dlg_MqttKey_Title" xml:space="preserve"><value>Choose the client private key (PEM)</value></data>
+  <data name="Dlg_MqttPemFilter" xml:space="preserve"><value>Certificate / key files|*.pem;*.crt;*.cer;*.key|All files|*.*</value></data>
+  <data name="Cap_MqttInvalid" xml:space="preserve"><value>MQTT configuration</value></data>
+  <data name="Fmt_Msg_MqttReadPem" xml:space="preserve"><value>Could not read the TLS file:
+{0}
+
+{1}</value></data>
+  <data name="Fmt_Msg_MqttEmptyPem" xml:space="preserve"><value>The selected TLS file is empty: {0}</value></data>
+  <data name="Fmt_Msg_MqttBadPem" xml:space="preserve"><value>The selected TLS file is not a valid certificate or key: {0}</value></data>
+  <data name="Fmt_Msg_MqttBadCertKey" xml:space="preserve"><value>The client certificate and key do not form a valid pair (malformed or mismatched).
+Certificate: {0}
+Key: {1}</value></data>
+  <data name="Fmt_Msg_MqttKeyInCert" xml:space="preserve"><value>This field must contain a certificate only, but the selected file includes a private key. Put the private key in the client key field instead:
+{0}</value></data>
+  <data name="Cap_MqttReadPem" xml:space="preserve"><value>Cannot read file</value></data>
+
+  <!-- ================= MQTT bridge (Phase 1d, round 2) ================= -->
+  <data name="Field_MqttHostIp" xml:space="preserve"><value>Host IP:</value></data>
+  <data name="Tip_MqttHostIp" xml:space="preserve"><value>IPv4 address the broker hostname maps to on the device (optional — auto-resolved if left blank).</value></data>
+  <data name="Btn_MqttTest" xml:space="preserve"><value>Test connection</value></data>
+  <data name="Tip_MqttTest" xml:space="preserve"><value>Open a real MQTT connection using the configured credentials and TLS, then disconnect.</value></data>
+  <data name="MqttTest_Testing" xml:space="preserve"><value>Testing connection…</value></data>
+  <data name="MqttTest_NeedHostPort" xml:space="preserve"><value>Enter a broker host and a valid port first.</value></data>
+  <data name="MqttTest_Timeout" xml:space="preserve"><value>timed out</value></data>
+  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Connected to {0}:{1}.</value></data>
+  <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ Could not connect: {0}</value></data>
+  <data name="Chk_MqttTopics" xml:space="preserve"><value>Customize topics (advanced)</value></data>
+  <data name="Tip_MqttTopics" xml:space="preserve"><value>Override the default MQTT topic names. Leave unchanged for the Home Assistant defaults.</value></data>
+  <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receive (commands):</value></data>
+  <data name="Field_MqttTopicDump" xml:space="preserve"><value>Bus dump:</value></data>
+  <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Start date:</value></data>
+  <data name="Field_MqttTopicLastWill" xml:space="preserve"><value>Last will:</value></data>
+  <data name="Field_MqttTopicKey" xml:space="preserve"><value>Keypad:</value></data>
+  <data name="Field_MqttTopicCmdResult" xml:space="preserve"><value>Command result:</value></data>
+  <data name="Field_MqttTopicFileContent" xml:space="preserve"><value>File content:</value></data>
+  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>The remote command channel lets anyone able to publish to the receive topic run commands on the device. Replies are sent in cleartext unless TLS is configured.
+
+Enable it only on an authenticated, trusted broker. Enable the remote command channel?</value></data>
+  <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Remote command channel</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>A topic is empty, spans multiple lines, or a publish topic contains an MQTT wildcard ('+' or '#').</value></data>
+  <data name="MqttTest_Refused" xml:space="preserve"><value>connection refused or no response.</value></data>
 </root>
