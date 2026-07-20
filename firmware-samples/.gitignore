@@ -1,0 +1,14 @@
+# Proprietary BTicino firmware images must never be committed (copyright /
+# redistribution) and would bloat git history. Keep only the folder structure
+# and docs; the extracted binaries stay local. See README.md → "Redistribution & git".
+#*.fwz
+#*.gz
+#*.ext4
+#*.ext4.gz
+*.img
+mnt/
+
+# ...but keep the structure and docs tracked.
+!.gitignore
+!README.md
+!**/.gitkeep
