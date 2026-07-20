@@ -47,6 +47,17 @@ apply_all() {
 			rc=1
 			continue
 		fi
+		# Defence-in-depth: the manifest is installer-written with fixed basenames,
+		# but never let a tampered "$file" escape $HA_DIR (e.g. "../TcpDump2Mqtt.conf"
+		# would otherwise be read and published, leaking config). Require a plain
+		# basename — no '/' and not "..".
+		case "$file" in
+			*/* | ..)
+				echo "ha_discovery: unsafe filename in manifest: $file"
+				rc=1
+				continue
+				;;
+		esac
 		n=$((n + 1))
 		if [ "${HA_DISCOVERY:-0}" = "1" ]; then
 			if [ ! -f "$HA_DIR/$file" ]; then
