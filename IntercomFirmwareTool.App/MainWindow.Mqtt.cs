@@ -637,6 +637,12 @@ namespace IntercomFirmwareTool.App
             if (!TryReadPem(_mqttCertPath, out certPem)) return false;
             if (!TryReadPem(_mqttKeyPath, out keyPem)) return false;
 
+            // Parse the TLS material now — the same load the Test path does — so a
+            // wrong/corrupt CA, cert or key fails here with a clear popup instead of
+            // building a valid-looking FWZ whose mosquitto TLS silently fails at boot
+            // (Core only checks presence/pairing, not that the PEM actually loads).
+            if (!TryValidatePems(caPem, certPem, keyPem)) return false;
+
             // The gate blocks an invalid port before Build; if we somehow reach here
             // with unparseable text, fail closed with 0 so Core's Validate rejects it
             // (a clean popup) rather than silently installing the 1883 default.
@@ -713,6 +719,45 @@ namespace IntercomFirmwareTool.App
             }
             pem = text;
             return true;
+        }
+
+        /// <summary>
+        /// Parses the selected TLS material the same way the Test path does, so a
+        /// wrong/corrupt CA, client cert or key is rejected at Build time (clean popup)
+        /// rather than baked into a firmware whose mosquitto TLS fails at boot. The CA
+        /// must yield at least one certificate; the client cert + key must load together
+        /// (which also verifies the key matches the certificate). Returns true when the
+        /// material is absent or valid; false after a popup when it won't parse.
+        /// </summary>
+        private bool TryValidatePems(string? caPem, string? certPem, string? keyPem)
+        {
+            if (caPem != null)
+            {
+                bool ok = false;
+                try
+                {
+                    var ca = new X509Certificate2Collection();
+                    ca.ImportFromPem(caPem);
+                    ok = ca.Count > 0;
+                    foreach (var c in ca) c.Dispose();
+                }
+                catch { ok = false; }
+                if (!ok) return PemInvalid(_mqttCaPath);
+            }
+
+            if (certPem != null && keyPem != null)
+            {
+                try { using var cert = X509Certificate2.CreateFromPem(certPem, keyPem); }
+                catch { return PemInvalid(_mqttCertPath); }
+            }
+            return true;
+        }
+
+        private bool PemInvalid(string? path)
+        {
+            MessageBox.Show(this, LF("Fmt_Msg_MqttBadPem", path ?? ""),
+                L("Cap_MqttReadPem"), MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
         }
 
         private static string? NullIfEmpty(string s) => s.Length == 0 ? null : s;

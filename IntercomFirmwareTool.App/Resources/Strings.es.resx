@@ -370,6 +370,7 @@ Abra Avanzado → Resultado para ver qué comprobaciones fallaron.</value></data
   <data name="Cap_MqttInvalid" xml:space="preserve"><value>Configuración MQTT</value></data>
   <data name="Fmt_Msg_MqttReadPem" xml:space="preserve"><value>No se pudo leer el archivo TLS: {0}</value></data>
   <data name="Fmt_Msg_MqttEmptyPem" xml:space="preserve"><value>El archivo TLS seleccionado está vacío: {0}</value></data>
+  <data name="Fmt_Msg_MqttBadPem" xml:space="preserve"><value>El archivo TLS seleccionado no es un certificado o clave válido: {0}</value></data>
   <data name="Cap_MqttReadPem" xml:space="preserve"><value>No se puede leer el archivo</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d, round 2) ================= -->
