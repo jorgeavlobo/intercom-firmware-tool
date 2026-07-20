@@ -495,6 +495,7 @@ namespace IntercomFirmwareTool.Core
                     ("python", new[] { "/usr/bin/python", "/usr/bin/python3" }),  // StartMqttSend tries both
                     ("pgrep", new[] { "/usr/bin/pgrep" }),                        // TcpDump2Mqtt/watchdog hard-code this
                     ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive command inject + StartMqttSend socket monitor (bare `nc` via PATH)
+                    ("awk", new[] { "/usr/bin/awk", "/bin/awk" }),               // StartMqttSend socket framer (busybox applet; falls back to tcpdump if absent at runtime)
                     ("route", new[] { "/sbin/route", "/usr/sbin/route", "/bin/route" }), // #10 base tool (not invoked by us)
                     ("ping", new[] { "/bin/ping", "/usr/bin/ping" }),            // #10 base tool (not invoked by us)
                 };

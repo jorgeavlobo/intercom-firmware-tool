@@ -144,7 +144,8 @@ path.
 ## Runtime dependencies
 
 **Base (factory firmware, confirmed present on a C100X):** `mosquitto_pub`,
-`mosquitto_sub`, a local `mosquitto` broker, `tcpdump`, `nc`, `route`, `ping`,
+`mosquitto_sub`, a local `mosquitto` broker, `tcpdump`, `nc`, `awk` (busybox —
+the socket framer; runtime-falls-back to tcpdump if absent), `route`, `ping`,
 `pgrep`, and `python` (2.7). The installer's read-back check (`ValidateMqtt`,
 issue `#10`) flags any that are missing before a build is accepted. Most are
 invoked directly by our scripts and are validated at the exact path the script uses;

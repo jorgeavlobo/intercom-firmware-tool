@@ -75,12 +75,13 @@ probe_socket() {
 	mkfifo -m 600 "$pfifo" 2>/dev/null || return 1
 	: > "$ptmp"
 
-	# Same connection semantics as run_socket: hold the write side open so a
-	# half-closing nc does not tear the socket down before the ACK arrives.
-	( exec 9>"$pfifo"; printf '*99*1##' >&9; exec sleep 2147483647 ) &
-	wpid=$!
+	# Same connection semantics as run_socket, held for the probe's lifetime: nc
+	# opens the read end, we hold the write end on fd 9 in this shell (no sleeper)
+	# so a half-closing nc does not tear the socket down before the ACK arrives.
 	( nc "$OWN_HOST" "$OWN_PORT_MON" < "$pfifo" > "$ptmp" 2>/dev/null ) &
 	npid=$!
+	exec 9>"$pfifo"
+	( printf '*99*1##' >&9 ) 2>/dev/null
 
 	rc=1
 	i=0
@@ -93,9 +94,9 @@ probe_socket() {
 		i=$((i + 1))
 	done
 
-	kill "$npid" "$wpid" 2>/dev/null
+	exec 9>&-
+	kill "$npid" 2>/dev/null
 	wait "$npid" 2>/dev/null
-	wait "$wpid" 2>/dev/null
 	rm -f "$pfifo" "$ptmp"
 	return $rc
 }
@@ -112,22 +113,28 @@ run_socket() {
 	mkfifo -m 600 "$cfifo" 2>/dev/null && mkfifo -m 600 "$rfifo" 2>/dev/null \
 		&& mkfifo -m 600 "$ffifo" 2>/dev/null || { rm -f "$cfifo" "$rfifo" "$ffifo"; return 1; }
 
-	# Hold the write side of the connection open: send the monitor-session
-	# request ("*99*1##"), then keep the fd open via a sleeper (some nc builds
-	# tear the socket down when stdin hits EOF). Killed on teardown below.
-	( exec 9>"$cfifo"; printf '*99*1##' >&9; exec sleep 2147483647 ) &
-	writer=$!
-
-	# Run the three stages as SEPARATE background processes (not one pipeline) so
-	# each has its own PID and can be supervised by liveness, not by data flow. A
-	# naive `nc | frame_own | mqtt_pub` sits HALF-DEAD if mqtt_pub exits (e.g. the
-	# broker is down) while the bus is idle: nc/awk only see SIGPIPE on the NEXT
-	# frame write, so on a quiet device nothing unwinds, StartMqttSend stays
-	# "alive" to the orchestrator's pgrep check, and it is never respawned. No
-	# self-amplification guard is needed (the monitor carries only bus events,
-	# not our own mosquitto_pub loopback traffic).
+	# Start nc first (it opens the read end of cfifo), then open the WRITE end on
+	# fd 9 in THIS shell and send the monitor-session request ("*99*1##").
+	# Holding fd 9 open for the lifetime of run_socket keeps nc's stdin open
+	# (some nc builds tear the socket down on stdin EOF) WITHOUT a separate
+	# sleeper process — so there is no long-lived `sleep` for the orchestrator to
+	# kill by a broad, collision-prone pattern. fd 9 closes when run_socket
+	# returns (or when this StartMqttSend process is killed), signalling nc to
+	# stop. The handshake write runs in a subshell so a SIGPIPE (nc already gone)
+	# dies with the subshell, not with StartMqttSend.
 	nc "$OWN_HOST" "$OWN_PORT_MON" < "$cfifo" > "$rfifo" &
 	ncpid=$!
+	exec 9>"$cfifo"
+	( printf '*99*1##' >&9 ) 2>/dev/null
+
+	# Run the framer and publisher as SEPARATE background processes (not one
+	# pipeline) so each has its own PID and can be supervised by liveness, not by
+	# data flow. A naive `nc | frame_own | mqtt_pub` sits HALF-DEAD if mqtt_pub
+	# exits (e.g. the broker is down) while the bus is idle: nc/awk only see
+	# SIGPIPE on the NEXT frame write, so on a quiet device nothing unwinds,
+	# StartMqttSend stays "alive" to the orchestrator's pgrep check, and it is
+	# never respawned. No self-amplification guard is needed (the monitor carries
+	# only bus events, not our own mosquitto_pub loopback traffic).
 	frame_own < "$rfifo" > "$ffifo" &
 	framepid=$!
 	mqtt_pub -l -t "${TOPIC_DUMP}" < "$ffifo" &
@@ -140,8 +147,9 @@ run_socket() {
 		sleep 5
 	done
 
-	kill "$ncpid" "$framepid" "$pubpid" "$writer" 2>/dev/null
-	wait "$ncpid" "$framepid" "$pubpid" "$writer" 2>/dev/null
+	exec 9>&-
+	kill "$ncpid" "$framepid" "$pubpid" 2>/dev/null
+	wait "$ncpid" "$framepid" "$pubpid" 2>/dev/null
 	rm -f "$cfifo" "$rfifo" "$ffifo"
 	return 0
 }
@@ -191,7 +199,15 @@ case "${CAPTURE_MODE}" in
 		run_tcpdump
 		;;
 	socket | *)
-		if probe_socket; then
+		# The socket framer is busybox awk. On a variant built without the awk
+		# applet the probe (nc + grep) would still pass, then frame_own would die
+		# with "awk: not found" and the orchestrator would respawn the broken
+		# socket path forever without ever trying tcpdump. Require awk up front and
+		# fall back if it is missing.
+		if ! command -v awk > /dev/null 2>&1; then
+			echo "StartMqttSend: awk not available (needed by the socket framer); falling back to tcpdump"
+			run_tcpdump
+		elif probe_socket; then
 			echo "StartMqttSend: capture mode = socket (OpenWebNet monitor ${OWN_HOST}:${OWN_PORT_MON})"
 			run_socket
 		else
