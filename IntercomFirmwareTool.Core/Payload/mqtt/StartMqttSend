@@ -64,6 +64,23 @@ frame_own() {
 	}'
 }
 
+# Kill each given PID AND its direct children. The socket pipeline backgrounds
+# shell FUNCTIONS (frame_own, mqtt_pub) and the device's /bin/sh is bash, which
+# does NOT exec-optimize a backgrounded function body — so $! is the wrapper
+# subshell and the real awk / mosquitto_pub is its child. Killing only the
+# wrapper would orphan a publisher stuck in DNS/TCP connect (leaking one per
+# reconnect) or an nc still holding the monitor session. pgrep -P reaps the real
+# child too. (nc is backgrounded directly, so it has no wrapper — kill_tree just
+# kills it and finds no children, which is fine.)
+kill_tree() {
+	for _p in "$@"; do
+		[ -n "$_p" ] || continue
+		_kids=$(/usr/bin/pgrep -P "$_p" 2>/dev/null)
+		# shellcheck disable=SC2086
+		kill "$_p" $_kids 2>/dev/null
+	done
+}
+
 # True when the OpenWebNet gateway accepts a monitor session (it replies with the
 # "*#*1##" ACK). Lets us decide whether the socket back-end is usable BEFORE
 # committing to it; a refusal (gateway absent or not yet up) selects tcpdump.
@@ -95,7 +112,7 @@ probe_socket() {
 	done
 
 	exec 9>&-
-	kill "$npid" 2>/dev/null
+	kill_tree "$npid"
 	wait "$npid" 2>/dev/null
 	rm -f "$pfifo" "$ptmp"
 	return $rc
@@ -148,7 +165,7 @@ run_socket() {
 	done
 
 	exec 9>&-
-	kill "$ncpid" "$framepid" "$pubpid" 2>/dev/null
+	kill_tree "$ncpid" "$framepid" "$pubpid"
 	wait "$ncpid" "$framepid" "$pubpid" 2>/dev/null
 	rm -f "$cfifo" "$rfifo" "$ffifo"
 	return 0
