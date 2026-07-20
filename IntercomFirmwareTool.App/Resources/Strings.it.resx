@@ -330,4 +330,40 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="Donate_Pre" xml:space="preserve"><value>Trovi utile questo strumento? </value></data>
   <data name="Donate_Emph" xml:space="preserve"><value>Offrimi un caffè</value></data>
   <data name="Donate_Post" xml:space="preserve"><value>. Grazie! ☺</value></data>
+
+  <!-- ================= MQTT bridge (Phase 1d) ================= -->
+  <data name="Chk_Mqtt" xml:space="preserve"><value>Installa il bridge MQTT (opzionale)</value></data>
+  <data name="Tip_Mqtt" xml:space="preserve"><value>Installa un bridge MQTT opzionale che espone il bus OpenWebNet e i tasti del pannello frontale tramite MQTT. Disattivato per impostazione predefinita.</value></data>
+  <data name="Field_MqttBroker" xml:space="preserve"><value>Broker MQTT:</value></data>
+  <data name="Tip_MqttBroker" xml:space="preserve"><value>Nome host o indirizzo IP del broker.</value></data>
+  <data name="Field_MqttPort" xml:space="preserve"><value>Porta:</value></data>
+  <data name="Tip_MqttPort" xml:space="preserve"><value>Porta TCP del broker (1–65535; predefinita 1883).</value></data>
+  <data name="Field_MqttUser" xml:space="preserve"><value>Nome utente:</value></data>
+  <data name="Tip_MqttUser" xml:space="preserve"><value>Nome utente del broker (opzionale; impostalo insieme a una password).</value></data>
+  <data name="Field_MqttPass" xml:space="preserve"><value>Password:</value></data>
+  <data name="Tip_MqttReveal" xml:space="preserve"><value>Mostra o nascondi la password MQTT</value></data>
+  <data name="Field_MqttCa" xml:space="preserve"><value>Cert. CA TLS:</value></data>
+  <data name="Tip_MqttCa" xml:space="preserve"><value>Certificato CA (PEM) opzionale per verificare il broker (TLS unidirezionale).</value></data>
+  <data name="Field_MqttClientCert" xml:space="preserve"><value>Cert. client:</value></data>
+  <data name="Tip_MqttClientCert" xml:space="preserve"><value>Certificato client (PEM) opzionale per il TLS reciproco.</value></data>
+  <data name="Field_MqttClientKey" xml:space="preserve"><value>Chiave client:</value></data>
+  <data name="Tip_MqttClientKey" xml:space="preserve"><value>Chiave privata client (PEM) opzionale per il TLS reciproco.</value></data>
+  <data name="Tip_MqttClearFile" xml:space="preserve"><value>Cancella il file selezionato</value></data>
+  <data name="Ph_MqttPem" xml:space="preserve"><value>(opzionale: scegli un file PEM)</value></data>
+  <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Consenti il canale dei comandi remoti</value></data>
+  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Abilita il canale dei comandi MQTT protetto. Richiede l'autenticazione al broker (nome utente e password, oppure TLS reciproco).</value></data>
+  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Il canale dei comandi remoti può eseguire comandi sul dispositivo. Abilitalo solo con un broker autenticato e attendibile.</value></data>
+  <data name="Miss_Mqtt" xml:space="preserve"><value>broker MQTT</value></data>
+  <data name="MqttHint_Port" xml:space="preserve"><value>La porta MQTT deve essere compresa tra 1 e 65535.</value></data>
+  <data name="MqttHint_UserPass" xml:space="preserve"><value>Imposta nome utente e password MQTT insieme, oppure lascia entrambi vuoti.</value></data>
+  <data name="MqttHint_CertKey" xml:space="preserve"><value>Fornisci il certificato e la chiave client TLS insieme, oppure nessuno dei due.</value></data>
+  <data name="MqttHint_MutualCa" xml:space="preserve"><value>Il TLS reciproco richiede anche un certificato CA.</value></data>
+  <data name="MqttHint_ShellAuth" xml:space="preserve"><value>Il canale dei comandi remoti richiede l'autenticazione (nome utente/password o TLS reciproco).</value></data>
+  <data name="Dlg_MqttCa_Title" xml:space="preserve"><value>Scegli il certificato CA (PEM)</value></data>
+  <data name="Dlg_MqttCert_Title" xml:space="preserve"><value>Scegli il certificato client (PEM)</value></data>
+  <data name="Dlg_MqttKey_Title" xml:space="preserve"><value>Scegli la chiave privata client (PEM)</value></data>
+  <data name="Dlg_MqttPemFilter" xml:space="preserve"><value>File di certificato / chiave|*.pem;*.crt;*.cer;*.key|Tutti i file|*.*</value></data>
+  <data name="Cap_MqttInvalid" xml:space="preserve"><value>Configurazione MQTT</value></data>
+  <data name="Fmt_Msg_MqttReadPem" xml:space="preserve"><value>Impossibile leggere il file TLS: {0}</value></data>
+  <data name="Cap_MqttReadPem" xml:space="preserve"><value>Impossibile leggere il file</value></data>
 </root>

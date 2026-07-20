@@ -80,6 +80,11 @@ namespace IntercomFirmwareTool.App
             _confirm.Changed += UpdateBuildEnabled;
             WirePeekButton();
 
+            // Optional MQTT bridge (Advanced): wire its masked password field before
+            // the first UpdateBuildEnabled below reads it. Everything else in the MQTT
+            // section is inert until the user ticks "Install MQTT bridge".
+            InitMqttUi();
+
             // Password fields start EMPTY on purpose: the user must enter a root
             // password (or tick key-only), so a build can never ship the publicly
             // known fquinto default. The empty-password guard in Build enforces it.
@@ -858,7 +863,8 @@ namespace IntercomFirmwareTool.App
             // Build button (and the hint below, via UpdateRequiredCues) stay disabled
             // and off the "✓ Ready to build." message for the duration of the op.
             BtnBuild.IsEnabled = _uiEnabled
-                && _fwzPath != null && _outputPath != null && HaveCredential();
+                && _fwzPath != null && _outputPath != null && HaveCredential()
+                && MqttOkToBuild();
             UpdateRequiredCues();
             // Keep the SSH key row's visibility in step with key-only mode and whether
             // a key is selected (both can change here); the advanced tools are toggled
@@ -894,6 +900,10 @@ namespace IntercomFirmwareTool.App
                 ? Visibility.Visible : Visibility.Collapsed;
 
             AdvancedTools.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
+
+            // The optional MQTT bridge section lives in Advanced too; it stays visible
+            // while enabled so an active build option isn't hidden by the toggle.
+            UpdateMqttVisibility(advanced);
 
             // The result output is part of Advanced. When shown, its row fills the
             // window; when hidden, the spacer row takes the slack so the footer stays
@@ -1007,6 +1017,7 @@ namespace IntercomFirmwareTool.App
             }
             if (_outputPath == null) { TxtOutputPath.Text = L("Ph_Output"); TxtOutputPath.Foreground = Brushes.Gray; }
             UpdateKeyPlaceholder();
+            RefreshMqttPlaceholders();
         }
 
         /// <summary>Re-applies the hold/release reveal tooltip + a11y name in the current language.</summary>
@@ -1195,6 +1206,11 @@ namespace IntercomFirmwareTool.App
             bool needConfirm = !passwordOff && pw.Length > 0 && confirm.Length == 0;
             bool confirmMismatch = !passwordOff && pw.Length > 0 && confirm.Length > 0 && pw != confirm;
             bool needKey = passwordOff && _keyPath == null;
+            // MQTT bridge (optional): the broker host is required when the bridge is on;
+            // the port and the both-or-neither / TLS rules surface as a build error.
+            bool needMqttHost = MqttEnabled && TxtMqttHost.Text.Trim().Length == 0;
+            bool mqttPortBad = MqttEnabled && !IsValidPortText(TxtMqttPort.Text);
+            string? mqttError = MqttStructuralError();
 
             SetFieldBorder(TxtFwzPath, needFirmware ? NeededBrush : null);
             // Output is disabled until a firmware is chosen; only cue it once usable.
@@ -1202,6 +1218,8 @@ namespace IntercomFirmwareTool.App
             SetFieldBorder(TxtPassword, needPassword ? NeededBrush : null);
             SetFieldBorder(TxtConfirm, needConfirm ? NeededBrush : confirmMismatch ? ErrorBrush : null);
             SetFieldBorder(TxtKeyPath, needKey ? NeededBrush : null);
+            SetFieldBorder(TxtMqttHost, needMqttHost ? NeededBrush : null);
+            SetFieldBorder(TxtMqttPort, mqttPortBad ? ErrorBrush : null);
 
             // "(required)" placeholders: on the password while it is blank, and on
             // confirm only once a password has been typed (mirrors needPassword/needConfirm).
@@ -1237,6 +1255,7 @@ namespace IntercomFirmwareTool.App
             if (needPassword) missing.Add(advanced ? L("Miss_Password_Advanced") : L("Miss_Password_Simple"));
             if (needConfirm) missing.Add(L("Miss_Confirm"));
             if (needKey) missing.Add(L("Miss_Key"));
+            if (needMqttHost) missing.Add(L("Miss_Mqtt"));
 
             string previousHint = TxtBuildHint.Text;
             if (!_uiEnabled)
@@ -1250,6 +1269,15 @@ namespace IntercomFirmwareTool.App
                 // A concrete error takes priority over the "still needed" list.
                 string prefix = missing.Count > 0 ? LF("Fmt_StillNeeded_Prefix", string.Join(", ", missing)) : "";
                 TxtBuildHint.Text = prefix + L("Hint_Mismatch");
+                TxtBuildHint.Foreground = ErrorBrush;
+            }
+            else if (mqttError != null)
+            {
+                // An MQTT misconfiguration (port range, both-or-neither, TLS/auth
+                // rules) blocks the build the same way; show it after any still-needed
+                // items so the user sees both.
+                string prefix = missing.Count > 0 ? LF("Fmt_StillNeeded_Prefix", string.Join(", ", missing)) : "";
+                TxtBuildHint.Text = prefix + mqttError;
                 TxtBuildHint.Foreground = ErrorBrush;
             }
             else if (missing.Count == 0)
@@ -1412,6 +1440,11 @@ namespace IntercomFirmwareTool.App
             SetStatus(""); // clear any stale status; the build reports via its popup
             var opts = new EnableSshOptions(password, publicKey);
 
+            // Optional MQTT bridge: collect + validate its options (null when the
+            // bridge is off). A file-read failure or invalid config shows a popup and
+            // aborts before the build starts.
+            if (!TryBuildMqttOptions(out MqttOptions? mqttOpts)) return;
+
             // Non-null here: guarded above (and Build is only enabled with firmware,
             // output and a credential set). They are fields, so the compiler re-widens
             // them to maybe-null after the intervening calls — assert with '!'.
@@ -1430,7 +1463,7 @@ namespace IntercomFirmwareTool.App
                     // original, which RunAndShow surfaces.
                     try
                     {
-                        built = FwzProbe.BuildModifiedFwz(fwz, opts, output);
+                        built = FwzProbe.BuildModifiedFwz(fwz, opts, output, mqttOpts);
                     }
                     catch (Exception ex)
                     {

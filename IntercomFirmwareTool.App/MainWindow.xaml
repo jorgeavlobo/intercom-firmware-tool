@@ -536,6 +536,117 @@
                 </StackPanel>
             </Grid>
 
+            <!-- MQTT bridge (advanced, optional). Off by default: ticking the box
+                 reveals the config panel. The section is shown while Advanced is open,
+                 or kept visible while enabled so an active build option is never
+                 hidden behind the toggle (mirrors the SSH key row). -->
+            <StackPanel x:Name="MqttSection" Margin="0,12,0,0" Visibility="Collapsed">
+                <CheckBox x:Name="ChkMqtt" Content="{loc:Loc Chk_Mqtt}"
+                          ToolTip="{loc:Loc Tip_Mqtt}"
+                          Checked="ChkMqtt_Toggled" Unchecked="ChkMqtt_Toggled"/>
+                <StackPanel x:Name="MqttPanel" Margin="22,8,0,0" Visibility="Collapsed">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>   <!-- 0: broker host + port -->
+                            <RowDefinition Height="Auto"/>   <!-- 1: username -->
+                            <RowDefinition Height="Auto"/>   <!-- 2: password -->
+                            <RowDefinition Height="Auto"/>   <!-- 3: TLS CA cert -->
+                            <RowDefinition Height="Auto"/>   <!-- 4: TLS client cert -->
+                            <RowDefinition Height="Auto"/>   <!-- 5: TLS client key -->
+                            <RowDefinition Height="Auto"/>   <!-- 6: allow remote shell -->
+                            <RowDefinition Height="Auto"/>   <!-- 7: remote shell warning -->
+                        </Grid.RowDefinitions>
+
+                        <!-- Broker host + port -->
+                        <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                                   Text="{loc:Loc Field_MqttBroker}"/>
+                        <StackPanel Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2"
+                                    Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBox x:Name="TxtMqttHost" Style="{StaticResource InputField}" Width="200"
+                                     ToolTip="{loc:Loc Tip_MqttBroker}" TextChanged="MqttField_TextChanged"/>
+                            <TextBlock Style="{StaticResource FieldLabel}" Margin="12,0,8,0"
+                                       Text="{loc:Loc Field_MqttPort}"/>
+                            <TextBox x:Name="TxtMqttPort" Style="{StaticResource InputField}" Width="70"
+                                     ToolTip="{loc:Loc Tip_MqttPort}" TextChanged="MqttField_TextChanged"/>
+                        </StackPanel>
+
+                        <!-- Username (optional; set with a password) -->
+                        <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                                   Text="{loc:Loc Field_MqttUser}"/>
+                        <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" x:Name="TxtMqttUser"
+                                 Style="{StaticResource InputField}" Margin="0,0,0,6"
+                                 HorizontalAlignment="Left" Width="200"
+                                 ToolTip="{loc:Loc Tip_MqttUser}" TextChanged="MqttField_TextChanged"/>
+
+                        <!-- Password (masked) + reveal -->
+                        <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                                   Text="{loc:Loc Field_MqttPass}"/>
+                        <StackPanel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2"
+                                    Orientation="Horizontal" Margin="0,0,0,6">
+                            <TextBox x:Name="TxtMqttPass" Style="{StaticResource InputField}"
+                                     Width="200" FontFamily="Consolas"/>
+                            <Button x:Name="BtnMqttReveal" Style="{StaticResource IconButton}"
+                                    Content="&#xE7B3;" ToolTip="{loc:Loc Tip_MqttReveal}"
+                                    AutomationProperties.Name="{loc:Loc Tip_MqttReveal}"
+                                    Click="BtnMqttReveal_Click"/>
+                        </StackPanel>
+
+                        <!-- TLS CA certificate (optional; enables one-way TLS) -->
+                        <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                                   Text="{loc:Loc Field_MqttCa}"/>
+                        <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtMqttCaPath"
+                                 Style="{StaticResource InputField}" IsReadOnly="True" Cursor="Hand"
+                                 Margin="0,0,0,6" Foreground="Gray" ToolTip="{loc:Loc Tip_MqttCa}"
+                                 PreviewMouseLeftButtonDown="MqttPem_MouseDown" PreviewKeyDown="MqttPem_PreviewKeyDown"/>
+                        <Button Grid.Row="3" Grid.Column="2" x:Name="BtnClearMqttCa"
+                                Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
+                                ToolTip="{loc:Loc Tip_MqttClearFile}"
+                                AutomationProperties.Name="{loc:Loc Tip_MqttClearFile}"
+                                Click="MqttPemClear_Click"/>
+
+                        <!-- TLS client certificate (optional; with the key = mutual TLS) -->
+                        <TextBlock Grid.Row="4" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                                   Text="{loc:Loc Field_MqttClientCert}"/>
+                        <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtMqttCertPath"
+                                 Style="{StaticResource InputField}" IsReadOnly="True" Cursor="Hand"
+                                 Margin="0,0,0,6" Foreground="Gray" ToolTip="{loc:Loc Tip_MqttClientCert}"
+                                 PreviewMouseLeftButtonDown="MqttPem_MouseDown" PreviewKeyDown="MqttPem_PreviewKeyDown"/>
+                        <Button Grid.Row="4" Grid.Column="2" x:Name="BtnClearMqttCert"
+                                Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
+                                ToolTip="{loc:Loc Tip_MqttClearFile}"
+                                AutomationProperties.Name="{loc:Loc Tip_MqttClearFile}"
+                                Click="MqttPemClear_Click"/>
+
+                        <!-- TLS client private key (optional; with the cert = mutual TLS) -->
+                        <TextBlock Grid.Row="5" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                                   Text="{loc:Loc Field_MqttClientKey}"/>
+                        <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtMqttKeyPath"
+                                 Style="{StaticResource InputField}" IsReadOnly="True" Cursor="Hand"
+                                 Margin="0,0,0,6" Foreground="Gray" ToolTip="{loc:Loc Tip_MqttClientKey}"
+                                 PreviewMouseLeftButtonDown="MqttPem_MouseDown" PreviewKeyDown="MqttPem_PreviewKeyDown"/>
+                        <Button Grid.Row="5" Grid.Column="2" x:Name="BtnClearMqttKey"
+                                Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
+                                ToolTip="{loc:Loc Tip_MqttClearFile}"
+                                AutomationProperties.Name="{loc:Loc Tip_MqttClearFile}"
+                                Click="MqttPemClear_Click"/>
+
+                        <!-- Gated remote command channel (needs broker auth) -->
+                        <CheckBox Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="2" x:Name="ChkMqttRemoteShell"
+                                  Margin="0,4,0,0" Content="{loc:Loc Chk_MqttRemoteShell}"
+                                  ToolTip="{loc:Loc Tip_MqttRemoteShell}"
+                                  Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
+                        <TextBlock Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="2"
+                                   Margin="0,3,0,0" Foreground="#FF9A6A00" FontSize="11" TextWrapping="Wrap"
+                                   Text="{loc:Loc Warn_MqttRemoteShell}"/>
+                    </Grid>
+                </StackPanel>
+            </StackPanel>
+
             <StackPanel x:Name="AdvancedTools" Orientation="Horizontal" Margin="0,12,0,0"
                         HorizontalAlignment="Center" Visibility="Collapsed">
                 <Button x:Name="BtnVerify" Style="{StaticResource SecondaryButton}" Margin="0,0,10,0"
