@@ -742,21 +742,24 @@ namespace IntercomFirmwareTool.App
                     foreach (var c in ca) c.Dispose();
                 }
                 catch { ok = false; }
-                if (!ok) return PemInvalid(_mqttCaPath);
+                // Only the CA file is involved here, so name it specifically.
+                if (!ok) return PemInvalid(LF("Fmt_Msg_MqttBadPem", _mqttCaPath ?? ""));
             }
 
             if (certPem != null && keyPem != null)
             {
+                // The load uses BOTH files (and verifies they pair up), so a failure
+                // can be the cert, the key, or a mismatch — name both, not just the cert.
                 try { using var cert = X509Certificate2.CreateFromPem(certPem, keyPem); }
-                catch { return PemInvalid(_mqttCertPath); }
+                catch { return PemInvalid(LF("Fmt_Msg_MqttBadCertKey", _mqttCertPath ?? "", _mqttKeyPath ?? "")); }
             }
             return true;
         }
 
-        private bool PemInvalid(string? path)
+        private bool PemInvalid(string message)
         {
-            MessageBox.Show(this, LF("Fmt_Msg_MqttBadPem", path ?? ""),
-                L("Cap_MqttReadPem"), MessageBoxButton.OK, MessageBoxImage.Warning);
+            MessageBox.Show(this, message, L("Cap_MqttReadPem"),
+                MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
         }
 

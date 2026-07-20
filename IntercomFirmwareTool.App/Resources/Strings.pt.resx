@@ -371,6 +371,9 @@ Abra Opções avançadas → Resultado para ver que verificações falharam.</va
   <data name="Fmt_Msg_MqttReadPem" xml:space="preserve"><value>Não foi possível ler o ficheiro TLS: {0}</value></data>
   <data name="Fmt_Msg_MqttEmptyPem" xml:space="preserve"><value>O ficheiro TLS selecionado está vazio: {0}</value></data>
   <data name="Fmt_Msg_MqttBadPem" xml:space="preserve"><value>O ficheiro TLS selecionado não é um certificado ou chave válido: {0}</value></data>
+  <data name="Fmt_Msg_MqttBadCertKey" xml:space="preserve"><value>O certificado e a chave do cliente não formam um par válido (malformados ou não correspondem).
+Certificado: {0}
+Chave: {1}</value></data>
   <data name="Cap_MqttReadPem" xml:space="preserve"><value>Não é possível ler o ficheiro</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d, round 2) ================= -->
