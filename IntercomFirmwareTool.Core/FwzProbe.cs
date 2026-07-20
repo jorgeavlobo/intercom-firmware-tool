@@ -321,21 +321,35 @@ namespace IntercomFirmwareTool.Core
                     // byte-for-byte: compare each entry's name AND the SHA-256 of its
                     // decrypted bytes, so a content change (wrong password, copy bug,
                     // library regression) is caught, not just a name match.
-                    var outputSigs = SigEntryHashes(tempOut, ex.PasswordUsed);
                     bool sigOk;
                     string sigDetail;
-                    if (removeSig)
+                    try
                     {
-                        sigOk = outputSigs.Count == 0;
-                        sigDetail = $"out {outputSigs.Count}";
+                        var outputSigs = SigEntryHashes(tempOut, ex.PasswordUsed);
+                        if (removeSig)
+                        {
+                            sigOk = outputSigs.Count == 0;
+                            sigDetail = $"out {outputSigs.Count}";
+                        }
+                        else
+                        {
+                            var inputSigs = SigEntryHashes(realInput, ex.PasswordUsed);
+                            sigOk = outputSigs.Count == inputSigs.Count &&
+                                inputSigs.All(kv => outputSigs.TryGetValue(kv.Key, out var h) &&
+                                                    h == kv.Value);
+                            sigDetail = $"in {inputSigs.Count}, out {outputSigs.Count}";
+                        }
                     }
-                    else
+                    catch (Exception sigEx)
                     {
-                        var inputSigs = SigEntryHashes(realInput, ex.PasswordUsed);
-                        sigOk = outputSigs.Count == inputSigs.Count &&
-                            inputSigs.All(kv => outputSigs.TryGetValue(kv.Key, out var h) &&
-                                                h == kv.Value);
-                        sigDetail = $"in {inputSigs.Count}, out {outputSigs.Count}";
+                        // Reading/decrypting a .sig entry can fail (a sidecar under a
+                        // different per-entry password, a CRC error, a truncated
+                        // entry). Fail the build as a clear FAILED check with the
+                        // reason, not an exception that aborts the whole round-trip
+                        // and hides the rest of the checklist.
+                        sigOk = false;
+                        sigDetail = string.IsNullOrWhiteSpace(sigEx.Message)
+                            ? sigEx.GetType().Name : sigEx.Message;
                     }
                     checkList.Add(new Ext4Check(
                         removeSig ? ".sig sidecars removed"
