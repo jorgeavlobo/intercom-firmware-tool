@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
 using IntercomFirmwareTool.Core.Localization;
 using ICSharpCode.SharpZipLib.Zip;
 // Disambiguate: ZipFile exists in both System.IO.Compression and SharpZipLib.
@@ -315,18 +316,31 @@ namespace IntercomFirmwareTool.Core
                         $"{ex.SelectedEntry} is ZipCrypto-encrypted (input password)",
                         EntryEncryptedWith(tempOut, ex.SelectedEntry, ex.PasswordUsed), ""));
 
-                    // .sig sidecars: assert the toggle actually took — none in the
-                    // output when removing, or exactly the input's set carried over
-                    // when keeping. Compares by entry name (ordinal, case-insensitive
-                    // like the .sig suffix test).
-                    var inputSigs = SigEntryNames(realInput, ex.PasswordUsed);
-                    var outputSigs = SigEntryNames(tempOut, ex.PasswordUsed);
-                    bool sigOk = removeSig
-                        ? outputSigs.Count == 0
-                        : outputSigs.SetEquals(inputSigs);
+                    // .sig sidecars: assert the toggle actually took. Removing → none
+                    // in the output. Keeping → the SAME sidecars carried through
+                    // byte-for-byte: compare each entry's name AND the SHA-256 of its
+                    // decrypted bytes, so a content change (wrong password, copy bug,
+                    // library regression) is caught, not just a name match.
+                    var outputSigs = SigEntryHashes(tempOut, ex.PasswordUsed);
+                    bool sigOk;
+                    string sigDetail;
+                    if (removeSig)
+                    {
+                        sigOk = outputSigs.Count == 0;
+                        sigDetail = $"out {outputSigs.Count}";
+                    }
+                    else
+                    {
+                        var inputSigs = SigEntryHashes(realInput, ex.PasswordUsed);
+                        sigOk = outputSigs.Count == inputSigs.Count &&
+                            inputSigs.All(kv => outputSigs.TryGetValue(kv.Key, out var h) &&
+                                                h == kv.Value);
+                        sigDetail = $"in {inputSigs.Count}, out {outputSigs.Count}";
+                    }
                     checkList.Add(new Ext4Check(
-                        removeSig ? ".sig sidecars removed" : ".sig sidecars kept (match input)",
-                        sigOk, $"in {inputSigs.Count}, out {outputSigs.Count}"));
+                        removeSig ? ".sig sidecars removed"
+                                  : ".sig sidecars kept unchanged (name + content)",
+                        sigOk, sigDetail));
 
                     IReadOnlyList<Ext4Check> checks = checkList;
                     bool all = true;
@@ -401,19 +415,24 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// The set of <c>.sig</c> entry names in a .fwz (ordinal, case-insensitive),
-        /// used to assert the keep/remove-.sig toggle took effect on the output.
-        /// Entry names live in the (unencrypted) central directory, but the password
-        /// is set for consistency with the other readers here.
+        /// Maps each <c>.sig</c> entry name (ordinal, case-insensitive) to the
+        /// SHA-256 of its <b>decrypted</b> bytes, so the keep-.sig round-trip can
+        /// assert the sidecars are carried through byte-for-byte — not merely that
+        /// the names match. The password is needed to decrypt the (ZipCrypto) entry
+        /// bytes for hashing.
         /// </summary>
-        private static HashSet<string> SigEntryNames(string fwz, string password)
+        private static Dictionary<string, string> SigEntryHashes(string fwz, string password)
         {
-            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             using var zf = new ZipFile(fwz) { Password = password };
             foreach (ZipEntry e in zf)
-                if (e.IsFile && e.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase))
-                    names.Add(e.Name);
-            return names;
+            {
+                if (!e.IsFile || !e.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                using var s = zf.GetInputStream(e);
+                map[e.Name] = Convert.ToHexString(SHA256.HashData(s));
+            }
+            return map;
         }
 
         /// <summary>
