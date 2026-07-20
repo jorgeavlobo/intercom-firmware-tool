@@ -63,44 +63,60 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Adds each missing <c>host → ip</c> mapping after the <c>openserver</c>
-        /// anchor, in order, in a single read-modify-write. Idempotent per mapping
-        /// (whole-line match); preserves the file's owner+mode (on-device
-        /// <c>0700 root:root</c>). Throws if the file is missing, or if any mapping
-        /// needs inserting but the anchor is absent. A no-op (no write) when every
-        /// mapping is already present.
+        /// Ensures each <c>host → ip</c> mapping is present exactly once, right after
+        /// the <c>openserver</c> anchor, in a single read-modify-write. Enforces
+        /// <b>one mapping per host</b>: an existing mapping for the same host with a
+        /// different IP (or a duplicate) is removed and replaced, rather than leaving
+        /// several <c>bt_hosts.sh add &lt;host&gt;</c> commands whose net effect would
+        /// depend on runtime order. Whole-line matching (a commented line never
+        /// counts); the stock <c>openserver</c> anchor is never removed; the file's
+        /// owner+mode are preserved (on-device <c>0700 root:root</c>). Idempotent — a
+        /// no-op (no write) when every mapping is already exactly present. Throws if
+        /// the file is missing, or if a mapping must be inserted but the anchor is
+        /// absent.
         /// </summary>
         internal static void AddMappings(ExtFileSystem fs, IReadOnlyList<(string Host, string Ip)> mappings)
         {
             if (!fs.FileExists(Path))
                 throw new InvalidOperationException(CoreStrings.Format("Hosts_FileMissing", Path));
 
-            var patched = new List<string>(SplitLines(ReadAllText(fs)));
-            int anchor = -1, insertAt = -1;
+            var lines = new List<string>(SplitLines(ReadAllText(fs)));
             bool changed = false;
             foreach (var (host, ip) in mappings)
             {
-                string addLine = MappingLine(host, ip);
-                // Idempotent: skip a mapping already present (whole-line), including
-                // one inserted earlier in this same call.
-                if (patched.Any(l => l.Trim() == addLine)) continue;
+                string desired = MappingLine(host, ip);
+                // The stock openserver→127.0.0.1 mapping IS the anchor line; it is
+                // always present, so a request for it is already satisfied and must
+                // never lead to removing or duplicating the anchor.
+                if (desired == OpenserverAnchor) continue;
 
-                // Resolve the anchor lazily — only when there is actually something
-                // to insert — so an all-present (no-op) call never fails on a missing
-                // anchor.
-                if (anchor < 0)
+                // Every existing mapping for this host (any IP), by whole line, but
+                // NEVER the openserver anchor. A commented line (trimmed, starts with
+                // '#') does not match the command prefix.
+                string prefix = $"/bin/bt_hosts.sh add {host} ";
+                bool IsHostMapping(string l)
                 {
-                    anchor = patched.FindIndex(l => l.Trim() == OpenserverAnchor);
-                    if (anchor < 0)
-                        throw new InvalidOperationException(
-                            CoreStrings.Format("Hosts_AnchorMissing", Path, OpenserverAnchor));
-                    insertAt = anchor + 1;
+                    string t = l.Trim();
+                    return t != OpenserverAnchor && t.StartsWith(prefix, StringComparison.Ordinal);
                 }
-                patched.Insert(insertAt, "\t" + addLine);
-                insertAt++;
+
+                int existing = lines.Count(IsHostMapping);
+                // Already exactly right: one mapping for this host and it is the
+                // desired one → nothing to do.
+                if (existing == 1 && lines.Any(l => l.Trim() == desired)) continue;
+
+                // Otherwise enforce uniqueness: drop every existing mapping for this
+                // host (wrong IP and/or duplicates), then insert the desired one.
+                if (existing > 0) { lines.RemoveAll(IsHostMapping); changed = true; }
+
+                int anchor = lines.FindIndex(l => l.Trim() == OpenserverAnchor);
+                if (anchor < 0)
+                    throw new InvalidOperationException(
+                        CoreStrings.Format("Hosts_AnchorMissing", Path, OpenserverAnchor));
+                lines.Insert(anchor + 1, "\t" + desired);
                 changed = true;
             }
-            if (changed) RewritePreservingMeta(fs, string.Join("\n", patched));
+            if (changed) RewritePreservingMeta(fs, string.Join("\n", lines));
         }
 
         // ---- fs plumbing (the drift-prone logic is above; this is trivial I/O) ---
