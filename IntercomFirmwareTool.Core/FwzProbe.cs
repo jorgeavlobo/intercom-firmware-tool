@@ -325,7 +325,7 @@ namespace IntercomFirmwareTool.Core
                     string sigDetail;
                     try
                     {
-                        var outputSigs = SigEntryHashes(tempOut, ex.PasswordUsed);
+                        var outputSigs = SigEntries(tempOut, ex.PasswordUsed);
                         if (removeSig)
                         {
                             sigOk = outputSigs.Count == 0;
@@ -333,10 +333,18 @@ namespace IntercomFirmwareTool.Core
                         }
                         else
                         {
-                            var inputSigs = SigEntryHashes(realInput, ex.PasswordUsed);
-                            sigOk = outputSigs.Count == inputSigs.Count &&
-                                inputSigs.All(kv => outputSigs.TryGetValue(kv.Key, out var h) &&
-                                                    h == kv.Value);
+                            var inputSigs = SigEntries(realInput, ex.PasswordUsed);
+                            // Exact multiset equality: same count and the same
+                            // (name, content-hash) pairs. Names are compared
+                            // case-SENSITIVELY (zip entry names are case-sensitive, so
+                            // "a.sig" ≠ "A.sig" and neither is collapsed/deduped), and
+                            // sorted so entry order doesn't affect the result.
+                            sigOk = inputSigs.Count == outputSigs.Count &&
+                                inputSigs.OrderBy(t => t.Name, StringComparer.Ordinal)
+                                         .ThenBy(t => t.Hash, StringComparer.Ordinal)
+                                    .SequenceEqual(
+                                        outputSigs.OrderBy(t => t.Name, StringComparer.Ordinal)
+                                                  .ThenBy(t => t.Hash, StringComparer.Ordinal));
                             sigDetail = $"in {inputSigs.Count}, out {outputSigs.Count}";
                         }
                     }
@@ -429,24 +437,24 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Maps each <c>.sig</c> entry name (ordinal, case-insensitive) to the
-        /// SHA-256 of its <b>decrypted</b> bytes, so the keep-.sig round-trip can
-        /// assert the sidecars are carried through byte-for-byte — not merely that
-        /// the names match. The password is needed to decrypt the (ZipCrypto) entry
-        /// bytes for hashing.
+        /// The <c>.sig</c> entries of a .fwz as a list of (name, SHA-256-of-decrypted-
+        /// bytes), so the keep-.sig round-trip can assert the sidecars are carried
+        /// through byte-for-byte. A <b>list</b> (not a dictionary) so two entries that
+        /// differ only by case, or a duplicate name, are each represented — nothing is
+        /// silently collapsed. The password decrypts the (ZipCrypto) bytes for hashing.
         /// </summary>
-        private static Dictionary<string, string> SigEntryHashes(string fwz, string password)
+        private static List<(string Name, string Hash)> SigEntries(string fwz, string password)
         {
-            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var list = new List<(string, string)>();
             using var zf = new ZipFile(fwz) { Password = password };
             foreach (ZipEntry e in zf)
             {
                 if (!e.IsFile || !e.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase))
                     continue;
                 using var s = zf.GetInputStream(e);
-                map[e.Name] = Convert.ToHexString(SHA256.HashData(s));
+                list.Add((e.Name, Convert.ToHexString(SHA256.HashData(s))));
             }
-            return map;
+            return list;
         }
 
         /// <summary>
