@@ -188,9 +188,7 @@ namespace IntercomFirmwareTool.Core
                 // device-only names — and don't append a duplicate line. An
                 // explicit HostIpForHosts override is always honored (ValidateMqtt
                 // then asserts that exact mapping).
-                bool alreadyMapped = fs.FileExists("/etc/init.d/bt_daemon-apps.sh") &&
-                    ReadAllText(fs, "/etc/init.d/bt_daemon-apps.sh")
-                        .Contains("/bin/bt_hosts.sh add " + opts.MqttHost + " ");
+                bool alreadyMapped = BtDaemonAppsHosts.HasHostMapping(fs, opts.MqttHost);
                 if (!(alreadyMapped && string.IsNullOrWhiteSpace(opts.HostIpForHosts)))
                     PatchHosts(fs, opts.MqttHost, ResolveHostIp(opts));
             }
@@ -430,16 +428,16 @@ namespace IntercomFirmwareTool.Core
                 // hosts patch: file present (explicit), and the host line present
                 // iff the broker is a name.
                 checks.Add(new("/etc/init.d/bt_daemon-apps.sh exists (hosts patch target)",
-                    fs.FileExists("/etc/init.d/bt_daemon-apps.sh"), ""));
-                string hosts = fs.FileExists("/etc/init.d/bt_daemon-apps.sh")
-                    ? ReadAllText(fs, "/etc/init.d/bt_daemon-apps.sh") : "";
+                    fs.FileExists(BtDaemonAppsHosts.Path), ""));
                 // When the broker IP was pinned explicitly (HostIpForHosts, hostname
                 // case), assert the exact mapping — otherwise a patch that wrote the
                 // wrong IP would still pass. When the IP was DNS-resolved at install
-                // time it isn't known here, so fall back to the host-prefix check.
+                // time it isn't known here, so fall back to the host-presence check.
+                // Both go through the shared whole-line matcher (a commented line
+                // does not count).
                 bool hostLine = (!opts.HostIsIp && !string.IsNullOrWhiteSpace(opts.HostIpForHosts))
-                    ? hosts.Contains($"/bin/bt_hosts.sh add {opts.MqttHost} {opts.HostIpForHosts}")
-                    : hosts.Contains("/bin/bt_hosts.sh add " + opts.MqttHost + " ");
+                    ? BtDaemonAppsHosts.HasMapping(fs, opts.MqttHost, opts.HostIpForHosts!)
+                    : BtDaemonAppsHosts.HasHostMapping(fs, opts.MqttHost);
                 checks.Add(new("bt_daemon-apps.sh host line present iff hostname",
                     opts.HostIsIp ? !hostLine : hostLine, ""));
 

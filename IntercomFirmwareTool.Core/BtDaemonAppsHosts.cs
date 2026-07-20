@@ -45,7 +45,21 @@ namespace IntercomFirmwareTool.Core
         {
             if (!fs.FileExists(Path)) return false;
             string expected = MappingLine(host, ip);
-            return SplitLines(ReadAllText(fs, Path)).Any(l => l.Trim() == expected);
+            return SplitLines(ReadAllText(fs)).Any(l => l.Trim() == expected);
+        }
+
+        /// <summary>
+        /// True when the file maps <paramref name="host"/> to ANY IP — a whole line
+        /// beginning with the <c>bt_hosts.sh add &lt;host&gt; </c> command. A commented
+        /// line (trimmed, it starts with <c>#</c>) does not match. Used where only the
+        /// presence of a mapping for the name matters, not its exact IP.
+        /// </summary>
+        internal static bool HasHostMapping(ExtFileSystem fs, string host)
+        {
+            if (!fs.FileExists(Path)) return false;
+            string prefix = $"/bin/bt_hosts.sh add {host} ";
+            return SplitLines(ReadAllText(fs))
+                .Any(l => l.Trim().StartsWith(prefix, StringComparison.Ordinal));
         }
 
         /// <summary>
@@ -61,7 +75,7 @@ namespace IntercomFirmwareTool.Core
             if (!fs.FileExists(Path))
                 throw new InvalidOperationException(CoreStrings.Format("Hosts_FileMissing", Path));
 
-            var patched = new List<string>(SplitLines(ReadAllText(fs, Path)));
+            var patched = new List<string>(SplitLines(ReadAllText(fs)));
             int anchor = -1, insertAt = -1;
             bool changed = false;
             foreach (var (host, ip) in mappings)
@@ -94,13 +108,13 @@ namespace IntercomFirmwareTool.Core
         private static string[] SplitLines(string content) =>
             content.Replace("\r\n", "\n").Split('\n');
 
-        private static string ReadAllText(ExtFileSystem fs, string path)
+        private static string ReadAllText(ExtFileSystem fs)
         {
-            using var file = fs.OpenFile(path, FileMode.Open, FileAccess.Read);
+            using var file = fs.OpenFile(Path, FileMode.Open, FileAccess.Read);
             long length = file.Length;
             if (length > MaxEditFileBytes)
                 throw new NotSupportedException(
-                    CoreStrings.Format("Hosts_FileTooLarge", path, length, MaxEditFileBytes));
+                    CoreStrings.Format("Hosts_FileTooLarge", Path, length, MaxEditFileBytes));
             int len = (int)length;
             var buf = new byte[len];
             int total = 0;
