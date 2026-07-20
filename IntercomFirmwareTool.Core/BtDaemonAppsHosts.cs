@@ -25,7 +25,7 @@ namespace IntercomFirmwareTool.Core
     internal static class BtDaemonAppsHosts
     {
         /// <summary>The init script that seeds the device's hosts file at boot.</summary>
-        internal const string Path = "/etc/init.d/bt_daemon-apps.sh";
+        internal const string ScriptPath = "/etc/init.d/bt_daemon-apps.sh";
 
         // The stock line every image carries; we insert new mappings right after it.
         private const string OpenserverAnchor = "/bin/bt_hosts.sh add openserver 127.0.0.1";
@@ -43,7 +43,7 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static bool HasMapping(ExtFileSystem fs, string host, string ip)
         {
-            if (!fs.FileExists(Path)) return false;
+            if (!fs.FileExists(ScriptPath)) return false;
             string expected = MappingLine(host, ip);
             return SplitLines(ReadAllText(fs)).Any(l => LineIs(l, expected));
         }
@@ -56,7 +56,7 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static bool HasHostMapping(ExtFileSystem fs, string host)
         {
-            if (!fs.FileExists(Path)) return false;
+            if (!fs.FileExists(ScriptPath)) return false;
             string prefix = $"/bin/bt_hosts.sh add {host} ";
             return SplitLines(ReadAllText(fs)).Any(l => LineStarts(l, prefix));
         }
@@ -76,8 +76,8 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static void AddMappings(ExtFileSystem fs, IReadOnlyList<(string Host, string Ip)> mappings)
         {
-            if (!fs.FileExists(Path))
-                throw new InvalidOperationException(CoreStrings.Format("Hosts_FileMissing", Path));
+            if (!fs.FileExists(ScriptPath))
+                throw new InvalidOperationException(CoreStrings.Format("Hosts_FileMissing", ScriptPath));
 
             var lines = new List<string>(SplitLines(ReadAllText(fs)));
             bool changed = false;
@@ -108,7 +108,7 @@ namespace IntercomFirmwareTool.Core
                 int anchor = lines.FindIndex(l => LineIs(l, OpenserverAnchor));
                 if (anchor < 0)
                     throw new InvalidOperationException(
-                        CoreStrings.Format("Hosts_AnchorMissing", Path, OpenserverAnchor));
+                        CoreStrings.Format("Hosts_AnchorMissing", ScriptPath, OpenserverAnchor));
                 lines.Insert(anchor + 1, "\t" + desired);
                 changed = true;
             }
@@ -134,11 +134,11 @@ namespace IntercomFirmwareTool.Core
 
         private static string ReadAllText(ExtFileSystem fs)
         {
-            using var file = fs.OpenFile(Path, FileMode.Open, FileAccess.Read);
+            using var file = fs.OpenFile(ScriptPath, FileMode.Open, FileAccess.Read);
             long length = file.Length;
             if (length > MaxEditFileBytes)
                 throw new NotSupportedException(
-                    CoreStrings.Format("Hosts_FileTooLarge", Path, length, MaxEditFileBytes));
+                    CoreStrings.Format("Hosts_FileTooLarge", ScriptPath, length, MaxEditFileBytes));
             int len = (int)length;
             var buf = new byte[len];
             int total = 0;
@@ -155,13 +155,13 @@ namespace IntercomFirmwareTool.Core
 
         private static void RewritePreservingMeta(ExtFileSystem fs, string text)
         {
-            uint mode = fs.GetMode(Path) & 0xFFF;
-            var owner = fs.GetOwner(Path);
+            uint mode = fs.GetMode(ScriptPath) & 0xFFF;
+            var owner = fs.GetOwner(ScriptPath);
             byte[] bytes = Encoding.UTF8.GetBytes(text);
-            using (var f = fs.OpenFile(Path, FileMode.Create, FileAccess.Write))
+            using (var f = fs.OpenFile(ScriptPath, FileMode.Create, FileAccess.Write))
                 f.Write(bytes, 0, bytes.Length);
-            fs.SetMode(Path, mode);
-            if (owner != null) fs.SetOwner(Path, owner.Item1, owner.Item2);
+            fs.SetMode(ScriptPath, mode);
+            if (owner != null) fs.SetOwner(ScriptPath, owner.Item1, owner.Item2);
         }
     }
 }

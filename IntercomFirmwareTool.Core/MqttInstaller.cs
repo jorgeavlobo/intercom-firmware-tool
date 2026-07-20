@@ -428,7 +428,7 @@ namespace IntercomFirmwareTool.Core
                 // hosts patch: file present (explicit), and the host line present
                 // iff the broker is a name.
                 checks.Add(new("/etc/init.d/bt_daemon-apps.sh exists (hosts patch target)",
-                    fs.FileExists(BtDaemonAppsHosts.Path), ""));
+                    fs.FileExists(BtDaemonAppsHosts.ScriptPath), ""));
                 // When the broker IP was pinned explicitly (HostIpForHosts, hostname
                 // case), assert the exact mapping — otherwise a patch that wrote the
                 // wrong IP would still pass. When the IP was DNS-resolved at install
