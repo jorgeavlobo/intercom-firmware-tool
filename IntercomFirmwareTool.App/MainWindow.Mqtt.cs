@@ -85,6 +85,14 @@ namespace IntercomFirmwareTool.App
             TxtMqttTopicCmdResult.Text = d.TopicCmdResult;
             TxtMqttTopicFileContent.Text = d.TopicFileContent;
 
+            // HA auto-discovery defaults set here (not in XAML) for the same reason
+            // as the port above: their Checked/TextChanged handlers call
+            // UpdateBuildEnabled, which reads the masked password fields — those must
+            // already be constructed, which they are by the time InitMqttUi runs.
+            // On by default (plug-and-play; read-only entities); node id prefilled.
+            TxtMqttHaNodeId.Text = d.HaNodeId;
+            ChkMqttHaDiscovery.IsChecked = true;
+
             RefreshMqttPlaceholders();
         }
 

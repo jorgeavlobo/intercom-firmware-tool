@@ -719,17 +719,21 @@
                          appear in Home Assistant with no manual YAML. Read-only, so the
                          secure-by-default posture holds; untick to skip (a later build
                          then clears any previously-published entities). -->
-                    <CheckBox x:Name="ChkMqttHaDiscovery" Margin="0,10,0,0" IsChecked="True"
+                    <!-- IsChecked (default on) is set in InitMqttUi, NOT here, so the
+                         Checked handler can't fire during InitializeComponent before the
+                         masked password fields it reads are constructed. -->
+                    <CheckBox x:Name="ChkMqttHaDiscovery" Margin="0,10,0,0"
                               Content="{loc:Loc Chk_MqttHaDiscovery}" ToolTip="{loc:Loc Tip_MqttHaDiscovery}"
                               Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
                     <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
                                Text="{loc:Loc Hint_MqttHaDiscovery}"/>
                     <!-- Per-unit HA device id: distinct values let several bridges
-                         coexist on one broker. Enabled only when discovery is on. -->
+                         coexist on one broker. Enabled only when discovery is on. The
+                         default Text is set in InitMqttUi (see the checkbox note). -->
                     <StackPanel Orientation="Horizontal" Margin="22,4,0,0"
                                 IsEnabled="{Binding IsChecked, ElementName=ChkMqttHaDiscovery}">
                         <TextBlock Text="{loc:Loc Field_MqttHaNodeId}" VerticalAlignment="Center" Margin="0,0,6,0"/>
-                        <TextBox x:Name="TxtMqttHaNodeId" Text="bticino_intercom" Width="200"
+                        <TextBox x:Name="TxtMqttHaNodeId" Width="200"
                                  ToolTip="{loc:Loc Tip_MqttHaNodeId}"
                                  TextChanged="MqttField_TextChanged"/>
                     </StackPanel>
