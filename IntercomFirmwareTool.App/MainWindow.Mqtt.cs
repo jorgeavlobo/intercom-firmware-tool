@@ -1,7 +1,7 @@
 using System;
 using System.IO;
 using System.Net;
-using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -10,6 +10,8 @@ using System.Windows.Input;
 using System.Windows.Media;
 using IntercomFirmwareTool.Core;
 using Microsoft.Win32;
+using MQTTnet;
+using MQTTnet.Client;
 
 namespace IntercomFirmwareTool.App
 {
@@ -219,7 +221,7 @@ namespace IntercomFirmwareTool.App
             }
         }
 
-        // ---- Test connection (raw TCP reachability, dependency-free) ---------
+        // ---- Test connection (real MQTT CONNECT via MQTTnet) ----------------
 
         private async void BtnMqttTest_Click(object sender, RoutedEventArgs e)
         {
@@ -231,26 +233,107 @@ namespace IntercomFirmwareTool.App
             }
             int port = int.Parse(TxtMqttPort.Text.Trim());
 
+            // Read the auth + TLS material the same way the build does, so the test
+            // exercises exactly what will be installed.
+            string? user = NullIfEmpty(TxtMqttUser.Text.Trim());
+            string? pass = NullIfEmpty(_mqttPass?.Value ?? "");
+            if (!TryReadPem(_mqttCaPath, out string? caPem)) return;
+            if (!TryReadPem(_mqttCertPath, out string? certPem)) return;
+            if (!TryReadPem(_mqttKeyPath, out string? keyPem)) return;
+
             BtnMqttTest.IsEnabled = false;
             SetMqttTestStatus(L("MqttTest_Testing"), error: false);
             bool ok = false;
             string? err = null;
             try
             {
-                // A plain TCP connect confirms the broker host/port is reachable; it
-                // does NOT check MQTT credentials or TLS (those surface at build/run).
-                using var client = new TcpClient();
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
-                await client.ConnectAsync(host, port, cts.Token);
-                ok = client.Connected;
+                ok = await MqttTestConnectAsync(host, port, user, pass, caPem, certPem, keyPem);
             }
             catch (OperationCanceledException) { err = L("MqttTest_Timeout"); }
             catch (Exception ex) { err = SafeMessage(ex); }
 
             BtnMqttTest.IsEnabled = _uiEnabled;
             SetMqttTestStatus(
-                ok ? LF("Fmt_MqttTest_Ok", host, port) : LF("Fmt_MqttTest_Fail", err ?? ""),
+                ok ? LF("Fmt_MqttTest_Ok", host, port)
+                   : LF("Fmt_MqttTest_Fail", err ?? L("MqttTest_Refused")),
                 error: !ok);
+        }
+
+        /// <summary>
+        /// Opens a real MQTT connection with the configured credentials and TLS,
+        /// then disconnects. Returns true on a successful CONNACK; throws with a
+        /// broker/TLS reason otherwise. This exercises auth and TLS — not just
+        /// reachability — so a bad password or an untrusted certificate is caught
+        /// here rather than only at runtime on the device.
+        /// </summary>
+        private static async Task<bool> MqttTestConnectAsync(
+            string host, int port, string? user, string? pass,
+            string? caPem, string? certPem, string? keyPem)
+        {
+            var factory = new MqttFactory();
+            using var client = factory.CreateMqttClient();
+
+            var builder = new MqttClientOptionsBuilder()
+                .WithTcpServer(host, port)
+                .WithClientId("intercom-fw-tool-conn-test")
+                .WithCleanSession(true)
+                .WithTimeout(TimeSpan.FromSeconds(6));
+
+            if (user != null && pass != null)
+                builder = builder.WithCredentials(user, pass);
+
+            bool wantTls = caPem != null || (certPem != null && keyPem != null);
+            if (wantTls)
+            {
+                var tls = new MqttClientTlsOptionsBuilder().UseTls(true);
+
+                if (caPem != null)
+                {
+                    // Validate the broker certificate against the supplied CA as a
+                    // custom trust root (the CA is provided precisely because it is
+                    // not in the machine store).
+                    using var ca = X509Certificate2.CreateFromPem(caPem);
+                    var caCopy = new X509Certificate2(ca.Export(X509ContentType.Cert));
+                    tls = tls.WithCertificateValidationHandler(ctx =>
+                    {
+                        using var chain = new X509Chain();
+                        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                        chain.ChainPolicy.CustomTrustStore.Add(caCopy);
+                        using var server = new X509Certificate2(ctx.Certificate);
+                        return chain.Build(server);
+                    });
+                }
+
+                if (certPem != null && keyPem != null)
+                {
+                    // A PEM-loaded cert must be round-tripped through PKCS#12 or the
+                    // private key is unusable for the handshake on Windows SChannel.
+                    using var ephemeral = X509Certificate2.CreateFromPem(certPem, keyPem);
+                    var clientCert = new X509Certificate2(ephemeral.Export(X509ContentType.Pkcs12));
+                    tls = tls.WithClientCertificates(new X509Certificate2Collection { clientCert });
+                }
+
+                builder = builder.WithTlsOptions(tls.Build());
+            }
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+            MqttClientConnectResult res = await client.ConnectAsync(builder.Build(), cts.Token);
+            bool ok = res.ResultCode == MqttClientConnectResultCode.Success;
+
+            if (client.IsConnected)
+            {
+                try { await client.DisconnectAsync(); } catch { /* best-effort close */ }
+            }
+
+            if (!ok)
+            {
+                string reason = string.IsNullOrEmpty(res.ReasonString)
+                    ? res.ResultCode.ToString()
+                    : $"{res.ResultCode}: {res.ReasonString}";
+                throw new Exception(reason);
+            }
+            return true;
         }
 
         private void SetMqttTestStatus(string text, bool error)

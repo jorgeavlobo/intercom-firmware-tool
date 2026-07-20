@@ -371,11 +371,11 @@ Abra Opções avançadas → Resultado para ver que verificações falharam.</va
   <data name="Field_MqttHostIp" xml:space="preserve"><value>IP do anfitrião:</value></data>
   <data name="Tip_MqttHostIp" xml:space="preserve"><value>Endereço IPv4 para o qual o nome do broker é mapeado no dispositivo (opcional — resolvido automaticamente se deixado em branco).</value></data>
   <data name="Btn_MqttTest" xml:space="preserve"><value>Testar ligação</value></data>
-  <data name="Tip_MqttTest" xml:space="preserve"><value>Tenta uma ligação TCP ao anfitrião e porta do broker. Não verifica credenciais nem TLS.</value></data>
+  <data name="Tip_MqttTest" xml:space="preserve"><value>Abre uma ligação MQTT real usando as credenciais e o TLS configurados e depois desliga.</value></data>
   <data name="MqttTest_Testing" xml:space="preserve"><value>A testar a ligação…</value></data>
   <data name="MqttTest_NeedHostPort" xml:space="preserve"><value>Introduza primeiro um anfitrião do broker e uma porta válida.</value></data>
   <data name="MqttTest_Timeout" xml:space="preserve"><value>tempo esgotado</value></data>
-  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Alcançado {0}:{1}.</value></data>
+  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Ligado a {0}:{1}.</value></data>
   <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ Não foi possível ligar: {0}</value></data>
   <data name="Chk_MqttTopics" xml:space="preserve"><value>Personalizar tópicos (avançado)</value></data>
   <data name="Tip_MqttTopics" xml:space="preserve"><value>Substitui os nomes de tópico MQTT predefinidos. Deixe inalterado para as predefinições do Home Assistant.</value></data>
@@ -391,4 +391,5 @@ Abra Opções avançadas → Resultado para ver que verificações falharam.</va
 Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comandos remoto?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de comandos remoto</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Um tópico está vazio ou um tópico de publicação contém um espaço ou um wildcard MQTT ('+' ou '#').</value></data>
+  <data name="MqttTest_Refused" xml:space="preserve"><value>ligação recusada ou sem resposta.</value></data>
 </root>

@@ -371,11 +371,11 @@ Open Advanced → Result to see which checks failed.</value></data>
   <data name="Field_MqttHostIp" xml:space="preserve"><value>Host IP:</value></data>
   <data name="Tip_MqttHostIp" xml:space="preserve"><value>IPv4 address the broker hostname maps to on the device (optional — auto-resolved if left blank).</value></data>
   <data name="Btn_MqttTest" xml:space="preserve"><value>Test connection</value></data>
-  <data name="Tip_MqttTest" xml:space="preserve"><value>Try a TCP connection to the broker host and port. Does not check credentials or TLS.</value></data>
+  <data name="Tip_MqttTest" xml:space="preserve"><value>Open a real MQTT connection using the configured credentials and TLS, then disconnect.</value></data>
   <data name="MqttTest_Testing" xml:space="preserve"><value>Testing connection…</value></data>
   <data name="MqttTest_NeedHostPort" xml:space="preserve"><value>Enter a broker host and a valid port first.</value></data>
   <data name="MqttTest_Timeout" xml:space="preserve"><value>timed out</value></data>
-  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Reached {0}:{1}.</value></data>
+  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Connected to {0}:{1}.</value></data>
   <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ Could not connect: {0}</value></data>
   <data name="Chk_MqttTopics" xml:space="preserve"><value>Customize topics (advanced)</value></data>
   <data name="Tip_MqttTopics" xml:space="preserve"><value>Override the default MQTT topic names. Leave unchanged for the Home Assistant defaults.</value></data>
@@ -391,4 +391,5 @@ Open Advanced → Result to see which checks failed.</value></data>
 Enable it only on an authenticated, trusted broker. Enable the remote command channel?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Remote command channel</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>A topic is empty, or a publish topic contains a space or an MQTT wildcard ('+' or '#').</value></data>
+  <data name="MqttTest_Refused" xml:space="preserve"><value>connection refused or no response.</value></data>
 </root>

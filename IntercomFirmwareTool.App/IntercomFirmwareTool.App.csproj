@@ -21,4 +21,12 @@
     <ProjectReference Include="..\IntercomFirmwareTool.Core\IntercomFirmwareTool.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The only third-party runtime dependency: MQTTnet powers the Advanced-tab
+         "Test connection" button (a real MQTT CONNECT that also exercises the
+         configured auth + TLS). Pinned to the 4.3.x line so the client/TLS API this
+         code targets stays stable (v5 renamed several of these types). -->
+    <PackageReference Include="MQTTnet" Version="4.3.*" />
+  </ItemGroup>
+
 </Project>

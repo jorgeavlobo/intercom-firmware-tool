@@ -371,11 +371,11 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="Field_MqttHostIp" xml:space="preserve"><value>Host-IP:</value></data>
   <data name="Tip_MqttHostIp" xml:space="preserve"><value>IPv4-Adresse, auf die der Broker-Hostname auf dem Gerät abgebildet wird (optional — wird automatisch aufgelöst, wenn leer gelassen).</value></data>
   <data name="Btn_MqttTest" xml:space="preserve"><value>Verbindung testen</value></data>
-  <data name="Tip_MqttTest" xml:space="preserve"><value>Versucht eine TCP-Verbindung zu Broker-Host und -Port. Prüft weder Anmeldedaten noch TLS.</value></data>
+  <data name="Tip_MqttTest" xml:space="preserve"><value>Öffnet eine echte MQTT-Verbindung mit den konfigurierten Anmeldedaten und TLS und trennt dann.</value></data>
   <data name="MqttTest_Testing" xml:space="preserve"><value>Verbindung wird getestet…</value></data>
   <data name="MqttTest_NeedHostPort" xml:space="preserve"><value>Geben Sie zuerst einen Broker-Host und einen gültigen Port ein.</value></data>
   <data name="MqttTest_Timeout" xml:space="preserve"><value>Zeitüberschreitung</value></data>
-  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Erreicht {0}:{1}.</value></data>
+  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Verbunden mit {0}:{1}.</value></data>
   <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ Verbindung fehlgeschlagen: {0}</value></data>
   <data name="Chk_MqttTopics" xml:space="preserve"><value>Topics anpassen (erweitert)</value></data>
   <data name="Tip_MqttTopics" xml:space="preserve"><value>Überschreibt die standardmäßigen MQTT-Topic-Namen. Für die Home-Assistant-Standardwerte unverändert lassen.</value></data>
@@ -391,4 +391,5 @@ Der Vorgang ist abgeschlossen.</value></data>
 Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. Fernbefehlskanal aktivieren?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Ein Topic ist leer oder ein Veröffentlichungs-Topic enthält ein Leerzeichen oder einen MQTT-Platzhalter ('+' oder '#').</value></data>
+  <data name="MqttTest_Refused" xml:space="preserve"><value>Verbindung abgelehnt oder keine Antwort.</value></data>
 </root>

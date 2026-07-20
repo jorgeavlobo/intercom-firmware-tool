@@ -371,11 +371,11 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="Field_MqttHostIp" xml:space="preserve"><value>IP host:</value></data>
   <data name="Tip_MqttHostIp" xml:space="preserve"><value>Indirizzo IPv4 a cui il nome host del broker è mappato sul dispositivo (opzionale — risolto automaticamente se lasciato vuoto).</value></data>
   <data name="Btn_MqttTest" xml:space="preserve"><value>Prova connessione</value></data>
-  <data name="Tip_MqttTest" xml:space="preserve"><value>Prova una connessione TCP all'host e alla porta del broker. Non verifica credenziali né TLS.</value></data>
+  <data name="Tip_MqttTest" xml:space="preserve"><value>Apre una connessione MQTT reale usando le credenziali e il TLS configurati, poi si disconnette.</value></data>
   <data name="MqttTest_Testing" xml:space="preserve"><value>Prova della connessione…</value></data>
   <data name="MqttTest_NeedHostPort" xml:space="preserve"><value>Inserisci prima un host del broker e una porta valida.</value></data>
   <data name="MqttTest_Timeout" xml:space="preserve"><value>tempo scaduto</value></data>
-  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Raggiunto {0}:{1}.</value></data>
+  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Connesso a {0}:{1}.</value></data>
   <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ Impossibile connettersi: {0}</value></data>
   <data name="Chk_MqttTopics" xml:space="preserve"><value>Personalizza i topic (avanzate)</value></data>
   <data name="Tip_MqttTopics" xml:space="preserve"><value>Sostituisce i nomi dei topic MQTT predefiniti. Lascia invariato per i valori predefiniti di Home Assistant.</value></data>
@@ -391,4 +391,5 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
 Abilitalo solo su un broker autenticato e attendibile. Abilitare il canale dei comandi remoti?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canale dei comandi remoti</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Un topic è vuoto oppure un topic di pubblicazione contiene uno spazio o un carattere jolly MQTT ('+' o '#').</value></data>
+  <data name="MqttTest_Refused" xml:space="preserve"><value>connessione rifiutata o nessuna risposta.</value></data>
 </root>
