@@ -597,8 +597,12 @@ namespace IntercomFirmwareTool.App
             };
             foreach (var box in allTopics)
             {
-                string v = box.Text.Trim();
-                if (v.Length == 0 || v.IndexOfAny(NewlineChars) >= 0) return L("MqttHint_Topic");
+                // Mirror Core verbatim (do NOT Trim): reject only a whitespace-only
+                // topic or one with a CR/LF, preserving the value exactly as typed —
+                // Core quotes it in the .conf, so leading/trailing/internal spaces are
+                // kept, and the gate stays a faithful mirror of what will be installed.
+                string v = box.Text;
+                if (string.IsNullOrWhiteSpace(v) || v.IndexOfAny(NewlineChars) >= 0) return L("MqttHint_Topic");
             }
             var publishTopics = new[]
             {
@@ -606,7 +610,7 @@ namespace IntercomFirmwareTool.App
                 TxtMqttTopicKey, TxtMqttTopicCmdResult, TxtMqttTopicFileContent,
             };
             foreach (var box in publishTopics)
-                if (box.Text.Trim().IndexOfAny(new[] { '+', '#' }) >= 0) return L("MqttHint_Topic");
+                if (box.Text.IndexOfAny(new[] { '+', '#' }) >= 0) return L("MqttHint_Topic");
 
             return null;
         }
@@ -654,13 +658,17 @@ namespace IntercomFirmwareTool.App
             {
                 // Topics are prefilled with the record's defaults, so an untouched
                 // panel reproduces those exactly; a customized one overrides them.
-                TopicRx = TxtMqttTopicRx.Text.Trim(),
-                TopicDump = TxtMqttTopicDump.Text.Trim(),
-                TopicStartDate = TxtMqttTopicStartDate.Text.Trim(),
-                TopicLastWill = TxtMqttTopicLastWill.Text.Trim(),
-                TopicKey = TxtMqttTopicKey.Text.Trim(),
-                TopicCmdResult = TxtMqttTopicCmdResult.Text.Trim(),
-                TopicFileContent = TxtMqttTopicFileContent.Text.Trim(),
+                // Passed VERBATIM (no Trim) so the installed topic is exactly what the
+                // user typed — Core does not trim (it quotes the value in the .conf and
+                // rejects only whitespace-only/newlines), so trimming here would have
+                // the UI silently drop leading/trailing spaces Core would keep.
+                TopicRx = TxtMqttTopicRx.Text,
+                TopicDump = TxtMqttTopicDump.Text,
+                TopicStartDate = TxtMqttTopicStartDate.Text,
+                TopicLastWill = TxtMqttTopicLastWill.Text,
+                TopicKey = TxtMqttTopicKey.Text,
+                TopicCmdResult = TxtMqttTopicCmdResult.Text,
+                TopicFileContent = TxtMqttTopicFileContent.Text,
             };
 
             // Surface the Core validator's exact (localized) message as a clean
