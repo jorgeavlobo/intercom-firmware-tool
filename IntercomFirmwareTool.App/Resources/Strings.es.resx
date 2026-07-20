@@ -279,6 +279,7 @@ Compilar ahí sobrescribiría y destruiría la clave. Elija una salida diferente
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Contr. root: (deshabilitada — inicio de sesión solo con clave)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Clave púb. : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Clave púb. : (ninguna — solo inicio de sesión con contraseña)</value></data>
+  <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Actualización : (bloqueada — servidores de actualización Legrand redirigidos a 127.0.0.1)</value></data>
   <data name="Fmt_Result_Build_Output" xml:space="preserve"><value>  Salida     : {0}</value></data>
   <data name="Fmt_Result_ArchivePw" xml:space="preserve"><value>Contraseña del archivo : {0}  (clave ZipCrypto, no el modelo del dispositivo)</value></data>
   <data name="Fmt_Result_Build_ModifiedEntry" xml:space="preserve"><value>Entrada modificada : {0}</value></data>
@@ -335,6 +336,9 @@ Abra Avanzado → Resultado para ver qué comprobaciones fallaron.</value></data
   <data name="Donate_Post" xml:space="preserve"><value>. ¡Gracias! ☺</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d) ================= -->
+  <data name="Chk_BlockUpdates" xml:space="preserve"><value>Bloquear actualizaciones automáticas de firmware</value></data>
+  <data name="Tip_BlockUpdates" xml:space="preserve"><value>Redirige los servidores de actualización de firmware de Legrand a 127.0.0.1 para que la unidad no pueda descargar e instalar en segundo plano una actualización OTA que borraría estos cambios. Desactivado por defecto; reversible reinstalando el firmware de fábrica.</value></data>
+  <data name="Hint_BlockUpdates" xml:space="preserve"><value>Protege la modificación de ser borrada por una actualización oficial, pero la unidad dejará de recibir actualizaciones o parches de seguridad mientras esté bloqueada.</value></data>
   <data name="Chk_Mqtt" xml:space="preserve"><value>Instalar puente MQTT (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Instala un puente MQTT opcional que expone el bus OpenWebNet y las teclas del panel frontal a través de MQTT. Desactivado de forma predeterminada.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>Broker MQTT:</value></data>

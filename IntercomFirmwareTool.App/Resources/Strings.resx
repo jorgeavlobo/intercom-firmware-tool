@@ -279,6 +279,7 @@ Overwrite it?</value></data>
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Root pw    : (disabled — key-only login)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Public key : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Public key : (none — password login only)</value></data>
+  <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Auto-update : (blocked — Legrand update servers mapped to 127.0.0.1)</value></data>
   <data name="Fmt_Result_Build_Output" xml:space="preserve"><value>  Output     : {0}</value></data>
   <data name="Fmt_Result_ArchivePw" xml:space="preserve"><value>Archive password : {0}  (ZipCrypto key, not the device model)</value></data>
   <data name="Fmt_Result_Build_ModifiedEntry" xml:space="preserve"><value>Modified entry : {0}</value></data>
@@ -335,6 +336,9 @@ Open Advanced → Result to see which checks failed.</value></data>
   <data name="Donate_Post" xml:space="preserve"><value>. Thank you! ☺</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d) ================= -->
+  <data name="Chk_BlockUpdates" xml:space="preserve"><value>Block firmware auto-updates</value></data>
+  <data name="Tip_BlockUpdates" xml:space="preserve"><value>Map the Legrand firmware-update servers to 127.0.0.1 so the unit can't silently download and flash an over-the-air update that would wipe these changes. Off by default; reversible by reflashing the stock firmware.</value></data>
+  <data name="Hint_BlockUpdates" xml:space="preserve"><value>Protects the mod from being wiped by an official update — but the unit will no longer receive updates or security fixes while blocked.</value></data>
   <data name="Chk_Mqtt" xml:space="preserve"><value>Install MQTT bridge (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Install an optional MQTT bridge that exposes the OpenWebNet bus and the front-panel keys over MQTT. Off by default.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>MQTT Broker:</value></data>

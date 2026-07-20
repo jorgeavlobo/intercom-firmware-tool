@@ -22,7 +22,8 @@ namespace IntercomFirmwareTool.Core
     /// </summary>
     public sealed record EnableSshOptions(
         string? RootPassword = null,
-        string? PublicKey = null)
+        string? PublicKey = null,
+        bool BlockFirmwareUpdates = false)
     {
         /// <summary>True when a non-empty root password is set (else login is key-only).</summary>
         public bool HasPassword => !string.IsNullOrEmpty(RootPassword);
@@ -67,6 +68,28 @@ namespace IntercomFirmwareTool.Core
         // Default first-partition offset: 1 MiB = 2048 sectors.
         private const long PartitionStartSector = 2048;
         private const long PartitionOffsetBytes = PartitionStartSector * SectorSize;
+
+        // ---- Firmware-update (OTA) block ---------------------------------------
+        // Legrand/BTicino OTA firmware-download endpoints (Azure Blob Storage). The
+        // device's Eliot cloud connector (/home/bticino/bin/bt_eliot, via Azure IoT
+        // Hub) receives a *dynamic* firmwareUri pointing at one of these and pulls the
+        // image, which fw_manager/dedrifupdater then flash — wiping any modification.
+        // The URI is not a static string on the image (so it can't be matched
+        // directly), so the robust chokepoint is name resolution: map these hosts to
+        // 127.0.0.1 via the device's own bt_hosts.sh (re-applied at every boot from
+        // bt_daemon-apps.sh). Verified against the C100X v1.5.8 rootfs; same host list
+        // as fquinto's disable_notify_new_firmware. One of these (prodlegrand…) is also
+        // the host FirmwareRegistry downloads from, confirming it is the OTA endpoint.
+        private static readonly string[] FirmwareUpdateHosts =
+        {
+            "prodlegrandressourcespkg.blob.core.windows.net",
+            "blob.ams25prdstr02a.store.core.windows.net",
+        };
+        private const string HostsInitScript = "/etc/init.d/bt_daemon-apps.sh";
+        // The EXACT existing mapping line we anchor after — not a bare "openserver"
+        // substring (which also appears in a `grep -v openserver` line in the same
+        // file: fquinto anchors on the substring and only works by luck of ordering).
+        private const string HostsAnchor = "/bin/bt_hosts.sh add openserver 127.0.0.1";
 
         /// <summary>
         /// Opens an ext4 image and reads (read-only) the contents of a file
@@ -562,6 +585,68 @@ namespace IntercomFirmwareTool.Core
             {
                 fs.CreateSymLink(linkTarget, linkPath);
             }
+
+            // Optional, independent of SSH/MQTT: stop the unit from silently
+            // OTA-updating (which would reflash stock firmware and wipe every edit
+            // above). Runs last in this session; MqttInstaller (if it runs after)
+            // patches the same file after its own openserver anchor — both are
+            // idempotent, anchor-based and compose.
+            if (opts.BlockFirmwareUpdates)
+                BlockFirmwareUpdates(fs);
+        }
+
+        /// <summary>
+        /// Blocks over-the-air firmware updates by mapping the Legrand OTA blob
+        /// hosts (<see cref="FirmwareUpdateHosts"/>) to <c>127.0.0.1</c> in
+        /// <c>bt_daemon-apps.sh</c> — via the device's own <c>bt_hosts.sh</c>, which
+        /// re-applies the mapping at every boot into the tmpfs <c>/etc/hosts</c>. So
+        /// even when the cloud hands the unit a firmware URI, the download host can't
+        /// resolve. Anchored to the EXACT existing <c>openserver</c> mapping line;
+        /// idempotent (skips a host already mapped); preserves the file's owner+mode
+        /// (on-device <c>0700 root:root</c>). Mirrors fquinto's
+        /// <c>disable_notify_new_firmware</c>, with a robust exact-line anchor and an
+        /// idempotency guard the original lacks.
+        /// </summary>
+        private static void BlockFirmwareUpdates(ExtFileSystem fs)
+        {
+            if (!fs.FileExists(HostsInitScript))
+                throw new InvalidOperationException(
+                    CoreStrings.Format("Ext4_FileMissingRefuseCreate", HostsInitScript));
+
+            string content = ReadAllTextFromFs(fs, HostsInitScript);
+            string[] lines = content.Replace("\r\n", "\n").Split('\n');
+
+            int anchor = Array.FindIndex(lines, l => l.Contains(HostsAnchor));
+            if (anchor < 0)
+                throw new InvalidOperationException(
+                    CoreStrings.Format("Mqtt_AnchorMissing", HostsInitScript, HostsAnchor));
+
+            var patched = new List<string>(lines);
+            int insertAt = anchor + 1;
+            bool changed = false;
+            foreach (var host in FirmwareUpdateHosts)
+            {
+                string addLine = $"/bin/bt_hosts.sh add {host} 127.0.0.1";
+                // Idempotent: a host already mapped (a prior run, or a manual edit)
+                // is left as-is rather than duplicated.
+                if (patched.Any(l => l.Contains(addLine))) continue;
+                patched.Insert(insertAt, "\t" + addLine);
+                insertAt++;
+                changed = true;
+            }
+            if (!changed) return; // every host already mapped — nothing to write
+
+            RewritePreservingMeta(fs, HostsInitScript, string.Join("\n", patched));
+        }
+
+        /// <summary>Rewrites a file's text, restoring its prior owner+mode afterwards.</summary>
+        private static void RewritePreservingMeta(ExtFileSystem fs, string path, string text)
+        {
+            uint mode = fs.GetMode(path) & 0xFFF;
+            var owner = fs.GetOwner(path);
+            WriteTextFile(fs, path, text);
+            fs.SetMode(path, mode);
+            if (owner != null) fs.SetOwner(path, owner.Item1, owner.Item2);
         }
 
         /// <summary>
@@ -626,6 +711,20 @@ namespace IntercomFirmwareTool.Core
                     fs.DirectoryExists("/etc/rc5.d"), ""));
                 checks.Add(new("/etc/init.d/dropbear exists (prerequisite)",
                     fs.FileExists("/etc/init.d/dropbear"), ""));
+
+                // OTA-block: only asserted when the option was requested (a normal
+                // build simply never patches, leaving bt_daemon-apps.sh stock — so
+                // there is nothing to assert when it is off, and asserting "absent"
+                // would wrongly fail cross-validation of an image that happens to
+                // carry other host mappings).
+                if (opts.BlockFirmwareUpdates)
+                {
+                    string hosts = fs.FileExists(HostsInitScript)
+                        ? ReadAllTextFromFs(fs, HostsInitScript) : "";
+                    foreach (var host in FirmwareUpdateHosts)
+                        checks.Add(new($"firmware-update host {host} -> 127.0.0.1 (OTA blocked)",
+                            hosts.Contains($"/bin/bt_hosts.sh add {host} 127.0.0.1"), ""));
+                }
             }
             finally
             {

@@ -279,6 +279,7 @@ Substituir?</value></data>
   <data name="Result_Build_RootPw_Disabled" xml:space="preserve"><value>  Pw root      : (desativada — início de sessão apenas por chave)</value></data>
   <data name="Fmt_Result_Build_PubKey" xml:space="preserve"><value>  Chave pública : {0}</value></data>
   <data name="Result_Build_PubKey_None" xml:space="preserve"><value>  Chave pública : (nenhuma — apenas início de sessão por palavra-passe)</value></data>
+  <data name="Result_Build_BlockUpdates_On" xml:space="preserve"><value>  Atualização : (bloqueada — servidores de atualização Legrand mapeados para 127.0.0.1)</value></data>
   <data name="Fmt_Result_Build_Output" xml:space="preserve"><value>  Saída        : {0}</value></data>
   <data name="Fmt_Result_ArchivePw" xml:space="preserve"><value>Palavra-passe do arquivo : {0}  (chave ZipCrypto, não o modelo do dispositivo)</value></data>
   <data name="Fmt_Result_Build_ModifiedEntry" xml:space="preserve"><value>Entrada modificada : {0}</value></data>
@@ -335,6 +336,9 @@ Abra Opções avançadas → Resultado para ver que verificações falharam.</va
   <data name="Donate_Post" xml:space="preserve"><value>. Obrigado! ☺</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d) ================= -->
+  <data name="Chk_BlockUpdates" xml:space="preserve"><value>Bloquear atualizações automáticas de firmware</value></data>
+  <data name="Tip_BlockUpdates" xml:space="preserve"><value>Mapeia os servidores de atualização de firmware da Legrand para 127.0.0.1 para que a unidade não possa descarregar e instalar silenciosamente uma atualização OTA que apagaria estas alterações. Desligado por omissão; reversível reinstalando a firmware de fábrica.</value></data>
+  <data name="Hint_BlockUpdates" xml:space="preserve"><value>Protege a modificação de ser apagada por uma atualização oficial — mas a unidade deixa de receber atualizações e correções de segurança enquanto estiver bloqueada.</value></data>
   <data name="Chk_Mqtt" xml:space="preserve"><value>Instalar ponte MQTT (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Instala uma ponte MQTT opcional que expõe o barramento OpenWebNet e as teclas do painel frontal através de MQTT. Desligada por predefinição.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>Broker MQTT:</value></data>
