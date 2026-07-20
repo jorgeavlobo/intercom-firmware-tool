@@ -289,7 +289,26 @@ namespace IntercomFirmwareTool.Core
                 bool preserveTemp = false;
                 try
                 {
-                    Repack(realInput, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut, removeSig);
+                    try
+                    {
+                        Repack(realInput, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut, removeSig);
+                    }
+                    catch (Exception repackEx)
+                    {
+                        // A repack failure — including a RETAINED .sig sidecar that
+                        // can't be read (a different per-entry password, a CRC error,
+                        // a truncated entry) which throws here, before the round-trip
+                        // block — becomes a structured FAILED check instead of an
+                        // exception that aborts the build. Nothing is committed (the
+                        // finally drops tempOut), and the reason shows in the log.
+                        return new FwzBuildResult("", ex.PasswordUsed, ex.SelectedEntry, false,
+                            new List<Ext4Check>
+                            {
+                                new("firmware repack succeeded", false,
+                                    string.IsNullOrWhiteSpace(repackEx.Message)
+                                        ? repackEx.GetType().Name : repackEx.Message)
+                            });
+                    }
 
                     // 4) Round-trip: validate the TEMP .fwz (reopen it through our
                     //    chain) before it is allowed to become the output.
