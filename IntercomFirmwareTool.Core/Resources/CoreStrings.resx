@@ -167,6 +167,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_InvalidPort" xml:space="preserve">
     <value>The MQTT broker port must be between 1 and 65535.</value>
   </data>
+  <data name="Mqtt_InvalidOwnEndpoint" xml:space="preserve">
+    <value>The OpenWebNet monitor host must be valid and its port must be between 1 and 65535.</value>
+  </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>MQTT username and password must be set together (both or neither).</value>
   </data>

@@ -29,6 +29,11 @@ namespace IntercomFirmwareTool.Core
     /// Enable the gated JSON command channel. Requires client auth (user/pass or mutual TLS);
     /// enforced by <see cref="Validate"/>.
     /// </param>
+    /// <param name="UseTcpdumpCapture">
+    /// Force the faithful tcpdump + filter.py capture back-end. When false (default) the bridge
+    /// opens a MONITOR session directly on the local OpenWebNet gateway (no tcpdump, no resident
+    /// python) and only falls back to tcpdump when that gateway is unreachable. See StartMqttSend.
+    /// </param>
     public sealed record MqttOptions(
         string MqttHost,
         int MqttPort = 1883,
@@ -38,7 +43,8 @@ namespace IntercomFirmwareTool.Core
         string? ClientCertPem = null,
         string? ClientKeyPem = null,
         string? HostIpForHosts = null,
-        bool AllowRemoteShell = false)
+        bool AllowRemoteShell = false,
+        bool UseTcpdumpCapture = false)
     {
         // A record's synthesized ToString() prints EVERY property — which would
         // leak MqttPass and the TLS private key (ClientKeyPem) into any log line
@@ -47,7 +53,13 @@ namespace IntercomFirmwareTool.Core
         public override string ToString() =>
             $"MqttOptions {{ MqttHost = {MqttHost}, MqttPort = {MqttPort}, " +
             $"HasAuth = {HasAuth}, HasTls = {HasTls}, HasMutualTls = {HasMutualTls}, " +
-            $"AllowRemoteShell = {AllowRemoteShell} }}";
+            $"AllowRemoteShell = {AllowRemoteShell}, " +
+            $"Capture = {(UseTcpdumpCapture ? "tcpdump" : "socket")} }}";
+
+        /// <summary>OpenWebNet gateway host for the socket monitor back-end (loopback alias).</summary>
+        public string OwnHost { get; init; } = "127.0.0.1";
+        /// <summary>OpenWebNet gateway plaintext OwnPort for the socket monitor session.</summary>
+        public int OwnPortMon { get; init; } = 20000;
 
         public string TopicRx { get; init; } = "Bticino/rx";
         public string TopicDump { get; init; } = "Bticino/tx";
@@ -218,6 +230,16 @@ namespace IntercomFirmwareTool.Core
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidHost"), nameof(opts));
             if (opts.MqttPort < 1 || opts.MqttPort > 65535)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidPort"), nameof(opts));
+
+            // The OpenWebNet monitor endpoint feeds the socket back-end's config.
+            // It is not exposed in the UI (the App always uses the defaults), but
+            // it is a public option, so a library caller could set a bad value —
+            // a 0/negative/oversized port or an empty host would generate a config
+            // that silently fails socket mode and falls back to tcpdump. Fail fast
+            // here instead, mirroring the broker host/port checks above.
+            if (string.IsNullOrWhiteSpace(opts.OwnHost) || !IsValidHost(opts.OwnHost) ||
+                opts.OwnPortMon < 1 || opts.OwnPortMon > 65535)
+                throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidOwnEndpoint"), nameof(opts));
 
             // A hosts-mapping IP override is only USED when the broker is given by
             // name (when the host is already an IP, PatchHosts is skipped and this
@@ -472,7 +494,7 @@ namespace IntercomFirmwareTool.Core
                     ("tcpdump", new[] { "/usr/sbin/tcpdump" }),                   // StartMqttSend hard-codes this
                     ("python", new[] { "/usr/bin/python", "/usr/bin/python3" }),  // StartMqttSend tries both
                     ("pgrep", new[] { "/usr/bin/pgrep" }),                        // TcpDump2Mqtt/watchdog hard-code this
-                    ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive: bare `nc` via PATH
+                    ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive command inject + StartMqttSend socket monitor (bare `nc` via PATH)
                     ("route", new[] { "/sbin/route", "/usr/sbin/route", "/bin/route" }), // #10 base tool (not invoked by us)
                     ("ping", new[] { "/bin/ping", "/usr/bin/ping" }),            // #10 base tool (not invoked by us)
                 };
@@ -486,6 +508,20 @@ namespace IntercomFirmwareTool.Core
                     checks.Add(new($"runtime dep {name} present",
                         paths.Any(p => DependencyPresent(fs, p)),
                         string.Join(" | ", paths)));
+
+                // awk is used ONLY by the socket capture back-end (its busybox framer).
+                // Gate the check on that choice: in tcpdump mode awk is not invoked at
+                // all, so requiring it would wrongly reject an otherwise-valid image
+                // (every ValidateMqtt failure fails the whole build). When socket mode
+                // IS selected we require it, so the build reflects the user's choice
+                // rather than silently degrading to the runtime tcpdump fallback.
+                if (!opts.UseTcpdumpCapture)
+                {
+                    var awkPaths = new[] { "/usr/bin/awk", "/bin/awk" };  // busybox applet
+                    checks.Add(new("runtime dep awk present (socket capture)",
+                        awkPaths.Any(p => DependencyPresent(fs, p)),
+                        string.Join(" | ", awkPaths)));
+                }
             }
             return checks;
         }
@@ -572,6 +608,13 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_FILE_CONTENT", opts.TopicFileContent));
 
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
+
+            // Capture back-end: 'socket' (default; direct OpenWebNet monitor session, no
+            // tcpdump/python) or 'tcpdump' (faithful Phase 1 pipeline). OWN_* is the gateway
+            // endpoint for the socket back-end. See StartMqttSend for the fallback behaviour.
+            sb.Append(Conf("CAPTURE_MODE", opts.UseTcpdumpCapture ? "tcpdump" : "socket"));
+            sb.Append(Conf("OWN_HOST", opts.OwnHost));
+            sb.Append("OWN_PORT_MON=").Append(opts.OwnPortMon).Append('\n');
             return sb.ToString();
         }
 

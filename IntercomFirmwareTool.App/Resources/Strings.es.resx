@@ -403,6 +403,9 @@ Clave: {1}</value></data>
   <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ No se pudo conectar: {0}</value></data>
   <data name="Chk_MqttTopics" xml:space="preserve"><value>Personalizar temas (avanzado)</value></data>
   <data name="Tip_MqttTopics" xml:space="preserve"><value>Sustituye los nombres de tema MQTT predeterminados. Déjelo sin cambios para los valores predeterminados de Home Assistant.</value></data>
+  <data name="Chk_MqttTcpdump" xml:space="preserve"><value>Usar captura tcpdump (compatibilidad)</value></data>
+  <data name="Tip_MqttTcpdump" xml:space="preserve"><value>Deja sin marcar para recibir los eventos directamente del gateway OpenWebNet local (sin tcpdump, sin Python residente). Márcalo solo si el puente no muestra actividad del bus — fuerza la captura tcpdump heredada.</value></data>
+  <data name="Hint_MqttTcpdump" xml:space="preserve"><value>Predeterminado: un socket de monitorización OpenWebNet directo, más ligero para el dispositivo. La vía tcpdump se usa automáticamente como alternativa si el gateway no es accesible.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Recepción (comandos):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Volcado del bus:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Fecha de inicio:</value></data>

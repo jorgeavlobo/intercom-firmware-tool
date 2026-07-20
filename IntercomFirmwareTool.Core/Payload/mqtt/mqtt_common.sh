@@ -20,6 +20,13 @@ fi
 : "${TOPIC_FILE_CONTENT:=Bticino/file_content_topic}"
 : "${TOPIC_CMD_RESULT:=Bticino/command_result_topic}"
 
+# Capture back-end + OpenWebNet monitor endpoint, centralised so the sender AND
+# the orchestrator (which builds pgrep kill patterns from these) agree. See
+# StartMqttSend for what the modes mean; openserver's plaintext OwnPort is 20000.
+: "${CAPTURE_MODE:=socket}"
+: "${OWN_HOST:=127.0.0.1}"
+: "${OWN_PORT_MON:=20000}"
+
 # mosquitto_pub with auth AND TLS applied independently (compose, do not choose
 # one or the other). Extra args (topic, -l, -r, -m ...) pass through; mosquitto
 # accepts options in any order.

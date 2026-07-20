@@ -167,6 +167,9 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_InvalidPort" xml:space="preserve">
     <value>Le port du broker MQTT doit être compris entre 1 et 65535.</value>
   </data>
+  <data name="Mqtt_InvalidOwnEndpoint" xml:space="preserve">
+    <value>L'hôte du moniteur OpenWebNet doit être valide et son port doit être compris entre 1 et 65535.</value>
+  </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>Le nom d'utilisateur et le mot de passe MQTT doivent être définis ensemble (les deux ou aucun).</value>
   </data>
