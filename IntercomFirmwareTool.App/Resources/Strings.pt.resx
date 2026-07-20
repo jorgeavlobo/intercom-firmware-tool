@@ -359,6 +359,7 @@ Abra Opções avançadas → Resultado para ver que verificações falharam.</va
   <data name="MqttHint_Host" xml:space="preserve"><value>O anfitrião do broker tem de ser um endereço IP ou nome de anfitrião válido.</value></data>
   <data name="MqttHint_HostIp" xml:space="preserve"><value>O IP do anfitrião do broker tem de ser um endereço IPv4 válido, ou deixado em branco para resolução automática.</value></data>
   <data name="MqttHint_UserPass" xml:space="preserve"><value>Defina o utilizador e a palavra-passe MQTT em conjunto, ou deixe ambos vazios.</value></data>
+  <data name="MqttHint_CredentialNewline" xml:space="preserve"><value>O utilizador e a palavra-passe MQTT têm de ocupar cada um uma única linha.</value></data>
   <data name="MqttHint_CertKey" xml:space="preserve"><value>Forneça o certificado e a chave de cliente TLS em conjunto, ou nenhum.</value></data>
   <data name="MqttHint_MutualCa" xml:space="preserve"><value>O TLS mútuo exige também um certificado de CA.</value></data>
   <data name="MqttHint_ShellAuth" xml:space="preserve"><value>O canal de comandos remoto exige autenticação (utilizador/palavra-passe ou TLS mútuo).</value></data>
@@ -393,6 +394,6 @@ Abra Opções avançadas → Resultado para ver que verificações falharam.</va
 
 Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comandos remoto?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de comandos remoto</value></data>
-  <data name="MqttHint_Topic" xml:space="preserve"><value>Um tópico está vazio ou um tópico de publicação contém um wildcard MQTT ('+' ou '#').</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>Um tópico está vazio, ocupa várias linhas ou um tópico de publicação contém um caráter universal MQTT ('+' ou '#').</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>ligação recusada ou sem resposta.</value></data>
 </root>

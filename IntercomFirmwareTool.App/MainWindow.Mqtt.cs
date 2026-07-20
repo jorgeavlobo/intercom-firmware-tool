@@ -414,7 +414,8 @@ namespace IntercomFirmwareTool.App
                             // chains to the CA and matches the host but isn't valid for TLS
                             // server authentication (e.g. clientAuth-only) must fail here
                             // too — otherwise the test goes green for a broker the device's
-                            // mosquitto client would reject on purpose validation.
+                            // mosquitto client would reject during certificate-purpose
+                            // validation.
                             chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1")); // id-kp-serverAuth
                             foreach (var c in caCerts)
                             {
@@ -563,6 +564,13 @@ namespace IntercomFirmwareTool.App
             bool hasPass = (_mqttPass?.Value.Length ?? 0) > 0;
             if (hasUser != hasPass) return L("MqttHint_UserPass");
 
+            // Credentials are sourced into the shell-quoted .conf; a CR/LF would make a
+            // multi-line value and break auth, so Core requires each single-line —
+            // mirror that (a pasted multi-line value would otherwise pass the gate).
+            if (TxtMqttUser.Text.Trim().IndexOfAny(NewlineChars) >= 0 ||
+                (_mqttPass?.Value.IndexOfAny(NewlineChars) ?? -1) >= 0)
+                return L("MqttHint_CredentialNewline");
+
             bool hasCert = _mqttCertPath != null;
             bool hasKey = _mqttKeyPath != null;
             if (hasCert != hasKey) return L("MqttHint_CertKey");
@@ -576,25 +584,34 @@ namespace IntercomFirmwareTool.App
                 return L("MqttHint_ShellAuth");
 
             // Topic sanity — mirror the Core validator (do NOT be stricter, or the
-            // UI blocks a config Core would accept): reject an empty topic, and a
-            // '+'/'#' wildcard on a publish topic. Spaces are allowed (the .conf
-            // quotes values). The subtler rules (a valid TopicRx subscription filter;
-            // TopicRx not matching a publish topic) stay with the Core popup.
-            if (TxtMqttTopicRx.Text.Trim().Length == 0) return L("MqttHint_Topic");
+            // UI blocks a config Core would accept): every topic must be non-empty and
+            // single-line, and a publish topic must not carry a '+'/'#' wildcard.
+            // Spaces are allowed (the .conf quotes values). The subtler rules (a valid
+            // TopicRx subscription filter; TopicRx not matching a publish topic) stay
+            // with the Core popup.
+            var allTopics = new[]
+            {
+                TxtMqttTopicRx, TxtMqttTopicDump, TxtMqttTopicStartDate, TxtMqttTopicLastWill,
+                TxtMqttTopicKey, TxtMqttTopicCmdResult, TxtMqttTopicFileContent,
+            };
+            foreach (var box in allTopics)
+            {
+                string v = box.Text.Trim();
+                if (v.Length == 0 || v.IndexOfAny(NewlineChars) >= 0) return L("MqttHint_Topic");
+            }
             var publishTopics = new[]
             {
                 TxtMqttTopicDump, TxtMqttTopicStartDate, TxtMqttTopicLastWill,
                 TxtMqttTopicKey, TxtMqttTopicCmdResult, TxtMqttTopicFileContent,
             };
             foreach (var box in publishTopics)
-            {
-                string v = box.Text.Trim();
-                if (v.Length == 0 || v.IndexOfAny(new[] { '+', '#' }) >= 0)
-                    return L("MqttHint_Topic");
-            }
+                if (box.Text.Trim().IndexOfAny(new[] { '+', '#' }) >= 0) return L("MqttHint_Topic");
 
             return null;
         }
+
+        // CR/LF: values sourced into the shell .conf must be single-line (see Core).
+        private static readonly char[] NewlineChars = { '\r', '\n' };
 
         // ---- Build integration ----------------------------------------------
 

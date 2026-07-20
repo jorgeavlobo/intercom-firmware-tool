@@ -359,6 +359,7 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="MqttHint_Host" xml:space="preserve"><value>L'host del broker deve essere un indirizzo IP o un nome host valido.</value></data>
   <data name="MqttHint_HostIp" xml:space="preserve"><value>L'IP dell'host del broker deve essere un indirizzo IPv4 valido, oppure lasciato vuoto per la risoluzione automatica.</value></data>
   <data name="MqttHint_UserPass" xml:space="preserve"><value>Imposta nome utente e password MQTT insieme, oppure lascia entrambi vuoti.</value></data>
+  <data name="MqttHint_CredentialNewline" xml:space="preserve"><value>Nome utente e password MQTT devono essere ciascuno su una sola riga.</value></data>
   <data name="MqttHint_CertKey" xml:space="preserve"><value>Fornisci il certificato e la chiave client TLS insieme, oppure nessuno dei due.</value></data>
   <data name="MqttHint_MutualCa" xml:space="preserve"><value>Il TLS reciproco richiede anche un certificato CA.</value></data>
   <data name="MqttHint_ShellAuth" xml:space="preserve"><value>Il canale dei comandi remoti richiede l'autenticazione (nome utente/password o TLS reciproco).</value></data>
@@ -393,6 +394,6 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
 
 Abilitalo solo su un broker autenticato e attendibile. Abilitare il canale dei comandi remoti?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canale dei comandi remoti</value></data>
-  <data name="MqttHint_Topic" xml:space="preserve"><value>Un topic è vuoto oppure un topic di pubblicazione contiene un carattere jolly MQTT ('+' o '#').</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>Un topic è vuoto, occupa più righe oppure un topic di pubblicazione contiene un carattere jolly MQTT ('+' o '#').</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>connessione rifiutata o nessuna risposta.</value></data>
 </root>

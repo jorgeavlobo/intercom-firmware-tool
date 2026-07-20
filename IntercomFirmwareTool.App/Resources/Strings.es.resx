@@ -359,6 +359,7 @@ Abra Avanzado → Resultado para ver qué comprobaciones fallaron.</value></data
   <data name="MqttHint_Host" xml:space="preserve"><value>El host del broker debe ser una dirección IP o un nombre de host válido.</value></data>
   <data name="MqttHint_HostIp" xml:space="preserve"><value>La IP del host del broker debe ser una dirección IPv4 válida, o dejarse en blanco para resolverse automáticamente.</value></data>
   <data name="MqttHint_UserPass" xml:space="preserve"><value>Configure el usuario y la contraseña MQTT juntos, o deje ambos vacíos.</value></data>
+  <data name="MqttHint_CredentialNewline" xml:space="preserve"><value>El usuario y la contraseña MQTT deben ocupar cada uno una sola línea.</value></data>
   <data name="MqttHint_CertKey" xml:space="preserve"><value>Proporcione el certificado y la clave de cliente TLS juntos, o ninguno.</value></data>
   <data name="MqttHint_MutualCa" xml:space="preserve"><value>El TLS mutuo también necesita un certificado de CA.</value></data>
   <data name="MqttHint_ShellAuth" xml:space="preserve"><value>El canal de comandos remoto necesita autenticación (usuario/contraseña o TLS mutuo).</value></data>
@@ -393,6 +394,6 @@ Abra Avanzado → Resultado para ver qué comprobaciones fallaron.</value></data
 
 Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de comandos remoto?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de comandos remoto</value></data>
-  <data name="MqttHint_Topic" xml:space="preserve"><value>Un tema está vacío o un tema de publicación contiene un comodín MQTT ('+' o '#').</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>Un tema está vacío, ocupa varias líneas o un tema de publicación contiene un comodín MQTT ('+' o '#').</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>conexión rechazada o sin respuesta.</value></data>
 </root>

@@ -359,6 +359,7 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="MqttHint_Host" xml:space="preserve"><value>Der Broker-Host muss eine gültige IP-Adresse oder ein gültiger Hostname sein.</value></data>
   <data name="MqttHint_HostIp" xml:space="preserve"><value>Die Broker-Host-IP muss eine gültige IPv4-Adresse sein oder für die automatische Auflösung leer gelassen werden.</value></data>
   <data name="MqttHint_UserPass" xml:space="preserve"><value>Legen Sie MQTT-Benutzername und -Passwort zusammen fest oder lassen Sie beide leer.</value></data>
+  <data name="MqttHint_CredentialNewline" xml:space="preserve"><value>MQTT-Benutzername und -Passwort müssen jeweils einzeilig sein.</value></data>
   <data name="MqttHint_CertKey" xml:space="preserve"><value>Geben Sie das TLS-Client-Zertifikat und den Schlüssel zusammen an oder keines von beiden.</value></data>
   <data name="MqttHint_MutualCa" xml:space="preserve"><value>Gegenseitiges TLS erfordert außerdem ein CA-Zertifikat.</value></data>
   <data name="MqttHint_ShellAuth" xml:space="preserve"><value>Der Fernbefehlskanal erfordert eine Authentifizierung (Benutzername/Passwort oder gegenseitiges TLS).</value></data>
@@ -393,6 +394,6 @@ Der Vorgang ist abgeschlossen.</value></data>
 
 Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. Fernbefehlskanal aktivieren?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal</value></data>
-  <data name="MqttHint_Topic" xml:space="preserve"><value>Ein Topic ist leer oder ein Veröffentlichungs-Topic enthält einen MQTT-Platzhalter ('+' oder '#').</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>Ein Topic ist leer, umfasst mehrere Zeilen oder ein Veröffentlichungs-Topic enthält einen MQTT-Platzhalter ('+' oder '#').</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>Verbindung abgelehnt oder keine Antwort.</value></data>
 </root>
