@@ -366,4 +366,28 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="Cap_MqttInvalid" xml:space="preserve"><value>MQTT-Konfiguration</value></data>
   <data name="Fmt_Msg_MqttReadPem" xml:space="preserve"><value>Die TLS-Datei konnte nicht gelesen werden: {0}</value></data>
   <data name="Cap_MqttReadPem" xml:space="preserve"><value>Datei kann nicht gelesen werden</value></data>
+
+  <!-- ================= MQTT bridge (Phase 1d, round 2) ================= -->
+  <data name="Field_MqttHostIp" xml:space="preserve"><value>Host-IP:</value></data>
+  <data name="Tip_MqttHostIp" xml:space="preserve"><value>IPv4-Adresse, auf die der Broker-Hostname auf dem Gerät abgebildet wird (optional — wird automatisch aufgelöst, wenn leer gelassen).</value></data>
+  <data name="Btn_MqttTest" xml:space="preserve"><value>Verbindung testen</value></data>
+  <data name="Tip_MqttTest" xml:space="preserve"><value>Versucht eine TCP-Verbindung zu Broker-Host und -Port. Prüft weder Anmeldedaten noch TLS.</value></data>
+  <data name="MqttTest_Testing" xml:space="preserve"><value>Verbindung wird getestet…</value></data>
+  <data name="MqttTest_NeedHostPort" xml:space="preserve"><value>Geben Sie zuerst einen Broker-Host und einen gültigen Port ein.</value></data>
+  <data name="MqttTest_Timeout" xml:space="preserve"><value>Zeitüberschreitung</value></data>
+  <data name="Fmt_MqttTest_Ok" xml:space="preserve"><value>✓ Erreicht {0}:{1}.</value></data>
+  <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ Verbindung fehlgeschlagen: {0}</value></data>
+  <data name="Chk_MqttTopics" xml:space="preserve"><value>Topics anpassen (erweitert)</value></data>
+  <data name="Tip_MqttTopics" xml:space="preserve"><value>Überschreibt die standardmäßigen MQTT-Topic-Namen. Für die Home-Assistant-Standardwerte unverändert lassen.</value></data>
+  <data name="Field_MqttTopicRx" xml:space="preserve"><value>Empfang (Befehle):</value></data>
+  <data name="Field_MqttTopicDump" xml:space="preserve"><value>Bus-Dump:</value></data>
+  <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Startdatum:</value></data>
+  <data name="Field_MqttTopicLastWill" xml:space="preserve"><value>Letzter Wille:</value></data>
+  <data name="Field_MqttTopicKey" xml:space="preserve"><value>Tastenfeld:</value></data>
+  <data name="Field_MqttTopicCmdResult" xml:space="preserve"><value>Befehlsergebnis:</value></data>
+  <data name="Field_MqttTopicFileContent" xml:space="preserve"><value>Dateiinhalt:</value></data>
+  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>Der Fernbefehlskanal erlaubt es jedem, der im Empfangs-Topic veröffentlichen kann, Befehle auf dem Gerät auszuführen. Antworten werden im Klartext gesendet, wenn kein TLS konfiguriert ist.
+
+Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. Fernbefehlskanal aktivieren?</value></data>
+  <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal</value></data>
 </root>

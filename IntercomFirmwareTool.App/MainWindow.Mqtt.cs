@@ -1,5 +1,9 @@
 using System;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -34,11 +38,15 @@ namespace IntercomFirmwareTool.App
         // pattern as the root password). Reveal is a simple show/hide toggle.
         private MaskedPasswordField? _mqttPass;
 
+        // Guards the programmatic (un)checking of the remote-shell box from
+        // re-triggering its confirmation dialog.
+        private bool _suppressMqttShell;
+
         private bool MqttEnabled => ChkMqtt.IsChecked == true;
 
-        /// <summary>Wire up the MQTT masked password field. Called from the ctor
-        /// after InitializeComponent (so TxtMqttPass exists) and before the first
-        /// UpdateBuildEnabled (so the gate can read the field).</summary>
+        /// <summary>Wire up the MQTT masked password field + topic defaults. Called
+        /// from the ctor after InitializeComponent (so the controls exist) and before
+        /// the first UpdateBuildEnabled (so the gate can read the fields).</summary>
         private void InitMqttUi()
         {
             _mqttPass = new MaskedPasswordField(TxtMqttPass);
@@ -47,6 +55,17 @@ namespace IntercomFirmwareTool.App
             // calls UpdateBuildEnabled — can never fire during InitializeComponent,
             // before the password fields it reads are constructed.
             TxtMqttPort.Text = "1883";
+
+            // Prefill the topic boxes with the record's defaults (Home Assistant set).
+            var d = new MqttOptions("x"); // a throwaway just to read the default topics
+            TxtMqttTopicRx.Text = d.TopicRx;
+            TxtMqttTopicDump.Text = d.TopicDump;
+            TxtMqttTopicStartDate.Text = d.TopicStartDate;
+            TxtMqttTopicLastWill.Text = d.TopicLastWill;
+            TxtMqttTopicKey.Text = d.TopicKey;
+            TxtMqttTopicCmdResult.Text = d.TopicCmdResult;
+            TxtMqttTopicFileContent.Text = d.TopicFileContent;
+
             RefreshMqttPlaceholders();
         }
 
@@ -55,11 +74,34 @@ namespace IntercomFirmwareTool.App
         /// <summary>Show/hide the config panel with the enable box, then re-gate.</summary>
         private void ChkMqtt_Toggled(object sender, RoutedEventArgs e) => UpdateBuildEnabled();
 
-        /// <summary>Any MQTT text field changed — re-evaluate the Build gate/cues.</summary>
+        /// <summary>Any MQTT text field changed — re-evaluate the Build gate/cues.
+        /// (Also refreshes the host-IP row and remote-shell enablement via the
+        /// UpdateBuildEnabled → UpdateMqttVisibility cascade.)</summary>
         private void MqttField_TextChanged(object sender, TextChangedEventArgs e) => UpdateBuildEnabled();
 
-        /// <summary>An MQTT checkbox (remote-shell) changed — re-evaluate the gate.</summary>
-        private void MqttOption_Changed(object sender, RoutedEventArgs e) => UpdateBuildEnabled();
+        /// <summary>The remote-shell DANGER toggle changed. Turning it ON asks for an
+        /// explicit confirmation (it can run commands on the device, cleartext without
+        /// TLS); declining reverts it.</summary>
+        private void MqttOption_Changed(object sender, RoutedEventArgs e)
+        {
+            if (!_suppressMqttShell && sender == ChkMqttRemoteShell && ChkMqttRemoteShell.IsChecked == true)
+            {
+                var answer = MessageBox.Show(this, L("Msg_MqttRemoteShellConfirm"),
+                    L("Cap_MqttRemoteShell"), MessageBoxButton.YesNo, MessageBoxImage.Warning);
+                if (answer != MessageBoxResult.Yes)
+                {
+                    _suppressMqttShell = true;
+                    ChkMqttRemoteShell.IsChecked = false;
+                    _suppressMqttShell = false;
+                }
+            }
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>Show/hide the collapsible topics panel (prefilled with defaults).</summary>
+        private void ChkMqttTopics_Toggled(object sender, RoutedEventArgs e) =>
+            MqttTopicsPanel.Visibility = ChkMqttTopics.IsChecked == true
+                ? Visibility.Visible : Visibility.Collapsed;
 
         /// <summary>Toggle whole-value reveal on the broker password.</summary>
         private void BtnMqttReveal_Click(object sender, RoutedEventArgs e)
@@ -142,6 +184,80 @@ namespace IntercomFirmwareTool.App
             BtnClearMqttCa.IsEnabled = _uiEnabled && _mqttCaPath != null;
             BtnClearMqttCert.IsEnabled = _uiEnabled && _mqttCertPath != null;
             BtnClearMqttKey.IsEnabled = _uiEnabled && _mqttKeyPath != null;
+            BtnMqttTest.IsEnabled = _uiEnabled;
+
+            UpdateMqttHostIpVisibility();
+            UpdateRemoteShellEnabled();
+        }
+
+        /// <summary>The host-IP row applies only when the broker is a hostname (an IP
+        /// host needs no bt_hosts mapping). Hidden otherwise.</summary>
+        private void UpdateMqttHostIpVisibility()
+        {
+            string host = TxtMqttHost.Text.Trim();
+            bool hostIsName = host.Length > 0 && !IPAddress.TryParse(host, out _);
+            var vis = (MqttEnabled && hostIsName) ? Visibility.Visible : Visibility.Collapsed;
+            LblMqttHostIp.Visibility = vis;
+            TxtMqttHostIp.Visibility = vis;
+        }
+
+        /// <summary>The remote command channel is a DANGER option: keep it disabled
+        /// until client authentication is configured (user+pass or mutual TLS), and
+        /// drop it if the auth that justified it is later removed.</summary>
+        private void UpdateRemoteShellEnabled()
+        {
+            bool hasAuth = TxtMqttUser.Text.Trim().Length > 0 && (_mqttPass?.Value.Length ?? 0) > 0;
+            bool mutualTls = _mqttCaPath != null && _mqttCertPath != null && _mqttKeyPath != null;
+            bool authOk = hasAuth || mutualTls;
+
+            ChkMqttRemoteShell.IsEnabled = _uiEnabled && MqttEnabled && authOk;
+            if (!authOk && ChkMqttRemoteShell.IsChecked == true)
+            {
+                _suppressMqttShell = true;   // don't re-open the confirmation dialog
+                ChkMqttRemoteShell.IsChecked = false;
+                _suppressMqttShell = false;
+            }
+        }
+
+        // ---- Test connection (raw TCP reachability, dependency-free) ---------
+
+        private async void BtnMqttTest_Click(object sender, RoutedEventArgs e)
+        {
+            string host = TxtMqttHost.Text.Trim();
+            if (host.Length == 0 || !IsValidPortText(TxtMqttPort.Text))
+            {
+                SetMqttTestStatus(L("MqttTest_NeedHostPort"), error: true);
+                return;
+            }
+            int port = int.Parse(TxtMqttPort.Text.Trim());
+
+            BtnMqttTest.IsEnabled = false;
+            SetMqttTestStatus(L("MqttTest_Testing"), error: false);
+            bool ok = false;
+            string? err = null;
+            try
+            {
+                // A plain TCP connect confirms the broker host/port is reachable; it
+                // does NOT check MQTT credentials or TLS (those surface at build/run).
+                using var client = new TcpClient();
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+                await client.ConnectAsync(host, port, cts.Token);
+                ok = client.Connected;
+            }
+            catch (OperationCanceledException) { err = L("MqttTest_Timeout"); }
+            catch (Exception ex) { err = SafeMessage(ex); }
+
+            BtnMqttTest.IsEnabled = _uiEnabled;
+            SetMqttTestStatus(
+                ok ? LF("Fmt_MqttTest_Ok", host, port) : LF("Fmt_MqttTest_Fail", err ?? ""),
+                error: !ok);
+        }
+
+        private void SetMqttTestStatus(string text, bool error)
+        {
+            TxtMqttTestStatus.Text = text;
+            TxtMqttTestStatus.Foreground = error ? ErrorBrush : ReadyBrush;
+            TxtMqttTestStatus.Visibility = Visibility.Visible;
         }
 
         // ---- Validation (mirror of MqttInstaller.Validate for inline cues) --
@@ -206,14 +322,31 @@ namespace IntercomFirmwareTool.App
             if (!TryReadPem(_mqttKeyPath, out keyPem)) return false;
 
             int port = int.TryParse(TxtMqttPort.Text.Trim(), out int p) ? p : 1883;
+            // The host-IP override only applies to a hostname broker; ignore any stale
+            // value when the host is an IP (matches MqttInstaller's own handling).
+            string hostTrim = TxtMqttHost.Text.Trim();
+            bool hostIsName = hostTrim.Length > 0 && !IPAddress.TryParse(hostTrim, out _);
+            string? hostIp = hostIsName ? NullIfEmpty(TxtMqttHostIp.Text.Trim()) : null;
+
             var opts = new MqttOptions(
-                TxtMqttHost.Text.Trim(),
+                hostTrim,
                 port,
                 NullIfEmpty(TxtMqttUser.Text.Trim()),
                 NullIfEmpty(_mqttPass?.Value ?? ""),
                 caPem, certPem, keyPem,
-                HostIpForHosts: null,
-                AllowRemoteShell: ChkMqttRemoteShell.IsChecked == true);
+                HostIpForHosts: hostIp,
+                AllowRemoteShell: ChkMqttRemoteShell.IsChecked == true)
+            {
+                // Topics are prefilled with the record's defaults, so an untouched
+                // panel reproduces those exactly; a customized one overrides them.
+                TopicRx = TxtMqttTopicRx.Text.Trim(),
+                TopicDump = TxtMqttTopicDump.Text.Trim(),
+                TopicStartDate = TxtMqttTopicStartDate.Text.Trim(),
+                TopicLastWill = TxtMqttTopicLastWill.Text.Trim(),
+                TopicKey = TxtMqttTopicKey.Text.Trim(),
+                TopicCmdResult = TxtMqttTopicCmdResult.Text.Trim(),
+                TopicFileContent = TxtMqttTopicFileContent.Text.Trim(),
+            };
 
             // Surface the Core validator's exact (localized) message as a clean
             // popup before the build starts. The build path validates again, so a
