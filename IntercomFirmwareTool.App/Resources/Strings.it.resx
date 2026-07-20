@@ -368,7 +368,10 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="Dlg_MqttKey_Title" xml:space="preserve"><value>Scegli la chiave privata client (PEM)</value></data>
   <data name="Dlg_MqttPemFilter" xml:space="preserve"><value>File di certificato / chiave|*.pem;*.crt;*.cer;*.key|Tutti i file|*.*</value></data>
   <data name="Cap_MqttInvalid" xml:space="preserve"><value>Configurazione MQTT</value></data>
-  <data name="Fmt_Msg_MqttReadPem" xml:space="preserve"><value>Impossibile leggere il file TLS: {0}</value></data>
+  <data name="Fmt_Msg_MqttReadPem" xml:space="preserve"><value>Impossibile leggere il file TLS:
+{0}
+
+{1}</value></data>
   <data name="Fmt_Msg_MqttEmptyPem" xml:space="preserve"><value>Il file TLS selezionato è vuoto: {0}</value></data>
   <data name="Fmt_Msg_MqttBadPem" xml:space="preserve"><value>Il file TLS selezionato non è un certificato o una chiave valida: {0}</value></data>
   <data name="Fmt_Msg_MqttBadCertKey" xml:space="preserve"><value>Il certificato e la chiave del client non formano una coppia valida (non validi o non corrispondenti).

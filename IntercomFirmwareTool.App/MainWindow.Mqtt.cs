@@ -703,7 +703,9 @@ namespace IntercomFirmwareTool.App
             try { text = File.ReadAllText(path); }
             catch (Exception ex)
             {
-                MessageBox.Show(this, LF("Fmt_Msg_MqttReadPem", SafeMessage(ex)),
+                // Name the file (path is non-null here) plus the reason, so with
+                // several PEMs configured the user knows which one failed to read.
+                MessageBox.Show(this, LF("Fmt_Msg_MqttReadPem", path, SafeMessage(ex)),
                     L("Cap_MqttReadPem"), MessageBoxButton.OK, MessageBoxImage.Warning);
                 return false;
             }
