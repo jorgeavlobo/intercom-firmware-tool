@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Security.Cryptography;
 using IntercomFirmwareTool.Core.Localization;
 using ICSharpCode.SharpZipLib.Zip;
 // Disambiguate: ZipFile exists in both System.IO.Compression and SharpZipLib.
@@ -210,7 +211,7 @@ namespace IntercomFirmwareTool.Core
         /// .fwz is never modified; the output is for validation, not flashing.
         /// </summary>
         public static FwzBuildResult BuildModifiedFwz(string inputFwz, EnableSshOptions opts, string outputPath,
-            MqttOptions? mqttOpts = null)
+            MqttOptions? mqttOpts = null, bool removeSig = true)
         {
             // Repack opens the output with FileMode.Create while still reading the
             // input; if they are the same file the source is truncated mid-read
@@ -288,7 +289,26 @@ namespace IntercomFirmwareTool.Core
                 bool preserveTemp = false;
                 try
                 {
-                    Repack(realInput, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut);
+                    try
+                    {
+                        Repack(realInput, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut, removeSig);
+                    }
+                    catch (Exception repackEx)
+                    {
+                        // A repack failure — including a RETAINED .sig sidecar that
+                        // can't be read (a different per-entry password, a CRC error,
+                        // a truncated entry) which throws here, before the round-trip
+                        // block — becomes a structured FAILED check instead of an
+                        // exception that aborts the build. Nothing is committed (the
+                        // finally drops tempOut), and the reason shows in the log.
+                        return new FwzBuildResult("", ex.PasswordUsed, ex.SelectedEntry, false,
+                            new List<Ext4Check>
+                            {
+                                new("firmware repack succeeded", false,
+                                    string.IsNullOrWhiteSpace(repackEx.Message)
+                                        ? repackEx.GetType().Name : repackEx.Message)
+                            });
+                    }
 
                     // 4) Round-trip: validate the TEMP .fwz (reopen it through our
                     //    chain) before it is allowed to become the output.
@@ -314,6 +334,54 @@ namespace IntercomFirmwareTool.Core
                     checkList.Add(new Ext4Check(
                         $"{ex.SelectedEntry} is ZipCrypto-encrypted (input password)",
                         EntryEncryptedWith(tempOut, ex.SelectedEntry, ex.PasswordUsed), ""));
+
+                    // .sig sidecars: assert the toggle actually took. Removing → none
+                    // in the output. Keeping → the SAME sidecars carried through
+                    // byte-for-byte: compare each entry's name AND the SHA-256 of its
+                    // decrypted bytes, so a content change (wrong password, copy bug,
+                    // library regression) is caught, not just a name match.
+                    bool sigOk;
+                    string sigDetail;
+                    try
+                    {
+                        var outputSigs = SigEntries(tempOut, ex.PasswordUsed);
+                        if (removeSig)
+                        {
+                            sigOk = outputSigs.Count == 0;
+                            sigDetail = $"out {outputSigs.Count}";
+                        }
+                        else
+                        {
+                            var inputSigs = SigEntries(realInput, ex.PasswordUsed);
+                            // Exact multiset equality: same count and the same
+                            // (name, content-hash) pairs. Names are compared
+                            // case-SENSITIVELY (zip entry names are case-sensitive, so
+                            // "a.sig" ≠ "A.sig" and neither is collapsed/deduped), and
+                            // sorted so entry order doesn't affect the result.
+                            sigOk = inputSigs.Count == outputSigs.Count &&
+                                inputSigs.OrderBy(t => t.Name, StringComparer.Ordinal)
+                                         .ThenBy(t => t.Hash, StringComparer.Ordinal)
+                                    .SequenceEqual(
+                                        outputSigs.OrderBy(t => t.Name, StringComparer.Ordinal)
+                                                  .ThenBy(t => t.Hash, StringComparer.Ordinal));
+                            sigDetail = $"in {inputSigs.Count}, out {outputSigs.Count}";
+                        }
+                    }
+                    catch (Exception sigEx)
+                    {
+                        // Reading/decrypting a .sig entry can fail (a sidecar under a
+                        // different per-entry password, a CRC error, a truncated
+                        // entry). Fail the build as a clear FAILED check with the
+                        // reason, not an exception that aborts the whole round-trip
+                        // and hides the rest of the checklist.
+                        sigOk = false;
+                        sigDetail = string.IsNullOrWhiteSpace(sigEx.Message)
+                            ? sigEx.GetType().Name : sigEx.Message;
+                    }
+                    checkList.Add(new Ext4Check(
+                        removeSig ? ".sig sidecars removed"
+                                  : ".sig sidecars kept unchanged (name + content)",
+                        sigOk, sigDetail));
 
                     IReadOnlyList<Ext4Check> checks = checkList;
                     bool all = true;
@@ -388,17 +456,43 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Writes a new .fwz: every entry of <paramref name="inputFwz"/> — except
-        /// <c>.sig</c> signature sidecars, which are dropped like fquinto's
-        /// default — re-added with DEFLATE level 9 + ZipCrypto
-        /// (<paramref name="password"/>), in the original order, with
-        /// <paramref name="modifiedEntryName"/> replaced by the bytes of
-        /// <paramref name="modifiedGzPath"/>. Mirrors fquinto's
+        /// The <c>.sig</c> entries of a .fwz as a list of (name, SHA-256-of-decrypted-
+        /// bytes), so the keep-.sig round-trip can assert the sidecars are carried
+        /// through byte-for-byte. A <b>list</b> (not a dictionary) so two entries that
+        /// differ only by case, or a duplicate name, are each represented — nothing is
+        /// silently collapsed. The password decrypts the (ZipCrypto) bytes for hashing.
+        /// </summary>
+        private static List<(string Name, string Hash)> SigEntries(string fwz, string password)
+        {
+            var list = new List<(string, string)>();
+            using var zf = new ZipFile(fwz) { Password = password };
+            foreach (ZipEntry e in zf)
+            {
+                if (!e.IsFile || !e.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                using var s = zf.GetInputStream(e);
+                list.Add((e.Name, Convert.ToHexString(SHA256.HashData(s))));
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// Writes a new .fwz: every entry of <paramref name="inputFwz"/> re-added
+        /// with DEFLATE level 9 + ZipCrypto (<paramref name="password"/>), in the
+        /// original order, with <paramref name="modifiedEntryName"/> replaced by the
+        /// bytes of <paramref name="modifiedGzPath"/>. Mirrors fquinto's
         /// pyminizip.compress_multiple(level=9).
+        /// <para>When <paramref name="removeSig"/> is true (the default, matching
+        /// fquinto's <c>remove_sig='y'</c>) the <c>.sig</c> signature sidecars are
+        /// dropped: fquinto's output works on real devices, so the updater tolerates
+        /// their absence, and keeping a signature for the now-modified payload could
+        /// get the archive rejected by a signature-checking updater. When false, the
+        /// original <c>.sig</c> entries are carried over verbatim (for parity /
+        /// research — note the sidecar for the modified payload is then stale).</para>
         /// </summary>
         private static void Repack(
             string inputFwz, string password, string modifiedEntryName,
-            string modifiedGzPath, string outputPath)
+            string modifiedGzPath, string outputPath, bool removeSig)
         {
             using var srcZip = new ZipFile(inputFwz) { Password = password };
             using var outFs = new FileStream(outputPath, FileMode.Create, FileAccess.Write);
@@ -408,13 +502,10 @@ namespace IntercomFirmwareTool.Core
             foreach (ZipEntry src in srcZip)
             {
                 if (!src.IsFile) continue;
-                // Drop stale signature sidecars. fquinto removes .sig files by
-                // default (main.py: remove_sig defaults to 'y', filtered out of
-                // the repack list), and its output works on real devices — so
-                // the updater tolerates their absence. Keeping a signature for
-                // the now-modified payload could instead get the archive
-                // rejected by a signature-checking updater.
-                if (src.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase)) continue;
+                // Signature sidecars: dropped by default (fquinto's behaviour), or
+                // carried over verbatim when the user opts to keep them.
+                if (removeSig && src.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase))
+                    continue;
                 // Mark the entry ZipCrypto-encrypted explicitly (not only via the
                 // stream Password): the device firmware requires traditional
                 // ZipCrypto, and being explicit keeps the repack correct regardless

@@ -771,6 +771,11 @@ namespace IntercomFirmwareTool.App
         private void ChkBlockUpdates_Toggled(object sender, RoutedEventArgs e)
             => UpdateAdvancedVisibility();
 
+        // Same as above for the keep-.sig option: recompute visibility so an unticked
+        // box doesn't linger, and it never gates Build.
+        private void ChkKeepSig_Toggled(object sender, RoutedEventArgs e)
+            => UpdateAdvancedVisibility();
+
         /// <summary>The current password value (real text, held by the masked field).</summary>
         private string CurrentPassword() => _pw.Value;
 
@@ -914,6 +919,12 @@ namespace IntercomFirmwareTool.App
             BlockUpdatesSection.Visibility = (advanced || ChkBlockUpdates.IsChecked == true)
                 ? Visibility.Visible : Visibility.Collapsed;
             ChkBlockUpdates.IsEnabled = _uiEnabled;
+
+            // The keep-.sig option is another advanced build toggle; same visibility/
+            // lock rule as the OTA-block row.
+            KeepSigSection.Visibility = (advanced || ChkKeepSig.IsChecked == true)
+                ? Visibility.Visible : Visibility.Collapsed;
+            ChkKeepSig.IsEnabled = _uiEnabled;
 
             // The optional MQTT bridge section lives in Advanced too; it stays visible
             // while enabled so an active build option isn't hidden by the toggle.
@@ -1480,6 +1491,10 @@ namespace IntercomFirmwareTool.App
             // them to maybe-null after the intervening calls — assert with '!'.
             string fwz = _fwzPath!, output = _outputPath!;
             string? keyForLog = opts.HasKey ? _keyPath : null;
+            // Capture UI-thread control state now; the build runs on a background
+            // thread and must not touch WPF controls. Default (unticked) = remove .sig,
+            // like fquinto.
+            bool removeSig = ChkKeepSig.IsChecked != true;
 
             FwzBuildResult? built = null;
             string? buildError = null;
@@ -1493,7 +1508,8 @@ namespace IntercomFirmwareTool.App
                     // original, which RunAndShow surfaces.
                     try
                     {
-                        built = FwzProbe.BuildModifiedFwz(fwz, opts, output, mqttOpts);
+                        built = FwzProbe.BuildModifiedFwz(fwz, opts, output, mqttOpts,
+                            removeSig: removeSig);
                     }
                     catch (Exception ex)
                     {

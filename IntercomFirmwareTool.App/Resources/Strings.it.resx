@@ -339,6 +339,9 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="Chk_BlockUpdates" xml:space="preserve"><value>Blocca gli aggiornamenti automatici del firmware</value></data>
   <data name="Tip_BlockUpdates" xml:space="preserve"><value>Reindirizza i server di aggiornamento firmware di Legrand a 127.0.0.1 così l'unità non può scaricare e installare in modo silenzioso un aggiornamento OTA che cancellerebbe queste modifiche. Disattivato per impostazione predefinita; reversibile riflashando il firmware di fabbrica.</value></data>
   <data name="Hint_BlockUpdates" xml:space="preserve"><value>Protegge la modifica dalla cancellazione da parte di un aggiornamento ufficiale, ma l'unità non riceverà più aggiornamenti o correzioni di sicurezza finché è bloccata.</value></data>
+  <data name="Chk_KeepSig" xml:space="preserve"><value>Mantieni i file di firma .sig</value></data>
+  <data name="Tip_KeepSig" xml:space="preserve"><value>Mantiene i file di firma .sig originali nel .fwz ricostruito invece di eliminarli. Disattivato per impostazione predefinita (fquinto li rimuove), perché la firma del payload modificato diventa obsoleta.</value></data>
+  <data name="Hint_KeepSig" xml:space="preserve"><value>Per impostazione predefinita vengono rimossi (come fquinto), il percorso testato. Mantenere una firma obsoleta può far rifiutare l'archivio a un updater che verifica le firme.</value></data>
   <data name="Chk_Mqtt" xml:space="preserve"><value>Installa il bridge MQTT (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Installa un bridge MQTT opzionale che espone il bus OpenWebNet e i tasti del pannello frontale tramite MQTT. Disattivato per impostazione predefinita.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>Broker MQTT:</value></data>
