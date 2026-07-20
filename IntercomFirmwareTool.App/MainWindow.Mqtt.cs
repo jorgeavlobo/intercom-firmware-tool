@@ -7,6 +7,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using System.Windows.Automation;   // AutomationProperties.SetName (per-file using; not shared across partials)
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -408,6 +409,14 @@ namespace IntercomFirmwareTool.App
                                 if (selfIssued) chain.ChainPolicy.CustomTrustStore.Add(c);
                                 else chain.ChainPolicy.ExtraStore.Add(c);
                             }
+                            // Also offer the intermediates the broker sent in its own
+                            // handshake (on ctx.Chain): with a root-only CA file, a
+                            // leaf+intermediate chain must still build — exactly as the
+                            // device's MQTT client would validate it. These certs are
+                            // owned by ctx.Chain, so they are referenced, not disposed.
+                            if (ctx.Chain != null)
+                                foreach (var el in ctx.Chain.ChainElements)
+                                    chain.ChainPolicy.ExtraStore.Add(el.Certificate);
                             try
                             {
                                 using var server = new X509Certificate2(ctx.Certificate);
