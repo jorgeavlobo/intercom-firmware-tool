@@ -2,7 +2,7 @@
 # redistribution) and would bloat git history. Keep only the folder structure
 # and docs; the extracted binaries stay local. See README.md → "Redistribution & git".
 *.fwz
-*.gz
+#*.gz
 *.ext4
 *.ext4.gz
 *.img
