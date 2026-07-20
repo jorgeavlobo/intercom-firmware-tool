@@ -349,6 +349,7 @@ Open Advanced → Result to see which checks failed.</value></data>
   <data name="Field_MqttClientKey" xml:space="preserve"><value>Client Key:</value></data>
   <data name="Tip_MqttClientKey" xml:space="preserve"><value>Optional client private key (PEM) for mutual TLS.</value></data>
   <data name="Tip_MqttClearFile" xml:space="preserve"><value>Clear the selected file</value></data>
+  <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Clear the {0} file</value></data>
   <data name="Ph_MqttPem" xml:space="preserve"><value>(optional: choose a PEM file)</value></data>
   <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Allow remote command channel</value></data>
   <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Enable the gated MQTT command channel. Requires broker authentication (username and password, or mutual TLS).</value></data>

@@ -349,6 +349,7 @@ Abra Opções avançadas → Resultado para ver que verificações falharam.</va
   <data name="Field_MqttClientKey" xml:space="preserve"><value>Chave cliente:</value></data>
   <data name="Tip_MqttClientKey" xml:space="preserve"><value>Chave privada de cliente (PEM) opcional para TLS mútuo.</value></data>
   <data name="Tip_MqttClearFile" xml:space="preserve"><value>Limpar o ficheiro selecionado</value></data>
+  <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Limpar o ficheiro {0}</value></data>
   <data name="Ph_MqttPem" xml:space="preserve"><value>(opcional: escolha um ficheiro PEM)</value></data>
   <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Permitir canal de comandos remoto</value></data>
   <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Ativa o canal de comandos MQTT protegido. Exige autenticação no broker (utilizador e palavra-passe, ou TLS mútuo).</value></data>

@@ -51,6 +51,13 @@ namespace IntercomFirmwareTool.App
         // it and allow a second, concurrent test).
         private bool _mqttTesting;
 
+        // Bumped every time a connection-affecting field changes (via
+        // ClearMqttTestStatus). A test captures it before connecting and only writes
+        // its result if the value is unchanged — so a slow CONNECT that finishes after
+        // the user has edited the config can't repaint a stale ✓/✗ for settings that
+        // are no longer on screen.
+        private int _mqttTestGen;
+
         private bool MqttEnabled => ChkMqtt.IsChecked == true;
 
         /// <summary>Wire up the MQTT masked password field + topic defaults. Called
@@ -179,7 +186,19 @@ namespace IntercomFirmwareTool.App
             SetMqttPemBox(TxtMqttCaPath, _mqttCaPath);
             SetMqttPemBox(TxtMqttCertPath, _mqttCertPath);
             SetMqttPemBox(TxtMqttKeyPath, _mqttKeyPath);
+
+            // The three "clear file" buttons share one glyph, so give each a distinct,
+            // localized accessible name ("Clear the <field> file") — otherwise a screen
+            // reader announces all three identically. Set here (not in XAML) so the
+            // names follow a language switch, which re-runs this method.
+            AutomationProperties.SetName(BtnClearMqttCa, ClearFileName("Field_MqttCa"));
+            AutomationProperties.SetName(BtnClearMqttCert, ClearFileName("Field_MqttClientCert"));
+            AutomationProperties.SetName(BtnClearMqttKey, ClearFileName("Field_MqttClientKey"));
         }
+
+        // "Clear the <field label> file" with the label's trailing colon trimmed.
+        private string ClearFileName(string fieldKey) =>
+            LF("Fmt_Aria_MqttClearFile", L(fieldKey).TrimEnd(':', '：', ' '));
 
         private void SetMqttPemBox(TextBox box, string? path)
         {
@@ -262,6 +281,14 @@ namespace IntercomFirmwareTool.App
             }
             int port = int.Parse(TxtMqttPort.Text.Trim());
 
+            // Mirror the device: for a hostname broker with a host-IP override, connect
+            // to that IPv4 (the address bt_hosts pins on the device) so the test hits
+            // the same endpoint the firmware will — while still validating the broker
+            // certificate against the hostname (TLS target host below).
+            bool hostIsName = !IPAddress.TryParse(host, out _);
+            string? hostIp = hostIsName ? NullIfEmpty(TxtMqttHostIp.Text.Trim()) : null;
+            string connectHost = hostIp ?? host;
+
             // Read the auth + TLS material the same way the build does, so the test
             // exercises exactly what will be installed.
             string? user = NullIfEmpty(TxtMqttUser.Text.Trim());
@@ -273,17 +300,22 @@ namespace IntercomFirmwareTool.App
             _mqttTesting = true;
             BtnMqttTest.IsEnabled = false;
             SetMqttTestStatus(L("MqttTest_Testing"), error: false);
+            int gen = _mqttTestGen;   // config snapshot; a later edit invalidates this result
             bool ok = false;
             string? err = null;
             try
             {
-                ok = await MqttTestConnectAsync(host, port, user, pass, caPem, certPem, keyPem);
+                ok = await MqttTestConnectAsync(connectHost, host, port, user, pass, caPem, certPem, keyPem);
             }
             catch (OperationCanceledException) { err = L("MqttTest_Timeout"); }
             catch (Exception ex) { err = SafeMessage(ex); }
             finally { _mqttTesting = false; }
 
             BtnMqttTest.IsEnabled = _uiEnabled;
+            // If a connection-affecting field changed while the CONNECT was in flight,
+            // its result no longer describes the visible config — the edit already
+            // cleared the status line, so leave it hidden rather than repaint a stale one.
+            if (gen != _mqttTestGen) return;
             SetMqttTestStatus(
                 ok ? LF("Fmt_MqttTest_Ok", host, port)
                    : LF("Fmt_MqttTest_Fail", err ?? L("MqttTest_Refused")),
@@ -298,7 +330,7 @@ namespace IntercomFirmwareTool.App
         /// here rather than only at runtime on the device.
         /// </summary>
         private static async Task<bool> MqttTestConnectAsync(
-            string host, int port, string? user, string? pass,
+            string host, string tlsHost, int port, string? user, string? pass,
             string? caPem, string? certPem, string? keyPem)
         {
             var factory = new MqttFactory();
@@ -324,7 +356,10 @@ namespace IntercomFirmwareTool.App
                 bool wantTls = caPem != null || (certPem != null && keyPem != null);
                 if (wantTls)
                 {
-                    var tls = new MqttClientTlsOptionsBuilder().UseTls(true);
+                    // Validate (and SNI) against the hostname even when the TCP endpoint
+                    // is a host-IP override — otherwise the broker cert's name wouldn't
+                    // match the IP we dialed and the handshake would fail spuriously.
+                    var tls = new MqttClientTlsOptionsBuilder().UseTls(true).WithTargetHost(tlsHost);
 
                     if (caPem != null)
                     {
@@ -342,13 +377,33 @@ namespace IntercomFirmwareTool.App
                             if ((ctx.SslPolicyErrors & (SslPolicyErrors.RemoteCertificateNotAvailable
                                     | SslPolicyErrors.RemoteCertificateNameMismatch)) != 0)
                                 return false;
-                            using var ca = X509Certificate2.CreateFromPem(caPem);
+
+                            // The CA PEM may be a bundle (root + intermediates), not a
+                            // single cert — CreateFromPem would read only the first and
+                            // reject a broker whose chain needs the intermediates. Import
+                            // them all: self-issued certs are the trust anchor(s), the
+                            // rest go to ExtraStore so the chain can be completed.
+                            var caCerts = new X509Certificate2Collection();
+                            caCerts.ImportFromPem(caPem);
                             using var chain = new X509Chain();
                             chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                             chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
-                            chain.ChainPolicy.CustomTrustStore.Add(ca);
-                            using var server = new X509Certificate2(ctx.Certificate);
-                            return chain.Build(server);
+                            foreach (var c in caCerts)
+                            {
+                                bool selfIssued = c.SubjectName.RawData.AsSpan()
+                                    .SequenceEqual(c.IssuerName.RawData);
+                                if (selfIssued) chain.ChainPolicy.CustomTrustStore.Add(c);
+                                else chain.ChainPolicy.ExtraStore.Add(c);
+                            }
+                            try
+                            {
+                                using var server = new X509Certificate2(ctx.Certificate);
+                                return chain.Build(server);
+                            }
+                            finally
+                            {
+                                foreach (var c in caCerts) c.Dispose();
+                            }
                         });
                     }
 
@@ -405,6 +460,7 @@ namespace IntercomFirmwareTool.App
         /// for validation of the current (untested) one.</summary>
         private void ClearMqttTestStatus()
         {
+            _mqttTestGen++;   // invalidate any in-flight test result for the old config
             TxtMqttTestStatus.Text = "";
             TxtMqttTestStatus.Visibility = Visibility.Collapsed;
         }

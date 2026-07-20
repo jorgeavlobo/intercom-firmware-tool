@@ -905,12 +905,11 @@ namespace IntercomFirmwareTool.App
             // while enabled so an active build option isn't hidden by the toggle.
             UpdateMqttVisibility(advanced);
 
-            // The result output is part of Advanced. When shown, its row fills the
-            // window; when hidden, the spacer row takes the slack so the footer stays
-            // pinned to the bottom (no empty gap).
+            // The result output is part of Advanced. The body scrolls (a page-level
+            // ScrollViewer) and the footer is pinned outside it, so the result box no
+            // longer needs star/spacer row juggling to stay reachable — it just shows
+            // or hides with Advanced (its own MaxHeight bounds a long log).
             ResultGroup.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
-            RowResult.Height = advanced ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
-            RowSpacer.Height = advanced ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
         }
 
         private double? _heightBeforeAdvanced;
@@ -1856,8 +1855,9 @@ namespace IntercomFirmwareTool.App
             // Starting an operation: force the fields back to masked first. If the
             // user was holding the eye (Peek), disabling the button can swallow the
             // mouse/key-up that would re-mask, leaving the password visible for the
-            // whole operation.
-            if (!enabled) SetReveal(false);
+            // whole operation. Re-mask the MQTT broker password too — its reveal is a
+            // sticky toggle, so it would otherwise stay in cleartext for the whole run.
+            if (!enabled) { SetReveal(false); if (_mqttPass != null) _mqttPass.Peek = false; }
 
             // The firmware and key path boxes are click-to-browse controls, so they
             // must be disabled during an operation too — otherwise they would look

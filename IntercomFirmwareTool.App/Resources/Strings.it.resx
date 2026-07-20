@@ -349,6 +349,7 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="Field_MqttClientKey" xml:space="preserve"><value>Chiave client:</value></data>
   <data name="Tip_MqttClientKey" xml:space="preserve"><value>Chiave privata client (PEM) opzionale per il TLS reciproco.</value></data>
   <data name="Tip_MqttClearFile" xml:space="preserve"><value>Cancella il file selezionato</value></data>
+  <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Cancella il file {0}</value></data>
   <data name="Ph_MqttPem" xml:space="preserve"><value>(opzionale: scegli un file PEM)</value></data>
   <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Consenti il canale dei comandi remoti</value></data>
   <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Abilita il canale dei comandi MQTT protetto. Richiede l'autenticazione al broker (nome utente e password, oppure TLS reciproco).</value></data>
