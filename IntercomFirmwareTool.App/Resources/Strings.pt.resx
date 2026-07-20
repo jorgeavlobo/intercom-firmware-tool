@@ -410,7 +410,7 @@ Chave: {1}</value></data>
   <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Publica configs de discovery MQTT retidas para as entidades da bridge (conectividade, trama do bus, última tecla) aparecerem automaticamente no Home Assistant, sem YAML manual. Só de leitura — não é criada nenhuma entidade de comando.</value></data>
   <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Ativado por predefinição: as entidades da bridge (conectividade, bus, última tecla) aparecem automaticamente no Home Assistant, como um dispositivo. Desmarque para o ignorar; desmarcá-lo num build posterior também as remove do broker.</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Id do dispositivo:</value></data>
-  <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identificador do dispositivo Home Assistant e das suas entidades. Use um valor distinto por unidade para várias bridges coexistirem no mesmo broker. Sem espaços, '/', '+' nem '#'.</value></data>
+  <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identificador do dispositivo Home Assistant e das suas entidades. Use um valor distinto por unidade para várias bridges coexistirem no mesmo broker. Sem espaços em branco, '/', '+' nem '#'.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receção (comandos):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Dump do barramento:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Data de início:</value></data>

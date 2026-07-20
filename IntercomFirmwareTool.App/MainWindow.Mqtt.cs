@@ -701,6 +701,9 @@ namespace IntercomFirmwareTool.App
                 // HA device/node id — distinct per unit lets several bridges coexist
                 // on one broker. Fall back to the record default if the field was
                 // cleared, so an empty box doesn't force a validation error.
+                // HaDiscoveryPrefix is deliberately NOT surfaced in the UI: it stays at
+                // the HA standard ("homeassistant"), which virtually no one changes, so
+                // exposing it would only add clutter. Library callers can still set it.
                 HaNodeId = NullIfEmpty(TxtMqttHaNodeId.Text.Trim()) ?? new MqttOptions("x").HaNodeId,
             };
 
