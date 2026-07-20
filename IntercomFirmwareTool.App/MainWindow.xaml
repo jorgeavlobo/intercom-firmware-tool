@@ -607,7 +607,8 @@
                                  Style="{StaticResource InputField}" Margin="0,0,0,6"
                                  HorizontalAlignment="Left" Width="200"
                                  AutomationProperties.LabeledBy="{Binding ElementName=LblMqttUser}"
-                                 ToolTip="{loc:Loc Tip_MqttUser}" TextChanged="MqttField_TextChanged"/>
+                                 ToolTip="{loc:Loc Tip_MqttUser}" TextChanged="MqttField_TextChanged"
+                                 LostFocus="MqttUser_LostFocus"/>
 
                         <!-- Password (masked) + reveal -->
                         <TextBlock x:Name="LblMqttPass" Grid.Row="3" Grid.Column="0"

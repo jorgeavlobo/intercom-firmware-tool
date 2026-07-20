@@ -101,6 +101,19 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
+        /// <summary>Normalize the broker username when the field commits, so the value
+        /// shown always matches the (trimmed) value used at test/build time — no silent
+        /// discrepancy between display and use. The username is trimmed like an email in
+        /// a sign-in form; the password is deliberately left verbatim, since leading or
+        /// trailing whitespace can be significant there.</summary>
+        private void MqttUser_LostFocus(object sender, RoutedEventArgs e)
+        {
+            string trimmed = TxtMqttUser.Text.Trim();
+            // Only reassign when it actually changes: an equal value raises no
+            // TextChanged, so this won't clear a fresh test result on a plain tab-out.
+            if (trimmed != TxtMqttUser.Text) TxtMqttUser.Text = trimmed;
+        }
+
         /// <summary>The remote-shell DANGER toggle changed. Turning it ON asks for an
         /// explicit confirmation (it can run commands on the device, cleartext without
         /// TLS); declining reverts it.</summary>
