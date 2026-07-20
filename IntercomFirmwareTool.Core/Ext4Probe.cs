@@ -588,9 +588,11 @@ namespace IntercomFirmwareTool.Core
 
             // Optional, independent of SSH/MQTT: stop the unit from silently
             // OTA-updating (which would reflash stock firmware and wipe every edit
-            // above). Runs last in this session; MqttInstaller (if it runs after)
-            // patches the same file after its own openserver anchor — both are
-            // idempotent, anchor-based and compose.
+            // above). This is the final step of ApplySshEnable; when the MQTT bridge
+            // is also installed, InstallMqtt runs AFTER this (later in the same
+            // EnableSsh session) and patches the same file after the same openserver
+            // anchor. Both are idempotent and anchor-based, so they compose
+            // regardless of order.
             if (opts.BlockFirmwareUpdates)
                 BlockFirmwareUpdates(fs);
         }
@@ -616,7 +618,13 @@ namespace IntercomFirmwareTool.Core
             string content = ReadAllTextFromFs(fs, HostsInitScript);
             string[] lines = content.Replace("\r\n", "\n").Split('\n');
 
-            int anchor = Array.FindIndex(lines, l => l.Contains(HostsAnchor));
+            // Match WHOLE lines (ignoring the scripts' leading tab / trailing space),
+            // not a substring: a commented-out or superset line (e.g. "# …add
+            // openserver…" or "…add openserver 127.0.0.1 # note") must not count as
+            // the anchor or as an already-present mapping — otherwise a commented
+            // mapping would suppress insertion yet still "pass", building an image
+            // that reports OTA-blocked without actually blocking.
+            int anchor = Array.FindIndex(lines, l => l.Trim() == HostsAnchor);
             if (anchor < 0)
                 throw new InvalidOperationException(
                     CoreStrings.Format("Mqtt_AnchorMissing", HostsInitScript, HostsAnchor));
@@ -628,8 +636,9 @@ namespace IntercomFirmwareTool.Core
             {
                 string addLine = $"/bin/bt_hosts.sh add {host} 127.0.0.1";
                 // Idempotent: a host already mapped (a prior run, or a manual edit)
-                // is left as-is rather than duplicated.
-                if (patched.Any(l => l.Contains(addLine))) continue;
+                // is left as-is rather than duplicated — whole-line match, so a
+                // commented mapping does NOT count as present.
+                if (patched.Any(l => l.Trim() == addLine)) continue;
                 patched.Insert(insertAt, "\t" + addLine);
                 insertAt++;
                 changed = true;
@@ -719,11 +728,17 @@ namespace IntercomFirmwareTool.Core
                 // carry other host mappings).
                 if (opts.BlockFirmwareUpdates)
                 {
-                    string hosts = fs.FileExists(HostsInitScript)
-                        ? ReadAllTextFromFs(fs, HostsInitScript) : "";
+                    // Whole-line match (like the patch side), so a commented or
+                    // superset line can't make an unblocked image falsely pass.
+                    string[] hostsLines = (fs.FileExists(HostsInitScript)
+                        ? ReadAllTextFromFs(fs, HostsInitScript) : "")
+                        .Replace("\r\n", "\n").Split('\n');
                     foreach (var host in FirmwareUpdateHosts)
+                    {
+                        string expected = $"/bin/bt_hosts.sh add {host} 127.0.0.1";
                         checks.Add(new($"firmware-update host {host} -> 127.0.0.1 (OTA blocked)",
-                            hosts.Contains($"/bin/bt_hosts.sh add {host} 127.0.0.1"), ""));
+                            hostsLines.Any(l => l.Trim() == expected), ""));
+                    }
                 }
             }
             finally
