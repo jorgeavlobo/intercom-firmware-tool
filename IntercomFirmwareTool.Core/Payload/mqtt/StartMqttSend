@@ -90,7 +90,10 @@ probe_socket() {
 	ptmp="$RUNDIR/own_probe_o.$$"
 	rm -f "$pfifo"
 	mkfifo -m 600 "$pfifo" 2>/dev/null || return 1
-	: > "$ptmp"
+	# Create the probe capture 0600 (it holds OpenWebNet traffic, like the FIFOs):
+	# umask in a subshell so the current umask isn't disturbed. nc's later
+	# `> "$ptmp"` truncates the existing file without loosening its mode.
+	( umask 077; : > "$ptmp" )
 
 	# Same connection semantics as run_socket, held for the probe's lifetime: nc
 	# opens the read end, we hold pfifo open on fd 9 in this shell (no sleeper) so
