@@ -30,6 +30,7 @@ kill_childs() {
 	kill_by "/etc/tcpdump2mqtt/StartMqttSend"
 	kill_by "/etc/tcpdump2mqtt/StartMqttReceive"
 	kill_by "/etc/tcpdump2mqtt/keypress.sh"
+	kill_by "/etc/tcpdump2mqtt/ha_discovery.sh"
 	# keypress.sh owns its evtest child and kills it via a trap on termination,
 	# so we don't match "evtest" here (that could hit unrelated evtest sessions).
 	kill_by "/etc/tcpdump2mqtt/filter.py"
@@ -88,6 +89,14 @@ fi
 echo "MQTT host ${MQTT_HOST}:${MQTT_PORT}"
 echo "Checking for stale processes..."
 kill_childs
+
+# Home Assistant auto-discovery (optional): publish the retained discovery configs
+# once. Backgrounded and self-retrying, so a broker that isn't up yet can't block
+# this watchdog loop; it exits on its own once published (or after its retries).
+if [ "${HA_DISCOVERY:-0}" = "1" ] && [ -x /etc/tcpdump2mqtt/ha_discovery.sh ]; then
+	echo "Publishing Home Assistant discovery configs..."
+	/etc/tcpdump2mqtt/ha_discovery.sh &
+fi
 
 # Keep the bridge services running. Deliberately NOT gated on any gateway/ICMP
 # probe: a gateway that blocks ICMP — or an unreachable gateway with a reachable

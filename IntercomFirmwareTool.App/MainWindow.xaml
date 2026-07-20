@@ -713,6 +713,15 @@
                     <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
                                Text="{loc:Loc Hint_MqttTcpdump}"/>
 
+                    <!-- Home Assistant auto-discovery (Phase 2, #12 item 1). On by default:
+                         publishes retained, read-only discovery configs so the bridge's
+                         entities appear in Home Assistant with no manual YAML. -->
+                    <CheckBox x:Name="ChkMqttHaDiscovery" Margin="0,10,0,0" IsChecked="True"
+                              Content="{loc:Loc Chk_MqttHaDiscovery}" ToolTip="{loc:Loc Tip_MqttHaDiscovery}"
+                              Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
+                    <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
+                               Text="{loc:Loc Hint_MqttHaDiscovery}"/>
+
                     <!-- Topics (collapsible, prefilled with the Home Assistant defaults) -->
                     <CheckBox x:Name="ChkMqttTopics" Margin="0,10,0,0"
                               Content="{loc:Loc Chk_MqttTopics}" ToolTip="{loc:Loc Tip_MqttTopics}"

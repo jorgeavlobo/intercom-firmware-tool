@@ -406,6 +406,9 @@ Chave: {1}</value></data>
   <data name="Chk_MqttTcpdump" xml:space="preserve"><value>Usar captura tcpdump (compatibilidade)</value></data>
   <data name="Tip_MqttTcpdump" xml:space="preserve"><value>Deixe desmarcado para receber os eventos diretamente do gateway OpenWebNet local (sem tcpdump, sem Python residente). Marque apenas se a bridge não mostrar atividade do bus — força a captura tcpdump antiga.</value></data>
   <data name="Hint_MqttTcpdump" xml:space="preserve"><value>Predefinição: um socket de monitorização OpenWebNet direto, mais leve para o dispositivo. O caminho tcpdump é usado automaticamente como recurso se o gateway estiver inacessível.</value></data>
+  <data name="Chk_MqttHaDiscovery" xml:space="preserve"><value>Deteção automática do Home Assistant</value></data>
+  <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Publica configs de discovery MQTT retidas para as entidades da bridge (conectividade, trama do bus, última tecla) aparecerem automaticamente no Home Assistant, sem YAML manual. Só de leitura — não é criada nenhuma entidade de comando.</value></data>
+  <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Ativado por predefinição. Cria um dispositivo Home Assistant com três entidades de diagnóstico. Desmarque se preferir configurar as entidades manualmente.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receção (comandos):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Dump do barramento:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Data de início:</value></data>

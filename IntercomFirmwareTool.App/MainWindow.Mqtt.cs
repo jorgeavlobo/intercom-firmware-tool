@@ -671,7 +671,10 @@ namespace IntercomFirmwareTool.App
                 AllowRemoteShell: ChkMqttRemoteShell.IsChecked == true,
                 // Unchecked (default) = the low-footprint OpenWebNet socket monitor;
                 // checked = force the faithful tcpdump + filter.py capture back-end.
-                UseTcpdumpCapture: ChkMqttTcpdump.IsChecked == true)
+                UseTcpdumpCapture: ChkMqttTcpdump.IsChecked == true,
+                // Publish HA discovery configs so entities appear automatically. On
+                // by default in the UI (plug-and-play, read-only entities).
+                EnableHaDiscovery: ChkMqttHaDiscovery.IsChecked == true)
             {
                 // Topics are prefilled with the record's defaults, so an untouched
                 // panel reproduces those exactly; a customized one overrides them.
