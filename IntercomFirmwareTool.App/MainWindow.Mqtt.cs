@@ -15,7 +15,6 @@ using System.Windows.Media;
 using IntercomFirmwareTool.Core;
 using Microsoft.Win32;
 using MQTTnet;
-using MQTTnet.Client;
 
 namespace IntercomFirmwareTool.App
 {
@@ -357,7 +356,7 @@ namespace IntercomFirmwareTool.App
             string host, string tlsHost, int port, string? user, string? pass,
             string? caPem, string? certPem, string? keyPem)
         {
-            var factory = new MqttFactory();
+            var factory = new MqttClientFactory();
             using var client = factory.CreateMqttClient();
 
             // The mutual-TLS client cert must stay alive through ConnectAsync (the
