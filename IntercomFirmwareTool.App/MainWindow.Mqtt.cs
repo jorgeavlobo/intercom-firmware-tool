@@ -45,6 +45,11 @@ namespace IntercomFirmwareTool.App
         // re-triggering its confirmation dialog.
         private bool _suppressMqttShell;
 
+        // True while a "Test connection" is in flight, so the visibility pass can't
+        // re-enable the Test button under it (a field edit would otherwise re-enable
+        // it and allow a second, concurrent test).
+        private bool _mqttTesting;
+
         private bool MqttEnabled => ChkMqtt.IsChecked == true;
 
         /// <summary>Wire up the MQTT masked password field + topic defaults. Called
@@ -187,7 +192,7 @@ namespace IntercomFirmwareTool.App
             BtnClearMqttCa.IsEnabled = _uiEnabled && _mqttCaPath != null;
             BtnClearMqttCert.IsEnabled = _uiEnabled && _mqttCertPath != null;
             BtnClearMqttKey.IsEnabled = _uiEnabled && _mqttKeyPath != null;
-            BtnMqttTest.IsEnabled = _uiEnabled;
+            BtnMqttTest.IsEnabled = _uiEnabled && !_mqttTesting;
 
             UpdateMqttHostIpVisibility();
             UpdateRemoteShellEnabled();
@@ -250,6 +255,7 @@ namespace IntercomFirmwareTool.App
             if (!TryReadPem(_mqttCertPath, out string? certPem)) return;
             if (!TryReadPem(_mqttKeyPath, out string? keyPem)) return;
 
+            _mqttTesting = true;
             BtnMqttTest.IsEnabled = false;
             SetMqttTestStatus(L("MqttTest_Testing"), error: false);
             bool ok = false;
@@ -260,6 +266,7 @@ namespace IntercomFirmwareTool.App
             }
             catch (OperationCanceledException) { err = L("MqttTest_Timeout"); }
             catch (Exception ex) { err = SafeMessage(ex); }
+            finally { _mqttTesting = false; }
 
             BtnMqttTest.IsEnabled = _uiEnabled;
             SetMqttTestStatus(
@@ -284,7 +291,9 @@ namespace IntercomFirmwareTool.App
 
             var builder = new MqttClientOptionsBuilder()
                 .WithTcpServer(host, port)
-                .WithClientId("intercom-fw-tool-conn-test")
+                // Unique per test so two app instances testing the same broker don't
+                // collide on client ID (which would disconnect one another).
+                .WithClientId("intercom-fw-tool-conn-test-" + Guid.NewGuid().ToString("N"))
                 .WithCleanSession(true)
                 .WithTimeout(TimeSpan.FromSeconds(6));
 
@@ -300,22 +309,23 @@ namespace IntercomFirmwareTool.App
                 {
                     // Validate the broker certificate against the supplied CA as a
                     // custom trust root (the CA is provided precisely because it is
-                    // not in the machine store).
-                    using var ca = X509Certificate2.CreateFromPem(caPem);
-                    var caCopy = new X509Certificate2(ca.Export(X509ContentType.Cert));
+                    // not in the machine store). Everything is built and disposed
+                    // inside the handler (per handshake) so no certificate handle
+                    // leaks across repeated tests.
                     tls = tls.WithCertificateValidationHandler(ctx =>
                     {
                         // A missing or name-mismatched server cert is a TLS failure
                         // that chain building does NOT cover — reject it outright so
                         // the test is a meaningful TLS check, then require the chain
-                        // to build to the supplied CA as a custom trust root.
+                        // to build to the supplied CA.
                         if ((ctx.SslPolicyErrors & (SslPolicyErrors.RemoteCertificateNotAvailable
                                 | SslPolicyErrors.RemoteCertificateNameMismatch)) != 0)
                             return false;
+                        using var ca = X509Certificate2.CreateFromPem(caPem);
                         using var chain = new X509Chain();
                         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
-                        chain.ChainPolicy.CustomTrustStore.Add(caCopy);
+                        chain.ChainPolicy.CustomTrustStore.Add(ca);
                         using var server = new X509Certificate2(ctx.Certificate);
                         return chain.Build(server);
                     });
