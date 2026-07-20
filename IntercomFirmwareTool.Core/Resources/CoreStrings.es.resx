@@ -192,10 +192,10 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
     <value>No se encontró el ancla esperada en {0} (buscando: {1}); parche rechazado.</value>
   </data>
   <data name="Hosts_FileMissing" xml:space="preserve">
-    <value>{0} no existe en la imagen; no se puede editar el archivo de hosts del dispositivo.</value>
+    <value>{0} no existe en la imagen; no se puede añadir la asignación de host de arranque.</value>
   </data>
   <data name="Hosts_AnchorMissing" xml:space="preserve">
-    <value>No se pudo encontrar el ancla esperada en {0} (buscando: {1}); se rechaza editar el archivo de hosts.</value>
+    <value>No se pudo encontrar el ancla esperada en {0} (buscando: {1}); se rechaza añadir la asignación de host.</value>
   </data>
   <data name="Hosts_FileTooLarge" xml:space="preserve">
     <value>{0} tiene {1} bytes, por encima del límite de {2} bytes para el script de init editable; se rechaza leerlo.</value>

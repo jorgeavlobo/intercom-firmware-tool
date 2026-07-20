@@ -192,10 +192,10 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
     <value>Der erwartete Anker in {0} wurde nicht gefunden (gesucht: {1}); Patch abgelehnt.</value>
   </data>
   <data name="Hosts_FileMissing" xml:space="preserve">
-    <value>{0} existiert nicht im Image; die Hosts-Datei des Geräts kann nicht angepasst werden.</value>
+    <value>{0} existiert nicht im Image; die Host-Zuordnung beim Systemstart kann nicht hinzugefügt werden.</value>
   </data>
   <data name="Hosts_AnchorMissing" xml:space="preserve">
-    <value>Der erwartete Anker in {0} wurde nicht gefunden (gesucht: {1}); das Anpassen der Hosts-Datei wird abgelehnt.</value>
+    <value>Der erwartete Anker in {0} wurde nicht gefunden (gesucht: {1}); das Hinzufügen der Host-Zuordnung wird abgelehnt.</value>
   </data>
   <data name="Hosts_FileTooLarge" xml:space="preserve">
     <value>{0} ist {1} Bytes groß, über dem {2}-Byte-Limit für das bearbeitbare Init-Skript; das Lesen wird abgelehnt.</value>

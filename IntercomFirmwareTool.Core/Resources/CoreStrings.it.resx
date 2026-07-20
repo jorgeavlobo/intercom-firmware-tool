@@ -192,10 +192,10 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
     <value>Impossibile trovare l'ancora prevista in {0} (ricerca di: {1}); patch rifiutata.</value>
   </data>
   <data name="Hosts_FileMissing" xml:space="preserve">
-    <value>{0} non esiste nell'immagine; impossibile applicare la patch al file hosts del dispositivo.</value>
+    <value>{0} non esiste nell'immagine; impossibile aggiungere la mappatura host all'avvio.</value>
   </data>
   <data name="Hosts_AnchorMissing" xml:space="preserve">
-    <value>Impossibile trovare l'ancora prevista in {0} (in cerca di: {1}); rifiuto di applicare la patch al file hosts.</value>
+    <value>Impossibile trovare l'ancora prevista in {0} (in cerca di: {1}); rifiuto di aggiungere la mappatura host.</value>
   </data>
   <data name="Hosts_FileTooLarge" xml:space="preserve">
     <value>{0} è di {1} byte, oltre il limite di {2} byte per lo script di init modificabile; rifiuto di leggerlo.</value>
