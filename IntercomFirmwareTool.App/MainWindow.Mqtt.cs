@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Net;
+using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
@@ -231,6 +232,14 @@ namespace IntercomFirmwareTool.App
                 SetMqttTestStatus(L("MqttTest_NeedHostPort"), error: true);
                 return;
             }
+            // Only test a config that would actually build — otherwise the test could
+            // connect anonymously (user without password) or with partial TLS and
+            // report a success the build would reject. Surface the same cue.
+            if (MqttStructuralError() is string structuralError)
+            {
+                SetMqttTestStatus(structuralError, error: true);
+                return;
+            }
             int port = int.Parse(TxtMqttPort.Text.Trim());
 
             // Read the auth + TLS material the same way the build does, so the test
@@ -296,6 +305,13 @@ namespace IntercomFirmwareTool.App
                     var caCopy = new X509Certificate2(ca.Export(X509ContentType.Cert));
                     tls = tls.WithCertificateValidationHandler(ctx =>
                     {
+                        // A missing or name-mismatched server cert is a TLS failure
+                        // that chain building does NOT cover — reject it outright so
+                        // the test is a meaningful TLS check, then require the chain
+                        // to build to the supplied CA as a custom trust root.
+                        if ((ctx.SslPolicyErrors & (SslPolicyErrors.RemoteCertificateNotAvailable
+                                | SslPolicyErrors.RemoteCertificateNameMismatch)) != 0)
+                            return false;
                         using var chain = new X509Chain();
                         chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                         chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
@@ -382,10 +398,11 @@ namespace IntercomFirmwareTool.App
             if (ChkMqttRemoteShell.IsChecked == true && !(hasAuth || mutualTls))
                 return L("MqttHint_ShellAuth");
 
-            // Topic sanity — catch the obvious mistakes inline (empty; a publish
-            // topic with a space or a '+'/'#' wildcard). The subtler rules (a valid
-            // TopicRx subscription filter; TopicRx not matching a publish topic) stay
-            // with the Core validator's pre-build popup.
+            // Topic sanity — mirror the Core validator (do NOT be stricter, or the
+            // UI blocks a config Core would accept): reject an empty topic, and a
+            // '+'/'#' wildcard on a publish topic. Spaces are allowed (the .conf
+            // quotes values). The subtler rules (a valid TopicRx subscription filter;
+            // TopicRx not matching a publish topic) stay with the Core popup.
             if (TxtMqttTopicRx.Text.Trim().Length == 0) return L("MqttHint_Topic");
             var publishTopics = new[]
             {
@@ -395,7 +412,7 @@ namespace IntercomFirmwareTool.App
             foreach (var box in publishTopics)
             {
                 string v = box.Text.Trim();
-                if (v.Length == 0 || v.IndexOfAny(new[] { ' ', '\t', '+', '#' }) >= 0)
+                if (v.Length == 0 || v.IndexOfAny(new[] { '+', '#' }) >= 0)
                     return L("MqttHint_Topic");
             }
 

@@ -390,6 +390,6 @@ Abra Opções avançadas → Resultado para ver que verificações falharam.</va
 
 Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comandos remoto?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de comandos remoto</value></data>
-  <data name="MqttHint_Topic" xml:space="preserve"><value>Um tópico está vazio ou um tópico de publicação contém um espaço ou um wildcard MQTT ('+' ou '#').</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>Um tópico está vazio ou um tópico de publicação contém um wildcard MQTT ('+' ou '#').</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>ligação recusada ou sem resposta.</value></data>
 </root>

@@ -390,6 +390,6 @@ Ouvrez Avancé → Résultat pour voir quelles vérifications ont échoué.</val
 
 Ne l'activez que sur un broker authentifié et de confiance. Activer le canal de commandes à distance ?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de commandes à distance</value></data>
-  <data name="MqttHint_Topic" xml:space="preserve"><value>Un sujet est vide ou un sujet de publication contient un espace ou un caractère générique MQTT (« + » ou « # »).</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>Un sujet est vide ou un sujet de publication contient un caractère générique MQTT (« + » ou « # »).</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>connexion refusée ou aucune réponse.</value></data>
 </root>

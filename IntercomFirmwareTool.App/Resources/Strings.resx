@@ -390,6 +390,6 @@ Open Advanced → Result to see which checks failed.</value></data>
 
 Enable it only on an authenticated, trusted broker. Enable the remote command channel?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Remote command channel</value></data>
-  <data name="MqttHint_Topic" xml:space="preserve"><value>A topic is empty, or a publish topic contains a space or an MQTT wildcard ('+' or '#').</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>A topic is empty, or a publish topic contains an MQTT wildcard ('+' or '#').</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>connection refused or no response.</value></data>
 </root>

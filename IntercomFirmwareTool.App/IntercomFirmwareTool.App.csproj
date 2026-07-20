@@ -25,8 +25,10 @@
     <!-- The only third-party runtime dependency: MQTTnet powers the Advanced-tab
          "Test connection" button (a real MQTT CONNECT that also exercises the
          configured auth + TLS). Pinned to the 4.3.x line so the client/TLS API this
-         code targets stays stable (v5 renamed several of these types). -->
-    <PackageReference Include="MQTTnet" Version="4.3.*" />
+         code targets stays stable (v5 renamed several of these types). Pinned to
+         an exact patch version for reproducible restores, matching the repo's
+         convention (e.g. SharpZipLib); bump deliberately when needed. -->
+    <PackageReference Include="MQTTnet" Version="4.3.7.1207" />
   </ItemGroup>
 
 </Project>
