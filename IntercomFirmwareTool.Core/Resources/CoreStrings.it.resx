@@ -168,7 +168,7 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
     <value>La porta del broker MQTT deve essere compresa tra 1 e 65535.</value>
   </data>
   <data name="Mqtt_InvalidOwnEndpoint" xml:space="preserve">
-    <value>L'host del monitor OpenWebNet deve essere valido e la porta compresa tra 1 e 65535.</value>
+    <value>L'host del monitor OpenWebNet deve essere valido e la porta deve essere compresa tra 1 e 65535.</value>
   </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>Nome utente e password MQTT devono essere impostati insieme (entrambi o nessuno).</value>

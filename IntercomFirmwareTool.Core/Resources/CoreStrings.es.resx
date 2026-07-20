@@ -168,7 +168,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
     <value>El puerto del broker MQTT debe estar entre 1 y 65535.</value>
   </data>
   <data name="Mqtt_InvalidOwnEndpoint" xml:space="preserve">
-    <value>El host del monitor OpenWebNet debe ser válido y su puerto estar entre 1 y 65535.</value>
+    <value>El host del monitor OpenWebNet debe ser válido y su puerto debe estar entre 1 y 65535.</value>
   </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>El usuario y la contraseña MQTT deben establecerse juntos (ambos o ninguno).</value>
