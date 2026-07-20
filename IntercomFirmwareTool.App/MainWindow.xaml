@@ -554,6 +554,18 @@
                            Text="{loc:Loc Hint_BlockUpdates}"/>
             </StackPanel>
 
+            <!-- Keep .sig signature sidecars (advanced, optional). Off by default =
+                 remove them, exactly like fquinto (remove_sig='y'). Kept for parity/
+                 research; the sidecar for the modified payload is stale, so a
+                 signature-checking updater could reject a kept archive. -->
+            <StackPanel x:Name="KeepSigSection" Margin="0,12,0,0" Visibility="Collapsed">
+                <CheckBox x:Name="ChkKeepSig" Content="{loc:Loc Chk_KeepSig}"
+                          ToolTip="{loc:Loc Tip_KeepSig}"
+                          Checked="ChkKeepSig_Toggled" Unchecked="ChkKeepSig_Toggled"/>
+                <TextBlock Margin="22,4,0,0" Foreground="Gray" FontSize="11" TextWrapping="Wrap"
+                           Text="{loc:Loc Hint_KeepSig}"/>
+            </StackPanel>
+
             <!-- MQTT bridge (advanced, optional). Off by default: ticking the box
                  reveals the config panel. The section is shown while Advanced is open,
                  or kept visible while enabled so an active build option is never

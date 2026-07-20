@@ -210,7 +210,7 @@ namespace IntercomFirmwareTool.Core
         /// .fwz is never modified; the output is for validation, not flashing.
         /// </summary>
         public static FwzBuildResult BuildModifiedFwz(string inputFwz, EnableSshOptions opts, string outputPath,
-            MqttOptions? mqttOpts = null)
+            MqttOptions? mqttOpts = null, bool removeSig = true)
         {
             // Repack opens the output with FileMode.Create while still reading the
             // input; if they are the same file the source is truncated mid-read
@@ -288,7 +288,7 @@ namespace IntercomFirmwareTool.Core
                 bool preserveTemp = false;
                 try
                 {
-                    Repack(realInput, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut);
+                    Repack(realInput, ex.PasswordUsed, ex.SelectedEntry, modifiedGz, tempOut, removeSig);
 
                     // 4) Round-trip: validate the TEMP .fwz (reopen it through our
                     //    chain) before it is allowed to become the output.
@@ -314,6 +314,19 @@ namespace IntercomFirmwareTool.Core
                     checkList.Add(new Ext4Check(
                         $"{ex.SelectedEntry} is ZipCrypto-encrypted (input password)",
                         EntryEncryptedWith(tempOut, ex.SelectedEntry, ex.PasswordUsed), ""));
+
+                    // .sig sidecars: assert the toggle actually took — none in the
+                    // output when removing, or exactly the input's set carried over
+                    // when keeping. Compares by entry name (ordinal, case-insensitive
+                    // like the .sig suffix test).
+                    var inputSigs = SigEntryNames(realInput, ex.PasswordUsed);
+                    var outputSigs = SigEntryNames(tempOut, ex.PasswordUsed);
+                    bool sigOk = removeSig
+                        ? outputSigs.Count == 0
+                        : outputSigs.SetEquals(inputSigs);
+                    checkList.Add(new Ext4Check(
+                        removeSig ? ".sig sidecars removed" : ".sig sidecars kept (match input)",
+                        sigOk, $"in {inputSigs.Count}, out {outputSigs.Count}"));
 
                     IReadOnlyList<Ext4Check> checks = checkList;
                     bool all = true;
@@ -388,17 +401,38 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Writes a new .fwz: every entry of <paramref name="inputFwz"/> — except
-        /// <c>.sig</c> signature sidecars, which are dropped like fquinto's
-        /// default — re-added with DEFLATE level 9 + ZipCrypto
-        /// (<paramref name="password"/>), in the original order, with
-        /// <paramref name="modifiedEntryName"/> replaced by the bytes of
-        /// <paramref name="modifiedGzPath"/>. Mirrors fquinto's
+        /// The set of <c>.sig</c> entry names in a .fwz (ordinal, case-insensitive),
+        /// used to assert the keep/remove-.sig toggle took effect on the output.
+        /// Entry names live in the (unencrypted) central directory, but the password
+        /// is set for consistency with the other readers here.
+        /// </summary>
+        private static HashSet<string> SigEntryNames(string fwz, string password)
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using var zf = new ZipFile(fwz) { Password = password };
+            foreach (ZipEntry e in zf)
+                if (e.IsFile && e.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase))
+                    names.Add(e.Name);
+            return names;
+        }
+
+        /// <summary>
+        /// Writes a new .fwz: every entry of <paramref name="inputFwz"/> re-added
+        /// with DEFLATE level 9 + ZipCrypto (<paramref name="password"/>), in the
+        /// original order, with <paramref name="modifiedEntryName"/> replaced by the
+        /// bytes of <paramref name="modifiedGzPath"/>. Mirrors fquinto's
         /// pyminizip.compress_multiple(level=9).
+        /// <para>When <paramref name="removeSig"/> is true (the default, matching
+        /// fquinto's <c>remove_sig='y'</c>) the <c>.sig</c> signature sidecars are
+        /// dropped: fquinto's output works on real devices, so the updater tolerates
+        /// their absence, and keeping a signature for the now-modified payload could
+        /// get the archive rejected by a signature-checking updater. When false, the
+        /// original <c>.sig</c> entries are carried over verbatim (for parity /
+        /// research — note the sidecar for the modified payload is then stale).</para>
         /// </summary>
         private static void Repack(
             string inputFwz, string password, string modifiedEntryName,
-            string modifiedGzPath, string outputPath)
+            string modifiedGzPath, string outputPath, bool removeSig)
         {
             using var srcZip = new ZipFile(inputFwz) { Password = password };
             using var outFs = new FileStream(outputPath, FileMode.Create, FileAccess.Write);
@@ -408,13 +442,10 @@ namespace IntercomFirmwareTool.Core
             foreach (ZipEntry src in srcZip)
             {
                 if (!src.IsFile) continue;
-                // Drop stale signature sidecars. fquinto removes .sig files by
-                // default (main.py: remove_sig defaults to 'y', filtered out of
-                // the repack list), and its output works on real devices — so
-                // the updater tolerates their absence. Keeping a signature for
-                // the now-modified payload could instead get the archive
-                // rejected by a signature-checking updater.
-                if (src.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase)) continue;
+                // Signature sidecars: dropped by default (fquinto's behaviour), or
+                // carried over verbatim when the user opts to keep them.
+                if (removeSig && src.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase))
+                    continue;
                 // Mark the entry ZipCrypto-encrypted explicitly (not only via the
                 // stream Password): the device firmware requires traditional
                 // ZipCrypto, and being explicit keeps the repack correct regardless

@@ -339,6 +339,9 @@ Open Advanced → Result to see which checks failed.</value></data>
   <data name="Chk_BlockUpdates" xml:space="preserve"><value>Block firmware auto-updates</value></data>
   <data name="Tip_BlockUpdates" xml:space="preserve"><value>Map the Legrand firmware-update servers to 127.0.0.1 so the unit can't silently download and flash an over-the-air update that would wipe these changes. Off by default; reversible by reflashing the stock firmware.</value></data>
   <data name="Hint_BlockUpdates" xml:space="preserve"><value>Protects the mod from being wiped by an official update — but the unit will no longer receive updates or security fixes while blocked.</value></data>
+  <data name="Chk_KeepSig" xml:space="preserve"><value>Keep .sig signature files</value></data>
+  <data name="Tip_KeepSig" xml:space="preserve"><value>Carry the original .sig signature sidecars into the rebuilt .fwz instead of dropping them. Off by default (fquinto removes them), because the signature for the modified payload becomes stale.</value></data>
+  <data name="Hint_KeepSig" xml:space="preserve"><value>Default is to remove them (like fquinto), which is the tested path. Keeping a stale signature can make a signature-checking updater reject the archive.</value></data>
   <data name="Chk_Mqtt" xml:space="preserve"><value>Install MQTT bridge (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Install an optional MQTT bridge that exposes the OpenWebNet bus and the front-panel keys over MQTT. Off by default.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>MQTT Broker:</value></data>
