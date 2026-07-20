@@ -312,12 +312,14 @@ namespace IntercomFirmwareTool.App
             string connectHost = hostIp ?? host;
 
             // Read the auth + TLS material the same way the build does, so the test
-            // exercises exactly what will be installed.
+            // exercises exactly what will be installed. A read failure shows its own
+            // popup and aborts the test — clear any prior ✓/✗ first so a stale
+            // "Connected" can't linger for a config whose retest never ran.
             string? user = NullIfEmpty(TxtMqttUser.Text.Trim());
             string? pass = NullIfEmpty(_mqttPass?.Value ?? "");
-            if (!TryReadPem(_mqttCaPath, out string? caPem)) return;
-            if (!TryReadPem(_mqttCertPath, out string? certPem)) return;
-            if (!TryReadPem(_mqttKeyPath, out string? keyPem)) return;
+            if (!TryReadPem(_mqttCaPath, out string? caPem)) { ClearMqttTestStatus(); return; }
+            if (!TryReadPem(_mqttCertPath, out string? certPem)) { ClearMqttTestStatus(); return; }
+            if (!TryReadPem(_mqttKeyPath, out string? keyPem)) { ClearMqttTestStatus(); return; }
 
             _mqttTesting = true;
             BtnMqttTest.IsEnabled = false;
