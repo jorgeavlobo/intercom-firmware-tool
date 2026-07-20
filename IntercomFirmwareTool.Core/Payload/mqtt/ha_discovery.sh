@@ -92,5 +92,5 @@ while [ "$i" -lt 6 ]; do
 	sleep $((i * 5))
 done
 
-echo "ha_discovery: broker unreachable after retries; discovery ${action} incomplete"
+echo "ha_discovery: broker unreachable after retries; could not ${action} all discovery configs"
 exit 1

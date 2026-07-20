@@ -171,7 +171,7 @@ The verified build was kept here — move/rename it manually:
     <value>The OpenWebNet monitor host must be valid and its port must be between 1 and 65535.</value>
   </data>
   <data name="Mqtt_InvalidHaDiscovery" xml:space="preserve">
-    <value>The Home Assistant discovery prefix and node id must be non-empty and free of whitespace and MQTT wildcards (+ #); the node id must not contain '/', and the prefix must not start or end with '/' or contain '//'.</value>
+    <value>The Home Assistant node id must use only letters, digits, '_' or '-'. The discovery prefix must be non-empty, with no whitespace, no MQTT wildcards (+ #), and no leading/trailing or double '/'.</value>
   </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>MQTT username and password must be set together (both or neither).</value>

@@ -287,23 +287,26 @@ namespace IntercomFirmwareTool.Core
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidOwnEndpoint"), nameof(opts));
 
             // The HA discovery prefix and node id become MQTT topic levels
-            // ("<prefix>/<component>/<node>/<obj>/config"), so they must be non-empty
-            // and free of whitespace and the topic wildcards + and #; the node is a
-            // single level, so it also cannot contain '/'. The prefix MAY contain '/'
-            // (a multi-level prefix), but not a leading/trailing/double slash — those
-            // would emit an empty topic level and HA would silently skip the entity.
-            // Validated UNCONDITIONALLY (not only when EnableHaDiscovery): the
-            // manifest is generated and ha_discovery.sh runs on every boot even when
-            // disabled (to CLEAR the retained configs), so a bad prefix/node would
-            // otherwise pass the build and fail every boot on-device.
+            // ("<prefix>/<component>/<node>/<obj>/config"). The node id is stricter
+            // than a generic topic level: Home Assistant's discovery parser only
+            // accepts node/object ids of [A-Za-z0-9_-], so anything else (e.g.
+            // "front.door", "door:1") is accepted here but silently ignored by HA.
+            // The prefix is looser — it may be multi-level — but must have no
+            // whitespace, no + / # wildcards, and no leading/trailing/double slash
+            // (which would emit an empty topic level). Validated UNCONDITIONALLY (not
+            // only when EnableHaDiscovery): the manifest is generated and
+            // ha_discovery.sh runs on every boot even when disabled (to CLEAR the
+            // retained configs), so a bad prefix/node would otherwise pass the build
+            // and fail every boot on-device.
             {
-                bool BadLevel(string s, bool allowSlash) =>
+                bool BadPrefix(string s) =>
                     string.IsNullOrWhiteSpace(s) || s.IndexOfAny(new[] { '+', '#' }) >= 0 ||
                     s.Any(char.IsWhiteSpace) ||
-                    (!allowSlash && s.Contains('/')) ||
-                    (allowSlash && (s.StartsWith('/') || s.EndsWith('/') || s.Contains("//")));
-                if (BadLevel(opts.HaDiscoveryPrefix, allowSlash: true) ||
-                    BadLevel(opts.HaNodeId, allowSlash: false))
+                    s.StartsWith('/') || s.EndsWith('/') || s.Contains("//");
+                bool BadNode(string s) =>
+                    string.IsNullOrEmpty(s) ||
+                    !s.All(c => char.IsAsciiLetterOrDigit(c) || c == '_' || c == '-');
+                if (BadPrefix(opts.HaDiscoveryPrefix) || BadNode(opts.HaNodeId))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidHaDiscovery"), nameof(opts));
             }
 
