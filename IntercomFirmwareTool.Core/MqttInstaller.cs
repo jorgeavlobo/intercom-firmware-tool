@@ -231,6 +231,16 @@ namespace IntercomFirmwareTool.Core
             if (opts.MqttPort < 1 || opts.MqttPort > 65535)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidPort"), nameof(opts));
 
+            // The OpenWebNet monitor endpoint feeds the socket back-end's config.
+            // It is not exposed in the UI (the App always uses the defaults), but
+            // it is a public option, so a library caller could set a bad value —
+            // a 0/negative/oversized port or an empty host would generate a config
+            // that silently fails socket mode and falls back to tcpdump. Fail fast
+            // here instead, mirroring the broker host/port checks above.
+            if (string.IsNullOrWhiteSpace(opts.OwnHost) || !IsValidHost(opts.OwnHost) ||
+                opts.OwnPortMon < 1 || opts.OwnPortMon > 65535)
+                throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidOwnEndpoint"), nameof(opts));
+
             // A hosts-mapping IP override is only USED when the broker is given by
             // name (when the host is already an IP, PatchHosts is skipped and this
             // field is ignored). So only validate it in the hostname case — a stale

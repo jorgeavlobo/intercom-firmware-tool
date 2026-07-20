@@ -100,30 +100,50 @@ probe_socket() {
 	return $rc
 }
 
-# Open the monitor session and stream frames to MQTT until the socket drops or
-# the publisher exits; the orchestrator (TcpDump2Mqtt) then respawns us.
+# Open the monitor session and stream frames to MQTT until ANY stage exits (the
+# socket drops, the framer dies, or the publisher loses the broker); the
+# orchestrator (TcpDump2Mqtt) then respawns us.
 run_socket() {
 	mkdir -p "$RUNDIR" 2>/dev/null
-	fifo="$RUNDIR/own_mon.$$"
-	rm -f "$fifo"
-	mkfifo -m 600 "$fifo" 2>/dev/null || return 1
+	cfifo="$RUNDIR/own_conn.$$"    # handshake holder -> nc stdin
+	rfifo="$RUNDIR/own_raw.$$"     # nc (socket bytes) -> frame_own
+	ffifo="$RUNDIR/own_frames.$$"  # frame_own (one frame/line) -> mqtt_pub
+	rm -f "$cfifo" "$rfifo" "$ffifo"
+	mkfifo -m 600 "$cfifo" 2>/dev/null && mkfifo -m 600 "$rfifo" 2>/dev/null \
+		&& mkfifo -m 600 "$ffifo" 2>/dev/null || { rm -f "$cfifo" "$rfifo" "$ffifo"; return 1; }
 
 	# Hold the write side of the connection open: send the monitor-session
 	# request ("*99*1##"), then keep the fd open via a sleeper (some nc builds
-	# tear the socket down when stdin hits EOF). `exec sleep` makes it a single
-	# process we kill the instant nc/the pipeline returns, so it never lingers.
-	( exec 9>"$fifo"; printf '*99*1##' >&9; exec sleep 2147483647 ) &
+	# tear the socket down when stdin hits EOF). Killed on teardown below.
+	( exec 9>"$cfifo"; printf '*99*1##' >&9; exec sleep 2147483647 ) &
 	writer=$!
 
-	# No self-amplification guard is needed here (unlike tcpdump): the monitor
-	# socket carries only bus events, not our own mosquitto_pub loopback traffic.
-	nc "$OWN_HOST" "$OWN_PORT_MON" < "$fifo" | frame_own | mqtt_pub -l -t "${TOPIC_DUMP}"
-	rc=$?
+	# Run the three stages as SEPARATE background processes (not one pipeline) so
+	# each has its own PID and can be supervised by liveness, not by data flow. A
+	# naive `nc | frame_own | mqtt_pub` sits HALF-DEAD if mqtt_pub exits (e.g. the
+	# broker is down) while the bus is idle: nc/awk only see SIGPIPE on the NEXT
+	# frame write, so on a quiet device nothing unwinds, StartMqttSend stays
+	# "alive" to the orchestrator's pgrep check, and it is never respawned. No
+	# self-amplification guard is needed (the monitor carries only bus events,
+	# not our own mosquitto_pub loopback traffic).
+	nc "$OWN_HOST" "$OWN_PORT_MON" < "$cfifo" > "$rfifo" &
+	ncpid=$!
+	frame_own < "$rfifo" > "$ffifo" &
+	framepid=$!
+	mqtt_pub -l -t "${TOPIC_DUMP}" < "$ffifo" &
+	pubpid=$!
 
-	kill "$writer" 2>/dev/null
-	wait "$writer" 2>/dev/null
-	rm -f "$fifo"
-	return $rc
+	# Supervise by PID: the instant any stage exits, tear the rest down so
+	# StartMqttSend returns and the orchestrator respawns us (re-probe + reconnect).
+	while kill -0 "$ncpid" 2>/dev/null && kill -0 "$framepid" 2>/dev/null \
+	   && kill -0 "$pubpid" 2>/dev/null; do
+		sleep 5
+	done
+
+	kill "$ncpid" "$framepid" "$pubpid" "$writer" 2>/dev/null
+	wait "$ncpid" "$framepid" "$pubpid" "$writer" 2>/dev/null
+	rm -f "$cfifo" "$rfifo" "$ffifo"
+	return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -163,7 +183,7 @@ run_tcpdump() {
 
 # Best-effort cleanup of FIFOs left by a previous instance that was killed
 # mid-run (RUNDIR is tmpfs, so this is belt-and-braces).
-rm -f "$RUNDIR"/own_mon.* "$RUNDIR"/own_probe_* 2>/dev/null
+rm -f "$RUNDIR"/own_conn.* "$RUNDIR"/own_raw.* "$RUNDIR"/own_frames.* "$RUNDIR"/own_probe_* 2>/dev/null
 
 case "${CAPTURE_MODE}" in
 	tcpdump)

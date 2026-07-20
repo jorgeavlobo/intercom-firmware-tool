@@ -167,6 +167,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_InvalidPort" xml:space="preserve">
     <value>A porta do broker MQTT tem de estar entre 1 e 65535.</value>
   </data>
+  <data name="Mqtt_InvalidOwnEndpoint" xml:space="preserve">
+    <value>O host do monitor OpenWebNet tem de ser válido e a porta estar entre 1 e 65535.</value>
+  </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>O utilizador e a palavra-passe MQTT têm de ser definidos em conjunto (ambos ou nenhum).</value>
   </data>
