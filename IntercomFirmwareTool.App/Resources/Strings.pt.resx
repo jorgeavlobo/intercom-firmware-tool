@@ -245,6 +245,9 @@ Escolha um ficheiro .pub válido ou gere um novo par.</value></data>
   <data name="Msg_OutputCollidesKey" xml:space="preserve"><value>O caminho de destino é o mesmo ficheiro que a chave SSH selecionada (pública ou
 privada). Escolha um destino diferente para que a chave não seja substituída.</value></data>
   <data name="Cap_OutputCollidesKey" xml:space="preserve"><value>O destino colide com a chave</value></data>
+  <data name="Fmt_Msg_OutputCollidesMqtt" xml:space="preserve"><value>O caminho de saída é o ficheiro TLS MQTT selecionado. A compilação iria sobrescrevê-lo — escolha uma saída diferente:
+{0}</value></data>
+  <data name="Cap_OutputCollidesMqtt" xml:space="preserve"><value>A saída colide com um ficheiro TLS</value></data>
   <data name="Msg_KeyRequired" xml:space="preserve"><value>O início de sessão por palavra-passe está desativado, pelo que é necessária uma chave SSH.
 
 Escolha ou gere uma chave, ou desmarque «Desativar» e defina uma palavra-passe.</value></data>

@@ -1426,6 +1426,22 @@ namespace IntercomFirmwareTool.App
                 return;
             }
 
+            // Never build over a selected MQTT TLS file: the build overwrites the
+            // output path with the generated .fwz, which would destroy the CA/cert/key
+            // on disk (its bytes are already in memory, but the file would be lost).
+            // Mirror the SSH-key collision guard above.
+            if (MqttEnabled)
+            {
+                foreach (var p in new[] { _mqttCaPath, _mqttCertPath, _mqttKeyPath })
+                    if (p != null && SamePath(_outputPath!, p))
+                    {
+                        MessageBox.Show(this,
+                            LF("Fmt_Msg_OutputCollidesMqtt", p),
+                            L("Cap_OutputCollidesMqtt"), MessageBoxButton.OK, MessageBoxImage.Warning);
+                        return;
+                    }
+            }
+
             // Confirm before overwriting an existing output file (the path may
             // have been auto-suggested, bypassing the Save dialog's own prompt).
             if (File.Exists(_outputPath))

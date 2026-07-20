@@ -245,6 +245,9 @@ Elija un archivo .pub válido o genere un nuevo par.</value></data>
   <data name="Msg_OutputCollidesKey" xml:space="preserve"><value>La ruta de salida es el mismo archivo que la clave SSH seleccionada (pública o
 privada). Elija una salida diferente para que la clave no se sobrescriba.</value></data>
   <data name="Cap_OutputCollidesKey" xml:space="preserve"><value>La salida colisiona con la clave</value></data>
+  <data name="Fmt_Msg_OutputCollidesMqtt" xml:space="preserve"><value>La ruta de salida es el archivo TLS MQTT seleccionado. La compilación lo sobrescribiría — elija una salida diferente:
+{0}</value></data>
+  <data name="Cap_OutputCollidesMqtt" xml:space="preserve"><value>La salida entra en conflicto con un archivo TLS</value></data>
   <data name="Msg_KeyRequired" xml:space="preserve"><value>El inicio de sesión con contraseña está deshabilitado, por lo que se requiere una clave SSH.
 
 Elija o genere una clave, o desmarque «Deshabilitar» y establezca una contraseña.</value></data>

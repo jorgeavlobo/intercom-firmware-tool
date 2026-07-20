@@ -245,6 +245,9 @@ Scegli un file .pub valido, o genera una nuova coppia.</value></data>
   <data name="Msg_OutputCollidesKey" xml:space="preserve"><value>Il percorso di output è lo stesso file della chiave SSH selezionata (pubblica o
 privata). Scegli un output diverso così la chiave non viene sovrascritta.</value></data>
   <data name="Cap_OutputCollidesKey" xml:space="preserve"><value>L'output collide con la chiave</value></data>
+  <data name="Fmt_Msg_OutputCollidesMqtt" xml:space="preserve"><value>Il percorso di output è il file TLS MQTT selezionato. La compilazione lo sovrascriverebbe — scegli un output diverso:
+{0}</value></data>
+  <data name="Cap_OutputCollidesMqtt" xml:space="preserve"><value>L'output è in conflitto con un file TLS</value></data>
   <data name="Msg_KeyRequired" xml:space="preserve"><value>L'accesso con password è disabilitato, quindi è richiesta una chiave SSH.
 
 Scegli o genera una chiave, oppure deseleziona «Disabilita» e imposta una password.</value></data>

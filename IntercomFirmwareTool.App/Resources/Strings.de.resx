@@ -245,6 +245,9 @@ Wählen Sie eine gültige .pub-Datei oder erzeugen Sie ein neues Paar.</value></
   <data name="Msg_OutputCollidesKey" xml:space="preserve"><value>Der Ausgabepfad ist dieselbe Datei wie der ausgewählte SSH-Schlüssel (öffentlich oder
 privat). Wählen Sie eine andere Ausgabe, damit der Schlüssel nicht überschrieben wird.</value></data>
   <data name="Cap_OutputCollidesKey" xml:space="preserve"><value>Ausgabe kollidiert mit dem Schlüssel</value></data>
+  <data name="Fmt_Msg_OutputCollidesMqtt" xml:space="preserve"><value>Der Ausgabepfad ist die ausgewählte MQTT-TLS-Datei. Der Build würde sie überschreiben — wählen Sie einen anderen Ausgabepfad:
+{0}</value></data>
+  <data name="Cap_OutputCollidesMqtt" xml:space="preserve"><value>Ausgabe kollidiert mit einer TLS-Datei</value></data>
   <data name="Msg_KeyRequired" xml:space="preserve"><value>Die Passwort-Anmeldung ist deaktiviert, daher ist ein SSH-Schlüssel erforderlich.
 
 Wählen oder erzeugen Sie einen Schlüssel, oder deaktivieren Sie „Deaktivieren“ und legen Sie ein Passwort fest.</value></data>

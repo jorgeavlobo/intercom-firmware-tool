@@ -245,6 +245,9 @@ Pick a valid .pub file, or generate a new pair.</value></data>
   <data name="Msg_OutputCollidesKey" xml:space="preserve"><value>The output path is the same file as the selected SSH key (public or
 private). Choose a different output so the key isn't overwritten.</value></data>
   <data name="Cap_OutputCollidesKey" xml:space="preserve"><value>Output collides with the key</value></data>
+  <data name="Fmt_Msg_OutputCollidesMqtt" xml:space="preserve"><value>The output path is the selected MQTT TLS file. Building would overwrite it — choose a different output:
+{0}</value></data>
+  <data name="Cap_OutputCollidesMqtt" xml:space="preserve"><value>Output collides with a TLS file</value></data>
   <data name="Msg_KeyRequired" xml:space="preserve"><value>Password login is disabled, so an SSH key is required.
 
 Choose or generate a key, or untick “Disable” and set a password.</value></data>

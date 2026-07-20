@@ -245,6 +245,9 @@ Choisissez un fichier .pub valide, ou générez une nouvelle paire.</value></dat
   <data name="Msg_OutputCollidesKey" xml:space="preserve"><value>Le chemin de sortie correspond au même fichier que la clé SSH sélectionnée (publique ou
 privée). Choisissez une autre sortie afin que la clé ne soit pas écrasée.</value></data>
   <data name="Cap_OutputCollidesKey" xml:space="preserve"><value>La sortie entre en collision avec la clé</value></data>
+  <data name="Fmt_Msg_OutputCollidesMqtt" xml:space="preserve"><value>Le chemin de sortie est le fichier TLS MQTT sélectionné. La compilation l'écraserait — choisissez une sortie différente :
+{0}</value></data>
+  <data name="Cap_OutputCollidesMqtt" xml:space="preserve"><value>La sortie entre en conflit avec un fichier TLS</value></data>
   <data name="Msg_KeyRequired" xml:space="preserve"><value>La connexion par mot de passe est désactivée, une clé SSH est donc requise.
 
 Choisissez ou générez une clé, ou décochez « Désactiver » et définissez un mot de passe.</value></data>
