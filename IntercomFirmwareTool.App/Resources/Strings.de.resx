@@ -369,6 +369,7 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="Dlg_MqttPemFilter" xml:space="preserve"><value>Zertifikat-/Schlüsseldateien|*.pem;*.crt;*.cer;*.key|Alle Dateien|*.*</value></data>
   <data name="Cap_MqttInvalid" xml:space="preserve"><value>MQTT-Konfiguration</value></data>
   <data name="Fmt_Msg_MqttReadPem" xml:space="preserve"><value>Die TLS-Datei konnte nicht gelesen werden: {0}</value></data>
+  <data name="Fmt_Msg_MqttEmptyPem" xml:space="preserve"><value>Die ausgewählte TLS-Datei ist leer: {0}</value></data>
   <data name="Cap_MqttReadPem" xml:space="preserve"><value>Datei kann nicht gelesen werden</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d, round 2) ================= -->

@@ -685,13 +685,26 @@ namespace IntercomFirmwareTool.App
         {
             pem = null;
             if (path == null) return true;
-            try { pem = File.ReadAllText(path); return true; }
+            string text;
+            try { text = File.ReadAllText(path); }
             catch (Exception ex)
             {
                 MessageBox.Show(this, LF("Fmt_Msg_MqttReadPem", SafeMessage(ex)),
                     L("Cap_MqttReadPem"), MessageBoxButton.OK, MessageBoxImage.Warning);
                 return false;
             }
+            // A selected file that reads empty must fail, not silently drop TLS: an
+            // empty CA makes MqttOptions.HasTls false, so the build would install a
+            // plaintext config even though the UI still shows a chosen file. Guard both
+            // the Test and Build paths here.
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                MessageBox.Show(this, LF("Fmt_Msg_MqttEmptyPem", path),
+                    L("Cap_MqttReadPem"), MessageBoxButton.OK, MessageBoxImage.Warning);
+                return false;
+            }
+            pem = text;
+            return true;
         }
 
         private static string? NullIfEmpty(string s) => s.Length == 0 ? null : s;

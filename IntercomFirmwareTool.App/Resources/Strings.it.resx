@@ -369,6 +369,7 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="Dlg_MqttPemFilter" xml:space="preserve"><value>File di certificato / chiave|*.pem;*.crt;*.cer;*.key|Tutti i file|*.*</value></data>
   <data name="Cap_MqttInvalid" xml:space="preserve"><value>Configurazione MQTT</value></data>
   <data name="Fmt_Msg_MqttReadPem" xml:space="preserve"><value>Impossibile leggere il file TLS: {0}</value></data>
+  <data name="Fmt_Msg_MqttEmptyPem" xml:space="preserve"><value>Il file TLS selezionato è vuoto: {0}</value></data>
   <data name="Cap_MqttReadPem" xml:space="preserve"><value>Impossibile leggere il file</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d, round 2) ================= -->
