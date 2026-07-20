@@ -564,15 +564,17 @@
                         </Grid.RowDefinitions>
 
                         <!-- Broker host + port + Test connection -->
-                        <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                                   Text="{loc:Loc Field_MqttBroker}"/>
+                        <TextBlock x:Name="LblMqttBroker" Grid.Row="0" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttBroker}"/>
                         <StackPanel Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2"
                                     Orientation="Horizontal" Margin="0,0,0,6">
                             <TextBox x:Name="TxtMqttHost" Style="{StaticResource InputField}" Width="200"
+                                     AutomationProperties.LabeledBy="{Binding ElementName=LblMqttBroker}"
                                      ToolTip="{loc:Loc Tip_MqttBroker}" TextChanged="MqttField_TextChanged"/>
-                            <TextBlock Style="{StaticResource FieldLabel}" Margin="12,0,8,0"
+                            <TextBlock x:Name="LblMqttPort" Style="{StaticResource FieldLabel}" Margin="12,0,8,0"
                                        Text="{loc:Loc Field_MqttPort}"/>
                             <TextBox x:Name="TxtMqttPort" Style="{StaticResource InputField}" Width="70"
+                                     AutomationProperties.LabeledBy="{Binding ElementName=LblMqttPort}"
                                      ToolTip="{loc:Loc Tip_MqttPort}" TextChanged="MqttField_TextChanged"/>
                             <Button x:Name="BtnMqttTest" Style="{StaticResource SecondaryButton}"
                                     Height="28" Margin="12,0,0,0" Padding="12,0"
@@ -590,23 +592,26 @@
                         <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" x:Name="TxtMqttHostIp"
                                  Style="{StaticResource InputField}" Margin="0,0,0,6"
                                  HorizontalAlignment="Left" Width="200" Visibility="Collapsed"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttHostIp}"
                                  ToolTip="{loc:Loc Tip_MqttHostIp}" TextChanged="MqttField_TextChanged"/>
 
                         <!-- Username (optional; set with a password) -->
-                        <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                                   Text="{loc:Loc Field_MqttUser}"/>
+                        <TextBlock x:Name="LblMqttUser" Grid.Row="2" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttUser}"/>
                         <TextBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" x:Name="TxtMqttUser"
                                  Style="{StaticResource InputField}" Margin="0,0,0,6"
                                  HorizontalAlignment="Left" Width="200"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttUser}"
                                  ToolTip="{loc:Loc Tip_MqttUser}" TextChanged="MqttField_TextChanged"/>
 
                         <!-- Password (masked) + reveal -->
-                        <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                                   Text="{loc:Loc Field_MqttPass}"/>
+                        <TextBlock x:Name="LblMqttPass" Grid.Row="3" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttPass}"/>
                         <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2"
                                     Orientation="Horizontal" Margin="0,0,0,6">
                             <TextBox x:Name="TxtMqttPass" Style="{StaticResource InputField}"
-                                     Width="200" FontFamily="Consolas"/>
+                                     Width="200" FontFamily="Consolas"
+                                     AutomationProperties.LabeledBy="{Binding ElementName=LblMqttPass}"/>
                             <Button x:Name="BtnMqttReveal" Style="{StaticResource IconButton}"
                                     Content="&#xE7B3;" ToolTip="{loc:Loc Tip_MqttReveal}"
                                     AutomationProperties.Name="{loc:Loc Tip_MqttReveal}"
@@ -614,11 +619,12 @@
                         </StackPanel>
 
                         <!-- TLS CA certificate (optional; enables one-way TLS) -->
-                        <TextBlock Grid.Row="4" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                                   Text="{loc:Loc Field_MqttCa}"/>
+                        <TextBlock x:Name="LblMqttCa" Grid.Row="4" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttCa}"/>
                         <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtMqttCaPath"
                                  Style="{StaticResource InputField}" IsReadOnly="True" Cursor="Hand"
                                  Margin="0,0,0,6" Foreground="Gray" ToolTip="{loc:Loc Tip_MqttCa}"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttCa}"
                                  PreviewMouseLeftButtonDown="MqttPem_MouseDown" PreviewKeyDown="MqttPem_PreviewKeyDown"/>
                         <Button Grid.Row="4" Grid.Column="2" x:Name="BtnClearMqttCa"
                                 Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
@@ -627,11 +633,12 @@
                                 Click="MqttPemClear_Click"/>
 
                         <!-- TLS client certificate (optional; with the key = mutual TLS) -->
-                        <TextBlock Grid.Row="5" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                                   Text="{loc:Loc Field_MqttClientCert}"/>
+                        <TextBlock x:Name="LblMqttClientCert" Grid.Row="5" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttClientCert}"/>
                         <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtMqttCertPath"
                                  Style="{StaticResource InputField}" IsReadOnly="True" Cursor="Hand"
                                  Margin="0,0,0,6" Foreground="Gray" ToolTip="{loc:Loc Tip_MqttClientCert}"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttClientCert}"
                                  PreviewMouseLeftButtonDown="MqttPem_MouseDown" PreviewKeyDown="MqttPem_PreviewKeyDown"/>
                         <Button Grid.Row="5" Grid.Column="2" x:Name="BtnClearMqttCert"
                                 Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
@@ -640,11 +647,12 @@
                                 Click="MqttPemClear_Click"/>
 
                         <!-- TLS client private key (optional; with the cert = mutual TLS) -->
-                        <TextBlock Grid.Row="6" Grid.Column="0" Style="{StaticResource FieldLabel}"
-                                   Text="{loc:Loc Field_MqttClientKey}"/>
+                        <TextBlock x:Name="LblMqttClientKey" Grid.Row="6" Grid.Column="0"
+                                   Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttClientKey}"/>
                         <TextBox Grid.Row="6" Grid.Column="1" x:Name="TxtMqttKeyPath"
                                  Style="{StaticResource InputField}" IsReadOnly="True" Cursor="Hand"
                                  Margin="0,0,0,6" Foreground="Gray" ToolTip="{loc:Loc Tip_MqttClientKey}"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttClientKey}"
                                  PreviewMouseLeftButtonDown="MqttPem_MouseDown" PreviewKeyDown="MqttPem_PreviewKeyDown"/>
                         <Button Grid.Row="6" Grid.Column="2" x:Name="BtnClearMqttKey"
                                 Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
@@ -686,20 +694,20 @@
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
-                        <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicRx}"/>
-                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtMqttTopicRx" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260"/>
-                        <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicDump}"/>
-                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtMqttTopicDump" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260"/>
-                        <TextBlock Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicStartDate}"/>
-                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="TxtMqttTopicStartDate" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260"/>
-                        <TextBlock Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicLastWill}"/>
-                        <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtMqttTopicLastWill" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260"/>
-                        <TextBlock Grid.Row="4" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicKey}"/>
-                        <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtMqttTopicKey" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260"/>
-                        <TextBlock Grid.Row="5" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicCmdResult}"/>
-                        <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtMqttTopicCmdResult" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260"/>
-                        <TextBlock Grid.Row="6" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicFileContent}"/>
-                        <TextBox Grid.Row="6" Grid.Column="1" x:Name="TxtMqttTopicFileContent" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260"/>
+                        <TextBlock x:Name="LblMqttTopicRx" Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicRx}"/>
+                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtMqttTopicRx" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicRx}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicDump" Grid.Row="1" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicDump}"/>
+                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="TxtMqttTopicDump" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicDump}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicStartDate" Grid.Row="2" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicStartDate}"/>
+                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="TxtMqttTopicStartDate" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicStartDate}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicLastWill" Grid.Row="3" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicLastWill}"/>
+                        <TextBox Grid.Row="3" Grid.Column="1" x:Name="TxtMqttTopicLastWill" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicLastWill}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicKey" Grid.Row="4" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicKey}"/>
+                        <TextBox Grid.Row="4" Grid.Column="1" x:Name="TxtMqttTopicKey" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicKey}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicCmdResult" Grid.Row="5" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicCmdResult}"/>
+                        <TextBox Grid.Row="5" Grid.Column="1" x:Name="TxtMqttTopicCmdResult" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicCmdResult}" TextChanged="MqttField_TextChanged"/>
+                        <TextBlock x:Name="LblMqttTopicFileContent" Grid.Row="6" Grid.Column="0" Style="{StaticResource FieldLabel}" Text="{loc:Loc Field_MqttTopicFileContent}"/>
+                        <TextBox Grid.Row="6" Grid.Column="1" x:Name="TxtMqttTopicFileContent" Style="{StaticResource InputField}" Margin="0,0,0,4" HorizontalAlignment="Left" Width="260" AutomationProperties.LabeledBy="{Binding ElementName=LblMqttTopicFileContent}" TextChanged="MqttField_TextChanged"/>
                     </Grid>
                 </StackPanel>
             </StackPanel>

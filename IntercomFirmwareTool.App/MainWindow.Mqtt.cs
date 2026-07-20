@@ -299,6 +299,23 @@ namespace IntercomFirmwareTool.App
             if (ChkMqttRemoteShell.IsChecked == true && !(hasAuth || mutualTls))
                 return L("MqttHint_ShellAuth");
 
+            // Topic sanity — catch the obvious mistakes inline (empty; a publish
+            // topic with a space or a '+'/'#' wildcard). The subtler rules (a valid
+            // TopicRx subscription filter; TopicRx not matching a publish topic) stay
+            // with the Core validator's pre-build popup.
+            if (TxtMqttTopicRx.Text.Trim().Length == 0) return L("MqttHint_Topic");
+            var publishTopics = new[]
+            {
+                TxtMqttTopicDump, TxtMqttTopicStartDate, TxtMqttTopicLastWill,
+                TxtMqttTopicKey, TxtMqttTopicCmdResult, TxtMqttTopicFileContent,
+            };
+            foreach (var box in publishTopics)
+            {
+                string v = box.Text.Trim();
+                if (v.Length == 0 || v.IndexOfAny(new[] { ' ', '\t', '+', '#' }) >= 0)
+                    return L("MqttHint_Topic");
+            }
+
             return null;
         }
 

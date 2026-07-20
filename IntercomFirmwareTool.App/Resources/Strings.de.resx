@@ -332,7 +332,7 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="Donate_Post" xml:space="preserve"><value>. Vielen Dank! ☺</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d) ================= -->
-  <data name="Chk_Mqtt" xml:space="preserve"><value>MQTT-Brücke installieren (optional)</value></data>
+  <data name="Chk_Mqtt" xml:space="preserve"><value>MQTT-Brücke installieren (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Installiert eine optionale MQTT-Brücke, die den OpenWebNet-Bus und die Tasten des Frontpanels über MQTT bereitstellt. Standardmäßig deaktiviert.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>MQTT-Broker:</value></data>
   <data name="Tip_MqttBroker" xml:space="preserve"><value>Hostname oder IP-Adresse des Brokers.</value></data>
@@ -390,4 +390,5 @@ Der Vorgang ist abgeschlossen.</value></data>
 
 Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. Fernbefehlskanal aktivieren?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>Ein Topic ist leer oder ein Veröffentlichungs-Topic enthält ein Leerzeichen oder einen MQTT-Platzhalter ('+' oder '#').</value></data>
 </root>

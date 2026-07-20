@@ -332,7 +332,7 @@ Open Advanced → Result to see which checks failed.</value></data>
   <data name="Donate_Post" xml:space="preserve"><value>. Thank you! ☺</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d) ================= -->
-  <data name="Chk_Mqtt" xml:space="preserve"><value>Install MQTT bridge (optional)</value></data>
+  <data name="Chk_Mqtt" xml:space="preserve"><value>Install MQTT bridge (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Install an optional MQTT bridge that exposes the OpenWebNet bus and the front-panel keys over MQTT. Off by default.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>MQTT Broker:</value></data>
   <data name="Tip_MqttBroker" xml:space="preserve"><value>Broker hostname or IP address.</value></data>
@@ -390,4 +390,5 @@ Open Advanced → Result to see which checks failed.</value></data>
 
 Enable it only on an authenticated, trusted broker. Enable the remote command channel?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Remote command channel</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>A topic is empty, or a publish topic contains a space or an MQTT wildcard ('+' or '#').</value></data>
 </root>

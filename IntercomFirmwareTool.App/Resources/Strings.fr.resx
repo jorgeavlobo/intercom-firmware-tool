@@ -332,7 +332,7 @@ Ouvrez Avancé → Résultat pour voir quelles vérifications ont échoué.</val
   <data name="Donate_Post" xml:space="preserve"><value>. Merci ! ☺</value></data>
 
   <!-- ================= MQTT bridge (Phase 1d) ================= -->
-  <data name="Chk_Mqtt" xml:space="preserve"><value>Installer le pont MQTT (facultatif)</value></data>
+  <data name="Chk_Mqtt" xml:space="preserve"><value>Installer le pont MQTT (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Installe un pont MQTT facultatif qui expose le bus OpenWebNet et les touches du panneau avant via MQTT. Désactivé par défaut.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>Broker MQTT :</value></data>
   <data name="Tip_MqttBroker" xml:space="preserve"><value>Nom d'hôte ou adresse IP du broker.</value></data>
@@ -390,4 +390,5 @@ Ouvrez Avancé → Résultat pour voir quelles vérifications ont échoué.</val
 
 Ne l'activez que sur un broker authentifié et de confiance. Activer le canal de commandes à distance ?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de commandes à distance</value></data>
+  <data name="MqttHint_Topic" xml:space="preserve"><value>Un sujet est vide ou un sujet de publication contient un espace ou un caractère générique MQTT (« + » ou « # »).</value></data>
 </root>
