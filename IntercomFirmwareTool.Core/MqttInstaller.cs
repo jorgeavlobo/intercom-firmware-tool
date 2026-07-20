@@ -119,8 +119,8 @@ namespace IntercomFirmwareTool.Core
 
         // The 9 embedded scripts. TcpDump2Mqtt.conf is generated (not a resource);
         // jq/evtest come from PayloadBinaries. Executables 0775; mqtt_common.sh is
-        // only sourced, so 0644. ha_discovery.sh is always installed but only runs
-        // when HA_DISCOVERY=1.
+        // only sourced, so 0644. ha_discovery.sh runs on every startup and
+        // self-selects publish (HA_DISCOVERY=1) vs clear (0).
         private static readonly ScriptFile[] Scripts =
         {
             new(ResourcePrefix + "TcpDump2Mqtt",       EtcDir + "/TcpDump2Mqtt",       775),
@@ -134,9 +134,10 @@ namespace IntercomFirmwareTool.Core
             new(ResourcePrefix + "bt_service_watchdog", "/etc/init.d/bt_service_watchdog", 775),
         };
 
-        // Home Assistant discovery configs (generated when EnableHaDiscovery): one
-        // JSON file per entity plus a manifest of "config-topic<TAB>filename" that
-        // ha_discovery.sh publishes retained. Only written when the feature is on.
+        // Home Assistant discovery configs: one JSON file per entity plus a manifest
+        // of "config-topic<TAB>filename". Written ALWAYS (regardless of the enable
+        // flag) so ha_discovery.sh can either publish them retained (HA_DISCOVERY=1)
+        // or clear the retained configs (HA_DISCOVERY=0).
         private const string HaDir = EtcDir + "/ha";
 
         // Boot symlinks in rc5.d. The 'z' after S99 sorts these AFTER the factory
@@ -285,14 +286,16 @@ namespace IntercomFirmwareTool.Core
                 opts.OwnPortMon < 1 || opts.OwnPortMon > 65535)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidOwnEndpoint"), nameof(opts));
 
-            // When HA discovery is on, the prefix and node id become MQTT topic
-            // levels ("<prefix>/<component>/<node>/<obj>/config"), so they must be
-            // non-empty and free of whitespace and the topic wildcards + and #; the
-            // node is a single level, so it also cannot contain '/'. The prefix MAY
-            // contain '/' (a multi-level prefix), but not a leading/trailing/double
-            // slash — those would emit an empty topic level and HA would silently
-            // skip the entity.
-            if (opts.EnableHaDiscovery)
+            // The HA discovery prefix and node id become MQTT topic levels
+            // ("<prefix>/<component>/<node>/<obj>/config"), so they must be non-empty
+            // and free of whitespace and the topic wildcards + and #; the node is a
+            // single level, so it also cannot contain '/'. The prefix MAY contain '/'
+            // (a multi-level prefix), but not a leading/trailing/double slash — those
+            // would emit an empty topic level and HA would silently skip the entity.
+            // Validated UNCONDITIONALLY (not only when EnableHaDiscovery): the
+            // manifest is generated and ha_discovery.sh runs on every boot even when
+            // disabled (to CLEAR the retained configs), so a bad prefix/node would
+            // otherwise pass the build and fail every boot on-device.
             {
                 bool BadLevel(string s, bool allowSlash) =>
                     string.IsNullOrWhiteSpace(s) || s.IndexOfAny(new[] { '+', '#' }) >= 0 ||
