@@ -3,6 +3,7 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography;              // Oid (serverAuth EKU on the TLS probe chain)
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
@@ -402,6 +403,12 @@ namespace IntercomFirmwareTool.App
                             using var chain = new X509Chain();
                             chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                             chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                            // Enforce the serverAuth EKU, as SslStream would: a cert that
+                            // chains to the CA and matches the host but isn't valid for TLS
+                            // server authentication (e.g. clientAuth-only) must fail here
+                            // too — otherwise the test goes green for a broker the device's
+                            // mosquitto client would reject on purpose validation.
+                            chain.ChainPolicy.ApplicationPolicy.Add(new Oid("1.3.6.1.5.5.7.3.1")); // id-kp-serverAuth
                             foreach (var c in caCerts)
                             {
                                 bool selfIssued = c.SubjectName.RawData.AsSpan()
