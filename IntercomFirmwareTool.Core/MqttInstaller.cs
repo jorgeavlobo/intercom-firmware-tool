@@ -29,6 +29,11 @@ namespace IntercomFirmwareTool.Core
     /// Enable the gated JSON command channel. Requires client auth (user/pass or mutual TLS);
     /// enforced by <see cref="Validate"/>.
     /// </param>
+    /// <param name="UseTcpdumpCapture">
+    /// Force the faithful tcpdump + filter.py capture back-end. When false (default) the bridge
+    /// opens a MONITOR session directly on the local OpenWebNet gateway (no tcpdump, no resident
+    /// python) and only falls back to tcpdump when that gateway is unreachable. See StartMqttSend.
+    /// </param>
     public sealed record MqttOptions(
         string MqttHost,
         int MqttPort = 1883,
@@ -38,7 +43,8 @@ namespace IntercomFirmwareTool.Core
         string? ClientCertPem = null,
         string? ClientKeyPem = null,
         string? HostIpForHosts = null,
-        bool AllowRemoteShell = false)
+        bool AllowRemoteShell = false,
+        bool UseTcpdumpCapture = false)
     {
         // A record's synthesized ToString() prints EVERY property — which would
         // leak MqttPass and the TLS private key (ClientKeyPem) into any log line
@@ -47,7 +53,13 @@ namespace IntercomFirmwareTool.Core
         public override string ToString() =>
             $"MqttOptions {{ MqttHost = {MqttHost}, MqttPort = {MqttPort}, " +
             $"HasAuth = {HasAuth}, HasTls = {HasTls}, HasMutualTls = {HasMutualTls}, " +
-            $"AllowRemoteShell = {AllowRemoteShell} }}";
+            $"AllowRemoteShell = {AllowRemoteShell}, " +
+            $"Capture = {(UseTcpdumpCapture ? "tcpdump" : "socket")} }}";
+
+        /// <summary>OpenWebNet gateway host for the socket monitor back-end (loopback alias).</summary>
+        public string OwnHost { get; init; } = "127.0.0.1";
+        /// <summary>OpenWebNet gateway plaintext OwnPort for the socket monitor session.</summary>
+        public int OwnPortMon { get; init; } = 20000;
 
         public string TopicRx { get; init; } = "Bticino/rx";
         public string TopicDump { get; init; } = "Bticino/tx";
@@ -472,7 +484,7 @@ namespace IntercomFirmwareTool.Core
                     ("tcpdump", new[] { "/usr/sbin/tcpdump" }),                   // StartMqttSend hard-codes this
                     ("python", new[] { "/usr/bin/python", "/usr/bin/python3" }),  // StartMqttSend tries both
                     ("pgrep", new[] { "/usr/bin/pgrep" }),                        // TcpDump2Mqtt/watchdog hard-code this
-                    ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive: bare `nc` via PATH
+                    ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive command inject + StartMqttSend socket monitor (bare `nc` via PATH)
                     ("route", new[] { "/sbin/route", "/usr/sbin/route", "/bin/route" }), // #10 base tool (not invoked by us)
                     ("ping", new[] { "/bin/ping", "/usr/bin/ping" }),            // #10 base tool (not invoked by us)
                 };
@@ -572,6 +584,13 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_FILE_CONTENT", opts.TopicFileContent));
 
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
+
+            // Capture back-end: 'socket' (default; direct OpenWebNet monitor session, no
+            // tcpdump/python) or 'tcpdump' (faithful Phase 1 pipeline). OWN_* is the gateway
+            // endpoint for the socket back-end. See StartMqttSend for the fallback behaviour.
+            sb.Append(Conf("CAPTURE_MODE", opts.UseTcpdumpCapture ? "tcpdump" : "socket"));
+            sb.Append(Conf("OWN_HOST", opts.OwnHost));
+            sb.Append("OWN_PORT_MON=").Append(opts.OwnPortMon).Append('\n');
             return sb.ToString();
         }
 

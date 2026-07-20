@@ -668,7 +668,10 @@ namespace IntercomFirmwareTool.App
                 NullIfEmpty(_mqttPass?.Value ?? ""),
                 caPem, certPem, keyPem,
                 HostIpForHosts: hostIp,
-                AllowRemoteShell: ChkMqttRemoteShell.IsChecked == true)
+                AllowRemoteShell: ChkMqttRemoteShell.IsChecked == true,
+                // Unchecked (default) = the low-footprint OpenWebNet socket monitor;
+                // checked = force the faithful tcpdump + filter.py capture back-end.
+                UseTcpdumpCapture: ChkMqttTcpdump.IsChecked == true)
             {
                 // Topics are prefilled with the record's defaults, so an untouched
                 // panel reproduces those exactly; a customized one overrides them.

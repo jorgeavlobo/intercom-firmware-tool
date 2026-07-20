@@ -1,35 +1,182 @@
 #!/bin/sh
 # StartMqttSend - publish every OpenWebNet frame the unit emits to MQTT.
 #
-# Sniffs the loopback interface (the SCS/OpenWebNet gateway speaks on lo),
-# extracts frames with filter.py, and publishes them to $TOPIC_DUMP.
+# Two capture back-ends select the same thing (the local bus event stream) two
+# different ways:
+#
+#   socket  (default) - open a MONITOR session directly on the local OpenWebNet
+#           gateway (openserver's plaintext OwnPort, permissive on localhost) and
+#           stream "*...##" frames straight from it. No tcpdump, no resident
+#           python interpreter: the "*...##" framing is done by busybox awk. This
+#           is the low-footprint Phase 2 path (issue #12, item 5) - it removes the
+#           continuous loopback packet capture AND the ~10-20 MB resident python.
+#
+#   tcpdump (fallback) - the faithful Phase 1 pipeline: sniff loopback with
+#           tcpdump -A and extract frames with filter.py. Selectable explicitly
+#           with CAPTURE_MODE=tcpdump, and used AUTOMATICALLY when the socket
+#           back-end cannot open a monitor session (gateway absent/not ready),
+#           so a variant that doesn't expose the OWN port still works.
 #
 # MIT-licensed reimplementation of fquinto's mqtt_scripts/StartMqttSend (GPL-2.0)
 # for IntercomFirmwareTool.
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
 . /etc/tcpdump2mqtt/mqtt_common.sh
 
-# Prefer python, fall back to python3; fail fast if neither is present.
-PYTHON="$( [ -x /usr/bin/python ] && echo /usr/bin/python || echo /usr/bin/python3 )"
-if [ ! -x "$PYTHON" ]; then
-	echo "StartMqttSend: no python interpreter (/usr/bin/python or /usr/bin/python3) found." >&2
-	exit 1
-fi
+# CAPTURE_MODE / OWN_HOST / OWN_PORT_MON come from the config (defaulted in
+# mqtt_common.sh). openserver is aliased to loopback (bt_hosts.sh) and its
+# plaintext OwnPort is 20000 (see /home/bticino/cfg/openserver: "OwnPort=20000",
+# "IsPermissive=1"), which accepts a local monitor session without HMAC.
+RUNDIR=/var/run/tcpdump2mqtt
 
-# tcpdump filter: only the local OpenWebNet chatter, dropping SIP/RTP and the
-# command-injection port (30006) so we do not echo our own writes back out.
-TCPDUMP_FILTER='not udp and not icmp and not port 5007 and not port 5060 and not port 20000 and not dst port 30006'
-# Self-amplification guard, but ONLY for a LOCAL broker: its mosquitto_pub
-# PUBLISH packets travel over lo carrying the *...## payload, which tcpdump would
-# re-capture, filter.py would re-extract and we'd republish — a loop. A REMOTE
-# broker has no such traffic on lo, and excluding its port unconditionally could
-# clobber a needed bus port (pcap `port` matches src OR dst; e.g. a broker on
-# 30006 would drop the gateway's source-30006 frames). So scope it to local.
-case "${MQTT_HOST}" in
-	127.0.0.1 | localhost | ::1 | 0.0.0.0)
-		[ -n "${MQTT_PORT}" ] && TCPDUMP_FILTER="${TCPDUMP_FILTER} and not port ${MQTT_PORT}" ;;
+# ---------------------------------------------------------------------------
+# socket back-end
+# ---------------------------------------------------------------------------
+
+# Split a raw OpenWebNet byte stream (frames "*...##", sent back-to-back with NO
+# newline separators) into one frame per line, so `mosquitto_pub -l` publishes
+# one MQTT message per frame.
+#
+# OpenWebNet frames legitimately contain single '#' bytes - status requests
+# "*#WHO*WHERE##", dimension frames "*#4*3*0#0##" - so we canNOT split on '#'.
+# busybox awk (1.27) honours only the FIRST character of RS, so a multi-char
+# RS="##" is not available. Instead set RS="#" and reassemble: every record
+# re-appends the '#' that RS consumed; an EMPTY record means two '#' in a row -
+# i.e. the closing "##" - which flushes the accumulated frame. This reconstructs
+# frames with internal '#' correctly. The session control frames ("*#*1##" ACK /
+# "*#*0##" NACK) are dropped so they are not republished as bus events.
+frame_own() {
+	awk '
+	BEGIN { RS = "#"; buf = "" }
+	{
+		if ($0 == "") {
+			# Second "#" of a "##" terminator: the frame is complete.
+			if (buf != "") {
+				frame = buf "#"
+				buf = ""
+				if (frame ~ /^\*/ && frame != "*#*1##" && frame != "*#*0##") {
+					print frame
+					fflush()
+				}
+			}
+		} else {
+			buf = buf $0 "#"
+		}
+	}'
+}
+
+# True when the OpenWebNet gateway accepts a monitor session (it replies with the
+# "*#*1##" ACK). Lets us decide whether the socket back-end is usable BEFORE
+# committing to it; a refusal (gateway absent or not yet up) selects tcpdump.
+probe_socket() {
+	mkdir -p "$RUNDIR" 2>/dev/null
+	pfifo="$RUNDIR/own_probe_i.$$"
+	ptmp="$RUNDIR/own_probe_o.$$"
+	rm -f "$pfifo"
+	mkfifo -m 600 "$pfifo" 2>/dev/null || return 1
+	: > "$ptmp"
+
+	# Same connection semantics as run_socket: hold the write side open so a
+	# half-closing nc does not tear the socket down before the ACK arrives.
+	( exec 9>"$pfifo"; printf '*99*1##' >&9; exec sleep 2147483647 ) &
+	wpid=$!
+	( nc "$OWN_HOST" "$OWN_PORT_MON" < "$pfifo" > "$ptmp" 2>/dev/null ) &
+	npid=$!
+
+	rc=1
+	i=0
+	while [ "$i" -lt 3 ]; do
+		sleep 1
+		if grep -q '\*#\*1##' "$ptmp" 2>/dev/null; then
+			rc=0
+			break
+		fi
+		i=$((i + 1))
+	done
+
+	kill "$npid" "$wpid" 2>/dev/null
+	wait "$npid" 2>/dev/null
+	wait "$wpid" 2>/dev/null
+	rm -f "$pfifo" "$ptmp"
+	return $rc
+}
+
+# Open the monitor session and stream frames to MQTT until the socket drops or
+# the publisher exits; the orchestrator (TcpDump2Mqtt) then respawns us.
+run_socket() {
+	mkdir -p "$RUNDIR" 2>/dev/null
+	fifo="$RUNDIR/own_mon.$$"
+	rm -f "$fifo"
+	mkfifo -m 600 "$fifo" 2>/dev/null || return 1
+
+	# Hold the write side of the connection open: send the monitor-session
+	# request ("*99*1##"), then keep the fd open via a sleeper (some nc builds
+	# tear the socket down when stdin hits EOF). `exec sleep` makes it a single
+	# process we kill the instant nc/the pipeline returns, so it never lingers.
+	( exec 9>"$fifo"; printf '*99*1##' >&9; exec sleep 2147483647 ) &
+	writer=$!
+
+	# No self-amplification guard is needed here (unlike tcpdump): the monitor
+	# socket carries only bus events, not our own mosquitto_pub loopback traffic.
+	nc "$OWN_HOST" "$OWN_PORT_MON" < "$fifo" | frame_own | mqtt_pub -l -t "${TOPIC_DUMP}"
+	rc=$?
+
+	kill "$writer" 2>/dev/null
+	wait "$writer" 2>/dev/null
+	rm -f "$fifo"
+	return $rc
+}
+
+# ---------------------------------------------------------------------------
+# tcpdump back-end (faithful Phase 1 pipeline; automatic + explicit fallback)
+# ---------------------------------------------------------------------------
+run_tcpdump() {
+	# Prefer python, fall back to python3; fail fast if neither is present.
+	PYTHON="$( [ -x /usr/bin/python ] && echo /usr/bin/python || echo /usr/bin/python3 )"
+	if [ ! -x "$PYTHON" ]; then
+		echo "StartMqttSend: no python interpreter (/usr/bin/python or /usr/bin/python3) for the tcpdump back-end." >&2
+		return 1
+	fi
+
+	# tcpdump filter: only the local OpenWebNet chatter, dropping SIP/RTP, the
+	# openserver control port (20000) and the command-injection port (30006) so
+	# we do not echo our own writes back out.
+	TCPDUMP_FILTER='not udp and not icmp and not port 5007 and not port 5060 and not port 20000 and not dst port 30006'
+	# Self-amplification guard, but ONLY for a LOCAL broker: its mosquitto_pub
+	# PUBLISH packets travel over lo carrying the *...## payload, which tcpdump
+	# would re-capture, filter.py would re-extract and we'd republish - a loop. A
+	# REMOTE broker has no such traffic on lo, and excluding its port
+	# unconditionally could clobber a needed bus port (pcap `port` matches src OR
+	# dst). So scope it to local.
+	case "${MQTT_HOST}" in
+		127.0.0.1 | localhost | ::1 | 0.0.0.0)
+			[ -n "${MQTT_PORT}" ] && TCPDUMP_FILTER="${TCPDUMP_FILTER} and not port ${MQTT_PORT}" ;;
+	esac
+
+	/usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER 2>&1 \
+		| "${PYTHON}" /etc/tcpdump2mqtt/filter.py \
+		| mqtt_pub -l -t "${TOPIC_DUMP}"
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+
+# Best-effort cleanup of FIFOs left by a previous instance that was killed
+# mid-run (RUNDIR is tmpfs, so this is belt-and-braces).
+rm -f "$RUNDIR"/own_mon.* "$RUNDIR"/own_probe_* 2>/dev/null
+
+case "${CAPTURE_MODE}" in
+	tcpdump)
+		echo "StartMqttSend: capture mode = tcpdump (configured)"
+		run_tcpdump
+		;;
+	socket | *)
+		if probe_socket; then
+			echo "StartMqttSend: capture mode = socket (OpenWebNet monitor ${OWN_HOST}:${OWN_PORT_MON})"
+			run_socket
+		else
+			echo "StartMqttSend: OpenWebNet monitor unavailable at ${OWN_HOST}:${OWN_PORT_MON}; falling back to tcpdump"
+			run_tcpdump
+		fi
+		;;
 esac
-
-/usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER 2>&1 \
-	| "${PYTHON}" /etc/tcpdump2mqtt/filter.py \
-	| mqtt_pub -l -t "${TOPIC_DUMP}"

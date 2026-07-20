@@ -38,6 +38,11 @@ kill_childs() {
 	# and so the mosquitto_sub reparented out of the receiver's command
 	# substitution does not linger as an orphan across outages.
 	kill_by "tcpdump.*dst port 30006"
+	# socket back-end children: the OpenWebNet monitor nc and its stdin-holding
+	# sleeper (a very specific sentinel duration, so it can't hit an unrelated
+	# sleep). Killing nc makes the awk framer and mosquitto_pub exit on EOF.
+	kill_by "nc ${OWN_HOST} ${OWN_PORT_MON}"
+	kill_by "sleep 2147483647"
 	kill_by "mosquitto_sub.*$(re_escape "${TOPIC_RX}")"
 	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_DUMP}")"
 }

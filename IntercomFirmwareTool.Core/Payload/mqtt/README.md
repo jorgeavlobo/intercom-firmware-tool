@@ -44,10 +44,10 @@ path.
 | `TcpDump2Mqtt` | Orchestrator: keeps sender/receiver/keypress alive, publishes status, recovers from network outages. |
 | `TcpDump2Mqtt.sh` | Init launcher (symlinked from `/etc/rc5.d/S99zTcpDump2Mqtt`). |
 | `mqtt_common.sh` | Shared helper sourced by the four scripts below: config load + `mqtt_pub`/`mqtt_sub_one` (auth+TLS) + the `remote_shell_allowed` gate. |
-| `StartMqttSend` | `tcpdump` on `lo` → `filter.py` → publish frames to `TOPIC_DUMP`. |
+| `StartMqttSend` | Publish bus frames to `TOPIC_DUMP`. Default: a direct OpenWebNet **monitor session** (`socket` mode — no tcpdump, no resident python; framing via busybox `awk`). Falls back to `tcpdump` on `lo` → `filter.py` when the gateway is unreachable, or when `CAPTURE_MODE=tcpdump`. |
 | `StartMqttReceive` | Subscribe `TOPIC_RX` → OpenWebNet passthrough to the unit; gated JSON command channel. |
 | `keypress.sh` | `evtest` front-panel keys → publish to `TOPIC_KEY`. |
-| `filter.py` | Extract `*…##` OpenWebNet frames from the `tcpdump -A` text stream (installed at `/etc/tcpdump2mqtt/filter.py`). |
+| `filter.py` | Extract `*…##` OpenWebNet frames from the `tcpdump -A` text stream, for the **tcpdump fallback** back-end only (installed at `/etc/tcpdump2mqtt/filter.py`). |
 | `bt_service_watchdog` | Independent init service: restarts dropbear/scsserver/mosquitto/TcpDump2Mqtt if they die. |
 | `TcpDump2Mqtt.conf` | Configuration template; the installer fills in broker/topics from the UI. |
 
@@ -112,6 +112,16 @@ path.
 18. **One frame per message.** `filter.py` splits coalesced OpenWebNet frames
     (e.g. `*1##*2##` on one `tcpdump` line) so each `*…##` frame is published as
     its own MQTT message rather than a combined/garbled payload.
+19. **Direct OpenWebNet monitor socket (Phase 2, #12 item 5).** `StartMqttSend`
+    now defaults to opening a MONITOR session on the local OpenWebNet gateway
+    (`openserver` OwnPort `20000`, permissive on loopback: `*99*1##` → stream)
+    instead of sniffing `lo` with `tcpdump`. This removes the continuous packet
+    capture **and** the ~10–20 MB resident `python` (the largest memory item of
+    the bridge): `*…##` framing is done by a small busybox `awk` state machine
+    that correctly handles frames containing internal `#` (e.g. `*#4*3*0#0##`).
+    It also eliminates the text-scraping cross-line fragility (see below). The
+    faithful `tcpdump`+`filter.py` path is kept and selected automatically when
+    the gateway can't be reached, or explicitly via `CAPTURE_MODE=tcpdump`.
 
 ## Known limitations (addressed in later phases)
 
@@ -119,10 +129,12 @@ path.
   disconnects cleanly each cycle, so the retained `offline` last will rarely
   fires and the topic can stay `online`. Reliable online/offline needs a
   persistent subscription — tracked in #12 (Phase 2).
-- **Cross-line frame splitting.** `filter.py` splits multiple frames coalesced
-  on one `tcpdump` line, but a single frame split ACROSS lines is not
-  reassembled (text scraping is line-oriented). Rare for small OpenWebNet frames;
-  the proper fix is reading the gateway socket directly (#12, Phase 2).
+- **Cross-line frame splitting (tcpdump mode only).** `filter.py` splits
+  multiple frames coalesced on one `tcpdump` line, but a single frame split
+  ACROSS lines is not reassembled (text scraping is line-oriented). Rare for
+  small OpenWebNet frames. **Resolved in the default `socket` back-end** (fix 19),
+  which reads the gateway socket directly and frames on `##`; this limitation now
+  applies only to the `tcpdump` fallback.
 - **Command-publisher authorization.** `ALLOW_REMOTE_SHELL` gates on THIS bridge
   authenticating to the broker; MQTT does not tell us whether the *publisher* of
   a `TOPIC_RX` command is authorized. On a shared broker, restrict publishing to
