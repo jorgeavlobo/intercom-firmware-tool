@@ -42,7 +42,7 @@ path.
 | File | Role |
 |---|---|
 | `TcpDump2Mqtt` | Orchestrator: keeps sender/receiver/keypress alive, publishes status, recovers from network outages. |
-| `TcpDump2Mqtt.sh` | Init launcher (symlinked from `/etc/rc5.d/S99TcpDump2Mqtt`). |
+| `TcpDump2Mqtt.sh` | Init launcher (symlinked from `/etc/rc5.d/S99zTcpDump2Mqtt`). |
 | `mqtt_common.sh` | Shared helper sourced by the four scripts below: config load + `mqtt_pub`/`mqtt_sub_one` (auth+TLS) + the `remote_shell_allowed` gate. |
 | `StartMqttSend` | `tcpdump` on `lo` → `filter.py` → publish frames to `TOPIC_DUMP`. |
 | `StartMqttReceive` | Subscribe `TOPIC_RX` → OpenWebNet passthrough to the unit; gated JSON command channel. |

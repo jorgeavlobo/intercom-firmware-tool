@@ -103,12 +103,15 @@ namespace IntercomFirmwareTool.Core
             new(ResourcePrefix + "bt_service_watchdog", "/etc/init.d/bt_service_watchdog", 775),
         };
 
-        // Boot symlinks in rc5.d. The watchdog (S99BtServiceWatchdog) sorts before
-        // the bridge (S99TcpDump2Mqtt) — B < T — so it comes up first.
+        // Boot symlinks in rc5.d. The 'z' after S99 sorts these AFTER the factory
+        // S99<Capital…> services (ASCII 'z' > any capital), so the bridge starts
+        // once the network, dbus/avahi and the BTicino apps are already up. The
+        // watchdog (…zBtServiceWatchdog) still sorts before the bridge
+        // (…zTcpDump2Mqtt) — B < T — so it comes up first.
         private static readonly (string Link, string Target)[] Symlinks =
         {
-            ("/etc/rc5.d/S99BtServiceWatchdog", "../init.d/bt_service_watchdog"),
-            ("/etc/rc5.d/S99TcpDump2Mqtt",      "../tcpdump2mqtt/TcpDump2Mqtt.sh"),
+            ("/etc/rc5.d/S99zBtServiceWatchdog", "../init.d/bt_service_watchdog"),
+            ("/etc/rc5.d/S99zTcpDump2Mqtt",      "../tcpdump2mqtt/TcpDump2Mqtt.sh"),
         };
 
         /// <summary>
@@ -476,13 +479,71 @@ namespace IntercomFirmwareTool.Core
                     ("ping", new[] { "/bin/ping", "/usr/bin/ping" }),            // #10 base tool (not invoked by us)
                 };
                 foreach (var (name, paths) in deps)
-                    // File only: these are executables / init scripts, so a
-                    // directory at the path is not a satisfied dependency.
+                    // Present = resolves to a real file, FOLLOWING symlinks: on a
+                    // stock image these tools are almost always symlinks (busybox
+                    // applets like nc/route/ping, version links like python ->
+                    // python2 -> python2.7, or pgrep -> pgrep.procps), and the ext
+                    // reader's FileExists returns false for a symlink. A plain
+                    // FileExists therefore false-fails a tool that IS present.
                     checks.Add(new($"runtime dep {name} present",
-                        paths.Any(fs.FileExists),
+                        paths.Any(p => DependencyPresent(fs, p)),
                         string.Join(" | ", paths)));
             }
             return checks;
+        }
+
+        /// <summary>
+        /// True when <paramref name="path"/> resolves to an existing regular file,
+        /// following symlinks. The ext reader's <c>FileExists</c> reports false for a
+        /// symlink, but on the device runtime tools are commonly symlinks (busybox
+        /// applets; version links like <c>python -&gt; python2 -&gt; python2.7</c>), so a
+        /// bare <c>FileExists</c> would false-fail a tool that is actually present. A
+        /// dangling symlink still fails (its chain never lands on a real file). The
+        /// hop budget guards a symlink cycle.
+        /// </summary>
+        private static bool DependencyPresent(ExtFileSystem fs, string path)
+        {
+            string current = path;
+            for (int hops = 0; hops < 40; hops++)
+            {
+                if (fs.FileExists(current)) return true;   // real file (executable / init script)
+                string target;
+                try { target = fs.ReadSymLink(current); } // throws if not a symlink (or absent)
+                catch { return false; }
+                if (string.IsNullOrEmpty(target)) return false;
+                current = ResolveLinkTarget(current, target);
+            }
+            return false; // exceeded the hop budget (likely a cycle) — treat as absent
+        }
+
+        /// <summary>
+        /// Resolves a symlink target — absolute, or relative to the link's own
+        /// directory — to a normalized absolute path, collapsing <c>.</c> and
+        /// <c>..</c> segments. (Parent components are assumed to be real directories,
+        /// which holds for the runtime-dep paths we check.)
+        /// </summary>
+        private static string ResolveLinkTarget(string linkPath, string target)
+        {
+            string combined;
+            if (target.StartsWith("/", StringComparison.Ordinal))
+            {
+                combined = target;
+            }
+            else
+            {
+                int slash = linkPath.LastIndexOf('/');
+                string dir = slash > 0 ? linkPath.Substring(0, slash) : "";
+                combined = dir + "/" + target;
+            }
+
+            var parts = new List<string>();
+            foreach (var seg in combined.Split('/'))
+            {
+                if (seg.Length == 0 || seg == ".") continue;
+                if (seg == "..") { if (parts.Count > 0) parts.RemoveAt(parts.Count - 1); }
+                else parts.Add(seg);
+            }
+            return "/" + string.Join("/", parts);
         }
 
         // ---- config generation --------------------------------------------------

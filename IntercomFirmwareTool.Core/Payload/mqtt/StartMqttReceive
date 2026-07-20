@@ -2,7 +2,7 @@
 # StartMqttReceive - apply commands received over MQTT to the unit.
 #
 # Subscribes to $TOPIC_RX. A raw OpenWebNet frame ("*...##") is forwarded to the
-# local gateway (nc 0 30006). Anything else is treated as a JSON command, but the
+# local gateway (nc 127.0.0.1 30006). Anything else is treated as a JSON command, but the
 # JSON command channel (read_file / write_file / execute_command) is a root-level
 # remote-control surface and is DISABLED unless the operator opted in AND the
 # client is authenticated (see remote_shell_allowed in mqtt_common.sh).
@@ -97,8 +97,11 @@ while : ; do
 	# printf, not echo: an MQTT payload starting with -n or containing backslashes
 	# would be mangled by some echo implementations.
 	if printf '%s\n' "$rxcmd" | grep -qE '^\*.*##$'; then
-		# Raw OpenWebNet frame - forward to the local gateway.
-		printf '%s\n' "$rxcmd" | nc 0 "$OWN_PORT"
+		# Raw OpenWebNet frame - forward to the local gateway. Use an explicit
+		# 127.0.0.1 (the openserver is mapped to loopback): busybox nc does not
+		# reliably accept the "0" host shorthand that some netcats read as
+		# localhost.
+		printf '%s\n' "$rxcmd" | nc 127.0.0.1 "$OWN_PORT"
 	else
 		handle_json "$rxcmd"
 	fi
