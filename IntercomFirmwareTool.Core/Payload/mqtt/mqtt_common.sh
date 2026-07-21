@@ -39,6 +39,12 @@ fi
 : "${OWN_HOST:=127.0.0.1}"
 : "${OWN_PORT_MON:=20000}"
 
+# Bus payload format: "raw" (default — publish OpenWebNet frames verbatim, the faithful
+# Phase-1 behaviour) or "json" (one structured object per frame — see own_frame_to_json).
+# Only the bus (TOPIC_DUMP) is affected; TOPIC_KEY is already JSON, and status/start_date
+# stay simple. Kept opt-in so the default image behaves exactly as before.
+: "${PAYLOAD_FORMAT:=raw}"
+
 # Home Assistant discovery success marker. ha_discovery.sh writes it once the
 # retained configs are reconciled; the orchestrator re-launches ha_discovery.sh
 # from its watchdog loop until this file exists, so a broker that is still down
@@ -92,6 +98,29 @@ mqtt_pub() {
 			set -- "$@" --cert "${MQTT_CERTFILE}" --key "${MQTT_KEYFILE}"
 	fi
 	/usr/bin/mosquitto_pub "$@"
+}
+
+# Transform a stream of raw OpenWebNet frames (one per line on stdin) into one compact
+# structured-JSON object per line, for PAYLOAD_FORMAT=json. Uses jq — already required by
+# the JSON command channel / keypress and installed by the bridge — so all string
+# escaping is correct. -R reads each raw line as a string; --unbuffered flushes per line
+# so a busy bus isn't delayed; -c keeps one object per line for `mosquitto_pub -l`.
+#
+# Structural (not semantic) parse: a leading "*#" marks a status/dimension REQUEST
+# ("*#WHO*WHERE…##"), otherwise a COMMAND ("*WHO*WHAT*WHERE…##"). Positional who/what/
+# where are surfaced for the common shapes; anything extra goes to params. Sub-parameters
+# inside a token (e.g. "0#0", "11#4#0") are left intact — decoding what WHO/WHAT mean is
+# out of scope (a consumer/HA template can map semantics). ts is UTC ISO-8601.
+own_frame_to_json() {
+	jq -Rc --unbuffered '
+		{ frame: ., ts: (now | todate) }
+		+ ( (ltrimstr("*") | rtrimstr("##")) as $b
+		    | if ($b | startswith("#"))
+		      then ($b | ltrimstr("#") | split("*")) as $t
+		           | { type: "request", who: $t[0], where: $t[1], params: $t[2:] }
+		      else ($b | split("*")) as $t
+		           | { type: "command", who: $t[0], what: $t[1], where: $t[2], params: $t[3:] }
+		      end )'
 }
 
 # Persistent command subscription: a long-lived mosquitto_sub that STREAMS every
