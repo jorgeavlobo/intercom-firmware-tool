@@ -75,7 +75,7 @@ kill_childs() {
 	# also carries the retained 'offline' last will, so this SIGTERM makes it
 	# disconnect CLEANLY (suppressing the will); exit_handler then publishes 'offline'
 	# explicitly.
-	kill_by "$(rx_sub_pat)"
+	kill_by "${RX_SUB_PAT:-$(rx_sub_pat)}"
 	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_DUMP}")"
 	# The start-date publisher (backgrounded after the sender starts) — reap a copy
 	# stuck in DNS/TCP connect so it can't survive a restart and later publish a
@@ -152,6 +152,13 @@ if [ -z "${MQTT_HOST}" ] || [ "$port_bad" -ne 0 ] || \
 	exit 1
 fi
 
+# Build the receiver-match pattern ONCE now that the config is validated: it's static
+# for our lifetime, but rx_sub_pat shells out (mqtt_client_id -> awk/tr) to build it, and
+# the watchdog would otherwise rebuild the same regex every 30s. Call sites use
+# "${RX_SUB_PAT:-$(rx_sub_pat)}" so a signal reaching exit_handler before this line still
+# gets a valid pattern (never an empty one, which pgrep -f would treat as match-all).
+RX_SUB_PAT=$(rx_sub_pat)
+
 # --- Default gateway (network liveness target) ------------------------------
 echo "MQTT host ${MQTT_HOST}:${MQTT_PORT}"
 echo "Checking for stale processes..."
@@ -217,7 +224,7 @@ while : ; do
 	# unreachable, each mosquitto_pub hanging on connect) can't accumulate a new hung
 	# publisher every pass on this constrained device. At most one is ever pending;
 	# when it finally gives up, the next pass starts a fresh one.
-	if /usr/bin/pgrep -f "$(rx_sub_pat)" > /dev/null 2>&1 && \
+	if /usr/bin/pgrep -f "${RX_SUB_PAT:-$(rx_sub_pat)}" > /dev/null 2>&1 && \
 	   ! /usr/bin/pgrep -f "mosquitto_pub.*$(re_escape "${TOPIC_LASTWILL}")" > /dev/null 2>&1; then
 		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online > /dev/null 2>&1 &
 	fi
