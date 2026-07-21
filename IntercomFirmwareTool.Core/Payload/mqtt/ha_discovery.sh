@@ -91,10 +91,11 @@ while [ "$i" -lt 6 ]; do
 		# creates the runtime dir 0700 (root-only) EVEN IF it already exists with a
 		# looser mode (e.g. StartMqttSend made it under a permissive umask), so an
 		# unprivileged account can't pre-create the marker or plant a symlink for the
-		# root truncation below to follow. rm -f first drops any symlink planted
-		# before the dir was locked down (rm removes the link, not its target).
+		# root truncation below to follow. rm -rf first drops any symlink, file OR
+		# directory planted at the marker path before the dir was locked down (a plain
+		# rm -f can't clear a directory, which would then block ": >" forever).
 		ensure_rundir
-		rm -f "$HA_MARKER" 2>/dev/null
+		rm -rf "$HA_MARKER" 2>/dev/null
 		if : > "$HA_MARKER" 2>/dev/null; then
 			exit 0
 		fi

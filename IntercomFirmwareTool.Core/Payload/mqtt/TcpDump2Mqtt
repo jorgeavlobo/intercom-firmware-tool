@@ -227,9 +227,14 @@ while : ; do
 	disc_count=$((disc_count + 1))
 	if [ "$disc_count" -ge 20 ]; then
 		disc_count=0
-		/bin/rm -f "$HA_MARKER"
+		/bin/rm -rf "$HA_MARKER"
 	fi
-	if [ -x /etc/tcpdump2mqtt/ha_discovery.sh ] && [ ! -e "$HA_MARKER" ] && \
+	# Convergence is a REGULAR FILE (ha_discovery.sh writes it with ": >"). Test -f,
+	# not -e: a stray directory or symlink at the marker path (e.g. planted before
+	# $RUNDIR was locked to 0700) must NOT be mistaken for "done" — it would block
+	# discovery forever, since plain rm can't clear a directory. -rf above and in
+	# ha_discovery.sh removes any such non-file path so a real marker can be written.
+	if [ -x /etc/tcpdump2mqtt/ha_discovery.sh ] && [ ! -f "$HA_MARKER" ] && \
 	   ! /usr/bin/pgrep -f "$(re_escape "/etc/tcpdump2mqtt/ha_discovery.sh")" > /dev/null 2>&1; then
 		/etc/tcpdump2mqtt/ha_discovery.sh &
 	fi
