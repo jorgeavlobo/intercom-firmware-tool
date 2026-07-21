@@ -129,6 +129,10 @@ echo "MQTT host ${MQTT_HOST}:${MQTT_PORT}"
 echo "Checking for stale processes..."
 kill_childs
 
+# Watchdog-pass counter that periodically forces a Home Assistant discovery
+# re-reconcile (see the discovery block in the loop).
+disc_count=0
+
 # Keep the bridge services running. Deliberately NOT gated on any gateway/ICMP
 # probe: a gateway that blocks ICMP — or an unreachable gateway with a reachable
 # local/same-subnet broker — must not stop the bridge from starting. Broker
@@ -214,6 +218,17 @@ while : ; do
 	# reboot. Gated on HA_MARKER (done) and on it not already running (pgrep, path
 	# re_escaped so the '.sh' dots can't over-match). Backgrounded so its retry
 	# sleeps can't block this watchdog loop.
+	#
+	# Also drop the marker every ~10 min (20 passes) to FORCE a periodic re-reconcile:
+	# a broker that restarts without on-disk persistence (Mosquitto's default) loses
+	# its retained store, so the discovery configs vanish while the marker still says
+	# "done". Without this, HA couldn't rediscover the entities until the intercom
+	# itself rebooted. Re-publishing retained configs is idempotent, so this is cheap.
+	disc_count=$((disc_count + 1))
+	if [ "$disc_count" -ge 20 ]; then
+		disc_count=0
+		/bin/rm -f "$HA_MARKER"
+	fi
 	if [ -x /etc/tcpdump2mqtt/ha_discovery.sh ] && [ ! -e "$HA_MARKER" ] && \
 	   ! /usr/bin/pgrep -f "$(re_escape "/etc/tcpdump2mqtt/ha_discovery.sh")" > /dev/null 2>&1; then
 		/etc/tcpdump2mqtt/ha_discovery.sh &
