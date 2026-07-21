@@ -233,9 +233,16 @@ async fn run() -> Result<(), String> {
                     Ok(_) => {}
                     Err(e) => {
                         // Connection dropped/unreachable: rumqttc reconnects on the
-                        // next poll; back off briefly so a hard-down broker doesn't spin.
+                        // next poll; back off briefly so a hard-down broker doesn't
+                        // spin. RACE the backoff against the shutdown signals — a plain
+                        // sleep here would block SIGTERM/SIGINT for up to 5 s while the
+                        // broker is down.
                         eprintln!("btmqttd: connection: {e}");
-                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        tokio::select! {
+                            _ = sig_term.recv() => break,
+                            _ = sig_int.recv() => break,
+                            _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                        }
                     }
                 }
             }
@@ -244,16 +251,24 @@ async fn run() -> Result<(), String> {
 
     // Stop every MQTT-producing task BEFORE the final `offline`, so none of them can
     // enqueue a publish after it and leave stale state (e.g. a lingering announce task
-    // re-retaining `online`) on the broker.
+    // re-retaining `online`) on the broker. abort() alone is NOT enough — it is
+    // asynchronous, so a task could still be mid-publish and enqueue AFTER `offline`;
+    // AWAIT each aborted handle so it has definitely stopped (any request it already
+    // enqueued is ordered before `offline` in rumqttc's FIFO channel) before we queue
+    // the final `offline` + DISCONNECT.
+    async fn stop(task: tokio::task::JoinHandle<()>) {
+        task.abort();
+        let _ = task.await;
+    }
     if let Some(h) = subscribe_task.take() {
-        h.abort();
+        stop(h).await;
     }
     if let Some(h) = announce_task.take() {
-        h.abort();
+        stop(h).await;
     }
-    sender_task.abort();
-    keys_task.abort();
-    cmd_worker.abort();
+    stop(sender_task).await;
+    stop(keys_task).await;
+    stop(cmd_worker).await;
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(())
 }
