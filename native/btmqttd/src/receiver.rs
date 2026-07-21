@@ -142,7 +142,9 @@ async fn write_file(path: &str, data: &str) {
     match tokio::task::spawn_blocking(move || write_file_blocking(&path, &bytes)).await {
         Ok(Ok(())) => {}
         Ok(Err(e)) => eprintln!("btmqttd: write_file: {e}"),
-        Err(e) => eprintln!("btmqttd: write_file task panicked: {e}"),
+        // JoinError is either a panic or a cancellation/abort; either way the write
+        // didn't complete. Report it generically rather than asserting "panicked".
+        Err(e) => eprintln!("btmqttd: write_file task did not complete: {e}"),
     }
 }
 

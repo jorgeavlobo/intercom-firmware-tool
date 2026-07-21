@@ -67,9 +67,13 @@ Then update the embedded copy and its provenance:
 
 ## Host checks (fast iteration)
 
+Run these on a **Linux host (or WSL)**. btmqttd depends on Unix-only APIs
+(`tokio::signal::unix`, `evdev`, libc), so `cargo test`/`cargo check` on Windows or
+macOS fail by design — the crate emits a clear `compile_error!` on non-Unix targets.
+
 ```sh
 cargo test     # config gate + OWN framing/JSON unit tests
-cargo check    # type-check against the host target
+cargo check    # type-check against the host target (Linux)
 ```
 
 ## Notes

@@ -14,6 +14,13 @@
 //! Replaces the shell-orchestrated mosquitto_pub/sub bridge (TcpDump2Mqtt,
 //! StartMqttSend, StartMqttReceive, keypress.sh, ha_discovery.sh, mqtt_common.sh).
 
+// btmqttd is a Linux daemon for the BTicino intercom: it depends on Unix-only APIs
+// (tokio::signal::unix for SIGTERM/SIGINT, evdev for the keypad, libc chown/umask).
+// A non-Unix host build would otherwise fail deep inside those uses with an opaque
+// error; fail early here with a clear message instead. Build/test on Linux (or WSL).
+#[cfg(not(unix))]
+compile_error!("btmqttd targets Unix (Linux) only — build and run host checks on Linux or WSL");
+
 mod config;
 mod ha;
 mod keys;
