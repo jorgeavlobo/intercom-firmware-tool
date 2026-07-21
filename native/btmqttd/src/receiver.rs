@@ -35,6 +35,19 @@ const FORWARD_TIMEOUT: Duration = Duration::from_secs(5);
 /// Monotonic suffix so concurrent write_file tasks never share a temp path.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Reduce a raw payload to the single-line record the shell receiver saw. Its loop
+/// used `IFS= read -r`, which consumes the `\n` record separator that `mosquitto_sub`
+/// appends but PRESERVES any other byte — crucially a trailing `\r`. So the shell
+/// tested `*…##\r` (CRLF frame) against `^\*.*##$` WITH the `\r` still present, the
+/// match failed, and it fell through to the ignored JSON path — never forwarded to
+/// the gateway. We take everything up to the first `\n` and keep the `\r` for exactly
+/// that parity (a naive CR/LF trim would forward the CRLF frame as a live command).
+/// Taking only the first line also matches a single `read`, and is the conservative
+/// choice (forwards no MORE than the shell would).
+fn shell_line(payload: &str) -> &str {
+    payload.split('\n').next().unwrap_or(payload)
+}
+
 /// Dispatch one received payload. Empty payloads are ignored (neither a frame nor
 /// JSON). Never panics; every failure is logged and swallowed so one bad command
 /// can't take the receiver down.
@@ -46,12 +59,11 @@ pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
             return;
         }
     };
-    // Strip only transport line endings (\r/\n), NOT interior/leading/trailing spaces.
-    // The shell receiver read lines with `IFS= read -r` and matched `^\*.*##$`, so a
-    // space-prefixed payload like " *1*0*12##" was NOT an OWN frame — it fell through
-    // to the JSON path and was ignored. Trimming ALL whitespace here would instead
-    // forward it to the gateway as a command, EXECUTING something the shell dropped.
-    let text = text.trim_matches(|c| c == '\r' || c == '\n');
+    // Match the shell's `IFS= read -r` record: first line only, `\r` preserved, and
+    // NO stripping of interior/leading/trailing spaces (a space-prefixed " *…##" was
+    // not an OWN frame in the shell either — it fell through to the ignored JSON path,
+    // rather than being forwarded to the gateway and executed).
+    let text = shell_line(text);
     // Blank / whitespace-only payloads are neither a frame nor JSON — ignore them.
     if text.trim().is_empty() {
         return;
@@ -324,5 +336,42 @@ async fn publish(client: &AsyncClient, topic: &str, payload: Vec<u8>, retain: bo
     // QoS-1 path.
     if let Err(e) = client.publish(topic, QoS::AtMostOnce, retain, payload).await {
         eprintln!("btmqttd: publish to {topic} failed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The classification the async dispatch() applies after shell_line(): a payload
+    // becomes an OWN frame (forwarded to the gateway) only when is_own_frame() holds
+    // on the shell's single-line record. Encodes the shell parity boundary directly.
+    fn is_frame(payload: &str) -> bool {
+        let text = shell_line(payload);
+        !text.trim().is_empty() && own::is_own_frame(text)
+    }
+
+    #[test]
+    fn crlf_frame_is_not_forwarded() {
+        // `IFS= read -r` keeps the trailing \r, so `*…##\r` failed `^\*.*##$` and was
+        // NOT forwarded. A naive \r/\n trim would have promoted it to a live command.
+        assert!(!is_frame("*1*0*12##\r"));
+        assert!(!is_frame("*1*0*12##\r\n"));
+        // A bare-LF (or no) terminator is the record separator the shell consumed —
+        // the frame IS recognised.
+        assert!(is_frame("*1*0*12##\n"));
+        assert!(is_frame("*1*0*12##"));
+    }
+
+    #[test]
+    fn shell_line_takes_first_line_and_ignores_blank() {
+        assert_eq!(shell_line("*1*0*12##\nextra"), "*1*0*12##");
+        assert_eq!(shell_line("*1*0*12##"), "*1*0*12##");
+        assert_eq!(shell_line("*1*0*12##\r"), "*1*0*12##\r"); // \r preserved
+        // Leading space is preserved (not an OWN frame -> JSON path), and a blank
+        // first line is ignored.
+        assert!(!is_frame(" *1*0*12##"));
+        assert!(!is_frame(""));
+        assert!(!is_frame("   \n*1*0*12##"));
     }
 }
