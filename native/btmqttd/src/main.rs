@@ -241,11 +241,26 @@ async fn run() -> Result<(), String> {
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        // Connection dropped/unreachable: rumqttc reconnects on the
-                        // next poll; back off briefly so a hard-down broker doesn't
-                        // spin. RACE the backoff against the shutdown signals — a plain
-                        // sleep here would block SIGTERM/SIGINT for up to 5 s while the
-                        // broker is down.
+                        // Connection dropped/unreachable. ABORT the in-flight birth tasks
+                        // NOW — not at the next ConnAck. Otherwise a subscribe/announce
+                        // task still running through the outage could enqueue a stale
+                        // retained `online` while the eventloop isn't draining the request
+                        // channel; rumqttc would then flush that stale `online` on
+                        // reconnect BEFORE the fresh SubAck re-establishes the command
+                        // subscription, reopening the availability-before-readiness gap the
+                        // SubAck gate exists to close. AWAIT each (via stop) so it has
+                        // definitely stopped before we reconnect; the next ConnAck
+                        // re-subscribes and re-announces from scratch.
+                        if let Some(h) = subscribe_task.take() {
+                            stop(h).await;
+                        }
+                        if let Some(h) = announce_task.take() {
+                            stop(h).await;
+                        }
+                        // rumqttc reconnects on the next poll; back off briefly so a
+                        // hard-down broker doesn't spin. RACE the backoff against the
+                        // shutdown signals — a plain sleep would block SIGTERM/SIGINT for
+                        // up to 5 s while the broker is down.
                         eprintln!("btmqttd: connection: {e}");
                         tokio::select! {
                             _ = sig_term.recv() => break,
