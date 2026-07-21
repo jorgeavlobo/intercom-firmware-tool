@@ -32,6 +32,23 @@ fi
 
 TAB=$(printf '\t')
 
+# Track the in-flight publisher so a stop signal reaps it instead of orphaning a
+# blocked mosquitto_pub. During a broker/DNS stall a foreground publish can hang;
+# if TcpDump2Mqtt's kill_childs then TERMs this script (matched by path), an
+# un-reaped mosquitto_pub child would linger and could re-publish/clear after the
+# watchdog started a replacement. So run each publish as a tracked background child
+# and kill+wait it on INT/TERM.
+pub_child=
+trap 'if [ -n "$pub_child" ]; then kill "$pub_child" 2>/dev/null; wait "$pub_child" 2>/dev/null; fi; exit 143' INT TERM
+pub() {
+	mqtt_pub "$@" &
+	pub_child=$!
+	wait "$pub_child"
+	_prc=$?
+	pub_child=
+	return "$_prc"
+}
+
 # Apply the manifest once: publish each entity's config retained (HA_DISCOVERY=1)
 # or clear the retained config with an empty message (HA_DISCOVERY=0). Returns
 # non-zero if any row is malformed, any publish fails, or nothing was applied, so
@@ -69,11 +86,11 @@ apply_all() {
 			fi
 			# -r retained (HA re-reads configs on restart); -f reads the JSON
 			# payload from the file (avoids quoting multi-line JSON on the CLI).
-			mqtt_pub -r -t "$topic" -f "$HA_DIR/$file" || rc=1
+			pub -r -t "$topic" -f "$HA_DIR/$file" || rc=1
 		else
 			# Clear the retained config: an empty retained payload (-r -n) makes the
 			# broker drop it, so HA removes the auto-discovered entity.
-			mqtt_pub -r -n -t "$topic" || rc=1
+			pub -r -n -t "$topic" || rc=1
 		fi
 	done < "$MANIFEST"
 	# No usable rows at all is itself a failure (empty/garbage manifest).
