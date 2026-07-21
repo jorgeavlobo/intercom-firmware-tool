@@ -145,6 +145,12 @@ impl Config {
     /// (on-box and the usual external choice) accepts ids longer than the MQTT 3.1.1
     /// 23-byte guidance — as the shell bridge already relied on; a strict broker gets
     /// the MQTT_CLIENT_ID escape hatch.
+    ///
+    /// This id differs from the shell bridge's (`btrx-…`) by design — btmqttd fully
+    /// REPLACES the shell scripts (they never run together on a device). If a broker
+    /// somehow already holds the shell's durable session, set MQTT_CLIENT_ID to that
+    /// old id to resume it (or clear the stale session on the broker) so no orphaned
+    /// subscription lingers.
     pub fn client_id(&self) -> String {
         if let Some(id) = &self.client_id {
             return id.clone();
