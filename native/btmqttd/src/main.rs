@@ -88,8 +88,15 @@ async fn run() -> Result<(), String> {
 
     // Bus -> MQTT and keypad -> MQTT run as independent tasks; they publish through
     // the shared client (rumqttc queues while disconnected and flushes on connect).
-    tokio::spawn(sender::run(cfg.clone(), client.clone()));
-    tokio::spawn(keys::run(cfg.clone(), client.clone()));
+    // Keep their handles so shutdown can ABORT every MQTT-producing task before it
+    // publishes the final retained `offline` — otherwise a task still in flight could
+    // enqueue a publish AFTER `offline` and leave stale state retained on the broker.
+    let sender_task = tokio::spawn(sender::run(cfg.clone(), client.clone()));
+    let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone()));
+    // The birth task for the CURRENT connection (spawned on each ConnAck). Only birth
+    // publishes to TOPIC_LASTWILL (`online`), so a lingering one is exactly what could
+    // clobber the shutdown `offline`; it is aborted on the next ConnAck and on exit.
+    let mut birth_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let mut sig_term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
     let mut sig_int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
@@ -113,8 +120,17 @@ async fn run() -> Result<(), String> {
                         // channel that THIS poll loop drains. If the bus/key tasks
                         // filled that channel during an outage, awaiting birth here
                         // would block the drain and deadlock. Spawning lets the loop
-                        // keep draining while birth's requests flush.
-                        tokio::spawn(birth(cfg.clone(), client.clone(), start_iso.clone()));
+                        // keep draining while birth's requests flush. Abort a still-
+                        // running birth from a previous connect first, so at most one
+                        // is ever in flight.
+                        if let Some(h) = birth_task.take() {
+                            h.abort();
+                        }
+                        birth_task = Some(tokio::spawn(birth(
+                            cfg.clone(),
+                            client.clone(),
+                            start_iso.clone(),
+                        )));
                     }
                     Ok(Event::Incoming(Incoming::Publish(p))) => {
                         // TOPIC_RX is the ONLY subscription, so every incoming Publish
@@ -152,6 +168,14 @@ async fn run() -> Result<(), String> {
         }
     }
 
+    // Stop every MQTT-producing task BEFORE the final `offline`, so none of them can
+    // enqueue a publish after it and leave stale state (e.g. a lingering birth task
+    // re-retaining `online`) on the broker.
+    if let Some(h) = birth_task.take() {
+        h.abort();
+    }
+    sender_task.abort();
+    keys_task.abort();
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(())
 }
