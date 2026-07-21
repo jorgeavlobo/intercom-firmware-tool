@@ -176,7 +176,13 @@ mqtt_detect_clean() {
 # hex chars, so DISTINCT inputs always produce DISTINCT outputs (not probabilistically, as
 # a 32-bit checksum would). stderr is discarded for quietness.
 mqtt_hex() {
-	printf '%s' "$1" | awk 'BEGIN{ORS="";for(i=0;i<256;i++)o[sprintf("%c",i)]=i}{for(i=1;i<=length($0);i++)printf "%02x",o[substr($0,i,1)]}' 2>/dev/null
+	# LC_ALL=C pins BYTE semantics. awk's length()/substr() (and sprintf("%c",i) that
+	# builds the ord[] table) are CHARACTER-based in a UTF-8 locale, so a non-ASCII topic
+	# byte would be read as a multibyte char absent from the table and break the
+	# byte-for-byte injective mapping (distinct topics could then collide). In the C
+	# locale every byte is one char, so each input byte maps to exactly two hex chars.
+	# (The device's busybox awk is already byte-oriented; this makes gawk/mawk identical.)
+	printf '%s' "$1" | LC_ALL=C awk 'BEGIN{ORS="";for(i=0;i<256;i++)o[sprintf("%c",i)]=i}{for(i=1;i<=length($0);i++)printf "%02x",o[substr($0,i,1)]}' 2>/dev/null
 }
 
 # The receiver's durable-session client id. An operator MQTT_CLIENT_ID override wins
