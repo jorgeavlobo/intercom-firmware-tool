@@ -773,12 +773,14 @@ namespace IntercomFirmwareTool.Core
             // reliable. ONLINE is refreshed by the orchestrator each watchdog pass
             // while presence is up (mosquitto_sub reconnects on its own, so a one-shot
             // birth would stick at 'offline' after a blip), and published as 'offline'
-            // explicitly on a clean shutdown. It errs toward a brief stale 'offline',
-            // never a stale 'online' outliving a dead bridge, so the connectivity
+            // explicitly on a clean shutdown. ONLINE is best-effort (coupled to the
+            // broker in practice, since the refresh only lands when the broker accepts
+            // it and the presence session shares the same credentials) and errs toward
+            // a brief stale 'offline' rather than a stale 'online', so the connectivity
             // sensor and the per-entity availability blocks below track the bridge's
-            // real state. (Atomic birth/will needs a single-connection MQTT client,
-            // which the mosquitto CLI tools can't provide; a proper client is future
-            // work — see #12.)
+            // real state well enough for a diagnostic view. (Truly atomic birth/will
+            // needs a single-connection MQTT client, which the mosquitto CLI tools
+            // can't provide; a proper client is future work — see #12.)
             var entities = new List<HaEntity>();
 
             // Connectivity: reports online/offline itself, so it carries NO

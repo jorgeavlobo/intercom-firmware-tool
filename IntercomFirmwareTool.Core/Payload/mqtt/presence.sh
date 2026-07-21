@@ -16,8 +16,8 @@
 # once the broker is reachable again. (Atomically tying 'online' to this session's
 # connect is not possible with the mosquitto CLI tools — a separate mosquitto_pub
 # can't share this client's connection — so the periodic refresh is the pragmatic
-# reliable approach; it errs toward a brief stale 'offline', never a stale 'online'
-# outliving a dead bridge.)
+# reliable approach; it's best-effort and errs toward a brief stale 'offline'
+# rather than a stale 'online'. See the README availability limitation.)
 #
 # On a CLEAN shutdown the orchestrator publishes 'offline' explicitly (a clean
 # disconnect suppresses the will).
