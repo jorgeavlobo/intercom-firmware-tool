@@ -95,7 +95,16 @@ mqtt_sub_one() {
 # publish 'offline' explicitly there — see presence.sh / TcpDump2Mqtt. Same auth/TLS
 # composition as mqtt_pub/mqtt_sub_one.
 mqtt_presence() {
-	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -t "${TOPIC_RX}" \
+	# Hold-open topic = TOPIC_RX, but strip a "$share/<group>/" prefix if present:
+	# a Mosquitto SHARED subscription distributes each message to ONE client in the
+	# group, so joining the receiver's shared group would let presence swallow
+	# commands meant for StartMqttReceive. Subscribing to the underlying (non-shared)
+	# filter keeps the same ACL topic while staying out of the shared group.
+	_pt="${TOPIC_RX}"
+	case "$_pt" in
+		'$share/'*) _pt="${_pt#\$share/}"; _pt="${_pt#*/}" ;;
+	esac
+	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -t "${_pt}" \
 		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
 	if [ -n "${MQTT_CAFILE}" ]; then

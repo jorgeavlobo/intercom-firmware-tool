@@ -73,7 +73,12 @@ namespace IntercomFirmwareTool.Core
         public string HaDiscoveryPrefix { get; init; } = "homeassistant";
         /// <summary>
         /// Stable id for the HA device + entity unique_ids / discovery object ids. Distinct per
-        /// unit lets several bridges coexist on one broker without colliding.
+        /// unit gives several bridges distinct HA devices/entities on one broker. NOTE: this
+        /// scopes only the discovery topic and unique_ids — the entities' state/availability
+        /// still read the MQTT data topics (TopicDump/TopicKey/TopicLastWill), so a multi-unit
+        /// deployment must ALSO give each unit distinct topics, or the HA devices will mirror
+        /// each other's bus/key/availability. (Auto-scoping topics from the node id is future
+        /// work — see #12.)
         /// </summary>
         public string HaNodeId { get; init; } = "bticino_intercom";
 

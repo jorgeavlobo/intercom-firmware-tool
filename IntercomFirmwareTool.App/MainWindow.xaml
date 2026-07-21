@@ -727,8 +727,10 @@
                               Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
                     <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
                                Text="{loc:Loc Hint_MqttHaDiscovery}"/>
-                    <!-- Per-unit HA device id: distinct values let several bridges
-                         coexist on one broker. Deliberately ALWAYS editable — not tied
+                    <!-- Per-unit HA device id: distinct values give each bridge its own
+                         HA device/entities (a multi-unit broker also needs distinct MQTT
+                         topics, else the devices mirror each other's data — see HaNodeId
+                         doc). Deliberately ALWAYS editable — not tied
                          to the checkbox — because the opt-out/clear path also needs it:
                          with discovery unchecked, ha_discovery.sh clears the retained
                          configs for THIS node id, so the user must be able to enter the

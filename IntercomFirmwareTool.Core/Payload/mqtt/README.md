@@ -138,6 +138,13 @@ path.
   (the refresh only lands when the broker accepts it, and the presence session
   shares the same credentials) and errs toward a brief stale `offline`. A truly
   atomic birth/will needs a single-connection MQTT client — tracked for #12.
+- **Multi-unit on one broker needs distinct topics too.** A distinct HA node id
+  gives each bridge its own HA *device* and entity `unique_id`s, but the entities'
+  state/availability still read the MQTT data topics (`TOPIC_DUMP`/`TOPIC_KEY`/
+  `TOPIC_LASTWILL`). Two units left on the default topics would therefore mirror
+  each other's bus/key/availability. For several units on one broker, give each a
+  distinct node id **and** distinct topics. (Auto-deriving topics from the node id
+  is future work — #12.)
 - **Cross-line frame splitting (tcpdump mode only).** `filter.py` splits
   multiple frames coalesced on one `tcpdump` line, but a single frame split
   ACROSS lines is not reassembled (text scraping is line-oriented). Rare for
