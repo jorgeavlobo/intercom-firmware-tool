@@ -19,20 +19,32 @@ use crate::own::{self, Framer};
 /// `*#*1##` ACK and then streams every bus frame.
 const MONITOR_REQ: &[u8] = b"*99*1##";
 
+/// How long a monitor session must last to count as "healthy" — a session that
+/// stayed up this long was working (whether or not the bus was busy), so the next
+/// reconnect is prompt; a session that dropped sooner backs off. Duration-based
+/// (as the shell receiver did) rather than frame-based, so a legitimately QUIET but
+/// long-lived monitor isn't penalised with backoff.
+const HEALTHY_SESSION: Duration = Duration::from_secs(60);
+
 /// Run forever: (re)connect to the monitor, stream + publish frames, and on any
 /// drop back off (capped) and reconnect. Never returns under normal operation.
 pub async fn run(cfg: Arc<Config>, client: AsyncClient) {
     let mut backoff = 0u64;
     loop {
-        match session(&cfg, &client).await {
-            Ok(()) => backoff = 0, // clean EOF after a healthy session — retry promptly
-            Err(e) => {
-                eprintln!(
-                    "btmqttd: monitor {}:{} unavailable: {e}",
-                    cfg.own_host, cfg.own_port_mon
-                );
-                backoff = (backoff + 1).min(6);
-            }
+        let start = tokio::time::Instant::now();
+        if let Err(e) = session(&cfg, &client).await {
+            eprintln!(
+                "btmqttd: monitor {}:{} unavailable: {e}",
+                cfg.own_host, cfg.own_port_mon
+            );
+        }
+        // Reset backoff after a session that stayed up a while (healthy); a quick
+        // accept-then-close (busy monitor slot, gateway not ready) backs off so we
+        // don't spin in a tight reconnect loop.
+        if start.elapsed() >= HEALTHY_SESSION {
+            backoff = 0;
+        } else {
+            backoff = (backoff + 1).min(6);
         }
         if backoff > 0 {
             tokio::time::sleep(Duration::from_secs(backoff * 5)).await;
@@ -41,7 +53,7 @@ pub async fn run(cfg: Arc<Config>, client: AsyncClient) {
 }
 
 /// One monitor session: connect, handshake, then read + publish until the socket
-/// closes or errors.
+/// closes (Ok) or errors. run() decides healthy-vs-backoff from how long this ran.
 async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
@@ -50,26 +62,13 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> std::io::Result<()>
     let mut framer = Framer::default();
     let mut buf = [0u8; 4096];
     let mut frames: Vec<String> = Vec::new();
-    let mut got_any_frame = false;
     loop {
         let n = sock.read(&mut buf).await?;
         if n == 0 {
-            // Treat an immediate EOF (accepted-then-closed with no frame ever read)
-            // as an error so run() backs off, instead of a "healthy" session that
-            // resets backoff and spins in a tight reconnect loop against a busy
-            // monitor slot. A close AFTER real traffic is a normal, retry-promptly EOF.
-            return if got_any_frame {
-                Ok(())
-            } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "monitor closed before any frame",
-                ))
-            };
+            return Ok(()); // gateway closed the monitor session
         }
         frames.clear();
         framer.push(&buf[..n], &mut frames);
-        got_any_frame |= !frames.is_empty();
         for frame in frames.drain(..) {
             publish_frame(cfg, client, &frame).await;
         }

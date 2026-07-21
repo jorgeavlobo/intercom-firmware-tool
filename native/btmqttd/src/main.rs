@@ -110,7 +110,14 @@ async fn run() -> Result<(), String> {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                         birth(&cfg, &client, &start_iso).await;
                     }
-                    Ok(Event::Incoming(Incoming::Publish(p))) if p.topic == cfg.topic_rx => {
+                    Ok(Event::Incoming(Incoming::Publish(p))) => {
+                        // TOPIC_RX is the ONLY subscription, so every incoming Publish
+                        // is a command — match on the packet, not on p.topic ==
+                        // cfg.topic_rx: a wildcard ("Bticino/+/rx") or shared
+                        // ("$share/g/…") TOPIC_RX (which MqttInstaller permits) is
+                        // delivered under its CONCRETE topic name, which would never
+                        // equal the filter string.
+                        //
                         // Commands must be published NON-retained. Drop a retained
                         // delivery (the subscribe-time retained message, or one
                         // mistakenly published retained) so a stale command isn't

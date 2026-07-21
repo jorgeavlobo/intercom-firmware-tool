@@ -120,29 +120,37 @@ async fn write_file(path: &str, data: &str) {
         eprintln!("btmqttd: write_file: missing file_path");
         return;
     }
-    let bytes = &data.as_bytes()[..data.len().min(CAP)];
-    // Write to a UNIQUE temp in the same directory then rename, so a crash mid-write
-    // can't leave a partial file and concurrent write_file tasks for the same path
-    // never share (and clobber) a temp inode. Created 0600 with O_EXCL; then match
-    // the existing file's mode/owner (best-effort) so replacing e.g. the 0600 config
-    // or a bticino-owned file doesn't change them.
-    let tmp = match create_unique_temp(path, bytes).await {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("btmqttd: write_file temp for {path}: {e}");
-            return;
-        }
-    };
-    preserve_mode_owner(path, &tmp);
-    if let Err(e) = tokio::fs::rename(&tmp, path).await {
-        eprintln!("btmqttd: write_file rename -> {path}: {e}");
-        let _ = tokio::fs::remove_file(&tmp).await;
+    let path = path.to_string();
+    let bytes = data.as_bytes()[..data.len().min(CAP)].to_vec();
+    // Do ALL the filesystem work on the blocking pool: open/chmod/chown/rename are
+    // synchronous syscalls that would otherwise stall the single-threaded runtime
+    // (delaying MQTT keepalives and other tasks).
+    match tokio::task::spawn_blocking(move || write_file_blocking(&path, &bytes)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("btmqttd: write_file: {e}"),
+        Err(e) => eprintln!("btmqttd: write_file task panicked: {e}"),
     }
 }
 
+/// Synchronous write-then-rename (runs on the blocking pool). Writes to a UNIQUE
+/// 0600 temp in the same directory (O_EXCL, so concurrent write_file tasks for the
+/// same path never share/clobber a temp inode), matches the existing file's
+/// mode/owner (best-effort), then atomically renames over the target.
+fn write_file_blocking(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = create_unique_temp(path, bytes)?;
+    preserve_mode_owner(path, &tmp);
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Create a fresh 0600 temp file (O_EXCL) beside `path` and write `bytes`, retrying
-/// on the vanishingly unlikely name collision. Returns the temp path.
-async fn create_unique_temp(path: &str, bytes: &[u8]) -> std::io::Result<String> {
+/// on the vanishingly unlikely name collision. Returns the temp path. Synchronous —
+/// called only from the blocking pool (write_file_blocking).
+fn create_unique_temp(path: &str, bytes: &[u8]) -> std::io::Result<String> {
+    use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let pid = std::process::id();
     for _ in 0..8 {
@@ -154,10 +162,9 @@ async fn create_unique_temp(path: &str, bytes: &[u8]) -> std::io::Result<String>
             .mode(0o600)
             .open(&tmp)
         {
-            Ok(std_file) => {
-                let mut f = tokio::fs::File::from_std(std_file);
-                f.write_all(bytes).await?;
-                f.flush().await?;
+            Ok(mut f) => {
+                f.write_all(bytes)?;
+                f.flush()?;
                 return Ok(tmp);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
