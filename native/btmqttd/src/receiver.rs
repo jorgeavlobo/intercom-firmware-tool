@@ -35,22 +35,15 @@ const FORWARD_TIMEOUT: Duration = Duration::from_secs(5);
 /// Monotonic suffix so concurrent write_file tasks never share a temp path.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// Reduce a raw payload to the single-line record the shell receiver saw. Its loop
-/// used `IFS= read -r`, which consumes the `\n` record separator that `mosquitto_sub`
-/// appends but PRESERVES any other byte — crucially a trailing `\r`. So the shell
-/// tested `*…##\r` (CRLF frame) against `^\*.*##$` WITH the `\r` still present, the
-/// match failed, and it fell through to the ignored JSON path — never forwarded to
-/// the gateway. We take everything up to the first `\n` and keep the `\r` for exactly
-/// that parity (a naive CR/LF trim would forward the CRLF frame as a live command).
-/// Taking only the first line also matches a single `read`, and is the conservative
-/// choice (forwards no MORE than the shell would).
-fn shell_line(payload: &str) -> &str {
-    payload.split('\n').next().unwrap_or(payload)
-}
-
-/// Dispatch one received payload. Empty payloads are ignored (neither a frame nor
-/// JSON). Never panics; every failure is logged and swallowed so one bad command
-/// can't take the receiver down.
+/// Dispatch one received payload. The shell receiver looped `while IFS= read -r
+/// rxcmd`, so it processed EVERY `\n`-delimited line of a payload IN ORDER — a
+/// multi-line message is several records, not one. We split on `\n` and run each
+/// record through the same ordered path (`dispatch` is awaited sequentially by the
+/// single command worker, so ordering is preserved). `read -r` consumes only the
+/// `\n` separator and keeps any other byte, so `\r` is PRESERVED within each record
+/// (a CRLF frame `*…##\r` therefore fails the OWN-frame check and is not forwarded,
+/// exactly as the shell's `^\*.*##$` did). Never panics; every failure is logged and
+/// swallowed so one bad record can't take the receiver down.
 pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
     let text = match std::str::from_utf8(payload) {
         Ok(t) => t,
@@ -59,22 +52,26 @@ pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
             return;
         }
     };
-    // Match the shell's `IFS= read -r` record: first line only, `\r` preserved, and
-    // NO stripping of interior/leading/trailing spaces (a space-prefixed " *…##" was
-    // not an OWN frame in the shell either — it fell through to the ignored JSON path,
-    // rather than being forwarded to the gateway and executed).
-    let text = shell_line(text);
-    // Blank / whitespace-only payloads are neither a frame nor JSON — ignore them.
-    if text.trim().is_empty() {
+    for record in text.split('\n') {
+        dispatch_record(cfg, client, record).await;
+    }
+}
+
+/// Classify and act on ONE line (the shell's per-`read` record). `record` keeps its
+/// `\r` and any interior/leading/trailing spaces — a space-prefixed " *…##" is not an
+/// OWN frame (it falls to the ignored JSON path, as in the shell, rather than being
+/// forwarded to the gateway and executed).
+async fn dispatch_record(cfg: &Arc<Config>, client: &AsyncClient, record: &str) {
+    // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
+    if record.trim().is_empty() {
         return;
     }
-
-    if own::is_own_frame(text) {
-        if let Err(e) = forward_to_gateway(text).await {
+    if own::is_own_frame(record) {
+        if let Err(e) = forward_to_gateway(record).await {
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
-        handle_json(cfg, client, text).await;
+        handle_json(cfg, client, record).await;
     }
 }
 
@@ -112,12 +109,22 @@ async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, msg: &str) {
     };
     let command = v.get("command").and_then(Value::as_str).unwrap_or("");
     let file_path = v.get("file_path").and_then(Value::as_str).unwrap_or("");
-    let data = v.get("data").and_then(Value::as_str).unwrap_or("");
+    // `data` as Option: a MISSING (or non-string) key is rejected per-command rather
+    // than defaulting to "". Defaulting silently truncates a write_file target to
+    // empty and runs execute_command as `sh -c ""` — dangerous on a remote command
+    // surface. An EXPLICIT "data":"" is still honoured (an intentional truncate / no-op).
+    let data = v.get("data").and_then(Value::as_str);
 
     match command {
         "read_file" => read_file(cfg, client, file_path).await,
-        "write_file" => write_file(file_path, data).await,
-        "execute_command" => execute_command(cfg, client, data).await,
+        "write_file" => match data {
+            Some(d) => write_file(file_path, d).await,
+            None => eprintln!("btmqttd: write_file: missing 'data'"),
+        },
+        "execute_command" => match data {
+            Some(d) => execute_command(cfg, client, d).await,
+            None => eprintln!("btmqttd: execute_command: missing 'data'"),
+        },
         "" => eprintln!("btmqttd: JSON command missing 'command'"),
         other => eprintln!("btmqttd: unsupported command: {other}"),
     }
@@ -343,12 +350,18 @@ async fn publish(client: &AsyncClient, topic: &str, payload: Vec<u8>, retain: bo
 mod tests {
     use super::*;
 
-    // The classification the async dispatch() applies after shell_line(): a payload
-    // becomes an OWN frame (forwarded to the gateway) only when is_own_frame() holds
-    // on the shell's single-line record. Encodes the shell parity boundary directly.
-    fn is_frame(payload: &str) -> bool {
-        let text = shell_line(payload);
-        !text.trim().is_empty() && own::is_own_frame(text)
+    /// The per-record classification dispatch_record() applies: a record is forwarded
+    /// to the gateway as an OWN frame only when it is non-blank AND is_own_frame().
+    /// Otherwise it goes to the (gated / possibly-ignored) JSON path. Encodes the
+    /// shell parity boundary without needing the network.
+    fn is_frame(record: &str) -> bool {
+        !record.trim().is_empty() && own::is_own_frame(record)
+    }
+
+    /// Mirror dispatch()'s payload → records split so tests can assert per-line
+    /// behaviour (the shell's `while IFS= read -r` loop).
+    fn records(payload: &str) -> Vec<&str> {
+        payload.split('\n').collect()
     }
 
     #[test]
@@ -356,22 +369,40 @@ mod tests {
         // `IFS= read -r` keeps the trailing \r, so `*…##\r` failed `^\*.*##$` and was
         // NOT forwarded. A naive \r/\n trim would have promoted it to a live command.
         assert!(!is_frame("*1*0*12##\r"));
-        assert!(!is_frame("*1*0*12##\r\n"));
         // A bare-LF (or no) terminator is the record separator the shell consumed —
         // the frame IS recognised.
-        assert!(is_frame("*1*0*12##\n"));
         assert!(is_frame("*1*0*12##"));
     }
 
     #[test]
-    fn shell_line_takes_first_line_and_ignores_blank() {
-        assert_eq!(shell_line("*1*0*12##\nextra"), "*1*0*12##");
-        assert_eq!(shell_line("*1*0*12##"), "*1*0*12##");
-        assert_eq!(shell_line("*1*0*12##\r"), "*1*0*12##\r"); // \r preserved
-        // Leading space is preserved (not an OWN frame -> JSON path), and a blank
-        // first line is ignored.
-        assert!(!is_frame(" *1*0*12##"));
-        assert!(!is_frame(""));
-        assert!(!is_frame("   \n*1*0*12##"));
+    fn every_line_is_a_record_second_line_forwarded() {
+        // The shell looped over EVERY line, so junk on line 1 is ignored and a valid
+        // frame on line 2 is still forwarded — btmqttd must not drop the 2nd record.
+        let r = records("junk\n*1*0*12##");
+        assert_eq!(r.len(), 2);
+        assert!(!is_frame(r[0])); // "junk" -> JSON path -> ignored
+        assert!(is_frame(r[1])); // frame -> forwarded
+    }
+
+    #[test]
+    fn crlf_is_preserved_per_record() {
+        // A CRLF-separated pair: record 0 keeps its \r (not forwarded), record 1 is a
+        // clean LF-terminated frame (forwarded).
+        let r = records("*1*0*12##\r\n*2*1*3##");
+        assert_eq!(r, vec!["*1*0*12##\r", "*2*1*3##"]);
+        assert!(!is_frame(r[0]));
+        assert!(is_frame(r[1]));
+    }
+
+    #[test]
+    fn blank_and_space_prefixed_records_ignored() {
+        assert!(!is_frame("")); // empty record
+        assert!(!is_frame("   ")); // whitespace-only
+        assert!(!is_frame(" *1*0*12##")); // leading space -> JSON path, not a frame
+        // A trailing blank record (from a trailing '\n') is ignored, not an error.
+        let r = records("*1*0*12##\n");
+        assert_eq!(r, vec!["*1*0*12##", ""]);
+        assert!(is_frame(r[0]));
+        assert!(!is_frame(r[1]));
     }
 }

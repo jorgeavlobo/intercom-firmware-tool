@@ -39,12 +39,13 @@ pub async fn reconcile(cfg: &Arc<Config>, client: &AsyncClient) {
             continue;
         }
         let Some((topic, file)) = line.split_once('\t') else {
-            eprintln!("btmqttd: ha malformed manifest row");
+            // {:?} so the missing TAB (and any stray whitespace) is visible in the log.
+            eprintln!("btmqttd: ha malformed manifest row (no TAB): {line:?}");
             continue;
         };
         let (topic, file) = (topic.trim(), file.trim());
         if topic.is_empty() || file.is_empty() {
-            eprintln!("btmqttd: ha malformed manifest row");
+            eprintln!("btmqttd: ha malformed manifest row (empty topic/file): {line:?}");
             continue;
         }
         // Defence-in-depth: require a plain basename so a tampered filename can't
