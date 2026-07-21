@@ -766,6 +766,10 @@ namespace IntercomFirmwareTool.Core
         private static readonly JsonSerializerOptions HaJson = new()
         {
             WriteIndented = true,
+            // Force LF: WriteIndented otherwise follows the host newline, so a Windows
+            // build would emit CRLF and the on-device JSON would differ byte-for-byte
+            // from a Linux build (and from the ValidateMqtt read-back expectation).
+            NewLine = "\n",
         };
 
         /// <summary>

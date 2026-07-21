@@ -738,8 +738,10 @@
                          the default in a new session, would clear the wrong identity).
                          The default Text is set in InitMqttUi (see the checkbox note). -->
                     <StackPanel Orientation="Horizontal" Margin="22,4,0,0">
-                        <TextBlock Text="{loc:Loc Field_MqttHaNodeId}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBlock x:Name="LblMqttHaNodeId" Text="{loc:Loc Field_MqttHaNodeId}"
+                                   VerticalAlignment="Center" Margin="0,0,6,0"/>
                         <TextBox x:Name="TxtMqttHaNodeId" Width="200"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttHaNodeId}"
                                  ToolTip="{loc:Loc Tip_MqttHaNodeId}"
                                  TextChanged="MqttField_TextChanged"/>
                     </StackPanel>

@@ -423,5 +423,6 @@ Schlüssel: {1}</value></data>
 Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. Fernbefehlskanal aktivieren?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Ein Topic ist leer, umfasst mehrere Zeilen oder ein Veröffentlichungs-Topic enthält einen MQTT-Platzhalter ('+' oder '#').</value></data>
+  <data name="MqttHint_HaNodeId" xml:space="preserve"><value>Die Home-Assistant-Knoten-ID darf nur Buchstaben, Ziffern, '_' oder '-' enthalten.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>Verbindung abgelehnt oder keine Antwort.</value></data>
 </root>

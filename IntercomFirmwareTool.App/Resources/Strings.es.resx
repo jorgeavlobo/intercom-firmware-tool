@@ -423,5 +423,6 @@ Clave: {1}</value></data>
 Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de comandos remoto?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de comandos remoto</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Un tema está vacío, ocupa varias líneas o un tema de publicación contiene un comodín MQTT ('+' o '#').</value></data>
+  <data name="MqttHint_HaNodeId" xml:space="preserve"><value>El id del nodo de Home Assistant solo puede contener letras, dígitos, '_' o '-'.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>conexión rechazada o sin respuesta.</value></data>
 </root>

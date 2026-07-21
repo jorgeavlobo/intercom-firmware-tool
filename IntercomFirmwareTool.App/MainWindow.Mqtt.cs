@@ -628,6 +628,20 @@ namespace IntercomFirmwareTool.App
             foreach (var box in publishTopics)
                 if (box.Text.IndexOfAny(new[] { '+', '#' }) >= 0) return L("MqttHint_Topic");
 
+            // HA discovery node id — mirror MqttInstaller.Validate, which checks it
+            // ONLY when discovery is enabled: the node becomes a discovery-topic level
+            // and unique_id, so it must be the HA charset [A-Za-z0-9_-]. An empty field
+            // falls back to the valid default, so only a non-empty out-of-charset value
+            // is rejected — fail here rather than later in the Core popup.
+            if (ChkMqttHaDiscovery.IsChecked == true)
+            {
+                string node = TxtMqttHaNodeId.Text.Trim();
+                if (node.Length > 0)
+                    foreach (char c in node)
+                        if (!(char.IsAsciiLetterOrDigit(c) || c == '_' || c == '-'))
+                            return L("MqttHint_HaNodeId");
+            }
+
             return null;
         }
 
