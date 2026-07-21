@@ -169,13 +169,17 @@ async fn run() -> Result<(), String> {
                         // the subscribe enqueues into the same bounded request channel
                         // THIS poll loop drains, so awaiting it here could deadlock if
                         // the bus/key tasks filled the channel during an outage.
-                        // Announcing `online` waits for the SubAck (below). Abort any
-                        // still-running tasks from a previous connect first.
+                        // Announcing availability waits for the SubAck (below). Abort any
+                        // still-running tasks from a previous connect first. The announce
+                        // task is abort-AND-AWAITED (stop) because it may publish retained
+                        // `online` OR `offline`: abort alone is async, so a stale one could
+                        // still enqueue AFTER the next connect's availability publish and
+                        // leave the wrong retained state on the broker.
                         if let Some(h) = subscribe_task.take() {
                             h.abort();
                         }
                         if let Some(h) = announce_task.take() {
-                            h.abort();
+                            stop(h).await;
                         }
                         subscribe_task =
                             Some(tokio::spawn(subscribe_cmd(cfg.clone(), client.clone())));
@@ -199,8 +203,12 @@ async fn run() -> Result<(), String> {
                                     )
                                 )
                             });
+                        // abort-AND-AWAIT (stop): the previous availability task may be a
+                        // refusal-path `announce_offline`; if only abort()ed it could still
+                        // enqueue `offline` AFTER the `online` we spawn below and leave the
+                        // bridge retained offline despite a command-ready subscription.
                         if let Some(h) = announce_task.take() {
-                            h.abort();
+                            stop(h).await;
                         }
                         if !ready {
                             eprintln!(
