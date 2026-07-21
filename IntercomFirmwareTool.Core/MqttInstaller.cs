@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using IntercomFirmwareTool.Core.Localization;
 
 namespace IntercomFirmwareTool.Core
@@ -34,6 +35,11 @@ namespace IntercomFirmwareTool.Core
     /// opens a MONITOR session directly on the local OpenWebNet gateway (no tcpdump, no resident
     /// python) and only falls back to tcpdump when that gateway is unreachable. See StartMqttSend.
     /// </param>
+    /// <param name="EnableHaDiscovery">
+    /// Publish retained Home Assistant MQTT discovery configs at bridge startup, so the
+    /// connectivity/bus/keypad entities appear in HA automatically (no manual YAML). Additive and
+    /// read-only (no command entity); off by default at the Core layer. See ha_discovery.sh.
+    /// </param>
     public sealed record MqttOptions(
         string MqttHost,
         int MqttPort = 1883,
@@ -44,7 +50,8 @@ namespace IntercomFirmwareTool.Core
         string? ClientKeyPem = null,
         string? HostIpForHosts = null,
         bool AllowRemoteShell = false,
-        bool UseTcpdumpCapture = false)
+        bool UseTcpdumpCapture = false,
+        bool EnableHaDiscovery = false)
     {
         // A record's synthesized ToString() prints EVERY property — which would
         // leak MqttPass and the TLS private key (ClientKeyPem) into any log line
@@ -54,12 +61,26 @@ namespace IntercomFirmwareTool.Core
             $"MqttOptions {{ MqttHost = {MqttHost}, MqttPort = {MqttPort}, " +
             $"HasAuth = {HasAuth}, HasTls = {HasTls}, HasMutualTls = {HasMutualTls}, " +
             $"AllowRemoteShell = {AllowRemoteShell}, " +
-            $"Capture = {(UseTcpdumpCapture ? "tcpdump" : "socket")} }}";
+            $"Capture = {(UseTcpdumpCapture ? "tcpdump" : "socket")}, " +
+            $"HaDiscovery = {EnableHaDiscovery} }}";
 
         /// <summary>OpenWebNet gateway host for the socket monitor back-end (loopback alias).</summary>
         public string OwnHost { get; init; } = "127.0.0.1";
         /// <summary>OpenWebNet gateway plaintext OwnPort for the socket monitor session.</summary>
         public int OwnPortMon { get; init; } = 20000;
+
+        /// <summary>Home Assistant MQTT discovery topic prefix (HA default is "homeassistant").</summary>
+        public string HaDiscoveryPrefix { get; init; } = "homeassistant";
+        /// <summary>
+        /// Stable id for the HA device + entity unique_ids / discovery object ids. Distinct per
+        /// unit gives several bridges distinct HA devices/entities on one broker. NOTE: this
+        /// scopes only the discovery topic and unique_ids — the entities' state/availability
+        /// still read the MQTT data topics (TopicDump/TopicKey/TopicLastWill), so a multi-unit
+        /// deployment must ALSO give each unit distinct topics, or the HA devices will mirror
+        /// each other's bus/key/availability. (Auto-scoping topics from the node id is future
+        /// work — see #12.)
+        /// </summary>
+        public string HaNodeId { get; init; } = "bticino_intercom";
 
         public string TopicRx { get; init; } = "Bticino/rx";
         public string TopicDump { get; init; } = "Bticino/tx";
@@ -100,9 +121,11 @@ namespace IntercomFirmwareTool.Core
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
 
-        // The 8 embedded scripts. TcpDump2Mqtt.conf is generated (not a resource);
+        // The 10 embedded scripts. TcpDump2Mqtt.conf is generated (not a resource);
         // jq/evtest come from PayloadBinaries. Executables 0775; mqtt_common.sh is
-        // only sourced, so 0644.
+        // only sourced, so 0644. ha_discovery.sh runs on every startup and
+        // self-selects publish (HA_DISCOVERY=1) vs clear (0). presence.sh holds the
+        // persistent last-will session so HA availability is reliable.
         private static readonly ScriptFile[] Scripts =
         {
             new(ResourcePrefix + "TcpDump2Mqtt",       EtcDir + "/TcpDump2Mqtt",       775),
@@ -112,8 +135,16 @@ namespace IntercomFirmwareTool.Core
             new(ResourcePrefix + "keypress.sh",        EtcDir + "/keypress.sh",        775),
             new(ResourcePrefix + "filter.py",          EtcDir + "/filter.py",          775),
             new(ResourcePrefix + "mqtt_common.sh",     EtcDir + "/mqtt_common.sh",     644),
+            new(ResourcePrefix + "ha_discovery.sh",    EtcDir + "/ha_discovery.sh",    775),
+            new(ResourcePrefix + "presence.sh",        EtcDir + "/presence.sh",        775),
             new(ResourcePrefix + "bt_service_watchdog", "/etc/init.d/bt_service_watchdog", 775),
         };
+
+        // Home Assistant discovery configs: one JSON file per entity plus a manifest
+        // of "config-topic<TAB>filename". Written ALWAYS (regardless of the enable
+        // flag) so ha_discovery.sh can either publish them retained (HA_DISCOVERY=1)
+        // or clear the retained configs (HA_DISCOVERY=0).
+        private const string HaDir = EtcDir + "/ha";
 
         // Boot symlinks in rc5.d. The 'z' after S99 sorts these AFTER the factory
         // S99<Capital…> services (ASCII 'z' > any capital), so the bridge starts
@@ -189,6 +220,26 @@ namespace IntercomFirmwareTool.Core
             // --- generated config (0600 — holds MQTT_PASS) ----------------------
             WriteConfigFile(fs, EtcDir + "/TcpDump2Mqtt.conf", GenerateConf(opts), 600);
 
+            // --- Home Assistant discovery configs -------------------------------
+            // One retained-config JSON per entity + a manifest of
+            // "config-topic<TAB>filename". Written ALWAYS (not only when enabled):
+            // ha_discovery.sh publishes them retained when HA_DISCOVERY=1, and
+            // CLEARS the retained configs (empty payload) when HA_DISCOVERY=0 — so a
+            // rebuild that unticks discovery actually removes the HA entities from a
+            // broker that already saw them, instead of leaving them orphaned.
+            {
+                EnsureDir(fs, HaDir);
+                fs.SetMode(HaDir, ToMode(755));
+                fs.SetOwner(HaDir, 0, 0);
+                var manifest = new StringBuilder();
+                foreach (var e in GenerateHaDiscovery(opts))
+                {
+                    WriteConfigFile(fs, HaDir + "/" + e.FileName, e.Json, 644);
+                    manifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
+                }
+                WriteConfigFile(fs, HaDir + "/manifest", manifest.ToString(), 644);
+            }
+
             // --- idempotent init-script patches ---------------------------------
             PatchFlexisip(fs);
             if (!opts.HostIsIp)
@@ -240,6 +291,30 @@ namespace IntercomFirmwareTool.Core
             if (string.IsNullOrWhiteSpace(opts.OwnHost) || !IsValidHost(opts.OwnHost) ||
                 opts.OwnPortMon < 1 || opts.OwnPortMon > 65535)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidOwnEndpoint"), nameof(opts));
+
+            // The HA discovery prefix and node id become MQTT topic levels
+            // ("<prefix>/<component>/<node>/<obj>/config"). The node id is stricter
+            // than a generic topic level: Home Assistant's discovery parser only
+            // accepts node/object ids of [A-Za-z0-9_-], so anything else (e.g.
+            // "front.door", "door:1") is accepted here but silently ignored by HA.
+            // The prefix is looser — it may be multi-level — but must have no
+            // whitespace, no + / # wildcards, and no leading/trailing/double slash
+            // (which would emit an empty topic level). Validated UNCONDITIONALLY (not
+            // only when EnableHaDiscovery): the manifest is generated and
+            // ha_discovery.sh runs on every boot even when disabled (to CLEAR the
+            // retained configs), so a bad prefix/node would otherwise pass the build
+            // and fail every boot on-device.
+            {
+                bool BadPrefix(string s) =>
+                    string.IsNullOrWhiteSpace(s) || s.IndexOfAny(new[] { '+', '#' }) >= 0 ||
+                    s.Any(char.IsWhiteSpace) ||
+                    s.StartsWith('/') || s.EndsWith('/') || s.Contains("//");
+                bool BadNode(string s) =>
+                    string.IsNullOrEmpty(s) ||
+                    !s.All(c => char.IsAsciiLetterOrDigit(c) || c == '_' || c == '-');
+                if (BadPrefix(opts.HaDiscoveryPrefix) || BadNode(opts.HaNodeId))
+                    throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidHaDiscovery"), nameof(opts));
+            }
 
             // A hosts-mapping IP override is only USED when the broker is given by
             // name (when the host is already an IP, PatchHosts is skipped and this
@@ -301,13 +376,35 @@ namespace IntercomFirmwareTool.Core
                 if (t.IndexOfAny(new[] { '+', '#' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
 
+            // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by
+            // the broker against the UNDERLYING <filter>, and both StartMqttReceive
+            // and the presence session subscribe to that underlying filter. So the
+            // checks below must run on <filter>, not the raw "$share/..." string —
+            // otherwise "$share/g/Bticino/#" would slip past the self-loop guard while
+            // the broker still delivers the bridge's own Bticino/tx publishes to
+            // StartMqttReceive, replaying them to the gateway. Normalise here (and
+            // reject a malformed share: empty group/filter, or wildcards in the group).
+            string rxFilter = opts.TopicRx;
+            if (rxFilter.StartsWith("$share/", StringComparison.Ordinal))
+            {
+                string rest = rxFilter.Substring("$share/".Length);
+                int slash = rest.IndexOf('/');
+                string group = slash >= 0 ? rest.Substring(0, slash) : rest;
+                string inner = slash >= 0 ? rest.Substring(slash + 1) : "";
+                if (group.Length == 0 || inner.Length == 0 ||
+                    group.IndexOfAny(new[] { '+', '#' }) >= 0)
+                    throw new ArgumentException(
+                        CoreStrings.Get("Mqtt_InvalidSubscriptionFilter"), nameof(opts));
+                rxFilter = inner;
+            }
+
             // TopicRx is the only SUBSCRIBE filter (mosquitto_sub -t). It MAY use
             // the wildcards '+'/'#', but they must follow MQTT subscription-filter
             // rules: '+' occupies a whole level and '#' is the final whole level.
             // An invalid filter (e.g. "Bticino/rx#" or "Bticino/+rx") would build
             // but be rejected by the broker at subscribe time.
-            if (opts.TopicRx.IndexOfAny(new[] { '+', '#' }) >= 0 &&
-                !IsValidSubscriptionFilter(opts.TopicRx))
+            if (rxFilter.IndexOfAny(new[] { '+', '#' }) >= 0 &&
+                !IsValidSubscriptionFilter(rxFilter))
                 throw new ArgumentException(
                     CoreStrings.Get("Mqtt_InvalidSubscriptionFilter"), nameof(opts));
 
@@ -318,7 +415,7 @@ namespace IntercomFirmwareTool.Core
             // replay them to the gateway — a feedback loop that floods the bus.
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent })
-                if (TopicFilterMatches(opts.TopicRx, pub))
+                if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
         }
@@ -402,6 +499,27 @@ namespace IntercomFirmwareTool.Core
                     ? ReadAllText(fs, EtcDir + "/TcpDump2Mqtt.conf") : "";
                 checks.Add(new(".conf matches the generated config for these options",
                     conf == GenerateConf(opts), ""));
+
+                // HA discovery configs: always present and byte-exact (they are
+                // written regardless of the enable flag, so ha_discovery.sh can
+                // publish OR clear them). Read back the manifest and each JSON,
+                // comparing to what these options generate (a true read-back, like
+                // the .conf check above).
+                {
+                    var expected = GenerateHaDiscovery(opts);
+                    var expectedManifest = new StringBuilder();
+                    foreach (var e in expected) expectedManifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
+                    CheckFile(fs, checks, HaDir + "/manifest", 644);
+                    string gotManifest = fs.FileExists(HaDir + "/manifest") ? ReadAllText(fs, HaDir + "/manifest") : "";
+                    checks.Add(new("ha/manifest matches the generated discovery set",
+                        gotManifest == expectedManifest.ToString(), ""));
+                    foreach (var e in expected)
+                    {
+                        CheckFile(fs, checks, HaDir + "/" + e.FileName, 644);
+                        string got = fs.FileExists(HaDir + "/" + e.FileName) ? ReadAllText(fs, HaDir + "/" + e.FileName) : "";
+                        checks.Add(new($"ha/{e.FileName} matches the generated config", got == e.Json, ""));
+                    }
+                }
 
                 // TLS material present iff supplied.
                 if (opts.HasTls) CheckFile(fs, checks, EtcDir + "/ca.crt", 644);
@@ -615,6 +733,11 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("CAPTURE_MODE", opts.UseTcpdumpCapture ? "tcpdump" : "socket"));
             sb.Append(Conf("OWN_HOST", opts.OwnHost));
             sb.Append("OWN_PORT_MON=").Append(opts.OwnPortMon).Append('\n');
+
+            // Home Assistant auto-discovery: when 1, the orchestrator runs
+            // ha_discovery.sh once at startup to publish the retained configs under
+            // HaDir. The discovery prefix/node/topics are baked into those files.
+            sb.Append("HA_DISCOVERY=").Append(opts.EnableHaDiscovery ? '1' : '0').Append('\n');
             return sb.ToString();
         }
 
@@ -626,6 +749,126 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         private static string Conf(string key, string value) =>
             $"{key}='{value.Replace("'", "'\\''")}'\n";
+
+        // ---- Home Assistant MQTT discovery --------------------------------------
+
+        /// <summary>A discovery entity: its retained-config topic, the on-device
+        /// JSON filename (under <see cref="HaDir"/>), and the JSON payload.</summary>
+        private readonly record struct HaEntity(string FileName, string ConfigTopic, string Json);
+
+        // Default STJ encoder: it does NOT escape the '{'/'}' of value_template
+        // (only '<' '>' '&' '+' and non-ASCII, none of which appear in the default
+        // payloads), so the discovery JSON stays valid and readable for Home
+        // Assistant. Preferred over UnsafeRelaxedJsonEscaping — the relaxed encoder
+        // buys nothing here (no chars need it) and gets flagged by security tooling;
+        // the default even escapes '&'/'<'/'>' should a user set an exotic topic.
+        // WriteIndented for a readable on-device file.
+        private static readonly JsonSerializerOptions HaJson = new()
+        {
+            WriteIndented = true,
+            // Force LF: WriteIndented otherwise follows the host newline, so a Windows
+            // build would emit CRLF and the on-device JSON would differ byte-for-byte
+            // from a Linux build (and from the ValidateMqtt read-back expectation).
+            NewLine = "\n",
+        };
+
+        /// <summary>
+        /// Builds the Home Assistant MQTT discovery configs for the bridge: a
+        /// connectivity <c>binary_sensor</c> (online/offline via the last-will
+        /// topic), a diagnostic <c>sensor</c> for the last OpenWebNet bus frame, and
+        /// a <c>sensor</c> for the last key press (with code/value as attributes).
+        /// All read-only and grouped under one HA device — no command entity, to
+        /// keep the secure-by-default posture. Topics/prefix/node are baked in here,
+        /// so the on-device publisher just sends each payload retained.
+        /// </summary>
+        private static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts)
+        {
+            string prefix = opts.HaDiscoveryPrefix;
+            string node = opts.HaNodeId;
+
+            // Shared device block so every entity groups under one HA device.
+            var device = new
+            {
+                identifiers = new[] { node },
+                name = "BTicino intercom bridge",
+                manufacturer = "BTicino",
+                model = "OpenWebNet MQTT bridge",
+            };
+
+            string Topic(string component, string objectId) =>
+                $"{prefix}/{component}/{node}/{objectId}/config";
+
+            // Availability (TopicLastWill): the dedicated presence session
+            // (presence.sh) holds a persistent connection whose retained 'offline'
+            // last will the broker delivers on an UNCLEAN drop — so OFFLINE is
+            // reliable. ONLINE is refreshed by the orchestrator each watchdog pass
+            // while presence is up (mosquitto_sub reconnects on its own, so a one-shot
+            // birth would stick at 'offline' after a blip), and published as 'offline'
+            // explicitly on a clean shutdown. ONLINE is best-effort (coupled to the
+            // broker in practice, since the refresh only lands when the broker accepts
+            // it and the presence session shares the same credentials) and errs toward
+            // a brief stale 'offline' rather than a stale 'online', so the connectivity
+            // sensor and the per-entity availability blocks below track the bridge's
+            // real state well enough for a diagnostic view. (Truly atomic birth/will
+            // needs a single-connection MQTT client, which the mosquitto CLI tools
+            // can't provide; a proper client is future work — see #12.)
+            var entities = new List<HaEntity>();
+
+            // Connectivity: reports online/offline itself, so it carries NO
+            // availability block (else HA would show it "unavailable" when offline
+            // instead of "off").
+            entities.Add(new HaEntity(
+                "status.json",
+                Topic("binary_sensor", "status"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Bridge",
+                    unique_id = $"{node}_status",
+                    device_class = "connectivity",
+                    state_topic = opts.TopicLastWill,
+                    payload_on = "online",
+                    payload_off = "offline",
+                    entity_category = "diagnostic",
+                    device,
+                }, HaJson)));
+
+            // Last OpenWebNet bus frame (diagnostic).
+            entities.Add(new HaEntity(
+                "bus.json",
+                Topic("sensor", "bus"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "OpenWebNet bus",
+                    unique_id = $"{node}_bus",
+                    state_topic = opts.TopicDump,
+                    icon = "mdi:bus",
+                    entity_category = "diagnostic",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Last key press: state = key name, code/value exposed as attributes.
+            entities.Add(new HaEntity(
+                "key.json",
+                Topic("sensor", "key"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Last key",
+                    unique_id = $"{node}_key",
+                    state_topic = opts.TopicKey,
+                    value_template = "{{ value_json.key }}",
+                    json_attributes_topic = opts.TopicKey,
+                    icon = "mdi:gesture-tap-button",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            return entities;
+        }
 
         // ---- init-script patches (owner/mode preserved, idempotent) -------------
 

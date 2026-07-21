@@ -406,6 +406,11 @@ Clé : {1}</value></data>
   <data name="Chk_MqttTcpdump" xml:space="preserve"><value>Utiliser la capture tcpdump (compatibilité)</value></data>
   <data name="Tip_MqttTcpdump" xml:space="preserve"><value>Laissez décoché pour recevoir les événements directement depuis la passerelle OpenWebNet locale (sans tcpdump, sans Python résident). Cochez uniquement si le pont n'affiche aucune activité du bus — cela force l'ancienne capture tcpdump.</value></data>
   <data name="Hint_MqttTcpdump" xml:space="preserve"><value>Par défaut : un socket de supervision OpenWebNet direct, plus léger pour l'appareil. La voie tcpdump sert de repli automatique si la passerelle est injoignable.</value></data>
+  <data name="Chk_MqttHaDiscovery" xml:space="preserve"><value>Découverte automatique Home Assistant</value></data>
+  <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Publie des configs de découverte MQTT persistantes pour que les entités du pont (connectivité, trames du bus, dernière touche) apparaissent automatiquement dans Home Assistant, sans YAML manuel. Lecture seule — aucune entité de commande n'est créée.</value></data>
+  <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Activé par défaut : les entités du pont (connectivité, bus, dernière touche) apparaissent automatiquement dans Home Assistant, comme un appareil. Décochez pour l'ignorer ; une build ultérieure avec le même identifiant d'appareil les supprime ensuite du broker.</value></data>
+  <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Id de l'appareil :</value></data>
+  <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identifiant de l'appareil Home Assistant et de ses entités. Distinct par unité donne à chaque pont son propre appareil HA ; pour plusieurs unités sur un même broker, définissez aussi des topics distincts (sinon ils se reflètent). Uniquement lettres et chiffres ASCII, « _ » ou « - ».</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Réception (commandes) :</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Vidage du bus :</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Date de début :</value></data>
@@ -418,5 +423,6 @@ Clé : {1}</value></data>
 Ne l'activez que sur un broker authentifié et de confiance. Activer le canal de commandes à distance ?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de commandes à distance</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Un sujet est vide, s'étend sur plusieurs lignes, ou un sujet de publication contient un caractère générique MQTT ('+' ou '#').</value></data>
+  <data name="MqttHint_HaNodeId" xml:space="preserve"><value>L'id du nœud Home Assistant ne peut contenir que des lettres et chiffres ASCII, « _ » ou « - ».</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>connexion refusée ou aucune réponse.</value></data>
 </root>

@@ -27,12 +27,23 @@ kill_by() {
 re_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'; }
 
 kill_childs() {
-	kill_by "/etc/tcpdump2mqtt/StartMqttSend"
-	kill_by "/etc/tcpdump2mqtt/StartMqttReceive"
-	kill_by "/etc/tcpdump2mqtt/keypress.sh"
+	# re_escape the script paths: kill_by builds a pgrep -f REGEX, so the '.' in
+	# ".sh"/".py" would otherwise match any character and could over-match an
+	# unrelated process path.
+	kill_by "$(re_escape "/etc/tcpdump2mqtt/StartMqttSend")"
+	kill_by "$(re_escape "/etc/tcpdump2mqtt/StartMqttReceive")"
+	kill_by "$(re_escape "/etc/tcpdump2mqtt/keypress.sh")"
+	# presence.sh normally reaps its own mosquitto_sub child via a trap on TERM, but
+	# also match the presence sub directly (its will topic uniquely identifies it —
+	# the receiver's mqtt_sub_one no longer carries a will) so a child orphaned by a
+	# SIGKILL of presence.sh, or by a signal in the pre-$! window, can't linger as a
+	# stray will-holder and let the next watchdog pass start a duplicate.
+	kill_by "$(re_escape "/etc/tcpdump2mqtt/presence.sh")"
+	kill_by "mosquitto_sub.*$(re_escape "${TOPIC_LASTWILL}")"
+	kill_by "$(re_escape "/etc/tcpdump2mqtt/ha_discovery.sh")"
 	# keypress.sh owns its evtest child and kills it via a trap on termination,
 	# so we don't match "evtest" here (that could hit unrelated evtest sessions).
-	kill_by "/etc/tcpdump2mqtt/filter.py"
+	kill_by "$(re_escape "/etc/tcpdump2mqtt/filter.py")"
 	# Our own pipeline children, matched specifically (by our port/topics) so a
 	# manual tcpdump or an unrelated mosquitto session on the box is left alone,
 	# and so the mosquitto_sub reparented out of the receiver's command
@@ -47,11 +58,48 @@ kill_childs() {
 	kill_by "nc $(re_escape "${OWN_HOST}") $(re_escape "${OWN_PORT_MON}")"
 	kill_by "mosquitto_sub.*$(re_escape "${TOPIC_RX}")"
 	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_DUMP}")"
+	# The start-date publisher (backgrounded after the sender starts) — reap a copy
+	# stuck in DNS/TCP connect so it can't survive a restart and later publish a
+	# stale retained start_date, or accumulate one hung publisher per sender restart.
+	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_STARTD}")"
+	# Any in-flight 'online' publisher (the watchdog loop below refreshes 'online' to
+	# TOPIC_LASTWILL each pass; presence.sh itself only holds the mosquitto_sub will
+	# session). Reap it so a lagging publish can't overwrite the shutdown 'offline'
+	# after the will-holder is already gone.
+	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_LASTWILL}")"
 }
 
 exit_handler() {
 	echo "TcpDump2Mqtt shutting down."
+	# Tear the children down FIRST (this stops presence.sh and signals any in-flight
+	# 'online' publisher). kill_by only SIGNALs, so WAIT (bounded) for a lagging
+	# 'online' mosquitto_pub to actually exit before the final 'offline' — otherwise
+	# it could land afterwards and revive a stale 'online' with no will-holder.
 	kill_childs
+	i=0
+	while [ "$i" -lt 5 ] && \
+	      /usr/bin/pgrep -f "mosquitto_pub.*$(re_escape "${TOPIC_LASTWILL}")" > /dev/null 2>&1; do
+		i=$((i + 1))
+		/bin/sleep 1
+	done
+	# A clean shutdown disconnects the presence session cleanly, which SUPPRESSES
+	# its last will, so this explicit retained 'offline' is what stops HA from
+	# showing the bridge connected after a graceful stop — and nothing is left to
+	# overwrite it now. BOUNDED: background it and wait a few seconds, then give up.
+	# A foreground publish to a stalled broker would hang this handler forever with
+	# no children left, so the bt_service_watchdog could never restart the bridge.
+	mqtt_pub -r -t "${TOPIC_LASTWILL}" -m offline > /dev/null 2>&1 &
+	off=$!
+	i=0
+	while [ "$i" -lt 3 ] && kill -0 "$off" 2>/dev/null; do
+		i=$((i + 1))
+		/bin/sleep 1
+	done
+	# kill_tree, not plain kill: mqtt_pub is a FUNCTION, so $off is the wrapper
+	# subshell and the real mosquitto_pub is its child. Killing only the wrapper
+	# would leave a publisher stuck in DNS/TCP connect alive, and its retained
+	# 'offline' could later overwrite the 'online' of a bridge the watchdog restarts.
+	kill_tree "$off"
 	exit 0
 }
 trap exit_handler INT TERM
@@ -89,6 +137,10 @@ echo "MQTT host ${MQTT_HOST}:${MQTT_PORT}"
 echo "Checking for stale processes..."
 kill_childs
 
+# Watchdog-pass counter that periodically forces a Home Assistant discovery
+# re-reconcile (see the discovery block in the loop).
+disc_count=0
+
 # Keep the bridge services running. Deliberately NOT gated on any gateway/ICMP
 # probe: a gateway that blocks ICMP — or an unreachable gateway with a reachable
 # local/same-subnet broker — must not stop the bridge from starting. Broker
@@ -116,13 +168,85 @@ while : ; do
 		echo "Starting MQTT receiver..."
 		/etc/tcpdump2mqtt/StartMqttReceive &
 		/bin/sleep 5
-		# Backgrounded (see above) so a stalled publish can't block the loop.
-		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online &
+	fi
+
+	# Presence: presence.sh holds a long-lived session carrying the retained
+	# 'offline' last will, so an UNCLEAN drop makes the broker mark the bridge
+	# offline (the reliable half of availability). Start or respawn it if it died.
+	presence_up=0
+	if [ -x /etc/tcpdump2mqtt/presence.sh ]; then
+		if /usr/bin/pgrep -f "$(re_escape "/etc/tcpdump2mqtt/presence.sh")" > /dev/null 2>&1; then
+			presence_up=1
+		else
+			echo "Starting MQTT presence..."
+			/etc/tcpdump2mqtt/presence.sh &
+			/bin/sleep 2
+			# Treat it as up only if it SURVIVED startup: presence.sh exits if its
+			# mosquitto_sub dies immediately (e.g. auth refused at CONNECT), so a
+			# freshly-forked-then-gone wrapper won't get an 'online' published for it.
+			# This is deliberately NOT proof of a live MQTT session (a merely
+			# unreachable broker keeps mosquitto_sub alive retrying) — see below.
+			if /usr/bin/pgrep -f "$(re_escape "/etc/tcpdump2mqtt/presence.sh")" > /dev/null 2>&1; then
+				presence_up=1
+			fi
+		fi
+	fi
+
+	# Refresh the retained 'online' each pass while presence is up. Best-effort by
+	# nature: a separate mosquitto_pub can't share the presence subscriber's LWT
+	# connection, so 'online' is not atomic with the will. In practice it's coupled
+	# through the broker — this publish only takes effect when the broker accepts it,
+	# and the presence session uses the SAME credentials, so a broker that accepts
+	# this publish also lets the presence session connect (registering the will).
+	# The session reconnects on its own after a blip, and an unclean blip leaves the
+	# broker's retained value at 'offline' (the will), so republishing here restores
+	# 'online' within one loop; an unreachable broker makes this no-op; a dead bridge
+	# (no loop) leaves 'offline'. It thus errs toward a brief stale 'offline' rather
+	# than a stale 'online'. Backgrounded so a stalled publish can't block the loop —
+	# but only when no earlier 'online' publish is still in flight, so a prolonged
+	# outage (broker unreachable, each mosquitto_pub hanging on connect) can't
+	# accumulate a new hung publisher every pass on this constrained device. At most
+	# one is ever pending; when it finally gives up, the next pass starts a fresh one.
+	if [ "$presence_up" -eq 1 ] && \
+	   ! /usr/bin/pgrep -f "mosquitto_pub.*$(re_escape "${TOPIC_LASTWILL}")" > /dev/null 2>&1; then
+		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online > /dev/null 2>&1 &
 	fi
 
 	if [ -x /etc/tcpdump2mqtt/keypress.sh ] && \
 	   ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/keypress.sh" > /dev/null 2>&1; then
 		/etc/tcpdump2mqtt/keypress.sh &
+	fi
+
+	# Home Assistant auto-discovery: reconcile the retained discovery configs —
+	# ha_discovery.sh PUBLISHES them when HA_DISCOVERY=1, or CLEARS them when 0 (so
+	# an opt-out removes the entities), and writes HA_MARKER once it succeeds.
+	# Re-launch it from the loop until that marker exists: retained state only needs
+	# to land ONCE, but a broker that is still down after the script's own retries
+	# would, with a one-shot launch, never get discovery published/cleared until a
+	# reboot. Gated on HA_MARKER (done) and on it not already running (pgrep, path
+	# re_escaped so the '.sh' dots can't over-match). Backgrounded so its retry
+	# sleeps can't block this watchdog loop.
+	#
+	# Also drop the marker every ~10 min (20 passes) to FORCE a periodic re-reconcile:
+	# a broker that restarts without on-disk persistence (Mosquitto's default) loses
+	# its retained store, so the discovery configs vanish while the marker still says
+	# "done". Without this, HA couldn't rediscover the entities until the intercom
+	# itself rebooted. Re-publishing retained configs is idempotent, so this is cheap.
+	disc_count=$((disc_count + 1))
+	if [ "$disc_count" -ge 20 ]; then
+		disc_count=0
+		/bin/rm -rf "$HA_MARKER"
+	fi
+	# Convergence is a REGULAR, NON-SYMLINK file (ha_discovery.sh writes it with
+	# ": >"). Test -f AND ! -L, not -e: a stray directory, or a symlink pointing at
+	# any regular file, planted at the marker path (e.g. before $RUNDIR was locked to
+	# 0700) must NOT be mistaken for "done" — -f alone follows a symlink and -e
+	# accepts a directory. -rf above and in ha_discovery.sh removes any such non-file
+	# path (link included) so a real marker can be written.
+	if [ -x /etc/tcpdump2mqtt/ha_discovery.sh ] && \
+	   { [ ! -f "$HA_MARKER" ] || [ -L "$HA_MARKER" ]; } && \
+	   ! /usr/bin/pgrep -f "$(re_escape "/etc/tcpdump2mqtt/ha_discovery.sh")" > /dev/null 2>&1; then
+		/etc/tcpdump2mqtt/ha_discovery.sh &
 	fi
 
 	/bin/sleep 30

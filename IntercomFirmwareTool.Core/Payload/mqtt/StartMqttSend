@@ -64,28 +64,15 @@ frame_own() {
 	}'
 }
 
-# Kill each given PID AND its direct children. The socket pipeline backgrounds
-# shell FUNCTIONS (frame_own, mqtt_pub) and the device's /bin/sh is bash, which
-# does NOT exec-optimize a backgrounded function body — so $! is the wrapper
-# subshell and the real awk / mosquitto_pub is its child. Killing only the
-# wrapper would orphan a publisher stuck in DNS/TCP connect (leaking one per
-# reconnect) or an nc still holding the monitor session. pgrep -P reaps the real
-# child too. (nc is backgrounded directly, so it has no wrapper — kill_tree just
-# kills it and finds no children, which is fine.)
-kill_tree() {
-	for _p in "$@"; do
-		[ -n "$_p" ] || continue
-		_kids=$(/usr/bin/pgrep -P "$_p" 2>/dev/null)
-		# shellcheck disable=SC2086
-		kill "$_p" $_kids 2>/dev/null
-	done
-}
+# kill_tree() (kill a PID AND its real children) is shared via mqtt_common.sh,
+# sourced above — the socket pipeline backgrounds shell FUNCTIONS whose $! is a
+# wrapper subshell, so the real awk/mosquitto_pub child is reaped by pgrep -P.
 
 # True when the OpenWebNet gateway accepts a monitor session (it replies with the
 # "*#*1##" ACK). Lets us decide whether the socket back-end is usable BEFORE
 # committing to it; a refusal (gateway absent or not yet up) selects tcpdump.
 probe_socket() {
-	mkdir -p "$RUNDIR" 2>/dev/null
+	ensure_rundir   # 0700 root-only (mqtt_common.sh); FIFOs below are 0600
 	pfifo="$RUNDIR/own_probe_i.$$"
 	ptmp="$RUNDIR/own_probe_o.$$"
 	rm -f "$pfifo"
@@ -127,7 +114,7 @@ probe_socket() {
 # socket drops, the framer dies, or the publisher loses the broker); the
 # orchestrator (TcpDump2Mqtt) then respawns us.
 run_socket() {
-	mkdir -p "$RUNDIR" 2>/dev/null
+	ensure_rundir   # 0700 root-only (mqtt_common.sh); FIFOs below are 0600
 	cfifo="$RUNDIR/own_conn.$$"    # handshake holder -> nc stdin
 	rfifo="$RUNDIR/own_raw.$$"     # nc (socket bytes) -> frame_own
 	ffifo="$RUNDIR/own_frames.$$"  # frame_own (one frame/line) -> mqtt_pub

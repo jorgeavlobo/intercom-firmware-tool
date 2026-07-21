@@ -406,6 +406,11 @@ Key: {1}</value></data>
   <data name="Chk_MqttTcpdump" xml:space="preserve"><value>Use tcpdump capture (compatibility)</value></data>
   <data name="Tip_MqttTcpdump" xml:space="preserve"><value>Leave unchecked to stream events straight from the local OpenWebNet gateway (no tcpdump, no resident Python). Tick this only if the bridge shows no bus activity — it forces the legacy tcpdump capture.</value></data>
   <data name="Hint_MqttTcpdump" xml:space="preserve"><value>Default: a direct OpenWebNet monitor socket, lighter on the device. The tcpdump path is used automatically as a fallback if the gateway is unreachable.</value></data>
+  <data name="Chk_MqttHaDiscovery" xml:space="preserve"><value>Home Assistant auto-discovery</value></data>
+  <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Publish retained MQTT discovery configs so the bridge's entities (connectivity, bus dump, last key) appear in Home Assistant automatically, with no manual YAML. Read-only — no command entity is created.</value></data>
+  <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>On by default: the bridge's entities (connectivity, bus, last key) appear in Home Assistant automatically, as one device. Untick to skip it; a later build with the same device id then clears them from the broker.</value></data>
+  <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Device id:</value></data>
+  <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identifier for the Home Assistant device and its entities. Distinct per unit gives each bridge its own HA device; for several units on one broker, also set distinct topics (else they mirror each other). ASCII letters, digits, '_' or '-' only.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receive (commands):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Bus dump:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Start date:</value></data>
@@ -418,5 +423,6 @@ Key: {1}</value></data>
 Enable it only on an authenticated, trusted broker. Enable the remote command channel?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Remote command channel</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>A topic is empty, spans multiple lines, or a publish topic contains an MQTT wildcard ('+' or '#').</value></data>
+  <data name="MqttHint_HaNodeId" xml:space="preserve"><value>The Home Assistant node id may contain only ASCII letters, digits, '_' or '-'.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>connection refused or no response.</value></data>
 </root>

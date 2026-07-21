@@ -713,6 +713,39 @@
                     <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
                                Text="{loc:Loc Hint_MqttTcpdump}"/>
 
+                    <!-- Home Assistant auto-discovery (Phase 2, #12 item 1). ON by
+                         default when the bridge is installed (plug-and-play): publishes
+                         retained, read-only discovery configs so the bridge's entities
+                         appear in Home Assistant with no manual YAML. Read-only, so the
+                         secure-by-default posture holds; untick to skip (a later build
+                         then clears any previously-published entities). -->
+                    <!-- IsChecked (default on) is set in InitMqttUi, NOT here, so the
+                         Checked handler can't fire during InitializeComponent before the
+                         masked password fields it reads are constructed. -->
+                    <CheckBox x:Name="ChkMqttHaDiscovery" Margin="0,10,0,0"
+                              Content="{loc:Loc Chk_MqttHaDiscovery}" ToolTip="{loc:Loc Tip_MqttHaDiscovery}"
+                              Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
+                    <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
+                               Text="{loc:Loc Hint_MqttHaDiscovery}"/>
+                    <!-- Per-unit HA device id: distinct values give each bridge its own
+                         HA device/entities (a multi-unit broker also needs distinct MQTT
+                         topics, else the devices mirror each other's data — see HaNodeId
+                         doc). Deliberately ALWAYS editable — not tied
+                         to the checkbox — because the opt-out/clear path also needs it:
+                         with discovery unchecked, ha_discovery.sh clears the retained
+                         configs for THIS node id, so the user must be able to enter the
+                         id a previous build published under (a disabled field, reset to
+                         the default in a new session, would clear the wrong identity).
+                         The default Text is set in InitMqttUi (see the checkbox note). -->
+                    <StackPanel Orientation="Horizontal" Margin="22,4,0,0">
+                        <TextBlock x:Name="LblMqttHaNodeId" Text="{loc:Loc Field_MqttHaNodeId}"
+                                   VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBox x:Name="TxtMqttHaNodeId" Width="200"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttHaNodeId}"
+                                 ToolTip="{loc:Loc Tip_MqttHaNodeId}"
+                                 TextChanged="MqttField_TextChanged"/>
+                    </StackPanel>
+
                     <!-- Topics (collapsible, prefilled with the Home Assistant defaults) -->
                     <CheckBox x:Name="ChkMqttTopics" Margin="0,10,0,0"
                               Content="{loc:Loc Chk_MqttTopics}" ToolTip="{loc:Loc Tip_MqttTopics}"

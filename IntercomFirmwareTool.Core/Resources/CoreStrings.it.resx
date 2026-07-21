@@ -170,6 +170,9 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Mqtt_InvalidOwnEndpoint" xml:space="preserve">
     <value>L'host del monitor OpenWebNet deve essere valido e la porta deve essere compresa tra 1 e 65535.</value>
   </data>
+  <data name="Mqtt_InvalidHaDiscovery" xml:space="preserve">
+    <value>Il node id di Home Assistant deve essere non vuoto e può usare solo lettere e cifre ASCII, '_' o '-'. Il prefisso di discovery deve essere non vuoto, senza spazi, senza wildcard MQTT (+ #) e senza '/' iniziale, finale o doppio.</value>
+  </data>
   <data name="Mqtt_UserPassBothOrNeither" xml:space="preserve">
     <value>Nome utente e password MQTT devono essere impostati insieme (entrambi o nessuno).</value>
   </data>

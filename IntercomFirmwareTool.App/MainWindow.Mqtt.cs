@@ -85,6 +85,14 @@ namespace IntercomFirmwareTool.App
             TxtMqttTopicCmdResult.Text = d.TopicCmdResult;
             TxtMqttTopicFileContent.Text = d.TopicFileContent;
 
+            // HA auto-discovery defaults set here (not in XAML) for the same reason
+            // as the port above: their Checked/TextChanged handlers call
+            // UpdateBuildEnabled, which reads the masked password fields — those must
+            // already be constructed, which they are by the time InitMqttUi runs.
+            // On by default (plug-and-play; read-only entities); node id prefilled.
+            TxtMqttHaNodeId.Text = d.HaNodeId;
+            ChkMqttHaDiscovery.IsChecked = true;
+
             RefreshMqttPlaceholders();
         }
 
@@ -620,6 +628,22 @@ namespace IntercomFirmwareTool.App
             foreach (var box in publishTopics)
                 if (box.Text.IndexOfAny(new[] { '+', '#' }) >= 0) return L("MqttHint_Topic");
 
+            // HA discovery node id — mirror MqttInstaller.Validate, which validates it
+            // UNCONDITIONALLY (not only when discovery is enabled): the manifest is
+            // generated and ha_discovery.sh runs even when disabled, to CLEAR the
+            // retained configs, so a bad node id would fail the build with discovery
+            // off too. The node becomes a discovery-topic level and unique_id, so it
+            // must be the HA charset [A-Za-z0-9_-]. An empty field falls back to the
+            // valid default in TryBuildMqttOptions, so only a non-empty out-of-charset
+            // value is rejected — fail here rather than later in the Core popup.
+            {
+                string node = TxtMqttHaNodeId.Text.Trim();
+                if (node.Length > 0)
+                    foreach (char c in node)
+                        if (!(char.IsAsciiLetterOrDigit(c) || c == '_' || c == '-'))
+                            return L("MqttHint_HaNodeId");
+            }
+
             return null;
         }
 
@@ -671,7 +695,11 @@ namespace IntercomFirmwareTool.App
                 AllowRemoteShell: ChkMqttRemoteShell.IsChecked == true,
                 // Unchecked (default) = the low-footprint OpenWebNet socket monitor;
                 // checked = force the faithful tcpdump + filter.py capture back-end.
-                UseTcpdumpCapture: ChkMqttTcpdump.IsChecked == true)
+                UseTcpdumpCapture: ChkMqttTcpdump.IsChecked == true,
+                // Publish HA discovery configs so entities appear automatically. ON
+                // by default when the bridge is installed (plug-and-play); read-only
+                // entities, so secure-by-default holds.
+                EnableHaDiscovery: ChkMqttHaDiscovery.IsChecked == true)
             {
                 // Topics are prefilled with the record's defaults, so an untouched
                 // panel reproduces those exactly; a customized one overrides them.
@@ -686,6 +714,14 @@ namespace IntercomFirmwareTool.App
                 TopicKey = TxtMqttTopicKey.Text,
                 TopicCmdResult = TxtMqttTopicCmdResult.Text,
                 TopicFileContent = TxtMqttTopicFileContent.Text,
+                // HA device/node id — distinct per unit gives each bridge its own HA
+                // device/entities on one broker (multi-unit also needs distinct MQTT
+                // topics; see the HaNodeId doc). Fall back to the record default if the
+                // field was cleared, so an empty box doesn't force a validation error.
+                // HaDiscoveryPrefix is deliberately NOT surfaced in the UI: it stays at
+                // the HA standard ("homeassistant"), which virtually no one changes, so
+                // exposing it would only add clutter. Library callers can still set it.
+                HaNodeId = NullIfEmpty(TxtMqttHaNodeId.Text.Trim()) ?? new MqttOptions("x").HaNodeId,
             };
 
             // Surface the Core validator's exact (localized) message as a clean
