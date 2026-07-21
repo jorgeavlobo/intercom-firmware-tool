@@ -699,7 +699,10 @@ namespace IntercomFirmwareTool.App
                 // Publish HA discovery configs so entities appear automatically. ON
                 // by default when the bridge is installed (plug-and-play); read-only
                 // entities, so secure-by-default holds.
-                EnableHaDiscovery: ChkMqttHaDiscovery.IsChecked == true)
+                EnableHaDiscovery: ChkMqttHaDiscovery.IsChecked == true,
+                // Unchecked (default) = raw OpenWebNet frames on the bus (faithful);
+                // checked = one structured JSON object per frame on TOPIC_DUMP.
+                UseJsonPayload: ChkMqttJsonPayload.IsChecked == true)
             {
                 // Topics are prefilled with the record's defaults, so an untouched
                 // panel reproduces those exactly; a customized one overrides them.
