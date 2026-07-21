@@ -126,10 +126,10 @@ impl Config {
     }
 
     /// The MQTT client id. An operator override (`MQTT_CLIENT_ID`) wins; otherwise a
-    /// stable, per-unit id derived from the LWT topic. With atomic birth/will on one
-    /// connection we use a CLEAN session, so the long injective hex id the shell
-    /// needed for durable-session resume (and its 23-byte portability problem) is
-    /// gone (see issue #32).
+    /// stable, per-unit id derived from the topics. The session is DURABLE
+    /// (clean_session=false, see main.rs) so the broker can queue QoS 1 commands
+    /// across a brief disconnect, which requires a STABLE, collision-free id to resume
+    /// the right session — exactly what the injective hex below provides.
     ///
     /// The id is `btmqttd-<sanitised LWT>-<hex(LWT)>-<hex(RX)>`. The sanitised prefix
     /// is a lossy readability aid; the appended lowercase HEX of the raw LWT- and
