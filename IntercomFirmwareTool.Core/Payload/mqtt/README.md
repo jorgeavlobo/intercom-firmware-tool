@@ -44,7 +44,7 @@ path.
 | `TcpDump2Mqtt` | Orchestrator: keeps sender/receiver/keypress alive, publishes status, recovers from network outages. |
 | `TcpDump2Mqtt.sh` | Init launcher (symlinked from `/etc/rc5.d/S99zTcpDump2Mqtt`). |
 | `mqtt_common.sh` | Shared helper sourced by the scripts below: config load + `mqtt_pub`/`mqtt_sub_stream` (auth+TLS) + the `remote_shell_allowed` gate. |
-| `StartMqttSend` | Publish bus frames to `TOPIC_DUMP`. Default: a direct OpenWebNet **monitor session** (`socket` mode — no tcpdump, no resident python; framing via busybox `awk`). Falls back to `tcpdump` on `lo` → `filter.py` when the gateway is unreachable, or when `CAPTURE_MODE=tcpdump`. |
+| `StartMqttSend` | Publish bus frames to `TOPIC_DUMP`. Default: a direct OpenWebNet **monitor session** (`socket` mode — no tcpdump, no resident python; framing via busybox `awk`). Falls back to `tcpdump` on `lo` → `filter.py` when the gateway is unreachable, or when `CAPTURE_MODE=tcpdump`. With `PAYLOAD_FORMAT=json` each frame is published as a structured object (`own_frame_to_json`, jq) instead of the raw string. |
 | `StartMqttReceive` | Holds a **persistent** subscription to `TOPIC_RX` → OpenWebNet passthrough to the unit; gated JSON command channel. The same long-lived session carries the retained `offline` last will, so it is the single owner of HA availability (`TOPIC_LASTWILL`). Commands are consumed line-by-line, so each must be a **single line** (OpenWebNet frames already are; JSON commands must be **compact** — multi-line file content travels as a JSON `\n`-escaped string). |
 | `keypress.sh` | `evtest` front-panel keys → publish to `TOPIC_KEY`. |
 | `filter.py` | Extract `*…##` OpenWebNet frames from the `tcpdump -A` text stream, for the **tcpdump fallback** back-end only (installed at `/etc/tcpdump2mqtt/filter.py`). |
@@ -132,6 +132,22 @@ path.
     It also eliminates the text-scraping cross-line fragility (see below). The
     faithful `tcpdump`+`filter.py` path is kept and selected automatically when
     the gateway can't be reached, or explicitly via `CAPTURE_MODE=tcpdump`.
+20. **Structured JSON bus payloads (Phase 2, #12 item 3).**
+    `PAYLOAD_FORMAT=json` (the **default**; set `raw` to opt out) publishes the bus
+    as one structured object per frame instead of the raw `*…##` string:
+    `{"frame","ts","type","who","what","where","params"}`, built by `jq`
+    (`own_frame_to_json`) so escaping is correct. It's a **structural** parse — a
+    leading `*#` is a `request`, otherwise a `command`; positional `who`/`what`/
+    `where` are surfaced and token sub-parameters (`0#0`) kept intact — not a
+    semantic decode of what the codes mean. Only `TOPIC_DUMP` changes (`TOPIC_KEY`
+    is already JSON); it works under both capture back-ends, each of which runs the
+    transform as its own PID-supervised stage so a broker-down publisher is still
+    detected on a quiet bus (the `tcpdump` fallback got the same per-stage
+    supervision as the socket path). If `jq` is missing the sender **downgrades to
+    raw**, and the HA `bus` entity's `value_template` tolerates that (state stays
+    the raw frame). With HA discovery on, the `bus` entity exposes the parsed fields
+    as attributes. Semantic decoding is future work — see the single-connection
+    client in #32.
 
 ## Known limitations (addressed in later phases)
 

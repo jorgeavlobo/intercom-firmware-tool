@@ -40,6 +40,15 @@ namespace IntercomFirmwareTool.Core
     /// connectivity/bus/keypad entities appear in HA automatically (no manual YAML). Additive and
     /// read-only (no command entity); off by default at the Core layer. See ha_discovery.sh.
     /// </param>
+    /// <param name="UseJsonPayload">
+    /// Publish the bus (TOPIC_DUMP) as one structured JSON object per OpenWebNet frame
+    /// (<c>{frame, ts, type, who, what, where, params}</c>) instead of the raw "*...##" string.
+    /// On by default (json — the modern, HA-friendly representation); set false for raw frames
+    /// (a low-level, dependency-free option). TOPIC_KEY is already JSON either way. When on, the
+    /// HA <c>bus</c> entity exposes the parsed fields as attributes (its value_template also
+    /// tolerates a raw payload, so the on-device jq-missing downgrade still shows the frame). See
+    /// PAYLOAD_FORMAT / own_frame_to_json in the payload scripts.
+    /// </param>
     public sealed record MqttOptions(
         string MqttHost,
         int MqttPort = 1883,
@@ -51,7 +60,8 @@ namespace IntercomFirmwareTool.Core
         string? HostIpForHosts = null,
         bool AllowRemoteShell = false,
         bool UseTcpdumpCapture = false,
-        bool EnableHaDiscovery = false)
+        bool EnableHaDiscovery = false,
+        bool UseJsonPayload = true)
     {
         // A record's synthesized ToString() prints EVERY property — which would
         // leak MqttPass and the TLS private key (ClientKeyPem) into any log line
@@ -62,6 +72,7 @@ namespace IntercomFirmwareTool.Core
             $"HasAuth = {HasAuth}, HasTls = {HasTls}, HasMutualTls = {HasMutualTls}, " +
             $"AllowRemoteShell = {AllowRemoteShell}, " +
             $"Capture = {(UseTcpdumpCapture ? "tcpdump" : "socket")}, " +
+            $"Payload = {(UseJsonPayload ? "json" : "raw")}, " +
             $"HaDiscovery = {EnableHaDiscovery} }}";
 
         /// <summary>OpenWebNet gateway host for the socket monitor back-end (loopback alias).</summary>
@@ -726,6 +737,12 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("OWN_HOST", opts.OwnHost));
             sb.Append("OWN_PORT_MON=").Append(opts.OwnPortMon).Append('\n');
 
+            // Bus payload format: 'json' (default; one structured object per frame — see
+            // own_frame_to_json) or 'raw' (OpenWebNet frames verbatim). Only TOPIC_DUMP is
+            // affected. StartMqttSend downgrades json->raw if jq is missing; the HA bus entity's
+            // value_template tolerates a raw payload, so that stays functional.
+            sb.Append(Conf("PAYLOAD_FORMAT", opts.UseJsonPayload ? "json" : "raw"));
+
             // Home Assistant auto-discovery: when 1, the orchestrator runs
             // ha_discovery.sh once at startup to publish the retained configs under
             // HaDir. The discovery prefix/node/topics are baked into those files.
@@ -824,11 +841,34 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
-            // Last OpenWebNet bus frame (diagnostic).
-            entities.Add(new HaEntity(
-                "bus.json",
-                Topic("sensor", "bus"),
-                JsonSerializer.Serialize(new
+            // Last OpenWebNet bus frame (diagnostic). In JSON payload mode the state is the
+            // frame and the parsed fields (type/who/what/where/params/ts) are exposed as entity
+            // attributes; in raw mode the state is the frame string.
+            // Both templates TOLERATE a non-JSON payload: StartMqttSend downgrades json->raw when
+            // jq is missing, so raw "*...##" frames can arrive on TopicDump. The value_template
+            // then still shows the raw frame instead of going unknown ("value_json is defined else
+            // value"), and the json_attributes_template yields "{}" instead of letting Home
+            // Assistant try to parse each raw frame as attributes JSON (which logs "Erroneous
+            // JSON" noise) — attributes just stay empty until JSON output resumes.
+            // Two separate anonymous objects (not a ?: to object) so JsonSerializer keeps each
+            // one's compile-time type — serializing through a plain `object` would emit `{}`.
+            string busConfigJson = opts.UseJsonPayload
+                ? JsonSerializer.Serialize(new
+                {
+                    name = "OpenWebNet bus",
+                    unique_id = $"{node}_bus",
+                    state_topic = opts.TopicDump,
+                    value_template = "{{ value_json.frame if value_json is defined else value }}",
+                    json_attributes_topic = opts.TopicDump,
+                    json_attributes_template = "{{ value if value_json is defined else '{}' }}",
+                    icon = "mdi:bus",
+                    entity_category = "diagnostic",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)
+                : JsonSerializer.Serialize(new
                 {
                     name = "OpenWebNet bus",
                     unique_id = $"{node}_bus",
@@ -839,7 +879,8 @@ namespace IntercomFirmwareTool.Core
                     payload_available = "online",
                     payload_not_available = "offline",
                     device,
-                }, HaJson)));
+                }, HaJson);
+            entities.Add(new HaEntity("bus.json", Topic("sensor", "bus"), busConfigJson));
 
             // Last key press: state = key name, code/value exposed as attributes.
             entities.Add(new HaEntity(

@@ -39,6 +39,13 @@ fi
 : "${OWN_HOST:=127.0.0.1}"
 : "${OWN_PORT_MON:=20000}"
 
+# Bus payload format: "json" (default — one structured object per frame, see
+# own_frame_to_json; the modern, HA-friendly representation) or "raw" (the OpenWebNet
+# frame verbatim — the low-level, dependency-free option, for debugging or a bare-frame
+# consumer). Only the bus (TOPIC_DUMP) is affected; TOPIC_KEY is already JSON, and
+# status/start_date stay simple.
+: "${PAYLOAD_FORMAT:=json}"
+
 # Home Assistant discovery success marker. ha_discovery.sh writes it once the
 # retained configs are reconciled; the orchestrator re-launches ha_discovery.sh
 # from its watchdog loop until this file exists, so a broker that is still down
@@ -94,6 +101,39 @@ mqtt_pub() {
 	/usr/bin/mosquitto_pub "$@"
 }
 
+# Transform a stream of raw OpenWebNet frames (one per line on stdin) into one compact
+# structured-JSON object per line, for PAYLOAD_FORMAT=json. Uses jq — already required by
+# the JSON command channel / keypress and installed by the bridge — so all string
+# escaping is correct. -R reads each raw line as a string; --unbuffered flushes per line
+# so a busy bus isn't delayed; -c keeps one object per line for `mosquitto_pub -l`.
+#
+# Structural (not semantic) parse: a leading "*#" marks a status/dimension REQUEST
+# ("*#WHO*WHERE…##"), otherwise a COMMAND ("*WHO*WHAT*WHERE…##"). Positional who/what/
+# where are surfaced for the common shapes; anything extra goes to params. Sub-parameters
+# inside a token (e.g. "0#0", "11#4#0") are left intact — decoding what WHO/WHAT mean is
+# out of scope (a consumer/HA template can map semantics). ts is UTC ISO-8601.
+#
+# The session ACK/NACK control frames ("*#*1##" / "*#*0##") are DROPPED here (jq `empty`):
+# they carry no bus event and would otherwise parse into a malformed object (empty who,
+# where="1"/"0"). Both capture back-ends already suppress them upstream (the socket framer
+# in frame_own, the tcpdump path in filter.py), so this guard is normally redundant; it is
+# kept as a defensive net that keeps JSON output well-formed even if a control frame ever
+# reaches this stage.
+own_frame_to_json() {
+	jq -Rc --unbuffered '
+		if . == "*#*1##" or . == "*#*0##" then empty
+		else
+		{ frame: ., ts: (now | todate) }
+		+ ( (ltrimstr("*") | rtrimstr("##")) as $b
+		    | if ($b | startswith("#"))
+		      then ($b | ltrimstr("#") | split("*")) as $t
+		           | { type: "request", who: $t[0], what: null, where: $t[1], params: $t[2:] }
+		      else ($b | split("*")) as $t
+		           | { type: "command", who: $t[0], what: $t[1], where: $t[2], params: $t[3:] }
+		      end )
+		end'
+}
+
 # Persistent command subscription: a long-lived mosquitto_sub that STREAMS every
 # message on TOPIC_RX and ALSO carries the retained 'offline' last will on
 # TOPIC_LASTWILL — a single session that is both the command receiver AND the
@@ -146,7 +186,13 @@ mqtt_detect_clean() {
 # hex chars, so DISTINCT inputs always produce DISTINCT outputs (not probabilistically, as
 # a 32-bit checksum would). stderr is discarded for quietness.
 mqtt_hex() {
-	printf '%s' "$1" | awk 'BEGIN{ORS="";for(i=0;i<256;i++)o[sprintf("%c",i)]=i}{for(i=1;i<=length($0);i++)printf "%02x",o[substr($0,i,1)]}' 2>/dev/null
+	# LC_ALL=C pins BYTE semantics. awk's length()/substr() (and sprintf("%c",i) that
+	# builds the ord[] table) are CHARACTER-based in a UTF-8 locale, so a non-ASCII topic
+	# byte would be read as a multibyte char absent from the table and break the
+	# byte-for-byte injective mapping (distinct topics could then collide). In the C
+	# locale every byte is one char, so each input byte maps to exactly two hex chars.
+	# (The device's busybox awk is already byte-oriented; this makes gawk/mawk identical.)
+	printf '%s' "$1" | LC_ALL=C awk 'BEGIN{ORS="";for(i=0;i<256;i++)o[sprintf("%c",i)]=i}{for(i=1;i<=length($0);i++)printf "%02x",o[substr($0,i,1)]}' 2>/dev/null
 }
 
 # The receiver's durable-session client id. An operator MQTT_CLIENT_ID override wins

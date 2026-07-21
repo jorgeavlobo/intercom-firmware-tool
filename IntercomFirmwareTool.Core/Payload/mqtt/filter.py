@@ -20,6 +20,11 @@ import sys
 # concatenated frames on one line are split; internal '*' bytes stay in-frame.
 FRAME = re.compile(r"\*.*?##")
 
+# Session ACK/NACK control frames carry no bus event. Drop them so the tcpdump
+# back-end matches the socket framer (frame_own), which also drops them — this
+# keeps both raw and JSON payloads consistent across the two capture back-ends.
+CONTROL = frozenset(("*#*1##", "*#*0##"))
+
 
 def main():
     # iter(readline, "") instead of "for line in sys.stdin": on CPython 2 the
@@ -28,7 +33,10 @@ def main():
     # on both Python 2 and 3.
     for line in iter(sys.stdin.readline, ""):
         for match in FRAME.finditer(line):
-            print(match.group(0))
+            frame = match.group(0)
+            if frame in CONTROL:
+                continue
+            print(frame)
             sys.stdout.flush()
 
 

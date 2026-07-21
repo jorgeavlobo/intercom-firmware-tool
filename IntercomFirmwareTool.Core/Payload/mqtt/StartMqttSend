@@ -22,6 +22,14 @@
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
 . /etc/tcpdump2mqtt/mqtt_common.sh
 
+# PAYLOAD_FORMAT=json needs jq (own_frame_to_json). jq is installed by the bridge, but on
+# a variant without it, downgrade to raw here rather than spawn a JSON stage that dies and
+# is respawned forever — the raw frames still publish faithfully.
+if [ "${PAYLOAD_FORMAT}" = "json" ] && ! command -v jq > /dev/null 2>&1; then
+	echo "StartMqttSend: PAYLOAD_FORMAT=json needs jq (not found); publishing raw frames."
+	PAYLOAD_FORMAT=raw
+fi
+
 # CAPTURE_MODE / OWN_HOST / OWN_PORT_MON come from the config (defaulted in
 # mqtt_common.sh). openserver is aliased to loopback (bt_hosts.sh) and its
 # plaintext OwnPort is 20000 (see /home/bticino/cfg/openserver: "OwnPort=20000",
@@ -117,10 +125,14 @@ run_socket() {
 	ensure_rundir   # 0700 root-only (mqtt_common.sh); FIFOs below are 0600
 	cfifo="$RUNDIR/own_conn.$$"    # handshake holder -> nc stdin
 	rfifo="$RUNDIR/own_raw.$$"     # nc (socket bytes) -> frame_own
-	ffifo="$RUNDIR/own_frames.$$"  # frame_own (one frame/line) -> mqtt_pub
-	rm -f "$cfifo" "$rfifo" "$ffifo"
+	ffifo="$RUNDIR/own_frames.$$"  # frame_own (one frame/line) -> publisher (or JSON stage)
+	jfifo="$RUNDIR/own_json.$$"    # own_frame_to_json -> mqtt_pub (PAYLOAD_FORMAT=json only)
+	rm -f "$cfifo" "$rfifo" "$ffifo" "$jfifo"
 	mkfifo -m 600 "$cfifo" 2>/dev/null && mkfifo -m 600 "$rfifo" 2>/dev/null \
 		&& mkfifo -m 600 "$ffifo" 2>/dev/null || { rm -f "$cfifo" "$rfifo" "$ffifo"; return 1; }
+	if [ "${PAYLOAD_FORMAT}" = "json" ]; then
+		mkfifo -m 600 "$jfifo" 2>/dev/null || { rm -f "$cfifo" "$rfifo" "$ffifo" "$jfifo"; return 1; }
+	fi
 
 	# Start nc first (it opens the read end of cfifo), then open cfifo on fd 9 in
 	# THIS shell and send the monitor-session request ("*99*1##"). Open READ+WRITE
@@ -148,20 +160,35 @@ run_socket() {
 	# only bus events, not our own mosquitto_pub loopback traffic).
 	frame_own < "$rfifo" > "$ffifo" &
 	framepid=$!
-	mqtt_pub -l -t "${TOPIC_DUMP}" < "$ffifo" &
-	pubpid=$!
+	# PAYLOAD_FORMAT=json inserts own_frame_to_json as its OWN tracked stage (its own
+	# FIFO + PID), so mqtt_pub stays DIRECTLY supervised — a broker-down publisher is
+	# still noticed on a quiet bus (see the half-dead note above), which a wrapping
+	# `own_frame_to_json | mqtt_pub` subshell would defeat (jq blocked on read).
+	jsonpid=
+	if [ "${PAYLOAD_FORMAT}" = "json" ]; then
+		own_frame_to_json < "$ffifo" > "$jfifo" &
+		jsonpid=$!
+		mqtt_pub -l -t "${TOPIC_DUMP}" < "$jfifo" &
+		pubpid=$!
+	else
+		mqtt_pub -l -t "${TOPIC_DUMP}" < "$ffifo" &
+		pubpid=$!
+	fi
 
 	# Supervise by PID: the instant any stage exits, tear the rest down so
 	# StartMqttSend returns and the orchestrator respawns us (re-probe + reconnect).
 	while kill -0 "$ncpid" 2>/dev/null && kill -0 "$framepid" 2>/dev/null \
-	   && kill -0 "$pubpid" 2>/dev/null; do
+	   && kill -0 "$pubpid" 2>/dev/null \
+	   && { [ -z "$jsonpid" ] || kill -0 "$jsonpid" 2>/dev/null; }; do
 		sleep 5
 	done
 
 	exec 9>&-
-	kill_tree "$ncpid" "$framepid" "$pubpid"
-	wait "$ncpid" "$framepid" "$pubpid" 2>/dev/null
-	rm -f "$cfifo" "$rfifo" "$ffifo"
+	# shellcheck disable=SC2086
+	kill_tree "$ncpid" "$framepid" "$pubpid" $jsonpid
+	# shellcheck disable=SC2086
+	wait "$ncpid" "$framepid" "$pubpid" $jsonpid 2>/dev/null
+	rm -f "$cfifo" "$rfifo" "$ffifo" "$jfifo"
 	return 0
 }
 
@@ -191,9 +218,58 @@ run_tcpdump() {
 			[ -n "${MQTT_PORT}" ] && TCPDUMP_FILTER="${TCPDUMP_FILTER} and not port ${MQTT_PORT}" ;;
 	esac
 
-	/usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER 2>&1 \
-		| "${PYTHON}" /etc/tcpdump2mqtt/filter.py \
-		| mqtt_pub -l -t "${TOPIC_DUMP}"
+	# Run the stages as SEPARATE background processes over FIFOs (not one foreground
+	# pipeline), and supervise by PID — the same model as run_socket. A plain
+	# `tcpdump | filter.py | [own_frame_to_json |] mqtt_pub` sits HALF-DEAD if a
+	# downstream stage exits (e.g. mqtt_pub when the broker is down) while the bus is
+	# quiet: the upstream stages block on their next read, nothing gets SIGPIPE, so the
+	# pipeline never unwinds and the orchestrator's liveness check keeps seeing us
+	# "alive" and never respawns us. Supervising each PID and tearing the rest down the
+	# instant any stage exits fixes that; PAYLOAD_FORMAT=json just inserts one more
+	# tracked stage (own_frame_to_json) between filter.py and mqtt_pub.
+	ensure_rundir   # 0700 root-only (mqtt_common.sh); FIFOs below are 0600
+	tdfifo="$RUNDIR/td_raw.$$"      # tcpdump -> filter.py
+	fdfifo="$RUNDIR/td_frames.$$"   # filter.py (one frame/line) -> publisher (or JSON stage)
+	jdfifo="$RUNDIR/td_json.$$"     # own_frame_to_json -> mqtt_pub (PAYLOAD_FORMAT=json only)
+	rm -f "$tdfifo" "$fdfifo" "$jdfifo"
+	mkfifo -m 600 "$tdfifo" 2>/dev/null && mkfifo -m 600 "$fdfifo" 2>/dev/null \
+		|| { rm -f "$tdfifo" "$fdfifo"; return 1; }
+	if [ "${PAYLOAD_FORMAT}" = "json" ]; then
+		mkfifo -m 600 "$jdfifo" 2>/dev/null || { rm -f "$tdfifo" "$fdfifo" "$jdfifo"; return 1; }
+	fi
+
+	# tcpdump's stderr is merged into the frame stream (2>&1) exactly as the old
+	# pipeline did — filter.py extracts `*…##` frames and ignores the rest.
+	# shellcheck disable=SC2086
+	/usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER > "$tdfifo" 2>&1 &
+	tdpid=$!
+	"${PYTHON}" /etc/tcpdump2mqtt/filter.py < "$tdfifo" > "$fdfifo" &
+	fpid=$!
+	jsonpid=
+	if [ "${PAYLOAD_FORMAT}" = "json" ]; then
+		own_frame_to_json < "$fdfifo" > "$jdfifo" &
+		jsonpid=$!
+		mqtt_pub -l -t "${TOPIC_DUMP}" < "$jdfifo" &
+		pubpid=$!
+	else
+		mqtt_pub -l -t "${TOPIC_DUMP}" < "$fdfifo" &
+		pubpid=$!
+	fi
+
+	# Supervise by PID: the instant any stage exits, tear the rest down so this returns
+	# and the orchestrator respawns us — even on a quiet bus.
+	while kill -0 "$tdpid" 2>/dev/null && kill -0 "$fpid" 2>/dev/null \
+	   && kill -0 "$pubpid" 2>/dev/null \
+	   && { [ -z "$jsonpid" ] || kill -0 "$jsonpid" 2>/dev/null; }; do
+		sleep 5
+	done
+
+	# shellcheck disable=SC2086
+	kill_tree "$tdpid" "$fpid" "$pubpid" $jsonpid
+	# shellcheck disable=SC2086
+	wait "$tdpid" "$fpid" "$pubpid" $jsonpid 2>/dev/null
+	rm -f "$tdfifo" "$fdfifo" "$jdfifo"
+	return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -202,7 +278,8 @@ run_tcpdump() {
 
 # Best-effort cleanup of FIFOs left by a previous instance that was killed
 # mid-run (RUNDIR is tmpfs, so this is belt-and-braces).
-rm -f "$RUNDIR"/own_conn.* "$RUNDIR"/own_raw.* "$RUNDIR"/own_frames.* "$RUNDIR"/own_probe_* 2>/dev/null
+rm -f "$RUNDIR"/own_conn.* "$RUNDIR"/own_raw.* "$RUNDIR"/own_frames.* "$RUNDIR"/own_json.* "$RUNDIR"/own_probe_* \
+      "$RUNDIR"/td_raw.* "$RUNDIR"/td_frames.* "$RUNDIR"/td_json.* 2>/dev/null
 
 case "${CAPTURE_MODE}" in
 	tcpdump)
