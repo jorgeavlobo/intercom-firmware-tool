@@ -116,10 +116,11 @@ namespace IntercomFirmwareTool.Core
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
 
-        // The 9 embedded scripts. TcpDump2Mqtt.conf is generated (not a resource);
+        // The 10 embedded scripts. TcpDump2Mqtt.conf is generated (not a resource);
         // jq/evtest come from PayloadBinaries. Executables 0775; mqtt_common.sh is
         // only sourced, so 0644. ha_discovery.sh runs on every startup and
-        // self-selects publish (HA_DISCOVERY=1) vs clear (0).
+        // self-selects publish (HA_DISCOVERY=1) vs clear (0). presence.sh holds the
+        // persistent last-will session so HA availability is reliable.
         private static readonly ScriptFile[] Scripts =
         {
             new(ResourcePrefix + "TcpDump2Mqtt",       EtcDir + "/TcpDump2Mqtt",       775),
@@ -130,6 +131,7 @@ namespace IntercomFirmwareTool.Core
             new(ResourcePrefix + "filter.py",          EtcDir + "/filter.py",          775),
             new(ResourcePrefix + "mqtt_common.sh",     EtcDir + "/mqtt_common.sh",     644),
             new(ResourcePrefix + "ha_discovery.sh",    EtcDir + "/ha_discovery.sh",    775),
+            new(ResourcePrefix + "presence.sh",        EtcDir + "/presence.sh",        775),
             new(ResourcePrefix + "bt_service_watchdog", "/etc/init.d/bt_service_watchdog", 775),
         };
 
@@ -765,14 +767,14 @@ namespace IntercomFirmwareTool.Core
             string Topic(string component, string objectId) =>
                 $"{prefix}/{component}/{node}/{objectId}/config";
 
-            // NOTE on availability: the last-will (TopicLastWill) is the ONLY
-            // online/offline signal today, and with the current one-shot -C 1
-            // subscription (mqtt_sub_one) the will fires only on an UNCLEAN drop —
-            // clean disconnects leave it 'online', so "unavailable" is best-effort,
-            // not reliable. This is by design for Phase 2 item 1: a persistent
-            // subscription (item 2, #12) will keep the will accurate and make the
-            // connectivity sensor and the per-entity availability blocks below
-            // trustworthy. Kept intentionally so the entities exist now.
+            // Availability (TopicLastWill) is kept reliable by the dedicated
+            // presence session (presence.sh): it holds a persistent connection whose
+            // retained 'offline' last will fires on an UNCLEAN drop, and the
+            // orchestrator publishes 'online' when that session is (re)established and
+            // 'offline' explicitly on a clean shutdown. So the connectivity sensor and
+            // the per-entity availability blocks below track the bridge's real state
+            // (the one-shot receiver subscription alone couldn't — its clean -C 1
+            // disconnects suppress the will).
             var entities = new List<HaEntity>();
 
             // Connectivity: reports online/offline itself, so it carries NO

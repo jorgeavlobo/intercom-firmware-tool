@@ -33,6 +33,9 @@ kill_childs() {
 	kill_by "$(re_escape "/etc/tcpdump2mqtt/StartMqttSend")"
 	kill_by "$(re_escape "/etc/tcpdump2mqtt/StartMqttReceive")"
 	kill_by "$(re_escape "/etc/tcpdump2mqtt/keypress.sh")"
+	# presence.sh reaps its own mosquitto_sub child via a trap on TERM, so we only
+	# match the script path here (the child is a clean disconnect, no will fired).
+	kill_by "$(re_escape "/etc/tcpdump2mqtt/presence.sh")"
 	kill_by "$(re_escape "/etc/tcpdump2mqtt/ha_discovery.sh")"
 	# keypress.sh owns its evtest child and kills it via a trap on termination,
 	# so we don't match "evtest" here (that could hit unrelated evtest sessions).
@@ -55,6 +58,12 @@ kill_childs() {
 
 exit_handler() {
 	echo "TcpDump2Mqtt shutting down."
+	# A clean shutdown disconnects the presence session cleanly, which SUPPRESSES
+	# its last will — so announce 'offline' explicitly (retained) before tearing
+	# the children down, otherwise TOPIC_LASTWILL would wrongly stay 'online' and
+	# HA would show the bridge connected after a graceful stop. Best-effort: if the
+	# broker is already gone this just fails quietly.
+	mqtt_pub -r -t "${TOPIC_LASTWILL}" -m offline > /dev/null 2>&1
 	kill_childs
 	exit 0
 }
@@ -120,7 +129,20 @@ while : ; do
 		echo "Starting MQTT receiver..."
 		/etc/tcpdump2mqtt/StartMqttReceive &
 		/bin/sleep 5
-		# Backgrounded (see above) so a stalled publish can't block the loop.
+	fi
+
+	# Presence: the long-lived session that holds the retained 'offline' will, so an
+	# UNCLEAN drop makes HA see the bridge offline. Announce 'online' only AFTER the
+	# session is (re)established — publishing online without a live will-holder is
+	# exactly the stale-'online' bug we're fixing. If the broker is still down both
+	# the session and this publish fail together, and the next pass retries; when it
+	# comes up, presence connects and online lands. Backgrounded so a stalled publish
+	# can't block the loop.
+	if [ -x /etc/tcpdump2mqtt/presence.sh ] && \
+	   ! /usr/bin/pgrep -f "$(re_escape "/etc/tcpdump2mqtt/presence.sh")" > /dev/null 2>&1; then
+		echo "Starting MQTT presence..."
+		/etc/tcpdump2mqtt/presence.sh &
+		/bin/sleep 2
 		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online &
 	fi
 

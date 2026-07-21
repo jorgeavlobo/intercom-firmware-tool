@@ -63,11 +63,34 @@ mqtt_sub_one() {
 	# forever until it is cleared. Commands must be published non-retained.
 	#
 	# NOTE: the retained 'offline' last will only fires on an UNCLEAN drop. With
-	# the -C 1 one-shot subscription each cycle ends in a clean disconnect, so
-	# the will rarely triggers and TOPIC_LASTWILL can stay 'online'. Reliable
-	# online/offline availability needs a persistent subscription (Phase 2, #12).
+	# the -C 1 one-shot subscription each cycle ends in a clean disconnect, so THIS
+	# will rarely triggers. Reliable online/offline availability is instead provided
+	# by the dedicated persistent presence session (mqtt_presence / presence.sh),
+	# which holds a will open; this receiver's will is redundant but harmless.
 	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -C 1 -R \
 		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain -t "${TOPIC_RX}"
+	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
+	if [ -n "${MQTT_CAFILE}" ]; then
+		set -- "$@" --cafile "${MQTT_CAFILE}"
+		[ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && \
+			set -- "$@" --cert "${MQTT_CERTFILE}" --key "${MQTT_KEYFILE}"
+	fi
+	/usr/bin/mosquitto_sub "$@"
+}
+
+# Persistent PRESENCE connection: a long-lived mosquitto_sub whose only job is to
+# hold an MQTT session with a retained 'offline' last will on TOPIC_LASTWILL. When
+# the bridge drops UNCLEANLY (crash, power loss, network death) the broker fires
+# that will, so Home Assistant sees the bridge go offline. The receiver's one-shot
+# -C 1 subscription can't do this (each cycle disconnects cleanly, suppressing the
+# will and leaving the topic 'online'); this dedicated session stays connected, so
+# availability is reliable. It subscribes to TOPIC_LASTWILL purely to keep the
+# socket open (the payload is ignored). Clean shutdowns DON'T fire the will, so the
+# orchestrator publishes 'offline' explicitly in its exit handler. Same auth/TLS
+# composition as mqtt_pub/mqtt_sub_one.
+mqtt_presence() {
+	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -t "${TOPIC_LASTWILL}" \
+		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
 	if [ -n "${MQTT_CAFILE}" ]; then
 		set -- "$@" --cafile "${MQTT_CAFILE}"
