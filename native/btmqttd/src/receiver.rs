@@ -227,6 +227,7 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
     // unread) full stdout pipe and never closes stderr, so join! would hang until the
     // timeout and drop the output we already had. Exiting at CAP total (then killing
     // the child below) returns the first 256 KB promptly instead.
+    // Returns (bytes, hit_cap): read stdout+stderr until CAP total or both close.
     let collect = async {
         let mut buf: Vec<u8> = Vec::new();
         let mut ob = [0u8; 8192];
@@ -251,18 +252,36 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
                 },
             }
         }
-        buf
+        let capped = buf.len() >= CAP;
+        (buf, capped)
     };
 
     let mut result = match tokio::time::timeout(EXEC_TIMEOUT, collect).await {
-        Ok(buf) => buf,
-        Err(_) => b"btmqttd: execute_command timed out".to_vec(),
+        Ok((buf, true)) => {
+            // Hit the output cap: SIGKILL the still-writing producer (like the shell's
+            // `head` closing the pipe), so it can't run on unbounded.
+            let _ = child.start_kill();
+            buf
+        }
+        Ok((buf, false)) => {
+            // Both streams closed BEFORE the cap. The command may have redirected /
+            // closed its output early yet still be doing side-effecting work (e.g.
+            // `exec >/dev/null 2>&1; sleep 5; touch …`); WAIT (bounded) for it to
+            // finish rather than killing it — matching the shell, which let the
+            // command process complete. If it overruns the budget, it's killed by the
+            // reap backstop below.
+            let _ = tokio::time::timeout(EXEC_TIMEOUT, child.wait()).await;
+            buf
+        }
+        Err(_) => {
+            // Overall timeout (slow producer, or a quiet command running too long).
+            let _ = child.start_kill();
+            b"btmqttd: execute_command timed out".to_vec()
+        }
     };
-    // ALWAYS kill then reap, under their own bounded timeout: the capped readers can
-    // hit CAP (or the whole collect can time out) while the child keeps running or is
-    // blocked on a now-unread full pipe, so a bare child.wait() could hang forever and
-    // the result would never be published. start_kill (SIGKILL) unblocks it; the
-    // bounded wait reaps without hanging (kill_on_drop is a further backstop).
+    // Bounded reap backstop: SIGKILL anything still alive (e.g. a side-effecting
+    // command that overran the wait above) and reap without hanging (kill_on_drop is
+    // a further guard).
     let _ = child.start_kill();
     let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     result.truncate(CAP);

@@ -201,9 +201,14 @@ pub fn parse_env(text: &str) -> HashMap<String, String> {
         let mut val = val.trim();
         // Strip a trailing inline comment only for UNquoted values (a '#' inside
         // quotes is literal). The installer doesn't emit inline comments, but be
-        // lenient about a hand-edited file.
+        // lenient about a hand-edited file: a '#' begins a comment when preceded by
+        // whitespace — space OR tab (POSIX) — so cut at the earliest of either.
         if !(val.starts_with('"') || val.starts_with('\'')) {
-            if let Some(idx) = val.find(" #") {
+            let cut = match (val.find(" #"), val.find("\t#")) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            if let Some(idx) = cut {
                 val = val[..idx].trim_end();
             }
         }
