@@ -87,11 +87,14 @@ i=0
 while [ "$i" -lt 6 ]; do
 	if apply_all; then
 		echo "ha_discovery: ${action}ed Home Assistant discovery configs"
-		# Signal convergence so the orchestrator stops re-launching us. The runtime
-		# dir is root-owned (created here, not in world-writable /tmp), so an
+		# Signal convergence so the orchestrator stops re-launching us. ensure_rundir
+		# creates the runtime dir 0700 (root-only) EVEN IF it already exists with a
+		# looser mode (e.g. StartMqttSend made it under a permissive umask), so an
 		# unprivileged account can't pre-create the marker or plant a symlink for the
-		# root truncation below to follow. mkdir -p is idempotent across boots.
-		mkdir -p "$RUNDIR" 2>/dev/null
+		# root truncation below to follow. rm -f first drops any symlink planted
+		# before the dir was locked down (rm removes the link, not its target).
+		ensure_rundir
+		rm -f "$HA_MARKER" 2>/dev/null
 		if : > "$HA_MARKER" 2>/dev/null; then
 			exit 0
 		fi

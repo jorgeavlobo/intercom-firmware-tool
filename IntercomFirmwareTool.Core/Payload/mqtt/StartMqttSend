@@ -85,7 +85,7 @@ kill_tree() {
 # "*#*1##" ACK). Lets us decide whether the socket back-end is usable BEFORE
 # committing to it; a refusal (gateway absent or not yet up) selects tcpdump.
 probe_socket() {
-	mkdir -p "$RUNDIR" 2>/dev/null
+	ensure_rundir   # 0700 root-only (mqtt_common.sh); FIFOs below are 0600
 	pfifo="$RUNDIR/own_probe_i.$$"
 	ptmp="$RUNDIR/own_probe_o.$$"
 	rm -f "$pfifo"
@@ -127,7 +127,7 @@ probe_socket() {
 # socket drops, the framer dies, or the publisher loses the broker); the
 # orchestrator (TcpDump2Mqtt) then respawns us.
 run_socket() {
-	mkdir -p "$RUNDIR" 2>/dev/null
+	ensure_rundir   # 0700 root-only (mqtt_common.sh); FIFOs below are 0600
 	cfifo="$RUNDIR/own_conn.$$"    # handshake holder -> nc stdin
 	rfifo="$RUNDIR/own_raw.$$"     # nc (socket bytes) -> frame_own
 	ffifo="$RUNDIR/own_frames.$$"  # frame_own (one frame/line) -> mqtt_pub

@@ -32,15 +32,24 @@ fi
 # from its watchdog loop until this file exists, so a broker that is still down
 # at boot can't leave discovery unpublished.
 #
-# Shared root-owned runtime dir (the marker and presence.sh's readiness FIFO live
-# here). Deliberately NOT world-writable /tmp: a non-root local account (e.g.
-# bticino2) could otherwise pre-create the marker (watchdog would treat discovery
-# as converged and never publish/clear it) or plant a symlink that a root write
-# would follow and truncate. /var/run/tcpdump2mqtt is root-owned (the scripts
-# mkdir it), so only root can plant anything there. It's on tmpfs, so a reboot
-# clears the marker and discovery re-reconciles.
+# Shared runtime dir: holds this marker and StartMqttSend's socket-pipeline FIFOs.
+# Deliberately NOT world-writable /tmp: a non-root local account (e.g. bticino2)
+# could otherwise pre-create the marker (watchdog would treat discovery as
+# converged and never publish/clear it) or plant a symlink that a root write would
+# follow and truncate. It's on tmpfs, so a reboot clears the marker and discovery
+# re-reconciles. Create it via ensure_rundir() so the mode is enforced regardless
+# of the caller's umask (a bare `mkdir -p` would inherit a permissive one).
 : "${RUNDIR:=/var/run/tcpdump2mqtt}"
 : "${HA_MARKER:=$RUNDIR/ha_done}"
+
+# Create $RUNDIR root-only (0700), enforcing the mode even if it already exists
+# with looser perms — so only root can plant/replace files there. Callers that
+# write a fixed-name file into it (e.g. the marker) should still rm -f it first to
+# drop any symlink planted before this ran.
+ensure_rundir() {
+	mkdir -p "$RUNDIR" 2>/dev/null
+	chmod 0700 "$RUNDIR" 2>/dev/null
+}
 
 # mosquitto_pub with auth AND TLS applied independently (compose, do not choose
 # one or the other). Extra args (topic, -l, -r, -m ...) pass through; mosquitto
