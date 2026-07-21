@@ -104,14 +104,48 @@ mqtt_pub() {
 mqtt_sub_stream() {
 	# -R ignores RETAINED messages: TOPIC_RX is a live command channel; a retained
 	# command would otherwise be re-delivered on every reconnect and replay forever
-	# until it is cleared. Commands must be published non-retained.
+	# until it is cleared. Commands must be published non-retained. (-R suppresses only
+	# messages with the RETAIN flag; queued session messages redelivered to a resuming
+	# durable session are normal messages, so those are still delivered — see -c.)
 	#
 	# TOPIC_RX is subscribed as-is (a "$share/<group>/<filter>" shared subscription
 	# is fine here — this IS the sole command consumer, so it SHOULD join the group;
 	# unlike the old separate presence holder, there's no second subscriber to steal
 	# commands from). The will targets TOPIC_LASTWILL (publish/retain), a topic the
 	# bridge is already allowed to write.
-	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -R -t "${TOPIC_RX}" \
+
+	# Stable, per-unit client id so a DURABLE session (see -c below) can be RESUMED
+	# across reconnects/restarts. Derived from TOPIC_LASTWILL: that topic must already
+	# be distinct per unit for multi-unit-on-one-broker (see README), so this id is
+	# unique exactly when that requirement is met, and it's stable (config is stable) —
+	# unlike mosquitto's default PID-based id, which changes every restart and so
+	# couldn't resume a session. Sanitised to [A-Za-z0-9_-]; length isn't capped
+	# because the broker already accepts mosquitto's own long default ids.
+	_cid="btrx-$(printf '%s' "${TOPIC_LASTWILL:-default}" | tr -c 'A-Za-z0-9_-' '_')"
+
+	# Persistent (durable) session WHEN the client supports it: clean-session=0 lets
+	# the broker QUEUE QoS>=1 commands published while the receiver is briefly
+	# disconnected and deliver them on reconnect — closing the residual in-flight gap
+	# that a clean session at QoS 0 can't (the broker discards anything sent during the
+	# blip). The -c/--disable-clean-session flag arrived in mosquitto 1.5; the
+	# intercom's client may predate it, so probe --help ONCE and fall back to a clean
+	# session (still far better than the old per-message reconnect) when it's absent.
+	# Probe --help for the -c option's description rather than the long flag name:
+	# older builds document it only as "-c : disable clean session/..." with no
+	# "--disable-clean-session" spelling, so match the (English-only, unlocalised)
+	# description text, which is present exactly when -c is supported.
+	_clean=
+	/usr/bin/mosquitto_sub --help 2>&1 | grep -qiE -- '--disable-clean-session|disable clean session' && _clean=-c
+
+	# -q 1: subscribe at QoS 1 so queued/redelivered commands are at-least-once. (The
+	# end-to-end guarantee also needs the PUBLISHER to use QoS 1; and at-least-once
+	# means a command MAY be redelivered after a crash mid-processing — harmless for
+	# bus frames / key presses, at most a re-run for execute_command.)
+	#
+	# ${_clean} is intentionally UNQUOTED: it expands to the single arg -c when set, or
+	# to nothing (no empty arg) when the client lacks persistent-session support.
+	# shellcheck disable=SC2086
+	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -i "${_cid}" ${_clean} -q 1 -R -t "${TOPIC_RX}" \
 		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
 	if [ -n "${MQTT_CAFILE}" ]; then

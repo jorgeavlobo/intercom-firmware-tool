@@ -72,7 +72,11 @@ path.
    command that arrived in the resubscribe gap) and it backs off (capped) when the
    broker is unreachable instead of spinning at 100 % CPU. That same session also
    carries the retained `offline` last will, so a single connection owns HA
-   availability (no separate presence holder).
+   availability (no separate presence holder). It subscribes at **QoS 1** with a
+   **durable session** (stable per-unit client id + `-c`, when the client supports
+   it — it degrades to a clean session on a mosquitto older than 1.5), so the broker
+   queues commands sent during a brief reconnect blip and delivers them on
+   reconnect, closing the residual in-flight gap too.
 4. **POSIX sh.** Dropped the bash-only `function` keyword; validated with
    `dash -n`.
 5. **Robust process tracking.** `pgrep -f` on explicit paths instead of fragile
@@ -137,10 +141,20 @@ path.
   separate `mosquitto_pub` can't share the subscriber's LWT connection, and the
   subscriber reconnects internally (so process liveness is not proof of a live
   session). The orchestrator therefore refreshes retained `online` each watchdog
-  pass while the receiver is up; it's coupled to the broker in practice (the
-  refresh only lands when the broker accepts it, and the receiver shares the same
+  pass while the will-holding `mosquitto_sub` is actually running (not merely while
+  the `StartMqttReceive` wrapper is retrying); it's coupled to the broker in practice
+  (the refresh only lands when the broker accepts it, and the receiver shares the same
   credentials) and errs toward a brief stale `offline`. A truly atomic birth/will
   needs a single-connection MQTT client — tracked for #12.
+- **Durable command session trade-offs.** The receiver uses a persistent session
+  (`-c`) at QoS 1 so commands sent during a brief reconnect blip are queued and
+  delivered. Two consequences, both acceptable for a low-volume, operator-driven
+  command channel: the broker retains that session (and any queued commands) while
+  the receiver is down for a long stretch — up to a device power-off — since MQTT
+  3.1/3.1.1 has no session-expiry; and QoS 1 is at-least-once, so a command may be
+  redelivered after a crash mid-processing (harmless for bus frames / key presses,
+  at most a re-run for `execute_command`). On a mosquitto client older than 1.5
+  (no `-c`) the session falls back to clean, reopening only this residual gap.
 - **Multi-unit on one broker needs distinct topics too.** A distinct HA node id
   gives each bridge its own HA *device* and entity `unique_id`s, but the entities'
   state/availability still read the MQTT data topics (`TOPIC_DUMP`/`TOPIC_KEY`/
