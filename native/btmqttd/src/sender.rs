@@ -110,11 +110,16 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> std::io::Result<()>
             ))
         }
     }
-    // Publish any bus frames that arrived in the same read(s) as the ACK (the ACK
-    // itself is dropped by the framer).
-    framer.push(&pre, &mut frames);
-    for frame in frames.drain(..) {
-        publish_frame(cfg, client, &frame).await;
+    // Feed ONLY the bytes AFTER the ACK to the framer, so any bus frames that arrived
+    // in the same read(s) as the ACK are published while the handshake ACK and any
+    // pre-ACK banner/chatter are NOT framed (feeding all of `pre` could otherwise let
+    // stray pre-ACK bytes merge into a garbage frame). We got here only on ACK, so the
+    // search succeeds; slice past the first ACK occurrence.
+    if let Some(pos) = pre.windows(own::ACK.len()).position(|w| w == own::ACK) {
+        framer.push(&pre[pos + own::ACK.len()..], &mut frames);
+        for frame in frames.drain(..) {
+            publish_frame(cfg, client, &frame).await;
+        }
     }
 
     loop {
