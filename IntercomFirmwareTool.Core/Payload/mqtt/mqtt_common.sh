@@ -82,55 +82,36 @@ mqtt_pub() {
 	/usr/bin/mosquitto_pub "$@"
 }
 
-# mosquitto_sub for exactly one message on TOPIC_RX, same auth/TLS composition.
-mqtt_sub_one() {
-	# -R ignores RETAINED messages: TOPIC_RX is a live command channel, and each
-	# -C 1 reconnect would otherwise re-receive a retained command and replay it
-	# forever until it is cleared. Commands must be published non-retained.
+# Persistent command subscription: a long-lived mosquitto_sub that STREAMS every
+# message on TOPIC_RX and ALSO carries the retained 'offline' last will on
+# TOPIC_LASTWILL — a single session that is both the command receiver AND the
+# availability holder (see StartMqttReceive).
+#
+# Why one persistent session instead of the old one-shot (-C 1) receiver + a
+# separate presence holder:
+#   * No command-loss window. The one-shot model reconnected after every message,
+#     and any command published in that resubscribe gap was dropped (with -R the
+#     broker doesn't retain it). A session that stays subscribed receives them all.
+#   * Reliable OFFLINE. Because the session stays open, an UNCLEAN drop (crash,
+#     power loss, network death) makes the broker deliver the will, so Home
+#     Assistant sees the bridge go offline. A one-shot -C 1 cycle disconnects
+#     CLEANLY, which suppresses the will — it could never own availability, which
+#     is why a dedicated presence session used to exist. With the receiver now
+#     persistent, that second session is redundant and has been removed.
+# mosquitto_sub reconnects INTERNALLY after a blip, re-registering the will, and it
+# flushes stdout after each message, so piping it into `while read` delivers commands
+# promptly. Same auth/TLS composition as mqtt_pub.
+mqtt_sub_stream() {
+	# -R ignores RETAINED messages: TOPIC_RX is a live command channel; a retained
+	# command would otherwise be re-delivered on every reconnect and replay forever
+	# until it is cleared. Commands must be published non-retained.
 	#
-	# NOTE: no last will here. TOPIC_LASTWILL availability is owned SOLELY by the
-	# persistent presence session (mqtt_presence / presence.sh). If this one-shot
-	# receiver carried the will too, an UNCLEAN drop of one of its -C 1 cycles could
-	# publish 'offline' and briefly flip a healthy bridge offline until the next
-	# watchdog refresh — so the will stays only where it's meaningful.
-	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -C 1 -R -t "${TOPIC_RX}"
-	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
-	if [ -n "${MQTT_CAFILE}" ]; then
-		set -- "$@" --cafile "${MQTT_CAFILE}"
-		[ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && \
-			set -- "$@" --cert "${MQTT_CERTFILE}" --key "${MQTT_KEYFILE}"
-	fi
-	/usr/bin/mosquitto_sub "$@"
-}
-
-# Persistent PRESENCE connection: a long-lived mosquitto_sub whose only job is to
-# hold an MQTT session with a retained 'offline' last will on TOPIC_LASTWILL. When
-# the bridge drops UNCLEANLY (crash, power loss, network death) the broker delivers
-# that will, so Home Assistant sees the bridge go offline. The receiver's one-shot
-# -C 1 subscription can't do this (each cycle disconnects cleanly, suppressing the
-# will and leaving the topic 'online'); this dedicated session stays connected (and
-# reconnects on its own after a blip, re-registering the will), so the OFFLINE side
-# of availability is reliable. It subscribes to TOPIC_RX purely to keep the socket
-# open (the payload is ignored — this is NOT the command receiver). TOPIC_RX is
-# chosen deliberately: the bridge already needs SUBSCRIBE permission on it (the
-# receiver uses it), so on a broker with topic ACLs that allow publishing status
-# but only subscribing to the command topic, presence doesn't impose a new
-# subscribe requirement on TOPIC_LASTWILL. The will still targets TOPIC_LASTWILL
-# (publish/retain, which the bridge is already allowed to do). The ONLINE side is
-# refreshed by the orchestrator loop, and clean shutdowns (which suppress the will)
-# publish 'offline' explicitly there — see presence.sh / TcpDump2Mqtt. Same auth/TLS
-# composition as mqtt_pub/mqtt_sub_one.
-mqtt_presence() {
-	# Hold-open topic = TOPIC_RX, but strip a "$share/<group>/" prefix if present:
-	# a Mosquitto SHARED subscription distributes each message to ONE client in the
-	# group, so joining the receiver's shared group would let presence swallow
-	# commands meant for StartMqttReceive. Subscribing to the underlying (non-shared)
-	# filter keeps the same ACL topic while staying out of the shared group.
-	_pt="${TOPIC_RX}"
-	case "$_pt" in
-		'$share/'*) _pt="${_pt#\$share/}"; _pt="${_pt#*/}" ;;
-	esac
-	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -t "${_pt}" \
+	# TOPIC_RX is subscribed as-is (a "$share/<group>/<filter>" shared subscription
+	# is fine here — this IS the sole command consumer, so it SHOULD join the group;
+	# unlike the old separate presence holder, there's no second subscriber to steal
+	# commands from). The will targets TOPIC_LASTWILL (publish/retain), a topic the
+	# bridge is already allowed to write.
+	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -R -t "${TOPIC_RX}" \
 		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
 	if [ -n "${MQTT_CAFILE}" ]; then
@@ -138,7 +119,11 @@ mqtt_presence() {
 		[ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && \
 			set -- "$@" --cert "${MQTT_CERTFILE}" --key "${MQTT_KEYFILE}"
 	fi
-	/usr/bin/mosquitto_sub "$@"
+	# exec so mosquitto_sub REPLACES this function's subshell (the left side of the
+	# receiver's `mqtt_sub_stream | while read` pipe): no wrapper subshell is left
+	# holding the real process, so the orchestrator's pgrep -f "mosquitto_sub.*RX"
+	# matches (and can signal) the actual client directly.
+	exec /usr/bin/mosquitto_sub "$@"
 }
 
 # The JSON remote-command channel is honoured only when explicitly enabled AND
@@ -149,7 +134,7 @@ remote_shell_allowed() {
 	[ "${ALLOW_REMOTE_SHELL:-0}" = "1" ] || return 1
 	# Password auth: BOTH username and password.
 	[ -n "${MQTT_USER}" ] && [ -n "${MQTT_PASS}" ] && return 0
-	# Mutual TLS: CA + client cert + key — exactly what mqtt_pub/mqtt_sub_one
+	# Mutual TLS: CA + client cert + key — exactly what mqtt_pub/mqtt_sub_stream
 	# actually send (they only add --cert/--key when MQTT_CAFILE is set).
 	[ -n "${MQTT_CAFILE}" ] && [ -n "${MQTT_CERTFILE}" ] && [ -n "${MQTT_KEYFILE}" ] && return 0
 	return 1
