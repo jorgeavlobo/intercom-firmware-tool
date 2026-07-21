@@ -86,6 +86,28 @@ async fn run() -> Result<(), String> {
 
     let (client, mut eventloop) = AsyncClient::new(opts, 32);
 
+    // Commands from TOPIC_RX go through a BOUNDED channel to a SINGLE ordered worker,
+    // not a task-per-message. This does two things at once:
+    //   * Order — the shell receiver consumed the subscription line-by-line, so
+    //     sequential commands (ordered OWN frames, or write_file/execute_command
+    //     series) were applied in order; one worker awaiting each dispatch preserves
+    //     that. Per-message tasks could complete out of order.
+    //   * Bound — a burst (or a slow execute_command) can't spawn unbounded tasks and
+    //     exhaust memory / starve the single-threaded runtime; over the queue depth a
+    //     command is DROPPED with a log line (predictable overload). The broker's
+    //     TOPIC_RX ACL remains the primary gate.
+    const CMD_QUEUE_DEPTH: usize = 32;
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CMD_QUEUE_DEPTH);
+    let cmd_worker = tokio::spawn({
+        let cfg = cfg.clone();
+        let client = client.clone();
+        async move {
+            while let Some(payload) = cmd_rx.recv().await {
+                receiver::dispatch(&cfg, &client, &payload).await;
+            }
+        }
+    });
+
     // Bus -> MQTT and keypad -> MQTT run as independent tasks; they publish through
     // the shared client (rumqttc queues while disconnected and flushes on connect).
     // Keep their handles so shutdown can ABORT every MQTT-producing task before it
@@ -176,13 +198,15 @@ async fn run() -> Result<(), String> {
                         // plus a startup retained-clear for this.
                         if p.retain {
                             eprintln!("btmqttd: ignoring retained message on {}", cfg.topic_rx);
-                        } else {
-                            let cfg = cfg.clone();
-                            let client = client.clone();
-                            let payload = p.payload;
-                            tokio::spawn(async move {
-                                receiver::dispatch(&cfg, &client, &payload).await;
-                            });
+                        } else if let Err(e) = cmd_tx.try_send(p.payload.to_vec()) {
+                            // Full -> overloaded (drop, don't queue unboundedly);
+                            // Closed -> the worker is gone (shutting down).
+                            match e {
+                                tokio::sync::mpsc::error::TrySendError::Full(_) => eprintln!(
+                                    "btmqttd: command dropped — handler queue full (>{CMD_QUEUE_DEPTH} pending)"
+                                ),
+                                tokio::sync::mpsc::error::TrySendError::Closed(_) => {}
+                            }
                         }
                     }
                     Ok(_) => {}
@@ -208,6 +232,7 @@ async fn run() -> Result<(), String> {
     }
     sender_task.abort();
     keys_task.abort();
+    cmd_worker.abort();
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(())
 }
