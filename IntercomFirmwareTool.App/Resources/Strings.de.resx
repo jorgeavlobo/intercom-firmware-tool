@@ -410,7 +410,7 @@ Schlüssel: {1}</value></data>
   <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Veröffentlicht beibehaltene MQTT-Discovery-Konfigurationen, damit die Entitäten der Bridge (Konnektivität, Bus-Dump, letzte Taste) automatisch in Home Assistant erscheinen – ohne manuelles YAML. Nur lesend – es wird keine Befehlsentität erstellt.</value></data>
   <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Standardmäßig aktiviert: Die Entitäten der Bridge (Konnektivität, Bus, letzte Taste) erscheinen automatisch in Home Assistant, als ein Gerät. Deaktivieren, um es zu überspringen; ein späterer Build mit derselben Geräte-ID entfernt sie dann vom Broker.</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Geräte-ID:</value></data>
-  <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Kennung des Home-Assistant-Geräts und seiner Entitäten. Pro Einheit eigener Wert gibt jeder Bridge ihr eigenes HA-Gerät; für mehrere Einheiten an einem Broker auch eigene Topics festlegen (sonst spiegeln sie sich). Nur Buchstaben, Ziffern, '_' oder '-'.</value></data>
+  <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Kennung des Home-Assistant-Geräts und seiner Entitäten. Pro Einheit eigener Wert gibt jeder Bridge ihr eigenes HA-Gerät; für mehrere Einheiten an einem Broker auch eigene Topics festlegen (sonst spiegeln sie sich). Nur ASCII-Buchstaben, ASCII-Ziffern, '_' oder '-'.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Empfang (Befehle):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Bus-Dump:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Startdatum:</value></data>
@@ -423,6 +423,6 @@ Schlüssel: {1}</value></data>
 Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. Fernbefehlskanal aktivieren?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Ein Topic ist leer, umfasst mehrere Zeilen oder ein Veröffentlichungs-Topic enthält einen MQTT-Platzhalter ('+' oder '#').</value></data>
-  <data name="MqttHint_HaNodeId" xml:space="preserve"><value>Die Home-Assistant-Knoten-ID darf nur Buchstaben, Ziffern, '_' oder '-' enthalten.</value></data>
+  <data name="MqttHint_HaNodeId" xml:space="preserve"><value>Die Home-Assistant-Knoten-ID darf nur ASCII-Buchstaben, ASCII-Ziffern, '_' oder '-' enthalten.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>Verbindung abgelehnt oder keine Antwort.</value></data>
 </root>

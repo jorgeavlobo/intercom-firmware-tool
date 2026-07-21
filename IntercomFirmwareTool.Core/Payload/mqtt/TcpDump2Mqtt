@@ -58,6 +58,10 @@ kill_childs() {
 	kill_by "nc $(re_escape "${OWN_HOST}") $(re_escape "${OWN_PORT_MON}")"
 	kill_by "mosquitto_sub.*$(re_escape "${TOPIC_RX}")"
 	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_DUMP}")"
+	# The start-date publisher (backgrounded after the sender starts) — reap a copy
+	# stuck in DNS/TCP connect so it can't survive a restart and later publish a
+	# stale retained start_date, or accumulate one hung publisher per sender restart.
+	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_STARTD}")"
 	# Any in-flight 'online' publisher (the watchdog loop below refreshes 'online' to
 	# TOPIC_LASTWILL each pass; presence.sh itself only holds the mosquitto_sub will
 	# session). Reap it so a lagging publish can't overwrite the shutdown 'offline'
