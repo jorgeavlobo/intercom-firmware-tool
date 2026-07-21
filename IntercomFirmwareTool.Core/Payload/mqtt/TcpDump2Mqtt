@@ -35,12 +35,15 @@ re_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'; }
 #     subscription whose topic merely CONTAINS TOPIC_RX as a substring ("-t Bticino/rx2")
 #     is not matched.
 # -i precedes -t in mqtt_sub_stream's argv, so match them in that order (.* spans the
-# optional -c/-q/-R between). TOPIC_RX is re_escaped so its own metacharacters can't
-# broaden the match; MQTT_SUB_ID_PREFIX is a fixed literal (btrx-). Used both to reap
-# that subscriber in kill_childs and to gate the retained 'online' refresh on a live
-# LWT holder.
+# optional -c/-q/-R between). BOTH interpolated values are re_escaped so a regex
+# metacharacter can't broaden or break the match: TOPIC_RX is operator-set, and
+# MQTT_SUB_ID_PREFIX — though it defaults to the literal "btrx-" — is overridable via
+# the environment/config, so it's escaped too rather than trusted as a literal. Used
+# both to reap that subscriber in kill_childs and to gate the retained 'online'
+# refresh on a live LWT holder.
 rx_sub_pat() {
-	printf 'mosquitto_sub .*-i %s.*-t %s( |$)' "${MQTT_SUB_ID_PREFIX}" "$(re_escape "${TOPIC_RX}")"
+	printf 'mosquitto_sub .*-i %s.*-t %s( |$)' \
+		"$(re_escape "${MQTT_SUB_ID_PREFIX}")" "$(re_escape "${TOPIC_RX}")"
 }
 
 kill_childs() {
