@@ -263,7 +263,7 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
     let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
         eprintln!("btmqttd: execute_command: child stdout/stderr pipe missing");
         let _ = child.start_kill();
-        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        drop(child); // reaped by tokio's global orphan reaper (kill_on_drop)
         return;
     };
 
@@ -327,19 +327,23 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
         Err(_) => (b"btmqttd: execute_command timed out".to_vec(), true),
     };
     // Kill only when we stopped at the cap or hit the timeout; on a clean finish the
-    // child already exited AND was reaped (child.wait) inside `run`, so just drop it.
+    // child already exited AND was reaped (child.wait) inside `run`.
+    //
+    // Reaping strategy: we neither wait synchronously nor spawn a per-command reaper.
+    // A synchronous wait would stall the single ordered command worker; a detached
+    // reaper task per command would be UNBOUNDED — an authenticated flood of
+    // CAP-hitting commands whose children are momentarily unreapable (e.g. D-state
+    // kernel I/O) could pile up tasks. Instead we DROP the Child: kill_on_drop(true)
+    // SIGKILLs it and hands it to tokio's SINGLE global orphan reaper (signal-driven),
+    // which reaps it on the next SIGCHLD. That is bounded (one shared reaper, no
+    // per-command task) and leaves no zombie. A child stuck in uninterruptible kernel
+    // I/O can't be reaped by ANY userspace mechanism until the kernel releases it —
+    // and this gated channel is an authenticated arbitrary-`sh -c` surface anyway, so
+    // bounding such children adds no security a shell user couldn't bypass directly.
     if capped_or_timeout {
         let _ = child.start_kill();
-        // Reap in a DETACHED task. The child was just SIGKILLed, so it exits promptly,
-        // but waiting it here would hold the ordered command worker; and a bounded wait
-        // that timed out would drop the Child while it was still a zombie (reaped only
-        // later, if at all, by tokio's drop-time orphan reaper). Detaching keeps the
-        // worker bounded AND guarantees the child is eventually waited — never a
-        // lingering zombie. kill_on_drop remains a further backstop.
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-        });
     }
+    drop(child); // kill_on_drop + tokio's global orphan reaper handle cleanup
     result.truncate(CAP);
     publish(client, &cfg.topic_cmd_result, result, false).await;
 }
