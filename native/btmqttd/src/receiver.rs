@@ -25,6 +25,13 @@ const CAP: usize = 262_144;
 /// closing the pipe to SIGPIPE a runaway; we kill explicitly after this).
 const EXEC_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Wall-clock cap for forwarding a frame to the local gateway. The command worker
+/// is single and ordered, so a gateway that accepts the connection but stops
+/// reading (or hangs on connect) would block write_all/flush with no deadline and
+/// stall EVERY subsequent command, not just this frame. Loopback + a tiny payload
+/// makes this unlikely, but the bound keeps the worker live regardless.
+const FORWARD_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Monotonic suffix so concurrent write_file tasks never share a temp path.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -56,11 +63,17 @@ pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
 /// the LOOPBACK gateway (127.0.0.1:30006), as StartMqttReceive did — OWN_HOST is
 /// only the monitor (read) endpoint, not the command (write) endpoint.
 async fn forward_to_gateway(frame: &str) -> std::io::Result<()> {
-    let mut sock = TcpStream::connect(("127.0.0.1", OWN_PORT_CMD)).await?;
-    sock.write_all(frame.as_bytes()).await?;
-    sock.write_all(b"\n").await?;
-    sock.flush().await?;
-    Ok(())
+    tokio::time::timeout(FORWARD_TIMEOUT, async {
+        let mut sock = TcpStream::connect(("127.0.0.1", OWN_PORT_CMD)).await?;
+        sock.write_all(frame.as_bytes()).await?;
+        sock.write_all(b"\n").await?;
+        sock.flush().await?;
+        Ok::<_, std::io::Error>(())
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "gateway forward timed out")
+    })?
 }
 
 async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, msg: &str) {
@@ -227,7 +240,13 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
     };
 
     // Read stdout+stderr CONCURRENTLY and stop the moment we have CAP bytes TOTAL —
-    // like the shell's `... 2>&1 | head -c 262144`. Reading each to its own CAP with
+    // like the shell's `... 2>&1 | head -c 262144` in the ONE sense that matters here:
+    // a single combined diagnostic blob capped at CAP total bytes. We do NOT reproduce
+    // the shell's exact merged-stream byte order — reading two separate pipes
+    // interleaves by ARRIVAL order (arguably closer to real time than a buffered pipe),
+    // and a command that writes to both streams may see them interleaved differently.
+    // That's fine: the result is an opaque diagnostic blob, not a stream whose
+    // stdout/stderr ordering is contractual. Reading each to its own CAP with
     // join! would instead WAIT for the second stream even after the first is full:
     // a command that writes >CAP to stdout and keeps running blocks on the (now
     // unread) full stdout pipe and never closes stderr, so join! would hang until the

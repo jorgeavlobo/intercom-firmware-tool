@@ -3,12 +3,18 @@
 //! replacement for keypress.sh (evtest + jq), using the pure-Rust `evdev` crate.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use evdev::{Device, EventType, InputEventKind};
 use rumqttc::{AsyncClient, QoS};
 use serde_json::json;
 
 use crate::config::Config;
+
+/// A capture session that lasted at least this long counts as "healthy": the device
+/// was working, so the next reopen is prompt. A session that ended sooner (device
+/// absent, immediate read error) backs off. Same duration heuristic as sender::run.
+const HEALTHY_SESSION: Duration = Duration::from_secs(60);
 
 /// Locate the keypad event device: the one whose name contains "keypad"
 /// (case-insensitive), falling back to /dev/input/event0 — mirroring keypress.sh's
@@ -31,32 +37,54 @@ fn find_keypad() -> Option<(String, Device)> {
     fallback
 }
 
-/// Run forever: read key events and publish them. If the keypad can't be opened
-/// (absent on some variant) this logs once and returns — the rest of the bridge is
-/// unaffected.
+/// Run forever: (re)open the keypad and publish key events, reopening with capped
+/// backoff on any failure. The shell relied on TcpDump2Mqtt's pgrep watchdog to
+/// respawn keypress.sh; this self-heals instead, so a transient evdev read error or
+/// a device that re-enumerates doesn't leave key publishing dead for the daemon's
+/// lifetime. A model with no keypad at all just retries quietly (backoff caps at
+/// 30s, and the "device absent" reason is logged only once until it changes), so it
+/// costs almost nothing while surviving a boot-time race where the node appears late.
 pub async fn run(cfg: Arc<Config>, client: AsyncClient) {
+    let mut backoff = 0u64;
+    let mut last_reason: Option<String> = None;
+    loop {
+        let start = tokio::time::Instant::now();
+        let reason = session(&cfg, &client).await;
+        // A long-lived session was healthy: reopen promptly. A quick failure backs off.
+        if start.elapsed() >= HEALTHY_SESSION {
+            backoff = 0;
+        } else {
+            backoff = (backoff + 1).min(6);
+        }
+        // Log the reason only when it changes, so a permanently keypad-less variant
+        // doesn't spam the log every backoff interval.
+        if last_reason.as_deref() != Some(reason.as_str()) {
+            eprintln!("btmqttd: {reason}; retrying key capture");
+            last_reason = Some(reason);
+        }
+        if backoff > 0 {
+            tokio::time::sleep(Duration::from_secs(backoff * 5)).await;
+        }
+    }
+}
+
+/// One capture session: open the keypad and publish events until the device can't be
+/// opened or a read errors. Returns a short human reason for why it stopped, which
+/// run() uses for de-duplicated logging.
+async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> String {
     let (path, dev) = match find_keypad() {
         Some(d) => d,
-        None => {
-            eprintln!("btmqttd: no keypad input device found; key publishing disabled");
-            return;
-        }
+        None => return "no keypad input device found".to_string(),
     };
     let mut events = match dev.into_event_stream() {
         Ok(s) => s,
-        Err(e) => {
-            eprintln!("btmqttd: cannot read keypad {path}: {e}");
-            return;
-        }
+        Err(e) => return format!("cannot read keypad {path}: {e}"),
     };
 
     loop {
         let ev = match events.next_event().await {
             Ok(ev) => ev,
-            Err(e) => {
-                eprintln!("btmqttd: keypad read error on {path}: {e}");
-                return;
-            }
+            Err(e) => return format!("keypad read error on {path}: {e}"),
         };
         if ev.event_type() != EventType::KEY {
             continue;
