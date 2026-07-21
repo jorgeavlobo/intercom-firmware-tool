@@ -767,14 +767,18 @@ namespace IntercomFirmwareTool.Core
             string Topic(string component, string objectId) =>
                 $"{prefix}/{component}/{node}/{objectId}/config";
 
-            // Availability (TopicLastWill) is kept reliable by the dedicated
-            // presence session (presence.sh): it holds a persistent connection whose
-            // retained 'offline' last will fires on an UNCLEAN drop, and the
-            // orchestrator publishes 'online' when that session is (re)established and
-            // 'offline' explicitly on a clean shutdown. So the connectivity sensor and
-            // the per-entity availability blocks below track the bridge's real state
-            // (the one-shot receiver subscription alone couldn't — its clean -C 1
-            // disconnects suppress the will).
+            // Availability (TopicLastWill): the dedicated presence session
+            // (presence.sh) holds a persistent connection whose retained 'offline'
+            // last will the broker delivers on an UNCLEAN drop — so OFFLINE is
+            // reliable. ONLINE is refreshed by the orchestrator each watchdog pass
+            // while presence is up (mosquitto_sub reconnects on its own, so a one-shot
+            // birth would stick at 'offline' after a blip), and published as 'offline'
+            // explicitly on a clean shutdown. It errs toward a brief stale 'offline',
+            // never a stale 'online' outliving a dead bridge, so the connectivity
+            // sensor and the per-entity availability blocks below track the bridge's
+            // real state. (Atomic birth/will needs a single-connection MQTT client,
+            // which the mosquitto CLI tools can't provide; a proper client is future
+            // work — see #12.)
             var entities = new List<HaEntity>();
 
             // Connectivity: reports online/offline itself, so it carries NO

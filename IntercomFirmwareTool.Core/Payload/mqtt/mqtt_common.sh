@@ -82,14 +82,16 @@ mqtt_sub_one() {
 
 # Persistent PRESENCE connection: a long-lived mosquitto_sub whose only job is to
 # hold an MQTT session with a retained 'offline' last will on TOPIC_LASTWILL. When
-# the bridge drops UNCLEANLY (crash, power loss, network death) the broker fires
+# the bridge drops UNCLEANLY (crash, power loss, network death) the broker delivers
 # that will, so Home Assistant sees the bridge go offline. The receiver's one-shot
 # -C 1 subscription can't do this (each cycle disconnects cleanly, suppressing the
-# will and leaving the topic 'online'); this dedicated session stays connected, so
-# availability is reliable. It subscribes to TOPIC_LASTWILL purely to keep the
-# socket open (the payload is ignored). Clean shutdowns DON'T fire the will, so the
-# orchestrator publishes 'offline' explicitly in its exit handler. Same auth/TLS
-# composition as mqtt_pub/mqtt_sub_one.
+# will and leaving the topic 'online'); this dedicated session stays connected (and
+# reconnects on its own after a blip, re-registering the will), so the OFFLINE side
+# of availability is reliable. It subscribes to TOPIC_LASTWILL purely to keep the
+# socket open (the payload is ignored). The ONLINE side is refreshed by the
+# orchestrator loop, and clean shutdowns (which suppress the will) publish 'offline'
+# explicitly there — see presence.sh / TcpDump2Mqtt. Same auth/TLS composition as
+# mqtt_pub/mqtt_sub_one.
 mqtt_presence() {
 	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -t "${TOPIC_LASTWILL}" \
 		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain

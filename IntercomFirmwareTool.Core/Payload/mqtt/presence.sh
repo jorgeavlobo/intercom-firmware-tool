@@ -1,80 +1,42 @@
 #!/bin/sh
 # presence.sh - hold a persistent MQTT session for reliable HA availability.
 #
-# Runs the long-lived presence subscription (mqtt_presence) that keeps an MQTT
-# session open with a retained 'offline' last will on TOPIC_LASTWILL. If the
-# bridge dies uncleanly the broker delivers that will and Home Assistant sees the
-# bridge (and the entities whose availability is this topic) go offline.
+# Runs the long-lived presence subscription (mqtt_presence): a mosquitto_sub that
+# keeps an MQTT session open with a retained 'offline' last will on TOPIC_LASTWILL.
+# If the bridge dies uncleanly (crash, power loss, network death) the broker
+# delivers that will, so Home Assistant sees the bridge (and the entities whose
+# availability is this topic) go offline. This is the RELIABLE half of availability
+# and needs no cooperation from us — the broker does it.
 #
-# Announcing 'online' is gated on the session ACTUALLY connecting, not on a timer:
-# we run mosquitto_sub with protocol debug (-d) through a FIFO and publish the
-# retained 'online' only after we see the SUBACK, which the broker sends only once
-# the client has connected AND subscribed. This ties 'online' to a live will-holder
-# — a plain sleep could publish 'online' after the session had already failed or
-# dropped, leaving stale availability with no will behind it.
+# The 'online' (birth) half is refreshed by the orchestrator's watchdog loop, not
+# here: mosquitto_sub reconnects INTERNALLY after a broker blip (the process stays
+# alive across reconnects), and an unclean blip makes the broker retain 'offline',
+# so a one-shot birth would leave availability stuck 'offline' after the first
+# reconnect. Re-publishing 'online' each watchdog pass restores it within one loop
+# once the broker is reachable again. (Atomically tying 'online' to this session's
+# connect is not possible with the mosquitto CLI tools — a separate mosquitto_pub
+# can't share this client's connection — so the periodic refresh is the pragmatic
+# reliable approach; it errs toward a brief stale 'offline', never a stale 'online'
+# outliving a dead bridge.)
 #
-# The orchestrator respawns this script if the broker drops it, and on a CLEAN
-# shutdown publishes 'offline' explicitly (a clean disconnect suppresses the will).
+# On a CLEAN shutdown the orchestrator publishes 'offline' explicitly (a clean
+# disconnect suppresses the will).
 #
 # MIT-licensed, part of IntercomFirmwareTool's MQTT bridge payload.
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
 . /etc/tcpdump2mqtt/mqtt_common.sh
 
-# Readiness FIFO in the root-owned runtime dir (NOT world-writable /tmp, so an
-# unprivileged account can't pre-create or symlink it). $$ keeps it per-instance.
-mkdir -p "$RUNDIR" 2>/dev/null
-FIFO="$RUNDIR/presence.$$"
-rm -f "$FIFO"
-if ! mkfifo "$FIFO" 2>/dev/null; then
-	echo "presence.sh: could not create FIFO $FIFO"
-	exit 1
-fi
-
 child=
-# On stop, kill the mosquitto_sub child and WAIT for it so it's reaped here rather
-# than briefly orphaned. This is a CLEAN disconnect, so the will does NOT fire —
-# the orchestrator's exit handler announces 'offline'.
-cleanup() {
-	if [ -n "$child" ]; then
-		kill "$child" 2>/dev/null
-		wait "$child" 2>/dev/null
-	fi
-	rm -f "$FIFO"
-	exit 0
-}
-trap cleanup INT TERM
+# On stop, kill the mosquitto_sub child and WAIT for it, so the wrapper stays alive
+# until the child is actually reaped (not merely signalled) — otherwise the watchdog
+# could start a second presence.sh over a still-dying one. This is a CLEAN
+# disconnect, so the will does NOT fire; the orchestrator announces 'offline'.
+trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; fi; exit 0' INT TERM
 
-# Presence session with protocol debug so the reader can see the SUBACK. Both
-# debug and any received payloads are merged into the FIFO.
-mqtt_presence -d > "$FIFO" 2>&1 &
+# Hold the session. Output is irrelevant (we don't parse it), so discard it. The
+# subscription itself just keeps the connection — and thus the will — alive.
+mqtt_presence > /dev/null 2>&1 &
 child=$!
-
-# Drain the FIFO (so mosquitto_sub never blocks on a full pipe) and, on the first
-# SUBACK, announce 'online' retained — once, tied to this live session. The loop
-# ends when mosquitto_sub closes the FIFO (session dropped), so the script then
-# exits and the orchestrator respawns it on its next watchdog pass.
-announced=
-while IFS= read -r line; do
-	case "$line" in
-		*SUBACK*)
-			[ -n "$announced" ] && continue
-			# A SUBACK proves the session was connected when the broker wrote that
-			# line, but it may be buffered from a session that has since dropped
-			# (whose retained LWT 'offline' the broker already delivered). Only
-			# announce 'online' while the mosquitto_sub child is still alive, and
-			# re-check right after the publish: if it died across it, reconcile back
-			# to 'offline' so we never strand a stale 'online' with no will-holder.
-			kill -0 "$child" 2>/dev/null || continue
-			mqtt_pub -r -t "$TOPIC_LASTWILL" -m online
-			if kill -0 "$child" 2>/dev/null; then
-				announced=1
-			else
-				mqtt_pub -r -t "$TOPIC_LASTWILL" -m offline
-			fi
-			;;
-	esac
-done < "$FIFO"
-
-# Session ended (broker dropped us). Reap the child and clean up; a respawn will
-# re-establish presence and re-announce 'online' if the broker is back.
-cleanup
+# Blocks until mosquitto_sub exits (it reconnects internally, so normally only on a
+# fatal error or when killed). On exit, the script ends and the watchdog respawns it.
+wait "$child"

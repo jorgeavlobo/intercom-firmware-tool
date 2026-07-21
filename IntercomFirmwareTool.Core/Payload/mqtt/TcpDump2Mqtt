@@ -144,15 +144,30 @@ while : ; do
 		/bin/sleep 5
 	fi
 
-	# Presence: the long-lived session that holds the retained 'offline' will, so an
-	# UNCLEAN drop makes HA see the bridge offline. presence.sh itself announces
-	# 'online' (retained) only once its session actually connects (gated on the
-	# broker's SUBACK), so 'online' is never advertised without a live will-holder —
-	# we just (re)start it here and let it self-announce; no timer, nothing to race.
-	if [ -x /etc/tcpdump2mqtt/presence.sh ] && \
-	   ! /usr/bin/pgrep -f "$(re_escape "/etc/tcpdump2mqtt/presence.sh")" > /dev/null 2>&1; then
-		echo "Starting MQTT presence..."
-		/etc/tcpdump2mqtt/presence.sh &
+	# Presence: presence.sh holds a long-lived session carrying the retained
+	# 'offline' last will, so an UNCLEAN drop makes the broker mark the bridge
+	# offline (the reliable half of availability). Start or respawn it if it died.
+	presence_up=0
+	if [ -x /etc/tcpdump2mqtt/presence.sh ]; then
+		if /usr/bin/pgrep -f "$(re_escape "/etc/tcpdump2mqtt/presence.sh")" > /dev/null 2>&1; then
+			presence_up=1
+		else
+			echo "Starting MQTT presence..."
+			/etc/tcpdump2mqtt/presence.sh &
+			presence_up=1   # just launched; a will-holder now exists for this pass
+		fi
+	fi
+
+	# Refresh the retained 'online' each pass, but ONLY while a presence will-holder
+	# exists (else 'online' could stick with nothing to fire the 'offline' will). The
+	# session reconnects on its own after a broker blip, and an unclean blip leaves
+	# the broker's retained value at 'offline' (the will), so a one-shot 'online'
+	# would stay 'offline' after the first reconnect; republishing here restores it
+	# within one loop once the broker is reachable. When the broker is unreachable
+	# the publish simply no-ops, and a genuinely dead bridge (no loop) correctly
+	# leaves 'offline'. Backgrounded so a stalled publish can't block the watchdog.
+	if [ "$presence_up" -eq 1 ]; then
+		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online > /dev/null 2>&1 &
 	fi
 
 	if [ -x /etc/tcpdump2mqtt/keypress.sh ] && \
