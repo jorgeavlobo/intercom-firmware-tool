@@ -54,17 +54,22 @@ kill_childs() {
 	kill_by "nc $(re_escape "${OWN_HOST}") $(re_escape "${OWN_PORT_MON}")"
 	kill_by "mosquitto_sub.*$(re_escape "${TOPIC_RX}")"
 	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_DUMP}")"
+	# Any in-flight presence 'online' publisher (presence.sh runs mqtt_pub to
+	# TOPIC_LASTWILL on connect). Reap it so a lagging publish can't overwrite the
+	# shutdown 'offline' after the will-holder is already gone.
+	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_LASTWILL}")"
 }
 
 exit_handler() {
 	echo "TcpDump2Mqtt shutting down."
-	# A clean shutdown disconnects the presence session cleanly, which SUPPRESSES
-	# its last will — so announce 'offline' explicitly (retained) before tearing
-	# the children down, otherwise TOPIC_LASTWILL would wrongly stay 'online' and
-	# HA would show the bridge connected after a graceful stop. Best-effort: if the
+	# Tear the children down FIRST (this stops presence.sh and reaps any in-flight
+	# 'online' publisher), THEN announce 'offline' — so nothing can overwrite it
+	# afterwards. A clean shutdown disconnects the presence session cleanly, which
+	# SUPPRESSES its last will, so this explicit retained 'offline' is what stops HA
+	# from showing the bridge connected after a graceful stop. Best-effort: if the
 	# broker is already gone this just fails quietly.
-	mqtt_pub -r -t "${TOPIC_LASTWILL}" -m offline > /dev/null 2>&1
 	kill_childs
+	mqtt_pub -r -t "${TOPIC_LASTWILL}" -m offline > /dev/null 2>&1
 	exit 0
 }
 trap exit_handler INT TERM
@@ -132,18 +137,14 @@ while : ; do
 	fi
 
 	# Presence: the long-lived session that holds the retained 'offline' will, so an
-	# UNCLEAN drop makes HA see the bridge offline. Announce 'online' only AFTER the
-	# session is (re)established — publishing online without a live will-holder is
-	# exactly the stale-'online' bug we're fixing. If the broker is still down both
-	# the session and this publish fail together, and the next pass retries; when it
-	# comes up, presence connects and online lands. Backgrounded so a stalled publish
-	# can't block the loop.
+	# UNCLEAN drop makes HA see the bridge offline. presence.sh itself announces
+	# 'online' (retained) only once its session actually connects (gated on the
+	# broker's SUBACK), so 'online' is never advertised without a live will-holder —
+	# we just (re)start it here and let it self-announce; no timer, nothing to race.
 	if [ -x /etc/tcpdump2mqtt/presence.sh ] && \
 	   ! /usr/bin/pgrep -f "$(re_escape "/etc/tcpdump2mqtt/presence.sh")" > /dev/null 2>&1; then
 		echo "Starting MQTT presence..."
 		/etc/tcpdump2mqtt/presence.sh &
-		/bin/sleep 2
-		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online &
 	fi
 
 	if [ -x /etc/tcpdump2mqtt/keypress.sh ] && \

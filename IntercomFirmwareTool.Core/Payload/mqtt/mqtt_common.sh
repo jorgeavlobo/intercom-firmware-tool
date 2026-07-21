@@ -32,14 +32,15 @@ fi
 # from its watchdog loop until this file exists, so a broker that is still down
 # at boot can't leave discovery unpublished.
 #
-# Deliberately NOT in world-writable /tmp: a non-root local account (e.g.
+# Shared root-owned runtime dir (the marker and presence.sh's readiness FIFO live
+# here). Deliberately NOT world-writable /tmp: a non-root local account (e.g.
 # bticino2) could otherwise pre-create the marker (watchdog would treat discovery
-# as converged and never publish/clear it) or plant a symlink that the root
-# ": > $HA_MARKER" write would follow and truncate. /var/run/tcpdump2mqtt is
-# root-owned (ha_discovery.sh mkdir's it), so only root can plant anything there.
-# It's on tmpfs, so a reboot clears the marker and discovery re-reconciles.
-: "${HA_RUNDIR:=/var/run/tcpdump2mqtt}"
-: "${HA_MARKER:=$HA_RUNDIR/ha_done}"
+# as converged and never publish/clear it) or plant a symlink that a root write
+# would follow and truncate. /var/run/tcpdump2mqtt is root-owned (the scripts
+# mkdir it), so only root can plant anything there. It's on tmpfs, so a reboot
+# clears the marker and discovery re-reconciles.
+: "${RUNDIR:=/var/run/tcpdump2mqtt}"
+: "${HA_MARKER:=$RUNDIR/ha_done}"
 
 # mosquitto_pub with auth AND TLS applied independently (compose, do not choose
 # one or the other). Extra args (topic, -l, -r, -m ...) pass through; mosquitto
@@ -62,11 +63,12 @@ mqtt_sub_one() {
 	# -C 1 reconnect would otherwise re-receive a retained command and replay it
 	# forever until it is cleared. Commands must be published non-retained.
 	#
-	# NOTE: the retained 'offline' last will only fires on an UNCLEAN drop. With
-	# the -C 1 one-shot subscription each cycle ends in a clean disconnect, so THIS
-	# will rarely triggers. Reliable online/offline availability is instead provided
-	# by the dedicated persistent presence session (mqtt_presence / presence.sh),
-	# which holds a will open; this receiver's will is redundant but harmless.
+	# NOTE: a retained 'offline' last-will message is delivered by the broker only
+	# on an UNCLEAN drop. The -C 1 one-shot subscription ends each cycle in a clean
+	# disconnect, so this will rarely fires. Reliable online/offline availability is
+	# instead provided by the dedicated persistent presence session (mqtt_presence /
+	# presence.sh), which holds a will open; this receiver's will is redundant but
+	# harmless.
 	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -C 1 -R \
 		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain -t "${TOPIC_RX}"
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"

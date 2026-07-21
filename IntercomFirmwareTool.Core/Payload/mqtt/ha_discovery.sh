@@ -91,9 +91,16 @@ while [ "$i" -lt 6 ]; do
 		# dir is root-owned (created here, not in world-writable /tmp), so an
 		# unprivileged account can't pre-create the marker or plant a symlink for the
 		# root truncation below to follow. mkdir -p is idempotent across boots.
-		mkdir -p "$HA_RUNDIR" 2>/dev/null
-		: > "$HA_MARKER" 2>/dev/null
-		exit 0
+		mkdir -p "$RUNDIR" 2>/dev/null
+		if : > "$HA_MARKER" 2>/dev/null; then
+			exit 0
+		fi
+		# The configs were applied, but the convergence marker couldn't be written
+		# (e.g. $RUNDIR unwritable). Without it the orchestrator will relaunch us
+		# every watchdog pass and re-apply the retained configs. Surface it and fail
+		# instead of a silent success, so the real problem is visible in the log.
+		echo "ha_discovery: could not write marker $HA_MARKER; will re-run each pass"
+		exit 1
 	fi
 	i=$((i + 1))
 	# Backoff (capped): the broker may not be up yet at boot.
