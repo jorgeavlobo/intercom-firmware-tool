@@ -844,9 +844,12 @@ namespace IntercomFirmwareTool.Core
             // Last OpenWebNet bus frame (diagnostic). In JSON payload mode the state is the
             // frame and the parsed fields (type/who/what/where/params/ts) are exposed as entity
             // attributes; in raw mode the state is the frame string.
-            // The JSON value_template TOLERATES a non-JSON payload ("value_json is defined else
-            // value"): StartMqttSend downgrades json->raw when jq is missing, so the entity then
-            // still shows the raw frame instead of going unknown (attributes just stay empty).
+            // Both templates TOLERATE a non-JSON payload: StartMqttSend downgrades json->raw when
+            // jq is missing, so raw "*...##" frames can arrive on TopicDump. The value_template
+            // then still shows the raw frame instead of going unknown ("value_json is defined else
+            // value"), and the json_attributes_template yields "{}" instead of letting Home
+            // Assistant try to parse each raw frame as attributes JSON (which logs "Erroneous
+            // JSON" noise) — attributes just stay empty until JSON output resumes.
             // Two separate anonymous objects (not a ?: to object) so JsonSerializer keeps each
             // one's compile-time type — serializing through a plain `object` would emit `{}`.
             string busConfigJson = opts.UseJsonPayload
@@ -857,6 +860,7 @@ namespace IntercomFirmwareTool.Core
                     state_topic = opts.TopicDump,
                     value_template = "{{ value_json.frame if value_json is defined else value }}",
                     json_attributes_topic = opts.TopicDump,
+                    json_attributes_template = "{{ value if value_json is defined else '{}' }}",
                     icon = "mdi:bus",
                     entity_category = "diagnostic",
                     availability_topic = opts.TopicLastWill,
