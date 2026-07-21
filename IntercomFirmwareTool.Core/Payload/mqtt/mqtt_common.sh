@@ -142,17 +142,19 @@ mqtt_sub_stream() {
 	# (config is stable) — unlike mosquitto's default PID-based id, which changes every
 	# restart and so couldn't resume a session.
 	#
-	# A readable sanitised prefix ([A-Za-z0-9_-]) PLUS a cksum of the RAW topic: the
-	# sanitisation alone is lossy, so two DISTINCT topics could collapse to the same
-	# prefix (e.g. "Bticino/a/b" and "Bticino/a_b" both -> "Bticino_a_b"); the raw-topic
-	# cksum keeps the id distinct for distinct topics. This matters because a broker
-	# allows only ONE live connection per client id, so a collision would make two
-	# otherwise-valid units kick each other off and flap the shared durable session.
-	# Length isn't capped because the broker already accepts mosquitto's own long
-	# default ids. cksum is a standard busybox applet; if it were absent the suffix is
-	# just empty, degrading to the (still per-prefix) sanitised id — not a hard failure.
+	# A readable sanitised prefix ([A-Za-z0-9_-]) PLUS an INJECTIVE hex encoding of the
+	# RAW topic. The sanitisation alone is lossy — two DISTINCT topics could collapse to
+	# the same prefix (e.g. "Bticino/a/b" and "Bticino/a_b" both -> "Bticino_a_b") — so
+	# the hex (a bijection: each byte -> two fixed hex chars) guarantees DISTINCT topics
+	# always produce DISTINCT ids, not merely probabilistically (a 32-bit checksum could
+	# still collide). This matters because a broker allows only ONE live connection per
+	# client id, so a collision would make two otherwise-valid units evict each other and
+	# flap the shared durable session. Length isn't capped because the broker already
+	# accepts mosquitto's own long default ids. od is a standard busybox applet; were it
+	# absent the hex is empty and the id degrades to the sanitised prefix (still distinct
+	# for every non-pathological topic) — never one shared id, so not a hard failure.
 	_lw="${TOPIC_LASTWILL:-default}"
-	_cid="btrx-$(printf '%s' "$_lw" | tr -c 'A-Za-z0-9_-' '_')-$(printf '%s' "$_lw" | cksum | cut -d' ' -f1)"
+	_cid="btrx-$(printf '%s' "$_lw" | tr -c 'A-Za-z0-9_-' '_')-$(printf '%s' "$_lw" | od -A n -t x1 | tr -d ' \n')"
 
 	# Persistent (durable) session WHEN the client supports it: clean-session=0 lets
 	# the broker QUEUE QoS>=1 commands published while the receiver is briefly
