@@ -57,9 +57,19 @@ announced=
 while IFS= read -r line; do
 	case "$line" in
 		*SUBACK*)
-			if [ -z "$announced" ]; then
+			[ -n "$announced" ] && continue
+			# A SUBACK proves the session was connected when the broker wrote that
+			# line, but it may be buffered from a session that has since dropped
+			# (whose retained LWT 'offline' the broker already delivered). Only
+			# announce 'online' while the mosquitto_sub child is still alive, and
+			# re-check right after the publish: if it died across it, reconcile back
+			# to 'offline' so we never strand a stale 'online' with no will-holder.
+			kill -0 "$child" 2>/dev/null || continue
+			mqtt_pub -r -t "$TOPIC_LASTWILL" -m online
+			if kill -0 "$child" 2>/dev/null; then
 				announced=1
-				mqtt_pub -r -t "$TOPIC_LASTWILL" -m online
+			else
+				mqtt_pub -r -t "$TOPIC_LASTWILL" -m offline
 			fi
 			;;
 	esac

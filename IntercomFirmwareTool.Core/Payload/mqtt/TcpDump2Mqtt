@@ -62,13 +62,21 @@ kill_childs() {
 
 exit_handler() {
 	echo "TcpDump2Mqtt shutting down."
-	# Tear the children down FIRST (this stops presence.sh and reaps any in-flight
-	# 'online' publisher), THEN announce 'offline' — so nothing can overwrite it
-	# afterwards. A clean shutdown disconnects the presence session cleanly, which
-	# SUPPRESSES its last will, so this explicit retained 'offline' is what stops HA
-	# from showing the bridge connected after a graceful stop. Best-effort: if the
-	# broker is already gone this just fails quietly.
+	# Tear the children down FIRST (this stops presence.sh and signals any in-flight
+	# 'online' publisher). kill_by only SIGNALs, so WAIT (bounded) for a lagging
+	# 'online' mosquitto_pub to actually exit before the final 'offline' — otherwise
+	# it could land afterwards and revive a stale 'online' with no will-holder.
 	kill_childs
+	i=0
+	while [ "$i" -lt 5 ] && \
+	      /usr/bin/pgrep -f "mosquitto_pub.*$(re_escape "${TOPIC_LASTWILL}")" > /dev/null 2>&1; do
+		i=$((i + 1))
+		/bin/sleep 1
+	done
+	# A clean shutdown disconnects the presence session cleanly, which SUPPRESSES
+	# its last will, so this explicit retained 'offline' is what stops HA from
+	# showing the bridge connected after a graceful stop — and nothing is left to
+	# overwrite it now. Best-effort: if the broker is already gone this fails quietly.
 	mqtt_pub -r -t "${TOPIC_LASTWILL}" -m offline > /dev/null 2>&1
 	exit 0
 }
