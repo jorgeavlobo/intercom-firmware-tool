@@ -197,6 +197,17 @@ while : ; do
 	# across broker outages, backing off and re-subscribing; respawn it only if the
 	# wrapper itself died.
 	if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttReceive" > /dev/null 2>&1; then
+		# Reap an ORPHANED receiver mosquitto_sub first. If the wrapper died UNCLEANLY
+		# (SIGKILL/OOM — no trap runs), the mosquitto_sub it exec'd in its pipeline
+		# survives, reparented to init and still connected. Respawning without reaping it
+		# would leave TWO subscribers with the SAME durable client id: the broker evicts
+		# one on the other's CONNECT, each mosquitto_sub reconnects, and they flap
+		# indefinitely — and both match rx_sub_pat, so the 'online' gate can't tell which
+		# is real. SIGTERM (kill_by) makes the orphan disconnect CLEANLY (will suppressed,
+		# no spurious 'offline') before the fresh receiver starts. No-op on a first start
+		# (nothing matches). A clean wrapper exit already reaps its own child, so this
+		# only fires on the unclean case.
+		kill_by "${RX_SUB_PAT:-$(rx_sub_pat)}"
 		echo "Starting MQTT receiver..."
 		/etc/tcpdump2mqtt/StartMqttReceive &
 		/bin/sleep 5
