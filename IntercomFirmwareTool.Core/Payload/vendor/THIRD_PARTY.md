@@ -1,173 +1,98 @@
-# Third-party binaries shipped by the MQTT bridge installer
+# Third-party binary shipped by the MQTT bridge installer
 
-The optional **MQTT bridge** feature (off by default) installs two prebuilt
-ARM userland tools into the firmware image, because they are **not** present in
-the factory BTicino C300X/C100X firmware and the bridge scripts need them:
+The optional **MQTT bridge** feature (off by default) installs one prebuilt ARM
+binary into the firmware image, because it is **not** present in the factory
+BTicino C300X/C100X firmware:
 
-| Tool | Used by | Installed as | Purpose |
-|---|---|---|---|
-| `jq` | `StartMqttReceive`, `keypress.sh` | `/usr/bin/jq` (`0775 root:root`) | build/parse the small JSON command and key-press payloads |
-| `evtest` | `keypress.sh` | `/usr/bin/evtest` (`0775 root:root`) | read front-panel key events from `/dev/input/eventN` |
+| Tool | Installed as | Purpose |
+|---|---|---|
+| `btmqttd` | `/usr/bin/btmqttd` (`0775 root:root`) | the single-connection MQTT bridge daemon (issue #32) — OpenWebNet bus monitor → MQTT, MQTT → gateway command dispatch, front-panel keypad → MQTT, Home Assistant discovery, TLS, atomic birth/will availability |
 
-These are **verbatim, unmodified** third-party binaries. They are redistributed
-here under their own licenses (below), independently of the MIT license that
-covers IntercomFirmwareTool's own code. **Bundling them does not relicense
-them** — each keeps its own license, unchanged.
+`btmqttd` is **our own program** (its source lives in this repository at
+[`native/btmqttd/`](../../../native/btmqttd), built per
+[`native/btmqttd/BUILD.md`](../../../native/btmqttd/BUILD.md)). It **replaces the
+entire previous shell-orchestrated bridge** — `StartMqttSend`,
+`StartMqttReceive`, `keypress.sh`, `filter.py`, `ha_discovery.sh`,
+`mqtt_common.sh`, `TcpDump2Mqtt`/`TcpDump2Mqtt.sh` — **and** the two vendored
+userland tools those scripts required: **`jq`** (JSON, now done natively with
+`serde_json`) and **`evtest`** (keypad, now done natively with the pure-Rust
+`evdev` crate). Removing `jq`/`evtest` also removes their copyleft obligations
+(`evtest` was GPL-2.0-or-later; the static `jq` bundled LGPL-2.1 glibc): the
+firmware image and this assembly no longer carry any GPL/LGPL component.
 
-- `evtest` stays **GPL-2.0-or-later**: any firmware image that includes it must
-  satisfy the GPL's obligations **for `evtest`** — ship its license notice and
-  honour the written offer for corresponding source (below). Placing it on the
-  same image as the otherwise-MIT tooling is *mere aggregation* (GPL v2 §2): that
-  does not extend the GPL to the other components, but it also does not make the
-  image "MIT as a whole".
-- `jq` is a permissive program (MIT), **but the shipped binary is statically
-  linked** and therefore *contains* code from other projects with their own
-  terms: **Oniguruma** (BSD-2-Clause) and the **GNU C Library / glibc**
-  (LGPL-2.1-or-later). The LGPL adds a relink/source obligation for the glibc
-  portion — see the `jq` section below.
-
-## Why `jq` 1.8.2 (not the version on the reference unit)
-
-The reference C100X was running fquinto's older static **jq 1.7**, which is
-affected by decNumber stack-buffer-overflow vulnerabilities (**CVE-2023-50268**,
-**CVE-2024-53427**, through jq 1.7.1). We ship the current patched upstream
-release **jq 1.8.2** — a jq *security release* that, over 1.7/1.8.1, fixes a
-large batch of issues, several reachable via the untrusted JSON parsed in
-`StartMqttReceive`: parser memory-corruption (e.g. **CVE-2026-32316** heap
-overflow, **CVE-2026-39979** out-of-bounds read, **CVE-2026-33948** NUL
-truncation) and a hash-collision denial of service (**CVE-2026-40164**). (In our
-layout that parse only runs behind the opt-in, authenticated command channel;
-`keypress.sh` uses jq only to *build* JSON from trusted values. We still ship the
-patched build rather than rely on that gating.)
-
-It is the official jqlang `jq-linux-armhf` asset, integrity-checked against the
-project's published `sha256sum.txt`, and **smoke-tested on a live C100X** (kernel
-4.9.11): despite being built with a newer glibc toolchain (it uses `DT_RELR`
-relocations), the fully-static binary runs correctly on that unit (`jq
---version`, a `.command` parse, and a `jq -cn` build all succeed). `evtest` is
-unchanged and remains byte-for-byte identical to the copy observed on that unit.
+`btmqttd` is a **statically-linked musl** binary, so it needs no runtime
+interpreter, no shared libraries, and none of the device tools the shell bridge
+depended on (`tcpdump`, `python`, `jq`, `nc`, `awk`, `pgrep`). It bundles ~65
+Rust crates, **all under permissive licenses** — MIT, Apache-2.0, ISC,
+BSD-3-Clause and Unicode-3.0 — with **no copyleft**. The aggregated dependency
+license texts and per-crate copyright notices travel with the binary in
+[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
 
 ## Provenance & integrity
 
-| Field | `jq` | `evtest` |
-|---|---|---|
-| File | `armhf/jq` | `armhf/evtest` |
-| Size | 1,340,000 bytes | 34,264 bytes |
-| SHA-256 | `78458244fb546469b4042e9e07cf78714ef6848895eb9515df76b4eb0b1dc992` | `96e3c20fb1742fc57b9b9efbc716cb4c7ae5a1faebe5621a14c1b3053d0d08c0` |
-| ELF | 32-bit LSB, ARM EABI5, **statically linked**, stripped | 32-bit LSB PIE, ARM EABI5, **dynamically linked** (`/lib/ld-linux-armhf.so.3`), stripped |
-| Build ID (SHA-1) | `55019f17610f57bc2ae9817d7f1cc56a3b30fbd1` | `0b6cfc5075b98021a854b5d4519ed3e1c6fa808e` |
-| Target triple | `arm-linux-gnueabihf` (armv7 hardfloat), statically links glibc 2.39 (jqlang CI on ubuntu-24.04) | `arm-linux-gnueabihf` (armv7 hardfloat), glibc 2.27 |
-| Upstream version | jq **1.8.2** (build: `--with-oniguruma=builtin --enable-all-static`) | evtest **1.35** |
-| Statically bundles | Oniguruma (BSD-2-Clause), glibc (LGPL-2.1-or-later) | — (dynamic; links the device's own glibc) |
-| License | **MIT** (jq) + ICU (decNumber) + Lucent/dtoa + BSD-2-Clause (Oniguruma) + LGPL-2.1-or-later (glibc) | **GPL-2.0-or-later** |
-| SPDX expression | `MIT AND ICU AND LicenseRef-dtoa AND BSD-2-Clause AND LGPL-2.1-or-later` | `GPL-2.0-or-later` |
-| License texts | [`licenses/jq-COPYING`](licenses/jq-COPYING), [`licenses/oniguruma-COPYING`](licenses/oniguruma-COPYING), [`licenses/glibc-LGPL-2.1.txt`](licenses/glibc-LGPL-2.1.txt) | [`licenses/evtest-COPYING`](licenses/evtest-COPYING) |
+| Field | `btmqttd` |
+|---|---|
+| File | `armhf/btmqttd` |
+| Size | 1,208,736 bytes |
+| SHA-256 | `00c1dc805bd1aba26eb16097a15171d4c98988bcf9b8ae7d3896869bb96cfd42` |
+| ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
+| ABI | armv7 (`Tag_CPU_arch: v7`), **hard-float** (`Tag_FP_arch: VFPv3-D16`, `Tag_ABI_VFP_args: VFP registers`; ELF flags `0x5000400`) |
+| Build ID | none (stripped; `rust-lld` emits no GNU build-id note) |
+| Target triple | `armv7-unknown-linux-musleabihf` (armv7 hardfloat), **static musl** — no dependency on the device glibc 2.27 |
+| Upstream version | `btmqttd` 0.1.0 (this repo, `native/btmqttd/`) |
+| Statically bundles | ~65 Rust crates (MIT / Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0 — all permissive) + musl libc (MIT) |
+| License | permissive only — see SPDX below |
+| SPDX expression | `MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0` |
+| License texts | [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt) |
 
-The SHA-256 values above are also enforced at load time by
-`PayloadBinaries` (the accessor throws if an embedded binary's bytes do not
-match), so a corrupted or swapped binary cannot be silently installed.
+The SHA-256 above is also enforced at load time by `PayloadBinaries` (the
+accessor throws if the embedded binary's bytes do not match), so a corrupted or
+swapped binary cannot be silently installed.
 
-## `jq` — MIT, statically bundling Oniguruma (BSD) and glibc (LGPL-2.1)
+## `btmqttd` — permissive Rust, statically-linked musl
 
-`jq` itself is copyright (C) 2012 Stephen Dolan and contributors, distributed
-under the MIT license. It also incorporates David M. Gay's `dtoa.c`/`g_fmt.c`
-(Lucent permissive notice) and the `decNumber` library (ICU license). The
-complete text of all of these, exactly as shipped with jq, is in
-[`licenses/jq-COPYING`](licenses/jq-COPYING).
+`btmqttd` is copyright the IntercomFirmwareTool authors and distributed under the
+same license as the rest of this repository. The shipped binary is **statically
+linked**, so the notices of the components it *contains* must travel with it —
+that is the purpose of
+[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt),
+which reproduces, once each, the full MIT, Apache License 2.0, ISC,
+BSD-3-Clause and Unicode-3.0 texts together with the real per-crate copyright
+lines. The load-bearing non-MIT/Apache components are:
 
-Source: <https://github.com/jqlang/jq> (tag `jq-1.8.2`). The `jq-linux-armhf`
-release asset is built by the project's public CI (workflow at that tag), which
-serves as the **build reference** for this static binary — not a byte-exact
-reproducible recipe, since that CI pulls its cross toolchain via a non-pinned
-`apt-get` (see the LGPL §6 note below for the glibc version and source).
+- **ring** (`Apache-2.0 AND ISC`) — the crypto backend behind rustls; bundles
+  BoringSSL-derived code. Copyright 2015–2025 Brian Smith and the BoringSSL /
+  OpenSSL authors.
+- **rustls-webpki** and **untrusted** (ISC) — certificate/DER handling. Copyright
+  2015 / 2015–2016 Brian Smith.
+- **subtle** (BSD-3-Clause) — constant-time primitives. Copyright Isis Agora
+  Lovecruft and Henry de Valence.
+- **unicode-ident** (`(MIT OR Apache-2.0) AND Unicode-3.0`) — the Unicode data
+  tables carry the Unicode, Inc. license (v3).
 
-Because the shipped binary is **statically linked** (`--enable-all-static`), it
-also contains two further projects, whose notices must travel with it:
+Every other crate is MIT and/or Apache-2.0 (we elect MIT where offered). None is
+copyleft.
 
-### Oniguruma — BSD-2-Clause
+## Build & reproducibility
 
-jq's regular-expression support is provided by the bundled **Oniguruma** library
-(`--with-oniguruma=builtin`), copyright (c) K.Kosako and contributors, under the
-2-clause BSD license. Its binary-redistribution clause requires this notice to
-accompany the binary; the full text is in
-[`licenses/oniguruma-COPYING`](licenses/oniguruma-COPYING).
-Source: <https://github.com/kkos/oniguruma>.
+The binary is cross-compiled to `armv7-unknown-linux-musleabihf` (static musl,
+hard-float) per [`native/btmqttd/BUILD.md`](../../../native/btmqttd/BUILD.md):
+Rust's self-contained `rust-lld` + bundled musl link our pure-Rust code, and
+`ring`'s small C/asm is compiled with an `arm-linux-gnueabihf` cross-gcc (only to
+object code; the final static link and the runtime libc are musl). The exact
+dependency versions are pinned in
+[`native/btmqttd/Cargo.lock`](../../../native/btmqttd/Cargo.lock). A recipient
+can rebuild the binary from that source + lockfile; the recorded SHA-256 is the
+integrity reference, and `PayloadBinaries` re-verifies it before every install.
 
-### GNU C Library (glibc) — LGPL-2.1-or-later (statically linked)
-
-The static `jq` links the **GNU C Library** into the executable. glibc is
-licensed **LGPL-2.1-or-later**; the full text is in
-[`licenses/glibc-LGPL-2.1.txt`](licenses/glibc-LGPL-2.1.txt). Static linking
-triggers LGPL §6: recipients must be able to relink `jq` against a modified
-glibc.
-
-**How that obligation is met here (LGPL §6).** The shipped `jq-linux-armhf` is
-built by the jqlang CI (workflow at tag `jq-1.8.2`,
-<https://github.com/jqlang/jq/blob/jq-1.8.2/.github/workflows/ci.yml>) on
-`ubuntu-24.04`, statically linking the armhf glibc from the distro package
-`crossbuild-essential-armhf` — i.e. **glibc 2.39**, Ubuntu 24.04's system glibc.
-The CI installs that toolchain with a non-pinned `apt-get`, so it fixes the glibc
-**version (2.39)** rather than a byte-exact toolchain image; we therefore record
-the version and its corresponding source rather than claiming a byte-reproducible
-build. glibc 2.39's complete corresponding source is available as an immutable
-upstream release — tag **`glibc-2.39`**
-(<https://sourceware.org/git/?p=glibc.git;a=tag;h=refs/tags/glibc-2.39>, tarball
-<https://ftp.gnu.org/gnu/glibc/glibc-2.39.tar.xz>) — and as the exact Ubuntu
-source package `glibc 2.39-0ubuntu*` from Launchpad
-(<https://launchpad.net/ubuntu/+source/glibc>). jq's own source is MIT (link
-above). With both public, a recipient can rebuild and relink `jq` against a
-modified glibc. The exact corresponding-source materials for this binary are
-**also available on request from the distributor** — open an issue at
-<https://github.com/jorgeavlobo/intercom-firmware-tool/issues> — for at least
-three years, for no more than the cost of the distribution.
-
-> **Note (dormant runtime plugins).** Even `--enable-all-static`, glibc keeps a
-> few subsystems plugin-based at runtime (NSS name resolution, `iconv`/`gconv`
-> converters, the locale archive). jq's use here — parse a small JSON object,
-> build a small one, both UTF-8 — does **not** call `setlocale`, `iconv`, or
-> hostname resolution, and the on-device smoke test exercised exactly those
-> paths, so this dormant dependency is not reached on the C100X's minimal rootfs.
-> The pinned glibc version above is the reference should any such path ever be
-> needed.
-
-## `evtest` — GPL-2.0-or-later
-
-`evtest` is copyright (C) 1999-2000 Vojtech Pavlik and (C) 2009-2011 Red Hat,
-Inc., distributed under the GNU General Public License, version 2 **or (at your
-option) any later version**. The complete GPL v2 text exactly as shipped with
-evtest is in [`licenses/evtest-COPYING`](licenses/evtest-COPYING).
-
-### Written offer for corresponding source (GPL-2.0 §3)
-
-The `evtest` binary shipped here is the unmodified upstream program. Its
-**complete corresponding source code** is the `evtest` project source at
-version 1.35:
-
-- Upstream project: <https://gitlab.freedesktop.org/libevdev/evtest>
-- The corresponding source for this exact binary — evtest **1.35** for
-  `arm-linux-gnueabihf` (glibc 2.27) — can be obtained from the upstream
-  project above, or **on request from the distributor** — open an issue at
-  <https://github.com/jorgeavlobo/intercom-firmware-tool/issues> — for a period
-  of at least three years, for no more than the cost of physically performing
-  the source distribution.
-- Build recipe (matches the shipped ELF target): cross-compile the unmodified
-  evtest 1.35 source with an `arm-linux-gnueabihf` glibc 2.27 toolchain, e.g.
-
-  ```sh
-  arm-linux-gnueabihf-gcc -O2 -o evtest evtest.c
-  ```
-
-  (evtest is a single translation unit; no configure step is required.)
-
-**Scope of these obligations.** The binaries are embedded **unconditionally** in
-`IntercomFirmwareTool.Core` (they are compiled-in resources), so any distribution
-of that assembly/package — regardless of the bridge toggle — redistributes `jq`
-and `evtest` and must therefore carry these notices and honour the source offers.
-This file travels with them for that reason. What the bridge toggle affects is
-the **generated firmware image**: the *planned* installer (Phase 1c, #10) *will*
-write `jq` and `evtest` into an image only when the bridge is enabled, so whoever
-redistributes such an image must likewise pass these offers along; an image built
-**without** the bridge (the default) will contain neither binary and carry no
-such obligation *for the image*. (No installer path exists yet — this phase only
-embeds the binaries; the image-side behaviour above is what Phase 1c will do.)
-The obligation on the tool's own assembly/package is unaffected either way.
+**Scope.** The binary is embedded **unconditionally** in
+`IntercomFirmwareTool.Core` (a compiled-in resource), so any distribution of that
+assembly redistributes `btmqttd` and should carry
+`btmqttd-THIRD-PARTY-LICENSES.txt` (this file travels with it for the same
+reason). What the bridge toggle affects is the **generated firmware image**: the
+installer writes `btmqttd` into an image only when the user enables the bridge;
+an image built without the bridge (the default) contains no third-party binary
+and carries no such obligation for the image. Because every bundled component is
+permissive, meeting these obligations is limited to **reproducing the notices** —
+there is no copyleft source-offer requirement, unlike the previous `jq`/`evtest`
+binaries this daemon replaces.

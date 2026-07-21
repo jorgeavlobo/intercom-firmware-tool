@@ -6,8 +6,9 @@
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
 # Short-Description: BTicino service watchdog
-# Description:       Monitors dropbear, scsserver, mosquitto and TcpDump2Mqtt and
-#                    restarts any that die. Runs independently of the MQTT bridge
+# Description:       Monitors dropbear, scsserver, mosquitto and the btmqttd MQTT
+#                    bridge daemon and restarts any that die. Also launches btmqttd
+#                    at boot (first loop iteration). Runs independently of the bridge
 #                    so SSH and gate/intercom commands survive an MQTT failure.
 ### END INIT INFO
 #
@@ -69,9 +70,14 @@ watchdog_loop() {
 		ensure scsserver /etc/init.d/bt_daemon-apps.sh start
 		ensure mosquitto /etc/init.d/mosquitto start
 
-		if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/TcpDump2Mqtt$" > /dev/null 2>&1; then
-			log "TcpDump2Mqtt not running - restarting"
-			/etc/tcpdump2mqtt/TcpDump2Mqtt >> "$TCPLOG" 2>&1 &
+		# btmqttd is the native single-connection MQTT bridge daemon (issue #32).
+		# It reads /etc/tcpdump2mqtt/TcpDump2Mqtt.conf, self-heals internally
+		# (MQTT reconnect, keypad reopen), and replaces the whole shell bridge; the
+		# watchdog only needs to (re)launch the PROCESS. `pgrep -x` matches the exact
+		# binary name.
+		if ! /usr/bin/pgrep -x btmqttd > /dev/null 2>&1; then
+			log "btmqttd not running - restarting"
+			/usr/bin/btmqttd >> "$TCPLOG" 2>&1 &
 		fi
 
 		# Keep the log from growing without bound: trim to 50 KB past 100 KB.

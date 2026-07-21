@@ -11,8 +11,8 @@ namespace IntercomFirmwareTool.Core
     /// <summary>
     /// Options for installing the optional MQTT bridge into a firmware image.
     /// The bridge is <b>off by default</b>; the installer only runs when the user
-    /// opts in. Mirrors the variables consumed by <c>TcpDump2Mqtt.conf</c> /
-    /// <c>mqtt_common.sh</c>.
+    /// opts in. Mirrors the variables <c>btmqttd</c> reads from
+    /// <c>TcpDump2Mqtt.conf</c>.
     /// </summary>
     /// <param name="MqttHost">Broker IP (preferred) or hostname. Required.</param>
     /// <param name="MqttPort">Broker port (1..65535, default 1883).</param>
@@ -30,15 +30,10 @@ namespace IntercomFirmwareTool.Core
     /// Enable the gated JSON command channel. Requires client auth (user/pass or mutual TLS);
     /// enforced by <see cref="Validate"/>.
     /// </param>
-    /// <param name="UseTcpdumpCapture">
-    /// Force the faithful tcpdump + filter.py capture back-end. When false (default) the bridge
-    /// opens a MONITOR session directly on the local OpenWebNet gateway (no tcpdump, no resident
-    /// python) and only falls back to tcpdump when that gateway is unreachable. See StartMqttSend.
-    /// </param>
     /// <param name="EnableHaDiscovery">
     /// Publish retained Home Assistant MQTT discovery configs at bridge startup, so the
     /// connectivity/bus/keypad entities appear in HA automatically (no manual YAML). Additive and
-    /// read-only (no command entity); off by default at the Core layer. See ha_discovery.sh.
+    /// read-only (no command entity); off by default at the Core layer. Reconciled natively by btmqttd.
     /// </param>
     /// <param name="UseJsonPayload">
     /// Publish the bus (TOPIC_DUMP) as one structured JSON object per OpenWebNet frame
@@ -46,8 +41,8 @@ namespace IntercomFirmwareTool.Core
     /// On by default (json — the modern, HA-friendly representation); set false for raw frames
     /// (a low-level, dependency-free option). TOPIC_KEY is already JSON either way. When on, the
     /// HA <c>bus</c> entity exposes the parsed fields as attributes (its value_template also
-    /// tolerates a raw payload, so the on-device jq-missing downgrade still shows the frame). See
-    /// PAYLOAD_FORMAT / own_frame_to_json in the payload scripts.
+    /// tolerates a raw payload, so a raw-mode frame still shows). See PAYLOAD_FORMAT /
+    /// frame_to_json in btmqttd.
     /// </param>
     public sealed record MqttOptions(
         string MqttHost,
@@ -59,7 +54,6 @@ namespace IntercomFirmwareTool.Core
         string? ClientKeyPem = null,
         string? HostIpForHosts = null,
         bool AllowRemoteShell = false,
-        bool UseTcpdumpCapture = false,
         bool EnableHaDiscovery = false,
         bool UseJsonPayload = true)
     {
@@ -71,7 +65,6 @@ namespace IntercomFirmwareTool.Core
             $"MqttOptions {{ MqttHost = {MqttHost}, MqttPort = {MqttPort}, " +
             $"HasAuth = {HasAuth}, HasTls = {HasTls}, HasMutualTls = {HasMutualTls}, " +
             $"AllowRemoteShell = {AllowRemoteShell}, " +
-            $"Capture = {(UseTcpdumpCapture ? "tcpdump" : "socket")}, " +
             $"Payload = {(UseJsonPayload ? "json" : "raw")}, " +
             $"HaDiscovery = {EnableHaDiscovery} }}";
 
@@ -132,40 +125,31 @@ namespace IntercomFirmwareTool.Core
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
 
-        // The 9 embedded scripts. TcpDump2Mqtt.conf is generated (not a resource);
-        // jq/evtest come from PayloadBinaries. Executables 0775; mqtt_common.sh is
-        // only sourced, so 0644. ha_discovery.sh runs on every startup and
-        // self-selects publish (HA_DISCOVERY=1) vs clear (0). StartMqttReceive holds
-        // the persistent last-will session (it is both the command receiver and the
-        // availability holder), so HA availability is reliable.
+        // The only embedded payload script is the SysV watchdog init: it launches
+        // and respawns the native btmqttd daemon (the whole shell bridge —
+        // StartMqttSend/Receive, keypress.sh, filter.py, ha_discovery.sh,
+        // mqtt_common.sh, TcpDump2Mqtt[.sh] — is replaced by btmqttd, installed as an
+        // ARM binary via PayloadBinaries). TcpDump2Mqtt.conf is generated (not a
+        // resource). Installed 0775.
         private static readonly ScriptFile[] Scripts =
         {
-            new(ResourcePrefix + "TcpDump2Mqtt",       EtcDir + "/TcpDump2Mqtt",       775),
-            new(ResourcePrefix + "TcpDump2Mqtt.sh",    EtcDir + "/TcpDump2Mqtt.sh",    775),
-            new(ResourcePrefix + "StartMqttSend",      EtcDir + "/StartMqttSend",      775),
-            new(ResourcePrefix + "StartMqttReceive",   EtcDir + "/StartMqttReceive",   775),
-            new(ResourcePrefix + "keypress.sh",        EtcDir + "/keypress.sh",        775),
-            new(ResourcePrefix + "filter.py",          EtcDir + "/filter.py",          775),
-            new(ResourcePrefix + "mqtt_common.sh",     EtcDir + "/mqtt_common.sh",     644),
-            new(ResourcePrefix + "ha_discovery.sh",    EtcDir + "/ha_discovery.sh",    775),
             new(ResourcePrefix + "bt_service_watchdog", "/etc/init.d/bt_service_watchdog", 775),
         };
 
         // Home Assistant discovery configs: one JSON file per entity plus a manifest
         // of "config-topic<TAB>filename". Written ALWAYS (regardless of the enable
-        // flag) so ha_discovery.sh can either publish them retained (HA_DISCOVERY=1)
+        // flag) so btmqttd can either publish them retained (HA_DISCOVERY=1)
         // or clear the retained configs (HA_DISCOVERY=0).
         private const string HaDir = EtcDir + "/ha";
 
-        // Boot symlinks in rc5.d. The 'z' after S99 sorts these AFTER the factory
-        // S99<Capital…> services (ASCII 'z' > any capital), so the bridge starts
-        // once the network, dbus/avahi and the BTicino apps are already up. The
-        // watchdog (…zBtServiceWatchdog) still sorts before the bridge
-        // (…zTcpDump2Mqtt) — B < T — so it comes up first.
+        // Boot symlink in rc5.d. The 'z' after S99 sorts this AFTER the factory
+        // S99<Capital…> services (ASCII 'z' > any capital), so it starts once the
+        // network, dbus/avahi and the BTicino apps are already up. Only the watchdog
+        // needs a boot symlink now: its first loop iteration launches btmqttd (and it
+        // respawns it if it dies), so there is no separate bridge boot service.
         private static readonly (string Link, string Target)[] Symlinks =
         {
             ("/etc/rc5.d/S99zBtServiceWatchdog", "../init.d/bt_service_watchdog"),
-            ("/etc/rc5.d/S99zTcpDump2Mqtt",      "../tcpdump2mqtt/TcpDump2Mqtt.sh"),
         };
 
         /// <summary>
@@ -234,7 +218,7 @@ namespace IntercomFirmwareTool.Core
             // --- Home Assistant discovery configs -------------------------------
             // One retained-config JSON per entity + a manifest of
             // "config-topic<TAB>filename". Written ALWAYS (not only when enabled):
-            // ha_discovery.sh publishes them retained when HA_DISCOVERY=1, and
+            // btmqttd publishes them retained when HA_DISCOVERY=1, and
             // CLEARS the retained configs (empty payload) when HA_DISCOVERY=0 — so a
             // rebuild that unticks discovery actually removes the HA entities from a
             // broker that already saw them, instead of leaving them orphaned.
@@ -293,11 +277,11 @@ namespace IntercomFirmwareTool.Core
             if (opts.MqttPort < 1 || opts.MqttPort > 65535)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidPort"), nameof(opts));
 
-            // The OpenWebNet monitor endpoint feeds the socket back-end's config.
+            // The OpenWebNet monitor endpoint feeds btmqttd's bus-monitor config.
             // It is not exposed in the UI (the App always uses the defaults), but
             // it is a public option, so a library caller could set a bad value —
             // a 0/negative/oversized port or an empty host would generate a config
-            // that silently fails socket mode and falls back to tcpdump. Fail fast
+            // whose monitor session can never connect (no fallback exists). Fail fast
             // here instead, mirroring the broker host/port checks above.
             if (string.IsNullOrWhiteSpace(opts.OwnHost) || !IsValidHost(opts.OwnHost) ||
                 opts.OwnPortMon < 1 || opts.OwnPortMon > 65535)
@@ -311,10 +295,10 @@ namespace IntercomFirmwareTool.Core
             // The prefix is looser — it may be multi-level — but must have no
             // whitespace, no + / # wildcards, and no leading/trailing/double slash
             // (which would emit an empty topic level). Validated UNCONDITIONALLY (not
-            // only when EnableHaDiscovery): the manifest is generated and
-            // ha_discovery.sh runs on every boot even when disabled (to CLEAR the
+            // only when EnableHaDiscovery): the manifest is generated and btmqttd
+            // reconciles it on every connect even when disabled (to CLEAR the
             // retained configs), so a bad prefix/node would otherwise pass the build
-            // and fail every boot on-device.
+            // and fail on-device.
             {
                 bool BadPrefix(string s) =>
                     string.IsNullOrWhiteSpace(s) || s.IndexOfAny(new[] { '+', '#' }) >= 0 ||
@@ -388,12 +372,12 @@ namespace IntercomFirmwareTool.Core
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
 
             // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by
-            // the broker against the UNDERLYING <filter> that StartMqttReceive
+            // the broker against the UNDERLYING <filter> that btmqttd
             // subscribes to. So the checks below must run on <filter>, not the raw
             // "$share/..." string —
             // otherwise "$share/g/Bticino/#" would slip past the self-loop guard while
             // the broker still delivers the bridge's own Bticino/tx publishes to
-            // StartMqttReceive, replaying them to the gateway. Normalise here (and
+            // btmqttd, replaying them to the gateway. Normalise here (and
             // reject a malformed share: empty group/filter, or wildcards in the group).
             string rxFilter = opts.TopicRx;
             if (rxFilter.StartsWith("$share/", StringComparison.Ordinal))
@@ -421,8 +405,8 @@ namespace IntercomFirmwareTool.Core
 
             // TopicRx must not match any PUBLISH topic (equal, or a wildcard that
             // matches one). If it did, the bridge would subscribe to its own
-            // output: StartMqttSend publishes bus frames to TopicDump, the
-            // TopicRx subscriber (StartMqttReceive) would then receive them and
+            // output: btmqttd publishes bus frames to TopicDump, the
+            // TopicRx subscriber (btmqttd itself) would then receive them and
             // replay them to the gateway — a feedback loop that floods the bus.
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent })
@@ -512,7 +496,7 @@ namespace IntercomFirmwareTool.Core
                     conf == GenerateConf(opts), ""));
 
                 // HA discovery configs: always present and byte-exact (they are
-                // written regardless of the enable flag, so ha_discovery.sh can
+                // written regardless of the enable flag, so btmqttd can
                 // publish OR clear them). Read back the manifest and each JSON,
                 // comparing to what these options generate (a true read-back, like
                 // the .conf check above).
@@ -602,47 +586,31 @@ namespace IntercomFirmwareTool.Core
                 }
 
                 // Runtime-dependency presence checks (issue #10 §F: base tools
-                // "confirmed present on a factory C100X"). jq/evtest are installed
-                // above, so not here. Two categories:
-                //  - Tools our scripts INVOKE: validate the EXACT path the script
-                //    uses — not just "a tcpdump/pgrep somewhere" — so an image with
-                //    the tool at a different path fails here rather than at boot.
-                //    Candidates are used ONLY where the script itself tolerates more
-                //    than one path: python (StartMqttSend tries /usr/bin/python then
-                //    /usr/bin/python3) and nc (StartMqttReceive calls bare `nc` via
-                //    PATH). tcpdump/pgrep/mosquitto_* are hard-coded absolute paths.
-                //  - Base tools our scripts do NOT invoke (route, ping): a plain
-                //    presence check against common locations. These confirm the
-                //    target is the expected firmware (per #10), not that a script
-                //    will find them, so multiple candidate paths are correct here.
+                // "confirmed present on a factory C100X"). btmqttd is a STATIC musl
+                // binary that speaks MQTT natively (rumqttc) and parses JSON / reads
+                // the keypad in-process, so it invokes NONE of the shell bridge's old
+                // tools — no tcpdump, python, jq, nc, awk, or mosquitto_pub/sub. What
+                // still matters:
+                //  - the mosquitto broker init (btmqttd connects to the local broker);
+                //  - pgrep, which bt_service_watchdog uses to launch/respawn btmqttd;
+                //  - route/ping — #10 base tools we do NOT invoke, a plain presence
+                //    check that confirms the target is the expected firmware.
                 var deps = new (string Name, string[] Paths)[]
                 {
-                    ("mosquitto_pub", new[] { "/usr/bin/mosquitto_pub" }),        // mqtt_common.sh
-                    ("mosquitto_sub", new[] { "/usr/bin/mosquitto_sub" }),        // mqtt_common.sh
                     ("mosquitto (broker init)", new[] { "/etc/init.d/mosquitto" }),
-                    ("tcpdump", new[] { "/usr/sbin/tcpdump" }),                   // StartMqttSend hard-codes this
-                    ("python", new[] { "/usr/bin/python", "/usr/bin/python3" }),  // StartMqttSend tries both
-                    ("pgrep", new[] { "/usr/bin/pgrep" }),                        // TcpDump2Mqtt/watchdog hard-code this
-                    ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive command inject + StartMqttSend socket monitor (bare `nc` via PATH)
-                    ("awk", new[] { "/usr/bin/awk", "/bin/awk" }),                // StartMqttSend socket framer + mqtt_common.sh injective client-id hex (bare `awk` via PATH)
+                    ("pgrep", new[] { "/usr/bin/pgrep" }),                        // bt_service_watchdog respawns btmqttd
                     ("route", new[] { "/sbin/route", "/usr/sbin/route", "/bin/route" }), // #10 base tool (not invoked by us)
                     ("ping", new[] { "/bin/ping", "/usr/bin/ping" }),            // #10 base tool (not invoked by us)
                 };
                 foreach (var (name, paths) in deps)
                     // Present = resolves to a real file, FOLLOWING symlinks: on a
                     // stock image these tools are almost always symlinks (busybox
-                    // applets like nc/route/ping, version links like python ->
-                    // python2 -> python2.7, or pgrep -> pgrep.procps), and the ext
+                    // applets like route/ping, or pgrep -> pgrep.procps), and the ext
                     // reader's FileExists returns false for a symlink. A plain
                     // FileExists therefore false-fails a tool that IS present.
                     checks.Add(new($"runtime dep {name} present",
                         paths.Any(p => DependencyPresent(fs, p)),
                         string.Join(" | ", paths)));
-
-                // awk is checked UNCONDITIONALLY in the deps list above: besides the
-                // socket-capture framer (which only runs in socket mode) it now also
-                // builds the receiver's durable client-id hex in mqtt_common.sh, which
-                // runs in every capture mode. So there is no capture-gated awk check.
             }
             return checks;
         }
@@ -730,22 +698,19 @@ namespace IntercomFirmwareTool.Core
 
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 
-            // Capture back-end: 'socket' (default; direct OpenWebNet monitor session, no
-            // tcpdump/python) or 'tcpdump' (faithful Phase 1 pipeline). OWN_* is the gateway
-            // endpoint for the socket back-end. See StartMqttSend for the fallback behaviour.
-            sb.Append(Conf("CAPTURE_MODE", opts.UseTcpdumpCapture ? "tcpdump" : "socket"));
+            // OpenWebNet gateway endpoint for the bus MONITOR session (btmqttd opens it
+            // directly — no tcpdump/python; the retired CAPTURE_MODE toggle is gone).
             sb.Append(Conf("OWN_HOST", opts.OwnHost));
             sb.Append("OWN_PORT_MON=").Append(opts.OwnPortMon).Append('\n');
 
             // Bus payload format: 'json' (default; one structured object per frame — see
             // own_frame_to_json) or 'raw' (OpenWebNet frames verbatim). Only TOPIC_DUMP is
-            // affected. StartMqttSend downgrades json->raw if jq is missing; the HA bus entity's
-            // value_template tolerates a raw payload, so that stays functional.
+            // affected; btmqttd parses frames natively (serde_json). TOPIC_KEY is JSON either way.
             sb.Append(Conf("PAYLOAD_FORMAT", opts.UseJsonPayload ? "json" : "raw"));
 
-            // Home Assistant auto-discovery: when 1, the orchestrator runs
-            // ha_discovery.sh once at startup to publish the retained configs under
-            // HaDir. The discovery prefix/node/topics are baked into those files.
+            // Home Assistant auto-discovery: when 1, btmqttd publishes the retained
+            // discovery configs (from the installer-generated manifest under HaDir) on
+            // every connect; when 0 it clears them. Reconciled natively (no ha_discovery.sh).
             sb.Append("HA_DISCOVERY=").Append(opts.EnableHaDiscovery ? '1' : '0').Append('\n');
             return sb.ToString();
         }
@@ -807,20 +772,14 @@ namespace IntercomFirmwareTool.Core
             string Topic(string component, string objectId) =>
                 $"{prefix}/{component}/{node}/{objectId}/config";
 
-            // Availability (TopicLastWill): the persistent command receiver
-            // (StartMqttReceive) holds a long-lived connection whose retained 'offline'
-            // last will the broker delivers on an UNCLEAN drop — so OFFLINE is
-            // reliable. ONLINE is refreshed by the orchestrator each watchdog pass
-            // while the receiver is up (mosquitto_sub reconnects on its own, so a
-            // one-shot birth would stick at 'offline' after a blip), and published as
-            // 'offline' explicitly on a clean shutdown. ONLINE is best-effort (coupled
-            // to the broker in practice, since the refresh only lands when the broker
-            // accepts it and the receiver shares the same credentials) and errs toward
-            // a brief stale 'offline' rather than a stale 'online', so the connectivity
-            // sensor and the per-entity availability blocks below track the bridge's
-            // real state well enough for a diagnostic view. (Truly atomic birth/will
-            // needs a single-connection MQTT client, which the mosquitto CLI tools
-            // can't provide; a proper client is future work — see #12.)
+            // Availability (TopicLastWill): btmqttd is a single-connection MQTT client,
+            // so availability is ATOMIC (issue #32). It registers the retained 'offline'
+            // last will at CONNECT — the broker delivers it on an UNCLEAN drop — and
+            // publishes retained 'online' only AFTER the command subscription's SubAck is
+            // confirmed at QoS>=1, so ONLINE never precedes a working command channel. A
+            // clean shutdown (SIGTERM/SIGINT) publishes 'offline' explicitly. No 30 s
+            // watchdog refresh and no birth/will race: the connectivity sensor and the
+            // per-entity availability blocks below reflect the bridge's real state.
             var entities = new List<HaEntity>();
 
             // Connectivity: reports online/offline itself, so it carries NO
@@ -844,8 +803,8 @@ namespace IntercomFirmwareTool.Core
             // Last OpenWebNet bus frame (diagnostic). In JSON payload mode the state is the
             // frame and the parsed fields (type/who/what/where/params/ts) are exposed as entity
             // attributes; in raw mode the state is the frame string.
-            // Both templates TOLERATE a non-JSON payload: StartMqttSend downgrades json->raw when
-            // jq is missing, so raw "*...##" frames can arrive on TopicDump. The value_template
+            // Both templates TOLERATE a non-JSON payload: in raw mode (PAYLOAD_FORMAT=raw)
+            // btmqttd publishes raw "*...##" frames on TopicDump. The value_template
             // then still shows the raw frame instead of going unknown ("value_json is defined else
             // value"), and the json_attributes_template yields "{}" instead of letting Home
             // Assistant try to parse each raw frame as attributes JSON (which logs "Erroneous

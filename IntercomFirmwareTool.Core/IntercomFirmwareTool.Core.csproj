@@ -22,84 +22,38 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- MQTT bridge (Phase 1b): the verbatim third-party ARM binaries the
-         installer writes into the firmware image, plus their license notices,
-         embedded so the assembly is self-contained. Retrieved as byte[] /
-         string via PayloadBinaries (SHA-256 verified). These files are
-         included as default `None` items too, so Remove them first to avoid a
-         duplicate-item (NETSDK1022) error. LogicalName is set explicitly so
-         the manifest resource name is stable regardless of MSBuild's path-to-
-         name munging. See Payload/vendor/THIRD_PARTY.md for provenance/licensing. -->
-    <None Remove="Payload\vendor\armhf\jq" />
-    <None Remove="Payload\vendor\armhf\evtest" />
+    <!-- MQTT bridge: the verbatim third-party ARM binary (btmqttd, a statically-
+         linked Rust daemon) the installer writes into the firmware image, plus its
+         aggregated dependency-license notice and the THIRD_PARTY provenance,
+         embedded so the assembly is self-contained. Retrieved as byte[] / string via
+         PayloadBinaries (SHA-256 verified). These files are included as default
+         `None` items too, so Remove them first to avoid a duplicate-item (NETSDK1022)
+         error. LogicalName is set explicitly so the manifest resource name is stable
+         regardless of MSBuild's path-to-name munging. See Payload/vendor/THIRD_PARTY.md
+         for provenance/licensing. -->
+    <None Remove="Payload\vendor\armhf\btmqttd" />
     <None Remove="Payload\vendor\THIRD_PARTY.md" />
-    <None Remove="Payload\vendor\licenses\jq-COPYING" />
-    <None Remove="Payload\vendor\licenses\evtest-COPYING" />
-    <None Remove="Payload\vendor\licenses\oniguruma-COPYING" />
-    <None Remove="Payload\vendor\licenses\glibc-LGPL-2.1.txt" />
-    <EmbeddedResource Include="Payload\vendor\armhf\jq">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.armhf.jq</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\vendor\armhf\evtest">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.armhf.evtest</LogicalName>
+    <None Remove="Payload\vendor\licenses\btmqttd-THIRD-PARTY-LICENSES.txt" />
+    <EmbeddedResource Include="Payload\vendor\armhf\btmqttd">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.armhf.btmqttd</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Include="Payload\vendor\THIRD_PARTY.md">
       <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.THIRD_PARTY.md</LogicalName>
     </EmbeddedResource>
-    <EmbeddedResource Include="Payload\vendor\licenses\jq-COPYING">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.licenses.jq-COPYING</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\vendor\licenses\evtest-COPYING">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.licenses.evtest-COPYING</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\vendor\licenses\oniguruma-COPYING">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.licenses.oniguruma-COPYING</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\vendor\licenses\glibc-LGPL-2.1.txt">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.licenses.glibc-LGPL-2.1.txt</LogicalName>
+    <EmbeddedResource Include="Payload\vendor\licenses\btmqttd-THIRD-PARTY-LICENSES.txt">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.licenses.btmqttd-THIRD-PARTY-LICENSES.txt</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>
-    <!-- MQTT bridge (Phase 1c): the payload scripts MqttInstaller writes into the
-         firmware image, embedded (LF-pinned via .gitattributes; MqttInstaller also
-         normalizes to LF defensively). TcpDump2Mqtt.conf is NOT embedded — it is
-         generated from MqttOptions; README.md is docs, not payload. Same
-         Remove-then-EmbeddedResource + explicit LogicalName pattern as the
-         vendor binaries above. -->
-    <None Remove="Payload\mqtt\TcpDump2Mqtt" />
-    <None Remove="Payload\mqtt\TcpDump2Mqtt.sh" />
-    <None Remove="Payload\mqtt\StartMqttSend" />
-    <None Remove="Payload\mqtt\StartMqttReceive" />
-    <None Remove="Payload\mqtt\keypress.sh" />
-    <None Remove="Payload\mqtt\filter.py" />
-    <None Remove="Payload\mqtt\mqtt_common.sh" />
-    <None Remove="Payload\mqtt\ha_discovery.sh" />
+    <!-- MQTT bridge: the only payload script the installer writes into the firmware
+         image is the SysV watchdog init script that launches + respawns the native
+         btmqttd daemon. The shell-orchestrated bridge (StartMqttSend/StartMqttReceive,
+         keypress.sh, filter.py, ha_discovery.sh, mqtt_common.sh, TcpDump2Mqtt[.sh]) is
+         fully replaced by btmqttd and no longer shipped. LF-pinned via .gitattributes;
+         MqttInstaller also normalizes to LF defensively. Same Remove-then-
+         EmbeddedResource + explicit LogicalName pattern as the vendor binary above. -->
     <None Remove="Payload\mqtt\bt_service_watchdog" />
-    <EmbeddedResource Include="Payload\mqtt\TcpDump2Mqtt">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.TcpDump2Mqtt</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\mqtt\TcpDump2Mqtt.sh">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.TcpDump2Mqtt.sh</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\mqtt\StartMqttSend">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.StartMqttSend</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\mqtt\StartMqttReceive">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.StartMqttReceive</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\mqtt\keypress.sh">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.keypress.sh</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\mqtt\filter.py">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.filter.py</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\mqtt\mqtt_common.sh">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.mqtt_common.sh</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\mqtt\ha_discovery.sh">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.ha_discovery.sh</LogicalName>
-    </EmbeddedResource>
     <EmbeddedResource Include="Payload\mqtt\bt_service_watchdog">
       <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.bt_service_watchdog</LogicalName>
     </EmbeddedResource>

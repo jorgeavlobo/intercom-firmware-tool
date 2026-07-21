@@ -403,9 +403,6 @@ Key: {1}</value></data>
   <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ Could not connect: {0}</value></data>
   <data name="Chk_MqttTopics" xml:space="preserve"><value>Customize topics (advanced)</value></data>
   <data name="Tip_MqttTopics" xml:space="preserve"><value>Override the default MQTT topic names. Leave unchanged for the Home Assistant defaults.</value></data>
-  <data name="Chk_MqttTcpdump" xml:space="preserve"><value>Use tcpdump capture (compatibility)</value></data>
-  <data name="Tip_MqttTcpdump" xml:space="preserve"><value>Leave unchecked to stream events straight from the local OpenWebNet gateway (no tcpdump, no resident Python). Tick this only if the bridge shows no bus activity — it forces the legacy tcpdump capture.</value></data>
-  <data name="Hint_MqttTcpdump" xml:space="preserve"><value>Default: a direct OpenWebNet monitor socket, lighter on the device. The tcpdump path is used automatically as a fallback if the gateway is unreachable.</value></data>
   <data name="Chk_MqttHaDiscovery" xml:space="preserve"><value>Home Assistant auto-discovery</value></data>
   <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Publish retained MQTT discovery configs so the bridge's entities (connectivity, bus dump, last key) appear in Home Assistant automatically, with no manual YAML. Read-only — no command entity is created.</value></data>
   <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>On by default: the bridge's entities (connectivity, bus, last key) appear in Home Assistant automatically, as one device. Untick to skip it; a later build with the same device id then clears them from the broker.</value></data>

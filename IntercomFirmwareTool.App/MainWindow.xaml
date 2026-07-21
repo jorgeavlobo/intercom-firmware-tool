@@ -704,15 +704,6 @@
                                TextWrapping="Wrap" Visibility="Collapsed"
                                AutomationProperties.LiveSetting="Polite"/>
 
-                    <!-- Capture back-end (Phase 2, #12 item 5). Unchecked (default) uses the
-                         low-footprint OpenWebNet monitor socket; ticking it forces the faithful
-                         tcpdump + filter.py compatibility path. -->
-                    <CheckBox x:Name="ChkMqttTcpdump" Margin="0,10,0,0"
-                              Content="{loc:Loc Chk_MqttTcpdump}" ToolTip="{loc:Loc Tip_MqttTcpdump}"
-                              Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
-                    <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
-                               Text="{loc:Loc Hint_MqttTcpdump}"/>
-
                     <!-- Structured JSON bus payloads (Phase 2, #12 item 3). ON by default
                          (set in InitMqttUi): publishes one structured object per frame on
                          TOPIC_DUMP; with HA discovery on, the bus entity exposes the parsed
@@ -742,7 +733,7 @@
                          topics, else the devices mirror each other's data — see HaNodeId
                          doc). Deliberately ALWAYS editable — not tied
                          to the checkbox — because the opt-out/clear path also needs it:
-                         with discovery unchecked, ha_discovery.sh clears the retained
+                         with discovery unchecked, btmqttd clears the retained
                          configs for THIS node id, so the user must be able to enter the
                          id a previous build published under (a disabled field, reset to
                          the default in a new session, would clear the wrong identity).

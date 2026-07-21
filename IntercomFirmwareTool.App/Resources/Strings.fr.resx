@@ -403,9 +403,6 @@ Clé : {1}</value></data>
   <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ Connexion impossible : {0}</value></data>
   <data name="Chk_MqttTopics" xml:space="preserve"><value>Personnaliser les sujets (avancé)</value></data>
   <data name="Tip_MqttTopics" xml:space="preserve"><value>Remplace les noms de sujet MQTT par défaut. Laissez inchangé pour les valeurs par défaut de Home Assistant.</value></data>
-  <data name="Chk_MqttTcpdump" xml:space="preserve"><value>Utiliser la capture tcpdump (compatibilité)</value></data>
-  <data name="Tip_MqttTcpdump" xml:space="preserve"><value>Laissez décoché pour recevoir les événements directement depuis la passerelle OpenWebNet locale (sans tcpdump, sans Python résident). Cochez uniquement si le pont n'affiche aucune activité du bus — cela force l'ancienne capture tcpdump.</value></data>
-  <data name="Hint_MqttTcpdump" xml:space="preserve"><value>Par défaut : un socket de supervision OpenWebNet direct, plus léger pour l'appareil. La voie tcpdump sert de repli automatique si la passerelle est injoignable.</value></data>
   <data name="Chk_MqttHaDiscovery" xml:space="preserve"><value>Découverte automatique Home Assistant</value></data>
   <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Publie des configs de découverte MQTT persistantes pour que les entités du pont (connectivité, trames du bus, dernière touche) apparaissent automatiquement dans Home Assistant, sans YAML manuel. Lecture seule — aucune entité de commande n'est créée.</value></data>
   <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Activé par défaut : les entités du pont (connectivité, bus, dernière touche) apparaissent automatiquement dans Home Assistant, comme un appareil. Décochez pour l'ignorer ; une build ultérieure avec le même identifiant d'appareil les supprime ensuite du broker.</value></data>

@@ -7,7 +7,7 @@ namespace IntercomFirmwareTool.Core
     /// Metadata for a verbatim third-party ARM binary that the optional MQTT
     /// bridge installs into the firmware image.
     /// </summary>
-    /// <param name="Name">Short tool name, e.g. "jq".</param>
+    /// <param name="Name">Short tool name, e.g. "btmqttd".</param>
     /// <param name="InstallPath">Absolute path on the device rootfs.</param>
     /// <param name="Length">Expected byte length of the embedded resource.</param>
     /// <param name="Sha256Hex">Lower-case hex SHA-256 of the exact bytes.</param>
@@ -25,7 +25,9 @@ namespace IntercomFirmwareTool.Core
     {
         /// <summary>
         /// Manifest resources of further license texts a statically-linked binary
-        /// bundles (e.g. Oniguruma, glibc), beyond <see cref="LicenseResourceName"/>.
+        /// bundles, beyond <see cref="LicenseResourceName"/>. Unused by the current
+        /// single binary (btmqttd aggregates all its dependency notices into one
+        /// license file), but kept so the metadata stays general.
         /// Declared as an init-only property (not a positional parameter) so the
         /// record's primary constructor and Deconstruct signature stay stable.
         /// </summary>
@@ -33,66 +35,42 @@ namespace IntercomFirmwareTool.Core
     }
 
     /// <summary>
-    /// Access to the third-party ARM binaries (jq, evtest) and their license
-    /// notices, embedded in this assembly, that the MQTT bridge installer writes
+    /// Access to the third-party ARM binary (<c>btmqttd</c>) and its license
+    /// notice, embedded in this assembly, that the MQTT bridge installer writes
     /// into the firmware image. Every <see cref="Read"/> re-verifies the bytes
     /// against their recorded length and SHA-256, so a corrupted or swapped
     /// resource can never be silently installed onto a device.
     ///
-    /// These binaries are NOT in the factory firmware and are shipped under
-    /// their own licenses (jq: MIT; evtest: GPL-2.0-or-later). See
-    /// <c>Payload/vendor/THIRD_PARTY.md</c> for provenance, integrity data and the
-    /// GPL written offer for source.
+    /// This binary is NOT in the factory firmware. It is a single, statically-linked
+    /// Rust daemon whose bundled crates are all permissive (MIT / Apache-2.0 / ISC /
+    /// BSD-3-Clause / Unicode-3.0 — no copyleft). See
+    /// <c>Payload/vendor/THIRD_PARTY.md</c> for provenance and integrity data, and
+    /// <c>Payload/vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt</c> for the
+    /// aggregated dependency license texts.
     /// </summary>
     public static class PayloadBinaries
     {
         /// <summary>
-        /// <c>jq</c> 1.8.2 — statically-linked armv7-hardfloat ELF. jq itself is
-        /// MIT, but the static binary also bundles Oniguruma (BSD-2-Clause) and
-        /// glibc (LGPL-2.1-or-later); see <c>Payload/vendor/THIRD_PARTY.md</c>.
-        /// 1.8.2 is a security release (over the reference unit's 1.7): it fixes
-        /// the decNumber overflows (CVE-2023-50268 / CVE-2024-53427) plus the jq
-        /// 1.8.2 batch — parser memory-corruption and a hash-collision DoS
-        /// (CVE-2026-40164) — all reachable via the untrusted JSON parsed in
-        /// <c>StartMqttReceive</c>. Also used by <c>keypress.sh</c> (build the
-        /// key-press JSON). Installed <c>0775 root:root</c>.
+        /// <c>btmqttd</c> — the single-connection MQTT bridge daemon (issue #32),
+        /// a statically-linked armv7 hard-float (musl) ELF that REPLACES the entire
+        /// shell-orchestrated bridge (StartMqttSend/StartMqttReceive, keypress.sh,
+        /// filter.py, ha_discovery.sh, mqtt_common.sh, TcpDump2Mqtt) plus the
+        /// vendored <c>jq</c> (native serde_json) and <c>evtest</c> (native evdev).
+        /// Static musl means it needs no runtime interpreter or shared libraries.
+        /// Installed <c>0775 root:root</c>. Built per <c>native/btmqttd/BUILD.md</c>.
         /// </summary>
-        public static readonly ArmBinary Jq = new(
-            Name: "jq",
-            InstallPath: "/usr/bin/jq",
-            Length: 1_340_000,
-            Sha256Hex: "78458244fb546469b4042e9e07cf78714ef6848895eb9515df76b4eb0b1dc992",
-            ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.jq",
-            LicenseResourceName: "IntercomFirmwareTool.Core.Payload.vendor.licenses.jq-COPYING",
-            // Full set carried by the static binary: jq (MIT); its bundled
-            // dtoa/g_fmt (David M. Gay's Lucent permissive notice — no standard
-            // SPDX id, so LicenseRef-dtoa) and decNumber (ICU), both documented
-            // in jq-COPYING; Oniguruma (BSD-2-Clause) and glibc (LGPL-2.1-or-later).
-            LicenseSpdx: "MIT AND ICU AND LicenseRef-dtoa AND BSD-2-Clause AND LGPL-2.1-or-later")
-        {
-            // Array.AsReadOnly so this nested collection can't be cast back to
-            // string[] and mutated (completes the immutability of the metadata).
-            AdditionalLicenseResourceNames = Array.AsReadOnly(new[]
-            {
-                "IntercomFirmwareTool.Core.Payload.vendor.licenses.oniguruma-COPYING",
-                "IntercomFirmwareTool.Core.Payload.vendor.licenses.glibc-LGPL-2.1.txt",
-            }),
-        };
-
-        /// <summary>
-        /// <c>evtest</c> 1.35 — dynamically-linked armv7-hardfloat ELF
-        /// (GPL-2.0-or-later; needs glibc's <c>/lib/ld-linux-armhf.so.3</c>,
-        /// present on the C100X/C300X). Used by <c>keypress.sh</c> to read the
-        /// front-panel keypad. Installed <c>0775 root:root</c>.
-        /// </summary>
-        public static readonly ArmBinary Evtest = new(
-            Name: "evtest",
-            InstallPath: "/usr/bin/evtest",
-            Length: 34_264,
-            Sha256Hex: "96e3c20fb1742fc57b9b9efbc716cb4c7ae5a1faebe5621a14c1b3053d0d08c0",
-            ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.evtest",
-            LicenseResourceName: "IntercomFirmwareTool.Core.Payload.vendor.licenses.evtest-COPYING",
-            LicenseSpdx: "GPL-2.0-or-later");
+        public static readonly ArmBinary Btmqttd = new(
+            Name: "btmqttd",
+            InstallPath: "/usr/bin/btmqttd",
+            Length: 1_208_736,
+            Sha256Hex: "00c1dc805bd1aba26eb16097a15171d4c98988bcf9b8ae7d3896869bb96cfd42",
+            ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.btmqttd",
+            LicenseResourceName:
+                "IntercomFirmwareTool.Core.Payload.vendor.licenses.btmqttd-THIRD-PARTY-LICENSES.txt",
+            // The static binary bundles ~65 Rust crates; the mandatory notices span
+            // MIT, Apache-2.0, ISC (ring/webpki/untrusted), BSD-3-Clause (subtle) and
+            // Unicode-3.0 (unicode-ident). All texts are in the aggregated notice file.
+            LicenseSpdx: "MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0");
 
         /// <summary>The complete third-party notice (Markdown).</summary>
         public const string ThirdPartyNoticeResourceName =
@@ -102,7 +80,7 @@ namespace IntercomFirmwareTool.Core
         // Array.AsReadOnly so the exposed IReadOnlyList can't be cast back to
         // ArmBinary[] and mutated (matching FirmwareRegistry.Known's convention).
         public static readonly IReadOnlyList<ArmBinary> All =
-            Array.AsReadOnly(new[] { Jq, Evtest });
+            Array.AsReadOnly(new[] { Btmqttd });
 
         /// <summary>
         /// Return the exact bytes of <paramref name="binary"/>, after verifying
@@ -147,9 +125,9 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// Every license resource name that applies to <paramref name="binary"/> —
-        /// the primary plus any licenses a statically-linked binary bundles
-        /// (Oniguruma, glibc for the static <c>jq</c>). Read each with
-        /// <see cref="LicenseTextByResource"/>.
+        /// the primary plus any additional licenses a statically-linked binary
+        /// declares in <see cref="ArmBinary.AdditionalLicenseResourceNames"/>. Read
+        /// each with <see cref="LicenseTextByResource"/>.
         /// </summary>
         public static IReadOnlyList<string> LicenseResourceNames(ArmBinary binary)
         {

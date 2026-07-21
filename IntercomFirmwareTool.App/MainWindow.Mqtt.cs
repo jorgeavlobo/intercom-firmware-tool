@@ -633,7 +633,7 @@ namespace IntercomFirmwareTool.App
 
             // HA discovery node id — mirror MqttInstaller.Validate, which validates it
             // UNCONDITIONALLY (not only when discovery is enabled): the manifest is
-            // generated and ha_discovery.sh runs even when disabled, to CLEAR the
+            // generated and btmqttd reconciles it even when disabled, to CLEAR the
             // retained configs, so a bad node id would fail the build with discovery
             // off too. The node becomes a discovery-topic level and unique_id, so it
             // must be the HA charset [A-Za-z0-9_-]. An empty field falls back to the
@@ -696,9 +696,6 @@ namespace IntercomFirmwareTool.App
                 caPem, certPem, keyPem,
                 HostIpForHosts: hostIp,
                 AllowRemoteShell: ChkMqttRemoteShell.IsChecked == true,
-                // Unchecked (default) = the low-footprint OpenWebNet socket monitor;
-                // checked = force the faithful tcpdump + filter.py capture back-end.
-                UseTcpdumpCapture: ChkMqttTcpdump.IsChecked == true,
                 // Publish HA discovery configs so entities appear automatically. ON
                 // by default when the bridge is installed (plug-and-play); read-only
                 // entities, so secure-by-default holds.
