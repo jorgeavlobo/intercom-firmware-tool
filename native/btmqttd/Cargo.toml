@@ -1,0 +1,42 @@
+[package]
+name = "btmqttd"
+version = "0.1.0"
+edition = "2021"
+description = "Single-connection MQTT bridge daemon for the BTicino OpenWebNet bus (IntercomFirmwareTool)."
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "btmqttd"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime — single-threaded ("rt", not "rt-multi-thread") to keep the
+# resident footprint small on the intercom (one worker thread is plenty for a
+# handful of sockets).
+tokio = { version = "1", default-features = false, features = [
+    "rt", "macros", "net", "time", "io-util", "signal", "sync", "process", "fs",
+] }
+# MQTT client. use-rustls pulls tokio-rustls -> rustls 0.22 -> ring for TLS; the
+# device broker is mosquitto v3.1 which accepts MQTT 3.1.1 (rumqttc's default).
+rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Physical key reading (front panel) via the kernel evdev interface — pure Rust
+# (libc bindings, no C to compile), replacing the evtest+jq keypress.sh.
+evdev = { version = "0.12", features = ["tokio"] }
+# UTC timestamps for the bus-frame `ts` field and the start-date topic (formatted
+# manually from date components, so only the base std feature is needed).
+time = { version = "0.3", default-features = false, features = ["std"] }
+# Owner/group preservation on write_file (chown — std has no owner setter).
+libc = "0.2"
+
+[profile.release]
+# Size-first: this is a resident daemon on a flash-constrained device.
+# NOTE: no `panic = "abort"` — with unwinding, a panic in a spawned task (sender,
+# keys, a per-command dispatch) is isolated by tokio as a JoinError instead of
+# aborting the whole daemon, so one bug can't take the bridge down.
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
