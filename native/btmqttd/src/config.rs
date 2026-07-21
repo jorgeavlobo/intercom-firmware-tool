@@ -125,24 +125,41 @@ impl Config {
     }
 
     /// The MQTT client id. An operator override (`MQTT_CLIENT_ID`) wins; otherwise a
-    /// short, stable, per-unit id derived from the LWT topic. With atomic birth/will
-    /// on one connection we use a CLEAN session, so the long injective hex id the
-    /// shell needed for durable-session resume (and its 23-byte portability problem)
-    /// is gone — a readable, sanitised id suffices (see issue #32).
+    /// stable, per-unit id derived from the LWT topic. With atomic birth/will on one
+    /// connection we use a CLEAN session, so the long injective hex id the shell
+    /// needed for durable-session resume (and its 23-byte portability problem) is
+    /// gone (see issue #32).
+    ///
+    /// The id is `btmqttd-<sanitised LWT>-<hash>`: the readable sanitised prefix is a
+    /// lossy aid, and the appended hash of the RAW LWT topic keeps DISTINCT topics
+    /// mapping to DISTINCT ids (plain truncation could collide and make two units
+    /// evict each other on the broker). mosquitto (on-box and the usual external
+    /// choice) accepts ids longer than the MQTT 3.1.1 23-byte guidance — as the shell
+    /// bridge already relied on; a strict broker gets the MQTT_CLIENT_ID escape hatch.
     pub fn client_id(&self) -> String {
         if let Some(id) = &self.client_id {
             return id.clone();
         }
-        let mut s = String::from("btmqttd-");
+        let mut san = String::new();
         for c in self.topic_lastwill.chars() {
-            s.push(if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' });
+            san.push(if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' });
         }
-        // Keep well within the MQTT 3.1.1 23-byte guidance where possible.
-        if s.len() > 23 {
-            s.truncate(23);
-        }
-        s
+        // Keep the readable prefix bounded, but never rely on it for uniqueness — the
+        // hash suffix carries that.
+        san.truncate(24);
+        format!("btmqttd-{san}-{:08x}", fnv1a(self.topic_lastwill.as_bytes()))
     }
+}
+
+/// 32-bit FNV-1a — a tiny, dependency-free hash used only to make the derived
+/// client id collision-resistant across distinct LWT topics (not for security).
+fn fnv1a(bytes: &[u8]) -> u32 {
+    let mut h: u32 = 0x811c_9dc5;
+    for &b in bytes {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    h
 }
 
 /// Parse a POSIX-sh `KEY=value` fragment into a map. Supports `#` comments, blank
@@ -171,20 +188,48 @@ pub fn parse_env(text: &str) -> HashMap<String, String> {
                 val = val[..idx].trim_end();
             }
         }
-        let val = unquote(val);
+        let val = shell_unquote(val);
         map.insert(key.to_string(), val);
     }
     map
 }
 
-/// Remove one layer of matching single or double quotes.
-fn unquote(v: &str) -> String {
-    let b = v.as_bytes();
-    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
-        v[1..v.len() - 1].to_string()
-    } else {
-        v.to_string()
+/// Decode POSIX-shell quoting for a value. The installer writes every value as
+/// `KEY='...'` and escapes an embedded apostrophe as `'\''` (close-quote, escaped
+/// literal quote, reopen) — e.g. `'a'\''b'` sources as `a'b`. This handles that
+/// exactly: single-quoted spans are literal, double-quoted spans are literal, and a
+/// backslash outside quotes escapes the next char. Not a full shell (no expansion),
+/// which is correct — the installer only ever quotes literal values.
+fn shell_unquote(v: &str) -> String {
+    let mut out = String::new();
+    let mut chars = v.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                for d in chars.by_ref() {
+                    if d == '\'' {
+                        break;
+                    }
+                    out.push(d);
+                }
+            }
+            '"' => {
+                for d in chars.by_ref() {
+                    if d == '"' {
+                        break;
+                    }
+                    out.push(d);
+                }
+            }
+            '\\' => {
+                if let Some(d) = chars.next() {
+                    out.push(d);
+                }
+            }
+            other => out.push(other),
+        }
     }
+    out
 }
 
 #[cfg(test)]
@@ -216,6 +261,31 @@ EMPTY=
         // defaults
         assert_eq!(c.topic_dump, "Bticino/tx");
         assert_eq!(c.own_port_mon, 20000);
+    }
+
+    #[test]
+    fn decodes_installer_single_quote_escaping() {
+        // The installer writes KEY='...' and escapes an apostrophe as '\'' —
+        // e.g. a password of a'b is written MQTT_PASS='a'\''b'.
+        let m = parse_env("MQTT_PASS='a'\\''b'\nMQTT_USER='p@ss word#1'\n");
+        assert_eq!(m.get("MQTT_PASS").map(String::as_str), Some("a'b"));
+        // Spaces and '#' inside the single quotes are literal.
+        assert_eq!(m.get("MQTT_USER").map(String::as_str), Some("p@ss word#1"));
+    }
+
+    #[test]
+    fn client_id_is_distinct_for_distinct_lastwill() {
+        let a = Config::from_map(parse_env("MQTT_HOST=h\nTOPIC_LASTWILL=Bticino/UnitA/LastWillT\n"));
+        let b = Config::from_map(parse_env("MQTT_HOST=h\nTOPIC_LASTWILL=Bticino/UnitB/LastWillT\n"));
+        assert_ne!(a.client_id(), b.client_id());
+        // Even when the sanitised prefixes would truncate to the same bytes.
+        let c = Config::from_map(parse_env(
+            "MQTT_HOST=h\nTOPIC_LASTWILL=Bticino/very-long-identical-prefix/AAAA\n",
+        ));
+        let d = Config::from_map(parse_env(
+            "MQTT_HOST=h\nTOPIC_LASTWILL=Bticino/very-long-identical-prefix/BBBB\n",
+        ));
+        assert_ne!(c.client_id(), d.client_id());
     }
 
     #[test]

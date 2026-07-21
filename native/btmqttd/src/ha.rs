@@ -20,7 +20,7 @@ use crate::config::{Config, HA_DIR};
 /// per-row error, so one bad entry can't block the others or the birth sequence.
 pub async fn reconcile(cfg: &Arc<Config>, client: &AsyncClient) {
     let manifest_path = format!("{HA_DIR}/manifest");
-    let manifest = match std::fs::read_to_string(&manifest_path) {
+    let manifest = match tokio::fs::read_to_string(&manifest_path).await {
         Ok(m) if !m.trim().is_empty() => m,
         Ok(_) => {
             eprintln!("btmqttd: ha manifest {manifest_path} is empty");
@@ -55,7 +55,7 @@ pub async fn reconcile(cfg: &Arc<Config>, client: &AsyncClient) {
         }
 
         let ok = if cfg.ha_discovery {
-            match std::fs::read(Path::new(HA_DIR).join(file)) {
+            match tokio::fs::read(Path::new(HA_DIR).join(file)).await {
                 Ok(payload) => publish(client, topic, payload).await,
                 Err(e) => {
                     eprintln!("btmqttd: ha missing {HA_DIR}/{file}: {e}");

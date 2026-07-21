@@ -33,8 +33,10 @@ libc = "0.2"
 
 [profile.release]
 # Size-first: this is a resident daemon on a flash-constrained device.
+# NOTE: no `panic = "abort"` — with unwinding, a panic in a spawned task (sender,
+# keys, a per-command dispatch) is isolated by tokio as a JoinError instead of
+# aborting the whole daemon, so one bug can't take the bridge down.
 opt-level = "z"
 lto = true
 strip = true
-panic = "abort"
 codegen-units = 1

@@ -50,13 +50,26 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> std::io::Result<()>
     let mut framer = Framer::default();
     let mut buf = [0u8; 4096];
     let mut frames: Vec<String> = Vec::new();
+    let mut got_any_frame = false;
     loop {
         let n = sock.read(&mut buf).await?;
         if n == 0 {
-            return Ok(()); // gateway closed the monitor session
+            // Treat an immediate EOF (accepted-then-closed with no frame ever read)
+            // as an error so run() backs off, instead of a "healthy" session that
+            // resets backoff and spins in a tight reconnect loop against a busy
+            // monitor slot. A close AFTER real traffic is a normal, retry-promptly EOF.
+            return if got_any_frame {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "monitor closed before any frame",
+                ))
+            };
         }
         frames.clear();
         framer.push(&buf[..n], &mut frames);
+        got_any_frame |= !frames.is_empty();
         for frame in frames.drain(..) {
             publish_frame(cfg, client, &frame).await;
         }

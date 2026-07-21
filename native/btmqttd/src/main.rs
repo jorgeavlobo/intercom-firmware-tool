@@ -25,7 +25,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rumqttc::{
-    AsyncClient, Event, Incoming, LastWill, MqttOptions, QoS, TlsConfiguration, Transport,
+    AsyncClient, Event, EventLoop, Incoming, LastWill, MqttOptions, Outgoing, QoS,
+    TlsConfiguration, Transport,
 };
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -102,12 +103,21 @@ async fn run() -> Result<(), String> {
                         birth(&cfg, &client, &start_iso).await;
                     }
                     Ok(Event::Incoming(Incoming::Publish(p))) if p.topic == cfg.topic_rx => {
-                        let cfg = cfg.clone();
-                        let client = client.clone();
-                        let payload = p.payload;
-                        tokio::spawn(async move {
-                            receiver::dispatch(&cfg, &client, &payload).await;
-                        });
+                        // Commands must be published NON-retained. Drop a retained
+                        // delivery (the subscribe-time retained message, or one
+                        // mistakenly published retained) so a stale command isn't
+                        // replayed on every connect — the shell used mosquitto_sub -R
+                        // plus a startup retained-clear for this.
+                        if p.retain {
+                            eprintln!("btmqttd: ignoring retained message on {}", cfg.topic_rx);
+                        } else {
+                            let cfg = cfg.clone();
+                            let client = client.clone();
+                            let payload = p.payload;
+                            tokio::spawn(async move {
+                                receiver::dispatch(&cfg, &client, &payload).await;
+                            });
+                        }
                     }
                     Ok(_) => {}
                     Err(e) => {
@@ -121,7 +131,7 @@ async fn run() -> Result<(), String> {
         }
     }
 
-    shutdown(&cfg, &client).await;
+    shutdown(&cfg, &client, &mut eventloop).await;
     Ok(())
 }
 
@@ -145,18 +155,44 @@ async fn birth(cfg: &Arc<Config>, client: &AsyncClient, start_iso: &str) {
     if let Err(e) = client.subscribe(&cfg.topic_rx, QoS::AtLeastOnce).await {
         eprintln!("btmqttd: subscribe {} failed: {e}", cfg.topic_rx);
     }
+    // Clear a stray retained value on a CONCRETE command topic: a command mistakenly
+    // published retained is delivered with retain=0 to this established subscription
+    // and would be executed, so drop the broker's retained copy (empty retained
+    // publish). A wildcard/shared TOPIC_RX can't be published to — skip it.
+    if is_concrete_topic(&cfg.topic_rx) {
+        let _ = client
+            .publish(&cfg.topic_rx, QoS::AtLeastOnce, true, Vec::new())
+            .await;
+    }
+}
+
+/// A topic that can be PUBLISHED to (no `+`/`#` wildcard, not a `$share/` group).
+fn is_concrete_topic(topic: &str) -> bool {
+    !topic.contains('+') && !topic.contains('#') && !topic.starts_with("$share/")
 }
 
 /// Clean shutdown: publish an explicit retained `offline` (the will only fires on an
-/// UNCLEAN drop), give it a moment to flush, then disconnect.
-async fn shutdown(cfg: &Arc<Config>, client: &AsyncClient) {
+/// UNCLEAN drop) and disconnect, then keep DRIVING the event loop until the
+/// disconnect actually flushes — `publish`/`disconnect` only QUEUE requests, so
+/// without polling they would never reach the broker. Bounded by a timeout.
+async fn shutdown(cfg: &Arc<Config>, client: &AsyncClient, eventloop: &mut EventLoop) {
     eprintln!("btmqttd: shutting down");
     let _ = client
         .publish(&cfg.topic_lastwill, QoS::AtLeastOnce, true, "offline")
         .await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
     let _ = client.disconnect().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Drive the loop so the queued offline PUBLISH is flushed and the DISCONNECT is
+    // sent; stop when the outgoing DISCONNECT goes out or the connection closes.
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match eventloop.poll().await {
+                Ok(Event::Outgoing(Outgoing::Disconnect)) => break,
+                Ok(_) => {}
+                Err(_) => break, // connection closed / errored — nothing left to flush
+            }
+        }
+    })
+    .await;
 }
 
 /// Build the rustls TLS config from the CA (and optional mutual-TLS client cert +
