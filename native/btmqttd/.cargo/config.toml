@@ -1,0 +1,14 @@
+# Reproducible cross-build for the intercom (C100X): 32-bit ARM EABI5, armv7
+# hard-float, statically linked against musl. See BUILD.md for the full recipe.
+#
+# The final link is done by rust-lld with Rust's self-contained musl, so no
+# external musl toolchain is required for OUR pure-Rust code. The one C
+# dependency (ring, rustls' crypto backend) is compiled with an ARM cross-gcc
+# selected via the CC_* env var in BUILD.md.
+[target.armv7-unknown-linux-musleabihf]
+linker = "rust-lld"
+rustflags = [
+    "-C", "linker-flavor=ld.lld",
+    "-C", "link-self-contained=yes",
+    "-C", "target-feature=+crt-static",
+]
