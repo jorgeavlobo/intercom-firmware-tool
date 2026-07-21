@@ -115,9 +115,10 @@ mqtt_pub() {
 #
 # The session ACK/NACK control frames ("*#*1##" / "*#*0##") are DROPPED here (jq `empty`):
 # they carry no bus event and would otherwise parse into a malformed object (empty who,
-# where="1"/"0"). The socket framer already drops them, but the tcpdump back-end's
-# filter.py passes them through — filtering here keeps JSON mode consistent across both
-# capture back-ends.
+# where="1"/"0"). Both capture back-ends already suppress them upstream (the socket framer
+# in frame_own, the tcpdump path in filter.py), so this guard is normally redundant; it is
+# kept as a defensive net that keeps JSON output well-formed even if a control frame ever
+# reaches this stage.
 own_frame_to_json() {
 	jq -Rc --unbuffered '
 		if . == "*#*1##" or . == "*#*0##" then empty
