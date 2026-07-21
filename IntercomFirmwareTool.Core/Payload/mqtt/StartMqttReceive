@@ -113,6 +113,11 @@ dispatch() {
 	fi
 }
 
+# Probe mosquitto_sub's durable-session (-c) support ONCE here in the parent shell, so
+# the cached MQTT_SUB_CLEAN is inherited by every mqtt_sub_stream pipeline subshell
+# below instead of re-running "mosquitto_sub --help" on each reconnect.
+mqtt_detect_clean
+
 fail=0
 while : ; do
 	# Persistent subscription: mqtt_sub_stream streams every command AND holds the

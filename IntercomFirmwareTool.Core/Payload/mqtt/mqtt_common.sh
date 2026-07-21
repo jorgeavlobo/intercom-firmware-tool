@@ -101,6 +101,28 @@ mqtt_pub() {
 # mosquitto_sub reconnects INTERNALLY after a blip, re-registering the will, and it
 # flushes stdout after each message, so piping it into `while read` delivers commands
 # promptly. Same auth/TLS composition as mqtt_pub.
+
+# Detect ONCE per process whether mosquitto_sub supports a durable session (-c) and
+# cache it in MQTT_SUB_CLEAN ("-c" when supported, "" when not). The ${VAR+set} test
+# treats a cached EMPTY result as "already probed", so the --help probe isn't re-run.
+# StartMqttReceive calls this in its PARENT shell before the reconnect loop; the value
+# is then inherited by every `mqtt_sub_stream | while read` pipeline subshell, so the
+# extra "mosquitto_sub --help | grep" runs just once, not on every reconnect.
+#
+# Probe --help for the -c option's DESCRIPTION rather than the long flag name: older
+# builds document it only as "-c : disable clean session/..." with no
+# "--disable-clean-session" spelling, so match the (English-only, unlocalised)
+# description text, which is present exactly when -c is supported.
+mqtt_detect_clean() {
+	if [ -z "${MQTT_SUB_CLEAN+set}" ]; then
+		if /usr/bin/mosquitto_sub --help 2>&1 | grep -qiE -- '--disable-clean-session|disable clean session'; then
+			MQTT_SUB_CLEAN=-c
+		else
+			MQTT_SUB_CLEAN=
+		fi
+	fi
+}
+
 mqtt_sub_stream() {
 	# -R ignores RETAINED messages: TOPIC_RX is a live command channel; a retained
 	# command would otherwise be re-delivered on every reconnect and replay forever
@@ -116,36 +138,41 @@ mqtt_sub_stream() {
 
 	# Stable, per-unit client id so a DURABLE session (see -c below) can be RESUMED
 	# across reconnects/restarts. Derived from TOPIC_LASTWILL: that topic must already
-	# be distinct per unit for multi-unit-on-one-broker (see README), so this id is
-	# unique exactly when that requirement is met, and it's stable (config is stable) —
-	# unlike mosquitto's default PID-based id, which changes every restart and so
-	# couldn't resume a session. Sanitised to [A-Za-z0-9_-]; length isn't capped
-	# because the broker already accepts mosquitto's own long default ids.
-	_cid="btrx-$(printf '%s' "${TOPIC_LASTWILL:-default}" | tr -c 'A-Za-z0-9_-' '_')"
+	# be distinct per unit for multi-unit-on-one-broker (see README), and it's stable
+	# (config is stable) — unlike mosquitto's default PID-based id, which changes every
+	# restart and so couldn't resume a session.
+	#
+	# A readable sanitised prefix ([A-Za-z0-9_-]) PLUS a cksum of the RAW topic: the
+	# sanitisation alone is lossy, so two DISTINCT topics could collapse to the same
+	# prefix (e.g. "Bticino/a/b" and "Bticino/a_b" both -> "Bticino_a_b"); the raw-topic
+	# cksum keeps the id distinct for distinct topics. This matters because a broker
+	# allows only ONE live connection per client id, so a collision would make two
+	# otherwise-valid units kick each other off and flap the shared durable session.
+	# Length isn't capped because the broker already accepts mosquitto's own long
+	# default ids. cksum is a standard busybox applet; if it were absent the suffix is
+	# just empty, degrading to the (still per-prefix) sanitised id — not a hard failure.
+	_lw="${TOPIC_LASTWILL:-default}"
+	_cid="btrx-$(printf '%s' "$_lw" | tr -c 'A-Za-z0-9_-' '_')-$(printf '%s' "$_lw" | cksum | cut -d' ' -f1)"
 
 	# Persistent (durable) session WHEN the client supports it: clean-session=0 lets
 	# the broker QUEUE QoS>=1 commands published while the receiver is briefly
 	# disconnected and deliver them on reconnect — closing the residual in-flight gap
 	# that a clean session at QoS 0 can't (the broker discards anything sent during the
-	# blip). The -c/--disable-clean-session flag arrived in mosquitto 1.5; the
-	# intercom's client may predate it, so probe --help ONCE and fall back to a clean
-	# session (still far better than the old per-message reconnect) when it's absent.
-	# Probe --help for the -c option's description rather than the long flag name:
-	# older builds document it only as "-c : disable clean session/..." with no
-	# "--disable-clean-session" spelling, so match the (English-only, unlocalised)
-	# description text, which is present exactly when -c is supported.
-	_clean=
-	/usr/bin/mosquitto_sub --help 2>&1 | grep -qiE -- '--disable-clean-session|disable clean session' && _clean=-c
+	# blip). The -c flag arrived in mosquitto 1.5; the intercom's client may predate it,
+	# so support is probed (and cached) by mqtt_detect_clean, which falls back to a
+	# clean session (still far better than the old per-message reconnect) when absent.
+	mqtt_detect_clean
 
 	# -q 1: subscribe at QoS 1 so queued/redelivered commands are at-least-once. (The
 	# end-to-end guarantee also needs the PUBLISHER to use QoS 1; and at-least-once
 	# means a command MAY be redelivered after a crash mid-processing — harmless for
 	# bus frames / key presses, at most a re-run for execute_command.)
 	#
-	# ${_clean} is intentionally UNQUOTED: it expands to the single arg -c when set, or
-	# to nothing (no empty arg) when the client lacks persistent-session support.
+	# ${MQTT_SUB_CLEAN} is intentionally UNQUOTED: it expands to the single arg -c when
+	# supported, or to nothing (no empty arg) when the client lacks persistent-session
+	# support.
 	# shellcheck disable=SC2086
-	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -i "${_cid}" ${_clean} -q 1 -R -t "${TOPIC_RX}" \
+	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -i "${_cid}" ${MQTT_SUB_CLEAN} -q 1 -R -t "${TOPIC_RX}" \
 		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
 	if [ -n "${MQTT_CAFILE}" ]; then
