@@ -59,6 +59,14 @@ async fn run() -> Result<(), String> {
 
     let mut opts = MqttOptions::new(cfg.client_id(), cfg.mqtt_host.clone(), cfg.mqtt_port);
     opts.set_keep_alive(Duration::from_secs(60));
+    // Transport-level packet-size ceiling (defense in depth). rumqttc's default
+    // INCOMING limit is only 10 KB, which would reject a legitimate write_file whose
+    // data approaches the 256 KB command contract; raise it to a bounded ceiling
+    // ABOVE the daemon-side per-command cap (MAX_CMD_BYTES) so the daemon drops a
+    // slightly-oversized command gracefully (log, keep the connection) while a wildly
+    // oversized packet is refused at the transport. OUTGOING is raised to match, so
+    // our own up-to-256 KB replies (read_file / command_result) publish.
+    opts.set_max_packet_size(512 * 1024, 512 * 1024);
     // DURABLE session (clean_session=false) with a stable, per-unit client id: the
     // broker QUEUES QoS 1 commands published to TOPIC_RX while the daemon is briefly
     // disconnected and delivers them on reconnect — closing the command-loss window a
@@ -97,6 +105,12 @@ async fn run() -> Result<(), String> {
     //     command is DROPPED with a log line (predictable overload). The broker's
     //     TOPIC_RX ACL remains the primary gate.
     const CMD_QUEUE_DEPTH: usize = 32;
+    // Per-command payload ceiling, enforced BEFORE cloning/enqueueing so the queue
+    // bounds memory (<= depth x cap), not just message count — otherwise 32 large
+    // publishes could accumulate while the worker is busy (e.g. a 60 s
+    // execute_command). 320 KB fits the 256 KB read/write/exec contract plus JSON
+    // overhead; a larger command is dropped with a log line.
+    const MAX_CMD_BYTES: usize = 320 * 1024;
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CMD_QUEUE_DEPTH);
     let cmd_worker = tokio::spawn({
         let cfg = cfg.clone();
@@ -198,6 +212,11 @@ async fn run() -> Result<(), String> {
                         // plus a startup retained-clear for this.
                         if p.retain {
                             eprintln!("btmqttd: ignoring retained message on {}", cfg.topic_rx);
+                        } else if p.payload.len() > MAX_CMD_BYTES {
+                            eprintln!(
+                                "btmqttd: command dropped — {} bytes exceeds the {MAX_CMD_BYTES}-byte limit",
+                                p.payload.len()
+                            );
                         } else if let Err(e) = cmd_tx.try_send(p.payload.to_vec()) {
                             // Full -> overloaded (drop, don't queue unboundedly);
                             // Closed -> the worker is gone (shutting down).
