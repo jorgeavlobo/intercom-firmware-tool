@@ -30,10 +30,42 @@ fail=0
 #   FRAME    - a single raw OpenWebNet frame fed to own_frame_to_json
 #   EXPECTED - the expected compact JSON with the ts field removed, or the empty
 #              string when the frame must be dropped (produces no output)
+#
+# Fails CLOSED: a nonzero exit from own_frame_to_json, or output that is not a
+# JSON object carrying a string `ts`, is a FAIL — never silently coerced to the
+# empty string (which would let a broken parser masquerade as a valid ACK/NACK
+# drop). Only genuinely empty output counts as a drop.
 check() {
 	frame=$1
 	expected=$2
-	got=$(printf '%s\n' "$frame" | own_frame_to_json | jq -c 'del(.ts)' 2>/dev/null || true)
+
+	# Run the parser and capture BOTH its output and exit status (no `|| true`).
+	raw=$(printf '%s\n' "$frame" | own_frame_to_json)
+	st=$?
+	if [ "$st" -ne 0 ]; then
+		printf 'FAIL  %-14s own_frame_to_json exited %d\n' "$frame" "$st" >&2
+		fail=1
+		return
+	fi
+
+	if [ -z "$raw" ]; then
+		# No output: a legitimately dropped frame.
+		got=""
+	else
+		# Non-empty output MUST be a JSON object with a string `ts`; then drop ts
+		# for the structural comparison. `jq -e` + the explicit error() make a
+		# malformed payload or a missing/non-string ts a hard failure.
+		if ! got=$(printf '%s\n' "$raw" | jq -ce '
+			if type == "object" and (.ts | type) == "string"
+			then del(.ts)
+			else error("payload is not an object with a string ts")
+			end'); then
+			printf 'FAIL  %-14s malformed payload: %s\n' "$frame" "$raw" >&2
+			fail=1
+			return
+		fi
+	fi
+
 	if [ "$got" = "$expected" ]; then
 		printf 'ok    %-14s -> %s\n' "$frame" "${got:-<dropped>}"
 	else
