@@ -155,6 +155,17 @@ path.
   redelivered after a crash mid-processing (harmless for bus frames / key presses,
   at most a re-run for `execute_command`). On a mosquitto client older than 1.5
   (no `-c`) the session falls back to clean, reopening only this residual gap.
+- **Durable client id is long (broker must accept it).** The resumable session needs
+  a stable, per-unit, collision-free client id, so it's derived by hex-encoding the
+  `TOPIC_LASTWILL`+`TOPIC_RX` topics — well over the 23 bytes MQTT 3.1.1 *requires*
+  brokers to accept (longer ids and `-` are optional there). mosquitto — the on-box
+  broker and the usual external choice — accepts it, and the bridge already relied on
+  this since the previous receiver used mosquitto's own >23-byte default id.
+  Collision-freedom over arbitrary topics and universal 23-byte portability can't both
+  hold; the default errs collision-free. For a broker that rejects the long id, set
+  **`MQTT_CLIENT_ID`** in `TcpDump2Mqtt.conf` to a short per-unit value (a fixed
+  override won't auto-abandon a stale session on a `TOPIC_RX` change — clear it
+  yourself if you retire a command topic).
 - **Multi-unit on one broker needs distinct topics too.** A distinct HA node id
   gives each bridge its own HA *device* and entity `unique_id`s, but the entities'
   state/availability still read the MQTT data topics (`TOPIC_DUMP`/`TOPIC_KEY`/

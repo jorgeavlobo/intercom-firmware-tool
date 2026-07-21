@@ -22,9 +22,15 @@ fi
 
 # Client-id prefix for the receiver's durable mosquitto_sub session. Centralised so
 # the id that mqtt_sub_stream builds AND the orchestrator's pgrep pattern (rx_sub_pat)
-# agree on the marker that identifies THIS bridge's receiver — the "-i <prefix>..."
-# arg lets pgrep target our subscriber and not an unrelated one on the same topic.
+# agree on the marker that identifies THIS bridge's receiver.
 : "${MQTT_SUB_ID_PREFIX:=btrx-}"
+
+# Optional operator override for the FULL receiver client id (see mqtt_client_id). Empty
+# by default, meaning "derive a collision-free id". Set it (per-unit unique) only when
+# targeting a broker that rejects the long derived id — e.g. one enforcing the MQTT 3.1.1
+# 23-byte minimum. The self-derived id abandons a stale session on a TOPIC_RX change;
+# a fixed override does not, so on such a change clear the old session yourself.
+: "${MQTT_CLIENT_ID:=}"
 
 # Capture back-end + OpenWebNet monitor endpoint, centralised so the sender AND
 # the orchestrator (which builds pgrep kill patterns from these) agree. See
@@ -139,6 +145,40 @@ mqtt_hex() {
 	printf '%s' "$1" | awk 'BEGIN{ORS="";for(i=0;i<256;i++)o[sprintf("%c",i)]=i}{for(i=1;i<=length($0);i++)printf "%02x",o[substr($0,i,1)]}' 2>/dev/null
 }
 
+# The receiver's durable-session client id. An operator MQTT_CLIENT_ID override wins
+# (used verbatim — their responsibility to keep it unique per unit and within their
+# broker's limits); otherwise a collision-free id is derived from the LASTWILL + RX
+# topics. Computed HERE (not inline) so mqtt_sub_stream's -i and the orchestrator's
+# rx_sub_pat process match agree on the exact string.
+#
+# The derived id is LONG (a readable sanitised LASTWILL prefix plus two hex-encoded raw
+# topics). MQTT 3.1.1 only REQUIRES brokers to accept 1-23 byte alphanumeric client ids;
+# longer ids and '-' are OPTIONAL. mosquitto (the on-box broker, and the usual external
+# choice) accepts them — and the bridge ALREADY relied on this, since the previous
+# receiver used mosquitto's own >23-byte default id. Collision-freedom over arbitrary
+# topics and universal 23-byte portability can't both hold, so the default errs
+# collision-free and a strict broker gets the MQTT_CLIENT_ID escape hatch (see README).
+#
+# Why both topics feed the derivation: TOPIC_LASTWILL is already per-unit distinct
+# (README), so the id is per-unit unique. TOPIC_RX is folded in so CHANGING the command
+# topic yields a DIFFERENT id -> a FRESH durable session; otherwise the broker would keep
+# the resumed session's OLD TOPIC_RX subscription alongside the new one and the bridge
+# would still accept commands on a retired topic (outside the installer's self-loop
+# check). The two hex groups are pure [0-9a-f] and '-'-separated (recoverable as the last
+# two groups), so the (LASTWILL, RX) pair maps INJECTIVELY to the id and distinct configs
+# never collide (a collision would make two units evict each other and flap the durable
+# session). The sanitised prefix is a lossy readability aid only; injectivity is the hex.
+mqtt_client_id() {
+	if [ -n "${MQTT_CLIENT_ID:-}" ]; then
+		printf '%s' "${MQTT_CLIENT_ID}"
+		return
+	fi
+	_lw="${TOPIC_LASTWILL:-default}"
+	_rx="${TOPIC_RX:-default}"
+	printf '%s%s-%s-%s' "${MQTT_SUB_ID_PREFIX}" \
+		"$(printf '%s' "$_lw" | tr -c 'A-Za-z0-9_-' '_')" "$(mqtt_hex "$_lw")" "$(mqtt_hex "$_rx")"
+}
+
 mqtt_sub_stream() {
 	# -R ignores RETAINED messages: TOPIC_RX is a live command channel; a retained
 	# command would otherwise be re-delivered on every reconnect and replay forever
@@ -152,31 +192,11 @@ mqtt_sub_stream() {
 	# commands from). The will targets TOPIC_LASTWILL (publish/retain), a topic the
 	# bridge is already allowed to write.
 
-	# Stable, per-unit client id so a DURABLE session (see -c below) can be RESUMED
-	# across reconnects/restarts. It's stable (config is stable) — unlike mosquitto's
-	# default PID-based id, which changes every restart and so couldn't resume a session.
-	#
-	# Derived from BOTH TOPIC_LASTWILL AND TOPIC_RX:
-	#   * TOPIC_LASTWILL is already distinct per unit for multi-unit-on-one-broker (see
-	#     README), so the id is per-unit unique.
-	#   * TOPIC_RX is folded in so that CHANGING the command topic yields a DIFFERENT id
-	#     and thus a FRESH session. With a durable session the broker keeps the resumed
-	#     session's OLD subscriptions, so reusing the id after a TOPIC_RX change would
-	#     leave the previous command topic subscribed alongside the new one — the bridge
-	#     would still accept commands on a topic the operator retired (and outside the
-	#     installer's self-loop check). A new id abandons that stale session instead.
-	#
-	# Format: readable sanitised LASTWILL prefix, then an INJECTIVE hex encoding of the
-	# raw LASTWILL and the raw RX (see mqtt_hex). The sanitised prefix alone is lossy
-	# (e.g. "Bticino/a/b" and "Bticino/a_b" both -> "Bticino_a_b"); the two hex groups —
-	# each pure [0-9a-f] and '-'-separated, recoverable as the last two groups — make the
-	# (LASTWILL, RX) pair map injectively to the id, so distinct configs never collide.
-	# A broker allows only ONE live connection per id, so a collision would make two
-	# otherwise-valid units evict each other and flap the durable session. Length isn't
-	# capped because the broker already accepts mosquitto's own long default ids.
-	_lw="${TOPIC_LASTWILL:-default}"
-	_rx="${TOPIC_RX:-default}"
-	_cid="${MQTT_SUB_ID_PREFIX}$(printf '%s' "$_lw" | tr -c 'A-Za-z0-9_-' '_')-$(mqtt_hex "$_lw")-$(mqtt_hex "$_rx")"
+	# Stable, per-unit durable-session client id (operator override or a collision-free
+	# derivation from the LASTWILL + RX topics) — see mqtt_client_id for the full
+	# rationale, the id-length/portability trade-off, and the MQTT_CLIENT_ID escape hatch.
+	# Stable across restarts (unlike mosquitto's default PID-based id) so -c can resume.
+	_cid="$(mqtt_client_id)"
 
 	# Persistent (durable) session WHEN the client supports it: clean-session=0 lets
 	# the broker QUEUE QoS>=1 commands published while the receiver is briefly

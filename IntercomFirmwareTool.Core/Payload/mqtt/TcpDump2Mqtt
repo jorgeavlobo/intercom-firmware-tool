@@ -28,22 +28,22 @@ re_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'; }
 
 # pgrep -f (ERE) pattern that matches OUR receiver's mosquitto_sub specifically. Two
 # anchors, both from mqtt_sub_stream's own command line:
-#   * "-i <MQTT_SUB_ID_PREFIX>" — the distinctive durable-session client id this bridge
-#     assigns, so a manual/debug mosquitto_sub on the same topic (which won't carry our
-#     id) is NOT reaped or mistaken for the live LWT holder.
+#   * "-i <client id>" — the EXACT durable-session client id this bridge assigns
+#     (mqtt_client_id: the derived id, or the operator's MQTT_CLIENT_ID override), so a
+#     manual/debug mosquitto_sub on the same topic (which won't carry our id) is NOT
+#     reaped or mistaken for the live LWT holder. Matching the full id (not just the
+#     prefix) keeps this correct even when the id is overridden.
 #   * "-t <TOPIC_RX>" bounded by a following space OR end-of-line, so a different
 #     subscription whose topic merely CONTAINS TOPIC_RX as a substring ("-t Bticino/rx2")
 #     is not matched.
 # -i precedes -t in mqtt_sub_stream's argv, so match them in that order (.* spans the
 # optional -c/-q/-R between). BOTH interpolated values are re_escaped so a regex
-# metacharacter can't broaden or break the match: TOPIC_RX is operator-set, and
-# MQTT_SUB_ID_PREFIX — though it defaults to the literal "btrx-" — is overridable via
-# the environment/config, so it's escaped too rather than trusted as a literal. Used
-# both to reap that subscriber in kill_childs and to gate the retained 'online'
-# refresh on a live LWT holder.
+# metacharacter (from a topic, or from an MQTT_CLIENT_ID/MQTT_SUB_ID_PREFIX override)
+# can't broaden or break the match. Used both to reap that subscriber in kill_childs and
+# to gate the retained 'online' refresh on a live LWT holder.
 rx_sub_pat() {
 	printf 'mosquitto_sub .*-i %s.*-t %s( |$)' \
-		"$(re_escape "${MQTT_SUB_ID_PREFIX}")" "$(re_escape "${TOPIC_RX}")"
+		"$(re_escape "$(mqtt_client_id)")" "$(re_escape "${TOPIC_RX}")"
 }
 
 kill_childs() {

@@ -628,19 +628,10 @@ namespace IntercomFirmwareTool.Core
                         paths.Any(p => DependencyPresent(fs, p)),
                         string.Join(" | ", paths)));
 
-                // awk is used ONLY by the socket capture back-end (its busybox framer).
-                // Gate the check on that choice: in tcpdump mode awk is not invoked at
-                // all, so requiring it would wrongly reject an otherwise-valid image
-                // (every ValidateMqtt failure fails the whole build). When socket mode
-                // IS selected we require it, so the build reflects the user's choice
-                // rather than silently degrading to the runtime tcpdump fallback.
-                if (!opts.UseTcpdumpCapture)
-                {
-                    var awkPaths = new[] { "/usr/bin/awk", "/bin/awk" };  // busybox applet
-                    checks.Add(new("runtime dep awk present (socket capture)",
-                        awkPaths.Any(p => DependencyPresent(fs, p)),
-                        string.Join(" | ", awkPaths)));
-                }
+                // awk is checked UNCONDITIONALLY in the deps list above: besides the
+                // socket-capture framer (which only runs in socket mode) it now also
+                // builds the receiver's durable client-id hex in mqtt_common.sh, which
+                // runs in every capture mode. So there is no capture-gated awk check.
             }
             return checks;
         }
