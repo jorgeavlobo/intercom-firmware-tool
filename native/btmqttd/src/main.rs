@@ -194,10 +194,13 @@ async fn birth(cfg: Arc<Config>, client: AsyncClient, start_iso: Arc<str>) {
     if let Err(e) = client.subscribe(&cfg.topic_rx, QoS::AtLeastOnce).await {
         eprintln!("btmqttd: subscribe {} failed: {e}", cfg.topic_rx);
     }
-    // Clear a stray retained value on a CONCRETE command topic: a command mistakenly
-    // published retained is delivered with retain=0 to this established subscription
-    // and would be executed, so drop the broker's retained copy (empty retained
-    // publish). A wildcard/shared TOPIC_RX can't be published to — skip it.
+    // Clear a stray retained value on a CONCRETE command topic. A command mistakenly
+    // published RETAINED is stored by the broker; per MQTT-3.3.1-9 it is then
+    // delivered to THIS already-established subscription with the RETAIN flag CLEARED
+    // (retain=0), so the `p.retain` guard in the poll loop does NOT catch it and it
+    // would be executed. (Only the subscribe-time retained delivery has retain=1 and
+    // is skipped there.) Dropping the broker's retained copy (empty retained publish)
+    // removes that. A wildcard/shared TOPIC_RX can't be published to — skip it.
     if is_concrete_topic(&cfg.topic_rx) {
         let _ = client
             .publish(&cfg.topic_rx, QoS::AtMostOnce, true, Vec::new())

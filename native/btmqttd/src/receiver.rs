@@ -102,7 +102,8 @@ async fn read_file(cfg: &Arc<Config>, client: &AsyncClient, path: &str) {
     let content = match tokio::fs::File::open(path).await {
         Ok(f) => {
             let mut buf = Vec::new();
-            if let Err(e) = f.take(CAP as u64).read_to_end(&mut buf).await {
+            let mut capped = f.take(CAP as u64);
+            if let Err(e) = capped.read_to_end(&mut buf).await {
                 eprintln!("btmqttd: read_file {path}: {e}");
             }
             buf
