@@ -184,11 +184,15 @@ mqtt_client_id() {
 }
 
 mqtt_sub_stream() {
-	# -R ignores RETAINED messages: TOPIC_RX is a live command channel; a retained
-	# command would otherwise be re-delivered on every reconnect and replay forever
-	# until it is cleared. Commands must be published non-retained. (-R suppresses only
-	# messages with the RETAIN flag; queued session messages redelivered to a resuming
-	# durable session are normal messages, so those are still delivered — see -c.)
+	# -R suppresses messages delivered WITH the retain bit set — i.e. the retained value
+	# handed to a FRESH subscription at SUBSCRIBE time. It is NOT a complete guard for a
+	# persistent subscription: MQTT clears the retain bit for a message delivered to an
+	# already-established subscription (and for queued messages redelivered to a resuming
+	# durable session), so a command mistakenly published *retained* still arrives here
+	# with retain=0 and would be dispatched. The actual contract is therefore "commands
+	# must be published NON-retained"; StartMqttReceive additionally clears a stray
+	# retained value off a concrete TOPIC_RX at startup. -R is kept because it still
+	# cheaply drops the subscribe-time retained delivery.
 	#
 	# TOPIC_RX is subscribed as-is (a "$share/<group>/<filter>" shared subscription
 	# is fine here — this IS the sole command consumer, so it SHOULD join the group;

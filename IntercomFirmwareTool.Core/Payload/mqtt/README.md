@@ -155,6 +155,15 @@ path.
   redelivered after a crash mid-processing (harmless for bus frames / key presses,
   at most a re-run for `execute_command`). On a mosquitto client older than 1.5
   (no `-c`) the session falls back to clean, reopening only this residual gap.
+- **Commands must be published non-retained.** With a persistent subscription, `-R`
+  only drops the retained value delivered at *subscribe* time; MQTT clears the retain
+  bit for a message delivered to an already-established subscription (or queued to a
+  resuming durable session), so a command published **retained** would arrive with
+  retain=0 and be executed once. The contract is therefore "publish commands
+  non-retained"; as a safety net the receiver also clears a stray retained value off a
+  *concrete* `TOPIC_RX` at startup (a wildcard/`$share` command topic can't be cleared
+  this way). Robust app-level de-duplication is future work — see the structured-JSON
+  item in #12 and the single-connection client in #32.
 - **Durable client id is long (broker must accept it).** The resumable session needs
   a stable, per-unit, collision-free client id, so it's derived by hex-encoding the
   `TOPIC_LASTWILL`+`TOPIC_RX` topics — well over the 23 bytes MQTT 3.1.1 *requires*

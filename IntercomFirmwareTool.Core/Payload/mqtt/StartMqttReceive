@@ -124,6 +124,22 @@ dispatch() {
 # below instead of re-running "mosquitto_sub --help" on each reconnect.
 mqtt_detect_clean
 
+# Clear any STRAY retained message on a concrete command topic, ONCE at startup.
+# Commands must be published NON-retained; the persistent subscription's -R only
+# suppresses messages delivered WITH the retain bit set (a fresh SUBSCRIBE), but MQTT
+# clears that bit for a message delivered to an already-established subscription — so a
+# command mistakenly published *retained* would be delivered (retain=0) and executed,
+# and with a durable session could also be queued and replayed on reconnect. Actively
+# deleting the broker's retained value removes that source (an empty retained publish
+# clears it). Only meaningful for a CONCRETE topic: a wildcard ("+"/"#") or shared
+# ("$share/…") TOPIC_RX can't be published to. Best-effort (needs publish rights on the
+# topic); if the empty payload loops back to us it's ignored by dispatch. Robust
+# app-level command de-duplication is future work — see #12 (structured JSON) and #32.
+case "${TOPIC_RX}" in
+	*[+#]* | '$share/'*) : ;;
+	*) mqtt_pub -r -t "${TOPIC_RX}" -n > /dev/null 2>&1 ;;
+esac
+
 fail=0
 while : ; do
 	# Persistent subscription: mqtt_sub_stream streams every command AND holds the
