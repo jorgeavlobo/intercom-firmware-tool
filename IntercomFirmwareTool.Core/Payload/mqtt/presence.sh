@@ -32,9 +32,12 @@ term=
 # until the child is actually reaped (not merely signalled) — otherwise the watchdog
 # could start a second presence.sh over a still-dying one. This is a CLEAN
 # disconnect, so the will does NOT fire; the orchestrator announces 'offline'.
+# kill_tree, not plain kill: mqtt_presence is a FUNCTION, so $child is the wrapper
+# subshell and the real /usr/bin/mosquitto_sub is its child — killing only the
+# wrapper would leave the real will-holder connected and orphaned.
 cleanup() {
 	if [ -n "$child" ]; then
-		kill "$child" 2>/dev/null
+		kill_tree "$child"
 		wait "$child" 2>/dev/null
 	fi
 	exit 0

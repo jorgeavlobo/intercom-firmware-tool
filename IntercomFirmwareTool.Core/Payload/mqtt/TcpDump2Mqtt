@@ -91,7 +91,11 @@ exit_handler() {
 		i=$((i + 1))
 		/bin/sleep 1
 	done
-	kill "$off" 2>/dev/null
+	# kill_tree, not plain kill: mqtt_pub is a FUNCTION, so $off is the wrapper
+	# subshell and the real mosquitto_pub is its child. Killing only the wrapper
+	# would leave a publisher stuck in DNS/TCP connect alive, and its retained
+	# 'offline' could later overwrite the 'online' of a bridge the watchdog restarts.
+	kill_tree "$off"
 	exit 0
 }
 trap exit_handler INT TERM
