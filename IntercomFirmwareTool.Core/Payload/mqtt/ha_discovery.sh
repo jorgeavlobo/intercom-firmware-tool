@@ -39,13 +39,30 @@ TAB=$(printf '\t')
 # watchdog started a replacement. So run each publish as a tracked background child
 # and kill+wait it on INT/TERM.
 pub_child=
-trap 'if [ -n "$pub_child" ]; then kill "$pub_child" 2>/dev/null; wait "$pub_child" 2>/dev/null; fi; exit 143' INT TERM
+term=
+# Recorder trap: it must NOT exit on its own — a signal in the "mqtt_pub & ->
+# pub_child=$!" window (before the PID is known) would otherwise leave the
+# just-launched child untracked and orphaned. So it only flags the request (and
+# reaps a child if one is already tracked); pub() then honours the flag at safe
+# points once the PID is captured, closing the window (same pattern as presence.sh).
+sig() {
+	term=1
+	if [ -n "$pub_child" ]; then kill "$pub_child" 2>/dev/null; wait "$pub_child" 2>/dev/null; pub_child=; fi
+}
+trap sig INT TERM
+
+# Run one mqtt_pub as a tracked child so INT/TERM reaps it instead of orphaning it.
 pub() {
+	[ -n "$term" ] && exit 143
 	mqtt_pub "$@" &
 	pub_child=$!
+	# A signal in the launch->capture window above set term but couldn't kill (PID
+	# not yet known); now that it is, reap the child and stop.
+	[ -n "$term" ] && { kill "$pub_child" 2>/dev/null; wait "$pub_child" 2>/dev/null; exit 143; }
 	wait "$pub_child"
 	_prc=$?
 	pub_child=
+	[ -n "$term" ] && exit 143
 	return "$_prc"
 }
 
