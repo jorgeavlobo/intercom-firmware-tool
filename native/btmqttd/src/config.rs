@@ -130,12 +130,14 @@ impl Config {
     /// needed for durable-session resume (and its 23-byte portability problem) is
     /// gone (see issue #32).
     ///
-    /// The id is `btmqttd-<sanitised LWT>-<hash>`: the readable sanitised prefix is a
-    /// lossy aid, and the appended hash of the RAW LWT topic keeps DISTINCT topics
-    /// mapping to DISTINCT ids (plain truncation could collide and make two units
-    /// evict each other on the broker). mosquitto (on-box and the usual external
-    /// choice) accepts ids longer than the MQTT 3.1.1 23-byte guidance — as the shell
-    /// bridge already relied on; a strict broker gets the MQTT_CLIENT_ID escape hatch.
+    /// The id is `btmqttd-<sanitised LWT>-<hex(LWT)>`. The sanitised prefix is a lossy
+    /// readability aid; the appended lowercase HEX of the raw LWT-topic bytes is an
+    /// INJECTIVE encoding, so DISTINCT topics always map to DISTINCT ids — no
+    /// collision (a plain truncation, or a 32-bit hash, could collide and make two
+    /// units evict each other on the broker). This mirrors the shell's `mqtt_hex`
+    /// derivation. mosquitto (on-box and the usual external choice) accepts ids
+    /// longer than the MQTT 3.1.1 23-byte guidance — as the shell bridge already
+    /// relied on; a strict broker gets the MQTT_CLIENT_ID escape hatch.
     pub fn client_id(&self) -> String {
         if let Some(id) = &self.client_id {
             return id.clone();
@@ -144,22 +146,20 @@ impl Config {
         for c in self.topic_lastwill.chars() {
             san.push(if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' });
         }
-        // Keep the readable prefix bounded, but never rely on it for uniqueness — the
-        // hash suffix carries that.
+        // Keep the readable prefix bounded; uniqueness comes from the injective hex.
         san.truncate(24);
-        format!("btmqttd-{san}-{:08x}", fnv1a(self.topic_lastwill.as_bytes()))
+        format!("btmqttd-{san}-{}", hex_bytes(self.topic_lastwill.as_bytes()))
     }
 }
 
-/// 32-bit FNV-1a — a tiny, dependency-free hash used only to make the derived
-/// client id collision-resistant across distinct LWT topics (not for security).
-fn fnv1a(bytes: &[u8]) -> u32 {
-    let mut h: u32 = 0x811c_9dc5;
+/// Injective lowercase-hex encoding: each byte -> two fixed hex chars, so distinct
+/// byte strings always produce distinct outputs (the shell's `mqtt_hex`).
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
-        h ^= b as u32;
-        h = h.wrapping_mul(0x0100_0193);
+        s.push_str(&format!("{b:02x}"));
     }
-    h
+    s
 }
 
 /// Parse a POSIX-sh `KEY=value` fragment into a map. Supports `#` comments, blank
