@@ -52,8 +52,12 @@ pub async fn run(cfg: Arc<Config>, client: AsyncClient) {
     }
 }
 
-/// One monitor session: connect, handshake, then read + publish until the socket
-/// closes (Ok) or errors. run() decides healthy-vs-backoff from how long this ran.
+/// How long to wait for the monitor ACK before giving up on this connection.
+const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// One monitor session: connect, handshake, VALIDATE the monitor ACK, then read +
+/// publish until the socket closes (Ok) or errors. run() decides healthy-vs-backoff
+/// from how long this ran.
 async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
@@ -62,6 +66,57 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> std::io::Result<()>
     let mut framer = Framer::default();
     let mut buf = [0u8; 4096];
     let mut frames: Vec<String> = Vec::new();
+
+    // Require the monitor ACK ("*#*1##") before streaming. The gateway may accept the
+    // TCP connection but REFUSE the monitor session with a NACK ("*#*0##") — e.g. a
+    // monitor slot is already in use — or just go idle. Without this check we'd sit on
+    // a silent socket forever, publishing nothing while run()'s duration heuristic
+    // treated the stuck session as healthy. The shell back-end probed for this ACK
+    // before committing to the socket path. The ACK/NACK are dropped by the framer,
+    // so scan the RAW bytes here; bytes trailing the ACK are handed to the framer.
+    let mut pre: Vec<u8> = Vec::new();
+    let outcome = tokio::time::timeout(ACK_TIMEOUT, async {
+        loop {
+            let n = sock.read(&mut buf).await?;
+            if n == 0 {
+                return Ok::<bool, std::io::Error>(false); // closed before any ACK
+            }
+            pre.extend_from_slice(&buf[..n]);
+            if pre.windows(own::ACK.len()).any(|w| w == own::ACK) {
+                return Ok(true);
+            }
+            if pre.windows(own::NACK.len()).any(|w| w == own::NACK) {
+                return Ok(false); // monitor refused
+            }
+            if pre.len() > 4096 {
+                return Ok(false); // unexpected chatter, no ACK — treat as refused
+            }
+        }
+    })
+    .await;
+    match outcome {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "monitor session refused (NACK / no ACK)",
+            ))
+        }
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "monitor ACK timed out",
+            ))
+        }
+    }
+    // Publish any bus frames that arrived in the same read(s) as the ACK (the ACK
+    // itself is dropped by the framer).
+    framer.push(&pre, &mut frames);
+    for frame in frames.drain(..) {
+        publish_frame(cfg, client, &frame).await;
+    }
+
     loop {
         let n = sock.read(&mut buf).await?;
         if n == 0 {

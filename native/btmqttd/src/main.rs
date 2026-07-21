@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use rumqttc::{
     AsyncClient, Event, EventLoop, Incoming, LastWill, MqttOptions, Outgoing, QoS,
-    TlsConfiguration, Transport,
+    SubscribeReasonCode, TlsConfiguration, Transport,
 };
 use tokio::signal::unix::{signal, SignalKind};
 
@@ -93,10 +93,13 @@ async fn run() -> Result<(), String> {
     // enqueue a publish AFTER `offline` and leave stale state retained on the broker.
     let sender_task = tokio::spawn(sender::run(cfg.clone(), client.clone()));
     let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone()));
-    // The birth task for the CURRENT connection (spawned on each ConnAck). Only birth
-    // publishes to TOPIC_LASTWILL (`online`), so a lingering one is exactly what could
-    // clobber the shutdown `offline`; it is aborted on the next ConnAck and on exit.
-    let mut birth_task: Option<tokio::task::JoinHandle<()>> = None;
+    // Birth is split across two events: SUBSCRIBE to the command topic on ConnAck,
+    // then ANNOUNCE (online + start_date + HA) only after the broker confirms the
+    // subscription (SubAck success). announce_task is the one that publishes
+    // TOPIC_LASTWILL (`online`), so a lingering one could clobber the shutdown
+    // `offline`; both are aborted on the next ConnAck and on exit.
+    let mut subscribe_task: Option<tokio::task::JoinHandle<()>> = None;
+    let mut announce_task: Option<tokio::task::JoinHandle<()>> = None;
 
     let mut sig_term = signal(SignalKind::terminate()).map_err(|e| e.to_string())?;
     let mut sig_int = signal(SignalKind::interrupt()).map_err(|e| e.to_string())?;
@@ -115,22 +118,48 @@ async fn run() -> Result<(), String> {
             ev = eventloop.poll() => {
                 match ev {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
-                        // Run birth as its OWN task, NOT inline: birth's
-                        // publish/subscribe enqueue into the same bounded request
-                        // channel that THIS poll loop drains. If the bus/key tasks
-                        // filled that channel during an outage, awaiting birth here
-                        // would block the drain and deadlock. Spawning lets the loop
-                        // keep draining while birth's requests flush. Abort a still-
-                        // running birth from a previous connect first, so at most one
-                        // is ever in flight.
-                        if let Some(h) = birth_task.take() {
+                        // SUBSCRIBE to the command topic, as its OWN task (not inline):
+                        // the subscribe enqueues into the same bounded request channel
+                        // THIS poll loop drains, so awaiting it here could deadlock if
+                        // the bus/key tasks filled the channel during an outage.
+                        // Announcing `online` waits for the SubAck (below). Abort any
+                        // still-running tasks from a previous connect first.
+                        if let Some(h) = subscribe_task.take() {
                             h.abort();
                         }
-                        birth_task = Some(tokio::spawn(birth(
-                            cfg.clone(),
-                            client.clone(),
-                            start_iso.clone(),
-                        )));
+                        if let Some(h) = announce_task.take() {
+                            h.abort();
+                        }
+                        subscribe_task =
+                            Some(tokio::spawn(subscribe_cmd(cfg.clone(), client.clone())));
+                    }
+                    Ok(Event::Incoming(Incoming::SubAck(suback))) => {
+                        // Only announce availability AFTER the broker confirms the
+                        // command subscription. If it REFUSED (ACL, bad filter →
+                        // SubscribeReasonCode::Failure), don't publish `online`: the
+                        // bridge is connected but cannot receive commands, and a false
+                        // `online` would let availability-triggered automations lose
+                        // commands. TOPIC_RX is our only SUBSCRIBE, so this SubAck is it.
+                        if suback
+                            .return_codes
+                            .iter()
+                            .any(|c| matches!(c, SubscribeReasonCode::Failure))
+                        {
+                            eprintln!(
+                                "btmqttd: broker REFUSED subscription to {} (check ACLs / \
+                                 topic filter); not announcing online",
+                                cfg.topic_rx
+                            );
+                        } else {
+                            if let Some(h) = announce_task.take() {
+                                h.abort();
+                            }
+                            announce_task = Some(tokio::spawn(announce(
+                                cfg.clone(),
+                                client.clone(),
+                                start_iso.clone(),
+                            )));
+                        }
                     }
                     Ok(Event::Incoming(Incoming::Publish(p))) => {
                         // TOPIC_RX is the ONLY subscription, so every incoming Publish
@@ -169,9 +198,12 @@ async fn run() -> Result<(), String> {
     }
 
     // Stop every MQTT-producing task BEFORE the final `offline`, so none of them can
-    // enqueue a publish after it and leave stale state (e.g. a lingering birth task
+    // enqueue a publish after it and leave stale state (e.g. a lingering announce task
     // re-retaining `online`) on the broker.
-    if let Some(h) = birth_task.take() {
+    if let Some(h) = subscribe_task.take() {
+        h.abort();
+    }
+    if let Some(h) = announce_task.take() {
         h.abort();
     }
     sender_task.abort();
@@ -180,15 +212,11 @@ async fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// On-connect birth sequence. Runs (spawned) on every connect, so a reconnect
-/// restores all state automatically. Owns its inputs so it can run as its own task
-/// (see the ConnAck handler for why it must not run inline).
-///
-/// ORDER MATTERS: SUBSCRIBE to the command topic FIRST, THEN announce `online`.
-/// Announcing availability before command readiness would let an automation that
-/// reacts to `online` publish a QoS 1 command while this (fresh) session has no
-/// command subscription yet — the broker wouldn't queue it and it would be lost.
-async fn birth(cfg: Arc<Config>, client: AsyncClient, start_iso: Arc<str>) {
+/// On-connect step 1: SUBSCRIBE to the command topic, then clear any stray retained
+/// command. Spawned (not inline) so awaiting the request-channel enqueue can't block
+/// the poll loop that drains it. The `online` announce is deferred to `announce()`,
+/// gated on this subscription's SubAck (see the SubAck handler).
+async fn subscribe_cmd(cfg: Arc<Config>, client: AsyncClient) {
     // Commands are subscribed at QoS 1 (at-least-once) — the one place QoS 1 matters,
     // so a command is redelivered rather than silently dropped (issue #12 item 2).
     if let Err(e) = client.subscribe(&cfg.topic_rx, QoS::AtLeastOnce).await {
@@ -206,9 +234,13 @@ async fn birth(cfg: Arc<Config>, client: AsyncClient, start_iso: Arc<str>) {
             .publish(&cfg.topic_rx, QoS::AtMostOnce, true, Vec::new())
             .await;
     }
-    // Availability/status publishes are QoS 0 retained — the shell default and the
-    // usual convention (the retain flag carries state to a late subscriber). Now that
-    // the command subscription is in place, it is safe to announce `online`.
+}
+
+/// On-connect step 2 (after a successful SubAck): announce availability and status.
+/// Runs only once command readiness is confirmed, so `online` never precedes a
+/// working command subscription. QoS 0 retained — the shell default and the usual
+/// convention (the retain flag carries state to a late subscriber).
+async fn announce(cfg: Arc<Config>, client: AsyncClient, start_iso: Arc<str>) {
     if let Err(e) = client
         .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
         .await
