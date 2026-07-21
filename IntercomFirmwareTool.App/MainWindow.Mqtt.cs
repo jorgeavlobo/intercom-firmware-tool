@@ -92,6 +92,9 @@ namespace IntercomFirmwareTool.App
             // On by default (plug-and-play; read-only entities); node id prefilled.
             TxtMqttHaNodeId.Text = d.HaNodeId;
             ChkMqttHaDiscovery.IsChecked = true;
+            // Structured JSON bus payloads: on by default (the modern, HA-friendly format);
+            // untick for raw frames. Set here (not in XAML) for the same reason as above.
+            ChkMqttJsonPayload.IsChecked = true;
 
             RefreshMqttPlaceholders();
         }
@@ -700,8 +703,8 @@ namespace IntercomFirmwareTool.App
                 // by default when the bridge is installed (plug-and-play); read-only
                 // entities, so secure-by-default holds.
                 EnableHaDiscovery: ChkMqttHaDiscovery.IsChecked == true,
-                // Unchecked (default) = raw OpenWebNet frames on the bus (faithful);
-                // checked = one structured JSON object per frame on TOPIC_DUMP.
+                // Checked (default) = one structured JSON object per frame on TOPIC_DUMP
+                // (modern, HA-friendly); unchecked = raw OpenWebNet frames.
                 UseJsonPayload: ChkMqttJsonPayload.IsChecked == true)
             {
                 // Topics are prefilled with the record's defaults, so an untouched

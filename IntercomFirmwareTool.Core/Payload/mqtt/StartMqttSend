@@ -218,10 +218,14 @@ run_tcpdump() {
 			[ -n "${MQTT_PORT}" ] && TCPDUMP_FILTER="${TCPDUMP_FILTER} and not port ${MQTT_PORT}" ;;
 	esac
 
-	# PAYLOAD_FORMAT=json inserts the same structural transform as the socket path. This
-	# is a plain foreground pipeline (not PID-supervised), so a stage simply added here
-	# needs no extra bookkeeping; if any stage exits the pipe ends and the orchestrator
-	# respawns us.
+	# PAYLOAD_FORMAT=json inserts the same structural transform. NOTE: unlike run_socket,
+	# this back-end is a plain foreground pipeline with NO per-stage PID supervision — a
+	# PRE-EXISTING property of the tcpdump fallback (the raw pipeline is the same shape).
+	# So if a downstream stage (mqtt_pub, or own_frame_to_json) exits while the bus is
+	# quiet, tcpdump/filter.py can block on the next read and this function may not return
+	# promptly. Adding the JSON stage doesn't change that trade-off; making the whole
+	# tcpdump fallback PID-supervised like run_socket is tracked separately. The socket
+	# back-end (the default) does not have this limitation.
 	if [ "${PAYLOAD_FORMAT}" = "json" ]; then
 		/usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER 2>&1 \
 			| "${PYTHON}" /etc/tcpdump2mqtt/filter.py \

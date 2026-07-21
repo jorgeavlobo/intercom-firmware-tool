@@ -39,11 +39,12 @@ fi
 : "${OWN_HOST:=127.0.0.1}"
 : "${OWN_PORT_MON:=20000}"
 
-# Bus payload format: "raw" (default — publish OpenWebNet frames verbatim, the faithful
-# Phase-1 behaviour) or "json" (one structured object per frame — see own_frame_to_json).
-# Only the bus (TOPIC_DUMP) is affected; TOPIC_KEY is already JSON, and status/start_date
-# stay simple. Kept opt-in so the default image behaves exactly as before.
-: "${PAYLOAD_FORMAT:=raw}"
+# Bus payload format: "json" (default — one structured object per frame, see
+# own_frame_to_json; the modern, HA-friendly representation) or "raw" (the OpenWebNet
+# frame verbatim — the low-level, dependency-free option, for debugging or a bare-frame
+# consumer). Only the bus (TOPIC_DUMP) is affected; TOPIC_KEY is already JSON, and
+# status/start_date stay simple.
+: "${PAYLOAD_FORMAT:=json}"
 
 # Home Assistant discovery success marker. ha_discovery.sh writes it once the
 # retained configs are reconciled; the orchestrator re-launches ha_discovery.sh

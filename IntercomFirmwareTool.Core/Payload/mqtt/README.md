@@ -132,9 +132,9 @@ path.
     It also eliminates the text-scraping cross-line fragility (see below). The
     faithful `tcpdump`+`filter.py` path is kept and selected automatically when
     the gateway can't be reached, or explicitly via `CAPTURE_MODE=tcpdump`.
-20. **Structured JSON bus payloads (Phase 2, #12 item 3).** Opt-in
-    `PAYLOAD_FORMAT=json` (default `raw`) publishes the bus as one structured
-    object per frame instead of the raw `*…##` string:
+20. **Structured JSON bus payloads (Phase 2, #12 item 3).**
+    `PAYLOAD_FORMAT=json` (the **default**; set `raw` to opt out) publishes the bus
+    as one structured object per frame instead of the raw `*…##` string:
     `{"frame","ts","type","who","what","where","params"}`, built by `jq`
     (`own_frame_to_json`) so escaping is correct. It's a **structural** parse — a
     leading `*#` is a `request`, otherwise a `command`; positional `who`/`what`/
@@ -142,9 +142,11 @@ path.
     semantic decode of what the codes mean. Only `TOPIC_DUMP` changes (`TOPIC_KEY`
     is already JSON); it works under both capture back-ends, and the socket path
     runs the transform as its own supervised stage so a broker-down publisher is
-    still detected on a quiet bus. With HA discovery on, the `bus` entity then
-    exposes the parsed fields as attributes. Semantic decoding is future work — see
-    the single-connection client in #32.
+    still detected on a quiet bus. If `jq` is missing the sender **downgrades to
+    raw**, and the HA `bus` entity's `value_template` tolerates that (state stays
+    the raw frame). With HA discovery on, the `bus` entity exposes the parsed fields
+    as attributes. Semantic decoding is future work — see the single-connection
+    client in #32.
 
 ## Known limitations (addressed in later phases)
 

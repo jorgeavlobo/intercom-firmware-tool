@@ -713,11 +713,10 @@
                     <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
                                Text="{loc:Loc Hint_MqttTcpdump}"/>
 
-                    <!-- Structured JSON bus payloads (Phase 2, #12 item 3). Unchecked
-                         (default) publishes raw OpenWebNet frames on the bus (faithful);
-                         ticking it publishes one structured object per frame on TOPIC_DUMP.
-                         With HA discovery on, the bus entity then exposes the parsed fields
-                         as attributes. -->
+                    <!-- Structured JSON bus payloads (Phase 2, #12 item 3). ON by default
+                         (set in InitMqttUi): publishes one structured object per frame on
+                         TOPIC_DUMP; with HA discovery on, the bus entity exposes the parsed
+                         fields as attributes. Untick for raw OpenWebNet frames. -->
                     <CheckBox x:Name="ChkMqttJsonPayload" Margin="0,10,0,0"
                               Content="{loc:Loc Chk_MqttJson}" ToolTip="{loc:Loc Tip_MqttJson}"
                               Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
