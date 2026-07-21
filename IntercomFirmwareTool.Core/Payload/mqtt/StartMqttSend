@@ -218,24 +218,58 @@ run_tcpdump() {
 			[ -n "${MQTT_PORT}" ] && TCPDUMP_FILTER="${TCPDUMP_FILTER} and not port ${MQTT_PORT}" ;;
 	esac
 
-	# PAYLOAD_FORMAT=json inserts the same structural transform. NOTE: unlike run_socket,
-	# this back-end is a plain foreground pipeline with NO per-stage PID supervision — a
-	# PRE-EXISTING property of the tcpdump fallback (the raw pipeline is the same shape).
-	# So if a downstream stage (mqtt_pub, or own_frame_to_json) exits while the bus is
-	# quiet, tcpdump/filter.py can block on the next read and this function may not return
-	# promptly. Adding the JSON stage doesn't change that trade-off; making the whole
-	# tcpdump fallback PID-supervised like run_socket is tracked separately. The socket
-	# back-end (the default) does not have this limitation.
+	# Run the stages as SEPARATE background processes over FIFOs (not one foreground
+	# pipeline), and supervise by PID — the same model as run_socket. A plain
+	# `tcpdump | filter.py | [own_frame_to_json |] mqtt_pub` sits HALF-DEAD if a
+	# downstream stage exits (e.g. mqtt_pub when the broker is down) while the bus is
+	# quiet: the upstream stages block on their next read, nothing gets SIGPIPE, so the
+	# pipeline never unwinds and the orchestrator's liveness check keeps seeing us
+	# "alive" and never respawns us. Supervising each PID and tearing the rest down the
+	# instant any stage exits fixes that; PAYLOAD_FORMAT=json just inserts one more
+	# tracked stage (own_frame_to_json) between filter.py and mqtt_pub.
+	ensure_rundir   # 0700 root-only (mqtt_common.sh); FIFOs below are 0600
+	tdfifo="$RUNDIR/td_raw.$$"      # tcpdump -> filter.py
+	fdfifo="$RUNDIR/td_frames.$$"   # filter.py (one frame/line) -> publisher (or JSON stage)
+	jdfifo="$RUNDIR/td_json.$$"     # own_frame_to_json -> mqtt_pub (PAYLOAD_FORMAT=json only)
+	rm -f "$tdfifo" "$fdfifo" "$jdfifo"
+	mkfifo -m 600 "$tdfifo" 2>/dev/null && mkfifo -m 600 "$fdfifo" 2>/dev/null \
+		|| { rm -f "$tdfifo" "$fdfifo"; return 1; }
 	if [ "${PAYLOAD_FORMAT}" = "json" ]; then
-		/usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER 2>&1 \
-			| "${PYTHON}" /etc/tcpdump2mqtt/filter.py \
-			| own_frame_to_json \
-			| mqtt_pub -l -t "${TOPIC_DUMP}"
-	else
-		/usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER 2>&1 \
-			| "${PYTHON}" /etc/tcpdump2mqtt/filter.py \
-			| mqtt_pub -l -t "${TOPIC_DUMP}"
+		mkfifo -m 600 "$jdfifo" 2>/dev/null || { rm -f "$tdfifo" "$fdfifo" "$jdfifo"; return 1; }
 	fi
+
+	# tcpdump's stderr is merged into the frame stream (2>&1) exactly as the old
+	# pipeline did — filter.py extracts `*…##` frames and ignores the rest.
+	# shellcheck disable=SC2086
+	/usr/sbin/tcpdump -i lo -U -A -q -l $TCPDUMP_FILTER > "$tdfifo" 2>&1 &
+	tdpid=$!
+	"${PYTHON}" /etc/tcpdump2mqtt/filter.py < "$tdfifo" > "$fdfifo" &
+	fpid=$!
+	jsonpid=
+	if [ "${PAYLOAD_FORMAT}" = "json" ]; then
+		own_frame_to_json < "$fdfifo" > "$jdfifo" &
+		jsonpid=$!
+		mqtt_pub -l -t "${TOPIC_DUMP}" < "$jdfifo" &
+		pubpid=$!
+	else
+		mqtt_pub -l -t "${TOPIC_DUMP}" < "$fdfifo" &
+		pubpid=$!
+	fi
+
+	# Supervise by PID: the instant any stage exits, tear the rest down so this returns
+	# and the orchestrator respawns us — even on a quiet bus.
+	while kill -0 "$tdpid" 2>/dev/null && kill -0 "$fpid" 2>/dev/null \
+	   && kill -0 "$pubpid" 2>/dev/null \
+	   && { [ -z "$jsonpid" ] || kill -0 "$jsonpid" 2>/dev/null; }; do
+		sleep 5
+	done
+
+	# shellcheck disable=SC2086
+	kill_tree "$tdpid" "$fpid" "$pubpid" $jsonpid
+	# shellcheck disable=SC2086
+	wait "$tdpid" "$fpid" "$pubpid" $jsonpid 2>/dev/null
+	rm -f "$tdfifo" "$fdfifo" "$jdfifo"
+	return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -244,7 +278,8 @@ run_tcpdump() {
 
 # Best-effort cleanup of FIFOs left by a previous instance that was killed
 # mid-run (RUNDIR is tmpfs, so this is belt-and-braces).
-rm -f "$RUNDIR"/own_conn.* "$RUNDIR"/own_raw.* "$RUNDIR"/own_frames.* "$RUNDIR"/own_json.* "$RUNDIR"/own_probe_* 2>/dev/null
+rm -f "$RUNDIR"/own_conn.* "$RUNDIR"/own_raw.* "$RUNDIR"/own_frames.* "$RUNDIR"/own_json.* "$RUNDIR"/own_probe_* \
+      "$RUNDIR"/td_raw.* "$RUNDIR"/td_frames.* "$RUNDIR"/td_json.* 2>/dev/null
 
 case "${CAPTURE_MODE}" in
 	tcpdump)

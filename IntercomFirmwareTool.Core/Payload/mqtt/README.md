@@ -140,9 +140,10 @@ path.
     leading `*#` is a `request`, otherwise a `command`; positional `who`/`what`/
     `where` are surfaced and token sub-parameters (`0#0`) kept intact — not a
     semantic decode of what the codes mean. Only `TOPIC_DUMP` changes (`TOPIC_KEY`
-    is already JSON); it works under both capture back-ends, and the socket path
-    runs the transform as its own supervised stage so a broker-down publisher is
-    still detected on a quiet bus. If `jq` is missing the sender **downgrades to
+    is already JSON); it works under both capture back-ends, each of which runs the
+    transform as its own PID-supervised stage so a broker-down publisher is still
+    detected on a quiet bus (the `tcpdump` fallback got the same per-stage
+    supervision as the socket path). If `jq` is missing the sender **downgrades to
     raw**, and the HA `bus` entity's `value_template` tolerates that (state stays
     the raw frame). With HA discovery on, the `bus` entity exposes the parsed fields
     as attributes. Semantic decoding is future work — see the single-connection
