@@ -131,14 +131,20 @@ impl Config {
     /// needed for durable-session resume (and its 23-byte portability problem) is
     /// gone (see issue #32).
     ///
-    /// The id is `btmqttd-<sanitised LWT>-<hex(LWT)>`. The sanitised prefix is a lossy
-    /// readability aid; the appended lowercase HEX of the raw LWT-topic bytes is an
-    /// INJECTIVE encoding, so DISTINCT topics always map to DISTINCT ids — no
-    /// collision (a plain truncation, or a 32-bit hash, could collide and make two
-    /// units evict each other on the broker). This mirrors the shell's `mqtt_hex`
-    /// derivation. mosquitto (on-box and the usual external choice) accepts ids
-    /// longer than the MQTT 3.1.1 23-byte guidance — as the shell bridge already
-    /// relied on; a strict broker gets the MQTT_CLIENT_ID escape hatch.
+    /// The id is `btmqttd-<sanitised LWT>-<hex(LWT)>-<hex(RX)>`. The sanitised prefix
+    /// is a lossy readability aid; the appended lowercase HEX of the raw LWT- and
+    /// RX-topic bytes is an INJECTIVE encoding, so DISTINCT topic pairs always map to
+    /// DISTINCT ids — no collision (a plain truncation, or a 32-bit hash, could
+    /// collide and make two units evict each other on the broker). This mirrors the
+    /// shell's `mqtt_hex` derivation.
+    ///
+    /// Both topics feed the id BECAUSE the session is DURABLE (clean_session=false):
+    /// TOPIC_LASTWILL makes it per-unit unique; folding in TOPIC_RX means CHANGING the
+    /// command topic yields a DIFFERENT id — a FRESH durable session — instead of the
+    /// broker keeping the old topic's subscription alongside the new one. mosquitto
+    /// (on-box and the usual external choice) accepts ids longer than the MQTT 3.1.1
+    /// 23-byte guidance — as the shell bridge already relied on; a strict broker gets
+    /// the MQTT_CLIENT_ID escape hatch.
     pub fn client_id(&self) -> String {
         if let Some(id) = &self.client_id {
             return id.clone();
@@ -149,7 +155,11 @@ impl Config {
         }
         // Keep the readable prefix bounded; uniqueness comes from the injective hex.
         san.truncate(24);
-        format!("btmqttd-{san}-{}", hex_bytes(self.topic_lastwill.as_bytes()))
+        format!(
+            "btmqttd-{san}-{}-{}",
+            hex_bytes(self.topic_lastwill.as_bytes()),
+            hex_bytes(self.topic_rx.as_bytes())
+        )
     }
 }
 
@@ -295,6 +305,11 @@ EMPTY=
             "MQTT_HOST=h\nTOPIC_LASTWILL=Bticino/very-long-identical-prefix/BBBB\n",
         ));
         assert_ne!(c.client_id(), d.client_id());
+        // Changing only TOPIC_RX must also change the id (durable session: a new
+        // command topic starts a fresh session instead of resuming the old one).
+        let e = Config::from_map(parse_env("MQTT_HOST=h\nTOPIC_LASTWILL=Bticino/lw\nTOPIC_RX=Bticino/rx1\n"));
+        let f = Config::from_map(parse_env("MQTT_HOST=h\nTOPIC_LASTWILL=Bticino/lw\nTOPIC_RX=Bticino/rx2\n"));
+        assert_ne!(e.client_id(), f.client_id());
     }
 
     #[test]

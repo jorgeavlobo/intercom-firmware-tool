@@ -59,8 +59,14 @@ async fn run() -> Result<(), String> {
 
     let mut opts = MqttOptions::new(cfg.client_id(), cfg.mqtt_host.clone(), cfg.mqtt_port);
     opts.set_keep_alive(Duration::from_secs(60));
-    // Atomic birth/will makes a durable session unnecessary — use a clean session.
-    opts.set_clean_session(true);
+    // DURABLE session (clean_session=false) with a stable, per-unit client id: the
+    // broker QUEUES QoS 1 commands published to TOPIC_RX while the daemon is briefly
+    // disconnected and delivers them on reconnect — closing the command-loss window a
+    // clean session reopens (issue #31). Atomic birth/will still handles availability;
+    // the durable session additionally preserves in-flight commands. The client id
+    // folds in TOPIC_RX (see Config::client_id), so changing the command topic starts
+    // a FRESH session instead of resuming the old topic's subscription.
+    opts.set_clean_session(false);
     if let (Some(u), Some(p)) = (&cfg.mqtt_user, &cfg.mqtt_pass) {
         opts.set_credentials(u.clone(), p.clone());
     }
