@@ -198,9 +198,8 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
     // Run `sh -c "$data"` — the gated remote-command channel's whole purpose is to
     // run operator-supplied shell (identical to StartMqttReceive's `sh -c "$data"`),
     // reachable only when remote_shell_allowed() already held. stdin from /dev/null
-    // so a command reading stdin can't swallow later work. Bound BOTH memory (cap
-    // each stream at CAP, read concurrently to avoid a full-pipe deadlock) and time
-    // (kill after EXEC_TIMEOUT), then reap the child.
+    // so a command reading stdin can't swallow later work. Bound BOTH memory (stop at
+    // CAP TOTAL bytes) and time (kill after EXEC_TIMEOUT), then reap the child.
     use std::process::Stdio;
     let mut child = match tokio::process::Command::new("sh")
         .arg("-c")
@@ -218,22 +217,41 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
             return;
         }
     };
-    let out = child.stdout.take().expect("piped stdout");
-    let err = child.stderr.take().expect("piped stderr");
+    let mut out = child.stdout.take().expect("piped stdout");
+    let mut err = child.stderr.take().expect("piped stderr");
 
+    // Read stdout+stderr CONCURRENTLY and stop the moment we have CAP bytes TOTAL —
+    // like the shell's `... 2>&1 | head -c 262144`. Reading each to its own CAP with
+    // join! would instead WAIT for the second stream even after the first is full:
+    // a command that writes >CAP to stdout and keeps running blocks on the (now
+    // unread) full stdout pipe and never closes stderr, so join! would hang until the
+    // timeout and drop the output we already had. Exiting at CAP total (then killing
+    // the child below) returns the first 256 KB promptly instead.
     let collect = async {
-        let mut ov = Vec::new();
-        let mut ev = Vec::new();
-        // Bind the capped readers so they outlive the join's awaits; concurrent so
-        // neither full pipe blocks the other; each capped at CAP.
-        let mut out_take = out.take(CAP as u64);
-        let mut err_take = err.take(CAP as u64);
-        let _ = tokio::join!(
-            out_take.read_to_end(&mut ov),
-            err_take.read_to_end(&mut ev),
-        );
-        ov.extend_from_slice(&ev);
-        ov
+        let mut buf: Vec<u8> = Vec::new();
+        let mut ob = [0u8; 8192];
+        let mut eb = [0u8; 8192];
+        let mut out_open = true;
+        let mut err_open = true;
+        while buf.len() < CAP && (out_open || err_open) {
+            tokio::select! {
+                r = out.read(&mut ob), if out_open => match r {
+                    Ok(0) | Err(_) => out_open = false,
+                    Ok(n) => {
+                        let take = (CAP - buf.len()).min(n);
+                        buf.extend_from_slice(&ob[..take]);
+                    }
+                },
+                r = err.read(&mut eb), if err_open => match r {
+                    Ok(0) | Err(_) => err_open = false,
+                    Ok(n) => {
+                        let take = (CAP - buf.len()).min(n);
+                        buf.extend_from_slice(&eb[..take]);
+                    }
+                },
+            }
+        }
+        buf
     };
 
     let mut result = match tokio::time::timeout(EXEC_TIMEOUT, collect).await {

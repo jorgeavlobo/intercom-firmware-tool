@@ -64,9 +64,9 @@ async fn run() -> Result<(), String> {
     // data approaches the 256 KB command contract; raise it to a bounded ceiling
     // ABOVE the daemon-side per-command cap (MAX_CMD_BYTES) so the daemon drops a
     // slightly-oversized command gracefully (log, keep the connection) while a wildly
-    // oversized packet is refused at the transport. OUTGOING is raised to match, so
-    // our own up-to-256 KB replies (read_file / command_result) publish.
-    opts.set_max_packet_size(512 * 1024, 512 * 1024);
+    // oversized packet is refused at the transport. OUTGOING (our own replies, up to
+    // the 256 KB read_file/command_result cap) needs far less.
+    opts.set_max_packet_size(1024 * 1024, 512 * 1024);
     // DURABLE session (clean_session=false) with a stable, per-unit client id: the
     // broker QUEUES QoS 1 commands published to TOPIC_RX while the daemon is briefly
     // disconnected and delivers them on reconnect — closing the command-loss window a
@@ -104,13 +104,15 @@ async fn run() -> Result<(), String> {
     //     exhaust memory / starve the single-threaded runtime; over the queue depth a
     //     command is DROPPED with a log line (predictable overload). The broker's
     //     TOPIC_RX ACL remains the primary gate.
-    const CMD_QUEUE_DEPTH: usize = 32;
+    const CMD_QUEUE_DEPTH: usize = 8;
     // Per-command payload ceiling, enforced BEFORE cloning/enqueueing so the queue
-    // bounds memory (<= depth x cap), not just message count — otherwise 32 large
-    // publishes could accumulate while the worker is busy (e.g. a 60 s
-    // execute_command). 320 KB fits the 256 KB read/write/exec contract plus JSON
-    // overhead; a larger command is dropped with a log line.
-    const MAX_CMD_BYTES: usize = 320 * 1024;
+    // bounds memory (<= depth x cap = 4 MB here), not just message count — otherwise
+    // large publishes could accumulate while the worker is busy (e.g. a 60 s
+    // execute_command). 512 KB = the 256 KB write_file DECODED-data contract plus room
+    // for JSON string escaping (newlines/quotes/backslashes roughly double a text
+    // config), so ordinary escaped writes fit; a pathological all-control-byte body
+    // (which escapes ~6x) is still dropped with a log line, as is anything larger.
+    const MAX_CMD_BYTES: usize = 512 * 1024;
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CMD_QUEUE_DEPTH);
     let cmd_worker = tokio::spawn({
         let cfg = cfg.clone();
