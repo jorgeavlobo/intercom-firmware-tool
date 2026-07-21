@@ -260,6 +260,12 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Put the shell in its OWN process group (pgid == its pid). On timeout/CAP we
+        // SIGKILL the whole group, not just the shell PID — otherwise a command like
+        // `sleep 300; echo done` or a pipeline leaves grandchildren running (reparented
+        // to init) after we publish the result, defeating the wall-clock/CAP bound and
+        // leaking processes on repeated timeouts.
+        .process_group(0)
         .kill_on_drop(true)
         .spawn()
     {
@@ -341,7 +347,18 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
     // Kill only when we stopped at the cap or hit the timeout; on a clean finish the
     // child already exited (and was reaped by child.wait) inside `run`.
     if capped_or_timeout {
-        let _ = child.start_kill();
+        // SIGKILL the whole process GROUP (pgid == the shell's pid, set via
+        // process_group(0) at spawn), so any children/pipeline the shell spawned die
+        // too — not just the shell. Fall back to signalling the direct child if the
+        // pid is somehow unavailable.
+        match child.id() {
+            Some(pid) => unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            },
+            None => {
+                let _ = child.start_kill();
+            }
+        }
     }
     // Reap the child under a FIXED concurrency cap (see `reap`): it is awaited to
     // completion in a task holding a semaphore permit, so cleanup is explicit and

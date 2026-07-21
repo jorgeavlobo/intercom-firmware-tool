@@ -238,11 +238,24 @@ fn shell_unquote(v: &str) -> String {
                 }
             }
             '"' => {
-                for d in chars.by_ref() {
-                    if d == '"' {
-                        break;
+                while let Some(d) = chars.next() {
+                    match d {
+                        '"' => break,
+                        // POSIX: inside DOUBLE quotes a backslash escapes only " \ $ `
+                        // (and a newline, for line continuation). Before any other
+                        // character it stays literal. Without this a value like
+                        // MQTT_PASS="a\"b" would end the quote at the escaped `"` and
+                        // silently mis-parse the rest of the line.
+                        '\\' => match chars.next() {
+                            Some(e @ ('"' | '\\' | '$' | '`')) => out.push(e),
+                            Some(e) => {
+                                out.push('\\');
+                                out.push(e);
+                            }
+                            None => out.push('\\'),
+                        },
+                        _ => out.push(d),
                     }
-                    out.push(d);
                 }
             }
             '\\' => {
@@ -295,6 +308,17 @@ EMPTY=
         assert_eq!(m.get("MQTT_PASS").map(String::as_str), Some("a'b"));
         // Spaces and '#' inside the single quotes are literal.
         assert_eq!(m.get("MQTT_USER").map(String::as_str), Some("p@ss word#1"));
+    }
+
+    #[test]
+    fn decodes_double_quote_backslash_escapes() {
+        // A hand-edited double-quoted value: POSIX sh escapes only " \ $ ` inside "".
+        // MQTT_PASS="a\"b" must decode to a"b (the escaped quote must NOT end the span
+        // early), and "a\\b" to a\b; a backslash before an ordinary char stays literal.
+        let m = parse_env("MQTT_PASS=\"a\\\"b\"\nTOPIC_RX=\"x\\\\y\"\nMQTT_USER=\"c\\d\"\n");
+        assert_eq!(m.get("MQTT_PASS").map(String::as_str), Some("a\"b"));
+        assert_eq!(m.get("TOPIC_RX").map(String::as_str), Some("x\\y"));
+        assert_eq!(m.get("MQTT_USER").map(String::as_str), Some("c\\d"));
     }
 
     #[test]
