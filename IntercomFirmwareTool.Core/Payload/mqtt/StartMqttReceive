@@ -82,7 +82,13 @@ handle_json() {
 			# Cap captured output at 256 KB: closing the pipe also SIGPIPEs a
 			# runaway/never-ending command, so it can't exhaust memory or blow
 			# past the broker's message limit.
-			result=$(sh -c "$data" 2>&1 | head -c 262144)
+			#
+			# stdin from /dev/null: this runs inside the `mqtt_sub_stream | while read`
+			# loop, so the child would otherwise inherit the SUBSCRIPTION pipe as its
+			# stdin — a command that reads stdin (cat, read, grep without a file) could
+			# then swallow or block on later MQTT payloads, dropping commands (and even
+			# echoing them back in TOPIC_CMD_RESULT).
+			result=$(sh -c "$data" </dev/null 2>&1 | head -c 262144)
 			mqtt_pub -t "${TOPIC_CMD_RESULT}" -m "$result"
 			;;
 		*)

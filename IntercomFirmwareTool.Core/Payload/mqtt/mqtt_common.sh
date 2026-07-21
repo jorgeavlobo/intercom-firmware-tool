@@ -124,10 +124,14 @@ mqtt_pub() {
 # Probe --help for the -c option's DESCRIPTION rather than the long flag name: older
 # builds document it only as "-c : disable clean session/..." with no
 # "--disable-clean-session" spelling, so match the (English-only, unlocalised)
-# description text, which is present exactly when -c is supported.
+# description text, which is present exactly when -c is supported. The pattern
+# "clean.session" (the '.' spans the space in "clean session" or the hyphen in
+# "--disable-clean-session") matches either spelling AND has no leading dash — so we
+# avoid grep's "--" end-of-options marker, which isn't POSIX and can break on a
+# minimal grep (which would silently disable durable-session detection).
 mqtt_detect_clean() {
 	if [ -z "${MQTT_SUB_CLEAN+set}" ]; then
-		if /usr/bin/mosquitto_sub --help 2>&1 | grep -qiE -- '--disable-clean-session|disable clean session'; then
+		if /usr/bin/mosquitto_sub --help 2>&1 | grep -qiE 'clean.session'; then
 			MQTT_SUB_CLEAN=-c
 		else
 			MQTT_SUB_CLEAN=
