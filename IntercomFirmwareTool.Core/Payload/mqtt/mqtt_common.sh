@@ -20,6 +20,12 @@ fi
 : "${TOPIC_FILE_CONTENT:=Bticino/file_content_topic}"
 : "${TOPIC_CMD_RESULT:=Bticino/command_result_topic}"
 
+# Client-id prefix for the receiver's durable mosquitto_sub session. Centralised so
+# the id that mqtt_sub_stream builds AND the orchestrator's pgrep pattern (rx_sub_pat)
+# agree on the marker that identifies THIS bridge's receiver — the "-i <prefix>..."
+# arg lets pgrep target our subscriber and not an unrelated one on the same topic.
+: "${MQTT_SUB_ID_PREFIX:=btrx-}"
+
 # Capture back-end + OpenWebNet monitor endpoint, centralised so the sender AND
 # the orchestrator (which builds pgrep kill patterns from these) agree. See
 # StartMqttSend for what the modes mean; openserver's plaintext OwnPort is 20000.
@@ -150,11 +156,15 @@ mqtt_sub_stream() {
 	# still collide). This matters because a broker allows only ONE live connection per
 	# client id, so a collision would make two otherwise-valid units evict each other and
 	# flap the shared durable session. Length isn't capped because the broker already
-	# accepts mosquitto's own long default ids. od is a standard busybox applet; were it
-	# absent the hex is empty and the id degrades to the sanitised prefix (still distinct
-	# for every non-pathological topic) — never one shared id, so not a hard failure.
+	# accepts mosquitto's own long default ids.
+	#
+	# The hex is built with awk (an ord[] table maps each byte to its value), NOT an
+	# external hexdump tool: awk is already REQUIRED by the default socket capture
+	# (StartMqttSend) and is validated by the installer, so the encoding is ALWAYS
+	# available — no unvalidated dependency whose absence would silently reintroduce the
+	# collision. stderr is discarded for quietness.
 	_lw="${TOPIC_LASTWILL:-default}"
-	_cid="btrx-$(printf '%s' "$_lw" | tr -c 'A-Za-z0-9_-' '_')-$(printf '%s' "$_lw" | od -A n -t x1 | tr -d ' \n')"
+	_cid="${MQTT_SUB_ID_PREFIX}$(printf '%s' "$_lw" | tr -c 'A-Za-z0-9_-' '_')-$(printf '%s' "$_lw" | awk 'BEGIN{ORS="";for(i=0;i<256;i++)o[sprintf("%c",i)]=i}{for(i=1;i<=length($0);i++)printf "%02x",o[substr($0,i,1)]}' 2>/dev/null)"
 
 	# Persistent (durable) session WHEN the client supports it: clean-session=0 lets
 	# the broker QUEUE QoS>=1 commands published while the receiver is briefly

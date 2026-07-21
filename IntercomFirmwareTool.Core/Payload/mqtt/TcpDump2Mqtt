@@ -26,13 +26,22 @@ kill_by() {
 # pgrep -f match (killing unrelated processes) or fail to match ours.
 re_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'; }
 
-# pgrep -f (ERE) pattern that matches OUR receiver's mosquitto_sub specifically: the
-# "-t <TOPIC_RX>" argument, bounded by a following space OR end-of-line, so a
-# different subscription whose topic merely CONTAINS TOPIC_RX as a substring
-# (e.g. "-t Bticino/rx2") is not matched. TOPIC_RX is re_escaped so its own
-# metacharacters can't broaden the match. Used both to reap that subscriber in
-# kill_childs and to gate the retained 'online' refresh on a live LWT holder.
-rx_sub_pat() { printf 'mosquitto_sub .*-t %s( |$)' "$(re_escape "${TOPIC_RX}")"; }
+# pgrep -f (ERE) pattern that matches OUR receiver's mosquitto_sub specifically. Two
+# anchors, both from mqtt_sub_stream's own command line:
+#   * "-i <MQTT_SUB_ID_PREFIX>" — the distinctive durable-session client id this bridge
+#     assigns, so a manual/debug mosquitto_sub on the same topic (which won't carry our
+#     id) is NOT reaped or mistaken for the live LWT holder.
+#   * "-t <TOPIC_RX>" bounded by a following space OR end-of-line, so a different
+#     subscription whose topic merely CONTAINS TOPIC_RX as a substring ("-t Bticino/rx2")
+#     is not matched.
+# -i precedes -t in mqtt_sub_stream's argv, so match them in that order (.* spans the
+# optional -c/-q/-R between). TOPIC_RX is re_escaped so its own metacharacters can't
+# broaden the match; MQTT_SUB_ID_PREFIX is a fixed literal (btrx-). Used both to reap
+# that subscriber in kill_childs and to gate the retained 'online' refresh on a live
+# LWT holder.
+rx_sub_pat() {
+	printf 'mosquitto_sub .*-i %s.*-t %s( |$)' "${MQTT_SUB_ID_PREFIX}" "$(re_escape "${TOPIC_RX}")"
+}
 
 kill_childs() {
 	# re_escape the script paths: kill_by builds a pgrep -f REGEX, so the '.' in
