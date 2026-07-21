@@ -58,9 +58,10 @@ kill_childs() {
 	kill_by "nc $(re_escape "${OWN_HOST}") $(re_escape "${OWN_PORT_MON}")"
 	kill_by "mosquitto_sub.*$(re_escape "${TOPIC_RX}")"
 	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_DUMP}")"
-	# Any in-flight presence 'online' publisher (presence.sh runs mqtt_pub to
-	# TOPIC_LASTWILL on connect). Reap it so a lagging publish can't overwrite the
-	# shutdown 'offline' after the will-holder is already gone.
+	# Any in-flight 'online' publisher (the watchdog loop below refreshes 'online' to
+	# TOPIC_LASTWILL each pass; presence.sh itself only holds the mosquitto_sub will
+	# session). Reap it so a lagging publish can't overwrite the shutdown 'offline'
+	# after the will-holder is already gone.
 	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_LASTWILL}")"
 }
 
