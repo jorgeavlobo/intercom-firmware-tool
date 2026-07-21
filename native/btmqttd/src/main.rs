@@ -181,21 +181,29 @@ async fn run() -> Result<(), String> {
                             Some(tokio::spawn(subscribe_cmd(cfg.clone(), client.clone())));
                     }
                     Ok(Event::Incoming(Incoming::SubAck(suback))) => {
-                        // Only announce availability AFTER the broker confirms the
-                        // command subscription. If it REFUSED (ACL, bad filter →
-                        // SubscribeReasonCode::Failure), don't publish `online`: the
-                        // bridge is connected but cannot receive commands, and a false
-                        // `online` would let availability-triggered automations lose
-                        // commands. TOPIC_RX is our only SUBSCRIBE, so this SubAck is it.
-                        if suback
-                            .return_codes
-                            .iter()
-                            .any(|c| matches!(c, SubscribeReasonCode::Failure))
-                        {
+                        // Announce availability ONLY after the broker confirms the command
+                        // subscription AT QoS >= 1. A Failure (0x80 — ACL/bad filter) OR a
+                        // QoS-0 DOWNGRADE grant both break reliable command delivery: the
+                        // effective QoS is min(pub, sub), so a QoS-0 grant silently drops
+                        // the QoS-1 / durable-session command queueing this bridge relies on
+                        // (issue #12 item 2 / #31). In either case DON'T publish `online` —
+                        // a false availability would let availability-triggered automations
+                        // lose commands. TOPIC_RX is our only SUBSCRIBE, so this SubAck is
+                        // it; log the granted codes to aid diagnosis.
+                        let ready = !suback.return_codes.is_empty()
+                            && suback.return_codes.iter().all(|c| {
+                                matches!(
+                                    c,
+                                    SubscribeReasonCode::Success(
+                                        QoS::AtLeastOnce | QoS::ExactlyOnce
+                                    )
+                                )
+                            });
+                        if !ready {
                             eprintln!(
-                                "btmqttd: broker REFUSED subscription to {} (check ACLs / \
-                                 topic filter); not announcing online",
-                                cfg.topic_rx
+                                "btmqttd: subscription to {} not granted at QoS>=1 \
+                                 (codes {:?}); not announcing online",
+                                cfg.topic_rx, suback.return_codes
                             );
                         } else {
                             if let Some(h) = announce_task.take() {
