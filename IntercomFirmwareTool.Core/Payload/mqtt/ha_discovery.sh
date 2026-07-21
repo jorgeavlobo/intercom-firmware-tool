@@ -87,7 +87,11 @@ i=0
 while [ "$i" -lt 6 ]; do
 	if apply_all; then
 		echo "ha_discovery: ${action}ed Home Assistant discovery configs"
-		# Signal convergence so the orchestrator stops re-launching us.
+		# Signal convergence so the orchestrator stops re-launching us. The runtime
+		# dir is root-owned (created here, not in world-writable /tmp), so an
+		# unprivileged account can't pre-create the marker or plant a symlink for the
+		# root truncation below to follow. mkdir -p is idempotent across boots.
+		mkdir -p "$HA_RUNDIR" 2>/dev/null
 		: > "$HA_MARKER" 2>/dev/null
 		exit 0
 	fi
