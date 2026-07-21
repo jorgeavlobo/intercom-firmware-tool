@@ -628,12 +628,14 @@ namespace IntercomFirmwareTool.App
             foreach (var box in publishTopics)
                 if (box.Text.IndexOfAny(new[] { '+', '#' }) >= 0) return L("MqttHint_Topic");
 
-            // HA discovery node id — mirror MqttInstaller.Validate, which checks it
-            // ONLY when discovery is enabled: the node becomes a discovery-topic level
-            // and unique_id, so it must be the HA charset [A-Za-z0-9_-]. An empty field
-            // falls back to the valid default, so only a non-empty out-of-charset value
-            // is rejected — fail here rather than later in the Core popup.
-            if (ChkMqttHaDiscovery.IsChecked == true)
+            // HA discovery node id — mirror MqttInstaller.Validate, which validates it
+            // UNCONDITIONALLY (not only when discovery is enabled): the manifest is
+            // generated and ha_discovery.sh runs even when disabled, to CLEAR the
+            // retained configs, so a bad node id would fail the build with discovery
+            // off too. The node becomes a discovery-topic level and unique_id, so it
+            // must be the HA charset [A-Za-z0-9_-]. An empty field falls back to the
+            // valid default in TryBuildMqttOptions, so only a non-empty out-of-charset
+            // value is rejected — fail here rather than later in the Core popup.
             {
                 string node = TxtMqttHaNodeId.Text.Trim();
                 if (node.Length > 0)
