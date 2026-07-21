@@ -199,16 +199,23 @@ async fn run() -> Result<(), String> {
                                     )
                                 )
                             });
+                        if let Some(h) = announce_task.take() {
+                            h.abort();
+                        }
                         if !ready {
                             eprintln!(
                                 "btmqttd: subscription to {} not granted at QoS>=1 \
                                  (codes {:?}); not announcing online",
                                 cfg.topic_rx, suback.return_codes
                             );
+                            // Assert retained `offline`: the bridge is connected but can't
+                            // reliably receive commands, so a stale retained `online` from a
+                            // previous run must not leave HA thinking we're available.
+                            // Tracked via announce_task so it's aborted on the next ConnAck /
+                            // shutdown like the online announce.
+                            announce_task =
+                                Some(tokio::spawn(announce_offline(cfg.clone(), client.clone())));
                         } else {
-                            if let Some(h) = announce_task.take() {
-                                h.abort();
-                            }
                             announce_task = Some(tokio::spawn(announce(
                                 cfg.clone(),
                                 client.clone(),
@@ -326,6 +333,19 @@ async fn subscribe_cmd(cfg: Arc<Config>, client: AsyncClient) {
         let _ = client
             .publish(&cfg.topic_rx, QoS::AtMostOnce, true, Vec::new())
             .await;
+    }
+}
+
+/// On-connect step 2b (after a REFUSED/DOWNGRADED SubAck): assert retained `offline`.
+/// The bridge is connected but can't reliably receive commands, so a stale retained
+/// `online` from a previous run would otherwise leave HA thinking it's available.
+/// Best-effort, QoS 0 retained (same convention as the online announce / the will).
+async fn announce_offline(cfg: Arc<Config>, client: AsyncClient) {
+    if let Err(e) = client
+        .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "offline")
+        .await
+    {
+        eprintln!("btmqttd: publish offline (subscription not ready) failed: {e}");
     }
 }
 

@@ -365,12 +365,23 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
     if capped_or_timeout {
         // SIGKILL the whole process GROUP (pgid == the shell's pid, set via
         // process_group(0) at spawn), so any children/pipeline the shell spawned die
-        // too — not just the shell. Fall back to signalling the direct child if the
-        // pid is somehow unavailable.
+        // too — not just the shell.
         match child.id() {
-            Some(pid) => unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            },
+            Some(pid) => {
+                let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                if rc != 0 {
+                    let err = std::io::Error::last_os_error();
+                    // ESRCH just means the group is already gone (the shell and its
+                    // children exited on their own) — benign; reap() collects the
+                    // zombie. Any OTHER error (e.g. EPERM) means the group may still be
+                    // alive, so fall back to killing the direct child, otherwise it (and
+                    // its REAP_SLOTS permit) could linger and stall further commands.
+                    if err.raw_os_error() != Some(libc::ESRCH) {
+                        eprintln!("btmqttd: killpg({pid}) failed: {err}; killing the shell directly");
+                        let _ = child.start_kill();
+                    }
+                }
+            }
             None => {
                 let _ = child.start_kill();
             }
