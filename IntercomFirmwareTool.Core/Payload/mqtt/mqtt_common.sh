@@ -84,13 +84,18 @@ mqtt_sub_one() {
 # -C 1 subscription can't do this (each cycle disconnects cleanly, suppressing the
 # will and leaving the topic 'online'); this dedicated session stays connected (and
 # reconnects on its own after a blip, re-registering the will), so the OFFLINE side
-# of availability is reliable. It subscribes to TOPIC_LASTWILL purely to keep the
-# socket open (the payload is ignored). The ONLINE side is refreshed by the
-# orchestrator loop, and clean shutdowns (which suppress the will) publish 'offline'
-# explicitly there — see presence.sh / TcpDump2Mqtt. Same auth/TLS composition as
-# mqtt_pub/mqtt_sub_one.
+# of availability is reliable. It subscribes to TOPIC_RX purely to keep the socket
+# open (the payload is ignored — this is NOT the command receiver). TOPIC_RX is
+# chosen deliberately: the bridge already needs SUBSCRIBE permission on it (the
+# receiver uses it), so on a broker with topic ACLs that allow publishing status
+# but only subscribing to the command topic, presence doesn't impose a new
+# subscribe requirement on TOPIC_LASTWILL. The will still targets TOPIC_LASTWILL
+# (publish/retain, which the bridge is already allowed to do). The ONLINE side is
+# refreshed by the orchestrator loop, and clean shutdowns (which suppress the will)
+# publish 'offline' explicitly there — see presence.sh / TcpDump2Mqtt. Same auth/TLS
+# composition as mqtt_pub/mqtt_sub_one.
 mqtt_presence() {
-	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -t "${TOPIC_LASTWILL}" \
+	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -t "${TOPIC_RX}" \
 		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
 	if [ -n "${MQTT_CAFILE}" ]; then
