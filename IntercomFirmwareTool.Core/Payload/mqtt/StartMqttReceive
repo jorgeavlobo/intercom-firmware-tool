@@ -1,17 +1,29 @@
 #!/bin/sh
 # StartMqttReceive - apply commands received over MQTT to the unit.
 #
-# Subscribes to $TOPIC_RX. A raw OpenWebNet frame ("*...##") is forwarded to the
-# local gateway (nc 127.0.0.1 30006). Anything else is treated as a JSON command, but the
-# JSON command channel (read_file / write_file / execute_command) is a root-level
-# remote-control surface and is DISABLED unless the operator opted in AND the
-# client is authenticated (see remote_shell_allowed in mqtt_common.sh).
+# Holds a PERSISTENT subscription to $TOPIC_RX (mqtt_sub_stream) and dispatches each
+# message: a raw OpenWebNet frame ("*...##") is forwarded to the local gateway
+# (nc 127.0.0.1 30006); anything else is treated as a JSON command. The JSON command
+# channel (read_file / write_file / execute_command) is a root-level remote-control
+# surface and is DISABLED unless the operator opted in AND the client is authenticated
+# (see remote_shell_allowed in mqtt_common.sh).
+#
+# The same long-lived session also carries the retained 'offline' last will, so it is
+# the single owner of MQTT availability (there is no separate presence holder). See
+# mqtt_sub_stream in mqtt_common.sh for why one persistent session replaced the old
+# one-shot (-C 1) receiver + presence pair.
+#
+# Because messages are consumed line-by-line from the subscription stream, a command
+# must be a SINGLE LINE: OpenWebNet frames already are, and JSON commands must be
+# published as COMPACT (one-line) JSON. Multi-line file content is still supported —
+# carry it as a JSON "\n"-escaped string inside that one-line payload (jq decodes the
+# escapes). An embedded literal newline would split the payload into fragments.
 #
 # MIT-licensed reimplementation of fquinto's mqtt_scripts/StartMqttReceive
 # (GPL-2.0) for IntercomFirmwareTool. Fixes over the original: the arbitrary
-# command channel is gated and refused on an unauthenticated broker, and a
-# reconnect backoff replaces the tight loop that pegged the CPU when the broker
-# was unreachable.
+# command channel is gated and refused on an unauthenticated broker; a persistent
+# subscription (no per-message reconnect) closes the command-loss window and avoids
+# the tight loop that pegged the CPU when the broker was unreachable.
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
 . /etc/tcpdump2mqtt/mqtt_common.sh
 
@@ -70,7 +82,13 @@ handle_json() {
 			# Cap captured output at 256 KB: closing the pipe also SIGPIPEs a
 			# runaway/never-ending command, so it can't exhaust memory or blow
 			# past the broker's message limit.
-			result=$(sh -c "$data" 2>&1 | head -c 262144)
+			#
+			# stdin from /dev/null: this runs inside the `mqtt_sub_stream | while read`
+			# loop, so the child would otherwise inherit the SUBSCRIPTION pipe as its
+			# stdin — a command that reads stdin (cat, read, grep without a file) could
+			# then swallow or block on later MQTT payloads, dropping commands (and even
+			# echoing them back in TOPIC_CMD_RESULT).
+			result=$(sh -c "$data" </dev/null 2>&1 | head -c 262144)
 			mqtt_pub -t "${TOPIC_CMD_RESULT}" -m "$result"
 			;;
 		*)
@@ -79,20 +97,14 @@ handle_json() {
 	esac
 }
 
-fail=0
-while : ; do
-	rxcmd=$(mqtt_sub_one)
-	status=$?
-
-	if [ $status -ne 0 ] || [ -z "$rxcmd" ]; then
-		# Broker unreachable or empty read - back off (capped) instead of
-		# spinning, then retry.
-		fail=$((fail + 1))
-		[ $fail -gt 6 ] && fail=6
-		sleep $((fail * 5))
-		continue
-	fi
-	fail=0
+# Dispatch one received line: forward a raw OpenWebNet frame to the gateway, else
+# hand it to the JSON command handler.
+dispatch() {
+	rxcmd="$1"
+	# Ignore empty lines (a genuinely empty MQTT message, or a blank line): they are
+	# neither a frame nor JSON, so skip them instead of letting handle_json log a
+	# spurious "Unsupported command" for each one.
+	[ -n "$rxcmd" ] || return
 
 	# printf, not echo: an MQTT payload starting with -n or containing backslashes
 	# would be mangled by some echo implementations.
@@ -105,4 +117,51 @@ while : ; do
 	else
 		handle_json "$rxcmd"
 	fi
+}
+
+# Probe mosquitto_sub's durable-session (-c) support ONCE here in the parent shell, so
+# the cached MQTT_SUB_CLEAN is inherited by every mqtt_sub_stream pipeline subshell
+# below instead of re-running "mosquitto_sub --help" on each reconnect.
+mqtt_detect_clean
+
+# Clear any STRAY retained message on a concrete command topic, ONCE at startup.
+# Commands must be published NON-retained; the persistent subscription's -R only
+# suppresses messages delivered WITH the retain bit set (a fresh SUBSCRIBE), but MQTT
+# clears that bit for a message delivered to an already-established subscription — so a
+# command mistakenly published *retained* would be delivered (retain=0) and executed,
+# and with a durable session could also be queued and replayed on reconnect. Actively
+# deleting the broker's retained value removes that source (an empty retained publish
+# clears it). Only meaningful for a CONCRETE topic: a wildcard ("+"/"#") or shared
+# ("$share/…") TOPIC_RX can't be published to. Best-effort (needs publish rights on the
+# topic); if the empty payload loops back to us it's ignored by dispatch. Robust
+# app-level command de-duplication is future work — see #12 (structured JSON) and #32.
+case "${TOPIC_RX}" in
+	*[+#]* | '$share/'*) : ;;
+	*) mqtt_pub -r -t "${TOPIC_RX}" -n > /dev/null 2>&1 ;;
+esac
+
+fail=0
+while : ; do
+	# Persistent subscription: mqtt_sub_stream streams every command AND holds the
+	# retained 'offline' last will. It reconnects internally after a broker blip, so
+	# it normally exits only on a HARD failure (e.g. the broker is unreachable at
+	# startup, before the first connect). -r on read preserves backslashes so a JSON
+	# "\n" escape reaches jq intact; IFS= keeps leading/trailing spaces in the line.
+	start=$(date +%s)
+	mqtt_sub_stream | while IFS= read -r rxcmd; do
+		dispatch "$rxcmd"
+	done
+
+	# The pipeline ended: mqtt_sub_stream exited. If the subscription had stayed up a
+	# while it was healthy (a normal reconnect-and-drop), so retry immediately; a
+	# quick exit means the broker is unreachable, so back off (capped) to avoid
+	# spinning. date +%s (busybox) avoids the bash-only SECONDS.
+	end=$(date +%s)
+	if [ $((end - start)) -ge 60 ]; then
+		fail=0
+	else
+		fail=$((fail + 1))
+		[ $fail -gt 6 ] && fail=6
+	fi
+	sleep $((fail * 5))
 done

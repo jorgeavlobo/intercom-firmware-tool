@@ -47,7 +47,7 @@ term=
 # pub_child=$!" window (before the PID is known) would otherwise leave the
 # just-launched child untracked and orphaned. So it only flags the request (and
 # reaps a child if one is already tracked); pub() then honours the flag at safe
-# points once the PID is captured, closing the window (same pattern as presence.sh).
+# points once the PID is captured, closing the window.
 sig() {
 	term=1
 	if [ -n "$pub_child" ]; then kill_tree "$pub_child"; wait "$pub_child" 2>/dev/null; pub_child=; fi

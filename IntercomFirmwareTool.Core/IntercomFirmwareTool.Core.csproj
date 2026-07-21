@@ -75,7 +75,6 @@
     <None Remove="Payload\mqtt\filter.py" />
     <None Remove="Payload\mqtt\mqtt_common.sh" />
     <None Remove="Payload\mqtt\ha_discovery.sh" />
-    <None Remove="Payload\mqtt\presence.sh" />
     <None Remove="Payload\mqtt\bt_service_watchdog" />
     <EmbeddedResource Include="Payload\mqtt\TcpDump2Mqtt">
       <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.TcpDump2Mqtt</LogicalName>
@@ -100,9 +99,6 @@
     </EmbeddedResource>
     <EmbeddedResource Include="Payload\mqtt\ha_discovery.sh">
       <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.ha_discovery.sh</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Payload\mqtt\presence.sh">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.presence.sh</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Include="Payload\mqtt\bt_service_watchdog">
       <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.bt_service_watchdog</LogicalName>

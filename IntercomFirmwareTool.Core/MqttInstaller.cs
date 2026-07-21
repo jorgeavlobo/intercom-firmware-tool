@@ -121,11 +121,12 @@ namespace IntercomFirmwareTool.Core
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
 
-        // The 10 embedded scripts. TcpDump2Mqtt.conf is generated (not a resource);
+        // The 9 embedded scripts. TcpDump2Mqtt.conf is generated (not a resource);
         // jq/evtest come from PayloadBinaries. Executables 0775; mqtt_common.sh is
         // only sourced, so 0644. ha_discovery.sh runs on every startup and
-        // self-selects publish (HA_DISCOVERY=1) vs clear (0). presence.sh holds the
-        // persistent last-will session so HA availability is reliable.
+        // self-selects publish (HA_DISCOVERY=1) vs clear (0). StartMqttReceive holds
+        // the persistent last-will session (it is both the command receiver and the
+        // availability holder), so HA availability is reliable.
         private static readonly ScriptFile[] Scripts =
         {
             new(ResourcePrefix + "TcpDump2Mqtt",       EtcDir + "/TcpDump2Mqtt",       775),
@@ -136,7 +137,6 @@ namespace IntercomFirmwareTool.Core
             new(ResourcePrefix + "filter.py",          EtcDir + "/filter.py",          775),
             new(ResourcePrefix + "mqtt_common.sh",     EtcDir + "/mqtt_common.sh",     644),
             new(ResourcePrefix + "ha_discovery.sh",    EtcDir + "/ha_discovery.sh",    775),
-            new(ResourcePrefix + "presence.sh",        EtcDir + "/presence.sh",        775),
             new(ResourcePrefix + "bt_service_watchdog", "/etc/init.d/bt_service_watchdog", 775),
         };
 
@@ -377,9 +377,9 @@ namespace IntercomFirmwareTool.Core
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
 
             // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by
-            // the broker against the UNDERLYING <filter>, and both StartMqttReceive
-            // and the presence session subscribe to that underlying filter. So the
-            // checks below must run on <filter>, not the raw "$share/..." string —
+            // the broker against the UNDERLYING <filter> that StartMqttReceive
+            // subscribes to. So the checks below must run on <filter>, not the raw
+            // "$share/..." string —
             // otherwise "$share/g/Bticino/#" would slip past the self-loop guard while
             // the broker still delivers the bridge's own Bticino/tx publishes to
             // StartMqttReceive, replaying them to the gateway. Normalise here (and
@@ -613,6 +613,7 @@ namespace IntercomFirmwareTool.Core
                     ("python", new[] { "/usr/bin/python", "/usr/bin/python3" }),  // StartMqttSend tries both
                     ("pgrep", new[] { "/usr/bin/pgrep" }),                        // TcpDump2Mqtt/watchdog hard-code this
                     ("nc", new[] { "/usr/bin/nc", "/bin/nc" }),                   // StartMqttReceive command inject + StartMqttSend socket monitor (bare `nc` via PATH)
+                    ("awk", new[] { "/usr/bin/awk", "/bin/awk" }),                // StartMqttSend socket framer + mqtt_common.sh injective client-id hex (bare `awk` via PATH)
                     ("route", new[] { "/sbin/route", "/usr/sbin/route", "/bin/route" }), // #10 base tool (not invoked by us)
                     ("ping", new[] { "/bin/ping", "/usr/bin/ping" }),            // #10 base tool (not invoked by us)
                 };
@@ -627,19 +628,10 @@ namespace IntercomFirmwareTool.Core
                         paths.Any(p => DependencyPresent(fs, p)),
                         string.Join(" | ", paths)));
 
-                // awk is used ONLY by the socket capture back-end (its busybox framer).
-                // Gate the check on that choice: in tcpdump mode awk is not invoked at
-                // all, so requiring it would wrongly reject an otherwise-valid image
-                // (every ValidateMqtt failure fails the whole build). When socket mode
-                // IS selected we require it, so the build reflects the user's choice
-                // rather than silently degrading to the runtime tcpdump fallback.
-                if (!opts.UseTcpdumpCapture)
-                {
-                    var awkPaths = new[] { "/usr/bin/awk", "/bin/awk" };  // busybox applet
-                    checks.Add(new("runtime dep awk present (socket capture)",
-                        awkPaths.Any(p => DependencyPresent(fs, p)),
-                        string.Join(" | ", awkPaths)));
-                }
+                // awk is checked UNCONDITIONALLY in the deps list above: besides the
+                // socket-capture framer (which only runs in socket mode) it now also
+                // builds the receiver's durable client-id hex in mqtt_common.sh, which
+                // runs in every capture mode. So there is no capture-gated awk check.
             }
             return checks;
         }
@@ -798,15 +790,15 @@ namespace IntercomFirmwareTool.Core
             string Topic(string component, string objectId) =>
                 $"{prefix}/{component}/{node}/{objectId}/config";
 
-            // Availability (TopicLastWill): the dedicated presence session
-            // (presence.sh) holds a persistent connection whose retained 'offline'
+            // Availability (TopicLastWill): the persistent command receiver
+            // (StartMqttReceive) holds a long-lived connection whose retained 'offline'
             // last will the broker delivers on an UNCLEAN drop — so OFFLINE is
             // reliable. ONLINE is refreshed by the orchestrator each watchdog pass
-            // while presence is up (mosquitto_sub reconnects on its own, so a one-shot
-            // birth would stick at 'offline' after a blip), and published as 'offline'
-            // explicitly on a clean shutdown. ONLINE is best-effort (coupled to the
-            // broker in practice, since the refresh only lands when the broker accepts
-            // it and the presence session shares the same credentials) and errs toward
+            // while the receiver is up (mosquitto_sub reconnects on its own, so a
+            // one-shot birth would stick at 'offline' after a blip), and published as
+            // 'offline' explicitly on a clean shutdown. ONLINE is best-effort (coupled
+            // to the broker in practice, since the refresh only lands when the broker
+            // accepts it and the receiver shares the same credentials) and errs toward
             // a brief stale 'offline' rather than a stale 'online', so the connectivity
             // sensor and the per-entity availability blocks below track the bridge's
             // real state well enough for a diagnostic view. (Truly atomic birth/will
