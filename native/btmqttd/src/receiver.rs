@@ -217,8 +217,14 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
             return;
         }
     };
-    let mut out = child.stdout.take().expect("piped stdout");
-    let mut err = child.stderr.take().expect("piped stderr");
+    // stdout/stderr are Some by construction (Stdio::piped() above), but handle None
+    // gracefully rather than panicking — the module's contract is "never panics".
+    let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
+        eprintln!("btmqttd: execute_command: child stdout/stderr pipe missing");
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+        return;
+    };
 
     // Read stdout+stderr CONCURRENTLY and stop the moment we have CAP bytes TOTAL —
     // like the shell's `... 2>&1 | head -c 262144`. Reading each to its own CAP with
