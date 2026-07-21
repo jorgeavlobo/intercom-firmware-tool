@@ -12,6 +12,7 @@ use rumqttc::{AsyncClient, QoS};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 
 use crate::config::{Config, OWN_PORT_CMD};
 use crate::own;
@@ -34,6 +35,17 @@ const FORWARD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Monotonic suffix so concurrent write_file tasks never share a temp path.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Fixed cap on concurrently-reaped killed children (see `reap`). Bounds how many
+/// reaper tasks can exist at once, so a flood of CAP-hitting commands whose children
+/// momentarily block unreaped can't grow the daemon's task count without limit.
+const REAP_CONCURRENCY: usize = 16;
+
+/// The fixed-capacity reaper permit pool. A killed child is AWAITED to completion in a
+/// task holding one of these permits; when all are taken (that many children stuck at
+/// once), further children fall back to a plain drop. `const_new` so it lives in a
+/// `static` with no lazy init.
+static REAP_SLOTS: Semaphore = Semaphore::const_new(REAP_CONCURRENCY);
 
 /// Dispatch one received payload. The shell receiver looped `while IFS= read -r
 /// rxcmd`, so it processed EVERY `\n`-delimited line of a payload IN ORDER — a
@@ -263,7 +275,7 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
     let (Some(mut out), Some(mut err)) = (child.stdout.take(), child.stderr.take()) else {
         eprintln!("btmqttd: execute_command: child stdout/stderr pipe missing");
         let _ = child.start_kill();
-        drop(child); // reaped by tokio's global orphan reaper (kill_on_drop)
+        reap(child); // bounded reaper awaits it to completion
         return;
     };
 
@@ -327,25 +339,47 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
         Err(_) => (b"btmqttd: execute_command timed out".to_vec(), true),
     };
     // Kill only when we stopped at the cap or hit the timeout; on a clean finish the
-    // child already exited AND was reaped (child.wait) inside `run`.
-    //
-    // Reaping strategy: we neither wait synchronously nor spawn a per-command reaper.
-    // A synchronous wait would stall the single ordered command worker; a detached
-    // reaper task per command would be UNBOUNDED — an authenticated flood of
-    // CAP-hitting commands whose children are momentarily unreapable (e.g. D-state
-    // kernel I/O) could pile up tasks. Instead we DROP the Child: kill_on_drop(true)
-    // SIGKILLs it and hands it to tokio's SINGLE global orphan reaper (signal-driven),
-    // which reaps it on the next SIGCHLD. That is bounded (one shared reaper, no
-    // per-command task) and leaves no zombie. A child stuck in uninterruptible kernel
-    // I/O can't be reaped by ANY userspace mechanism until the kernel releases it —
-    // and this gated channel is an authenticated arbitrary-`sh -c` surface anyway, so
-    // bounding such children adds no security a shell user couldn't bypass directly.
+    // child already exited (and was reaped by child.wait) inside `run`.
     if capped_or_timeout {
         let _ = child.start_kill();
     }
-    drop(child); // kill_on_drop + tokio's global orphan reaper handle cleanup
+    // Reap the child under a FIXED concurrency cap (see `reap`): it is awaited to
+    // completion in a task holding a semaphore permit, so cleanup is explicit and
+    // bounded — not tokio's non-guaranteed best-effort drop-time orphan cleanup, and
+    // not an unbounded per-command reaper task. On a clean finish the child already
+    // exited inside `run`, so its reaper returns instantly and frees its slot at once.
+    reap(child);
     result.truncate(CAP);
     publish(client, &cfg.topic_cmd_result, result, false).await;
+}
+
+/// Reap a (usually just-killed) child, awaiting it to completion so it is reliably
+/// collected — a bounded, explicit alternative to tokio's best-effort drop-time
+/// orphan cleanup. A short-lived task holds one of REAP_SLOTS' permits while it
+/// `wait()`s the child; a normally-exiting child (SIGKILL delivered, or a clean
+/// finish) is collected at once and frees its slot immediately.
+///
+/// The permit pool is the bound: if all REAP_CONCURRENCY slots are held — i.e. that
+/// many children are simultaneously stuck unreaped, e.g. blocked in uninterruptible
+/// kernel I/O (D-state) that even SIGKILL can't interrupt until it returns — the next
+/// child falls back to a plain drop (`kill_on_drop` still SIGKILLs it). So the number
+/// of reaper tasks is capped regardless of command rate; the daemon never spawns an
+/// unbounded number of them. (A truly D-stuck process holds a process-table slot until
+/// the kernel releases it no matter how it's waited; and this channel is a gated,
+/// authenticated `sh -c` surface, so this bound is about the daemon's own resources,
+/// not a defense against an authenticated operator who can already run any command.)
+fn reap(child: tokio::process::Child) {
+    match REAP_SLOTS.try_acquire() {
+        Ok(permit) => {
+            tokio::spawn(async move {
+                let _permit = permit; // held until the wait resolves, then released
+                let mut child = child;
+                let _ = child.wait().await;
+            });
+        }
+        // All slots busy: bounded fallback. kill_on_drop(true) SIGKILLs on drop.
+        Err(_) => drop(child),
+    }
 }
 
 async fn publish(client: &AsyncClient, topic: &str, payload: Vec<u8>, retain: bool) {
