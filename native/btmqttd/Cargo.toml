@@ -15,7 +15,7 @@ path = "src/main.rs"
 # resident footprint small on the intercom (one worker thread is plenty for a
 # handful of sockets).
 tokio = { version = "1", default-features = false, features = [
-    "rt", "macros", "net", "time", "io-util", "signal", "sync", "process",
+    "rt", "macros", "net", "time", "io-util", "signal", "sync", "process", "fs",
 ] }
 # MQTT client. use-rustls pulls tokio-rustls -> rustls 0.22 -> ring for TLS; the
 # device broker is mosquitto v3.1 which accepts MQTT 3.1.1 (rumqttc's default).

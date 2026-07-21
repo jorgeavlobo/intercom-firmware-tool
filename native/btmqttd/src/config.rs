@@ -65,10 +65,11 @@ impl Config {
     /// `mqtt_common.sh` (topic defaults, PAYLOAD_FORMAT=json, CAPTURE socket, etc.).
     pub fn from_map(m: HashMap<String, String>) -> Config {
         // A value that is present but empty means "unset" (the shell treated
-        // MQTT_USER= as empty and skipped auth), so collapse "" to None.
-        let opt = |k: &str| -> Option<String> {
-            m.get(k).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
-        };
+        // MQTT_USER= as empty and skipped auth), so collapse "" to None. Do NOT trim:
+        // shell_unquote already yields the exact intended value, and a credential or
+        // topic may legitimately contain leading/trailing spaces (e.g. the installer
+        // wrote MQTT_PASS=' secret '), which the shell-sourced config preserved.
+        let opt = |k: &str| -> Option<String> { m.get(k).filter(|s| !s.is_empty()).cloned() };
         let get = |k: &str, d: &str| -> String { opt(k).unwrap_or_else(|| d.to_string()) };
         let flag = |k: &str| -> bool { opt(k).as_deref() == Some("1") };
 
@@ -271,6 +272,14 @@ EMPTY=
         assert_eq!(m.get("MQTT_PASS").map(String::as_str), Some("a'b"));
         // Spaces and '#' inside the single quotes are literal.
         assert_eq!(m.get("MQTT_USER").map(String::as_str), Some("p@ss word#1"));
+    }
+
+    #[test]
+    fn preserves_leading_trailing_quoted_whitespace() {
+        // A credential with intentional surrounding spaces must survive intact — the
+        // shell-sourced config preserved it; a stray trim would reject the broker.
+        let c = Config::from_map(parse_env("MQTT_HOST=h\nMQTT_USER=u\nMQTT_PASS=' secret '\n"));
+        assert_eq!(c.mqtt_pass.as_deref(), Some(" secret "));
     }
 
     #[test]

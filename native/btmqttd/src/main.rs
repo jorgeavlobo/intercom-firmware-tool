@@ -65,11 +65,13 @@ async fn run() -> Result<(), String> {
         opts.set_credentials(u.clone(), p.clone());
     }
     // Retained `offline` last will: an unclean drop (crash/power loss) makes the
-    // broker deliver it, so Home Assistant sees the bridge go offline.
+    // broker deliver it, so Home Assistant sees the bridge go offline. QoS 0 (the
+    // shell bridge's default, and the usual convention for retained availability/LWT
+    // — the retain flag, not the QoS, is what carries state to a late subscriber).
     opts.set_last_will(LastWill::new(
         cfg.topic_lastwill.clone(),
         "offline",
-        QoS::AtLeastOnce,
+        QoS::AtMostOnce,
         true,
     ));
     if cfg.uses_tls() {
@@ -139,19 +141,23 @@ async fn run() -> Result<(), String> {
 /// time, reconcile HA discovery, and (re)subscribe to the command topic. Runs on
 /// every connect, so a reconnect restores all retained state automatically.
 async fn birth(cfg: &Arc<Config>, client: &AsyncClient, start_iso: &str) {
+    // Availability/status publishes are QoS 0 retained — the shell default and the
+    // usual convention (the retain flag carries state to a late subscriber).
     if let Err(e) = client
-        .publish(&cfg.topic_lastwill, QoS::AtLeastOnce, true, "online")
+        .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
         .await
     {
         eprintln!("btmqttd: publish online failed: {e}");
     }
     if let Err(e) = client
-        .publish(&cfg.topic_startd, QoS::AtLeastOnce, true, start_iso.as_bytes().to_vec())
+        .publish(&cfg.topic_startd, QoS::AtMostOnce, true, start_iso.as_bytes().to_vec())
         .await
     {
         eprintln!("btmqttd: publish start_date failed: {e}");
     }
     ha::reconcile(cfg, client).await;
+    // Commands are subscribed at QoS 1 (at-least-once) — the one place QoS 1 matters,
+    // so a command is redelivered rather than silently dropped (issue #12 item 2).
     if let Err(e) = client.subscribe(&cfg.topic_rx, QoS::AtLeastOnce).await {
         eprintln!("btmqttd: subscribe {} failed: {e}", cfg.topic_rx);
     }
@@ -161,7 +167,7 @@ async fn birth(cfg: &Arc<Config>, client: &AsyncClient, start_iso: &str) {
     // publish). A wildcard/shared TOPIC_RX can't be published to — skip it.
     if is_concrete_topic(&cfg.topic_rx) {
         let _ = client
-            .publish(&cfg.topic_rx, QoS::AtLeastOnce, true, Vec::new())
+            .publish(&cfg.topic_rx, QoS::AtMostOnce, true, Vec::new())
             .await;
     }
 }
@@ -178,7 +184,7 @@ fn is_concrete_topic(topic: &str) -> bool {
 async fn shutdown(cfg: &Arc<Config>, client: &AsyncClient, eventloop: &mut EventLoop) {
     eprintln!("btmqttd: shutting down");
     let _ = client
-        .publish(&cfg.topic_lastwill, QoS::AtLeastOnce, true, "offline")
+        .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "offline")
         .await;
     let _ = client.disconnect().await;
     // Drive the loop so the queued offline PUBLISH is flushed and the DISCONNECT is

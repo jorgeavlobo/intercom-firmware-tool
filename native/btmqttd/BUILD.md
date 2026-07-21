@@ -74,8 +74,10 @@ cargo check    # type-check against the host target
 
 ## Notes
 
-- `opt-level="z"`, LTO, `strip`, `panic="abort"`, `codegen-units=1` — size-first for
-  a flash-constrained device. Current size ≈ 1.03 MB (cf. `jq` 1.34 MB).
+- `opt-level="z"`, LTO, `strip`, `codegen-units=1` — size-first for a
+  flash-constrained device. Current size ≈ 1.2 MB (cf. `jq` 1.34 MB). Unwinding is
+  KEPT (no `panic="abort"`) so a panic in a spawned task is isolated by tokio
+  instead of aborting the daemon.
 - Single-threaded tokio runtime (`new_current_thread`) keeps the resident footprint
   small.
 - MQTT 3.1.1 (rumqttc default) — the device broker is mosquitto v3.1, which accepts

@@ -230,18 +230,24 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
 
     let mut result = match tokio::time::timeout(EXEC_TIMEOUT, collect).await {
         Ok(buf) => buf,
-        Err(_) => {
-            let _ = child.start_kill();
-            b"btmqttd: execute_command timed out".to_vec()
-        }
+        Err(_) => b"btmqttd: execute_command timed out".to_vec(),
     };
-    let _ = child.wait().await; // reap (kill_on_drop also guards)
+    // ALWAYS kill then reap, under their own bounded timeout: the capped readers can
+    // hit CAP (or the whole collect can time out) while the child keeps running or is
+    // blocked on a now-unread full pipe, so a bare child.wait() could hang forever and
+    // the result would never be published. start_kill (SIGKILL) unblocks it; the
+    // bounded wait reaps without hanging (kill_on_drop is a further backstop).
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     result.truncate(CAP);
     publish(client, &cfg.topic_cmd_result, result, false).await;
 }
 
 async fn publish(client: &AsyncClient, topic: &str, payload: Vec<u8>, retain: bool) {
-    if let Err(e) = client.publish(topic, QoS::AtLeastOnce, retain, payload).await {
+    // QoS 0 — the shell bridge's `mosquitto_pub` default for these diagnostic
+    // replies (command result / file content); the command SUBSCRIPTION is the only
+    // QoS-1 path.
+    if let Err(e) = client.publish(topic, QoS::AtMostOnce, retain, payload).await {
         eprintln!("btmqttd: publish to {topic} failed: {e}");
     }
 }

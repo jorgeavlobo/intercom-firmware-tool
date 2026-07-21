@@ -73,9 +73,10 @@ pub async fn reconcile(cfg: &Arc<Config>, client: &AsyncClient) {
     eprintln!("btmqttd: ha discovery {action} {applied} config(s)");
 }
 
-/// Publish a retained config (or an empty retained payload to clear it).
+/// Publish a retained config (or an empty retained payload to clear it). QoS 0
+/// retained, matching the shell's `pub -r` (mosquitto_pub default).
 async fn publish(client: &AsyncClient, topic: &str, payload: Vec<u8>) -> bool {
-    match client.publish(topic, QoS::AtLeastOnce, true, payload).await {
+    match client.publish(topic, QoS::AtMostOnce, true, payload).await {
         Ok(()) => true,
         Err(e) => {
             eprintln!("btmqttd: ha publish to {topic} failed: {e}");
