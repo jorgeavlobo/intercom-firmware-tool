@@ -164,11 +164,13 @@ impl Config {
 }
 
 /// Injective lowercase-hex encoding: each byte -> two fixed hex chars, so distinct
-/// byte strings always produce distinct outputs (the shell's `mqtt_hex`).
+/// byte strings always produce distinct outputs (the shell's `mqtt_hex`). Writes into
+/// the preallocated buffer with no per-byte allocation.
 fn hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write;
     let mut s = String::with_capacity(bytes.len() * 2);
     for &b in bytes {
-        s.push_str(&format!("{b:02x}"));
+        let _ = write!(s, "{b:02x}");
     }
     s
 }

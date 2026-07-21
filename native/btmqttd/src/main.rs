@@ -54,8 +54,8 @@ async fn run() -> Result<(), String> {
         return Err("MQTT_HOST is not set in the config".into());
     }
     // Service activation time (UTC ISO-8601), captured once and republished retained
-    // on every connect.
-    let start_iso = own::utc_now_iso();
+    // on every connect. Arc<str> so each spawned birth task gets a cheap clone.
+    let start_iso: Arc<str> = own::utc_now_iso().into();
 
     let mut opts = MqttOptions::new(cfg.client_id(), cfg.mqtt_host.clone(), cfg.mqtt_port);
     opts.set_keep_alive(Duration::from_secs(60));
@@ -108,7 +108,13 @@ async fn run() -> Result<(), String> {
             ev = eventloop.poll() => {
                 match ev {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
-                        birth(&cfg, &client, &start_iso).await;
+                        // Run birth as its OWN task, NOT inline: birth's
+                        // publish/subscribe enqueue into the same bounded request
+                        // channel that THIS poll loop drains. If the bus/key tasks
+                        // filled that channel during an outage, awaiting birth here
+                        // would block the drain and deadlock. Spawning lets the loop
+                        // keep draining while birth's requests flush.
+                        tokio::spawn(birth(cfg.clone(), client.clone(), start_iso.clone()));
                     }
                     Ok(Event::Incoming(Incoming::Publish(p))) => {
                         // TOPIC_RX is the ONLY subscription, so every incoming Publish
@@ -150,25 +156,15 @@ async fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// On-connect birth sequence: announce availability, republish the service start
-/// time, reconcile HA discovery, and (re)subscribe to the command topic. Runs on
-/// every connect, so a reconnect restores all retained state automatically.
-async fn birth(cfg: &Arc<Config>, client: &AsyncClient, start_iso: &str) {
-    // Availability/status publishes are QoS 0 retained — the shell default and the
-    // usual convention (the retain flag carries state to a late subscriber).
-    if let Err(e) = client
-        .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
-        .await
-    {
-        eprintln!("btmqttd: publish online failed: {e}");
-    }
-    if let Err(e) = client
-        .publish(&cfg.topic_startd, QoS::AtMostOnce, true, start_iso.as_bytes().to_vec())
-        .await
-    {
-        eprintln!("btmqttd: publish start_date failed: {e}");
-    }
-    ha::reconcile(cfg, client).await;
+/// On-connect birth sequence. Runs (spawned) on every connect, so a reconnect
+/// restores all state automatically. Owns its inputs so it can run as its own task
+/// (see the ConnAck handler for why it must not run inline).
+///
+/// ORDER MATTERS: SUBSCRIBE to the command topic FIRST, THEN announce `online`.
+/// Announcing availability before command readiness would let an automation that
+/// reacts to `online` publish a QoS 1 command while this (fresh) session has no
+/// command subscription yet — the broker wouldn't queue it and it would be lost.
+async fn birth(cfg: Arc<Config>, client: AsyncClient, start_iso: Arc<str>) {
     // Commands are subscribed at QoS 1 (at-least-once) — the one place QoS 1 matters,
     // so a command is redelivered rather than silently dropped (issue #12 item 2).
     if let Err(e) = client.subscribe(&cfg.topic_rx, QoS::AtLeastOnce).await {
@@ -183,6 +179,22 @@ async fn birth(cfg: &Arc<Config>, client: &AsyncClient, start_iso: &str) {
             .publish(&cfg.topic_rx, QoS::AtMostOnce, true, Vec::new())
             .await;
     }
+    // Availability/status publishes are QoS 0 retained — the shell default and the
+    // usual convention (the retain flag carries state to a late subscriber). Now that
+    // the command subscription is in place, it is safe to announce `online`.
+    if let Err(e) = client
+        .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
+        .await
+    {
+        eprintln!("btmqttd: publish online failed: {e}");
+    }
+    if let Err(e) = client
+        .publish(&cfg.topic_startd, QoS::AtMostOnce, true, start_iso.as_bytes().to_vec())
+        .await
+    {
+        eprintln!("btmqttd: publish start_date failed: {e}");
+    }
+    ha::reconcile(&cfg, &client).await;
 }
 
 /// A topic that can be PUBLISHED to (no `+`/`#` wildcard, not a `$share/` group).
@@ -196,10 +208,15 @@ fn is_concrete_topic(topic: &str) -> bool {
 /// without polling they would never reach the broker. Bounded by a timeout.
 async fn shutdown(cfg: &Arc<Config>, client: &AsyncClient, eventloop: &mut EventLoop) {
     eprintln!("btmqttd: shutting down");
-    let _ = client
-        .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "offline")
-        .await;
-    let _ = client.disconnect().await;
+    // Enqueue the offline publish + disconnect from a SEPARATE task: they go onto the
+    // same bounded request channel this poll loop drains, so awaiting them inline
+    // before we resume polling could deadlock if the channel is already full.
+    let c = client.clone();
+    let will_topic = cfg.topic_lastwill.clone();
+    tokio::spawn(async move {
+        let _ = c.publish(will_topic, QoS::AtMostOnce, true, "offline").await;
+        let _ = c.disconnect().await;
+    });
     // Drive the loop so the queued offline PUBLISH is flushed and the DISCONNECT is
     // sent; stop when the outgoing DISCONNECT goes out or the connection closes.
     let _ = tokio::time::timeout(Duration::from_secs(3), async {
