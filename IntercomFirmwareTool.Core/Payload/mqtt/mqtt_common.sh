@@ -118,7 +118,7 @@ own_frame_to_json() {
 		+ ( (ltrimstr("*") | rtrimstr("##")) as $b
 		    | if ($b | startswith("#"))
 		      then ($b | ltrimstr("#") | split("*")) as $t
-		           | { type: "request", who: $t[0], where: $t[1], params: $t[2:] }
+		           | { type: "request", who: $t[0], what: null, where: $t[1], params: $t[2:] }
 		      else ($b | split("*")) as $t
 		           | { type: "command", who: $t[0], what: $t[1], where: $t[2], params: $t[3:] }
 		      end )'
