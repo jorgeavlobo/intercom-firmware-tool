@@ -27,19 +27,35 @@ PATH=/sbin:/usr/sbin:/usr/bin:/bin
 . /etc/tcpdump2mqtt/mqtt_common.sh
 
 child=
+term=
 # On stop, kill the mosquitto_sub child and WAIT for it, so the wrapper stays alive
 # until the child is actually reaped (not merely signalled) — otherwise the watchdog
 # could start a second presence.sh over a still-dying one. This is a CLEAN
 # disconnect, so the will does NOT fire; the orchestrator announces 'offline'.
-# (Should a signal land in the tiny window before "child" is assigned below, the
-# child would be missed here — but the orchestrator's kill_childs also matches the
-# presence sub by its will topic, so it can't linger as a stray will-holder.)
-trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; fi; exit 0' INT TERM
+cleanup() {
+	if [ -n "$child" ]; then
+		kill "$child" 2>/dev/null
+		wait "$child" 2>/dev/null
+	fi
+	exit 0
+}
+
+# A signal in the window between backgrounding mqtt_presence and capturing its PID
+# can't yet be turned into a kill of the child. So install a lightweight RECORDER
+# first (just note the request, don't exit), then the real cleanup trap once $child
+# is known, then honour any request that landed in the window — closing the race
+# that would otherwise leave a stray will-holder and let the watchdog spawn a
+# duplicate.
+trap 'term=1' INT TERM
 
 # Hold the session. Output is irrelevant (we don't parse it), so discard it. The
 # subscription itself just keeps the connection — and thus the will — alive.
 mqtt_presence > /dev/null 2>&1 &
 child=$!
+
+trap cleanup INT TERM
+[ -n "$term" ] && cleanup
+
 # Blocks until mosquitto_sub exits (it reconnects internally, so normally only on a
 # fatal error or when killed). On exit, the script ends and the watchdog respawns it.
 wait "$child"
