@@ -26,6 +26,14 @@ kill_by() {
 # pgrep -f match (killing unrelated processes) or fail to match ours.
 re_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|]/\\&/g'; }
 
+# pgrep -f (ERE) pattern that matches OUR receiver's mosquitto_sub specifically: the
+# "-t <TOPIC_RX>" argument, bounded by a following space OR end-of-line, so a
+# different subscription whose topic merely CONTAINS TOPIC_RX as a substring
+# (e.g. "-t Bticino/rx2") is not matched. TOPIC_RX is re_escaped so its own
+# metacharacters can't broaden the match. Used both to reap that subscriber in
+# kill_childs and to gate the retained 'online' refresh on a live LWT holder.
+rx_sub_pat() { printf 'mosquitto_sub .*-t %s( |$)' "$(re_escape "${TOPIC_RX}")"; }
+
 kill_childs() {
 	# re_escape the script paths: kill_by builds a pgrep -f REGEX, so the '.' in
 	# ".sh"/".py" would otherwise match any character and could over-match an
@@ -47,10 +55,12 @@ kill_childs() {
 	# pgrep -f REGEX, and an unescaped host (even "127.0.0.1", whose dots are
 	# any-char) could overmatch unrelated nc processes.
 	kill_by "nc $(re_escape "${OWN_HOST}") $(re_escape "${OWN_PORT_MON}")"
-	# The receiver's persistent mosquitto_sub — matched by its command topic. It also
-	# carries the retained 'offline' last will, so this SIGTERM makes it disconnect
-	# CLEANLY (suppressing the will); exit_handler then publishes 'offline' explicitly.
-	kill_by "mosquitto_sub.*$(re_escape "${TOPIC_RX}")"
+	# The receiver's persistent mosquitto_sub — matched by its "-t <TOPIC_RX>" arg
+	# (rx_sub_pat, boundary-anchored so it can't hit an unrelated subscription). It
+	# also carries the retained 'offline' last will, so this SIGTERM makes it
+	# disconnect CLEANLY (suppressing the will); exit_handler then publishes 'offline'
+	# explicitly.
+	kill_by "$(rx_sub_pat)"
 	kill_by "mosquitto_pub.*$(re_escape "${TOPIC_DUMP}")"
 	# The start-date publisher (backgrounded after the sender starts) — reap a copy
 	# stuck in DNS/TCP connect so it can't survive a restart and later publish a
@@ -161,25 +171,24 @@ while : ; do
 
 	# Receiver: a persistent subscription that STREAMS commands AND holds the retained
 	# 'offline' last will, so an UNCLEAN drop makes the broker mark the bridge offline
-	# (the reliable half of availability). Start or respawn it if it died, and note
-	# whether it is up so the 'online' refresh below is gated on the will-holder.
-	receiver_up=0
-	if /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttReceive" > /dev/null 2>&1; then
-		receiver_up=1
-	else
+	# (the reliable half of availability). The wrapper (StartMqttReceive) stays alive
+	# across broker outages, backing off and re-subscribing; respawn it only if the
+	# wrapper itself died.
+	if ! /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttReceive" > /dev/null 2>&1; then
 		echo "Starting MQTT receiver..."
 		/etc/tcpdump2mqtt/StartMqttReceive &
 		/bin/sleep 5
-		# Treat it as up only if it SURVIVED startup. This is deliberately NOT proof of
-		# a live MQTT session (a merely unreachable broker keeps StartMqttReceive
-		# looping with backoff, which is still "up") — see the best-effort note below.
-		if /usr/bin/pgrep -f "/etc/tcpdump2mqtt/StartMqttReceive" > /dev/null 2>&1; then
-			receiver_up=1
-		fi
 	fi
 
-	# Refresh the retained 'online' each pass while the receiver (the will-holder) is
-	# up. Best-effort by nature: a separate mosquitto_pub can't share the receiver's
+	# Refresh the retained 'online' each pass — but ONLY while the actual will-holding
+	# mosquitto_sub is alive (rx_sub_pat), NOT merely while the StartMqttReceive
+	# wrapper is running. The wrapper keeps retrying with backoff even when the broker
+	# rejects CONNECT or the TopicRx subscription, so gating on the wrapper could
+	# announce 'online' with no live session holding the LWT (the old presence.sh
+	# process EXITED in that failure case). Gating on the subscriber process ties
+	# 'online' to a real session.
+	#
+	# Still best-effort otherwise: a separate mosquitto_pub can't share the receiver's
 	# subscription/LWT connection, so 'online' is not atomic with the will. In practice
 	# it's coupled through the broker — this publish only takes effect when the broker
 	# accepts it, and the receiver uses the SAME credentials, so a broker that accepts
@@ -193,7 +202,7 @@ while : ; do
 	# unreachable, each mosquitto_pub hanging on connect) can't accumulate a new hung
 	# publisher every pass on this constrained device. At most one is ever pending;
 	# when it finally gives up, the next pass starts a fresh one.
-	if [ "$receiver_up" -eq 1 ] && \
+	if /usr/bin/pgrep -f "$(rx_sub_pat)" > /dev/null 2>&1 && \
 	   ! /usr/bin/pgrep -f "mosquitto_pub.*$(re_escape "${TOPIC_LASTWILL}")" > /dev/null 2>&1; then
 		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online > /dev/null 2>&1 &
 	fi
