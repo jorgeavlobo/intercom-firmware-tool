@@ -728,10 +728,14 @@
                     <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
                                Text="{loc:Loc Hint_MqttHaDiscovery}"/>
                     <!-- Per-unit HA device id: distinct values let several bridges
-                         coexist on one broker. Enabled only when discovery is on. The
-                         default Text is set in InitMqttUi (see the checkbox note). -->
-                    <StackPanel Orientation="Horizontal" Margin="22,4,0,0"
-                                IsEnabled="{Binding IsChecked, ElementName=ChkMqttHaDiscovery}">
+                         coexist on one broker. Deliberately ALWAYS editable — not tied
+                         to the checkbox — because the opt-out/clear path also needs it:
+                         with discovery unchecked, ha_discovery.sh clears the retained
+                         configs for THIS node id, so the user must be able to enter the
+                         id a previous build published under (a disabled field, reset to
+                         the default in a new session, would clear the wrong identity).
+                         The default Text is set in InitMqttUi (see the checkbox note). -->
+                    <StackPanel Orientation="Horizontal" Margin="22,4,0,0">
                         <TextBlock Text="{loc:Loc Field_MqttHaNodeId}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                         <TextBox x:Name="TxtMqttHaNodeId" Width="200"
                                  ToolTip="{loc:Loc Tip_MqttHaNodeId}"
