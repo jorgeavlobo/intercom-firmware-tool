@@ -37,7 +37,10 @@ TAB=$(printf '\t')
 # if TcpDump2Mqtt's kill_childs then TERMs this script (matched by path), an
 # un-reaped mosquitto_pub child would linger and could re-publish/clear after the
 # watchdog started a replacement. So run each publish as a tracked background child
-# and kill+wait it on INT/TERM.
+# and reap it on INT/TERM. NOTE: mqtt_pub is a FUNCTION, so "mqtt_pub &" makes
+# pub_child the wrapper subshell, not the real /usr/bin/mosquitto_pub (bash doesn't
+# exec-optimize a backgrounded function body) — hence kill_tree (kills the wrapper
+# AND its mosquitto_pub child via pgrep -P), then wait reaps the wrapper.
 pub_child=
 term=
 # Recorder trap: it must NOT exit on its own — a signal in the "mqtt_pub & ->
@@ -47,7 +50,7 @@ term=
 # points once the PID is captured, closing the window (same pattern as presence.sh).
 sig() {
 	term=1
-	if [ -n "$pub_child" ]; then kill "$pub_child" 2>/dev/null; wait "$pub_child" 2>/dev/null; pub_child=; fi
+	if [ -n "$pub_child" ]; then kill_tree "$pub_child"; wait "$pub_child" 2>/dev/null; pub_child=; fi
 }
 trap sig INT TERM
 
@@ -57,8 +60,8 @@ pub() {
 	mqtt_pub "$@" &
 	pub_child=$!
 	# A signal in the launch->capture window above set term but couldn't kill (PID
-	# not yet known); now that it is, reap the child and stop.
-	[ -n "$term" ] && { kill "$pub_child" 2>/dev/null; wait "$pub_child" 2>/dev/null; exit 143; }
+	# not yet known); now that it is, reap the child (wrapper + real publisher) and stop.
+	[ -n "$term" ] && { kill_tree "$pub_child"; wait "$pub_child" 2>/dev/null; exit 143; }
 	wait "$pub_child"
 	_prc=$?
 	pub_child=

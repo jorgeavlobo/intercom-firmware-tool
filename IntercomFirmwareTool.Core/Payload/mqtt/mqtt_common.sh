@@ -51,6 +51,23 @@ ensure_rundir() {
 	chmod 0700 "$RUNDIR" 2>/dev/null
 }
 
+# Kill each given PID AND its direct children. Backgrounding a shell FUNCTION
+# (mqtt_pub, frame_own, …) runs it in a wrapper subshell, and the device's /bin/sh
+# is bash, which does NOT exec-optimize a backgrounded function body — so $! is the
+# wrapper subshell and the real /usr/bin/mosquitto_pub (or awk/nc) is its child.
+# Killing only the wrapper would orphan a publisher stuck in DNS/TCP connect; pgrep
+# -P reaps the real child too. Used by StartMqttSend (socket pipeline) and
+# ha_discovery.sh (its publisher). A directly-backgrounded binary has no wrapper,
+# so kill_tree just kills it and finds no children, which is fine.
+kill_tree() {
+	for _p in "$@"; do
+		[ -n "$_p" ] || continue
+		_kids=$(/usr/bin/pgrep -P "$_p" 2>/dev/null)
+		# shellcheck disable=SC2086
+		kill "$_p" $_kids 2>/dev/null
+	done
+}
+
 # mosquitto_pub with auth AND TLS applied independently (compose, do not choose
 # one or the other). Extra args (topic, -l, -r, -m ...) pass through; mosquitto
 # accepts options in any order.
