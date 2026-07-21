@@ -327,12 +327,19 @@ async fn execute_command(cfg: &Arc<Config>, client: &AsyncClient, data: &str) {
         Err(_) => (b"btmqttd: execute_command timed out".to_vec(), true),
     };
     // Kill only when we stopped at the cap or hit the timeout; on a clean finish the
-    // child already exited inside `run`. Bounded reap backstop regardless (kill_on_drop
-    // is a further guard), so nothing lingers.
+    // child already exited AND was reaped (child.wait) inside `run`, so just drop it.
     if capped_or_timeout {
         let _ = child.start_kill();
+        // Reap in a DETACHED task. The child was just SIGKILLed, so it exits promptly,
+        // but waiting it here would hold the ordered command worker; and a bounded wait
+        // that timed out would drop the Child while it was still a zombie (reaped only
+        // later, if at all, by tokio's drop-time orphan reaper). Detaching keeps the
+        // worker bounded AND guarantees the child is eventually waited — never a
+        // lingering zombie. kill_on_drop remains a further backstop.
+        tokio::spawn(async move {
+            let _ = child.wait().await;
+        });
     }
-    let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
     result.truncate(CAP);
     publish(client, &cfg.topic_cmd_result, result, false).await;
 }
