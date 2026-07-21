@@ -40,13 +40,20 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// can't take the receiver down.
 pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
     let text = match std::str::from_utf8(payload) {
-        Ok(t) => t.trim(),
+        Ok(t) => t,
         Err(_) => {
             eprintln!("btmqttd: ignoring non-UTF-8 command payload");
             return;
         }
     };
-    if text.is_empty() {
+    // Strip only transport line endings (\r/\n), NOT interior/leading/trailing spaces.
+    // The shell receiver read lines with `IFS= read -r` and matched `^\*.*##$`, so a
+    // space-prefixed payload like " *1*0*12##" was NOT an OWN frame — it fell through
+    // to the JSON path and was ignored. Trimming ALL whitespace here would instead
+    // forward it to the gateway as a command, EXECUTING something the shell dropped.
+    let text = text.trim_matches(|c| c == '\r' || c == '\n');
+    // Blank / whitespace-only payloads are neither a frame nor JSON — ignore them.
+    if text.trim().is_empty() {
         return;
     }
 

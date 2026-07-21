@@ -86,7 +86,11 @@ pub fn frame_to_json(frame: &str) -> Option<Value> {
     if frame.as_bytes() == ACK || frame.as_bytes() == NACK {
         return None;
     }
-    let body = frame.trim_start_matches('*').trim_end_matches("##");
+    // Remove exactly ONE leading `*` and ONE trailing `##`, matching jq's
+    // `ltrimstr("*")` / `rtrimstr("##")` (single occurrence). trim_*_matches would
+    // strip ALL repetitions, diverging on malformed frames like `**…` or `…####`.
+    let body = frame.strip_prefix('*').unwrap_or(frame);
+    let body = body.strip_suffix("##").unwrap_or(body);
     let ts = utc_now_iso();
 
     let obj = if let Some(req) = body.strip_prefix('#') {
@@ -185,6 +189,26 @@ mod tests {
     fn json_drops_control_frames() {
         assert!(frame_to_json("*#*1##").is_none());
         assert!(frame_to_json("*#*0##").is_none());
+    }
+
+    #[test]
+    fn strips_only_one_star_and_one_terminator() {
+        // jq ltrimstr/rtrimstr remove a SINGLE prefix/suffix. A malformed frame with a
+        // doubled leading `*` keeps the extra one, so `who` is the empty first token
+        // rather than being silently collapsed (which trim_start_matches would do).
+        let v = frame_to_json("**1*2*3##").unwrap();
+        assert_eq!(v["who"], ""); // extra leading `*` -> empty first token
+        assert_eq!(v["what"], "1");
+        assert_eq!(v["where"], "2");
+        assert_eq!(v["params"], json!(["3"]));
+
+        // A doubled trailing `##` strips only one; the other stays attached to the
+        // last token (not stripped away as trim_end_matches would).
+        let v = frame_to_json("*1*2*3####").unwrap();
+        assert_eq!(v["who"], "1");
+        assert_eq!(v["what"], "2");
+        assert_eq!(v["where"], "3##"); // extra `##` retained on the last token
+        assert_eq!(v["params"], json!([]));
     }
 
     #[test]
