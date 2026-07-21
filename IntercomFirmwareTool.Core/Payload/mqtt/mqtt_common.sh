@@ -112,8 +112,16 @@ mqtt_pub() {
 # where are surfaced for the common shapes; anything extra goes to params. Sub-parameters
 # inside a token (e.g. "0#0", "11#4#0") are left intact — decoding what WHO/WHAT mean is
 # out of scope (a consumer/HA template can map semantics). ts is UTC ISO-8601.
+#
+# The session ACK/NACK control frames ("*#*1##" / "*#*0##") are DROPPED here (jq `empty`):
+# they carry no bus event and would otherwise parse into a malformed object (empty who,
+# where="1"/"0"). The socket framer already drops them, but the tcpdump back-end's
+# filter.py passes them through — filtering here keeps JSON mode consistent across both
+# capture back-ends.
 own_frame_to_json() {
 	jq -Rc --unbuffered '
+		if . == "*#*1##" or . == "*#*0##" then empty
+		else
 		{ frame: ., ts: (now | todate) }
 		+ ( (ltrimstr("*") | rtrimstr("##")) as $b
 		    | if ($b | startswith("#"))
@@ -121,7 +129,8 @@ own_frame_to_json() {
 		           | { type: "request", who: $t[0], what: null, where: $t[1], params: $t[2:] }
 		      else ($b | split("*")) as $t
 		           | { type: "command", who: $t[0], what: $t[1], where: $t[2], params: $t[3:] }
-		      end )'
+		      end )
+		end'
 }
 
 # Persistent command subscription: a long-lived mosquitto_sub that STREAMS every
