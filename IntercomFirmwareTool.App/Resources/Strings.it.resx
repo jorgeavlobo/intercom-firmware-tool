@@ -410,7 +410,7 @@ Chiave: {1}</value></data>
   <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Pubblica le config di discovery MQTT ritenute così che le entità del bridge (connettività, dump del bus, ultimo tasto) compaiano automaticamente in Home Assistant, senza YAML manuale. Sola lettura — non viene creata alcuna entità di comando.</value></data>
   <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Attivo per impostazione predefinita: le entità del bridge (connettività, bus, ultimo tasto) compaiono automaticamente in Home Assistant, come un dispositivo. Deseleziona per saltarlo; una build successiva con lo stesso device id le rimuove poi dal broker.</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Id dispositivo:</value></data>
-  <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identificatore del dispositivo Home Assistant e delle sue entità. Usa un valore distinto per unità così più bridge possono coesistere sullo stesso broker. Solo lettere, cifre, '_' o '-'.</value></data>
+  <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identificatore del dispositivo Home Assistant e delle sue entità. Distinto per unità dà a ogni bridge il proprio dispositivo HA; per più unità sullo stesso broker imposta anche topic distinti (altrimenti si rispecchiano). Solo lettere, cifre, '_' o '-'.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Ricezione (comandi):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Dump del bus:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Data di inizio:</value></data>

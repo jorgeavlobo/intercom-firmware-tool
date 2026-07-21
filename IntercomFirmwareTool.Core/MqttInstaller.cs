@@ -376,13 +376,35 @@ namespace IntercomFirmwareTool.Core
                 if (t.IndexOfAny(new[] { '+', '#' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
 
+            // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by
+            // the broker against the UNDERLYING <filter>, and both StartMqttReceive
+            // and the presence session subscribe to that underlying filter. So the
+            // checks below must run on <filter>, not the raw "$share/..." string —
+            // otherwise "$share/g/Bticino/#" would slip past the self-loop guard while
+            // the broker still delivers the bridge's own Bticino/tx publishes to
+            // StartMqttReceive, replaying them to the gateway. Normalise here (and
+            // reject a malformed share: empty group/filter, or wildcards in the group).
+            string rxFilter = opts.TopicRx;
+            if (rxFilter.StartsWith("$share/", StringComparison.Ordinal))
+            {
+                string rest = rxFilter.Substring("$share/".Length);
+                int slash = rest.IndexOf('/');
+                string group = slash >= 0 ? rest.Substring(0, slash) : rest;
+                string inner = slash >= 0 ? rest.Substring(slash + 1) : "";
+                if (group.Length == 0 || inner.Length == 0 ||
+                    group.IndexOfAny(new[] { '+', '#' }) >= 0)
+                    throw new ArgumentException(
+                        CoreStrings.Get("Mqtt_InvalidSubscriptionFilter"), nameof(opts));
+                rxFilter = inner;
+            }
+
             // TopicRx is the only SUBSCRIBE filter (mosquitto_sub -t). It MAY use
             // the wildcards '+'/'#', but they must follow MQTT subscription-filter
             // rules: '+' occupies a whole level and '#' is the final whole level.
             // An invalid filter (e.g. "Bticino/rx#" or "Bticino/+rx") would build
             // but be rejected by the broker at subscribe time.
-            if (opts.TopicRx.IndexOfAny(new[] { '+', '#' }) >= 0 &&
-                !IsValidSubscriptionFilter(opts.TopicRx))
+            if (rxFilter.IndexOfAny(new[] { '+', '#' }) >= 0 &&
+                !IsValidSubscriptionFilter(rxFilter))
                 throw new ArgumentException(
                     CoreStrings.Get("Mqtt_InvalidSubscriptionFilter"), nameof(opts));
 
@@ -393,7 +415,7 @@ namespace IntercomFirmwareTool.Core
             // replay them to the gateway — a feedback loop that floods the bus.
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent })
-                if (TopicFilterMatches(opts.TopicRx, pub))
+                if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
         }
