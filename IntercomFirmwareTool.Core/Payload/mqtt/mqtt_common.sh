@@ -129,6 +129,16 @@ mqtt_detect_clean() {
 	fi
 }
 
+# INJECTIVE hex encoding of "$1" (an ord[] table maps each byte to its value), used to
+# build a collision-free durable client id. Uses awk — already REQUIRED by the default
+# socket capture (StartMqttSend) and validated by the installer — so no extra/unvalidated
+# dependency whose absence would silently reintroduce a collision. Each byte -> two fixed
+# hex chars, so DISTINCT inputs always produce DISTINCT outputs (not probabilistically, as
+# a 32-bit checksum would). stderr is discarded for quietness.
+mqtt_hex() {
+	printf '%s' "$1" | awk 'BEGIN{ORS="";for(i=0;i<256;i++)o[sprintf("%c",i)]=i}{for(i=1;i<=length($0);i++)printf "%02x",o[substr($0,i,1)]}' 2>/dev/null
+}
+
 mqtt_sub_stream() {
 	# -R ignores RETAINED messages: TOPIC_RX is a live command channel; a retained
 	# command would otherwise be re-delivered on every reconnect and replay forever
@@ -143,28 +153,30 @@ mqtt_sub_stream() {
 	# bridge is already allowed to write.
 
 	# Stable, per-unit client id so a DURABLE session (see -c below) can be RESUMED
-	# across reconnects/restarts. Derived from TOPIC_LASTWILL: that topic must already
-	# be distinct per unit for multi-unit-on-one-broker (see README), and it's stable
-	# (config is stable) — unlike mosquitto's default PID-based id, which changes every
-	# restart and so couldn't resume a session.
+	# across reconnects/restarts. It's stable (config is stable) — unlike mosquitto's
+	# default PID-based id, which changes every restart and so couldn't resume a session.
 	#
-	# A readable sanitised prefix ([A-Za-z0-9_-]) PLUS an INJECTIVE hex encoding of the
-	# RAW topic. The sanitisation alone is lossy — two DISTINCT topics could collapse to
-	# the same prefix (e.g. "Bticino/a/b" and "Bticino/a_b" both -> "Bticino_a_b") — so
-	# the hex (a bijection: each byte -> two fixed hex chars) guarantees DISTINCT topics
-	# always produce DISTINCT ids, not merely probabilistically (a 32-bit checksum could
-	# still collide). This matters because a broker allows only ONE live connection per
-	# client id, so a collision would make two otherwise-valid units evict each other and
-	# flap the shared durable session. Length isn't capped because the broker already
-	# accepts mosquitto's own long default ids.
+	# Derived from BOTH TOPIC_LASTWILL AND TOPIC_RX:
+	#   * TOPIC_LASTWILL is already distinct per unit for multi-unit-on-one-broker (see
+	#     README), so the id is per-unit unique.
+	#   * TOPIC_RX is folded in so that CHANGING the command topic yields a DIFFERENT id
+	#     and thus a FRESH session. With a durable session the broker keeps the resumed
+	#     session's OLD subscriptions, so reusing the id after a TOPIC_RX change would
+	#     leave the previous command topic subscribed alongside the new one — the bridge
+	#     would still accept commands on a topic the operator retired (and outside the
+	#     installer's self-loop check). A new id abandons that stale session instead.
 	#
-	# The hex is built with awk (an ord[] table maps each byte to its value), NOT an
-	# external hexdump tool: awk is already REQUIRED by the default socket capture
-	# (StartMqttSend) and is validated by the installer, so the encoding is ALWAYS
-	# available — no unvalidated dependency whose absence would silently reintroduce the
-	# collision. stderr is discarded for quietness.
+	# Format: readable sanitised LASTWILL prefix, then an INJECTIVE hex encoding of the
+	# raw LASTWILL and the raw RX (see mqtt_hex). The sanitised prefix alone is lossy
+	# (e.g. "Bticino/a/b" and "Bticino/a_b" both -> "Bticino_a_b"); the two hex groups —
+	# each pure [0-9a-f] and '-'-separated, recoverable as the last two groups — make the
+	# (LASTWILL, RX) pair map injectively to the id, so distinct configs never collide.
+	# A broker allows only ONE live connection per id, so a collision would make two
+	# otherwise-valid units evict each other and flap the durable session. Length isn't
+	# capped because the broker already accepts mosquitto's own long default ids.
 	_lw="${TOPIC_LASTWILL:-default}"
-	_cid="${MQTT_SUB_ID_PREFIX}$(printf '%s' "$_lw" | tr -c 'A-Za-z0-9_-' '_')-$(printf '%s' "$_lw" | awk 'BEGIN{ORS="";for(i=0;i<256;i++)o[sprintf("%c",i)]=i}{for(i=1;i<=length($0);i++)printf "%02x",o[substr($0,i,1)]}' 2>/dev/null)"
+	_rx="${TOPIC_RX:-default}"
+	_cid="${MQTT_SUB_ID_PREFIX}$(printf '%s' "$_lw" | tr -c 'A-Za-z0-9_-' '_')-$(mqtt_hex "$_lw")-$(mqtt_hex "$_rx")"
 
 	# Persistent (durable) session WHEN the client supports it: clean-session=0 lets
 	# the broker QUEUE QoS>=1 commands published while the receiver is briefly
