@@ -31,6 +31,9 @@ child=
 # until the child is actually reaped (not merely signalled) — otherwise the watchdog
 # could start a second presence.sh over a still-dying one. This is a CLEAN
 # disconnect, so the will does NOT fire; the orchestrator announces 'offline'.
+# (Should a signal land in the tiny window before "child" is assigned below, the
+# child would be missed here — but the orchestrator's kill_childs also matches the
+# presence sub by its will topic, so it can't linger as a stray will-holder.)
 trap 'if [ -n "$child" ]; then kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; fi; exit 0' INT TERM
 
 # Hold the session. Output is irrelevant (we don't parse it), so discard it. The

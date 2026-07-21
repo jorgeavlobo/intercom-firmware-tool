@@ -56,21 +56,18 @@ mqtt_pub() {
 	/usr/bin/mosquitto_pub "$@"
 }
 
-# mosquitto_sub for exactly one message on TOPIC_RX, same auth/TLS composition,
-# with the offline last will.
+# mosquitto_sub for exactly one message on TOPIC_RX, same auth/TLS composition.
 mqtt_sub_one() {
 	# -R ignores RETAINED messages: TOPIC_RX is a live command channel, and each
 	# -C 1 reconnect would otherwise re-receive a retained command and replay it
 	# forever until it is cleared. Commands must be published non-retained.
 	#
-	# NOTE: a retained 'offline' last-will message is delivered by the broker only
-	# on an UNCLEAN drop. The -C 1 one-shot subscription ends each cycle in a clean
-	# disconnect, so this will rarely fires. Reliable online/offline availability is
-	# instead provided by the dedicated persistent presence session (mqtt_presence /
-	# presence.sh), which holds a will open; this receiver's will is redundant but
-	# harmless.
-	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -C 1 -R \
-		--will-topic "${TOPIC_LASTWILL}" --will-payload offline --will-retain -t "${TOPIC_RX}"
+	# NOTE: no last will here. TOPIC_LASTWILL availability is owned SOLELY by the
+	# persistent presence session (mqtt_presence / presence.sh). If this one-shot
+	# receiver carried the will too, an UNCLEAN drop of one of its -C 1 cycles could
+	# publish 'offline' and briefly flip a healthy bridge offline until the next
+	# watchdog refresh — so the will stays only where it's meaningful.
+	set -- -h "${MQTT_HOST}" -p "${MQTT_PORT}" -C 1 -R -t "${TOPIC_RX}"
 	[ -n "${MQTT_USER}" ] && set -- "$@" -u "${MQTT_USER}" -P "${MQTT_PASS}"
 	if [ -n "${MQTT_CAFILE}" ]; then
 		set -- "$@" --cafile "${MQTT_CAFILE}"

@@ -33,9 +33,13 @@ kill_childs() {
 	kill_by "$(re_escape "/etc/tcpdump2mqtt/StartMqttSend")"
 	kill_by "$(re_escape "/etc/tcpdump2mqtt/StartMqttReceive")"
 	kill_by "$(re_escape "/etc/tcpdump2mqtt/keypress.sh")"
-	# presence.sh reaps its own mosquitto_sub child via a trap on TERM, so we only
-	# match the script path here (the child is a clean disconnect, no will fired).
+	# presence.sh normally reaps its own mosquitto_sub child via a trap on TERM, but
+	# also match the presence sub directly (its will topic uniquely identifies it —
+	# the receiver's mqtt_sub_one no longer carries a will) so a child orphaned by a
+	# SIGKILL of presence.sh, or by a signal in the pre-$! window, can't linger as a
+	# stray will-holder and let the next watchdog pass start a duplicate.
 	kill_by "$(re_escape "/etc/tcpdump2mqtt/presence.sh")"
+	kill_by "mosquitto_sub.*$(re_escape "${TOPIC_LASTWILL}")"
 	kill_by "$(re_escape "/etc/tcpdump2mqtt/ha_discovery.sh")"
 	# keypress.sh owns its evtest child and kills it via a trap on termination,
 	# so we don't match "evtest" here (that could hit unrelated evtest sessions).
@@ -76,8 +80,17 @@ exit_handler() {
 	# A clean shutdown disconnects the presence session cleanly, which SUPPRESSES
 	# its last will, so this explicit retained 'offline' is what stops HA from
 	# showing the bridge connected after a graceful stop — and nothing is left to
-	# overwrite it now. Best-effort: if the broker is already gone this fails quietly.
-	mqtt_pub -r -t "${TOPIC_LASTWILL}" -m offline > /dev/null 2>&1
+	# overwrite it now. BOUNDED: background it and wait a few seconds, then give up.
+	# A foreground publish to a stalled broker would hang this handler forever with
+	# no children left, so the bt_service_watchdog could never restart the bridge.
+	mqtt_pub -r -t "${TOPIC_LASTWILL}" -m offline > /dev/null 2>&1 &
+	off=$!
+	i=0
+	while [ "$i" -lt 3 ] && kill -0 "$off" 2>/dev/null; do
+		i=$((i + 1))
+		/bin/sleep 1
+	done
+	kill "$off" 2>/dev/null
 	exit 0
 }
 trap exit_handler INT TERM
@@ -176,8 +189,13 @@ while : ; do
 	# broker's retained value at 'offline' (the will), so republishing here restores
 	# 'online' within one loop; an unreachable broker makes this no-op; a dead bridge
 	# (no loop) leaves 'offline'. It thus errs toward a brief stale 'offline' rather
-	# than a stale 'online'. Backgrounded so a stalled publish can't block the loop.
-	if [ "$presence_up" -eq 1 ]; then
+	# than a stale 'online'. Backgrounded so a stalled publish can't block the loop —
+	# but only when no earlier 'online' publish is still in flight, so a prolonged
+	# outage (broker unreachable, each mosquitto_pub hanging on connect) can't
+	# accumulate a new hung publisher every pass on this constrained device. At most
+	# one is ever pending; when it finally gives up, the next pass starts a fresh one.
+	if [ "$presence_up" -eq 1 ] && \
+	   ! /usr/bin/pgrep -f "mosquitto_pub.*$(re_escape "${TOPIC_LASTWILL}")" > /dev/null 2>&1; then
 		mqtt_pub -r -t "${TOPIC_LASTWILL}" -m online > /dev/null 2>&1 &
 	fi
 
