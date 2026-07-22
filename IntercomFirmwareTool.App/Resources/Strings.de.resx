@@ -403,9 +403,6 @@ Schlüssel: {1}</value></data>
   <data name="Fmt_MqttTest_Fail" xml:space="preserve"><value>✗ Verbindung fehlgeschlagen: {0}</value></data>
   <data name="Chk_MqttTopics" xml:space="preserve"><value>Topics anpassen (erweitert)</value></data>
   <data name="Tip_MqttTopics" xml:space="preserve"><value>Überschreibt die standardmäßigen MQTT-Topic-Namen. Für die Home-Assistant-Standardwerte unverändert lassen.</value></data>
-  <data name="Chk_MqttTcpdump" xml:space="preserve"><value>tcpdump-Erfassung verwenden (Kompatibilität)</value></data>
-  <data name="Tip_MqttTcpdump" xml:space="preserve"><value>Deaktiviert lassen, um Ereignisse direkt vom lokalen OpenWebNet-Gateway zu empfangen (ohne tcpdump, ohne residenten Python). Nur aktivieren, wenn die Bridge keine Bus-Aktivität zeigt — erzwingt die alte tcpdump-Erfassung.</value></data>
-  <data name="Hint_MqttTcpdump" xml:space="preserve"><value>Standard: ein direkter OpenWebNet-Monitor-Socket, ressourcenschonender für das Gerät. Der tcpdump-Pfad wird automatisch als Rückfallebene genutzt, wenn das Gateway nicht erreichbar ist.</value></data>
   <data name="Chk_MqttHaDiscovery" xml:space="preserve"><value>Home-Assistant-Autoerkennung</value></data>
   <data name="Tip_MqttHaDiscovery" xml:space="preserve"><value>Veröffentlicht beibehaltene MQTT-Discovery-Konfigurationen, damit die Entitäten der Bridge (Konnektivität, Bus-Dump, letzte Taste) automatisch in Home Assistant erscheinen – ohne manuelles YAML. Nur lesend – es wird keine Befehlsentität erstellt.</value></data>
   <data name="Hint_MqttHaDiscovery" xml:space="preserve"><value>Standardmäßig aktiviert: Die Entitäten der Bridge (Konnektivität, Bus, letzte Taste) erscheinen automatisch in Home Assistant, als ein Gerät. Deaktivieren, um es zu überspringen; ein späterer Build mit derselben Geräte-ID entfernt sie dann vom Broker.</value></data>
