@@ -4,8 +4,9 @@ using System.Text;
 namespace IntercomFirmwareTool.Core
 {
     /// <summary>
-    /// Metadata for a verbatim third-party ARM binary that the optional MQTT
-    /// bridge installs into the firmware image.
+    /// Metadata for a prebuilt ARM binary that the optional MQTT bridge installs
+    /// into the firmware image. (btmqttd is first-party — built from this repo's
+    /// source; only its bundled dependency notices are third-party.)
     /// </summary>
     /// <param name="Name">Short tool name, e.g. "btmqttd".</param>
     /// <param name="InstallPath">Absolute path on the device rootfs.</param>
@@ -35,7 +36,7 @@ namespace IntercomFirmwareTool.Core
     }
 
     /// <summary>
-    /// Access to the third-party ARM binary (<c>btmqttd</c>) and its license
+    /// Access to the embedded ARM binary (<c>btmqttd</c>) and its dependency-license
     /// notice, embedded in this assembly, that the MQTT bridge installer writes
     /// into the firmware image. Every <see cref="Read"/> re-verifies the bytes
     /// against their recorded length and SHA-256, so a corrupted or swapped

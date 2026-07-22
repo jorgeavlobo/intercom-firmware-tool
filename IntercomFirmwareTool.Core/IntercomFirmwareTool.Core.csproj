@@ -22,8 +22,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- MQTT bridge: the verbatim third-party ARM binary (btmqttd, a statically-
-         linked Rust daemon) the installer writes into the firmware image, plus its
+    <!-- MQTT bridge: the prebuilt ARM binary (btmqttd, a statically-linked Rust
+         daemon built from this repo's native/btmqttd source — first-party, not
+         third-party) the installer writes into the firmware image, plus its
          aggregated dependency-license notice and the THIRD_PARTY provenance,
          embedded so the assembly is self-contained. Retrieved as byte[] / string via
          PayloadBinaries (SHA-256 verified). These files are included as default
