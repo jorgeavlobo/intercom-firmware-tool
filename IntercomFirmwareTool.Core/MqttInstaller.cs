@@ -591,7 +591,9 @@ namespace IntercomFirmwareTool.Core
                 // the keypad in-process, so it invokes NONE of the shell bridge's old
                 // tools — no tcpdump, python, jq, nc, awk, or mosquitto_pub/sub. What
                 // still matters:
-                //  - the mosquitto broker init (btmqttd connects to the local broker);
+                //  - the mosquitto broker init — a baseline/expected-firmware indicator
+                //    (the on-box broker the default config targets; MQTT_HOST may point
+                //    elsewhere, so this is a firmware-identity check, not a hard need);
                 //  - pgrep, which bt_service_watchdog uses to launch/respawn btmqttd;
                 //  - route/ping — #10 base tools we do NOT invoke, a plain presence
                 //    check that confirms the target is the expected firmware.
@@ -704,8 +706,9 @@ namespace IntercomFirmwareTool.Core
             sb.Append("OWN_PORT_MON=").Append(opts.OwnPortMon).Append('\n');
 
             // Bus payload format: 'json' (default; one structured object per frame — see
-            // own_frame_to_json) or 'raw' (OpenWebNet frames verbatim). Only TOPIC_DUMP is
-            // affected; btmqttd parses frames natively (serde_json). TOPIC_KEY is JSON either way.
+            // btmqttd's own::frame_to_json) or 'raw' (OpenWebNet frames verbatim). Only
+            // TOPIC_DUMP is affected; btmqttd parses frames natively (serde_json). TOPIC_KEY
+            // is JSON either way.
             sb.Append(Conf("PAYLOAD_FORMAT", opts.UseJsonPayload ? "json" : "raw"));
 
             // Home Assistant auto-discovery: when 1, btmqttd publishes the retained

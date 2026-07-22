@@ -2,8 +2,8 @@
 
 The MQTT bridge (issue `#32`, off by default) is now a single native daemon,
 **`btmqttd`** — a statically-linked Rust program whose source lives at
-[`native/btmqttd/`](../../../../native/btmqttd) (build recipe:
-[`native/btmqttd/BUILD.md`](../../../../native/btmqttd/BUILD.md)). It replaces the
+[`native/btmqttd/`](../../../native/btmqttd) (build recipe:
+[`native/btmqttd/BUILD.md`](../../../native/btmqttd/BUILD.md)). It replaces the
 entire previous shell-orchestrated bridge (`StartMqttSend`, `StartMqttReceive`,
 `keypress.sh`, `filter.py`, `ha_discovery.sh`, `mqtt_common.sh`,
 `TcpDump2Mqtt`/`TcpDump2Mqtt.sh`) **and** the two vendored userland tools those
@@ -27,7 +27,9 @@ crate).
   no watchdog refresh.
 
 Static musl means it needs no interpreter and none of the old runtime tools
-(`tcpdump`, `python`, `jq`, `nc`, `awk`, `mosquitto_pub`/`sub`).
+(`tcpdump`, `python`, `jq`, `nc`, `awk`, `mosquitto_pub`/`sub`). The one tool the
+installed bridge still relies on is `pgrep` — used by `bt_service_watchdog` (not
+by `btmqttd` itself) to launch and respawn the daemon.
 
 ## Files in this directory
 

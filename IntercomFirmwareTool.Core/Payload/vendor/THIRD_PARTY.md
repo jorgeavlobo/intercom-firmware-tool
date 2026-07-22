@@ -22,7 +22,9 @@ firmware image and this assembly no longer carry any GPL/LGPL component.
 
 `btmqttd` is a **statically-linked musl** binary, so it needs no runtime
 interpreter, no shared libraries, and none of the device tools the shell bridge
-depended on (`tcpdump`, `python`, `jq`, `nc`, `awk`, `pgrep`). It bundles ~65
+depended on (`tcpdump`, `python`, `jq`, `nc`, `awk`, `mosquitto_pub`/`sub`). (The
+installed *bridge* still uses `pgrep` — but in `bt_service_watchdog`, to
+launch/respawn the daemon, not in `btmqttd` itself.) It bundles ~65
 Rust crates, **all under permissive licenses** — MIT, Apache-2.0, ISC,
 BSD-3-Clause and Unicode-3.0 — with **no copyleft**. The aggregated dependency
 license texts and per-crate copyright notices travel with the binary in
