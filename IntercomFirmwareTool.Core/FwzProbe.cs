@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using IntercomFirmwareTool.Core.Localization;
+using ICSharpCode.SharpZipLib.Checksum;
 using ICSharpCode.SharpZipLib.Zip;
 // Disambiguate: ZipFile exists in both System.IO.Compression and SharpZipLib.
 // Here "ZipFile" always means the SharpZipLib one (which supports ZipCrypto).
@@ -481,7 +482,9 @@ namespace IntercomFirmwareTool.Core
         /// with DEFLATE level 9 + ZipCrypto (<paramref name="password"/>), in the
         /// original order, with <paramref name="modifiedEntryName"/> replaced by the
         /// bytes of <paramref name="modifiedGzPath"/>. Mirrors fquinto's
-        /// pyminizip.compress_multiple(level=9).
+        /// pyminizip.compress_multiple(level=9), and — like it — writes a "classic" ZIP
+        /// (no streaming data descriptor, no Zip64) by stamping each entry's uncompressed
+        /// size + CRC before writing, so MyHOME Suite's service-pack unpacker accepts it.
         /// <para>When <paramref name="removeSig"/> is true (the default, matching
         /// fquinto's <c>remove_sig='y'</c>) the <c>.sig</c> signature sidecars are
         /// dropped: fquinto's output works on real devices, so the updater tolerates
@@ -498,6 +501,11 @@ namespace IntercomFirmwareTool.Core
             using var outFs = new FileStream(outputPath, FileMode.Create, FileAccess.Write);
             using var zipOut = new ZipOutputStream(outFs) { Password = password };
             zipOut.SetLevel(9); // DEFLATE level 9, like fquinto
+            // Never emit Zip64 (the payloads are well under 4 GiB). Dynamic Zip64 on a
+            // streamed entry stamps the local header with version-needed 45 + a Zip64
+            // extra field, which MyHOME Suite's service-pack unpacker rejects. The
+            // original .fwz is plain (version 20, no Zip64); match it.
+            zipOut.UseZip64 = UseZip64.Off;
 
             foreach (ZipEntry src in srcZip)
             {
@@ -506,6 +514,9 @@ namespace IntercomFirmwareTool.Core
                 // carried over verbatim when the user opts to keep them.
                 if (removeSig && src.Name.EndsWith(".sig", StringComparison.OrdinalIgnoreCase))
                     continue;
+
+                bool isModified = string.Equals(src.Name, modifiedEntryName, StringComparison.Ordinal);
+
                 // Mark the entry ZipCrypto-encrypted explicitly (not only via the
                 // stream Password): the device firmware requires traditional
                 // ZipCrypto, and being explicit keeps the repack correct regardless
@@ -516,8 +527,37 @@ namespace IntercomFirmwareTool.Core
                     CompressionMethod = CompressionMethod.Deflated,
                     IsCrypted = true,
                 };
+
+                // Stamp the UNCOMPRESSED size + CRC-32 BEFORE PutNextEntry. This is what
+                // makes SharpZipLib write a "classic" ZIP entry like pyminizip / the
+                // BTicino original — the form MyHOME Suite's service-pack unpacker needs:
+                //   * the CRC is known up front, so it goes into the local file header
+                //     and NO streaming data descriptor (general-purpose bit 3) is written;
+                //   * for a ZipCrypto entry the 12-byte encryption header's check byte is
+                //     then derived from the CRC (not the mod-time) — the variant the
+                //     original uses and MyHOME Suite can decrypt.
+                // Left unset, ZipOutputStream streams the encrypted entry with bit 3 (and
+                // dynamic Zip64), which MyHOME Suite rejects at "Service pack validation"
+                // ("Unable to write to stream"). Verified against the real firmware: the
+                // original has bit3=0/zip64=0; ours had bit3=1/zip64=1 until this fix.
+                if (isModified)
+                {
+                    // The modified payload is a file on disk: hash its exact bytes.
+                    var (len, crc) = FileLengthAndCrc32(modifiedGzPath);
+                    entry.Size = len;
+                    entry.Crc = crc;
+                }
+                else
+                {
+                    // Carried over verbatim: the uncompressed bytes (hence size + CRC) are
+                    // identical to the source's, so reuse the source central-directory
+                    // values instead of re-reading the stream just to hash it.
+                    entry.Size = src.Size;
+                    entry.Crc = src.Crc;
+                }
+
                 zipOut.PutNextEntry(entry);
-                if (string.Equals(src.Name, modifiedEntryName, StringComparison.Ordinal))
+                if (isModified)
                 {
                     using var gzFs = new FileStream(modifiedGzPath, FileMode.Open, FileAccess.Read);
                     gzFs.CopyTo(zipOut);
@@ -530,6 +570,28 @@ namespace IntercomFirmwareTool.Core
                 zipOut.CloseEntry();
             }
             zipOut.Finish();
+        }
+
+        /// <summary>
+        /// The exact byte length and CRC-32 (the standard ZIP polynomial) of a file,
+        /// read in a bounded stream so a large payload is never fully buffered. Used to
+        /// stamp <see cref="ZipEntry.Size"/> + <see cref="ZipEntry.Crc"/> before writing
+        /// the modified entry, which keeps the repacked .fwz in the "classic" ZIP form
+        /// (no data descriptor / no Zip64) that MyHOME Suite accepts — see <see cref="Repack"/>.
+        /// </summary>
+        private static (long Length, long Crc) FileLengthAndCrc32(string path)
+        {
+            var crc = new Crc32();
+            long length = 0;
+            byte[] buffer = new byte[81920];
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read);
+            int n;
+            while ((n = fs.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                crc.Update(new ArraySegment<byte>(buffer, 0, n));
+                length += n;
+            }
+            return (length, crc.Value);
         }
 
         /// <summary>
