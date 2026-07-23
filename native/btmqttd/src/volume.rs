@@ -57,6 +57,9 @@ struct State {
 /// methods) and the monitor task (which calls [`observe`]).
 pub struct VolumeCtl {
     st: Mutex<State>,
+    /// Serialises the retained-state publishes so two concurrent observations can't
+    /// interleave and leave the older value retained (see `publish_current`).
+    publish_lock: Mutex<()>,
     /// OWN gateway for DIMENSION read/write — the openserver main gateway
     /// (`own_host:own_port_mon`, default `127.0.0.1:20000`), NOT the `:30006` command
     /// port `receiver` uses for actions (which does not handle dimensions).
@@ -74,6 +77,7 @@ impl VolumeCtl {
     pub fn new(cfg: &Arc<Config>, client: AsyncClient) -> Arc<Self> {
         Arc::new(VolumeCtl {
             st: Mutex::new(State { current: None, last_nonzero: DEFAULT_NONZERO }),
+            publish_lock: Mutex::new(()),
             host: cfg.own_host.clone(),
             port: cfg.own_port_mon,
             topic_volume: cfg.topic_volume.clone(),
@@ -95,7 +99,7 @@ impl VolumeCtl {
                 st.last_nonzero = pct;
             }
         }
-        self.publish_state(pct).await;
+        self.publish_current().await;
     }
 
     /// On-connect seed: read the current volume once via the command session so HA
@@ -110,8 +114,19 @@ impl VolumeCtl {
         let _ = self.ensure_current().await;
     }
 
-    /// Publish the retained `volume` (0..=100) and derived `mute` (`on`/`off`) state.
-    async fn publish_state(&self, pct: u8) {
+    /// Publish the retained `volume` (0..=100) and derived `mute` (`on`/`off`) state,
+    /// reading the LATEST `current` at publish time under a serialising lock. Two races
+    /// are closed together: `publish_lock` serialises retained writes so a slow publish
+    /// (broker backpressure) can't finish AFTER a newer one and leave the older value
+    /// retained; and reading `current` here (rather than a value captured earlier) means
+    /// every publish emits the newest observation, so the retained topics converge to the
+    /// true current state even if observations interleave. No-op until the first value.
+    async fn publish_current(&self) {
+        let _pub = self.publish_lock.lock().await;
+        let pct = match self.st.lock().await.current {
+            Some(p) => p,
+            None => return,
+        };
         let muted = if pct == 0 { "on" } else { "off" };
         self.publish_retained(&self.topic_volume, pct.to_string().into_bytes()).await;
         self.publish_retained(&self.topic_mute, muted.as_bytes().to_vec()).await;
@@ -195,7 +210,7 @@ impl VolumeCtl {
             }
         };
         if applied {
-            self.publish_state(n).await;
+            self.publish_current().await;
             Some(n)
         } else {
             self.st.lock().await.current
