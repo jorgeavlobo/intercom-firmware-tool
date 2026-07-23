@@ -972,10 +972,11 @@ namespace IntercomFirmwareTool.Core
                     name = "Volume",
                     unique_id = $"{node}_volume",
                     command_topic = controlTopic,
-                    // QoS 1 so a press published during a brief daemon reconnect is
-                    // queued (the daemon subscribes TOPIC_RX at QoS 1 with a durable
-                    // session; effective delivery is min(pub, sub), so a QoS-0 publish
-                    // would drop it). Matches the command channel's at-least-once intent.
+                    // QoS 1: an ABSOLUTE, idempotent command (set to N / mute on|off), so a
+                    // QoS-1 redelivery is harmless, while the durable QoS-1 command
+                    // subscription means a press published during a brief daemon reconnect
+                    // is queued rather than dropped (effective delivery is min(pub, sub)).
+                    // The non-idempotent step/gate buttons below use QoS 0.
                     qos = 1,
                     // `value | int`: HA number entities carry the value as a float, so a
                     // bare `{{ value }}` can render "50.0"; `| int` sends a clean integer.
@@ -1005,10 +1006,11 @@ namespace IntercomFirmwareTool.Core
                     name = "Mute",
                     unique_id = $"{node}_mute",
                     command_topic = controlTopic,
-                    // QoS 1 so a press published during a brief daemon reconnect is
-                    // queued (the daemon subscribes TOPIC_RX at QoS 1 with a durable
-                    // session; effective delivery is min(pub, sub), so a QoS-0 publish
-                    // would drop it). Matches the command channel's at-least-once intent.
+                    // QoS 1: an ABSOLUTE, idempotent command (set to N / mute on|off), so a
+                    // QoS-1 redelivery is harmless, while the durable QoS-1 command
+                    // subscription means a press published during a brief daemon reconnect
+                    // is queued rather than dropped (effective delivery is min(pub, sub)).
+                    // The non-idempotent step/gate buttons below use QoS 0.
                     qos = 1,
                     payload_on = "{\"action\":\"mute\",\"value\":\"on\"}",
                     payload_off = "{\"action\":\"mute\",\"value\":\"off\"}",
@@ -1032,11 +1034,13 @@ namespace IntercomFirmwareTool.Core
                     name = "Volume up",
                     unique_id = $"{node}_volume_up",
                     command_topic = controlTopic,
-                    // QoS 1 so a press published during a brief daemon reconnect is
-                    // queued (the daemon subscribes TOPIC_RX at QoS 1 with a durable
-                    // session; effective delivery is min(pub, sub), so a QoS-0 publish
-                    // would drop it). Matches the command channel's at-least-once intent.
-                    qos = 1,
+                    // QoS 0 (the default): a relative step is NON-idempotent, and QoS 1
+                    // may legitimately REDELIVER a publish (DUP on a lost PUBACK), applying
+                    // the step twice (e.g. +20 instead of +10). A press lost during a brief
+                    // reconnect is self-correcting — the user just presses again — so
+                    // avoiding duplication wins here, unlike the absolute volume/mute
+                    // commands above (idempotent, QoS 1).
+                    qos = 0,
                     payload_press = "{\"action\":\"volume_step\",\"value\":10}",
                     icon = "mdi:volume-plus",
                     availability_topic = opts.TopicLastWill,
@@ -1053,11 +1057,13 @@ namespace IntercomFirmwareTool.Core
                     name = "Volume down",
                     unique_id = $"{node}_volume_down",
                     command_topic = controlTopic,
-                    // QoS 1 so a press published during a brief daemon reconnect is
-                    // queued (the daemon subscribes TOPIC_RX at QoS 1 with a durable
-                    // session; effective delivery is min(pub, sub), so a QoS-0 publish
-                    // would drop it). Matches the command channel's at-least-once intent.
-                    qos = 1,
+                    // QoS 0 (the default): a relative step is NON-idempotent, and QoS 1
+                    // may legitimately REDELIVER a publish (DUP on a lost PUBACK), applying
+                    // the step twice (e.g. -20 instead of -10). A press lost during a brief
+                    // reconnect is self-correcting — the user just presses again — so
+                    // avoiding duplication wins here, unlike the absolute volume/mute
+                    // commands above (idempotent, QoS 1).
+                    qos = 0,
                     payload_press = "{\"action\":\"volume_step\",\"value\":-10}",
                     icon = "mdi:volume-minus",
                     availability_topic = opts.TopicLastWill,
@@ -1076,11 +1082,13 @@ namespace IntercomFirmwareTool.Core
                     name = "Gate",
                     unique_id = $"{node}_gate",
                     command_topic = controlTopic,
-                    // QoS 1 so a press published during a brief daemon reconnect is
-                    // queued (the daemon subscribes TOPIC_RX at QoS 1 with a durable
-                    // session; effective delivery is min(pub, sub), so a QoS-0 publish
-                    // would drop it). Matches the command channel's at-least-once intent.
-                    qos = 1,
+                    // QoS 0 (the default): opening the gate is a NON-idempotent side
+                    // effect, and QoS 1 may legitimately REDELIVER a publish (DUP on a lost
+                    // PUBACK), pulsing the gate twice from one press. A press lost during a
+                    // brief reconnect is self-correcting — the user just presses again — so
+                    // avoiding an unintended double actuation wins here, unlike the absolute
+                    // volume/mute commands above (idempotent, QoS 1).
+                    qos = 0,
                     payload_press = "{\"action\":\"gate\"}",
                     icon = "mdi:gate",
                     availability_topic = opts.TopicLastWill,
