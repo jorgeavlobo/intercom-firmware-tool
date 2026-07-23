@@ -25,6 +25,7 @@ compile_error!("btmqttd targets Linux only — build and run host checks on Linu
 
 mod config;
 mod dimension;
+mod gate;
 mod ha;
 mod keys;
 mod own;
@@ -110,6 +111,13 @@ async fn run() -> Result<(), String> {
     // volume from the bus broadcasts). All volume STATE lives here — HA is dumb.
     let volume = volume::VolumeCtl::new(&cfg, client.clone());
 
+    // Gate (issue #41) runs on its OWN task, fed by a small channel: the command worker
+    // enqueues a press request and moves on (no 300 ms block), the gate task serialises
+    // each press→hold→release, and shutdown DRAINS it (drops the sender + awaits) so a
+    // press is never left without its release. See gate.rs.
+    let (gate_tx, gate_rx) = tokio::sync::mpsc::channel::<()>(gate::QUEUE_DEPTH);
+    let gate_task = tokio::spawn(gate::run(gate_rx));
+
     // Commands from TOPIC_RX go through a BOUNDED channel to a SINGLE ordered worker,
     // not a task-per-message. This does two things at once:
     //   * Order — the shell receiver consumed the subscription line-by-line, so
@@ -134,9 +142,10 @@ async fn run() -> Result<(), String> {
         let cfg = cfg.clone();
         let client = client.clone();
         let volume = volume.clone();
+        let gate_tx = gate_tx.clone();
         async move {
             while let Some(payload) = cmd_rx.recv().await {
-                receiver::dispatch(&cfg, &client, &volume, &payload).await;
+                receiver::dispatch(&cfg, &client, &volume, &gate_tx, &payload).await;
             }
         }
     });
@@ -325,6 +334,13 @@ async fn run() -> Result<(), String> {
     stop(sender_task).await;
     stop(keys_task).await;
     stop(cmd_worker).await;
+    // Gate task: DRAIN rather than abort. cmd_worker (a sender) is stopped above, so
+    // dropping this last sender closes the channel; awaiting then lets any queued
+    // request and the pulse IN PROGRESS finish — the release is sent — instead of being
+    // cancelled mid-pulse and leaving the gate line energised. Bounded so an
+    // unresponsive gateway can't hang exit (the pulse is ~300 ms; 2 s is ample).
+    drop(gate_tx);
+    let _ = tokio::time::timeout(Duration::from_secs(2), gate_task).await;
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(())
 }

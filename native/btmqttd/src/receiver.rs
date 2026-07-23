@@ -21,20 +21,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
+use tokio::sync::mpsc::Sender;
+
 use crate::config::{Config, OWN_PORT_CMD};
 use crate::own;
 use crate::volume::VolumeCtl;
-
-/// Gate (issue #41): WHO=8 momentary command on WHERE=20. A single HA `button` press
-/// maps to a press-then-release pulse — `*8*19*20##` (press) then, after a short gap,
-/// `*8*20*20##` (release) — both via the `:30006` command port (WHO=8 actions route
-/// there, unlike dimensions). Verified frames on the unit.
-const GATE_PRESS: &str = "*8*19*20##";
-const GATE_RELEASE: &str = "*8*20*20##";
-
-/// Gap between the gate press and release — long enough to register a real momentary
-/// press, short enough to feel instant. Mirrors a physical button tap.
-const GATE_PULSE: Duration = Duration::from_millis(300);
 
 /// Cap for read_file/write_file/execute_command payloads (256 KB), matching
 /// `head -c 262144` in the shell — a huge/special file or runaway command must not
@@ -75,7 +66,13 @@ static REAP_SLOTS: Semaphore = Semaphore::const_new(REAP_CONCURRENCY);
 /// (a CRLF frame `*…##\r` therefore fails the OWN-frame check and is not forwarded,
 /// exactly as the shell's `^\*.*##$` did). Never panics; every failure is logged and
 /// swallowed so one bad record can't take the receiver down.
-pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeCtl>, payload: &[u8]) {
+pub async fn dispatch(
+    cfg: &Arc<Config>,
+    client: &AsyncClient,
+    vol: &Arc<VolumeCtl>,
+    gate: &Sender<()>,
+    payload: &[u8],
+) {
     let text = match std::str::from_utf8(payload) {
         Ok(t) => t,
         Err(_) => {
@@ -84,7 +81,7 @@ pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeC
         }
     };
     for record in text.split('\n') {
-        dispatch_record(cfg, client, vol, record).await;
+        dispatch_record(cfg, client, vol, gate, record).await;
     }
 }
 
@@ -92,7 +89,13 @@ pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeC
 /// `\r` and any interior/leading/trailing spaces — a space-prefixed " *…##" is not an
 /// OWN frame (it falls to the ignored JSON path, as in the shell, rather than being
 /// forwarded to the gateway and executed).
-async fn dispatch_record(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeCtl>, record: &str) {
+async fn dispatch_record(
+    cfg: &Arc<Config>,
+    client: &AsyncClient,
+    vol: &Arc<VolumeCtl>,
+    gate: &Sender<()>,
+    record: &str,
+) {
     // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
     if record.trim().is_empty() {
         return;
@@ -102,14 +105,15 @@ async fn dispatch_record(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<Volu
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
-        handle_json(cfg, client, vol, record).await;
+        handle_json(cfg, client, vol, gate, record).await;
     }
 }
 
 /// Forward a raw OpenWebNet frame to the gateway's command-injection port. Always
 /// the LOOPBACK gateway (127.0.0.1:30006), as StartMqttReceive did — OWN_HOST is
-/// only the monitor (read) endpoint, not the command (write) endpoint.
-async fn forward_to_gateway(frame: &str) -> std::io::Result<()> {
+/// only the monitor (read) endpoint, not the command (write) endpoint. `pub(crate)`
+/// so the gate task (`gate.rs`) can send its press/release frames the same way.
+pub(crate) async fn forward_to_gateway(frame: &str) -> std::io::Result<()> {
     tokio::time::timeout(FORWARD_TIMEOUT, async {
         let mut sock = TcpStream::connect(("127.0.0.1", OWN_PORT_CMD)).await?;
         sock.write_all(frame.as_bytes()).await?;
@@ -123,7 +127,13 @@ async fn forward_to_gateway(frame: &str) -> std::io::Result<()> {
     })?
 }
 
-async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeCtl>, msg: &str) {
+async fn handle_json(
+    cfg: &Arc<Config>,
+    client: &AsyncClient,
+    vol: &Arc<VolumeCtl>,
+    gate: &Sender<()>,
+    msg: &str,
+) {
     let v: Value = match serde_json::from_str(msg) {
         Ok(v) => v,
         Err(_) => {
@@ -145,7 +155,7 @@ async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeCt
     // dangerous (code execution). These are the payloads the HA volume/gate entities
     // publish (via command_template / payload_press).
     if let Some(action) = v.get("action").and_then(Value::as_str) {
-        handle_action(vol, action, &v).await;
+        handle_action(vol, gate, action, &v).await;
         return;
     }
 
@@ -184,7 +194,7 @@ async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeCt
 /// logged and ignored. A volume op that fails (gateway refused/unreachable) is logged;
 /// the retained state stays whatever the monitor last observed, so HA is never left
 /// showing a value the device didn't accept.
-async fn handle_action(vol: &Arc<VolumeCtl>, action: &str, v: &Value) {
+async fn handle_action(vol: &Arc<VolumeCtl>, gate: &Sender<()>, action: &str, v: &Value) {
     match action {
         // {"action":"volume","value":0..=100} — the slider `number`.
         "volume" => match v.get("value").and_then(json_percent) {
@@ -204,12 +214,18 @@ async fn handle_action(vol: &Arc<VolumeCtl>, action: &str, v: &Value) {
             Some(d) if d < 0 => log_action_err("volume_step", vol.step(false).await),
             _ => eprintln!("btmqttd: action volume_step: 'value' must be non-zero"),
         },
-        // {"action":"gate"} — the gate `button` (issue #41): a press/release pulse.
-        "gate" => {
-            if let Err(e) = gate_pulse().await {
-                eprintln!("btmqttd: action gate failed: {e}");
+        // {"action":"gate"} — the gate `button` (issue #41). Enqueue a pulse request to
+        // the dedicated gate task (gate.rs), which serialises press→hold→release off the
+        // command worker and is drained on shutdown so the release always follows. Full
+        // => a burst faster than the gate can pulse (drop, don't block the worker);
+        // Closed => the gate task is gone (shutting down).
+        "gate" => match gate.try_send(()) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
+                eprintln!("btmqttd: gate press dropped — pulse queue full");
             }
-        }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {}
+        },
         other => eprintln!("btmqttd: unsupported action: {other}"),
     }
 }
@@ -236,25 +252,6 @@ fn log_action_err(action: &str, r: std::io::Result<()>) {
     if let Err(e) = r {
         eprintln!("btmqttd: action {action} failed: {e}");
     }
-}
-
-/// Pulse the gate: send the WHO=8 press, then schedule the release after [`GATE_PULSE`]
-/// in a DETACHED task (both to the `:30006` command port, like every other WHO=8
-/// action). Detaching does two things: it keeps the single ordered command worker
-/// responsive (it does NOT block for the 300 ms hold, so the next command isn't
-/// delayed), and it makes the RELEASE still fire if the worker's current command
-/// future is cancelled after the press — so a press is never left without its release
-/// (which would hold the gate line energised). The press is sent inline so its own
-/// failure is reported to the caller; the detached release logs its own error.
-async fn gate_pulse() -> std::io::Result<()> {
-    forward_to_gateway(GATE_PRESS).await?;
-    tokio::spawn(async {
-        tokio::time::sleep(GATE_PULSE).await;
-        if let Err(e) = forward_to_gateway(GATE_RELEASE).await {
-            eprintln!("btmqttd: gate release failed: {e}");
-        }
-    });
-    Ok(())
 }
 
 async fn read_file(cfg: &Arc<Config>, client: &AsyncClient, path: &str) {

@@ -110,7 +110,9 @@ impl VolumeCtl {
 
     async fn publish_retained(&self, topic: &str, payload: Vec<u8>) {
         if let Err(e) = self.client.publish(topic, QoS::AtMostOnce, true, payload).await {
-            eprintln!("btmqttd: publish volume state to {topic} failed: {e}");
+            // Topic-agnostic: this publishes both the volume and the mute state, so name
+            // the actual topic rather than hard-coding "volume".
+            eprintln!("btmqttd: publish retained state to {topic} failed: {e}");
         }
     }
 
