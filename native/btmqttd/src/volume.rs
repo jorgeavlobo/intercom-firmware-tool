@@ -102,11 +102,12 @@ impl VolumeCtl {
     /// shows a value before the first change. Best-effort — a refused or unavailable
     /// gateway just leaves `current` unknown until the first monitor broadcast.
     pub async fn seed(&self) {
-        match dimension::read_volume(&self.host, self.port).await {
-            Ok(Some(pct)) => self.observe(pct).await,
-            Ok(None) => {} // no valid report — leave unknown, monitor will fill it in
-            Err(e) => eprintln!("btmqttd: volume seed read failed: {e}"),
-        }
+        // Delegate to ensure_current so the read is applied ONLY while `current` is still
+        // unknown. The command subscription is already live when announce() calls this,
+        // so a command or a monitor broadcast could set a newer value while this read is
+        // in flight — we must not overwrite it with the stale seed (same race guard the
+        // first-command mute/step path relies on).
+        let _ = self.ensure_current().await;
     }
 
     /// Publish the retained `volume` (0..=100) and derived `mute` (`on`/`off`) state.
