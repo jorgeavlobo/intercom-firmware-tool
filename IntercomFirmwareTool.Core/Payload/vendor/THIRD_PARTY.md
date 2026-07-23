@@ -35,8 +35,8 @@ license texts and per-crate copyright notices travel with the binary in
 | Field | `btmqttd` |
 |---|---|
 | File | `armhf/btmqttd` |
-| Size | 1,233,896 bytes |
-| SHA-256 | `8276ae9863fa81e17b9826f655baf28786ef58d779d8f861bc8d37b822b7a0c6` |
+| Size | 1,234,408 bytes |
+| SHA-256 | `b3da2c0bbe6c6a2514357d3b3bb3ef4efa3dd8fa1b90c0555df764144b40ec04` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7 (`Tag_CPU_arch: v7`), **hard-float** (`Tag_FP_arch: VFPv3-D16`, `Tag_ABI_VFP_args: VFP registers`; ELF flags `0x5000400`) |
 | Build ID | none (stripped; `rust-lld` emits no GNU build-id note) |

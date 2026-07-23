@@ -158,16 +158,35 @@ impl VolumeCtl {
         if let Some(c) = known {
             return Some(c);
         }
-        match dimension::read_volume(&self.host, self.port).await {
-            Ok(Some(n)) => {
-                self.observe(n).await; // records current + last_nonzero before any 0 write
-                Some(n)
-            }
-            Ok(None) => None,
+        let n = match dimension::read_volume(&self.host, self.port).await {
+            Ok(Some(n)) => n,
+            Ok(None) => return None,
             Err(e) => {
                 eprintln!("btmqttd: volume read (ensure_current) failed: {e}");
-                None
+                return None;
             }
+        };
+        // Apply the read ONLY if `current` is STILL unknown: the monitor is the source of
+        // truth and may have learned a newer value while our read was in flight — don't
+        // revert to the now-stale read. The check-and-set is atomic under the lock (the
+        // monitor can't interleave between them); publish happens off the lock.
+        let applied = {
+            let mut st = self.st.lock().await;
+            if st.current.is_none() {
+                st.current = Some(n);
+                if n > 0 {
+                    st.last_nonzero = n;
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if applied {
+            self.publish_state(n).await;
+            Some(n)
+        } else {
+            self.st.lock().await.current
         }
     }
 

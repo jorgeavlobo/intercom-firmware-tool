@@ -793,10 +793,14 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// The five volume/gate CONTROL entities' identity — (JSON filename, discovery
-        /// component, object id) — shared by the real-config generation and the
-        /// tombstone path in <see cref="GenerateHaDiscovery"/>, so both always agree on
-        /// exactly which config topics the controls occupy. These depend only on the
-        /// node id, not on TopicRx, so they are constant across every build.
+        /// component, object id). Used by the TOMBSTONE path in
+        /// <see cref="GenerateHaDiscovery"/> (when there is no concrete command topic) to
+        /// emit the exact same config topics with an empty payload, so a previous build's
+        /// controls are cleared. The real-config path builds each entity inline (their
+        /// JSON bodies differ: number vs switch vs button), so this list MUST be kept in
+        /// step with those five entities' filenames/components/object ids — it is the
+        /// single definition of WHICH config topics the controls occupy (constant across
+        /// builds; they depend only on the node id, not on TopicRx).
         /// </summary>
         private static readonly (string File, string Component, string ObjectId)[] ControlEntityIds =
         {
