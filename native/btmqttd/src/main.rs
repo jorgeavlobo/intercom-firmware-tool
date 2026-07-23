@@ -116,7 +116,10 @@ async fn run() -> Result<(), String> {
     // each press→hold→release, and shutdown DRAINS it (drops the sender + awaits) so a
     // press is never left without its release. See gate.rs.
     let (gate_tx, gate_rx) = tokio::sync::mpsc::channel::<()>(gate::QUEUE_DEPTH);
-    let gate_task = tokio::spawn(gate::run(gate_rx));
+    // Set at shutdown so the gate task finishes the pulse in progress but discards
+    // queued (not-yet-started) presses — bounding the drain to one pulse.
+    let gate_stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gate_task = tokio::spawn(gate::run(gate_rx, gate_stopping.clone()));
 
     // Commands from TOPIC_RX go through a BOUNDED channel to a SINGLE ordered worker,
     // not a task-per-message. This does two things at once:
@@ -334,13 +337,15 @@ async fn run() -> Result<(), String> {
     stop(sender_task).await;
     stop(keys_task).await;
     stop(cmd_worker).await;
-    // Gate task: DRAIN rather than abort. cmd_worker (a sender) is stopped above, so
-    // dropping this last sender closes the channel; awaiting then lets the pulse IN
-    // PROGRESS finish — the release is sent — instead of being cancelled mid-pulse and
-    // leaving the gate line energised. Bound the wait to ONE worst-case pulse plus a
-    // margin (gate::MAX_PULSE covers press+hold+release at the tight gate timeout), so
-    // the release is guaranteed to go out yet an unresponsive gateway can't hang exit.
+    // Gate task: DRAIN rather than abort. Signal `stopping` FIRST so the task finishes
+    // the pulse IN PROGRESS (its release is sent) but discards queued, not-yet-started
+    // presses (which emitted nothing, so dropping them strands nothing). Then drop this
+    // last sender (cmd_worker's is stopped above) to close the channel and await. The
+    // wait is bounded to ONE worst-case pulse plus a margin (gate::MAX_PULSE covers
+    // press+hold+release at the tight gate timeout) — enough for the in-flight release
+    // regardless of how many were queued, yet an unresponsive gateway can't hang exit.
     // On a responsive gateway a pulse is ~300 ms, so this returns almost immediately.
+    gate_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
     drop(gate_tx);
     let _ = tokio::time::timeout(gate::MAX_PULSE + Duration::from_secs(1), gate_task).await;
     shutdown(&cfg, &client, &mut eventloop).await;

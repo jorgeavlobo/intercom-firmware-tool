@@ -20,6 +20,8 @@
 //!     stop/restart. A plain detached `tokio::spawn` would be dropped at runtime
 //!     teardown, losing the release.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc::Receiver;
@@ -52,11 +54,20 @@ pub const GATE_FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
 pub const MAX_PULSE: Duration = Duration::from_millis(4_300);
 
 /// Run the gate task: for each queued press request, emit the full momentary pulse
-/// (press, hold, release), ONE AT A TIME. Returns only when the channel is closed AND
-/// drained — `main` drops the sender on shutdown, so any queued request and the pulse
-/// in progress finish (release sent) before this returns.
-pub async fn run(mut rx: Receiver<()>) {
+/// (press, hold, release), ONE AT A TIME. Returns when the channel is closed and no
+/// pulse is in progress.
+///
+/// `stopping` is set by `main` at shutdown: a pulse ALREADY in progress finishes
+/// (its release is sent), but queued presses that have NOT started are DISCARDED — a
+/// not-yet-started press has emitted nothing, so dropping it can't strand the gate.
+/// This keeps the shutdown drain bounded to ONE pulse ([`MAX_PULSE`]) regardless of
+/// how many were queued, instead of processing the whole backlog while the runtime
+/// tears down (which could cancel a later pulse between its press and release).
+pub async fn run(mut rx: Receiver<()>, stopping: Arc<AtomicBool>) {
     while rx.recv().await.is_some() {
+        if stopping.load(Ordering::Relaxed) {
+            break; // shutdown began: don't START another pulse (the in-flight one is done)
+        }
         pulse().await;
     }
 }
