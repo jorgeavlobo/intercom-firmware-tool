@@ -13,12 +13,14 @@
 //!   * **Serialised** — one pulse runs at a time, so a press is ALWAYS followed by its
 //!     own release before the next pulse begins (no interleaved/overlapping press and
 //!     release on the bus from rapid double-presses).
-//!   * **Release survives shutdown** — `main` OWNS this task and DRAINS it on shutdown
-//!     (drops the sender to close the channel, then awaits): any queued request plus
-//!     the pulse in progress complete — the release is sent — so a press is never left
-//!     without its release, which would hold the gate line energised across a
-//!     stop/restart. A plain detached `tokio::spawn` would be dropped at runtime
-//!     teardown, losing the release.
+//!   * **Release survives shutdown** — `main` OWNS this task and DRAINS it on shutdown:
+//!     it sets `stopping` and closes the channel, so the pulse IN PROGRESS completes
+//!     (its release is sent) while queued, not-yet-started presses are DISCARDED — a
+//!     press that never started emitted nothing, so dropping it strands nothing. So a
+//!     press is never left without its release (which would hold the gate line
+//!     energised across a stop/restart), and the drain only ever waits for ONE pulse.
+//!     A plain detached `tokio::spawn` would instead be dropped at runtime teardown,
+//!     losing the release.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

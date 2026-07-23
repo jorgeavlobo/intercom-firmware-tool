@@ -8,14 +8,22 @@
 //! publishes (`Bticino/volume`, `Bticino/mute`). No HA templating over the raw bus,
 //! no automations — correct even across an HA restart or a change made on the unit.
 //!
-//! ## Single source of truth: the monitor
-//! The device broadcasts `*#8**41*<N>##` on the monitor whenever the volume changes,
-//! by ANY path (slider, up/down, mute, or the unit's own menu). [`observe`] consumes
-//! those broadcasts (via the `sender` monitor hook) and an on-connect on-demand read
-//! ([`seed`]) — that is the ONLY writer of `current`/`last_nonzero` and the retained
-//! state topics. The command methods ([`set`]/[`mute`]/[`step`]) only WRITE to the
-//! device; state then flows back through the monitor. This keeps HA and the derived
-//! `muted` flag correct however the volume reaches 0.
+//! ## Authoritative state: device-confirmed values only
+//! `current`/`last_nonzero` and the retained state topics are written ONLY from values
+//! the DEVICE confirmed, funnelled through [`observe`]:
+//!   * the monitor broadcasts `*#8**41*<N>##` — emitted whenever the volume changes by
+//!     ANY path (slider, up/down, mute, or the unit's own menu), consumed via the
+//!     `sender` hook (this also catches changes made on the unit itself);
+//!   * the level a write ECHOES back — [`set`] applies it at once so a rapid follow-up
+//!     computes from the confirmed value rather than racing the monitor;
+//!   * an on-demand read — [`seed`] on connect, and [`ensure_current`] before a
+//!     first-command mute/step, so `last_nonzero` is right even before the monitor has
+//!     spoken. The read is applied only if `current` is still unknown, keeping the
+//!     monitor authoritative.
+//!
+//! No value is ever written optimistically from a request that the device hasn't
+//! acknowledged, which keeps HA and the derived `muted` flag correct however the volume
+//! reaches 0.
 //!
 //! ## Smart mute (owned here, not HA)
 //! `last_nonzero` tracks the last observed volume > 0, so UNMUTE restores the EXACT
