@@ -219,7 +219,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
     <value>{0} tiene {1} bytes, más que el límite de {2} bytes para un script de init editable; lectura rechazada.</value>
   </data>
   <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
-    <value>Un tema MQTT de publicación (todos excepto el tema de recepción) no puede contener los comodines '+' o '#'.</value>
+    <value>Un tema MQTT de publicación (todos excepto el tema de recepción) no puede contener los comodines '+' o '#', ni empezar por '$share/' (un prefijo solo para suscripciones).</value>
   </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>El tema de recepción MQTT no es un filtro de suscripción válido: '+' debe ocupar un nivel completo y '#' debe ser el último nivel completo.</value>

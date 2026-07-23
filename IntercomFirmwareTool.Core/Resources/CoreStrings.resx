@@ -192,7 +192,7 @@ The verified build was kept here — move/rename it manually:
     <value>The MQTT username or password contains a line break; credentials must be a single line.</value>
   </data>
   <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
-    <value>An MQTT publish topic (every topic except the receive topic) must not contain the wildcards '+' or '#'.</value>
+    <value>An MQTT publish topic (every topic except the receive topic) must not contain the wildcards '+' or '#', nor begin with '$share/' (a subscription-only prefix).</value>
   </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>The MQTT receive topic is not a valid subscription filter: '+' must occupy a whole level and '#' must be the final whole level.</value>

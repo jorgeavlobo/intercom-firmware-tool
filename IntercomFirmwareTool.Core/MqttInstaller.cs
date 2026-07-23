@@ -402,7 +402,12 @@ namespace IntercomFirmwareTool.Core
             foreach (var t in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                       opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
-                if (t.IndexOfAny(new[] { '+', '#' }) >= 0)
+                // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
+                // prefix — both are subscription-only and invalid to PUBLISH to (a broker
+                // rejects the publish), so no publish topic (including the derived volume/
+                // mute state topics) may use them. TopicRx, the only subscribe filter, may.
+                if (t.IndexOfAny(new[] { '+', '#' }) >= 0
+                    || t.StartsWith("$share/", StringComparison.Ordinal))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
 
             // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by
