@@ -133,9 +133,14 @@ impl VolumeCtl {
     /// 0..=100. Uses the last known `current`; if it's still unknown, reads it on
     /// demand first so the very first press steps from the real level, not a guess.
     pub async fn step(&self, up: bool) -> std::io::Result<()> {
+        // Copy `current` out and DROP the guard before the fallback await: matching on
+        // `self.st.lock().await.current` directly would keep the guard alive for the
+        // whole match, holding the lock across `read_volume` and blocking `observe()`
+        // (the monitor task) for the entire gateway round-trip.
+        let current = self.st.lock().await.current;
         // Never observed and the read gives nothing either: step from a 0 base, so
         // up -> STEP and down -> 0 (both clamp correctly).
-        let base = match self.st.lock().await.current {
+        let base = match current {
             Some(c) => c,
             None => dimension::read_volume(&self.host, self.port).await?.unwrap_or(0),
         };

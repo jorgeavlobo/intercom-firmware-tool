@@ -124,11 +124,18 @@ async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeCt
             return;
         }
     };
-    // Device-control ACTIONS (volume / mute / gate) are UNGATED: they exercise the
-    // same OWN-bus capability a raw frame on TOPIC_RX already has (that path forwards
-    // to the gateway with no gate), so a structured action is no more privileged. Only
-    // the arbitrary-shell channel below (read_file/write_file/execute_command) stays
-    // behind ALLOW_REMOTE_SHELL. These are the payloads the HA volume/gate entities
+    // Device-control ACTIONS (volume / mute / gate) are UNGATED — the broker ACL on
+    // TOPIC_RX is the trust boundary. TOPIC_RX is ALREADY a privileged control channel:
+    // a raw frame on it is forwarded to the gateway (:30006) with no gate, so a
+    // publisher can already actuate WHO=8 commands — including opening the gate
+    // (*8*19*20##). The `gate` action here is exactly that same :30006 capability.
+    // `volume`/`mute` additionally reach WHO=8 DIMENSION writes on openserver (:20000),
+    // a capability a raw :30006 frame does NOT have — but volume is low-stakes and
+    // strictly less sensitive than the gate a raw frame can already trigger, so gating
+    // only the volume path (while raw frames stay ungated) would add no real security.
+    // The arbitrary-shell channel below (read_file/write_file/execute_command) is the
+    // one that stays behind ALLOW_REMOTE_SHELL, because it is categorically more
+    // dangerous (code execution). These are the payloads the HA volume/gate entities
     // publish (via command_template / payload_press).
     if let Some(action) = v.get("action").and_then(Value::as_str) {
         handle_action(vol, action, &v).await;
@@ -173,8 +180,8 @@ async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeCt
 async fn handle_action(vol: &Arc<VolumeCtl>, action: &str, v: &Value) {
     match action {
         // {"action":"volume","value":0..=100} — the slider `number`.
-        "volume" => match v.get("value").and_then(Value::as_u64) {
-            Some(n) => log_action_err("volume", vol.set(n.min(100) as u8).await),
+        "volume" => match v.get("value").and_then(json_percent) {
+            Some(n) => log_action_err("volume", vol.set(n).await),
             None => eprintln!("btmqttd: action volume: missing/invalid 'value'"),
         },
         // {"action":"mute","value":"on"|"off"} — the mute `switch`.
@@ -198,6 +205,22 @@ async fn handle_action(vol: &Arc<VolumeCtl>, action: &str, v: &Value) {
         }
         other => eprintln!("btmqttd: unsupported action: {other}"),
     }
+}
+
+/// Parse a volume percent (0..=100) from a JSON number. Accepts an integer OR a
+/// float: Home Assistant `number` entities carry the value as a float, and the
+/// installer's slider `command_template` renders `{{ value }}`, which can emit
+/// `50.0`. A float is rounded to the nearest integer; both forms are clamped to
+/// 0..=100. Returns `None` for a non-number or a non-finite float (NaN/∞).
+fn json_percent(v: &Value) -> Option<u8> {
+    if let Some(n) = v.as_u64() {
+        return Some(n.min(100) as u8);
+    }
+    let f = v.as_f64()?;
+    if !f.is_finite() {
+        return None;
+    }
+    Some(f.round().clamp(0.0, 100.0) as u8)
 }
 
 /// Log a device-control action's error without aborting the worker (best-effort, like
@@ -523,6 +546,24 @@ mod tests {
     /// behaviour (the shell's `while IFS= read -r` loop).
     fn records(payload: &str) -> Vec<&str> {
         payload.split('\n').collect()
+    }
+
+    #[test]
+    fn json_percent_accepts_int_and_float_clamped_and_rounded() {
+        use serde_json::json;
+        // Integer values pass through, clamped to 0..=100.
+        assert_eq!(json_percent(&json!(0)), Some(0));
+        assert_eq!(json_percent(&json!(50)), Some(50));
+        assert_eq!(json_percent(&json!(100)), Some(100));
+        assert_eq!(json_percent(&json!(150)), Some(100)); // clamp
+        // Floats (what an HA `number` slider renders via `{{ value }}`) are rounded.
+        assert_eq!(json_percent(&json!(50.0)), Some(50));
+        assert_eq!(json_percent(&json!(49.6)), Some(50)); // round to nearest
+        assert_eq!(json_percent(&json!(120.0)), Some(100)); // clamp after round
+        assert_eq!(json_percent(&json!(-5.0)), Some(0)); // clamp low
+        // Non-numbers / non-finite are rejected (fall to the invalid-value path).
+        assert_eq!(json_percent(&json!("50")), None);
+        assert_eq!(json_percent(&json!(null)), None);
     }
 
     #[test]

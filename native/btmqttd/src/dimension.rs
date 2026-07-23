@@ -110,13 +110,24 @@ pub async fn read_volume(host: &str, port: u16) -> std::io::Result<Option<u8>> {
     Ok(replies.iter().find_map(|f| parse_volume_report(f)))
 }
 
-/// Write the volume (`pct` clamped to 0..=100). Ok means the frame was sent and the
-/// session completed; the authoritative confirmation is the `*#8**41*<N>##` broadcast
-/// the monitor delivers, which the volume state machine consumes.
+/// Write the volume (`pct` clamped to 0..=100). A successful write echoes the
+/// dimension report `*#8**41*<N>##`; a REFUSED write yields only the NACK `*#*0##`
+/// (dropped by the framer), so no report comes back. We therefore treat the ABSENCE
+/// of any volume report as an error, so a refused/ignored write is logged rather than
+/// reported as a silent success. (The authoritative STATE update is still the
+/// `*#8**41*<N>##` broadcast the monitor delivers — this return value only makes the
+/// command's own outcome visible to the caller for diagnosis.)
 pub async fn write_volume(host: &str, port: u16, pct: u8) -> std::io::Result<()> {
     let pct = pct.min(VOLUME_MAX);
-    let _ = session(host, port, &volume_write_frame(pct)).await?;
-    Ok(())
+    let replies = session(host, port, &volume_write_frame(pct)).await?;
+    if replies.iter().any(|f| parse_volume_report(f).is_some()) {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "volume write not acknowledged (no dimension report in reply)",
+        ))
+    }
 }
 
 #[cfg(test)]

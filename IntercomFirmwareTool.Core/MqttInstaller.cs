@@ -884,10 +884,22 @@ namespace IntercomFirmwareTool.Core
                 }, HaJson)));
 
             // ---- Volume control (#40) + gate (#41) — COMMAND entities ---------------
-            // These publish JSON actions to TopicRx (the existing command channel);
-            // btmqttd routes them ungated (same capability as a raw frame on TopicRx)
+            // These publish JSON actions to the command channel; btmqttd routes volume/
+            // mute/step to the openserver dimension session (:20000) and gate to :30006,
             // and owns all volume state. State is read back from the retained
             // TopicVolume / TopicMute topics btmqttd maintains from the bus.
+            //
+            // HA's command_topic must be a CONCRETE publish topic. TopicRx MAY be a
+            // wildcard or a "$share/<group>/<filter>" subscription filter (valid for the
+            // daemon to SUBSCRIBE, per Validate), but HA cannot publish a command to a
+            // wildcard, and publishing to "$share/..." is invalid. Derive the concrete
+            // publish topic (the plain topic, or a $share subscription's underlying
+            // filter when THAT is concrete); if none exists, omit the control entities —
+            // the read-only sensors above still ship (graceful degradation, no regression
+            // for a wildcard-TopicRx deployment).
+            string? controlTopic = ConcretePublishTopic(opts.TopicRx);
+            if (controlTopic is null)
+                return entities;
 
             // Volume slider: 0..100 step 10. command_template renders the numeric value
             // into the volume action; state_topic reflects the real level (learned from
@@ -899,8 +911,11 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume",
                     unique_id = $"{node}_volume",
-                    command_topic = opts.TopicRx,
-                    command_template = "{\"action\":\"volume\",\"value\":{{ value }}}",
+                    command_topic = controlTopic,
+                    // `value | int`: HA number entities carry the value as a float, so a
+                    // bare `{{ value }}` can render "50.0"; `| int` sends a clean integer.
+                    // (btmqttd also accepts a float defensively — see json_percent.)
+                    command_template = "{\"action\":\"volume\",\"value\":{{ value | int }}}",
                     state_topic = opts.TopicVolume,
                     min = 0,
                     max = 100,
@@ -924,7 +939,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Mute",
                     unique_id = $"{node}_mute",
-                    command_topic = opts.TopicRx,
+                    command_topic = controlTopic,
                     payload_on = "{\"action\":\"mute\",\"value\":\"on\"}",
                     payload_off = "{\"action\":\"mute\",\"value\":\"off\"}",
                     state_topic = opts.TopicMute,
@@ -946,7 +961,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume up",
                     unique_id = $"{node}_volume_up",
-                    command_topic = opts.TopicRx,
+                    command_topic = controlTopic,
                     payload_press = "{\"action\":\"volume_step\",\"value\":10}",
                     icon = "mdi:volume-plus",
                     availability_topic = opts.TopicLastWill,
@@ -962,7 +977,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume down",
                     unique_id = $"{node}_volume_down",
-                    command_topic = opts.TopicRx,
+                    command_topic = controlTopic,
                     payload_press = "{\"action\":\"volume_step\",\"value\":-10}",
                     icon = "mdi:volume-minus",
                     availability_topic = opts.TopicLastWill,
@@ -980,7 +995,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Gate",
                     unique_id = $"{node}_gate",
-                    command_topic = opts.TopicRx,
+                    command_topic = controlTopic,
                     payload_press = "{\"action\":\"gate\"}",
                     icon = "mdi:gate",
                     availability_topic = opts.TopicLastWill,
@@ -990,6 +1005,28 @@ namespace IntercomFirmwareTool.Core
                 }, HaJson)));
 
             return entities;
+        }
+
+        /// <summary>
+        /// The concrete topic HA can PUBLISH a command to, derived from
+        /// <paramref name="topicRx"/> (the daemon's subscription filter). Returns the
+        /// topic itself when it is concrete; for a <c>$share/&lt;group&gt;/&lt;filter&gt;</c>
+        /// shared subscription, the underlying <c>&lt;filter&gt;</c> when THAT is concrete
+        /// (a publish to it reaches the shared group); otherwise <c>null</c> — a
+        /// wildcard filter has no single publish topic, so the HA control entities are
+        /// omitted. Mirrors the <c>$share</c> normalisation in <see cref="Validate"/>.
+        /// </summary>
+        private static string? ConcretePublishTopic(string topicRx)
+        {
+            string t = topicRx;
+            if (t.StartsWith("$share/", StringComparison.Ordinal))
+            {
+                string rest = t.Substring("$share/".Length);
+                int slash = rest.IndexOf('/');
+                if (slash < 0) return null;              // malformed: no filter
+                t = rest.Substring(slash + 1);           // the underlying filter
+            }
+            return t.IndexOfAny(new[] { '+', '#' }) >= 0 ? null : t;
         }
 
         // ---- init-script patches (owner/mode preserved, idempotent) -------------
