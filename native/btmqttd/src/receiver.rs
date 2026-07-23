@@ -101,7 +101,7 @@ async fn dispatch_record(
         return;
     }
     if own::is_own_frame(record) {
-        if let Err(e) = forward_to_gateway(record).await {
+        if let Err(e) = forward_to_gateway(record, FORWARD_TIMEOUT).await {
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
@@ -112,9 +112,11 @@ async fn dispatch_record(
 /// Forward a raw OpenWebNet frame to the gateway's command-injection port. Always
 /// the LOOPBACK gateway (127.0.0.1:30006), as StartMqttReceive did — OWN_HOST is
 /// only the monitor (read) endpoint, not the command (write) endpoint. `pub(crate)`
-/// so the gate task (`gate.rs`) can send its press/release frames the same way.
-pub(crate) async fn forward_to_gateway(frame: &str) -> std::io::Result<()> {
-    tokio::time::timeout(FORWARD_TIMEOUT, async {
+/// so the gate task (`gate.rs`) can send its press/release frames the same way; it
+/// passes a TIGHTER `timeout` so a full press+hold+release pulse fits inside the
+/// shutdown drain window (the raw-command path passes [`FORWARD_TIMEOUT`]).
+pub(crate) async fn forward_to_gateway(frame: &str, timeout: Duration) -> std::io::Result<()> {
+    tokio::time::timeout(timeout, async {
         let mut sock = TcpStream::connect(("127.0.0.1", OWN_PORT_CMD)).await?;
         sock.write_all(frame.as_bytes()).await?;
         sock.write_all(b"\n").await?;

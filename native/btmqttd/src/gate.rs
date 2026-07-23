@@ -38,6 +38,19 @@ const GATE_RELEASE: &str = "*8*20*20##";
 /// press, short enough to feel instant. Mirrors a physical button tap.
 const GATE_PULSE: Duration = Duration::from_millis(300);
 
+/// Per-frame forward timeout for the gate — TIGHTER than the raw-command path's 5 s.
+/// The gateway is on loopback (frames land in ~ms), and a tight cap keeps a full
+/// press+hold+release pulse bounded well under the shutdown drain window: worst case
+/// `2*GATE_FORWARD_TIMEOUT + GATE_PULSE` = 4.3 s, so the drain (see `main`) can wait
+/// out the pulse in progress and still exit promptly. A hung gateway wouldn't deliver
+/// the frame anyway, so a shorter cap costs nothing there.
+pub const GATE_FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The longest a single pulse can take: press + hold + release, each forward bounded
+/// by [`GATE_FORWARD_TIMEOUT`]. `main` sizes the shutdown drain from this so the
+/// in-progress pulse's release is sent before exit. = 2×2 s + 300 ms.
+pub const MAX_PULSE: Duration = Duration::from_millis(4_300);
+
 /// Run the gate task: for each queued press request, emit the full momentary pulse
 /// (press, hold, release), ONE AT A TIME. Returns only when the channel is closed AND
 /// drained — `main` drops the sender on shutdown, so any queued request and the pulse
@@ -52,11 +65,11 @@ pub async fn run(mut rx: Receiver<()>) {
 /// logged. The release is ALWAYS attempted — even if the press errored — so we never
 /// leave a half-actuated button; a redundant release on a failed press is harmless.
 async fn pulse() {
-    if let Err(e) = forward_to_gateway(GATE_PRESS).await {
+    if let Err(e) = forward_to_gateway(GATE_PRESS, GATE_FORWARD_TIMEOUT).await {
         eprintln!("btmqttd: gate press failed: {e}");
     }
     tokio::time::sleep(GATE_PULSE).await;
-    if let Err(e) = forward_to_gateway(GATE_RELEASE).await {
+    if let Err(e) = forward_to_gateway(GATE_RELEASE, GATE_FORWARD_TIMEOUT).await {
         eprintln!("btmqttd: gate release failed: {e}");
     }
 }

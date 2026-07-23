@@ -335,12 +335,14 @@ async fn run() -> Result<(), String> {
     stop(keys_task).await;
     stop(cmd_worker).await;
     // Gate task: DRAIN rather than abort. cmd_worker (a sender) is stopped above, so
-    // dropping this last sender closes the channel; awaiting then lets any queued
-    // request and the pulse IN PROGRESS finish — the release is sent — instead of being
-    // cancelled mid-pulse and leaving the gate line energised. Bounded so an
-    // unresponsive gateway can't hang exit (the pulse is ~300 ms; 2 s is ample).
+    // dropping this last sender closes the channel; awaiting then lets the pulse IN
+    // PROGRESS finish — the release is sent — instead of being cancelled mid-pulse and
+    // leaving the gate line energised. Bound the wait to ONE worst-case pulse plus a
+    // margin (gate::MAX_PULSE covers press+hold+release at the tight gate timeout), so
+    // the release is guaranteed to go out yet an unresponsive gateway can't hang exit.
+    // On a responsive gateway a pulse is ~300 ms, so this returns almost immediately.
     drop(gate_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(2), gate_task).await;
+    let _ = tokio::time::timeout(gate::MAX_PULSE + Duration::from_secs(1), gate_task).await;
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(())
 }

@@ -134,25 +134,53 @@ impl VolumeCtl {
     /// `last_nonzero` is maintained by [`observe`], so at mute time it already equals
     /// the current audible level.
     pub async fn mute(&self, on: bool) -> std::io::Result<()> {
-        let target = if on { 0 } else { self.st.lock().await.last_nonzero };
-        self.set(target).await
+        if on {
+            // Learn the real level first (if still unknown) so `last_nonzero` reflects it
+            // BEFORE we write 0 — otherwise a mute-on as the very first action after
+            // start/reconnect (before the seed/monitor populate `current`) would set 0
+            // with `last_nonzero` still at the default, and unmute would restore that
+            // default instead of the true pre-mute level.
+            self.ensure_current().await;
+            self.set(0).await
+        } else {
+            let target = self.st.lock().await.last_nonzero;
+            self.set(target).await
+        }
+    }
+
+    /// Return the current volume, learning it first if unknown: read it on demand and
+    /// OBSERVE it (updating `current` AND `last_nonzero`) so the smart-mute invariant
+    /// holds even when the FIRST action after start/reconnect precedes the on-connect
+    /// seed / monitor update. Returns `None` only if the level is unknown AND the
+    /// on-demand read yields nothing (gateway refused/unreachable); callers fall back.
+    async fn ensure_current(&self) -> Option<u8> {
+        let known = { self.st.lock().await.current };
+        if let Some(c) = known {
+            return Some(c);
+        }
+        match dimension::read_volume(&self.host, self.port).await {
+            Ok(Some(n)) => {
+                self.observe(n).await; // records current + last_nonzero before any 0 write
+                Some(n)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                eprintln!("btmqttd: volume read (ensure_current) failed: {e}");
+                None
+            }
+        }
     }
 
     /// Step the volume by `delta` (the buttons pass +[`STEP`] / -[`STEP`]), clamped to
     /// 0..=100. Uses the last known `current`; if it's still unknown, reads it on
     /// demand first so the very first press steps from the real level, not a guess.
     pub async fn step(&self, up: bool) -> std::io::Result<()> {
-        // Copy `current` out and DROP the guard before the fallback await: matching on
-        // `self.st.lock().await.current` directly would keep the guard alive for the
-        // whole match, holding the lock across `read_volume` and blocking `observe()`
-        // (the monitor task) for the entire gateway round-trip.
-        let current = self.st.lock().await.current;
-        // Never observed and the read gives nothing either: step from a 0 base, so
-        // up -> STEP and down -> 0 (both clamp correctly).
-        let base = match current {
-            Some(c) => c,
-            None => dimension::read_volume(&self.host, self.port).await?.unwrap_or(0),
-        };
+        // Resolve the base level, reading + OBSERVING it if still unknown (ensure_current
+        // drops the lock before the read and records last_nonzero), so a step that lands
+        // on 0 as the first action after start/reconnect still captures the true pre-zero
+        // level — else unmute would restore the default, not e.g. 10. Unknown even after
+        // the read -> step from 0 (up -> STEP, down -> 0, both clamp correctly).
+        let base = self.ensure_current().await.unwrap_or(0);
         let next = if up {
             base.saturating_add(STEP).min(100)
         } else {
