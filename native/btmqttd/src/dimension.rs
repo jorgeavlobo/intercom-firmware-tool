@@ -110,24 +110,26 @@ pub async fn read_volume(host: &str, port: u16) -> std::io::Result<Option<u8>> {
     Ok(replies.iter().find_map(|f| parse_volume_report(f)))
 }
 
-/// Write the volume (`pct` clamped to 0..=100). A successful write echoes the
-/// dimension report `*#8**41*<N>##`; a REFUSED write yields only the NACK `*#*0##`
-/// (dropped by the framer), so no report comes back. We therefore treat the ABSENCE
-/// of any volume report as an error, so a refused/ignored write is logged rather than
-/// reported as a silent success. (The authoritative STATE update is still the
-/// `*#8**41*<N>##` broadcast the monitor delivers — this return value only makes the
-/// command's own outcome visible to the caller for diagnosis.)
-pub async fn write_volume(host: &str, port: u16, pct: u8) -> std::io::Result<()> {
+/// Write the volume (`pct` clamped to 0..=100) and return the level the device
+/// ECHOES back. A successful write replies with the dimension report
+/// `*#8**41*<N>##`; a REFUSED write yields only the NACK `*#*0##` (dropped by the
+/// framer), so no report comes back — which we surface as an error (logged rather
+/// than a silent success).
+///
+/// Returning the echoed level lets the caller update its state from the device's OWN
+/// confirmation immediately, instead of waiting on (and racing) the monitor
+/// broadcast: a rapid follow-up step/set then computes from the confirmed value
+/// rather than a stale one, so consecutive up/down presses don't skip or repeat a
+/// step. The monitor broadcast still reaffirms the same value shortly after.
+pub async fn write_volume(host: &str, port: u16, pct: u8) -> std::io::Result<u8> {
     let pct = pct.min(VOLUME_MAX);
     let replies = session(host, port, &volume_write_frame(pct)).await?;
-    if replies.iter().any(|f| parse_volume_report(f).is_some()) {
-        Ok(())
-    } else {
-        Err(std::io::Error::new(
+    replies.iter().find_map(|f| parse_volume_report(f)).ok_or_else(|| {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "volume write not acknowledged (no dimension report in reply)",
-        ))
-    }
+        )
+    })
 }
 
 #[cfg(test)]

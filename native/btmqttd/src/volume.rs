@@ -114,11 +114,17 @@ impl VolumeCtl {
         }
     }
 
-    /// Set the volume to `pct` (clamped 0..=100). Writes the dimension to the device;
-    /// state is refreshed by the resulting monitor broadcast (see [`observe`]), so we
-    /// do NOT optimistically mutate state here — the bus stays the source of truth.
+    /// Set the volume to `pct` (clamped 0..=100). Writes the dimension to the device
+    /// and applies the level the device ECHOES back via [`observe`], so a rapid
+    /// follow-up [`step`]/[`set`] computes from the CONFIRMED value instead of racing
+    /// the monitor broadcast (which could otherwise let consecutive up/down presses
+    /// skip or repeat a step). The monitor broadcast reaffirms the same value shortly
+    /// after; `observe` is idempotent, so the double update is harmless. A write the
+    /// gateway refuses returns an error here and leaves state untouched.
     pub async fn set(&self, pct: u8) -> std::io::Result<()> {
-        dimension::write_volume(&self.host, self.port, pct.min(100)).await
+        let confirmed = dimension::write_volume(&self.host, self.port, pct.min(100)).await?;
+        self.observe(confirmed).await;
+        Ok(())
     }
 
     /// Mute (`on`) or unmute (`off`). Mute writes 0; unmute restores `last_nonzero`
