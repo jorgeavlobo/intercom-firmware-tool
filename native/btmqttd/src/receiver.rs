@@ -1,8 +1,15 @@
 //! MQTT -> bus: dispatch a message received on TOPIC_RX. A raw OpenWebNet frame is
-//! forwarded to the local gateway (127.0.0.1:30006); anything else is a JSON
-//! command, honoured ONLY when the gated remote-command channel is unlocked
-//! (ALLOW_REMOTE_SHELL=1 AND the client is authenticated). Faithful port of
-//! StartMqttReceive's dispatch/handle_json.
+//! forwarded to the local gateway (127.0.0.1:30006). A JSON payload is one of two
+//! things:
+//!   * an UNGATED device-control ACTION (volume / mute / volume_step / gate — issues
+//!     #40/#41): these actuate the OWN bus the same way a raw frame on TOPIC_RX
+//!     already can (the broker ACL on TOPIC_RX is the trust boundary), so they are
+//!     not behind the remote-shell gate; see handle_action for the posture note;
+//!   * a GATED shell command (read_file / write_file / execute_command), honoured
+//!     ONLY when the remote-command channel is unlocked (ALLOW_REMOTE_SHELL=1 AND the
+//!     client is authenticated) — code execution, so it stays locked by default.
+//!
+//! Extends StartMqttReceive's dispatch/handle_json with the device-control actions.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -231,13 +238,23 @@ fn log_action_err(action: &str, r: std::io::Result<()>) {
     }
 }
 
-/// Pulse the gate: send the WHO=8 press, wait [`GATE_PULSE`], send the release — both
-/// to the `:30006` command port (like every other WHO=8 action). A single HA button
-/// press thus performs the full momentary press the unit expects.
+/// Pulse the gate: send the WHO=8 press, then schedule the release after [`GATE_PULSE`]
+/// in a DETACHED task (both to the `:30006` command port, like every other WHO=8
+/// action). Detaching does two things: it keeps the single ordered command worker
+/// responsive (it does NOT block for the 300 ms hold, so the next command isn't
+/// delayed), and it makes the RELEASE still fire if the worker's current command
+/// future is cancelled after the press — so a press is never left without its release
+/// (which would hold the gate line energised). The press is sent inline so its own
+/// failure is reported to the caller; the detached release logs its own error.
 async fn gate_pulse() -> std::io::Result<()> {
     forward_to_gateway(GATE_PRESS).await?;
-    tokio::time::sleep(GATE_PULSE).await;
-    forward_to_gateway(GATE_RELEASE).await
+    tokio::spawn(async {
+        tokio::time::sleep(GATE_PULSE).await;
+        if let Err(e) = forward_to_gateway(GATE_RELEASE).await {
+            eprintln!("btmqttd: gate release failed: {e}");
+        }
+    });
+    Ok(())
 }
 
 async fn read_file(cfg: &Arc<Config>, client: &AsyncClient, path: &str) {

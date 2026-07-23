@@ -94,12 +94,38 @@ namespace IntercomFirmwareTool.Core
         public string TopicCmdResult { get; init; } = "Bticino/command_result_topic";
         public string TopicFileContent { get; init; } = "Bticino/file_content_topic";
 
-        /// <summary>Retained volume-state topic (0..100) HA's slider reads back (#40).
-        /// The volume/mute/gate COMMANDS reuse <see cref="TopicRx"/> as small JSON
-        /// actions, so only the two STATE topics are new — no extra subscription.</summary>
-        public string TopicVolume { get; init; } = "Bticino/volume";
-        /// <summary>Retained mute-state topic (on/off) HA's mute switch reads back (#40).</summary>
-        public string TopicMute { get; init; } = "Bticino/mute";
+        /// <summary>
+        /// Retained volume-state topic (0..100) HA's slider reads back (#40). NULL (the
+        /// default) means "derive from the <see cref="TopicLastWill"/> namespace" via
+        /// <see cref="EffectiveTopicVolume"/>, so it AUTO-SCOPES per unit: a unit whose
+        /// last-will is <c>Home1/unitA/LastWillT</c> publishes volume to
+        /// <c>Home1/unitA/volume</c> (and the default <c>Bticino/LastWillT</c> yields
+        /// <c>Bticino/volume</c>, unchanged). Set a non-null value to override. The
+        /// volume/mute/gate COMMANDS reuse <see cref="TopicRx"/> as small JSON actions,
+        /// so only these two STATE topics are new — no extra subscription.
+        /// </summary>
+        public string? TopicVolume { get; init; }
+        /// <summary>Retained mute-state topic (on/off) HA's mute switch reads back (#40).
+        /// NULL (default) derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicMute"/>.</summary>
+        public string? TopicMute { get; init; }
+
+        /// <summary>The volume state topic actually used: the explicit
+        /// <see cref="TopicVolume"/>, or one derived from the <see cref="TopicLastWill"/>
+        /// namespace so multi-unit deployments auto-scope without extra UI.</summary>
+        public string EffectiveTopicVolume => TopicVolume ?? (TopicNamespace(TopicLastWill) + "volume");
+        /// <summary>The mute state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicMute => TopicMute ?? (TopicNamespace(TopicLastWill) + "mute");
+
+        /// <summary>The namespace prefix of <paramref name="topic"/> — everything up to
+        /// and INCLUDING the last '/', or "" when the topic has no '/'. Scopes the
+        /// derived volume/mute state topics to the same namespace as the per-unit
+        /// last-will topic.</summary>
+        private static string TopicNamespace(string topic)
+        {
+            int slash = topic.LastIndexOf('/');
+            return slash >= 0 ? topic.Substring(0, slash + 1) : "";
+        }
 
         /// <summary>True when BOTH username and password are set (password auth).</summary>
         public bool HasAuth => !string.IsNullOrEmpty(MqttUser) && !string.IsNullOrEmpty(MqttPass);
@@ -364,7 +390,7 @@ namespace IntercomFirmwareTool.Core
             // .conf and used as MQTT topic filters).
             foreach (var t in new[] { opts.TopicRx, opts.TopicDump, opts.TopicStartDate,
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
-                                      opts.TopicFileContent, opts.TopicVolume, opts.TopicMute })
+                                      opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
@@ -375,7 +401,7 @@ namespace IntercomFirmwareTool.Core
             // publish at runtime. TopicRx may keep them (a valid subscription).
             foreach (var t in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
-                                      opts.TopicVolume, opts.TopicMute })
+                                      opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
                 if (t.IndexOfAny(new[] { '+', '#' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
 
@@ -418,7 +444,7 @@ namespace IntercomFirmwareTool.Core
             // replay them to the gateway — a feedback loop that floods the bus.
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
-                                        opts.TopicVolume, opts.TopicMute })
+                                        opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
@@ -709,8 +735,10 @@ namespace IntercomFirmwareTool.Core
 
             // Volume control (#40): retained state topics btmqttd publishes and the HA
             // slider/mute switch read back. Commands reuse TOPIC_RX (JSON actions).
-            sb.Append(Conf("TOPIC_VOLUME", opts.TopicVolume));
-            sb.Append(Conf("TOPIC_MUTE", opts.TopicMute));
+            // Effective* resolves the auto-scoped default (derived from the last-will
+            // namespace) or an explicit override.
+            sb.Append(Conf("TOPIC_VOLUME", opts.EffectiveTopicVolume));
+            sb.Append(Conf("TOPIC_MUTE", opts.EffectiveTopicMute));
 
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 
@@ -761,6 +789,22 @@ namespace IntercomFirmwareTool.Core
             // build would emit CRLF and the on-device JSON would differ byte-for-byte
             // from a Linux build (and from the ValidateMqtt read-back expectation).
             NewLine = "\n",
+        };
+
+        /// <summary>
+        /// The five volume/gate CONTROL entities' identity — (JSON filename, discovery
+        /// component, object id) — shared by the real-config generation and the
+        /// tombstone path in <see cref="GenerateHaDiscovery"/>, so both always agree on
+        /// exactly which config topics the controls occupy. These depend only on the
+        /// node id, not on TopicRx, so they are constant across every build.
+        /// </summary>
+        private static readonly (string File, string Component, string ObjectId)[] ControlEntityIds =
+        {
+            ("volume.json", "number", "volume"),
+            ("mute.json", "switch", "mute"),
+            ("volume_up.json", "button", "volume_up"),
+            ("volume_down.json", "button", "volume_down"),
+            ("gate.json", "button", "gate"),
         };
 
         /// <summary>
@@ -894,12 +938,24 @@ namespace IntercomFirmwareTool.Core
             // daemon to SUBSCRIBE, per Validate), but HA cannot publish a command to a
             // wildcard, and publishing to "$share/..." is invalid. Derive the concrete
             // publish topic (the plain topic, or a $share subscription's underlying
-            // filter when THAT is concrete); if none exists, omit the control entities —
-            // the read-only sensors above still ship (graceful degradation, no regression
-            // for a wildcard-TopicRx deployment).
+            // filter when THAT is concrete).
+            //
+            // The five control config topics are the SAME regardless (they depend on the
+            // node id, not TopicRx). When there is NO concrete publish topic, emit them
+            // as TOMBSTONES — same config topic, EMPTY payload — instead of omitting
+            // them: ha::reconcile only touches config topics present in the manifest, so
+            // omitting them would leave any controls a PREVIOUS concrete-TopicRx build
+            // published retained on the broker, and HA would keep showing buttons that
+            // publish to the stale command topic. An empty retained payload clears them.
+            // (With a concrete topic, the real working configs are built below.) The
+            // read-only sensors above always ship — graceful degradation, no regression.
             string? controlTopic = ConcretePublishTopic(opts.TopicRx);
             if (controlTopic is null)
+            {
+                foreach (var (file, component, objectId) in ControlEntityIds)
+                    entities.Add(new HaEntity(file, Topic(component, objectId), ""));
                 return entities;
+            }
 
             // Volume slider: 0..100 step 10. command_template renders the numeric value
             // into the volume action; state_topic reflects the real level (learned from
@@ -916,7 +972,7 @@ namespace IntercomFirmwareTool.Core
                     // bare `{{ value }}` can render "50.0"; `| int` sends a clean integer.
                     // (btmqttd also accepts a float defensively — see json_percent.)
                     command_template = "{\"action\":\"volume\",\"value\":{{ value | int }}}",
-                    state_topic = opts.TopicVolume,
+                    state_topic = opts.EffectiveTopicVolume,
                     min = 0,
                     max = 100,
                     step = 10,
@@ -942,7 +998,7 @@ namespace IntercomFirmwareTool.Core
                     command_topic = controlTopic,
                     payload_on = "{\"action\":\"mute\",\"value\":\"on\"}",
                     payload_off = "{\"action\":\"mute\",\"value\":\"off\"}",
-                    state_topic = opts.TopicMute,
+                    state_topic = opts.EffectiveTopicMute,
                     state_on = "on",
                     state_off = "off",
                     icon = "mdi:volume-mute",

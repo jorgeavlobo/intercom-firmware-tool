@@ -1,4 +1,5 @@
-//! Device-side volume state machine (issue #40) + gate pulse (issue #41).
+//! Device-side volume state machine (issue #40). (The gate pulse of #41 lives in
+//! `receiver.rs`, next to the other WHO=8 command-port actions.)
 //!
 //! All volume STATE and logic live here — Home Assistant stays "dumb": it renders
 //! four auto-discovered entities (slider `number`, `mute` switch, up/down `button`s)
