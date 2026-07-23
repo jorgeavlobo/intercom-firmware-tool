@@ -133,7 +133,17 @@ impl VolumeCtl {
     /// after; `observe` is idempotent, so the double update is harmless. A write the
     /// gateway refuses returns an error here and leaves state untouched.
     pub async fn set(&self, pct: u8) -> std::io::Result<()> {
-        let confirmed = dimension::write_volume(&self.host, self.port, pct.min(100)).await?;
+        let pct = pct.min(100);
+        // Zeroing before the level is known would strand `last_nonzero` at its default,
+        // so a later unmute would restore that default instead of the true pre-zero
+        // level. Learn the real level first when zeroing from an unknown state. This is
+        // the single place the guard lives, so it covers EVERY zero path — mute-on,
+        // slider-to-0, step-to-0, a JSON `volume` 0 — and ensure_current is a no-op once
+        // `current` is known, so non-zero sets and repeat calls pay nothing.
+        if pct == 0 {
+            self.ensure_current().await;
+        }
+        let confirmed = dimension::write_volume(&self.host, self.port, pct).await?;
         self.observe(confirmed).await;
         Ok(())
     }
@@ -143,18 +153,11 @@ impl VolumeCtl {
     /// `last_nonzero` is maintained by [`observe`], so at mute time it already equals
     /// the current audible level.
     pub async fn mute(&self, on: bool) -> std::io::Result<()> {
-        if on {
-            // Learn the real level first (if still unknown) so `last_nonzero` reflects it
-            // BEFORE we write 0 — otherwise a mute-on as the very first action after
-            // start/reconnect (before the seed/monitor populate `current`) would set 0
-            // with `last_nonzero` still at the default, and unmute would restore that
-            // default instead of the true pre-mute level.
-            self.ensure_current().await;
-            self.set(0).await
-        } else {
-            let target = self.st.lock().await.last_nonzero;
-            self.set(target).await
-        }
+        // Mute writes 0 — set() learns the pre-zero level first (so unmute can restore
+        // it); unmute writes `last_nonzero`, the exact pre-mute level (or DEFAULT_NONZERO
+        // if none was ever observed).
+        let target = if on { 0 } else { self.st.lock().await.last_nonzero };
+        self.set(target).await
     }
 
     /// Return the current volume, learning it first if unknown: read it on demand and
