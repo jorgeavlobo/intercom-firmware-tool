@@ -16,6 +16,18 @@ use tokio::sync::Semaphore;
 
 use crate::config::{Config, OWN_PORT_CMD};
 use crate::own;
+use crate::volume::VolumeCtl;
+
+/// Gate (issue #41): WHO=8 momentary command on WHERE=20. A single HA `button` press
+/// maps to a press-then-release pulse — `*8*19*20##` (press) then, after a short gap,
+/// `*8*20*20##` (release) — both via the `:30006` command port (WHO=8 actions route
+/// there, unlike dimensions). Verified frames on the unit.
+const GATE_PRESS: &str = "*8*19*20##";
+const GATE_RELEASE: &str = "*8*20*20##";
+
+/// Gap between the gate press and release — long enough to register a real momentary
+/// press, short enough to feel instant. Mirrors a physical button tap.
+const GATE_PULSE: Duration = Duration::from_millis(300);
 
 /// Cap for read_file/write_file/execute_command payloads (256 KB), matching
 /// `head -c 262144` in the shell — a huge/special file or runaway command must not
@@ -56,7 +68,7 @@ static REAP_SLOTS: Semaphore = Semaphore::const_new(REAP_CONCURRENCY);
 /// (a CRLF frame `*…##\r` therefore fails the OWN-frame check and is not forwarded,
 /// exactly as the shell's `^\*.*##$` did). Never panics; every failure is logged and
 /// swallowed so one bad record can't take the receiver down.
-pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
+pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeCtl>, payload: &[u8]) {
     let text = match std::str::from_utf8(payload) {
         Ok(t) => t,
         Err(_) => {
@@ -65,7 +77,7 @@ pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
         }
     };
     for record in text.split('\n') {
-        dispatch_record(cfg, client, record).await;
+        dispatch_record(cfg, client, vol, record).await;
     }
 }
 
@@ -73,7 +85,7 @@ pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
 /// `\r` and any interior/leading/trailing spaces — a space-prefixed " *…##" is not an
 /// OWN frame (it falls to the ignored JSON path, as in the shell, rather than being
 /// forwarded to the gateway and executed).
-async fn dispatch_record(cfg: &Arc<Config>, client: &AsyncClient, record: &str) {
+async fn dispatch_record(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeCtl>, record: &str) {
     // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
     if record.trim().is_empty() {
         return;
@@ -83,7 +95,7 @@ async fn dispatch_record(cfg: &Arc<Config>, client: &AsyncClient, record: &str) 
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
-        handle_json(cfg, client, record).await;
+        handle_json(cfg, client, vol, record).await;
     }
 }
 
@@ -104,14 +116,7 @@ async fn forward_to_gateway(frame: &str) -> std::io::Result<()> {
     })?
 }
 
-async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, msg: &str) {
-    if !cfg.remote_shell_allowed() {
-        eprintln!(
-            "btmqttd: ignored JSON command: remote channel disabled (needs \
-             ALLOW_REMOTE_SHELL=1 and an authenticated broker: user/pass or mutual TLS)."
-        );
-        return;
-    }
+async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, vol: &Arc<VolumeCtl>, msg: &str) {
     let v: Value = match serde_json::from_str(msg) {
         Ok(v) => v,
         Err(_) => {
@@ -119,6 +124,24 @@ async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, msg: &str) {
             return;
         }
     };
+    // Device-control ACTIONS (volume / mute / gate) are UNGATED: they exercise the
+    // same OWN-bus capability a raw frame on TOPIC_RX already has (that path forwards
+    // to the gateway with no gate), so a structured action is no more privileged. Only
+    // the arbitrary-shell channel below (read_file/write_file/execute_command) stays
+    // behind ALLOW_REMOTE_SHELL. These are the payloads the HA volume/gate entities
+    // publish (via command_template / payload_press).
+    if let Some(action) = v.get("action").and_then(Value::as_str) {
+        handle_action(vol, action, &v).await;
+        return;
+    }
+
+    if !cfg.remote_shell_allowed() {
+        eprintln!(
+            "btmqttd: ignored JSON command: remote channel disabled (needs \
+             ALLOW_REMOTE_SHELL=1 and an authenticated broker: user/pass or mutual TLS)."
+        );
+        return;
+    }
     let command = v.get("command").and_then(Value::as_str).unwrap_or("");
     let file_path = v.get("file_path").and_then(Value::as_str).unwrap_or("");
     // `data` as Option: a MISSING (or non-string) key is rejected per-command rather
@@ -140,6 +163,58 @@ async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, msg: &str) {
         "" => eprintln!("btmqttd: JSON command missing 'command'"),
         other => eprintln!("btmqttd: unsupported command: {other}"),
     }
+}
+
+/// Handle an ungated device-control action (issue #40 volume, #41 gate). `v` is the
+/// already-parsed action object; `action` is its `action` field. Unknown actions are
+/// logged and ignored. A volume op that fails (gateway refused/unreachable) is logged;
+/// the retained state stays whatever the monitor last observed, so HA is never left
+/// showing a value the device didn't accept.
+async fn handle_action(vol: &Arc<VolumeCtl>, action: &str, v: &Value) {
+    match action {
+        // {"action":"volume","value":0..=100} — the slider `number`.
+        "volume" => match v.get("value").and_then(Value::as_u64) {
+            Some(n) => log_action_err("volume", vol.set(n.min(100) as u8).await),
+            None => eprintln!("btmqttd: action volume: missing/invalid 'value'"),
+        },
+        // {"action":"mute","value":"on"|"off"} — the mute `switch`.
+        "mute" => match v.get("value").and_then(Value::as_str) {
+            Some("on") => log_action_err("mute", vol.mute(true).await),
+            Some("off") => log_action_err("mute", vol.mute(false).await),
+            _ => eprintln!("btmqttd: action mute: 'value' must be \"on\" or \"off\""),
+        },
+        // {"action":"volume_step","value":10|-10} — the up/down `button`s. Only the
+        // SIGN matters (the step size is owned device-side); any positive value is up.
+        "volume_step" => match v.get("value").and_then(Value::as_i64) {
+            Some(d) if d > 0 => log_action_err("volume_step", vol.step(true).await),
+            Some(d) if d < 0 => log_action_err("volume_step", vol.step(false).await),
+            _ => eprintln!("btmqttd: action volume_step: 'value' must be non-zero"),
+        },
+        // {"action":"gate"} — the gate `button` (issue #41): a press/release pulse.
+        "gate" => {
+            if let Err(e) = gate_pulse().await {
+                eprintln!("btmqttd: action gate failed: {e}");
+            }
+        }
+        other => eprintln!("btmqttd: unsupported action: {other}"),
+    }
+}
+
+/// Log a device-control action's error without aborting the worker (best-effort, like
+/// the rest of the receiver): a failed set/step leaves HA on the last observed state.
+fn log_action_err(action: &str, r: std::io::Result<()>) {
+    if let Err(e) = r {
+        eprintln!("btmqttd: action {action} failed: {e}");
+    }
+}
+
+/// Pulse the gate: send the WHO=8 press, wait [`GATE_PULSE`], send the release — both
+/// to the `:30006` command port (like every other WHO=8 action). A single HA button
+/// press thus performs the full momentary press the unit expects.
+async fn gate_pulse() -> std::io::Result<()> {
+    forward_to_gateway(GATE_PRESS).await?;
+    tokio::time::sleep(GATE_PULSE).await;
+    forward_to_gateway(GATE_RELEASE).await
 }
 
 async fn read_file(cfg: &Arc<Config>, client: &AsyncClient, path: &str) {

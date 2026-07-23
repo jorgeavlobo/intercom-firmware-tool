@@ -94,6 +94,13 @@ namespace IntercomFirmwareTool.Core
         public string TopicCmdResult { get; init; } = "Bticino/command_result_topic";
         public string TopicFileContent { get; init; } = "Bticino/file_content_topic";
 
+        /// <summary>Retained volume-state topic (0..100) HA's slider reads back (#40).
+        /// The volume/mute/gate COMMANDS reuse <see cref="TopicRx"/> as small JSON
+        /// actions, so only the two STATE topics are new — no extra subscription.</summary>
+        public string TopicVolume { get; init; } = "Bticino/volume";
+        /// <summary>Retained mute-state topic (on/off) HA's mute switch reads back (#40).</summary>
+        public string TopicMute { get; init; } = "Bticino/mute";
+
         /// <summary>True when BOTH username and password are set (password auth).</summary>
         public bool HasAuth => !string.IsNullOrEmpty(MqttUser) && !string.IsNullOrEmpty(MqttPass);
         /// <summary>True when a CA is supplied (one-way TLS, at least).</summary>
@@ -357,7 +364,7 @@ namespace IntercomFirmwareTool.Core
             // .conf and used as MQTT topic filters).
             foreach (var t in new[] { opts.TopicRx, opts.TopicDump, opts.TopicStartDate,
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
-                                      opts.TopicFileContent })
+                                      opts.TopicFileContent, opts.TopicVolume, opts.TopicMute })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
@@ -367,7 +374,8 @@ namespace IntercomFirmwareTool.Core
             // --will-topic, so a wildcard here would build an image that cannot
             // publish at runtime. TopicRx may keep them (a valid subscription).
             foreach (var t in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
-                                      opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent })
+                                      opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
+                                      opts.TopicVolume, opts.TopicMute })
                 if (t.IndexOfAny(new[] { '+', '#' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
 
@@ -409,7 +417,8 @@ namespace IntercomFirmwareTool.Core
             // TopicRx subscriber (btmqttd itself) would then receive them and
             // replay them to the gateway — a feedback loop that floods the bus.
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
-                                        opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent })
+                                        opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
+                                        opts.TopicVolume, opts.TopicMute })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
@@ -698,6 +707,11 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_CMD_RESULT", opts.TopicCmdResult));
             sb.Append(Conf("TOPIC_FILE_CONTENT", opts.TopicFileContent));
 
+            // Volume control (#40): retained state topics btmqttd publishes and the HA
+            // slider/mute switch read back. Commands reuse TOPIC_RX (JSON actions).
+            sb.Append(Conf("TOPIC_VOLUME", opts.TopicVolume));
+            sb.Append(Conf("TOPIC_MUTE", opts.TopicMute));
+
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 
             // OpenWebNet gateway endpoint for the bus MONITOR session (btmqttd opens it
@@ -752,11 +766,18 @@ namespace IntercomFirmwareTool.Core
         /// <summary>
         /// Builds the Home Assistant MQTT discovery configs for the bridge: a
         /// connectivity <c>binary_sensor</c> (online/offline via the last-will
-        /// topic), a diagnostic <c>sensor</c> for the last OpenWebNet bus frame, and
-        /// a <c>sensor</c> for the last key press (with code/value as attributes).
-        /// All read-only and grouped under one HA device — no command entity, to
-        /// keep the secure-by-default posture. Topics/prefix/node are baked in here,
-        /// so the on-device publisher just sends each payload retained.
+        /// topic), a diagnostic <c>sensor</c> for the last OpenWebNet bus frame, a
+        /// <c>sensor</c> for the last key press (with code/value as attributes), and
+        /// the volume-control set (#40): a <c>number</c> slider, a <c>switch</c> for
+        /// smart mute, and two <c>button</c>s for ±10%, plus a gate <c>button</c>
+        /// (#41). All grouped under one HA device. The volume/gate command entities
+        /// publish small JSON ACTIONS to <see cref="MqttOptions.TopicRx"/> (the
+        /// existing command channel — no new subscription), so they exercise the same
+        /// OWN-bus capability a raw frame on that topic already has; btmqttd owns all
+        /// volume state (survives HA restarts). Discovery stays opt-in
+        /// (<see cref="MqttOptions.EnableHaDiscovery"/>): when off, btmqttd CLEARS
+        /// these retained configs. Topics/prefix/node are baked in here, so the
+        /// on-device publisher just sends each payload retained.
         /// </summary>
         private static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts)
         {
@@ -856,6 +877,112 @@ namespace IntercomFirmwareTool.Core
                     value_template = "{{ value_json.key }}",
                     json_attributes_topic = opts.TopicKey,
                     icon = "mdi:gesture-tap-button",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // ---- Volume control (#40) + gate (#41) — COMMAND entities ---------------
+            // These publish JSON actions to TopicRx (the existing command channel);
+            // btmqttd routes them ungated (same capability as a raw frame on TopicRx)
+            // and owns all volume state. State is read back from the retained
+            // TopicVolume / TopicMute topics btmqttd maintains from the bus.
+
+            // Volume slider: 0..100 step 10. command_template renders the numeric value
+            // into the volume action; state_topic reflects the real level (learned from
+            // the bus, so it also follows changes made on the unit's own menu).
+            entities.Add(new HaEntity(
+                "volume.json",
+                Topic("number", "volume"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Volume",
+                    unique_id = $"{node}_volume",
+                    command_topic = opts.TopicRx,
+                    command_template = "{\"action\":\"volume\",\"value\":{{ value }}}",
+                    state_topic = opts.TopicVolume,
+                    min = 0,
+                    max = 100,
+                    step = 10,
+                    mode = "slider",
+                    icon = "mdi:volume-high",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Smart mute switch: on = mute (btmqttd remembers the pre-mute level),
+            // off = restore that exact level. state_topic follows the derived muted flag
+            // (volume == 0 by any path), so muting via the slider/down button/unit menu
+            // all flip this switch too.
+            entities.Add(new HaEntity(
+                "mute.json",
+                Topic("switch", "mute"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Mute",
+                    unique_id = $"{node}_mute",
+                    command_topic = opts.TopicRx,
+                    payload_on = "{\"action\":\"mute\",\"value\":\"on\"}",
+                    payload_off = "{\"action\":\"mute\",\"value\":\"off\"}",
+                    state_topic = opts.TopicMute,
+                    state_on = "on",
+                    state_off = "off",
+                    icon = "mdi:volume-mute",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Volume up / down buttons: ±10% (btmqttd clamps to 0..100). Only the sign
+            // of the step value matters — the step size is owned device-side.
+            entities.Add(new HaEntity(
+                "volume_up.json",
+                Topic("button", "volume_up"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Volume up",
+                    unique_id = $"{node}_volume_up",
+                    command_topic = opts.TopicRx,
+                    payload_press = "{\"action\":\"volume_step\",\"value\":10}",
+                    icon = "mdi:volume-plus",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            entities.Add(new HaEntity(
+                "volume_down.json",
+                Topic("button", "volume_down"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Volume down",
+                    unique_id = $"{node}_volume_down",
+                    command_topic = opts.TopicRx,
+                    payload_press = "{\"action\":\"volume_step\",\"value\":-10}",
+                    icon = "mdi:volume-minus",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Gate button (#41): a single press performs the full momentary press/release
+            // pulse (btmqttd sends *8*19*20## then *8*20*20## via the :30006 command port).
+            entities.Add(new HaEntity(
+                "gate.json",
+                Topic("button", "gate"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Gate",
+                    unique_id = $"{node}_gate",
+                    command_topic = opts.TopicRx,
+                    payload_press = "{\"action\":\"gate\"}",
+                    icon = "mdi:gate",
                     availability_topic = opts.TopicLastWill,
                     payload_available = "online",
                     payload_not_available = "offline",
