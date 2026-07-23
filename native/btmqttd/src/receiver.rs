@@ -233,10 +233,11 @@ async fn handle_action(vol: &Arc<VolumeCtl>, gate: &Sender<()>, action: &str, v:
 }
 
 /// Parse a volume percent (0..=100) from a JSON number. Accepts an integer OR a
-/// float: Home Assistant `number` entities carry the value as a float, and the
-/// installer's slider `command_template` renders `{{ value }}`, which can emit
-/// `50.0`. A float is rounded to the nearest integer; both forms are clamped to
-/// 0..=100. Returns `None` for a non-number or a non-finite float (NaN/∞).
+/// float: the installer's slider `command_template` renders `{{ value | int }}` (an
+/// integer), but Home Assistant `number` entities carry the value as a float and
+/// another publisher (or a hand-crafted payload) could still send `50.0`, so a float
+/// is accepted DEFENSIVELY — rounded to the nearest integer. Both forms are clamped
+/// to 0..=100. Returns `None` for a non-number or a non-finite float (NaN/∞).
 fn json_percent(v: &Value) -> Option<u8> {
     if let Some(n) = v.as_u64() {
         return Some(n.min(100) as u8);
