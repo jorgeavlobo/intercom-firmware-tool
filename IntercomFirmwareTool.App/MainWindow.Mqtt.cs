@@ -176,8 +176,12 @@ namespace IntercomFirmwareTool.App
                 if (_brokerDiscovery == null || _discoveryPrefillDone) return;
                 if (TxtMqttHost.Text.Trim().Length > 0) return;   // user already entered a broker
 
-                BrokerCandidate? cand = _brokerDiscovery.MdnsCandidates.FirstOrDefault();
-                if (cand == null && !_discoveryScanDone)
+                // Candidate pool, mDNS first (it carries the hostname). Only PLAINTEXT (non-8883)
+                // brokers can be auto-configured: a TLS broker also needs a CA the discovery
+                // can't supply, so pre-filling one would build a plaintext config against a TLS
+                // listener. Run the scan only when no plaintext candidate is known yet.
+                var pool = new List<BrokerCandidate>(_brokerDiscovery.MdnsCandidates);
+                if (!pool.Any(c => c.Port != 8883) && !_discoveryScanDone)
                 {
                     _discoveryScanDone = true;   // the /24 scan is heavy — attempt it only once
                     SetMqttDiscoveryInfo(L("MqttDiscovering"));
@@ -186,17 +190,28 @@ namespace IntercomFirmwareTool.App
                     catch { scan = System.Array.Empty<BrokerCandidate>(); }
                     // The user may have disabled the bridge or typed a broker while we scanned.
                     if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
-                    // Prefer a background mDNS hit that may have landed WHILE the scan ran (mDNS
-                    // gives the hostname directly and covers ports/subnets the scan doesn't);
-                    // fall back to the scan result otherwise.
-                    cand = _brokerDiscovery.MdnsCandidates.FirstOrDefault() ?? scan.FirstOrDefault();
+                    // Re-read mDNS (a hit may have landed during the scan), then add the scan hits.
+                    pool = new List<BrokerCandidate>(_brokerDiscovery.MdnsCandidates);
+                    pool.AddRange(scan);
                 }
 
-                if (cand == null) { SetMqttDiscoveryInfo(null); return; }
-
-                _discoveryPrefillDone = true;
-                PrefillBrokerFields(cand);
-                SetMqttDiscoveryInfo(LF("Fmt_MqttDiscovered", cand.Hostname ?? cand.Ip));
+                // A plaintext broker → pre-fill and mark ready.
+                if (pool.FirstOrDefault(c => c.Port != 8883) is BrokerCandidate plain)
+                {
+                    _discoveryPrefillDone = true;
+                    PrefillBrokerFields(plain);
+                    SetMqttDiscoveryInfo(LF("Fmt_MqttDiscovered", plain.Hostname ?? plain.Ip));
+                    return;
+                }
+                // Only a TLS broker found → surface it but DON'T pre-fill (it needs a CA the
+                // user must add; a plaintext pre-fill would build a broken config).
+                if (pool.FirstOrDefault() is BrokerCandidate tls)
+                {
+                    _discoveryPrefillDone = true;
+                    SetMqttDiscoveryInfo(LF("Fmt_MqttDiscoveredTls", tls.Hostname ?? tls.Ip));
+                    return;
+                }
+                SetMqttDiscoveryInfo(null);
             }
             catch { /* discovery pre-fill is best-effort; never fault the fire-and-forget task */ }
         }
