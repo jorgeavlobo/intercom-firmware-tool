@@ -29,6 +29,7 @@ mod gate;
 mod ha;
 mod keys;
 mod own;
+mod persist;
 mod receiver;
 mod rediscovery;
 mod sender;
@@ -213,6 +214,40 @@ async fn run() -> Result<(), String> {
     let mut tried_ips: std::collections::HashSet<std::net::Ipv4Addr> =
         std::collections::HashSet::new();
 
+    // Persisted-IP boot restore (issue #49 item 1): the last connect-confirmed broker IP
+    // is remembered on a writable, reboot-persistent partition. Seed /etc/hosts from it
+    // BEFORE the first connect so a reboot after the broker moved reconnects to the
+    // learned IP immediately — instead of re-running the whole failure-count + /24 scan.
+    // Only when rediscovery is active (name broker + trust anchor); the reconnect still
+    // authenticates, so a stale persisted IP is harmless (it fails and rediscovery
+    // resumes). `last_persisted` tracks what's on disk so a stable broker never rewrites
+    // the flash partition on every ConnAck.
+    //
+    // `build_ip` is the broker's /etc/hosts mapping AS SEEDED BY THE BOOT INIT — captured
+    // here BEFORE we seed anything. It is the record's "base": a persisted learned IP is
+    // only trusted while its base still matches this build-time IP, so a firmware re-flash
+    // that re-points the broker (the cfg/extra partition survives a re-flash) invalidates
+    // a stale learned address instead of overriding the new mapping.
+    let build_ip: Option<std::net::Ipv4Addr> = if rediscovery_active {
+        rediscovery::current_broker_ip(&cfg.mqtt_host).await
+    } else {
+        None
+    };
+    let mut last_persisted: Option<std::net::Ipv4Addr> = None;
+    if let Some(build_ip) = build_ip {
+        if let Some(learned) = persist::load(&cfg.mqtt_host, build_ip) {
+            last_persisted = Some(learned);
+            match rediscovery::seed_hosts(&cfg.mqtt_host, learned).await {
+                Ok(true) => eprintln!(
+                    "btmqttd: seeded '{}' -> {learned} in {} from persisted state",
+                    cfg.mqtt_host, rediscovery::HOSTS_PATH
+                ),
+                Ok(false) => {} // already mapped there (build-time seed agrees) — quiet
+                Err(e) => eprintln!("btmqttd: could not seed persisted broker IP: {e}"),
+            }
+        }
+    }
+
     loop {
         tokio::select! {
             _ = sig_term.recv() => break,
@@ -225,6 +260,30 @@ async fn run() -> Result<(), String> {
                         // that returns to a former address can be found again.
                         conn_failures = 0;
                         tried_ips.clear();
+                        // Persist the connect-confirmed broker IP (issue #49 item 1): this
+                        // ConnAck means the current /etc/hosts mapping authenticated / passed
+                        // the pinned-TLS handshake, so it is trustworthy to remember for the
+                        // next boot. Only meaningful once a name broker has a build-time base
+                        // to compare against (`build_ip`).
+                        if let (Some(build_ip), Some(confirmed)) =
+                            (build_ip, rediscovery::current_broker_ip(&cfg.mqtt_host).await)
+                        {
+                            if confirmed == build_ip {
+                                // The broker is at (or has returned to) its build-time IP, which
+                                // the boot init re-seeds anyway. Forget any stale learned record
+                                // so a reboot doesn't seed a now-wrong address.
+                                if last_persisted.is_some() {
+                                    persist::clear();
+                                    last_persisted = None;
+                                }
+                            } else if last_persisted != Some(confirmed) {
+                                // A rediscovered IP that just authenticated → remember it against
+                                // the build-time base. Write only on a CHANGE, so a stable broker
+                                // never churns the flash partition.
+                                persist::store(&cfg.mqtt_host, build_ip, confirmed);
+                                last_persisted = Some(confirmed);
+                            }
+                        }
                         // SUBSCRIBE to the command topic, as its OWN task (not inline):
                         // the subscribe enqueues into the same bounded request channel
                         // THIS poll loop drains, so awaiting it here could deadlock if

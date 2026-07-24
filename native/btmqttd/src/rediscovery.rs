@@ -33,10 +33,11 @@
 //! bridge attach to an unauthenticated or mismatched broker.
 //!
 //! Scope of this module: same-subnet (`/24`) rediscovery, opt-in (`MQTT_REDISCOVERY`,
-//! off by default) and only when the broker is a name. Learned addresses are NOT yet
-//! persisted across a reboot (the boot-time hosts seed re-pins the original IP); that
-//! persistence, mDNS discovery, and config-time MAC capture in the installer are
-//! tracked as follow-ups on #43.
+//! off by default) and only when the broker is a name. A learned address IS now persisted
+//! across a reboot (issue #49 item 1): `persist.rs` remembers the connect-confirmed IP on
+//! the writable `cfg/extra` partition and `main` seeds `/etc/hosts` from it at startup, so
+//! a reboot after the broker moved reconnects immediately instead of re-scanning. Device
+//! mDNS discovery and cross-subnet / port fallback remain follow-ups (#49 items 2–3).
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -247,6 +248,34 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
             None
         }
     }
+}
+
+/// The IPv4 currently mapped to the broker `name` in `/etc/hosts`, if any. Async I/O
+/// wrapper over the pure [`parse_hosts_ip`] used by the persist-on-connect path
+/// (issue #49 item 1): on a successful `ConnAck`, `main` reads this confirmed-good IP
+/// and remembers it. `None` if the file can't be read or the name isn't pinned.
+pub async fn current_broker_ip(name: &str) -> Option<Ipv4Addr> {
+    let hosts = tokio::fs::read_to_string(HOSTS_PATH).await.ok()?;
+    parse_hosts_ip(&hosts, name)
+}
+
+/// Seed `/etc/hosts` so the broker `name` maps to `ip` — the boot-time restore of a
+/// previously learned, connect-confirmed address (issue #49 item 1). Reuses the SAME
+/// atomic, other-mappings-preserving rewrite as rediscovery, so seeding never disturbs
+/// the device's other name resolution. Returns `Ok(true)` when the mapping was changed,
+/// `Ok(false)` when it already pointed at `ip` (so `main` can skip a redundant rewrite
+/// and log nothing). The reconnect still authenticates the broker, so seeding a stale
+/// persisted IP is safe — it just fails and normal rediscovery resumes.
+pub async fn seed_hosts(name: &str, ip: Ipv4Addr) -> std::io::Result<bool> {
+    let hosts = tokio::fs::read_to_string(HOSTS_PATH).await?;
+    if parse_hosts_ip(&hosts, name) == Some(ip) {
+        return Ok(false); // already mapped there — nothing to do
+    }
+    let rewritten = rewrite_hosts(&hosts, name, ip);
+    tokio::task::spawn_blocking(move || write_hosts_blocking(&rewritten))
+        .await
+        .map_err(std::io::Error::other)??;
+    Ok(true)
 }
 
 /// TCP-connect-probe `port` on each candidate, returning those that accept. Batched to
