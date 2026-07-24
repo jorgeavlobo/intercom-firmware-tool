@@ -125,6 +125,17 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
         }
     };
     let anchor = parse_hosts_ip(&hosts, &cfg.mqtt_host)?;
+    // Only ever scan a private LAN /24. If the broker name is pinned to a public,
+    // loopback or link-local address, probing its whole /24 would be off-scope outbound
+    // scanning — refuse (Copilot). A moved LAN broker is, by definition, on a private
+    // subnet, so this loses nothing legitimate.
+    if !anchor_is_scannable(anchor) {
+        eprintln!(
+            "btmqttd: rediscovery: broker anchor {anchor} is not a private LAN address; \
+             refusing to scan a non-local /24"
+        );
+        return None;
+    }
     // Retire the CURRENT mapping for the rest of this outage: without this, once we
     // repoint A -> B, the next pass (anchor now B) would find A eligible again and could
     // bounce back to an address already shown unusable this outage (CodeRabbit). Proposals
@@ -268,6 +279,14 @@ fn parse_hosts_ip(hosts: &str, name: &str) -> Option<Ipv4Addr> {
         }
     }
     None
+}
+
+/// Whether `anchor`'s `/24` is safe to scan: only a **private** (RFC1918) LAN address
+/// qualifies. `Ipv4Addr::is_private` is false for loopback, link-local, public and
+/// other special ranges, so this one check keeps rediscovery from probing a non-local
+/// subnet.
+fn anchor_is_scannable(anchor: Ipv4Addr) -> bool {
+    anchor.is_private()
 }
 
 /// Every host address in `anchor`'s `/24` except the network (.0), broadcast (.255)
@@ -415,6 +434,17 @@ mod tests {
     fn parse_hosts_ip_ignores_ipv6_mapping() {
         let hosts = "fe80::1 broker.lan\n";
         assert_eq!(parse_hosts_ip(hosts, "broker.lan"), None);
+    }
+
+    #[test]
+    fn anchor_is_scannable_only_for_private_lan() {
+        assert!(anchor_is_scannable(Ipv4Addr::new(192, 168, 50, 64)));
+        assert!(anchor_is_scannable(Ipv4Addr::new(10, 1, 2, 3)));
+        assert!(anchor_is_scannable(Ipv4Addr::new(172, 16, 5, 5)));
+        assert!(!anchor_is_scannable(Ipv4Addr::new(127, 0, 0, 1))); // loopback
+        assert!(!anchor_is_scannable(Ipv4Addr::new(169, 254, 1, 1))); // link-local
+        assert!(!anchor_is_scannable(Ipv4Addr::new(8, 8, 8, 8))); // public
+        assert!(!anchor_is_scannable(Ipv4Addr::new(172, 32, 0, 1))); // just outside 172.16/12
     }
 
     #[test]

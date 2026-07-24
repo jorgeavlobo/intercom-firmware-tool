@@ -54,8 +54,10 @@ pub struct Config {
     // Broker rediscovery (issue #43): when the broker moves to a new LAN IP, scan its
     // /24 and repoint the broker's /etc/hosts mapping so the next reconnect finds it.
     // OFF by default and only effective when the broker is configured by NAME (the
-    // rewrite has no effect on a bare-IP config). `broker_mac`, when set, is an
-    // optional confirmation HINT the scan prefers — never a trust gate.
+    // rewrite has no effect on a bare-IP config). `broker_mac`'s role depends on TLS:
+    // WITH TLS it is a tie-breaker HINT (the reconnect's pinned-cert validation is the
+    // trust gate, so it only orders candidates); WITHOUT TLS it is REQUIRED and becomes
+    // the trust gate — a candidate is adopted only if its ARP MAC matches it.
     pub rediscovery: bool,
     pub broker_mac: Option<[u8; 6]>,
 }
