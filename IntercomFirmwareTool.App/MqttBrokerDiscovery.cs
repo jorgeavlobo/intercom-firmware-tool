@@ -80,31 +80,37 @@ namespace IntercomFirmwareTool.App
             }
             catch { /* socket setup / send failed — no candidates */ }
 
-            // Correlate — but ONLY SRV records that actually belong to our service, i.e.
-            // an instance the PTR answer pointed to, or a name of the form
-            // "<instance>._mqtt._tcp.local". A chatty responder may include unrelated SRV+A
-            // pairs in the same datagram; those must not be mistaken for MQTT brokers.
-            var instances = new HashSet<string>(ptr, StringComparer.OrdinalIgnoreCase);
-            var found = new List<BrokerCandidate>();
-            foreach (var kv in srv)
+            // Correlation + publish is inside the guard too, so this fire-and-forget method
+            // honours its "never throws" contract even on an unexpected failure here.
+            try
             {
-                // Instance names are "<instance>._mqtt._tcp.local" → suffix "." + ServiceName.
-                bool isMqtt = instances.Contains(kv.Key)
-                    || kv.Key.EndsWith("." + ServiceName, StringComparison.OrdinalIgnoreCase);
-                if (!isMqtt) continue;
-                if (a.TryGetValue(kv.Value.target, out string? ip))
+                // Correlate — but ONLY SRV records that actually belong to our service, i.e.
+                // an instance the PTR answer pointed to, or a name of the form
+                // "<instance>._mqtt._tcp.local". A chatty responder may include unrelated SRV+A
+                // pairs in the same datagram; those must not be mistaken for MQTT brokers.
+                var instances = new HashSet<string>(ptr, StringComparer.OrdinalIgnoreCase);
+                var found = new List<BrokerCandidate>();
+                foreach (var kv in srv)
                 {
-                    string host = kv.Value.target.TrimEnd('.');
-                    found.Add(new BrokerCandidate(NullIfEmpty(host), ip, kv.Value.port));
+                    // Instance names are "<instance>._mqtt._tcp.local" → suffix "." + ServiceName.
+                    bool isMqtt = instances.Contains(kv.Key)
+                        || kv.Key.EndsWith("." + ServiceName, StringComparison.OrdinalIgnoreCase);
+                    if (!isMqtt) continue;
+                    if (a.TryGetValue(kv.Value.target, out string? ip))
+                    {
+                        string host = kv.Value.target.TrimEnd('.');
+                        found.Add(new BrokerCandidate(NullIfEmpty(host), ip, kv.Value.port));
+                    }
+                }
+
+                lock (_lock)
+                {
+                    foreach (var c in found)
+                        if (!_mdns.Any(x => x.Ip == c.Ip && x.Port == c.Port))
+                            _mdns.Add(c);
                 }
             }
-
-            lock (_lock)
-            {
-                foreach (var c in found)
-                    if (!_mdns.Any(x => x.Ip == c.Ip && x.Port == c.Port))
-                        _mdns.Add(c);
-            }
+            catch { /* correlation failed — no candidates; never fault this fire-and-forget task */ }
         }
 
         /// <summary>A UDP socket for the mDNS exchange. Preferably bound to port 5353 and
