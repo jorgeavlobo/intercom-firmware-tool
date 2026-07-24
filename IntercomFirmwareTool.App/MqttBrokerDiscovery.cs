@@ -81,18 +81,24 @@ namespace IntercomFirmwareTool.App
             }
             catch { /* socket setup / send failed — no candidates */ }
 
-            // Correlate: every SRV whose target has an A record is a usable candidate.
+            // Correlate — but ONLY SRV records that actually belong to our service, i.e.
+            // an instance the PTR answer pointed to, or a name of the form
+            // "<instance>._mqtt._tcp.local". A chatty responder may include unrelated SRV+A
+            // pairs in the same datagram; those must not be mistaken for MQTT brokers.
+            var instances = new HashSet<string>(ptr, StringComparer.OrdinalIgnoreCase);
             var found = new List<BrokerCandidate>();
             foreach (var kv in srv)
             {
+                // Instance names are "<instance>._mqtt._tcp.local" → suffix "." + ServiceName.
+                bool isMqtt = instances.Contains(kv.Key)
+                    || kv.Key.EndsWith("." + ServiceName, StringComparison.OrdinalIgnoreCase);
+                if (!isMqtt) continue;
                 if (a.TryGetValue(kv.Value.target, out string? ip))
                 {
                     string host = kv.Value.target.TrimEnd('.');
                     found.Add(new BrokerCandidate(NullIfEmpty(host), ip, kv.Value.port));
                 }
             }
-            // PTR-only instances with no SRV/A can't be used (no address) — silently dropped.
-            _ = ptr;
 
             lock (_lock)
             {
@@ -287,7 +293,9 @@ namespace IntercomFirmwareTool.App
                 await stream.WriteAsync(connect, ioCts.Token);
                 byte[] resp = new byte[1];
                 int n = await stream.ReadAsync(resp, ioCts.Token);
-                return n == 1 && (resp[0] & 0xF0) == 0x20;   // CONNACK packet type
+                // A CONNACK fixed header is exactly 0x20 (type 2, reserved flags all 0);
+                // 0x21–0x2F would be a malformed header, so match 0x20 exactly.
+                return n == 1 && resp[0] == 0x20;
             }
             catch { return false; }
         }
