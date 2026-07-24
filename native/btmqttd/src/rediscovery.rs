@@ -344,10 +344,11 @@ fn mac_matches(ip: Ipv4Addr, arp: &[(Ipv4Addr, [u8; 6])], broker_mac: Option<[u8
     broker_mac.is_some_and(|want| arp.iter().any(|(aip, amac)| *aip == ip && *amac == want))
 }
 
-/// Order the open candidates for adoption: a MAC-matched host first (when a broker MAC
-/// is known and present in the ARP table), then the remaining open hosts in address
-/// order. Anything in `tried` is excluded. The result is what the driver proposes, in
-/// order, across successive rediscovery passes.
+/// Order the open candidates for adoption: MAC-matched hosts first (when a broker MAC
+/// is known and present in the ARP table), then the remaining open hosts, each group in
+/// ascending address order. Anything in `tried` is excluded. Both groups are sorted so
+/// selection is DETERMINISTIC regardless of the order `open` arrives in (the driver
+/// picks `next()` from this list), matching the documented contract.
 fn order_candidates(
     open: &[Ipv4Addr],
     arp: &[(Ipv4Addr, [u8; 6])],
@@ -366,6 +367,8 @@ fn order_candidates(
             rest.push(ip);
         }
     }
+    matched.sort_unstable();
+    rest.sort_unstable();
     matched.extend(rest);
     matched
 }
@@ -376,14 +379,18 @@ fn order_candidates(
 /// keep their original address (the line is rewritten without the matched name), and a
 /// single `ip<TAB>name` line is appended. Lines that don't name the broker — localhost,
 /// openserver, the OTA blocks, comments, blanks — are preserved verbatim, so rewriting
-/// the broker mapping never disturbs the device's other name resolution.
+/// the broker mapping never disturbs the device's other name resolution. Only lines
+/// whose first column is an **IPv4** address are considered: rediscovery is IPv4-only,
+/// so an `IPv6` mapping for the same name (e.g. `::1 broker.lan`) is left untouched.
 fn rewrite_hosts(hosts: &str, name: &str, ip: Ipv4Addr) -> String {
     let mut out = String::with_capacity(hosts.len() + 32);
     for raw in hosts.lines() {
         let body = raw.split('#').next().unwrap_or("").trim();
         let mut cols = body.split_whitespace();
         let addr = cols.next();
-        let names_it = addr.is_some() && cols.clone().any(|alias| alias.eq_ignore_ascii_case(name));
+        // Only rewrite IPv4 rows; an IPv6 row naming the broker is preserved verbatim.
+        let is_ipv4 = addr.is_some_and(|a| a.parse::<Ipv4Addr>().is_ok());
+        let names_it = is_ipv4 && cols.clone().any(|alias| alias.eq_ignore_ascii_case(name));
         if !names_it {
             out.push_str(raw);
             out.push('\n');
@@ -509,12 +516,13 @@ IP address       HW type     Flags       HW address            Mask     Device
     }
 
     #[test]
-    fn order_candidates_without_mac_keeps_address_order() {
+    fn order_candidates_without_mac_sorts_by_address() {
+        // Regardless of the input order, the result is ascending address order.
         let open = [Ipv4Addr::new(192, 168, 50, 20), Ipv4Addr::new(192, 168, 50, 9)];
         let ordered = order_candidates(&open, &[], None, &HashSet::new());
         assert_eq!(
             ordered,
-            vec![Ipv4Addr::new(192, 168, 50, 20), Ipv4Addr::new(192, 168, 50, 9)]
+            vec![Ipv4Addr::new(192, 168, 50, 9), Ipv4Addr::new(192, 168, 50, 20)]
         );
     }
 
@@ -555,6 +563,19 @@ IP address       HW type     Flags       HW address            Mask     Device
         assert_eq!(parse_hosts_ip(&out, "broker.lan"), Some(Ipv4Addr::new(192, 168, 50, 200)));
         assert_eq!(out.matches("broker.lan").count(), 1);
         assert_eq!(out.matches("MyBroker").count(), 1);
+    }
+
+    #[test]
+    fn rewrite_hosts_leaves_ipv6_mappings_untouched() {
+        // Rediscovery is IPv4-only: an IPv6 row for the same name must survive verbatim.
+        let hosts = "\
+fe80::1\tbroker.lan
+192.168.50.64\tbroker.lan
+";
+        let out = rewrite_hosts(hosts, "broker.lan", Ipv4Addr::new(192, 168, 50, 200));
+        assert!(out.contains("fe80::1\tbroker.lan\n")); // IPv6 mapping preserved
+        assert!(out.contains("192.168.50.200\tbroker.lan\n")); // IPv4 repointed
+        assert!(!out.contains("192.168.50.64")); // stale IPv4 gone
     }
 
     #[test]
