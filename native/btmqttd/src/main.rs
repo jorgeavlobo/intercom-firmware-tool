@@ -30,6 +30,7 @@ mod ha;
 mod keys;
 mod own;
 mod receiver;
+mod rediscovery;
 mod sender;
 mod volume;
 
@@ -178,6 +179,25 @@ async fn run() -> Result<(), String> {
         cfg.client_id()
     );
 
+    // Broker rediscovery (issue #43): only when opted in AND the broker is a NAME —
+    // the mechanism repoints the name's /etc/hosts mapping, which a bare-IP config
+    // doesn't use. Warn (once, here) if it was enabled with an IP so the misconfig is
+    // visible rather than silently inert.
+    let host_is_ip = cfg.mqtt_host.parse::<std::net::IpAddr>().is_ok();
+    let rediscovery_active = cfg.rediscovery && !host_is_ip;
+    if cfg.rediscovery && host_is_ip {
+        eprintln!(
+            "btmqttd: rediscovery enabled but MQTT_HOST is an IP ({}); rediscovery needs a \
+             hostname to repoint — disabled",
+            cfg.mqtt_host
+        );
+    }
+    // Consecutive poll failures, and the addresses rediscovery has already proposed
+    // (so proposals are monotonic). Both reset once a connection is (re)established.
+    let mut conn_failures: u32 = 0;
+    let mut tried_ips: std::collections::HashSet<std::net::Ipv4Addr> =
+        std::collections::HashSet::new();
+
     loop {
         tokio::select! {
             _ = sig_term.recv() => break,
@@ -185,6 +205,11 @@ async fn run() -> Result<(), String> {
             ev = eventloop.poll() => {
                 match ev {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
+                        // Connected: clear the rediscovery failure streak and the
+                        // proposed-address memory, so a later outage starts fresh and a
+                        // broker that returns to a former address can be found again.
+                        conn_failures = 0;
+                        tried_ips.clear();
                         // SUBSCRIBE to the command topic, as its OWN task (not inline):
                         // the subscribe enqueues into the same bounded request channel
                         // THIS poll loop drains, so awaiting it here could deadlock if
@@ -306,6 +331,28 @@ async fn run() -> Result<(), String> {
                         // shutdown signals — a plain sleep would block SIGTERM/SIGINT for
                         // up to 5 s while the broker is down.
                         eprintln!("btmqttd: connection: {e}");
+                        conn_failures = conn_failures.saturating_add(1);
+                        // After a sustained outage, try to rediscover the broker on its
+                        // /24 and repoint its /etc/hosts mapping; the next reconnect then
+                        // re-resolves and applies the normal authenticated/TLS-pinned
+                        // connect (the trust gate). RACE it against shutdown so a scan
+                        // can't delay SIGTERM/SIGINT. Reset the streak afterwards so the
+                        // proposed candidate gets a fresh window before the next probe.
+                        if rediscovery_active && conn_failures >= rediscovery::REDISCOVER_AFTER_FAILURES {
+                            tokio::select! {
+                                _ = sig_term.recv() => break,
+                                _ = sig_int.recv() => break,
+                                r = rediscovery::rediscover(&cfg, &mut tried_ips) => {
+                                    if let Some(ip) = r {
+                                        eprintln!(
+                                            "btmqttd: rediscovery: repointed '{}' -> {ip} in {}",
+                                            cfg.mqtt_host, rediscovery::HOSTS_PATH
+                                        );
+                                    }
+                                }
+                            }
+                            conn_failures = 0;
+                        }
                         tokio::select! {
                             _ = sig_term.recv() => break,
                             _ = sig_int.recv() => break,
