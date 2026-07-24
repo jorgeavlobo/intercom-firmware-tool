@@ -209,6 +209,9 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
     <value>L'IP du broker fournie (pour le mappage d'hôtes sur l'appareil) n'est pas une adresse IPv4 valide.</value>
   </data>
+  <data name="Mqtt_InvalidBrokerMac" xml:space="preserve">
+    <value>L'adresse MAC du broker n'est pas valide. Six octets hexadécimaux séparés par ':' ou '-' sont attendus, p. ex. aa:bb:cc:dd:ee:ff.</value>
+  </data>
   <data name="Mqtt_HostUnresolved" xml:space="preserve">
     <value>Impossible de résoudre le nom d'hôte du broker « {0} » en une IP pour le mappage d'hôtes sur l'appareil ; fournissez l'IP ou utilisez une adresse IP comme hôte.</value>
   </data>

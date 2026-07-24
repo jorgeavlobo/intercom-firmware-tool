@@ -3,6 +3,7 @@ using System.IO;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;            // SendARP P/Invoke (broker-MAC capture)
 using System.Security.Cryptography;              // Oid (serverAuth EKU on the TLS probe chain)
 using System.Security.Cryptography.X509Certificates;
 using System.Threading;
@@ -59,6 +60,23 @@ namespace IntercomFirmwareTool.App
         // the user has edited the config can't repaint a stale ✓/✗ for settings that
         // are no longer on screen.
         private int _mqttTestGen;
+
+        // The broker's MAC address, captured by ARP on a successful "Test connection"
+        // (issue #43). It is the plaintext trust anchor for rediscovery: with no TLS,
+        // the device only adopts a rescanned broker whose ARP MAC matches this. Null
+        // until captured; dropped when the broker endpoint changes to a different
+        // machine (see MqttBrokerField_TextChanged / BrokerStillAtCapturedMac).
+        private string? _mqttBrokerMac;
+        // The IPv4 the MAC was captured for — used to decide, on a later host/host-IP
+        // edit, whether the anchor still describes the configured broker.
+        private string? _mqttMacIp;
+        // The reverse-DNS name (lowercased) offered for _mqttMacIp when the broker was
+        // typed as a bare IP, so following that suggestion preserves the MAC.
+        private string? _mqttMacSuggestedHost;
+        // True while the async ARP + reverse-DNS capture runs after a good connect. The
+        // Build gate reads it (MqttOkToBuild) so a build snapshot can't be taken with a
+        // half-filled MAC; cleared in the capture's finally.
+        private bool _mqttCapturing;
 
         private bool MqttEnabled => ChkMqtt.IsChecked == true;
 
@@ -124,6 +142,54 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
+        /// <summary>The broker host or host-IP override changed. These two fields alone
+        /// determine which machine the MAC anchor belongs to, so a captured MAC is
+        /// dropped here UNLESS the new endpoint still resolves to the captured IP — the
+        /// user typed that IP, pinned it via the host-IP override, or followed the
+        /// reverse-DNS hostname suggestion. Port/auth/TLS edits go through
+        /// <see cref="MqttField_TextChanged"/> and never touch the MAC: it is an L2 fact
+        /// about the host, independent of port or credentials.</summary>
+        private void MqttBrokerField_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (_mqttBrokerMac != null && !BrokerStillAtCapturedMac())
+                ClearBrokerMac();               // different endpoint → anchor no longer applies
+            else
+                RefreshMqttRediscoveryInfo();    // kept: adjust the note to the current host form
+            ClearMqttTestStatus();
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>Whether the currently-configured broker endpoint still points at the
+        /// IP the MAC was captured for — the condition under which the anchor stays
+        /// valid across a host/host-IP edit.</summary>
+        private bool BrokerStillAtCapturedMac()
+        {
+            if (_mqttMacIp == null) return false;
+            string host = TxtMqttHost.Text.Trim();
+            // Broker typed as the captured IP directly.
+            if (host == _mqttMacIp) return true;
+            // Hostname broker: the anchor holds if it is pinned to the captured IP via
+            // the host-IP override, or the name equals the reverse-DNS suggestion (which
+            // resolves to that IP).
+            if (!IPAddress.TryParse(host, out _))
+            {
+                if (TxtMqttHostIp.Text.Trim() == _mqttMacIp) return true;
+                if (_mqttMacSuggestedHost != null &&
+                    host.Equals(_mqttMacSuggestedHost, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>Forget the captured MAC anchor and hide its note.</summary>
+        private void ClearBrokerMac()
+        {
+            _mqttBrokerMac = null;
+            _mqttMacIp = null;
+            _mqttMacSuggestedHost = null;
+            SetMqttRediscoveryInfo(null);
+        }
+
         /// <summary>Normalize the broker username when the field commits, so the value
         /// shown always matches the (trimmed) value used at test/build time — no silent
         /// discrepancy between display and use. The username is trimmed like an email in
@@ -153,6 +219,10 @@ namespace IntercomFirmwareTool.App
                     _suppressMqttShell = false;
                 }
             }
+            // The captured-MAC note is meaningful only while rediscovery is on (the
+            // anchor's sole consumer): show it when re-enabled, hide it when disabled.
+            if (sender == ChkMqttRediscovery)
+                RefreshMqttRediscoveryInfo();
             UpdateBuildEnabled();
         }
 
@@ -262,7 +332,7 @@ namespace IntercomFirmwareTool.App
             BtnClearMqttCa.IsEnabled = _uiEnabled && _mqttCaPath != null;
             BtnClearMqttCert.IsEnabled = _uiEnabled && _mqttCertPath != null;
             BtnClearMqttKey.IsEnabled = _uiEnabled && _mqttKeyPath != null;
-            BtnMqttTest.IsEnabled = _uiEnabled && !_mqttTesting;
+            BtnMqttTest.IsEnabled = _uiEnabled && !_mqttTesting && !_mqttCapturing;
 
             UpdateMqttHostIpVisibility();
             UpdateRemoteShellEnabled();
@@ -349,15 +419,136 @@ namespace IntercomFirmwareTool.App
             catch (Exception ex) { err = SafeMessage(ex); }
             finally { _mqttTesting = false; }
 
-            BtnMqttTest.IsEnabled = _uiEnabled;
             // If a connection-affecting field changed while the CONNECT was in flight,
             // its result no longer describes the visible config — the edit already
             // cleared the status line, so leave it hidden rather than repaint a stale one.
-            if (gen != _mqttTestGen) return;
+            if (gen != _mqttTestGen) { BtnMqttTest.IsEnabled = _uiEnabled; return; }
             SetMqttTestStatus(
                 ok ? LF("Fmt_MqttTest_Ok", host, port)
                    : LF("Fmt_MqttTest_Fail", err ?? L("MqttTest_Refused")),
                 error: !ok);
+
+            // On a good connect, capture the broker's MAC (and, for a bare-IP broker, a
+            // reverse-DNS hostname suggestion) as the plaintext rediscovery anchor —
+            // only when rediscovery is enabled, since the MAC is its anchor and would be
+            // unused otherwise. Build stays locked (via _mqttCapturing) through the
+            // async ARP/DNS so the snapshot can't be taken with a half-filled MAC.
+            if (ok && ChkMqttRediscovery.IsChecked == true)
+                await CaptureBrokerMacAsync(host, connectHost, gen);
+
+            BtnMqttTest.IsEnabled = _uiEnabled;
+        }
+
+        /// <summary>
+        /// After a successful test, resolve the broker to an on-link IPv4 and ARP it for
+        /// the broker's MAC (the plaintext rediscovery anchor, issue #43). For a bare-IP
+        /// broker it also does a reverse-DNS lookup and, if a name comes back, suggests
+        /// entering it (a bare-IP config has nothing for rediscovery to repoint) —
+        /// non-destructively: the note is shown, the host field is never rewritten. The
+        /// whole method is best-effort and never throws: a broker on another subnet
+        /// (ARP can't reach it) simply yields no anchor, with a note saying so.
+        /// </summary>
+        private async Task CaptureBrokerMacAsync(string host, string connectHost, int gen)
+        {
+            _mqttCapturing = true;
+            UpdateBuildEnabled();   // lock Build while ARP/reverse-DNS run
+            try
+            {
+                // Resolve the endpoint to an IPv4: connectHost is already an IPv4 for an
+                // IP host or a host-IP override; a bare hostname needs DNS. ARP is IPv4
+                // only, so a v6-only resolution yields no anchor.
+                IPAddress? ip = null;
+                if (IPAddress.TryParse(connectHost, out var direct) &&
+                    direct.AddressFamily == AddressFamily.InterNetwork)
+                    ip = direct;
+                else
+                {
+                    try
+                    {
+                        var addrs = await Dns.GetHostAddressesAsync(connectHost);
+                        ip = Array.Find(addrs, a => a.AddressFamily == AddressFamily.InterNetwork);
+                    }
+                    catch { ip = null; }
+                }
+
+                // SendARP can briefly block; keep it off the UI thread.
+                string? mac = ip != null ? await Task.Run(() => TryGetMacViaArp(ip)) : null;
+
+                // Reverse-DNS only when the broker was typed as a bare IP: a hostname
+                // config already has a name for rediscovery to repoint. The name (if any)
+                // is a non-destructive SUGGESTION — surfaced, never written to the host
+                // field. Compute it into a local before committing, so every await is done
+                // by the time we touch the shared MAC state below.
+                string? suggested = null;
+                if (mac != null && IPAddress.TryParse(host, out _))
+                {
+                    try
+                    {
+                        var entry = await Dns.GetHostEntryAsync(ip!);
+                        if (!string.IsNullOrWhiteSpace(entry.HostName) &&
+                            !IPAddress.TryParse(entry.HostName, out _))
+                            suggested = entry.HostName.ToLowerInvariant();
+                    }
+                    catch { /* no PTR record — a MAC-only anchor is fine */ }
+                }
+
+                // Single commit point AFTER all awaits: if a connection-affecting edit
+                // happened while ARP/DNS ran, the generation no longer matches — drop the
+                // whole capture rather than write a MAC for an endpoint no longer on screen.
+                if (gen != _mqttTestGen) return;
+
+                if (mac == null)
+                {
+                    // Reachable but no MAC (broker off-subnet, or an ARP race): forget any
+                    // stale anchor and say so, so the user knows plaintext rediscovery has
+                    // no anchor for this broker (TLS would still anchor it).
+                    ClearBrokerMac();
+                    SetMqttRediscoveryInfo(L("MqttHint_AnchorNoMac"));
+                    return;
+                }
+
+                _mqttBrokerMac = mac;
+                _mqttMacIp = ip!.ToString();
+                _mqttMacSuggestedHost = suggested;
+                RefreshMqttRediscoveryInfo();
+            }
+            finally
+            {
+                _mqttCapturing = false;
+                UpdateBuildEnabled();   // re-enable Build; the gate re-reads the MAC state
+            }
+        }
+
+        // Windows iphlpapi ARP resolution. Fills macAddr for an on-link IPv4; a non-zero
+        // return, or an all-zero/short address, means "no entry" (e.g. off-subnet).
+        [DllImport("iphlpapi.dll", ExactSpelling = true)]
+        private static extern int SendARP(uint destIp, uint srcIp, byte[] macAddr, ref int macAddrLen);
+
+        /// <summary>Best-effort ARP lookup of an on-link IPv4's MAC, returned as the
+        /// canonical lowercase <c>aa:bb:cc:dd:ee:ff</c> btmqttd's parse_mac accepts, or
+        /// null when it can't be resolved (off-link address, SendARP failure, or an
+        /// all-zero / short result).</summary>
+        private static string? TryGetMacViaArp(IPAddress ip)
+        {
+            if (ip.AddressFamily != AddressFamily.InterNetwork) return null;
+            byte[] b = ip.GetAddressBytes();   // a.b.c.d, most-significant octet first
+            // SendARP wants the destination as a uint whose LEAST-significant byte is the
+            // first address octet (i.e. the 4 raw bytes read little-endian). Build it with
+            // explicit shifts so the order is unambiguous on any host endianness.
+            uint dest = (uint)(b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24));
+            byte[] mac = new byte[6];
+            int len = mac.Length;
+            try
+            {
+                if (SendARP(dest, 0, mac, ref len) != 0 || len < 6) return null;
+            }
+            catch (DllNotFoundException) { return null; }        // non-Windows / no iphlpapi
+            catch (EntryPointNotFoundException) { return null; }
+            // An all-zero address is an incomplete ARP row, not a real MAC.
+            bool allZero = true;
+            for (int i = 0; i < 6; i++) if (mac[i] != 0) { allZero = false; break; }
+            if (allZero) return null;
+            return $"{mac[0]:x2}:{mac[1]:x2}:{mac[2]:x2}:{mac[3]:x2}:{mac[4]:x2}:{mac[5]:x2}";
         }
 
         /// <summary>
@@ -525,6 +716,48 @@ namespace IntercomFirmwareTool.App
             TxtMqttTestStatus.Visibility = Visibility.Collapsed;
         }
 
+        /// <summary>Show (or, with null/empty text, hide) the rediscovery-anchor note
+        /// under the checkbox. Announced to screen readers like the test-status line.</summary>
+        private void SetMqttRediscoveryInfo(string? text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                TxtMqttRediscoveryInfo.Text = "";
+                TxtMqttRediscoveryInfo.Visibility = Visibility.Collapsed;
+                return;
+            }
+            TxtMqttRediscoveryInfo.Text = text;
+            TxtMqttRediscoveryInfo.Visibility = Visibility.Visible;
+            AnnounceLiveRegion(TxtMqttRediscoveryInfo);
+        }
+
+        /// <summary>Recompute the anchor note from the current state. Hidden when
+        /// rediscovery is off or no MAC is captured. Otherwise one of three honest
+        /// cases, because device-side rediscovery repoints a HOSTNAME (a bare-IP broker
+        /// has no name to repoint, so a MAC alone doesn't make it recoverable):
+        /// <list type="bullet">
+        /// <item>broker is a hostname → the anchor is effective (name + MAC);</item>
+        /// <item>broker is a bare IP with a reverse-DNS name → suggest adopting it;</item>
+        /// <item>broker is a bare IP with no name → note that a hostname is needed.</item>
+        /// </list>
+        /// The distinct "connected but no MAC" hint is set directly by the capture and
+        /// left until the next relevant event.</summary>
+        private void RefreshMqttRediscoveryInfo()
+        {
+            if (ChkMqttRediscovery.IsChecked != true || _mqttBrokerMac == null)
+            {
+                SetMqttRediscoveryInfo(null);
+                return;
+            }
+            string mac = _mqttBrokerMac, ip = _mqttMacIp ?? "";
+            if (!IPAddress.TryParse(TxtMqttHost.Text.Trim(), out _))
+                SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorMac", mac, ip));         // hostname → effective
+            else if (_mqttMacSuggestedHost != null)
+                SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorHostname", mac, ip, _mqttMacSuggestedHost));
+            else
+                SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorIpOnly", mac, ip));      // bare IP, no name
+        }
+
         // ---- Validation (mirror of MqttInstaller.Validate for inline cues) --
 
         private static bool IsValidPortText(string s) =>
@@ -554,6 +787,10 @@ namespace IntercomFirmwareTool.App
         private bool MqttOkToBuild()
         {
             if (!MqttEnabled) return true;
+            // A broker-MAC capture (ARP + reverse-DNS) is in flight after "Test
+            // connection": block Build until it settles, so the mqttOpts snapshot can't
+            // be taken with a null MAC the finished capture would have filled in.
+            if (_mqttCapturing) return false;
             if (TxtMqttHost.Text.Trim().Length == 0) return false;
             return MqttStructuralError() == null;
         }
@@ -711,7 +948,12 @@ namespace IntercomFirmwareTool.App
                 UseJsonPayload: ChkMqttJsonPayload.IsChecked == true,
                 // Broker rediscovery (#43/#44), on by default. Device-side it self-gates
                 // (hostname config + TLS), so it is inert unless those hold.
-                MqttRediscovery: ChkMqttRediscovery.IsChecked == true)
+                MqttRediscovery: ChkMqttRediscovery.IsChecked == true,
+                // Plaintext rediscovery anchor (#43): the broker MAC captured on Test
+                // connection. Only embedded when rediscovery is on (its only consumer);
+                // the field is already null unless it matches the current endpoint, so a
+                // stale anchor can't reach the build.
+                MqttBrokerMac: ChkMqttRediscovery.IsChecked == true ? _mqttBrokerMac : null)
             {
                 // Topics are prefilled with the record's defaults, so an untouched
                 // panel reproduces those exactly; a customized one overrides them.

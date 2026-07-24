@@ -209,6 +209,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
     <value>O IP do broker fornecido (para o mapeamento de hosts no dispositivo) não é um endereço IPv4 válido.</value>
   </data>
+  <data name="Mqtt_InvalidBrokerMac" xml:space="preserve">
+    <value>O endereço MAC do broker não é válido. São esperados seis octetos hexadecimais separados por ':' ou '-', p. ex. aa:bb:cc:dd:ee:ff.</value>
+  </data>
   <data name="Mqtt_HostUnresolved" xml:space="preserve">
     <value>Não foi possível resolver o nome do broker "{0}" para um IP para o mapeamento de hosts no dispositivo; forneça o IP ou use um endereço IP como host.</value>
   </data>

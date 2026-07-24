@@ -50,8 +50,15 @@ namespace IntercomFirmwareTool.Core
     /// <c>/etc/hosts</c> mapping so the bridge reconnects without a re-flash. On by default.
     /// Self-gates on the device: it only acts when the broker is a NAME (the repoint has no
     /// effect on a bare-IP config) AND there is a trust anchor — TLS (the reconnect validates
-    /// the broker's pinned certificate). Writes <c>MQTT_REDISCOVERY</c>. (A broker-MAC anchor
-    /// for plaintext brokers, captured in the UI, is a separate follow-up.)
+    /// the broker's pinned certificate). Writes <c>MQTT_REDISCOVERY</c>.
+    /// </param>
+    /// <param name="MqttBrokerMac">
+    /// The broker's Ethernet MAC address (six hex octets, ':' or '-' separated), captured in
+    /// the UI at "Test connection" time via ARP. It is the plaintext trust anchor for
+    /// rediscovery: without TLS, btmqttd only adopts a rescanned candidate whose ARP MAC
+    /// matches this value — so a broker on a fixed NIC recovers a changed DHCP lease even with
+    /// no certificate. Writes <c>MQTT_BROKER_MAC</c> when set; null omits the key (rediscovery
+    /// then needs TLS as its anchor). Validated by <see cref="Validate"/>.
     /// </param>
     public sealed record MqttOptions(
         string MqttHost,
@@ -65,7 +72,8 @@ namespace IntercomFirmwareTool.Core
         bool AllowRemoteShell = false,
         bool EnableHaDiscovery = false,
         bool UseJsonPayload = true,
-        bool MqttRediscovery = true)
+        bool MqttRediscovery = true,
+        string? MqttBrokerMac = null)
     {
         // A record's synthesized ToString() prints EVERY property — which would
         // leak MqttPass and the TLS private key (ClientKeyPem) into any log line
@@ -77,7 +85,10 @@ namespace IntercomFirmwareTool.Core
             $"AllowRemoteShell = {AllowRemoteShell}, " +
             $"Payload = {(UseJsonPayload ? "json" : "raw")}, " +
             $"HaDiscovery = {EnableHaDiscovery}, " +
-            $"Rediscovery = {MqttRediscovery} }}";
+            $"Rediscovery = {MqttRediscovery}, " +
+            // The MAC is not a secret (any LAN host can ARP it), so print it — it
+            // aids diagnosing a rediscovery-anchor mismatch. "(none)" when unset.
+            $"BrokerMac = {MqttBrokerMac ?? "(none)"} }}";
 
         /// <summary>OpenWebNet gateway host for the socket monitor back-end (loopback alias).</summary>
         public string OwnHost { get; init; } = "127.0.0.1";
@@ -368,6 +379,13 @@ namespace IntercomFirmwareTool.Core
                 !(IPAddress.TryParse(opts.HostIpForHosts, out var hostIp) &&
                   hostIp.AddressFamily == AddressFamily.InterNetwork))
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidHostIp"), nameof(opts));
+
+            // Broker MAC anchor (rediscovery, plaintext path): if supplied it must be
+            // six hex octets, ':'/'-' separated — the exact shape btmqttd's parse_mac
+            // accepts. A malformed value would be silently dropped device-side, quietly
+            // disabling the plaintext anchor, so reject it here where the user sees why.
+            if (!string.IsNullOrWhiteSpace(opts.MqttBrokerMac) && !IsValidMac(opts.MqttBrokerMac!))
+                throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidBrokerMac"), nameof(opts));
 
             // user/pass are both-or-neither.
             bool hasUser = !string.IsNullOrEmpty(opts.MqttUser);
@@ -779,6 +797,12 @@ namespace IntercomFirmwareTool.Core
             // mapping. It self-gates device-side (needs a hostname config + a trust anchor —
             // TLS today), so this stays safe even when on by default.
             sb.Append("MQTT_REDISCOVERY=").Append(opts.MqttRediscovery ? '1' : '0').Append('\n');
+
+            // Broker MAC anchor (#43): the plaintext trust anchor for rediscovery.
+            // Emit only when set (Validate has already checked its shape) — absent, the
+            // device falls back to requiring TLS before adopting a rescanned broker.
+            if (!string.IsNullOrWhiteSpace(opts.MqttBrokerMac))
+                sb.Append(Conf("MQTT_BROKER_MAC", opts.MqttBrokerMac!));
             return sb.ToString();
         }
 
@@ -1441,6 +1465,23 @@ namespace IntercomFirmwareTool.Core
                 if (label[0] == '-' || label[^1] == '-') return false;
                 foreach (char c in label)
                     if (!(char.IsAsciiLetterOrDigit(c) || c == '-')) return false;
+            }
+            return true;
+        }
+
+        /// <summary>Six hex octets separated by ':' or '-' (e.g. <c>aa:bb:cc:dd:ee:ff</c>).
+        /// Kept in lockstep with btmqttd's <c>parse_mac</c>: exactly six two-digit hex
+        /// groups, no more, no fewer — so a value this accepts is one the device also
+        /// accepts (and vice versa). Case-insensitive.</summary>
+        private static bool IsValidMac(string mac)
+        {
+            var parts = mac.Split(':', '-');
+            if (parts.Length != 6) return false;
+            foreach (var part in parts)
+            {
+                if (part.Length != 2) return false;
+                foreach (char c in part)
+                    if (!char.IsAsciiHexDigit(c)) return false;
             }
             return true;
         }
