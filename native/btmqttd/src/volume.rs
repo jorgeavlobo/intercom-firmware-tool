@@ -106,12 +106,15 @@ impl VolumeCtl {
     /// shows a value before the first change. Best-effort — a refused or unavailable
     /// gateway just leaves `current` unknown until the first monitor broadcast.
     pub async fn seed(&self) {
-        // Delegate to ensure_current so the read is applied ONLY while `current` is still
-        // unknown. The command subscription is already live when announce() calls this,
-        // so a command or a monitor broadcast could set a newer value while this read is
-        // in flight — we must not overwrite it with the stale seed (same race guard the
-        // first-command mute/step path relies on).
-        let _ = self.ensure_current().await;
+        // Learn the level if still unknown — ensure_current reads + observes, applying
+        // the read ONLY while `current` is unknown (so a command/monitor update racing
+        // the read isn't clobbered). Then ALWAYS republish the retained volume/mute
+        // state: this runs on every (re)connect, and a broker that restarted dropped the
+        // retained state topics — HA discovery is re-sent on connect but the slider/
+        // switch would otherwise stay stateless until the next report/command, even when
+        // `current` was already known. publish_current is a no-op while `current` is None.
+        self.ensure_current().await;
+        self.publish_current().await;
     }
 
     /// Publish the retained `volume` (0..=100) and derived `mute` (`on`/`off`) state,
