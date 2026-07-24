@@ -259,6 +259,24 @@ pub async fn current_broker_ip(name: &str) -> Option<Ipv4Addr> {
     parse_hosts_ip(&hosts, name)
 }
 
+/// The boot init script that re-seeds `/etc/hosts` at EVERY boot (installer-written by
+/// `BtDaemonAppsHosts`, on the read-ONLY rootfs). Its `bt_hosts.sh add <host> <ip>` line
+/// for the broker is the IMMUTABLE build-time mapping — unlike `/etc/hosts` (tmpfs,
+/// mutated at runtime by rediscovery and the persistence seed).
+pub const BOOT_HOSTS_SCRIPT: &str = "/etc/init.d/bt_daemon-apps.sh";
+
+/// The build-time IPv4 the boot init seeds for broker `name`, read from
+/// [`BOOT_HOSTS_SCRIPT`] — the IMMUTABLE source of the record's "base" (issue #49 item 1 /
+/// Codex). Reading the build IP from here rather than the mutable `/etc/hosts` mapping is
+/// what makes the persistence correct across a `bt_service_watchdog` respawn (where
+/// `/etc/hosts` may already hold a rediscovered IP) and a firmware re-flash (which the
+/// rootfs script reflects but tmpfs does not). `None` if the script can't be read or has
+/// no mapping for the name.
+pub async fn build_time_ip(name: &str) -> Option<Ipv4Addr> {
+    let script = tokio::fs::read_to_string(BOOT_HOSTS_SCRIPT).await.ok()?;
+    parse_boot_hosts_ip(&script, name)
+}
+
 /// Whether `ip` currently answers on `port` AND its `/proc/net/arp` MAC matches
 /// `want_mac`. This is the PLAINTEXT trust gate re-applied before the boot seed restores
 /// a persisted IP (issue #49 item 1 / Codex P1): `rediscover` only ever adopts a plaintext
@@ -362,6 +380,32 @@ fn parse_hosts_ip(hosts: &str, name: &str) -> Option<Ipv4Addr> {
         let Ok(ip) = addr.parse::<Ipv4Addr>() else { continue };
         if cols.any(|alias| alias.eq_ignore_ascii_case(name)) {
             return Some(ip);
+        }
+    }
+    None
+}
+
+/// The IPv4 a `bt_hosts.sh add <host> <ip>` line in the boot init script maps `name` to,
+/// if any. Matches the installer's line shape (`BtDaemonAppsHosts.MappingLine`:
+/// `/bin/bt_hosts.sh add <host> <ip>`), host case-insensitively; commented lines and any
+/// non-IPv4 address are ignored. The first matching line wins.
+fn parse_boot_hosts_ip(script: &str, name: &str) -> Option<Ipv4Addr> {
+    for raw in script.lines() {
+        let line = raw.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        // Look for the `<…>bt_hosts.sh add <host> <ip>` shape anywhere on the line.
+        for w in toks.windows(4) {
+            if w[0].ends_with("bt_hosts.sh")
+                && w[1] == "add"
+                && w[2].eq_ignore_ascii_case(name)
+            {
+                if let Ok(ip) = w[3].parse::<Ipv4Addr>() {
+                    return Some(ip);
+                }
+            }
         }
     }
     None
@@ -521,6 +565,22 @@ mod tests {
         assert_eq!(parse_hosts_ip(hosts, "localhost"), Some(Ipv4Addr::new(127, 0, 0, 1)));
         assert_eq!(parse_hosts_ip(hosts, "commented.host"), None);
         assert_eq!(parse_hosts_ip(hosts, "absent"), None);
+    }
+
+    #[test]
+    fn parse_boot_hosts_ip_reads_the_installer_line() {
+        // The installer writes tab-indented `/bin/bt_hosts.sh add <host> <ip>` lines.
+        let script = "\
+#!/bin/sh
+\t/bin/bt_hosts.sh add openserver 127.0.0.1
+\t/bin/bt_hosts.sh add broker.lan 192.168.50.64
+# /bin/bt_hosts.sh add commented.host 10.0.0.1
+";
+        assert_eq!(parse_boot_hosts_ip(script, "broker.lan"), Some(Ipv4Addr::new(192, 168, 50, 64)));
+        assert_eq!(parse_boot_hosts_ip(script, "BROKER.LAN"), Some(Ipv4Addr::new(192, 168, 50, 64)));
+        assert_eq!(parse_boot_hosts_ip(script, "openserver"), Some(Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(parse_boot_hosts_ip(script, "commented.host"), None); // commented out
+        assert_eq!(parse_boot_hosts_ip(script, "absent"), None);
     }
 
     #[test]

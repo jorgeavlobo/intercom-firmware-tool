@@ -218,14 +218,22 @@ async fn run() -> Result<(), String> {
     // is remembered on a writable, reboot-persistent partition. Seed /etc/hosts from it
     // BEFORE the first connect so a reboot after the broker moved reconnects to the
     // learned IP immediately — instead of re-running the whole failure-count + /24 scan.
-    // Only when rediscovery is active (name broker + trust anchor). `last_persisted`
-    // tracks what's on disk so a stable broker never rewrites the flash partition.
+    // Only when rediscovery is active (name broker + trust anchor).
     //
-    // `current` is the broker's /etc/hosts mapping right now; `record` is any persisted
-    // (base, learned). Persist I/O is blocking std::fs, so it's offloaded to the blocking
-    // pool (the runtime is single-threaded — Copilot).
-    let current = if rediscovery_active {
-        rediscovery::current_broker_ip(&cfg.mqtt_host).await
+    // `build_ip` — the record's "base" — is read from the IMMUTABLE boot init script
+    // (rediscovery::build_time_ip), NOT the mutable /etc/hosts mapping. That is what makes
+    // this correct across a bt_service_watchdog RESPAWN (where /etc/hosts may already hold
+    // a rediscovered IP) and a firmware RE-FLASH (which the rootfs script reflects but the
+    // surviving cfg/extra record does not) — Codex.
+    //
+    // Two independent flags: `last_persisted` is the ADOPTED learned IP (what /etc/hosts is
+    // seeded to), so a stable broker never rewrites the flash partition; `persisted_on_disk`
+    // is merely whether a record FILE exists — including one the base or MAC gate rejected,
+    // so a build-IP ConnAck can clear that stale file too (CodeRabbit). Persist I/O is
+    // blocking std::fs, so it's offloaded to the blocking pool (single-threaded runtime —
+    // Copilot).
+    let build_ip = if rediscovery_active {
+        rediscovery::build_time_ip(&cfg.mqtt_host).await
     } else {
         None
     };
@@ -236,54 +244,42 @@ async fn run() -> Result<(), String> {
         None
     };
 
-    // The record's "base" is the build-time /etc/hosts IP the move was learned against.
-    // On a fresh reboot that is simply `current` (the boot init just re-seeded it). But
-    // bt_service_watchdog respawns btmqttd WITHOUT a reboot, so on a respawn `current` may
-    // already be a rediscovered IP; if a record's learned matches it, that record's stored
-    // base IS the true build-time IP — recover it, so a later move records the right base
-    // and a future real reboot doesn't reject the record as a stale-base mismatch (Codex P2).
-    let build_ip: Option<std::net::Ipv4Addr> = match (current, record) {
-        (Some(cur), Some((base, learned))) if learned == cur => Some(base),
-        (cur, _) => cur,
-    };
-
     let mut last_persisted: Option<std::net::Ipv4Addr> = None;
+    let mut persisted_on_disk = record.is_some();
     if let (Some(build_ip), Some((base, learned))) = (build_ip, record) {
         // Apply the record only while its base still matches this firmware's build IP; a
-        // mismatch means a re-flash re-pointed the broker and the record is stale.
+        // mismatch means a re-flash re-pointed the broker and the record is stale (it will
+        // be cleared on the first build-IP ConnAck via `persisted_on_disk`).
         if base == build_ip {
-            if current == Some(learned) {
-                // Watchdog respawn: /etc/hosts already holds the learned IP — adopt it,
-                // no reseed needed.
-                last_persisted = Some(learned);
+            // Seed the learned IP. In PLAINTEXT mode re-apply the same ARP-MAC gate
+            // rediscover() uses: a persisted IP that DHCP reassigned while the unit was off
+            // must not receive our credentials on the first connect (Codex). Under TLS the
+            // reconnect's pinned-cert handshake is the gate. seed_hosts is idempotent, so a
+            // respawn whose /etc/hosts already holds the learned IP just no-ops.
+            let trusted = if cfg.uses_tls() {
+                true
+            } else if let Some(mac) = cfg.broker_mac {
+                rediscovery::arp_mac_matches(learned, cfg.mqtt_port, mac).await
             } else {
-                // Fresh reboot → seed the learned IP. In PLAINTEXT mode re-apply the same
-                // ARP-MAC gate rediscover() uses: a persisted IP that DHCP reassigned while
-                // the unit was off must not receive our credentials on the first connect
-                // (Codex P1). Under TLS the reconnect's pinned-cert handshake is the gate.
-                let trusted = if cfg.uses_tls() {
-                    true
-                } else if let Some(mac) = cfg.broker_mac {
-                    rediscovery::arp_mac_matches(learned, cfg.mqtt_port, mac).await
-                } else {
-                    false // rediscovery_active guarantees TLS or a MAC; belt-and-braces
-                };
-                if trusted {
-                    last_persisted = Some(learned);
-                    match rediscovery::seed_hosts(&cfg.mqtt_host, learned).await {
-                        Ok(true) => eprintln!(
+                false // rediscovery_active guarantees TLS or a MAC; belt-and-braces
+            };
+            if trusted {
+                match rediscovery::seed_hosts(&cfg.mqtt_host, learned).await {
+                    Ok(true) => {
+                        last_persisted = Some(learned);
+                        eprintln!(
                             "btmqttd: seeded '{}' -> {learned} in {} from persisted state",
                             cfg.mqtt_host, rediscovery::HOSTS_PATH
-                        ),
-                        Ok(false) => {} // already mapped there — quiet
-                        Err(e) => eprintln!("btmqttd: could not seed persisted broker IP: {e}"),
+                        );
                     }
-                } else {
-                    eprintln!(
-                        "btmqttd: persisted broker IP {learned} did not confirm the broker MAC \
-                         at boot; not seeding (normal rediscovery will re-locate it)"
-                    );
+                    Ok(false) => last_persisted = Some(learned), // already mapped (respawn)
+                    Err(e) => eprintln!("btmqttd: could not seed persisted broker IP: {e}"),
                 }
+            } else {
+                eprintln!(
+                    "btmqttd: persisted broker IP {learned} did not confirm the broker MAC \
+                     at boot; not seeding (normal rediscovery will re-locate it)"
+                );
             }
         }
     }
@@ -316,14 +312,17 @@ async fn run() -> Result<(), String> {
                         {
                             if confirmed == build_ip {
                                 // The broker is at (or has returned to) its build-time IP, which
-                                // the boot init re-seeds anyway. Forget any stale learned record
-                                // so a reboot doesn't seed a now-wrong address.
-                                if last_persisted.is_some()
+                                // the boot init re-seeds anyway. Forget any on-disk record —
+                                // including one boot restore REJECTED (base mismatch / MAC gate),
+                                // so `persisted_on_disk`, not `last_persisted`, drives the clear
+                                // (CodeRabbit) — so a reboot doesn't seed a now-wrong address.
+                                if persisted_on_disk
                                     && tokio::task::spawn_blocking(persist::clear)
                                         .await
                                         .unwrap_or(false)
                                 {
                                     last_persisted = None;
+                                    persisted_on_disk = false;
                                 }
                             } else if last_persisted != Some(confirmed) {
                                 // A rediscovered IP that just authenticated → remember it against
@@ -337,6 +336,7 @@ async fn run() -> Result<(), String> {
                                 .unwrap_or(false)
                                 {
                                     last_persisted = Some(confirmed);
+                                    persisted_on_disk = true;
                                 }
                             }
                         }
