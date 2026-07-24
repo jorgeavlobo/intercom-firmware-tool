@@ -482,9 +482,12 @@ namespace IntercomFirmwareTool.App
                 {
                     bool ok2 = await RunMqttConnectionTestAsync(captureAnchor: false);
                     if (_mqttBrokerMac != null)   // config not edited away during the retest
+                        // On failure the note stays generic (it points at the test-status
+                        // line for the actual reason) rather than asserting a certificate
+                        // mismatch — the retest can fail for auth/timeout/DNS reasons too.
                         SetMqttRediscoveryInfo(ok2
                             ? LF("Fmt_MqttAnchorPromoted", _mqttBrokerMac, _mqttMacIp ?? "", _mqttMacSuggestedHost ?? "")
-                            : LF("Fmt_MqttAnchorCertMismatch", _mqttBrokerMac, _mqttMacIp ?? "", _mqttMacSuggestedHost ?? ""));
+                            : LF("Fmt_MqttAnchorHostnameFail", _mqttBrokerMac, _mqttMacIp ?? "", _mqttMacSuggestedHost ?? ""));
                 }
             }
 
