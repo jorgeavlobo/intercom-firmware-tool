@@ -23,9 +23,9 @@ namespace IntercomFirmwareTool.App
     /// <item><b>mDNS</b> — a hand-rolled <c>_mqtt._tcp.local</c> query (unicast-response
     /// bit set) parsed for PTR/SRV/A records, giving <c>(hostname, IPv4, port)</c> directly.
     /// Cheap and passive; run at startup.</item>
-    /// <item><b>/24 scan</b> — a heavier fallback: TCP-probe every host on the local /24,
-    /// confirm a plaintext broker with a raw MQTT CONNECT/CONNACK exchange (port 1883) or a
-    /// bare TCP open (TLS port 8883), then reverse-DNS the address. Run on demand only.</item>
+    /// <item><b>/24 scan</b> — a heavier fallback: TCP-probe every host on each active LAN
+    /// /24, confirm a broker with a real MQTT CONNECT/CONNACK — over a TLS handshake on 8883
+    /// — then reverse-DNS the address. Run on demand only.</item>
     /// </list>
     /// Everything here is best-effort and swallows all errors — discovery failing must never
     /// disrupt the app; it simply yields no candidates.
@@ -67,14 +67,14 @@ namespace IntercomFirmwareTool.App
                 udp.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 4);
 
                 byte[] query = BuildPtrQuery(ServiceName);
-                await udp.SendAsync(query, query.Length, new IPEndPoint(MdnsGroup, MdnsPort));
+                await udp.SendAsync(query, query.Length, new IPEndPoint(MdnsGroup, MdnsPort)).ConfigureAwait(false);
 
                 using var winCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 winCts.CancelAfter(window);
                 while (!winCts.IsCancellationRequested)
                 {
                     UdpReceiveResult res;
-                    try { res = await udp.ReceiveAsync(winCts.Token); }
+                    try { res = await udp.ReceiveAsync(winCts.Token).ConfigureAwait(false); }
                     catch (OperationCanceledException) { break; }
                     catch { break; }
                     try { ParseDnsResponse(res.Buffer, ptr, srv, a); }
@@ -248,12 +248,12 @@ namespace IntercomFirmwareTool.App
                     for (int h = 1; h <= 254; h++)
                         tasks.Add(ProbeHostAsync($"{prefix}.{h}", port, useTls, sem, hits, ct));
 
-            try { await Task.WhenAll(tasks); } catch { /* individual probes already swallow */ }
+            try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { /* individual probes already swallow */ }
 
             var results = new List<BrokerCandidate>();
             foreach (var kv in hits.OrderBy(k => k.Key))
             {
-                string? host = await TryReverseDnsAsync(kv.Key, ct);
+                string? host = await TryReverseDnsAsync(kv.Key, ct).ConfigureAwait(false);
                 results.Add(new BrokerCandidate(host, kv.Key, kv.Value));
             }
             return results;
@@ -272,7 +272,7 @@ namespace IntercomFirmwareTool.App
                 using var tcp = new TcpClient();
                 using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 connectCts.CancelAfter(TimeSpan.FromMilliseconds(400));
-                try { await tcp.ConnectAsync(IPAddress.Parse(ip), port, connectCts.Token); }
+                try { await tcp.ConnectAsync(IPAddress.Parse(ip), port, connectCts.Token).ConfigureAwait(false); }
                 catch { return; }   // closed / filtered / timed out — not a hit
 
                 using var ioCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -288,10 +288,10 @@ namespace IntercomFirmwareTool.App
                         // (and Build) validate the certificate properly.
                         ssl = new SslStream(stream, leaveInnerStreamOpen: false, (_, _, _, _) => true);
                         await ssl.AuthenticateAsClientAsync(
-                            new SslClientAuthenticationOptions { TargetHost = ip }, ioCts.Token);
+                            new SslClientAuthenticationOptions { TargetHost = ip }, ioCts.Token).ConfigureAwait(false);
                         stream = ssl;
                     }
-                    if (await IsMqttOverStreamAsync(stream, ioCts.Token))
+                    if (await IsMqttOverStreamAsync(stream, ioCts.Token).ConfigureAwait(false))
                         hits.AddOrUpdate(ip, port, (_, existing) => Math.Min(existing, port)); // prefer 1883
                 }
                 finally { ssl?.Dispose(); }
@@ -310,12 +310,12 @@ namespace IntercomFirmwareTool.App
             try
             {
                 byte[] connect = BuildMqttConnect("intercom-fw-tool-scan");
-                await stream.WriteAsync(connect, ct);
+                await stream.WriteAsync(connect, ct).ConfigureAwait(false);
                 byte[] hdr = new byte[2];
                 int got = 0;
                 while (got < hdr.Length)
                 {
-                    int n = await stream.ReadAsync(hdr.AsMemory(got, hdr.Length - got), ct);
+                    int n = await stream.ReadAsync(hdr.AsMemory(got, hdr.Length - got), ct).ConfigureAwait(false);
                     if (n <= 0) break;   // peer closed
                     got += n;
                 }
@@ -357,7 +357,7 @@ namespace IntercomFirmwareTool.App
             {
                 using var dnsCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 dnsCts.CancelAfter(TimeSpan.FromSeconds(2));
-                var entry = await Dns.GetHostEntryAsync(IPAddress.Parse(ip)).WaitAsync(dnsCts.Token);
+                var entry = await Dns.GetHostEntryAsync(IPAddress.Parse(ip)).WaitAsync(dnsCts.Token).ConfigureAwait(false);
                 string name = (entry.HostName ?? "").TrimEnd('.');
                 // Reject an IP-shaped "name" (some resolvers echo the address back).
                 return (name.Length > 0 && !IPAddress.TryParse(name, out _)) ? name : null;
