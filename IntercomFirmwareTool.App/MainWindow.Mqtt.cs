@@ -166,16 +166,19 @@ namespace IntercomFirmwareTool.App
         {
             if (_mqttMacIp == null || !IPAddress.TryParse(_mqttMacIp, out var capturedIp)) return false;
             string host = TxtMqttHost.Text.Trim();
-            // Broker typed as an IP: it holds the anchor only if it is the captured
-            // address. Compare as IPAddress values, not strings, so a different textual
-            // form of the same IPv4 doesn't spuriously drop a valid anchor.
+            // Broker typed as an IP: it targets that address directly — hold the anchor
+            // only if it is the captured one. Compare as IPAddress values, not strings,
+            // so a different textual form of the same IPv4 still matches.
             if (IPAddress.TryParse(host, out var hostIp)) return hostIp.Equals(capturedIp);
-            // Hostname broker: the anchor holds if it is pinned to the captured IP via
-            // the host-IP override, or the name equals the reverse-DNS suggestion (which
-            // resolves to that IP).
-            if (IPAddress.TryParse(TxtMqttHostIp.Text.Trim(), out var overrideIp) &&
-                overrideIp.Equals(capturedIp))
-                return true;
+            // Hostname broker: the build pins the name to the host-IP override when one
+            // is given (it becomes HostIpForHosts), so a non-empty override is
+            // AUTHORITATIVE for what the MAC must match. If it isn't the captured IP the
+            // build targets a different machine — drop the anchor, whatever the name is.
+            string hipText = TxtMqttHostIp.Text.Trim();
+            if (hipText.Length > 0)
+                return IPAddress.TryParse(hipText, out var overrideIp) && overrideIp.Equals(capturedIp);
+            // No override: the name is resolved at build time. Preserve only when it is
+            // the reverse-DNS name captured for this IP (which resolves back to it).
             return _mqttMacSuggestedHost != null &&
                    host.Equals(_mqttMacSuggestedHost, StringComparison.OrdinalIgnoreCase);
         }
