@@ -203,6 +203,21 @@ namespace IntercomFirmwareTool.App
             SetMqttRediscoveryInfo(null);
         }
 
+        /// <summary>Write the Host IP override (and optionally the broker hostname) as part
+        /// of the post-test canonicalization, guarded so the resulting TextChanged events
+        /// are not treated as user edits (which would drop the captured MAC / test result).
+        /// Pass <paramref name="hostName"/> null to set only the Host IP.</summary>
+        private void SetBrokerFieldsSuppressed(string? hostName, string hostIp)
+        {
+            _suppressMqttBrokerInvalidation = true;
+            try
+            {
+                TxtMqttHostIp.Text = hostIp;            // row becomes visible when host is a name
+                if (hostName != null) TxtMqttHost.Text = hostName;
+            }
+            finally { _suppressMqttBrokerInvalidation = false; }
+        }
+
         /// <summary>Normalize the broker username when the field commits, so the value
         /// shown always matches the (trimmed) value used at test/build time — no silent
         /// discrepancy between display and use. The username is trimmed like an email in
@@ -441,11 +456,12 @@ namespace IntercomFirmwareTool.App
                    : LF("Fmt_MqttTest_Fail", err ?? L("MqttTest_Refused")),
                 error: !ok);
 
-            // On a good connect, capture the broker's MAC (and, for a bare-IP broker, a
-            // reverse-DNS hostname suggestion) as the plaintext rediscovery anchor —
-            // only when rediscovery is enabled, since the MAC is its anchor and would be
-            // unused otherwise. Build stays locked (via _mqttCapturing) through the
-            // async ARP/DNS so the snapshot can't be taken with a half-filled MAC.
+            // On a good connect, capture the broker's MAC as the plaintext rediscovery
+            // anchor and canonicalize the config to a hostname + pinned IP (see
+            // CaptureBrokerMacAsync) — only when rediscovery is enabled, since the MAC is
+            // its anchor and would be unused otherwise. Build stays locked (via
+            // _mqttCapturing) through the async ARP/DNS so the snapshot can't be taken with
+            // a half-filled MAC.
             if (ok && ChkMqttRediscovery.IsChecked == true)
                 await CaptureBrokerMacAsync(host, connectHost, gen);
 
@@ -454,11 +470,16 @@ namespace IntercomFirmwareTool.App
 
         /// <summary>
         /// After a successful test, resolve the broker to an on-link IPv4 and ARP it for
-        /// the broker's MAC (the plaintext rediscovery anchor, issue #43). For a bare-IP
-        /// broker it also does a reverse-DNS lookup and, if a name comes back, suggests
-        /// entering it (a bare-IP config has nothing for rediscovery to repoint) —
-        /// non-destructively: the note is shown, the host field is never rewritten. The
-        /// whole method is best-effort and never throws: a broker on another subnet
+        /// the broker's MAC (the plaintext rediscovery anchor, issue #43), then canonicalize
+        /// the config toward the most robust firmware form — broker stored as a HOSTNAME,
+        /// pinned to the tested IP in the device hosts file:
+        /// <list type="bullet">
+        /// <item>a bare-IP broker with a reverse-DNS name is promoted (name → broker field,
+        /// IP → Host IP); under TLS the test result is cleared so the certificate is
+        /// re-validated against the hostname;</item>
+        /// <item>a hostname broker with an empty Host IP gets the resolved IP filled in.</item>
+        /// </list>
+        /// The whole method is best-effort and never throws: a broker on another subnet
         /// (ARP can't reach it) simply yields no anchor, with a note saying so.
         /// </summary>
         private async Task CaptureBrokerMacAsync(string host, string connectHost, int gen)
@@ -532,26 +553,42 @@ namespace IntercomFirmwareTool.App
                 _mqttMacIp = ip!.ToString();
                 _mqttMacSuggestedHost = suggested;
 
-                // Auto-promote a bare-IP broker to a hostname config when reverse-DNS found a
-                // name — but ONLY on the plaintext path. Move the tested IP into the host-IP
-                // override and put the name in the broker field: the firmware then stores the
-                // hostname (pinned to the IP in the device hosts file) so rediscovery can
-                // repoint it if the IP later changes, with the MAC as anchor — the most robust
-                // config. Suppressed so it keeps the MAC and the green test result (same
-                // endpoint). With TLS configured we do NOT promote: switching the broker to a
-                // hostname changes the certificate's validated target host, which this test
-                // (run against the IP) did not exercise — leave the non-destructive suggestion.
+                // Canonicalize toward the most robust firmware config: broker stored as a
+                // HOSTNAME (MQTT_HOST), pinned to the tested IPv4 in the device hosts file
+                // (HostIpForHosts), so rediscovery can repoint the name if the IP changes,
+                // with the MAC as the anchor. The field writes go through
+                // SetBrokerFieldsSuppressed so they aren't seen as a user edit — the MAC and
+                // (usually) the green test result survive, since the endpoint is unchanged.
+                bool hostIsIp = IPAddress.TryParse(host, out _);
                 bool hasTls = _mqttCaPath != null || (_mqttCertPath != null && _mqttKeyPath != null);
-                if (suggested != null && !hasTls)
+
+                if (hostIsIp && suggested != null)
                 {
-                    _suppressMqttBrokerInvalidation = true;
-                    try
+                    // Bare-IP broker with a reverse-DNS name → promote: name into the broker
+                    // field, the tested IP into Host IP.
+                    SetBrokerFieldsSuppressed(suggested, _mqttMacIp);
+                    if (hasTls)
                     {
-                        TxtMqttHostIp.Text = _mqttMacIp;   // host-IP row becomes visible (host is now a name)
-                        TxtMqttHost.Text = suggested;
+                        // The test validated the certificate against the IP; the config now
+                        // targets the hostname (a different TLS identity we did not exercise).
+                        // Drop the ✓ and ask for a re-test — it connects via the pinned IP but
+                        // checks the cert against the hostname, so it protects an IP-only cert.
+                        ClearMqttTestStatus();
+                        SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorPromotedRetest", mac, _mqttMacIp, suggested));
                     }
-                    finally { _suppressMqttBrokerInvalidation = false; }
-                    SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorPromoted", mac, _mqttMacIp, suggested));
+                    else
+                    {
+                        // Plaintext: same endpoint, so the ✓ still holds.
+                        SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorPromoted", mac, _mqttMacIp, suggested));
+                    }
+                }
+                else if (!hostIsIp && TxtMqttHostIp.Text.Trim().Length == 0)
+                {
+                    // Hostname broker with no Host IP yet → fill in the resolved IP so the pin
+                    // is explicit and visible. The TLS target (the hostname) is unchanged, so
+                    // the ✓ still holds whether or not TLS is configured.
+                    SetBrokerFieldsSuppressed(null, _mqttMacIp);
+                    SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorPinned", mac, _mqttMacIp, host));
                 }
                 else
                 {
