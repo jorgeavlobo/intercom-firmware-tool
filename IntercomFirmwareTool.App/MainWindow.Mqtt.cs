@@ -98,6 +98,7 @@ namespace IntercomFirmwareTool.App
         private bool _discoveryScanDone;
         private bool _discoveryPrefillDone;                  // set ONLY after fields are actually pre-filled
         private bool _discoveryPrefillInFlight;              // one prefill/scan at a time (reentrancy gate)
+        private bool _discoveryPrefillRerun;                 // an enable arrived while a prefill was in flight
 
         private bool MqttEnabled => ChkMqtt.IsChecked == true;
 
@@ -178,7 +179,11 @@ namespace IntercomFirmwareTool.App
             // second /24 scan) while the first is suspended at an await, and the two would
             // cancel/dispose each other's scan CTS. Every entry and await-continuation here runs
             // on the UI thread (no ConfigureAwait(false) in this method), so a plain bool suffices.
-            if (_discoveryPrefillInFlight) return;
+            // A re-enable that arrives while a pass is in flight is NOT dropped: it latches a rerun
+            // so the finally can start a fresh pass — otherwise an off→on during a scan's
+            // cancellation would leave the bridge enabled with no scan (the in-flight task exits
+            // via the cancelled path and this second entry was rejected).
+            if (_discoveryPrefillInFlight) { _discoveryPrefillRerun = true; return; }
             _discoveryPrefillInFlight = true;
             // Wrap the whole body: this runs fire-and-forget from the toggle handler, so it must
             // never fault (an unobserved exception would surface via UnobservedTaskException).
@@ -259,7 +264,25 @@ namespace IntercomFirmwareTool.App
                 SetMqttDiscoveryInfo(null);
             }
             catch { /* discovery pre-fill is best-effort; never fault the fire-and-forget task */ }
-            finally { _discoveryPrefillInFlight = false; }
+            finally
+            {
+                _discoveryPrefillInFlight = false;
+                // A re-enable arrived while this pass ran (e.g. off→on during a scan's
+                // cancellation, so this pass exited via the cancelled path). Run one more pass so
+                // the re-enable isn't silently dropped — but only if discovery is still wanted.
+                // Bounded: it re-runs only on an explicit latch, and a completed scan/prefill
+                // (_discoveryScanDone / _discoveryPrefillDone) makes the next pass a quick no-op.
+                if (_discoveryPrefillRerun && MqttEnabled
+                    && TxtMqttHost.Text.Trim().Length == 0 && !_discoveryPrefillDone)
+                {
+                    _discoveryPrefillRerun = false;
+                    _ = TryPrefillBrokerFromDiscoveryAsync();
+                }
+                else
+                {
+                    _discoveryPrefillRerun = false;
+                }
+            }
         }
 
         /// <summary>The current candidate pool: live mDNS answers plus the last /24 scan's

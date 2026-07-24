@@ -511,7 +511,7 @@ namespace IntercomFirmwareTool.App
 
         private static readonly string[] VirtualAdapterMarkers =
         {
-            "vpn", "tailscale", "wireguard", "zerotier", "openvpn", "hamachi",
+            "vpn", "tailscale", "wireguard", "nordlynx", "zerotier", "openvpn", "hamachi",
             "hyper-v", "vethernet", "vmware", "virtualbox", "vbox", "virtual",
             "docker", "wsl", "tap-windows", "pseudo", "loopback", "bluetooth",
         };
