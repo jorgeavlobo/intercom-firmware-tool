@@ -164,21 +164,20 @@ namespace IntercomFirmwareTool.App
         /// valid across a host/host-IP edit.</summary>
         private bool BrokerStillAtCapturedMac()
         {
-            if (_mqttMacIp == null) return false;
+            if (_mqttMacIp == null || !IPAddress.TryParse(_mqttMacIp, out var capturedIp)) return false;
             string host = TxtMqttHost.Text.Trim();
-            // Broker typed as the captured IP directly.
-            if (host == _mqttMacIp) return true;
+            // Broker typed as an IP: it holds the anchor only if it is the captured
+            // address. Compare as IPAddress values, not strings, so a different textual
+            // form of the same IPv4 doesn't spuriously drop a valid anchor.
+            if (IPAddress.TryParse(host, out var hostIp)) return hostIp.Equals(capturedIp);
             // Hostname broker: the anchor holds if it is pinned to the captured IP via
             // the host-IP override, or the name equals the reverse-DNS suggestion (which
             // resolves to that IP).
-            if (!IPAddress.TryParse(host, out _))
-            {
-                if (TxtMqttHostIp.Text.Trim() == _mqttMacIp) return true;
-                if (_mqttMacSuggestedHost != null &&
-                    host.Equals(_mqttMacSuggestedHost, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-            return false;
+            if (IPAddress.TryParse(TxtMqttHostIp.Text.Trim(), out var overrideIp) &&
+                overrideIp.Equals(capturedIp))
+                return true;
+            return _mqttMacSuggestedHost != null &&
+                   host.Equals(_mqttMacSuggestedHost, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>Forget the captured MAC anchor and hide its note.</summary>
@@ -542,8 +541,11 @@ namespace IntercomFirmwareTool.App
             {
                 if (SendARP(dest, 0, mac, ref len) != 0 || len < 6) return null;
             }
-            catch (DllNotFoundException) { return null; }        // non-Windows / no iphlpapi
-            catch (EntryPointNotFoundException) { return null; }
+            // Best-effort: ANY interop failure means "no MAC", never a crash of the
+            // async-void Test-connection handler — a missing iphlpapi / non-Windows host
+            // (DllNotFoundException, EntryPointNotFoundException) or a native fault
+            // surfaced as SEHException/other. Swallow them all and report no anchor.
+            catch (Exception) { return null; }
             // An all-zero address is an incomplete ARP row, not a real MAC.
             bool allZero = true;
             for (int i = 0; i < 6; i++) if (mac[i] != 0) { allZero = false; break; }
