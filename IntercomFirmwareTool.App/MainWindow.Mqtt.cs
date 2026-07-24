@@ -231,7 +231,7 @@ namespace IntercomFirmwareTool.App
                 if (pool.FirstOrDefault() is BrokerCandidate tls)
                 {
                     _discoveryPrefillDone = true;
-                    SetMqttDiscoveryInfo(LF("Fmt_MqttDiscoveredTls", tls.Hostname ?? tls.Ip));
+                    SetMqttDiscoveryInfo(LF("Fmt_MqttDiscoveredTls", tls.Hostname ?? tls.Ip, tls.Port));
                     return;
                 }
                 SetMqttDiscoveryInfo(null);

@@ -414,7 +414,7 @@ Clave: {1}</value></data>
   <data name="Hint_MqttRediscovery" xml:space="preserve"><value>Activado de forma predeterminada. Usa «Probar conexión» para capturar la MAC del broker de modo que la redetección funcione sin TLS en una LAN de confianza (un cotejo de conveniencia, no autenticación — usa TLS para una garantía real); introducir el broker como hostname también permite reapuntar su dirección.</value></data>
   <data name="MqttDiscovering" xml:space="preserve"><value>Buscando un broker en la red…</value></data>
   <data name="Fmt_MqttDiscovered" xml:space="preserve"><value>Se encontró un broker en la red: {0} — rellenado abajo.</value></data>
-  <data name="Fmt_MqttDiscoveredTls" xml:space="preserve"><value>Se encontró un broker TLS en la red: {0} — introdúcelo y selecciona su certificado CA.</value></data>
+  <data name="Fmt_MqttDiscoveredTls" xml:space="preserve"><value>Se encontró un broker TLS en la red: {0} (puerto {1}) — introdúcelo y selecciona su certificado CA.</value></data>
   <data name="Fmt_MqttAnchorMac" xml:space="preserve"><value>MAC del broker {0} capturada ({1}). La redetección ya puede recuperar este broker incluso sin TLS.</value></data>
   <data name="Fmt_MqttAnchorHostname" xml:space="preserve"><value>MAC del broker {0} capturada ({1}). {1} resuelve a «{2}» — introduce ese hostname arriba para que la redetección pueda recuperar el broker (reapunta un hostname, no una IP a secas).</value></data>
   <data name="Fmt_MqttAnchorIpOnly" xml:space="preserve"><value>MAC del broker {0} capturada ({1}), pero este broker está indicado por IP. La redetección reapunta un hostname, así que introduce el broker como hostname para que surta efecto.</value></data>
