@@ -410,10 +410,31 @@ namespace IntercomFirmwareTool.App
                 dnsCts.CancelAfter(TimeSpan.FromSeconds(2));
                 var entry = await Dns.GetHostEntryAsync(IPAddress.Parse(ip)).WaitAsync(dnsCts.Token).ConfigureAwait(false);
                 string name = (entry.HostName ?? "").TrimEnd('.');
-                // Reject an IP-shaped "name" (some resolvers echo the address back).
-                return (name.Length > 0 && !IPAddress.TryParse(name, out _)) ? name : null;
+                // Only return a name the app would actually accept as a broker host. A PTR
+                // carrying underscores (or other characters Core's IsValidHost rejects), or an
+                // IP-shaped echo, must fall back to the IP-only path — otherwise the prefill
+                // writes a host that can never be tested or built.
+                return IsAcceptableHostname(name) ? name : null;
             }
             catch { return null; }
+        }
+
+        /// <summary>Mirrors MainWindow.IsValidMqttHost / MqttInstaller.IsValidHost for the
+        /// reverse-DNS path (minus the IP branch — an IP-shaped PTR echo is not a useful host
+        /// here): 1..253 chars, dot-separated labels of 1..63 [A-Za-z0-9-] that don't start or
+        /// end with '-'. Keeps discovery from surfacing a structurally invalid host.</summary>
+        private static bool IsAcceptableHostname(string name)
+        {
+            if (name.Length == 0 || name.Length > 253) return false;
+            if (IPAddress.TryParse(name, out _)) return false;   // resolver echoed the address back
+            foreach (var label in name.Split('.'))
+            {
+                if (label.Length == 0 || label.Length > 63) return false;
+                if (label[0] == '-' || label[^1] == '-') return false;
+                foreach (char c in label)
+                    if (!(char.IsAsciiLetterOrDigit(c) || c == '-')) return false;
+            }
+            return true;
         }
 
         /// <summary>The /24 prefixes (first three octets) to scan: the private-range IPv4
