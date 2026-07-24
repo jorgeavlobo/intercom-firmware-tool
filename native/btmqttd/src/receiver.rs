@@ -196,39 +196,64 @@ async fn handle_json(
 /// logged and ignored. A volume op that fails (gateway refused/unreachable) is logged;
 /// the retained state stays whatever the monitor last observed, so HA is never left
 /// showing a value the device didn't accept.
-async fn handle_action(vol: &Arc<VolumeCtl>, gate: &Sender<()>, action: &str, v: &Value) {
+/// A parsed device-control action — the PURE classification of a JSON action object,
+/// separated from the async dispatch so it can be unit-tested without a live gateway or
+/// broker. Values are already validated/normalised (volume clamped/rounded, step
+/// reduced to a direction).
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    /// Absolute volume set, `0..=100` — the slider `number`.
+    Volume(u8),
+    /// Mute (`true`) / unmute (`false`) — the mute `switch`.
+    Mute(bool),
+    /// Relative step: up (`true`) / down (`false`) — the ± `button`s. Only the SIGN of
+    /// the JSON value matters (the step size is owned device-side).
+    Step(bool),
+    /// Momentary gate pulse (issue #41) — the gate `button`.
+    Gate,
+}
+
+/// Classify a JSON action object (`{"action":<name>,"value":…}`) into an [`Action`], or
+/// `None` when the action name is unknown or its value is missing/invalid. Pure — the
+/// async dispatch (device write / gate enqueue) lives in [`handle_action`].
+fn parse_action(action: &str, v: &Value) -> Option<Action> {
     match action {
-        // {"action":"volume","value":0..=100} — the slider `number`.
-        "volume" => match v.get("value").and_then(json_percent) {
-            Some(n) => log_action_err("volume", vol.set(n).await),
-            None => eprintln!("btmqttd: action volume: missing/invalid 'value'"),
-        },
-        // {"action":"mute","value":"on"|"off"} — the mute `switch`.
+        "volume" => v.get("value").and_then(json_percent).map(Action::Volume),
         "mute" => match v.get("value").and_then(Value::as_str) {
-            Some("on") => log_action_err("mute", vol.mute(true).await),
-            Some("off") => log_action_err("mute", vol.mute(false).await),
-            _ => eprintln!("btmqttd: action mute: 'value' must be \"on\" or \"off\""),
+            Some("on") => Some(Action::Mute(true)),
+            Some("off") => Some(Action::Mute(false)),
+            _ => None,
         },
-        // {"action":"volume_step","value":10|-10} — the up/down `button`s. Only the
-        // SIGN matters (the step size is owned device-side); any positive value is up.
         "volume_step" => match v.get("value").and_then(Value::as_i64) {
-            Some(d) if d > 0 => log_action_err("volume_step", vol.step(true).await),
-            Some(d) if d < 0 => log_action_err("volume_step", vol.step(false).await),
-            _ => eprintln!("btmqttd: action volume_step: 'value' must be non-zero"),
+            Some(d) if d > 0 => Some(Action::Step(true)),
+            Some(d) if d < 0 => Some(Action::Step(false)),
+            _ => None,
         },
-        // {"action":"gate"} — the gate `button` (issue #41). Enqueue a pulse request to
-        // the dedicated gate task (gate.rs), which serialises press→hold→release off the
-        // command worker and is drained on shutdown so the release always follows. Full
-        // => a burst faster than the gate can pulse (drop, don't block the worker);
-        // Closed => the gate task is gone (shutting down).
-        "gate" => match gate.try_send(()) {
+        "gate" => Some(Action::Gate),
+        _ => None,
+    }
+}
+
+async fn handle_action(vol: &Arc<VolumeCtl>, gate: &Sender<()>, action: &str, v: &Value) {
+    match parse_action(action, v) {
+        Some(Action::Volume(n)) => log_action_err("volume", vol.set(n).await),
+        Some(Action::Mute(on)) => log_action_err("mute", vol.mute(on).await),
+        Some(Action::Step(up)) => log_action_err("volume_step", vol.step(up).await),
+        // Enqueue a pulse request to the dedicated gate task (gate.rs), which serialises
+        // press→hold→release off the command worker and is drained on shutdown so the
+        // release always follows. Full => a burst faster than the gate can pulse (drop,
+        // don't block the worker); Closed => the gate task is gone (shutting down).
+        Some(Action::Gate) => match gate.try_send(()) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
                 eprintln!("btmqttd: gate press dropped — pulse queue full");
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {}
         },
-        other => eprintln!("btmqttd: unsupported action: {other}"),
+        None => eprintln!(
+            "btmqttd: ignored action {action:?} (unknown, or missing/invalid value {:?})",
+            v.get("value")
+        ),
     }
 }
 
@@ -581,6 +606,43 @@ mod tests {
         // Non-numbers / non-finite are rejected (fall to the invalid-value path).
         assert_eq!(json_percent(&json!("50")), None);
         assert_eq!(json_percent(&json!(null)), None);
+    }
+
+    #[test]
+    fn parse_action_classifies_the_control_surface() {
+        use serde_json::json;
+        // volume: int or float, clamped/rounded (via json_percent).
+        assert_eq!(parse_action("volume", &json!({"value": 50})), Some(Action::Volume(50)));
+        assert_eq!(parse_action("volume", &json!({"value": 49.6})), Some(Action::Volume(50)));
+        assert_eq!(parse_action("volume", &json!({"value": 150})), Some(Action::Volume(100)));
+        // mute: only "on"/"off".
+        assert_eq!(parse_action("mute", &json!({"value": "on"})), Some(Action::Mute(true)));
+        assert_eq!(parse_action("mute", &json!({"value": "off"})), Some(Action::Mute(false)));
+        // volume_step: only the SIGN matters.
+        assert_eq!(parse_action("volume_step", &json!({"value": 10})), Some(Action::Step(true)));
+        assert_eq!(parse_action("volume_step", &json!({"value": -10})), Some(Action::Step(false)));
+        assert_eq!(parse_action("volume_step", &json!({"value": -1})), Some(Action::Step(false)));
+        // gate: no value needed.
+        assert_eq!(parse_action("gate", &json!({})), Some(Action::Gate));
+        assert_eq!(parse_action("gate", &json!({"value": "ignored"})), Some(Action::Gate));
+    }
+
+    #[test]
+    fn parse_action_rejects_unknown_and_invalid() {
+        use serde_json::json;
+        // Unknown action name.
+        assert_eq!(parse_action("nope", &json!({"value": 1})), None);
+        assert_eq!(parse_action("", &json!({})), None);
+        // volume: missing / non-numeric / non-finite value.
+        assert_eq!(parse_action("volume", &json!({})), None);
+        assert_eq!(parse_action("volume", &json!({"value": "x"})), None);
+        // mute: value other than on/off.
+        assert_eq!(parse_action("mute", &json!({"value": "maybe"})), None);
+        assert_eq!(parse_action("mute", &json!({"value": 1})), None);
+        // volume_step: zero (no direction) / missing / non-integer.
+        assert_eq!(parse_action("volume_step", &json!({"value": 0})), None);
+        assert_eq!(parse_action("volume_step", &json!({})), None);
+        assert_eq!(parse_action("volume_step", &json!({"value": "up"})), None);
     }
 
     #[test]
