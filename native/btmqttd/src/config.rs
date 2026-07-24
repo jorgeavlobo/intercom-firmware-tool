@@ -51,6 +51,15 @@ pub struct Config {
     pub ha_discovery: bool,
     pub allow_remote_shell: bool,
     pub client_id: Option<String>,
+    // Broker rediscovery (issue #43): when the broker moves to a new LAN IP, scan its
+    // /24 and repoint the broker's /etc/hosts mapping so the next reconnect finds it.
+    // OFF by default and only effective when the broker is configured by NAME (the
+    // rewrite has no effect on a bare-IP config). `broker_mac`'s role depends on TLS:
+    // WITH TLS it is a tie-breaker HINT (the reconnect's pinned-cert validation is the
+    // trust gate, so it only orders candidates); WITHOUT TLS it is REQUIRED and becomes
+    // the trust gate — a candidate is adopted only if its ARP MAC matches it.
+    pub rediscovery: bool,
+    pub broker_mac: Option<[u8; 6]>,
 }
 
 impl Config {
@@ -102,6 +111,8 @@ impl Config {
             ha_discovery: flag("HA_DISCOVERY"),
             allow_remote_shell: flag("ALLOW_REMOTE_SHELL"),
             client_id: opt("MQTT_CLIENT_ID"),
+            rediscovery: flag("MQTT_REDISCOVERY"),
+            broker_mac: opt("MQTT_BROKER_MAC").and_then(|s| crate::rediscovery::parse_mac(&s)),
         }
     }
 
