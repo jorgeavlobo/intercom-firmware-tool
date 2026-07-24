@@ -241,8 +241,8 @@ namespace IntercomFirmwareTool.App
                 // A plaintext broker → pre-fill and mark ready (terminal: fields are now set).
                 if (pool.FirstOrDefault(c => !c.IsTls) is BrokerCandidate plain)
                 {
-                    _discoveryPrefillDone = true;
                     PrefillBrokerFields(plain);
+                    _discoveryPrefillDone = true;   // set ONLY after the fields are actually written
                     SetMqttDiscoveryInfo(LF("Fmt_MqttDiscovered", plain.Hostname ?? plain.Ip));
                     return;
                 }
