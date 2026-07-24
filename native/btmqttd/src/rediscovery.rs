@@ -124,7 +124,20 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
             return None;
         }
     };
-    let anchor = parse_hosts_ip(&hosts, &cfg.mqtt_host)?;
+    let anchor = match parse_hosts_ip(&hosts, &cfg.mqtt_host) {
+        Some(a) => a,
+        None => {
+            // The name isn't pinned to an IPv4 in the hosts file — a misconfiguration
+            // (the installer normally pins it). Say so instead of returning silently,
+            // which otherwise looks like rediscovery just never triggering.
+            eprintln!(
+                "btmqttd: rediscovery: broker name '{}' has no IPv4 mapping in {HOSTS_PATH}; \
+                 cannot rediscover (is it pinned there?)",
+                cfg.mqtt_host
+            );
+            return None;
+        }
+    };
     // Only ever scan a private LAN /24. If the broker name is pinned to a public,
     // loopback or link-local address, probing its whole /24 would be off-scope outbound
     // scanning — refuse (Copilot). A moved LAN broker is, by definition, on a private
@@ -163,15 +176,32 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
             "btmqttd: rediscovery: no untried host in {anchor}/24 has port {} open",
             cfg.mqtt_port
         );
+        // No OPEN untried host this pass — the monotonic memory is now useless (there is
+        // nothing left to propose), and keeping former anchors/candidates retired would
+        // strand us on the wrong mapping if the real broker later returns on one of them
+        // during the same outage. Clear it so the next pass re-probes the whole /24,
+        // including previously-tried addresses (Codex P2).
+        tried.clear();
         return None;
     }
 
     // MAC hint (best-effort): the ARP table only has entries for hosts contacted
     // recently — probing above just populated it for the open hosts.
-    let arp = tokio::fs::read_to_string("/proc/net/arp")
-        .await
-        .map(|t| parse_proc_net_arp(&t))
-        .unwrap_or_default();
+    let arp = match tokio::fs::read_to_string("/proc/net/arp").await {
+        Ok(t) => parse_proc_net_arp(&t),
+        Err(e) => {
+            // Only material in plaintext mode, where a MAC match is the trust gate:
+            // without the ARP table no candidate can match, so surface WHY instead of
+            // failing later with a misleading "no candidate matches the broker MAC".
+            if cfg.broker_mac.is_some() {
+                eprintln!(
+                    "btmqttd: rediscovery: cannot read /proc/net/arp ({e}); MAC matching \
+                     unavailable this pass"
+                );
+            }
+            Vec::new()
+        }
+    };
 
     let ordered = order_candidates(&open, &arp, cfg.broker_mac, tried);
     // Trust gate: with TLS the reconnect authenticates the broker, so any open
