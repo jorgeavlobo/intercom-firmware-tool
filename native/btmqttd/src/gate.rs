@@ -38,22 +38,29 @@ pub const QUEUE_DEPTH: usize = 4;
 const GATE_PRESS: &str = "*8*19*20##";
 const GATE_RELEASE: &str = "*8*20*20##";
 
-/// Gap between the gate press and release — long enough to register a real momentary
-/// press, short enough to feel instant. Mirrors a physical button tap.
-const GATE_PULSE: Duration = Duration::from_millis(300);
+// The three timings below are defined ONCE in milliseconds and every Duration
+// (including MAX_PULSE) is derived from them, so changing one can't leave MAX_PULSE —
+// and hence main's shutdown-drain bound — silently out of sync.
 
-/// Per-frame forward timeout for the gate — TIGHTER than the raw-command path's 5 s.
-/// The gateway is on loopback (frames land in ~ms), and a tight cap keeps a full
-/// press+hold+release pulse bounded well under the shutdown drain window: worst case
-/// `2*GATE_FORWARD_TIMEOUT + GATE_PULSE` = 4.3 s, so the drain (see `main`) can wait
-/// out the pulse in progress and still exit promptly. A hung gateway wouldn't deliver
-/// the frame anyway, so a shorter cap costs nothing there.
-pub const GATE_FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
+/// Gap between the gate press and release (ms) — long enough to register a real
+/// momentary press, short enough to feel instant. Mirrors a physical button tap.
+const GATE_PULSE_MS: u64 = 300;
+const GATE_PULSE: Duration = Duration::from_millis(GATE_PULSE_MS);
 
-/// The longest a single pulse can take: press + hold + release, each forward bounded
-/// by [`GATE_FORWARD_TIMEOUT`]. `main` sizes the shutdown drain from this so the
-/// in-progress pulse's release is sent before exit. = 2×2 s + 300 ms.
-pub const MAX_PULSE: Duration = Duration::from_millis(4_300);
+/// Per-frame forward timeout for the gate (ms) — TIGHTER than the raw-command path's
+/// 5 s. The gateway is on loopback (frames land in ~ms), and a tight cap keeps a full
+/// press+hold+release pulse bounded well under the shutdown drain window, so the drain
+/// (see `main`) can wait out the pulse in progress and still exit promptly. A hung
+/// gateway wouldn't deliver the frame anyway, so a shorter cap costs nothing there.
+const GATE_FORWARD_TIMEOUT_MS: u64 = 2_000;
+pub const GATE_FORWARD_TIMEOUT: Duration = Duration::from_millis(GATE_FORWARD_TIMEOUT_MS);
+
+/// The longest a single pulse can take: press + hold + release (two forwards each
+/// bounded by [`GATE_FORWARD_TIMEOUT`], plus the hold). DERIVED from the millis
+/// constants above so it can't drift; `main` sizes the shutdown drain from it so the
+/// in-progress pulse's release is sent before exit.
+pub const MAX_PULSE: Duration =
+    Duration::from_millis(2 * GATE_FORWARD_TIMEOUT_MS + GATE_PULSE_MS);
 
 /// Run the gate task: for each queued press request, emit the full momentary pulse
 /// (press, hold, release), ONE AT A TIME. Returns when the channel is closed and no
