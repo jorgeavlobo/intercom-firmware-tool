@@ -228,24 +228,25 @@ async fn run() -> Result<(), String> {
     //
     // Two independent flags: `last_persisted` is the ADOPTED learned IP (what /etc/hosts is
     // seeded to), so a stable broker never rewrites the flash partition; `persisted_on_disk`
-    // is merely whether a record FILE exists — including one the base or MAC gate rejected,
-    // so a build-IP ConnAck can clear that stale file too (CodeRabbit). Persist I/O is
-    // blocking std::fs, so it's offloaded to the blocking pool (single-threaded runtime —
+    // is whether the state FILE exists at all — even one holding a record for a DIFFERENT host
+    // or a corrupt one (neither parses), so a build-IP ConnAck clears it and a later switch
+    // back to that host can't resurrect its obsolete learned IP (Codex/Copilot). Persist I/O
+    // is blocking std::fs, so it's offloaded to the blocking pool (single-threaded runtime —
     // Copilot).
     let build_ip = if rediscovery_active {
         rediscovery::build_time_ip(&cfg.mqtt_host).await
     } else {
         None
     };
-    let record = if rediscovery_active {
+    let (persisted_file_exists, record) = if rediscovery_active {
         let host = cfg.mqtt_host.clone();
-        tokio::task::spawn_blocking(move || persist::read_record(&host)).await.ok().flatten()
+        tokio::task::spawn_blocking(move || persist::read_state(&host)).await.unwrap_or((false, None))
     } else {
-        None
+        (false, None)
     };
 
     let mut last_persisted: Option<std::net::Ipv4Addr> = None;
-    let mut persisted_on_disk = record.is_some();
+    let mut persisted_on_disk = persisted_file_exists;
     if let (Some(build_ip), Some((base, learned))) = (build_ip, record) {
         // Apply the record only while its base still matches this firmware's build IP; a
         // mismatch means a re-flash re-pointed the broker and the record is stale (it will

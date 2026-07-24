@@ -62,15 +62,16 @@ fn state_file_in(dir: &Path) -> PathBuf {
     dir.join(STATE_FILE)
 }
 
-/// The persisted `(base_ip, learned_ip)` record for `host`, or `None`. Returned when the
-/// record is for THIS host (ASCII case-insensitive) and its learned address is a private
-/// LAN IPv4 (the same bound rediscovery enforces). The caller compares `base_ip` against
-/// the current build-time mapping — a mismatch (a firmware re-flash re-pointed the broker)
-/// means the record is stale. `None` on a different host, a malformed/non-private learned
-/// address, or a missing file. Blocking `std::fs`; call via `spawn_blocking` off the
-/// async runtime.
-pub fn read_record(host: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
-    read_record_in(&state_dir(), host)
+/// The persisted state as `(file_exists, record)`, read in one pass. `file_exists` is
+/// whether the state FILE is present at all (any content) — even one holding a record for a
+/// DIFFERENT host or a corrupt one, neither of which parses — so the caller can clear it
+/// after a build-IP connection and a later switch back to that host can't resurrect its
+/// obsolete learned IP (Codex/Copilot). `record` is `Some((base_ip, learned_ip))` only when
+/// the file parses a record for THIS host (ASCII case-insensitive) with a private LAN
+/// learned IPv4; the caller compares `base_ip` against the build-time mapping (a re-flash
+/// mismatch ⇒ stale). Blocking `std::fs`; call via `spawn_blocking` off the async runtime.
+pub fn read_state(host: &str) -> (bool, Option<(Ipv4Addr, Ipv4Addr)>) {
+    read_state_in(&state_dir(), host)
 }
 
 /// Persist `host`'s learned IP atomically, recording the `base_ip` (build-time mapping)
@@ -99,9 +100,15 @@ pub fn clear() -> bool {
 // $BTMQTTD_STATE_DIR and delegate.
 // ---------------------------------------------------------------------------
 
-fn read_record_in(dir: &Path, host: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
-    let text = std::fs::read_to_string(state_file_in(dir)).ok()?;
-    parse_record(&text, host)
+fn read_state_in(dir: &Path, host: &str) -> (bool, Option<(Ipv4Addr, Ipv4Addr)>) {
+    match std::fs::read_to_string(state_file_in(dir)) {
+        Ok(text) => (true, parse_record(&text, host)),
+        // Genuinely absent → nothing to clear later.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (false, None),
+        // Present but unreadable (e.g. a permission blip): treat as existing so a build-IP
+        // ConnAck still attempts to clear it, rather than leaving it to resurface.
+        Err(_) => (true, None),
+    }
 }
 
 fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> bool {
@@ -219,18 +226,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("btmqttd-persist-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!(read_record_in(&dir, "broker.lan"), None); // nothing yet
+        assert_eq!(read_state_in(&dir, "broker.lan"), (false, None)); // no file yet
         assert!(store_in(&dir, "broker.lan", BUILD, LEARNED));
-        assert_eq!(read_record_in(&dir, "broker.lan"), Some((BUILD, LEARNED)));
-        // A different host does not read the stored value.
-        assert_eq!(read_record_in(&dir, "other"), None);
+        assert_eq!(read_state_in(&dir, "broker.lan"), (true, Some((BUILD, LEARNED))));
+        // A different host: the FILE still exists (so it can be cleared) but no record parses.
+        assert_eq!(read_state_in(&dir, "other"), (true, None));
         // Overwrite updates in place.
         let l2 = Ipv4Addr::new(192, 168, 50, 201);
         assert!(store_in(&dir, "broker.lan", BUILD, l2));
-        assert_eq!(read_record_in(&dir, "broker.lan"), Some((BUILD, l2)));
+        assert_eq!(read_state_in(&dir, "broker.lan"), (true, Some((BUILD, l2))));
         // Clear forgets it; clearing again is still success (missing file is success).
         assert!(clear_in(&dir));
-        assert_eq!(read_record_in(&dir, "broker.lan"), None);
+        assert_eq!(read_state_in(&dir, "broker.lan"), (false, None));
         assert!(clear_in(&dir));
 
         let _ = std::fs::remove_dir_all(&dir);
