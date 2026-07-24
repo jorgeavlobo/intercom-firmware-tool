@@ -600,7 +600,7 @@
                                     Orientation="Horizontal" Margin="0,0,0,6">
                             <TextBox x:Name="TxtMqttHost" Style="{StaticResource InputField}" Width="200"
                                      AutomationProperties.LabeledBy="{Binding ElementName=LblMqttBroker}"
-                                     ToolTip="{loc:Loc Tip_MqttBroker}" TextChanged="MqttField_TextChanged"/>
+                                     ToolTip="{loc:Loc Tip_MqttBroker}" TextChanged="MqttBrokerField_TextChanged"/>
                             <TextBlock x:Name="LblMqttPort" Style="{StaticResource FieldLabel}" Margin="12,0,8,0"
                                        Text="{loc:Loc Field_MqttPort}"/>
                             <TextBox x:Name="TxtMqttPort" Style="{StaticResource InputField}" Width="70"
@@ -623,7 +623,7 @@
                                  Style="{StaticResource InputField}" Margin="0,0,0,6"
                                  HorizontalAlignment="Left" Width="200" Visibility="Collapsed"
                                  AutomationProperties.LabeledBy="{Binding ElementName=LblMqttHostIp}"
-                                 ToolTip="{loc:Loc Tip_MqttHostIp}" TextChanged="MqttField_TextChanged"/>
+                                 ToolTip="{loc:Loc Tip_MqttHostIp}" TextChanged="MqttBrokerField_TextChanged"/>
 
                         <!-- Username (optional; set with a password) -->
                         <TextBlock x:Name="LblMqttUser" Grid.Row="2" Grid.Column="0"
@@ -725,6 +725,12 @@
                               Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
                     <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
                                Text="{loc:Loc Hint_MqttRediscovery}"/>
+                    <!-- Captured-anchor note (transient): set by the Test-connection MAC
+                         capture, hidden otherwise. Live region so a screen reader announces
+                         a fresh capture / suggestion. -->
+                    <TextBlock x:Name="TxtMqttRediscoveryInfo" Margin="22,3,0,0" Foreground="#FF3C7D3C"
+                               FontSize="11" TextWrapping="Wrap" Visibility="Collapsed"
+                               AutomationProperties.LiveSetting="Polite"/>
 
                     <!-- Home Assistant auto-discovery (Phase 2, #12 item 1). ON by
                          default when the bridge is installed (plug-and-play): publishes

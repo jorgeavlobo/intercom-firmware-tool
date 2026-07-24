@@ -209,6 +209,9 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
     <value>Die angegebene Broker-IP (für die Hosts-Zuordnung auf dem Gerät) ist keine gültige IPv4-Adresse.</value>
   </data>
+  <data name="Mqtt_InvalidBrokerMac" xml:space="preserve">
+    <value>Die Broker-MAC-Adresse ist ungültig. Erwartet werden sechs hexadezimale Oktette, getrennt durch ':' oder '-', z. B. aa:bb:cc:dd:ee:ff.</value>
+  </data>
   <data name="Mqtt_HostUnresolved" xml:space="preserve">
     <value>Der Broker-Hostname "{0}" konnte nicht zu einer IP für die Hosts-Zuordnung auf dem Gerät aufgelöst werden; geben Sie die IP an oder verwenden Sie eine IP-Adresse als Host.</value>
   </data>

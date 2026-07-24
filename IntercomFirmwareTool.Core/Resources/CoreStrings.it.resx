@@ -209,6 +209,9 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Mqtt_InvalidHostIp" xml:space="preserve">
     <value>L'IP del broker fornito (per la mappatura host sul dispositivo) non è un indirizzo IPv4 valido.</value>
   </data>
+  <data name="Mqtt_InvalidBrokerMac" xml:space="preserve">
+    <value>L'indirizzo MAC del broker non è valido. Sono attesi sei ottetti esadecimali separati da ':' o '-', ad es. aa:bb:cc:dd:ee:ff.</value>
+  </data>
   <data name="Mqtt_HostUnresolved" xml:space="preserve">
     <value>Impossibile risolvere il nome host del broker "{0}" in un IP per la mappatura host sul dispositivo; fornire l'IP o usare un indirizzo IP come host.</value>
   </data>
