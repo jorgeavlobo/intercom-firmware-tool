@@ -200,16 +200,18 @@ namespace IntercomFirmwareTool.App
                 // turned off (via _discoveryScanCts).
                 if (!pool.Any(c => c.Port != 8883) && !_discoveryScanDone)
                 {
-                    _discoveryScanDone = true;   // the /24 scan is heavy — attempt it only once
                     SetMqttDiscoveryInfo(L("MqttDiscovering"));
                     _discoveryScanCts?.Cancel();
-                    _discoveryScanCts = CancellationTokenSource.CreateLinkedTokenSource(
+                    var scanCts = _discoveryScanCts = CancellationTokenSource.CreateLinkedTokenSource(
                         _discoveryCts?.Token ?? CancellationToken.None);
                     IReadOnlyList<BrokerCandidate> scan;
-                    try { scan = await _brokerDiscovery.ScanSubnetAsync(_discoveryScanCts.Token); }
+                    try { scan = await _brokerDiscovery.ScanSubnetAsync(scanCts.Token); }
                     catch { scan = System.Array.Empty<BrokerCandidate>(); }
-                    // The user may have disabled the bridge (which cancels the scan) or typed a
-                    // broker while we scanned.
+                    // A cancelled scan (bridge disabled mid-scan, or window closing) stays
+                    // RETRYABLE — don't burn the one-shot flag on it.
+                    if (scanCts.IsCancellationRequested) { SetMqttDiscoveryInfo(null); return; }
+                    _discoveryScanDone = true;   // a full sweep ran — the heavy scan won't repeat
+                    // The user may have typed a broker while we scanned.
                     if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
                     // Re-read mDNS (a hit may have landed during the scan), then add the scan hits.
                     pool = new List<BrokerCandidate>(_brokerDiscovery.MdnsCandidates);

@@ -124,6 +124,10 @@ namespace IntercomFirmwareTool.App
             try
             {
                 m = new UdpClient(AddressFamily.InterNetwork);
+                // Windows binds exclusively by default; SO_REUSEADDR alone isn't enough to
+                // co-bind 5353 with a system mDNS responder — clear ExclusiveAddressUse too,
+                // else the bind fails and we drop to the ephemeral (multicast-blind) fallback.
+                m.ExclusiveAddressUse = false;
                 m.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 m.Client.Bind(new IPEndPoint(IPAddress.Any, MdnsPort));
                 m.JoinMulticastGroup(MdnsGroup);
