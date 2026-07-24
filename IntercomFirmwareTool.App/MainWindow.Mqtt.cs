@@ -467,7 +467,11 @@ namespace IntercomFirmwareTool.App
                 {
                     try
                     {
-                        var addrs = await Dns.GetHostAddressesAsync(connectHost);
+                        // Bound the lookup: a stalled resolver must not leave _mqttCapturing
+                        // set (Build/Test disabled) indefinitely. On timeout WaitAsync throws
+                        // and the catch falls back to no anchor; the finally still runs.
+                        var addrs = await Dns.GetHostAddressesAsync(connectHost)
+                            .WaitAsync(DnsCaptureTimeout);
                         ip = Array.Find(addrs, a => a.AddressFamily == AddressFamily.InterNetwork);
                     }
                     catch { ip = null; }
@@ -486,12 +490,14 @@ namespace IntercomFirmwareTool.App
                 {
                     try
                     {
-                        var entry = await Dns.GetHostEntryAsync(ip!);
+                        // GetHostEntryAsync has no CancellationToken overload, so bound it the
+                        // same way — a hung reverse lookup would otherwise pin _mqttCapturing.
+                        var entry = await Dns.GetHostEntryAsync(ip!).WaitAsync(DnsCaptureTimeout);
                         if (!string.IsNullOrWhiteSpace(entry.HostName) &&
                             !IPAddress.TryParse(entry.HostName, out _))
                             suggested = entry.HostName.ToLowerInvariant();
                     }
-                    catch { /* no PTR record — a MAC-only anchor is fine */ }
+                    catch { /* no PTR record / timeout — a MAC-only anchor is fine */ }
                 }
 
                 // Single commit point AFTER all awaits: if a connection-affecting edit
@@ -521,6 +527,10 @@ namespace IntercomFirmwareTool.App
             }
         }
 
+        // Upper bound on each DNS lookup during MAC capture, so a stalled resolver can't
+        // hold the capture (and thus Build/Test) locked. 5s matches the connect timeout.
+        private static readonly TimeSpan DnsCaptureTimeout = TimeSpan.FromSeconds(5);
+
         // Windows iphlpapi ARP resolution. Fills macAddr for an on-link IPv4; a non-zero
         // return, or an all-zero/short address, means "no entry" (e.g. off-subnet).
         [DllImport("iphlpapi.dll", ExactSpelling = true)]
@@ -538,8 +548,11 @@ namespace IntercomFirmwareTool.App
             // first address octet (i.e. the 4 raw bytes read little-endian). Build it with
             // explicit shifts so the order is unambiguous on any host endianness.
             uint dest = (uint)(b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24));
-            byte[] mac = new byte[6];
-            int len = mac.Length;
+            // SendARP documents pMacAddr as at least two ULONGs (8 bytes), even though it
+            // writes only the 6 MAC bytes; allocate 8 to honor that contract, but pass
+            // len = 6 as the buffer size so it never reports more than a MAC's worth.
+            byte[] mac = new byte[8];
+            int len = 6;
             try
             {
                 if (SendARP(dest, 0, mac, ref len) != 0 || len < 6) return null;

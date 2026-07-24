@@ -54,11 +54,13 @@ namespace IntercomFirmwareTool.Core
     /// </param>
     /// <param name="MqttBrokerMac">
     /// The broker's Ethernet MAC address (six hex octets, ':' or '-' separated), captured in
-    /// the UI at "Test connection" time via ARP. It is the plaintext trust anchor for
-    /// rediscovery: without TLS, btmqttd only adopts a rescanned candidate whose ARP MAC
-    /// matches this value — so a broker on a fixed NIC recovers a changed DHCP lease even with
-    /// no certificate. Writes <c>MQTT_BROKER_MAC</c> when set; null omits the key (rediscovery
-    /// then needs TLS as its anchor). Validated by <see cref="Validate"/>.
+    /// the UI at "Test connection" time via ARP. On the plaintext (no-TLS) path it lets
+    /// rediscovery re-adopt a rescanned candidate whose ARP MAC matches this value — so a
+    /// broker on a fixed NIC recovers a changed DHCP lease without a certificate. This is a
+    /// convenience match for a trusted LAN, NOT authentication: a same-subnet attacker can
+    /// spoof both IP and MAC, so TLS remains the only cryptographic anchor. Writes
+    /// <c>MQTT_BROKER_MAC</c> when set; null omits the key (rediscovery then requires TLS).
+    /// Validated by <see cref="Validate"/>.
     /// </param>
     public sealed record MqttOptions(
         string MqttHost,
