@@ -94,8 +94,9 @@ namespace IntercomFirmwareTool.App
         private CancellationTokenSource? _discoveryCts;      // cancels all discovery on window close
         private CancellationTokenSource? _discoveryScanCts;  // cancels an in-flight /24 scan (bridge off)
         private Task? _mdnsTask;                              // the background mDNS run (awaited before a scan)
+        private readonly List<BrokerCandidate> _lastScanResults = new();  // cached so a re-enable re-evaluates
         private bool _discoveryScanDone;
-        private bool _discoveryPrefillDone;
+        private bool _discoveryPrefillDone;                  // set ONLY after fields are actually pre-filled
 
         private bool MqttEnabled => ChkMqtt.IsChecked == true;
 
@@ -178,11 +179,11 @@ namespace IntercomFirmwareTool.App
                 if (_brokerDiscovery == null || _discoveryPrefillDone) return;
                 if (TxtMqttHost.Text.Trim().Length > 0) return;   // user already entered a broker
 
-                // Candidate pool, mDNS first (it carries the hostname). Only PLAINTEXT (non-8883)
-                // brokers can be auto-configured: a TLS broker also needs a CA the discovery
-                // can't supply, so pre-filling one would build a plaintext config against a TLS
-                // listener.
-                var pool = new List<BrokerCandidate>(_brokerDiscovery.MdnsCandidates);
+                // Candidate pool = live mDNS candidates + the last scan's results (cached, so a
+                // disable→re-enable re-evaluates without re-scanning). Only a PLAINTEXT broker can
+                // be auto-configured: a TLS broker also needs a CA the discovery can't supply, so
+                // pre-filling one would build a plaintext config against a TLS listener.
+                var pool = BuildDiscoveryPool();
 
                 // No plaintext candidate yet, and the background mDNS is still running (the user
                 // enabled the bridge within its window)? Give it its full window to answer before
@@ -193,7 +194,7 @@ namespace IntercomFirmwareTool.App
                     SetMqttDiscoveryInfo(L("MqttDiscovering"));
                     try { await mdns.WaitAsync(TimeSpan.FromSeconds(4)); } catch { /* window/timeout */ }
                     if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
-                    pool = new List<BrokerCandidate>(_brokerDiscovery.MdnsCandidates);
+                    pool = BuildDiscoveryPool();
                 }
 
                 // Still nothing plaintext → the /24 scan, once, cancellable when the bridge is
@@ -221,14 +222,14 @@ namespace IntercomFirmwareTool.App
                     // RETRYABLE — don't burn the one-shot flag on it.
                     if (cancelled) { SetMqttDiscoveryInfo(null); return; }
                     _discoveryScanDone = true;   // a full sweep ran — the heavy scan won't repeat
+                    _lastScanResults.Clear();
+                    _lastScanResults.AddRange(scan);   // cache for a later re-enable
                     // The user may have typed a broker while we scanned.
                     if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
-                    // Re-read mDNS (a hit may have landed during the scan), then add the scan hits.
-                    pool = new List<BrokerCandidate>(_brokerDiscovery.MdnsCandidates);
-                    pool.AddRange(scan);
+                    pool = BuildDiscoveryPool();
                 }
 
-                // A plaintext broker → pre-fill and mark ready.
+                // A plaintext broker → pre-fill and mark ready (terminal: fields are now set).
                 if (pool.FirstOrDefault(c => !c.IsTls) is BrokerCandidate plain)
                 {
                     _discoveryPrefillDone = true;
@@ -240,13 +241,25 @@ namespace IntercomFirmwareTool.App
                 // user must add; a plaintext pre-fill would build a broken config).
                 if (pool.FirstOrDefault() is BrokerCandidate tls)
                 {
-                    _discoveryPrefillDone = true;
+                    // NOTE: do NOT set _discoveryPrefillDone here — nothing was pre-filled.
+                    // Leaving it clear lets a later disable→re-enable re-surface this guidance
+                    // (and re-evaluate if a plaintext candidate has since appeared).
                     SetMqttDiscoveryInfo(LF("Fmt_MqttDiscoveredTls", tls.Hostname ?? tls.Ip, tls.Port));
                     return;
                 }
                 SetMqttDiscoveryInfo(null);
             }
             catch { /* discovery pre-fill is best-effort; never fault the fire-and-forget task */ }
+        }
+
+        /// <summary>The current candidate pool: live mDNS answers plus the last /24 scan's
+        /// results (cached in <see cref="_lastScanResults"/>). Rebuilt on each read so a
+        /// disable→re-enable, or a late-arriving mDNS answer, re-evaluates without re-scanning.</summary>
+        private List<BrokerCandidate> BuildDiscoveryPool()
+        {
+            var pool = new List<BrokerCandidate>(_brokerDiscovery!.MdnsCandidates);
+            pool.AddRange(_lastScanResults);
+            return pool;
         }
 
         /// <summary>Seed the broker/Host IP/port fields from a discovered candidate — a
