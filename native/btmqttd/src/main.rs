@@ -24,11 +24,14 @@
 compile_error!("btmqttd targets Linux only — build and run host checks on Linux or WSL");
 
 mod config;
+mod dimension;
+mod gate;
 mod ha;
 mod keys;
 mod own;
 mod receiver;
 mod sender;
+mod volume;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -103,6 +106,21 @@ async fn run() -> Result<(), String> {
 
     let (client, mut eventloop) = AsyncClient::new(opts, 32);
 
+    // Volume/mute state machine (issue #40), shared between the command worker (which
+    // applies volume/mute/step actions) and the monitor task (which learns the real
+    // volume from the bus broadcasts). All volume STATE lives here — HA is dumb.
+    let volume = volume::VolumeCtl::new(&cfg, client.clone());
+
+    // Gate (issue #41) runs on its OWN task, fed by a small channel: the command worker
+    // enqueues a press request and moves on (no 300 ms block), the gate task serialises
+    // each press→hold→release, and shutdown DRAINS it (drops the sender + awaits) so a
+    // press is never left without its release. See gate.rs.
+    let (gate_tx, gate_rx) = tokio::sync::mpsc::channel::<()>(gate::QUEUE_DEPTH);
+    // Set at shutdown so the gate task finishes the pulse in progress but discards
+    // queued (not-yet-started) presses — bounding the drain to one pulse.
+    let gate_stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gate_task = tokio::spawn(gate::run(gate_rx, gate_stopping.clone()));
+
     // Commands from TOPIC_RX go through a BOUNDED channel to a SINGLE ordered worker,
     // not a task-per-message. This does two things at once:
     //   * Order — the shell receiver consumed the subscription line-by-line, so
@@ -126,9 +144,11 @@ async fn run() -> Result<(), String> {
     let cmd_worker = tokio::spawn({
         let cfg = cfg.clone();
         let client = client.clone();
+        let volume = volume.clone();
+        let gate_tx = gate_tx.clone();
         async move {
             while let Some(payload) = cmd_rx.recv().await {
-                receiver::dispatch(&cfg, &client, &payload).await;
+                receiver::dispatch(&cfg, &client, &volume, &gate_tx, &payload).await;
             }
         }
     });
@@ -138,7 +158,7 @@ async fn run() -> Result<(), String> {
     // Keep their handles so shutdown can ABORT every MQTT-producing task before it
     // publishes the final retained `offline` — otherwise a task still in flight could
     // enqueue a publish AFTER `offline` and leave stale state retained on the broker.
-    let sender_task = tokio::spawn(sender::run(cfg.clone(), client.clone()));
+    let sender_task = tokio::spawn(sender::run(cfg.clone(), client.clone(), volume.clone()));
     let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone()));
     // Birth is split across two events: SUBSCRIBE to the command topic on ConnAck,
     // then ANNOUNCE (online + start_date + HA) only after the broker confirms the
@@ -228,6 +248,7 @@ async fn run() -> Result<(), String> {
                                 cfg.clone(),
                                 client.clone(),
                                 start_iso.clone(),
+                                volume.clone(),
                             )));
                         }
                     }
@@ -316,6 +337,17 @@ async fn run() -> Result<(), String> {
     stop(sender_task).await;
     stop(keys_task).await;
     stop(cmd_worker).await;
+    // Gate task: DRAIN rather than abort. Signal `stopping` FIRST so the task finishes
+    // the pulse IN PROGRESS (its release is sent) but discards queued, not-yet-started
+    // presses (which emitted nothing, so dropping them strands nothing). Then drop this
+    // last sender (cmd_worker's is stopped above) to close the channel and await. The
+    // wait is bounded to ONE worst-case pulse plus a margin (gate::MAX_PULSE covers
+    // press+hold+release at the tight gate timeout) — enough for the in-flight release
+    // regardless of how many were queued, yet an unresponsive gateway can't hang exit.
+    // On a responsive gateway a pulse is ~300 ms, so this returns almost immediately.
+    gate_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(gate_tx);
+    let _ = tokio::time::timeout(gate::MAX_PULSE + Duration::from_secs(1), gate_task).await;
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(())
 }
@@ -361,7 +393,12 @@ async fn announce_offline(cfg: Arc<Config>, client: AsyncClient) {
 /// Runs only once command readiness is confirmed, so `online` never precedes a
 /// working command subscription. QoS 0 retained — the shell default and the usual
 /// convention (the retain flag carries state to a late subscriber).
-async fn announce(cfg: Arc<Config>, client: AsyncClient, start_iso: Arc<str>) {
+async fn announce(
+    cfg: Arc<Config>,
+    client: AsyncClient,
+    start_iso: Arc<str>,
+    volume: Arc<volume::VolumeCtl>,
+) {
     if let Err(e) = client
         .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
         .await
@@ -375,6 +412,14 @@ async fn announce(cfg: Arc<Config>, client: AsyncClient, start_iso: Arc<str>) {
         eprintln!("btmqttd: publish start_date failed: {e}");
     }
     ha::reconcile(&cfg, &client).await;
+    // Seed the volume slider/mute with the unit's real level via an on-demand read, so
+    // HA shows a value immediately on connect (the monitor keeps it live afterwards).
+    // Only meaningful with discovery on — otherwise no entity reads the state topics —
+    // but the retained publish is harmless either way; still, skip the extra gateway
+    // round-trip when discovery is off.
+    if cfg.ha_discovery {
+        volume.seed().await;
+    }
 }
 
 /// A topic that can be PUBLISHED to (no `+`/`#` wildcard, not a `$share/` group).

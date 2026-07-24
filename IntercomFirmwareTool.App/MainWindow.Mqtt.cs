@@ -697,8 +697,11 @@ namespace IntercomFirmwareTool.App
                 HostIpForHosts: hostIp,
                 AllowRemoteShell: ChkMqttRemoteShell.IsChecked == true,
                 // Publish HA discovery configs so entities appear automatically. ON
-                // by default when the bridge is installed (plug-and-play); read-only
-                // entities, so secure-by-default holds.
+                // by default when the bridge is installed (plug-and-play). Creates the
+                // read-only sensors AND the volume/gate CONTROL entities (issues #40/#41),
+                // which publish commands to the intercom — the broker ACL on the command
+                // topic is the trust boundary. The tooltip (Tip_MqttHaDiscovery) discloses
+                // the controls, including the gate button.
                 EnableHaDiscovery: ChkMqttHaDiscovery.IsChecked == true,
                 // Checked (default) = one structured JSON object per frame on TOPIC_DUMP
                 // (modern, HA-friendly); unchecked = raw OpenWebNet frames.

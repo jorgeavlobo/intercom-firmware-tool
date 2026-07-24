@@ -94,6 +94,39 @@ namespace IntercomFirmwareTool.Core
         public string TopicCmdResult { get; init; } = "Bticino/command_result_topic";
         public string TopicFileContent { get; init; } = "Bticino/file_content_topic";
 
+        /// <summary>
+        /// Retained volume-state topic (0..100) HA's slider reads back (#40). NULL (the
+        /// default) means "derive from the <see cref="TopicLastWill"/> namespace" via
+        /// <see cref="EffectiveTopicVolume"/>, so it AUTO-SCOPES per unit: a unit whose
+        /// last-will is <c>Home1/unitA/LastWillT</c> publishes volume to
+        /// <c>Home1/unitA/volume</c> (and the default <c>Bticino/LastWillT</c> yields
+        /// <c>Bticino/volume</c>, unchanged). Set a non-null value to override. The
+        /// volume/mute/gate COMMANDS reuse <see cref="TopicRx"/> as small JSON actions,
+        /// so only these two STATE topics are new — no extra subscription.
+        /// </summary>
+        public string? TopicVolume { get; init; }
+        /// <summary>Retained mute-state topic (on/off) HA's mute switch reads back (#40).
+        /// NULL (default) derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicMute"/>.</summary>
+        public string? TopicMute { get; init; }
+
+        /// <summary>The volume state topic actually used: the explicit
+        /// <see cref="TopicVolume"/>, or one derived from the <see cref="TopicLastWill"/>
+        /// namespace so multi-unit deployments auto-scope without extra UI.</summary>
+        public string EffectiveTopicVolume => TopicVolume ?? (TopicNamespace(TopicLastWill) + "volume");
+        /// <summary>The mute state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicMute => TopicMute ?? (TopicNamespace(TopicLastWill) + "mute");
+
+        /// <summary>The namespace prefix of <paramref name="topic"/> — everything up to
+        /// and INCLUDING the last '/', or "" when the topic has no '/'. Scopes the
+        /// derived volume/mute state topics to the same namespace as the per-unit
+        /// last-will topic.</summary>
+        private static string TopicNamespace(string topic)
+        {
+            int slash = topic.LastIndexOf('/');
+            return slash >= 0 ? topic.Substring(0, slash + 1) : "";
+        }
+
         /// <summary>True when BOTH username and password are set (password auth).</summary>
         public bool HasAuth => !string.IsNullOrEmpty(MqttUser) && !string.IsNullOrEmpty(MqttPass);
         /// <summary>True when a CA is supplied (one-way TLS, at least).</summary>
@@ -357,7 +390,7 @@ namespace IntercomFirmwareTool.Core
             // .conf and used as MQTT topic filters).
             foreach (var t in new[] { opts.TopicRx, opts.TopicDump, opts.TopicStartDate,
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
-                                      opts.TopicFileContent })
+                                      opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
@@ -367,8 +400,14 @@ namespace IntercomFirmwareTool.Core
             // --will-topic, so a wildcard here would build an image that cannot
             // publish at runtime. TopicRx may keep them (a valid subscription).
             foreach (var t in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
-                                      opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent })
-                if (t.IndexOfAny(new[] { '+', '#' }) >= 0)
+                                      opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
+                                      opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
+                // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
+                // prefix — both are subscription-only and invalid to PUBLISH to (a broker
+                // rejects the publish), so no publish topic (including the derived volume/
+                // mute state topics) may use them. TopicRx, the only subscribe filter, may.
+                if (t.IndexOfAny(new[] { '+', '#' }) >= 0
+                    || t.StartsWith("$share/", StringComparison.Ordinal))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
 
             // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by
@@ -409,7 +448,8 @@ namespace IntercomFirmwareTool.Core
             // TopicRx subscriber (btmqttd itself) would then receive them and
             // replay them to the gateway — a feedback loop that floods the bus.
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
-                                        opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent })
+                                        opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
+                                        opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
@@ -698,6 +738,13 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_CMD_RESULT", opts.TopicCmdResult));
             sb.Append(Conf("TOPIC_FILE_CONTENT", opts.TopicFileContent));
 
+            // Volume control (#40): retained state topics btmqttd publishes and the HA
+            // slider/mute switch read back. Commands reuse TOPIC_RX (JSON actions).
+            // Effective* resolves the auto-scoped default (derived from the last-will
+            // namespace) or an explicit override.
+            sb.Append(Conf("TOPIC_VOLUME", opts.EffectiveTopicVolume));
+            sb.Append(Conf("TOPIC_MUTE", opts.EffectiveTopicMute));
+
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 
             // OpenWebNet gateway endpoint for the bus MONITOR session (btmqttd opens it
@@ -750,13 +797,40 @@ namespace IntercomFirmwareTool.Core
         };
 
         /// <summary>
+        /// The five volume/gate CONTROL entities' identity — (JSON filename, discovery
+        /// component, object id). Used by the TOMBSTONE path in
+        /// <see cref="GenerateHaDiscovery"/> (when there is no concrete command topic) to
+        /// emit the exact same config topics with an empty payload, so a previous build's
+        /// controls are cleared. The real-config path builds each entity inline (their
+        /// JSON bodies differ: number vs switch vs button), so this list MUST be kept in
+        /// step with those five entities' filenames/components/object ids — it is the
+        /// single definition of WHICH config topics the controls occupy (constant across
+        /// builds; they depend only on the node id, not on TopicRx).
+        /// </summary>
+        private static readonly (string File, string Component, string ObjectId)[] ControlEntityIds =
+        {
+            ("volume.json", "number", "volume"),
+            ("mute.json", "switch", "mute"),
+            ("volume_up.json", "button", "volume_up"),
+            ("volume_down.json", "button", "volume_down"),
+            ("gate.json", "button", "gate"),
+        };
+
+        /// <summary>
         /// Builds the Home Assistant MQTT discovery configs for the bridge: a
         /// connectivity <c>binary_sensor</c> (online/offline via the last-will
-        /// topic), a diagnostic <c>sensor</c> for the last OpenWebNet bus frame, and
-        /// a <c>sensor</c> for the last key press (with code/value as attributes).
-        /// All read-only and grouped under one HA device — no command entity, to
-        /// keep the secure-by-default posture. Topics/prefix/node are baked in here,
-        /// so the on-device publisher just sends each payload retained.
+        /// topic), a diagnostic <c>sensor</c> for the last OpenWebNet bus frame, a
+        /// <c>sensor</c> for the last key press (with code/value as attributes), and
+        /// the volume-control set (#40): a <c>number</c> slider, a <c>switch</c> for
+        /// smart mute, and two <c>button</c>s for ±10%, plus a gate <c>button</c>
+        /// (#41). All grouped under one HA device. The volume/gate command entities
+        /// publish small JSON ACTIONS to <see cref="MqttOptions.TopicRx"/> (the
+        /// existing command channel — no new subscription), so they exercise the same
+        /// OWN-bus capability a raw frame on that topic already has; btmqttd owns all
+        /// volume state (survives HA restarts). Discovery stays opt-in
+        /// (<see cref="MqttOptions.EnableHaDiscovery"/>): when off, btmqttd CLEARS
+        /// these retained configs. Topics/prefix/node are baked in here, so the
+        /// on-device publisher just sends each payload retained.
         /// </summary>
         private static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts)
         {
@@ -862,7 +936,195 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
+            // ---- Volume control (#40) + gate (#41) — COMMAND entities ---------------
+            // These publish JSON actions to the command channel; btmqttd routes volume/
+            // mute/step to the openserver dimension session (:20000) and gate to :30006,
+            // and owns all volume state. State is read back from the retained
+            // TopicVolume / TopicMute topics btmqttd maintains from the bus.
+            //
+            // HA's command_topic must be a CONCRETE publish topic. TopicRx MAY be a
+            // wildcard or a "$share/<group>/<filter>" subscription filter (valid for the
+            // daemon to SUBSCRIBE, per Validate), but HA cannot publish a command to a
+            // wildcard, and publishing to "$share/..." is invalid. Derive the concrete
+            // publish topic (the plain topic, or a $share subscription's underlying
+            // filter when THAT is concrete).
+            //
+            // The five control config topics are the SAME regardless (they depend on the
+            // node id, not TopicRx). When there is NO concrete publish topic, emit them
+            // as TOMBSTONES — same config topic, EMPTY payload — instead of omitting
+            // them: ha::reconcile only touches config topics present in the manifest, so
+            // omitting them would leave any controls a PREVIOUS concrete-TopicRx build
+            // published retained on the broker, and HA would keep showing buttons that
+            // publish to the stale command topic. An empty retained payload clears them.
+            // (With a concrete topic, the real working configs are built below.) The
+            // read-only sensors above always ship — graceful degradation, no regression.
+            string? controlTopic = ConcretePublishTopic(opts.TopicRx);
+            if (controlTopic is null)
+            {
+                foreach (var (file, component, objectId) in ControlEntityIds)
+                    entities.Add(new HaEntity(file, Topic(component, objectId), ""));
+                return entities;
+            }
+
+            // Volume slider: 0..100 step 10. command_template renders the numeric value
+            // into the volume action; state_topic reflects the real level (learned from
+            // the bus, so it also follows changes made on the unit's own menu).
+            entities.Add(new HaEntity(
+                "volume.json",
+                Topic("number", "volume"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Volume",
+                    unique_id = $"{node}_volume",
+                    command_topic = controlTopic,
+                    // QoS 1: an ABSOLUTE, idempotent command (set to N / mute on|off), so a
+                    // QoS-1 redelivery is harmless, while the durable QoS-1 command
+                    // subscription means a press published during a brief daemon reconnect
+                    // is queued rather than dropped (effective delivery is min(pub, sub)).
+                    // The non-idempotent step/gate buttons below use QoS 0.
+                    qos = 1,
+                    // `value | int`: HA number entities carry the value as a float, so a
+                    // bare `{{ value }}` can render "50.0"; `| int` sends a clean integer.
+                    // (btmqttd also accepts a float defensively — see json_percent.)
+                    command_template = "{\"action\":\"volume\",\"value\":{{ value | int }}}",
+                    state_topic = opts.EffectiveTopicVolume,
+                    min = 0,
+                    max = 100,
+                    step = 10,
+                    mode = "slider",
+                    icon = "mdi:volume-high",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Smart mute switch: on = mute (btmqttd remembers the pre-mute level),
+            // off = restore that exact level. state_topic follows the derived muted flag
+            // (volume == 0 by any path), so muting via the slider/down button/unit menu
+            // all flip this switch too.
+            entities.Add(new HaEntity(
+                "mute.json",
+                Topic("switch", "mute"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Mute",
+                    unique_id = $"{node}_mute",
+                    command_topic = controlTopic,
+                    // QoS 1: an ABSOLUTE, idempotent command (set to N / mute on|off), so a
+                    // QoS-1 redelivery is harmless, while the durable QoS-1 command
+                    // subscription means a press published during a brief daemon reconnect
+                    // is queued rather than dropped (effective delivery is min(pub, sub)).
+                    // The non-idempotent step/gate buttons below use QoS 0.
+                    qos = 1,
+                    payload_on = "{\"action\":\"mute\",\"value\":\"on\"}",
+                    payload_off = "{\"action\":\"mute\",\"value\":\"off\"}",
+                    state_topic = opts.EffectiveTopicMute,
+                    state_on = "on",
+                    state_off = "off",
+                    icon = "mdi:volume-mute",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Volume up / down buttons: ±10% (btmqttd clamps to 0..100). Only the sign
+            // of the step value matters — the step size is owned device-side.
+            entities.Add(new HaEntity(
+                "volume_up.json",
+                Topic("button", "volume_up"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Volume up",
+                    unique_id = $"{node}_volume_up",
+                    command_topic = controlTopic,
+                    // QoS 0 (the default): a relative step is NON-idempotent, and QoS 1
+                    // may legitimately REDELIVER a publish (DUP on a lost PUBACK), applying
+                    // the step twice (e.g. +20 instead of +10). A press lost during a brief
+                    // reconnect is self-correcting — the user just presses again — so
+                    // avoiding duplication wins here, unlike the absolute volume/mute
+                    // commands above (idempotent, QoS 1).
+                    qos = 0,
+                    payload_press = "{\"action\":\"volume_step\",\"value\":10}",
+                    icon = "mdi:volume-plus",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            entities.Add(new HaEntity(
+                "volume_down.json",
+                Topic("button", "volume_down"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Volume down",
+                    unique_id = $"{node}_volume_down",
+                    command_topic = controlTopic,
+                    // QoS 0 (the default): a relative step is NON-idempotent, and QoS 1
+                    // may legitimately REDELIVER a publish (DUP on a lost PUBACK), applying
+                    // the step twice (e.g. -20 instead of -10). A press lost during a brief
+                    // reconnect is self-correcting — the user just presses again — so
+                    // avoiding duplication wins here, unlike the absolute volume/mute
+                    // commands above (idempotent, QoS 1).
+                    qos = 0,
+                    payload_press = "{\"action\":\"volume_step\",\"value\":-10}",
+                    icon = "mdi:volume-minus",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Gate button (#41): a single press performs the full momentary press/release
+            // pulse (btmqttd sends *8*19*20## then *8*20*20## via the :30006 command port).
+            entities.Add(new HaEntity(
+                "gate.json",
+                Topic("button", "gate"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Gate",
+                    unique_id = $"{node}_gate",
+                    command_topic = controlTopic,
+                    // QoS 0 (the default): opening the gate is a NON-idempotent side
+                    // effect, and QoS 1 may legitimately REDELIVER a publish (DUP on a lost
+                    // PUBACK), pulsing the gate twice from one press. A press lost during a
+                    // brief reconnect is self-correcting — the user just presses again — so
+                    // avoiding an unintended double actuation wins here, unlike the absolute
+                    // volume/mute commands above (idempotent, QoS 1).
+                    qos = 0,
+                    payload_press = "{\"action\":\"gate\"}",
+                    icon = "mdi:gate",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
             return entities;
+        }
+
+        /// <summary>
+        /// The concrete topic HA can PUBLISH a command to, derived from
+        /// <paramref name="topicRx"/> (the daemon's subscription filter). Returns the
+        /// topic itself when it is concrete; for a <c>$share/&lt;group&gt;/&lt;filter&gt;</c>
+        /// shared subscription, the underlying <c>&lt;filter&gt;</c> when THAT is concrete
+        /// (a publish to it reaches the shared group); otherwise <c>null</c> — a
+        /// wildcard filter has no single publish topic, so the HA control entities are
+        /// omitted. Mirrors the <c>$share</c> normalisation in <see cref="Validate"/>.
+        /// </summary>
+        private static string? ConcretePublishTopic(string topicRx)
+        {
+            string t = topicRx;
+            if (t.StartsWith("$share/", StringComparison.Ordinal))
+            {
+                string rest = t.Substring("$share/".Length);
+                int slash = rest.IndexOf('/');
+                if (slash < 0) return null;              // malformed: no filter
+                t = rest.Substring(slash + 1);           // the underlying filter
+            }
+            return t.IndexOfAny(new[] { '+', '#' }) >= 0 ? null : t;
         }
 
         // ---- init-script patches (owner/mode preserved, idempotent) -------------

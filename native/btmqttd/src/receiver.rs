@@ -1,8 +1,15 @@
 //! MQTT -> bus: dispatch a message received on TOPIC_RX. A raw OpenWebNet frame is
-//! forwarded to the local gateway (127.0.0.1:30006); anything else is a JSON
-//! command, honoured ONLY when the gated remote-command channel is unlocked
-//! (ALLOW_REMOTE_SHELL=1 AND the client is authenticated). Faithful port of
-//! StartMqttReceive's dispatch/handle_json.
+//! forwarded to the local gateway (127.0.0.1:30006). A JSON payload is one of two
+//! things:
+//!   * an UNGATED device-control ACTION (volume / mute / volume_step / gate — issues
+//!     #40/#41): these actuate the OWN bus the same way a raw frame on TOPIC_RX
+//!     already can (the broker ACL on TOPIC_RX is the trust boundary), so they are
+//!     not behind the remote-shell gate; see handle_action for the posture note;
+//!   * a GATED shell command (read_file / write_file / execute_command), honoured
+//!     ONLY when the remote-command channel is unlocked (ALLOW_REMOTE_SHELL=1 AND the
+//!     client is authenticated) — code execution, so it stays locked by default.
+//!
+//! Extends StartMqttReceive's dispatch/handle_json with the device-control actions.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -14,8 +21,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
+use tokio::sync::mpsc::Sender;
+
 use crate::config::{Config, OWN_PORT_CMD};
 use crate::own;
+use crate::volume::VolumeCtl;
 
 /// Cap for read_file/write_file/execute_command payloads (256 KB), matching
 /// `head -c 262144` in the shell — a huge/special file or runaway command must not
@@ -56,7 +66,13 @@ static REAP_SLOTS: Semaphore = Semaphore::const_new(REAP_CONCURRENCY);
 /// (a CRLF frame `*…##\r` therefore fails the OWN-frame check and is not forwarded,
 /// exactly as the shell's `^\*.*##$` did). Never panics; every failure is logged and
 /// swallowed so one bad record can't take the receiver down.
-pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
+pub async fn dispatch(
+    cfg: &Arc<Config>,
+    client: &AsyncClient,
+    vol: &Arc<VolumeCtl>,
+    gate: &Sender<()>,
+    payload: &[u8],
+) {
     let text = match std::str::from_utf8(payload) {
         Ok(t) => t,
         Err(_) => {
@@ -65,7 +81,7 @@ pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
         }
     };
     for record in text.split('\n') {
-        dispatch_record(cfg, client, record).await;
+        dispatch_record(cfg, client, vol, gate, record).await;
     }
 }
 
@@ -73,25 +89,34 @@ pub async fn dispatch(cfg: &Arc<Config>, client: &AsyncClient, payload: &[u8]) {
 /// `\r` and any interior/leading/trailing spaces — a space-prefixed " *…##" is not an
 /// OWN frame (it falls to the ignored JSON path, as in the shell, rather than being
 /// forwarded to the gateway and executed).
-async fn dispatch_record(cfg: &Arc<Config>, client: &AsyncClient, record: &str) {
+async fn dispatch_record(
+    cfg: &Arc<Config>,
+    client: &AsyncClient,
+    vol: &Arc<VolumeCtl>,
+    gate: &Sender<()>,
+    record: &str,
+) {
     // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
     if record.trim().is_empty() {
         return;
     }
     if own::is_own_frame(record) {
-        if let Err(e) = forward_to_gateway(record).await {
+        if let Err(e) = forward_to_gateway(record, FORWARD_TIMEOUT).await {
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
-        handle_json(cfg, client, record).await;
+        handle_json(cfg, client, vol, gate, record).await;
     }
 }
 
 /// Forward a raw OpenWebNet frame to the gateway's command-injection port. Always
 /// the LOOPBACK gateway (127.0.0.1:30006), as StartMqttReceive did — OWN_HOST is
-/// only the monitor (read) endpoint, not the command (write) endpoint.
-async fn forward_to_gateway(frame: &str) -> std::io::Result<()> {
-    tokio::time::timeout(FORWARD_TIMEOUT, async {
+/// only the monitor (read) endpoint, not the command (write) endpoint. `pub(crate)`
+/// so the gate task (`gate.rs`) can send its press/release frames the same way; it
+/// passes a TIGHTER `timeout` so a full press+hold+release pulse fits inside the
+/// shutdown drain window (the raw-command path passes [`FORWARD_TIMEOUT`]).
+pub(crate) async fn forward_to_gateway(frame: &str, timeout: Duration) -> std::io::Result<()> {
+    tokio::time::timeout(timeout, async {
         let mut sock = TcpStream::connect(("127.0.0.1", OWN_PORT_CMD)).await?;
         sock.write_all(frame.as_bytes()).await?;
         sock.write_all(b"\n").await?;
@@ -104,14 +129,13 @@ async fn forward_to_gateway(frame: &str) -> std::io::Result<()> {
     })?
 }
 
-async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, msg: &str) {
-    if !cfg.remote_shell_allowed() {
-        eprintln!(
-            "btmqttd: ignored JSON command: remote channel disabled (needs \
-             ALLOW_REMOTE_SHELL=1 and an authenticated broker: user/pass or mutual TLS)."
-        );
-        return;
-    }
+async fn handle_json(
+    cfg: &Arc<Config>,
+    client: &AsyncClient,
+    vol: &Arc<VolumeCtl>,
+    gate: &Sender<()>,
+    msg: &str,
+) {
     let v: Value = match serde_json::from_str(msg) {
         Ok(v) => v,
         Err(_) => {
@@ -119,6 +143,31 @@ async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, msg: &str) {
             return;
         }
     };
+    // Device-control ACTIONS (volume / mute / gate) are UNGATED — the broker ACL on
+    // TOPIC_RX is the trust boundary. TOPIC_RX is ALREADY a privileged control channel:
+    // a raw frame on it is forwarded to the gateway (:30006) with no gate, so a
+    // publisher can already actuate WHO=8 commands — including opening the gate
+    // (*8*19*20##). The `gate` action here is exactly that same :30006 capability.
+    // `volume`/`mute` additionally reach WHO=8 DIMENSION writes on openserver (:20000),
+    // a capability a raw :30006 frame does NOT have — but volume is low-stakes and
+    // strictly less sensitive than the gate a raw frame can already trigger, so gating
+    // only the volume path (while raw frames stay ungated) would add no real security.
+    // The arbitrary-shell channel below (read_file/write_file/execute_command) is the
+    // one that stays behind ALLOW_REMOTE_SHELL, because it is categorically more
+    // dangerous (code execution). These are the payloads the HA volume/gate entities
+    // publish (via command_template / payload_press).
+    if let Some(action) = v.get("action").and_then(Value::as_str) {
+        handle_action(vol, gate, action, &v).await;
+        return;
+    }
+
+    if !cfg.remote_shell_allowed() {
+        eprintln!(
+            "btmqttd: ignored JSON command: remote channel disabled (needs \
+             ALLOW_REMOTE_SHELL=1 and an authenticated broker: user/pass or mutual TLS)."
+        );
+        return;
+    }
     let command = v.get("command").and_then(Value::as_str).unwrap_or("");
     let file_path = v.get("file_path").and_then(Value::as_str).unwrap_or("");
     // `data` as Option: a MISSING (or non-string) key is rejected per-command rather
@@ -139,6 +188,97 @@ async fn handle_json(cfg: &Arc<Config>, client: &AsyncClient, msg: &str) {
         },
         "" => eprintln!("btmqttd: JSON command missing 'command'"),
         other => eprintln!("btmqttd: unsupported command: {other}"),
+    }
+}
+
+/// Handle an ungated device-control action (issue #40 volume, #41 gate). `v` is the
+/// already-parsed action object; `action` is its `action` field. Unknown actions are
+/// logged and ignored. A volume op that fails (gateway refused/unreachable) is logged;
+/// the retained state stays whatever the monitor last observed, so HA is never left
+/// showing a value the device didn't accept.
+/// A parsed device-control action — the PURE classification of a JSON action object,
+/// separated from the async dispatch so it can be unit-tested without a live gateway or
+/// broker. Values are already validated/normalised (volume clamped/rounded, step
+/// reduced to a direction).
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    /// Absolute volume set, `0..=100` — the slider `number`.
+    Volume(u8),
+    /// Mute (`true`) / unmute (`false`) — the mute `switch`.
+    Mute(bool),
+    /// Relative step: up (`true`) / down (`false`) — the ± `button`s. Only the SIGN of
+    /// the JSON value matters (the step size is owned device-side).
+    Step(bool),
+    /// Momentary gate pulse (issue #41) — the gate `button`.
+    Gate,
+}
+
+/// Classify a JSON action object (`{"action":<name>,"value":…}`) into an [`Action`], or
+/// `None` when the action name is unknown or its value is missing/invalid. Pure — the
+/// async dispatch (device write / gate enqueue) lives in [`handle_action`].
+fn parse_action(action: &str, v: &Value) -> Option<Action> {
+    match action {
+        "volume" => v.get("value").and_then(json_percent).map(Action::Volume),
+        "mute" => match v.get("value").and_then(Value::as_str) {
+            Some("on") => Some(Action::Mute(true)),
+            Some("off") => Some(Action::Mute(false)),
+            _ => None,
+        },
+        "volume_step" => match v.get("value").and_then(Value::as_i64) {
+            Some(d) if d > 0 => Some(Action::Step(true)),
+            Some(d) if d < 0 => Some(Action::Step(false)),
+            _ => None,
+        },
+        "gate" => Some(Action::Gate),
+        _ => None,
+    }
+}
+
+async fn handle_action(vol: &Arc<VolumeCtl>, gate: &Sender<()>, action: &str, v: &Value) {
+    match parse_action(action, v) {
+        Some(Action::Volume(n)) => log_action_err("volume", vol.set(n).await),
+        Some(Action::Mute(on)) => log_action_err("mute", vol.mute(on).await),
+        Some(Action::Step(up)) => log_action_err("volume_step", vol.step(up).await),
+        // Enqueue a pulse request to the dedicated gate task (gate.rs), which serialises
+        // press→hold→release off the command worker and is drained on shutdown so the
+        // release always follows. Full => a burst faster than the gate can pulse (drop,
+        // don't block the worker); Closed => the gate task is gone (shutting down).
+        Some(Action::Gate) => match gate.try_send(()) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
+                eprintln!("btmqttd: gate press dropped — pulse queue full");
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {}
+        },
+        None => eprintln!(
+            "btmqttd: ignored action {action:?} (unknown, or missing/invalid value {:?})",
+            v.get("value")
+        ),
+    }
+}
+
+/// Parse a volume percent (0..=100) from a JSON number. Accepts an integer OR a
+/// float: the installer's slider `command_template` renders `{{ value | int }}` (an
+/// integer), but Home Assistant `number` entities carry the value as a float and
+/// another publisher (or a hand-crafted payload) could still send `50.0`, so a float
+/// is accepted DEFENSIVELY — rounded to the nearest integer. Both forms are clamped
+/// to 0..=100. Returns `None` for a non-number or a non-finite float (NaN/∞).
+fn json_percent(v: &Value) -> Option<u8> {
+    if let Some(n) = v.as_u64() {
+        return Some(n.min(100) as u8);
+    }
+    let f = v.as_f64()?;
+    if !f.is_finite() {
+        return None;
+    }
+    Some(f.round().clamp(0.0, 100.0) as u8)
+}
+
+/// Log a device-control action's error without aborting the worker (best-effort, like
+/// the rest of the receiver): a failed set/step leaves HA on the last observed state.
+fn log_action_err(action: &str, r: std::io::Result<()>) {
+    if let Err(e) = r {
+        eprintln!("btmqttd: action {action} failed: {e}");
     }
 }
 
@@ -448,6 +588,61 @@ mod tests {
     /// behaviour (the shell's `while IFS= read -r` loop).
     fn records(payload: &str) -> Vec<&str> {
         payload.split('\n').collect()
+    }
+
+    #[test]
+    fn json_percent_accepts_int_and_float_clamped_and_rounded() {
+        use serde_json::json;
+        // Integer values pass through, clamped to 0..=100.
+        assert_eq!(json_percent(&json!(0)), Some(0));
+        assert_eq!(json_percent(&json!(50)), Some(50));
+        assert_eq!(json_percent(&json!(100)), Some(100));
+        assert_eq!(json_percent(&json!(150)), Some(100)); // clamp
+        // Floats (what an HA `number` slider renders via `{{ value }}`) are rounded.
+        assert_eq!(json_percent(&json!(50.0)), Some(50));
+        assert_eq!(json_percent(&json!(49.6)), Some(50)); // round to nearest
+        assert_eq!(json_percent(&json!(120.0)), Some(100)); // clamp after round
+        assert_eq!(json_percent(&json!(-5.0)), Some(0)); // clamp low
+        // Non-numbers / non-finite are rejected (fall to the invalid-value path).
+        assert_eq!(json_percent(&json!("50")), None);
+        assert_eq!(json_percent(&json!(null)), None);
+    }
+
+    #[test]
+    fn parse_action_classifies_the_control_surface() {
+        use serde_json::json;
+        // volume: int or float, clamped/rounded (via json_percent).
+        assert_eq!(parse_action("volume", &json!({"value": 50})), Some(Action::Volume(50)));
+        assert_eq!(parse_action("volume", &json!({"value": 49.6})), Some(Action::Volume(50)));
+        assert_eq!(parse_action("volume", &json!({"value": 150})), Some(Action::Volume(100)));
+        // mute: only "on"/"off".
+        assert_eq!(parse_action("mute", &json!({"value": "on"})), Some(Action::Mute(true)));
+        assert_eq!(parse_action("mute", &json!({"value": "off"})), Some(Action::Mute(false)));
+        // volume_step: only the SIGN matters.
+        assert_eq!(parse_action("volume_step", &json!({"value": 10})), Some(Action::Step(true)));
+        assert_eq!(parse_action("volume_step", &json!({"value": -10})), Some(Action::Step(false)));
+        assert_eq!(parse_action("volume_step", &json!({"value": -1})), Some(Action::Step(false)));
+        // gate: no value needed.
+        assert_eq!(parse_action("gate", &json!({})), Some(Action::Gate));
+        assert_eq!(parse_action("gate", &json!({"value": "ignored"})), Some(Action::Gate));
+    }
+
+    #[test]
+    fn parse_action_rejects_unknown_and_invalid() {
+        use serde_json::json;
+        // Unknown action name.
+        assert_eq!(parse_action("nope", &json!({"value": 1})), None);
+        assert_eq!(parse_action("", &json!({})), None);
+        // volume: missing / non-numeric / non-finite value.
+        assert_eq!(parse_action("volume", &json!({})), None);
+        assert_eq!(parse_action("volume", &json!({"value": "x"})), None);
+        // mute: value other than on/off.
+        assert_eq!(parse_action("mute", &json!({"value": "maybe"})), None);
+        assert_eq!(parse_action("mute", &json!({"value": 1})), None);
+        // volume_step: zero (no direction) / missing / non-integer.
+        assert_eq!(parse_action("volume_step", &json!({"value": 0})), None);
+        assert_eq!(parse_action("volume_step", &json!({})), None);
+        assert_eq!(parse_action("volume_step", &json!({"value": "up"})), None);
     }
 
     #[test]

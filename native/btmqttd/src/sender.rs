@@ -13,7 +13,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::config::Config;
+use crate::dimension;
 use crate::own::{self, Framer};
+use crate::volume::VolumeCtl;
 
 /// Monitor-session request sent right after connect. The gateway replies with the
 /// `*#*1##` ACK and then streams every bus frame.
@@ -28,11 +30,11 @@ const HEALTHY_SESSION: Duration = Duration::from_secs(60);
 
 /// Run forever: (re)connect to the monitor, stream + publish frames, and on any
 /// drop back off (capped) and reconnect. Never returns under normal operation.
-pub async fn run(cfg: Arc<Config>, client: AsyncClient) {
+pub async fn run(cfg: Arc<Config>, client: AsyncClient, volume: Arc<VolumeCtl>) {
     let mut backoff = 0u64;
     loop {
         let start = tokio::time::Instant::now();
-        if let Err(e) = session(&cfg, &client).await {
+        if let Err(e) = session(&cfg, &client, &volume).await {
             eprintln!(
                 "btmqttd: monitor {}:{} unavailable: {e}",
                 cfg.own_host, cfg.own_port_mon
@@ -58,7 +60,7 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// One monitor session: connect, handshake, VALIDATE the monitor ACK, then read +
 /// publish until the socket closes (Ok) or errors. run() decides healthy-vs-backoff
 /// from how long this ran.
-async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> std::io::Result<()> {
+async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl>) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
     sock.flush().await?;
@@ -118,7 +120,7 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> std::io::Result<()>
     if let Some(pos) = pre.windows(own::ACK.len()).position(|w| w == own::ACK) {
         framer.push(&pre[pos + own::ACK.len()..], &mut frames);
         for frame in frames.drain(..) {
-            publish_frame(cfg, client, &frame).await;
+            publish_frame(cfg, client, volume, &frame).await;
         }
     }
 
@@ -130,7 +132,7 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> std::io::Result<()>
         frames.clear();
         framer.push(&buf[..n], &mut frames);
         for frame in frames.drain(..) {
-            publish_frame(cfg, client, &frame).await;
+            publish_frame(cfg, client, volume, &frame).await;
         }
     }
 }
@@ -138,7 +140,15 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient) -> std::io::Result<()>
 /// Publish one framed OWN string to TOPIC_DUMP — as compact JSON (PAYLOAD_FORMAT=
 /// json, the default) or the raw frame. QoS 0, not retained, as the shell's
 /// `mqtt_pub -l` did.
-async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, frame: &str) {
+async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl>, frame: &str) {
+    // Learn the real volume from the bus (issue #40): the unit broadcasts
+    // `*#8**41*<N>##` on the monitor whenever the volume changes by ANY path (slider,
+    // up/down, mute, or the unit's own menu), so this is the single source of truth for
+    // `current`/`muted`. Parse BEFORE the format branch so it works in raw mode too;
+    // non-volume frames parse to None and are ignored.
+    if let Some(pct) = dimension::parse_volume_report(frame) {
+        volume.observe(pct).await;
+    }
     let payload: Vec<u8> = if cfg.payload_json {
         match own::frame_to_json(frame) {
             Some(v) => v.to_string().into_bytes(),
