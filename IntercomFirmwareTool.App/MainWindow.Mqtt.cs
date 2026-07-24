@@ -95,6 +95,9 @@ namespace IntercomFirmwareTool.App
             // Structured JSON bus payloads: on by default (the modern, HA-friendly format);
             // untick for raw frames. Set here (not in XAML) for the same reason as above.
             ChkMqttJsonPayload.IsChecked = true;
+            // Broker rediscovery: on by default (#43/#44). It self-gates on the device
+            // (needs a hostname config + a TLS trust anchor), so on-by-default is safe.
+            ChkMqttRediscovery.IsChecked = true;
 
             RefreshMqttPlaceholders();
         }
@@ -705,7 +708,10 @@ namespace IntercomFirmwareTool.App
                 EnableHaDiscovery: ChkMqttHaDiscovery.IsChecked == true,
                 // Checked (default) = one structured JSON object per frame on TOPIC_DUMP
                 // (modern, HA-friendly); unchecked = raw OpenWebNet frames.
-                UseJsonPayload: ChkMqttJsonPayload.IsChecked == true)
+                UseJsonPayload: ChkMqttJsonPayload.IsChecked == true,
+                // Broker rediscovery (#43/#44), on by default. Device-side it self-gates
+                // (hostname config + TLS), so it is inert unless those hold.
+                MqttRediscovery: ChkMqttRediscovery.IsChecked == true)
             {
                 // Topics are prefilled with the record's defaults, so an untouched
                 // panel reproduces those exactly; a customized one overrides them.

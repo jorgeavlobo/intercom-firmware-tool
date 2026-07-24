@@ -44,6 +44,15 @@ namespace IntercomFirmwareTool.Core
     /// tolerates a raw payload, so a raw-mode frame still shows). See PAYLOAD_FORMAT /
     /// frame_to_json in btmqttd.
     /// </param>
+    /// <param name="MqttRediscovery">
+    /// Let the device recover the broker after its LAN IP changes (issues #43/#44): when the
+    /// broker's address goes stale, btmqttd scans its /24 and repoints the broker name's
+    /// <c>/etc/hosts</c> mapping so the bridge reconnects without a re-flash. On by default.
+    /// Self-gates on the device: it only acts when the broker is a NAME (the repoint has no
+    /// effect on a bare-IP config) AND there is a trust anchor — TLS (the reconnect validates
+    /// the broker's pinned certificate). Writes <c>MQTT_REDISCOVERY</c>. (A broker-MAC anchor
+    /// for plaintext brokers, captured in the UI, is a separate follow-up.)
+    /// </param>
     public sealed record MqttOptions(
         string MqttHost,
         int MqttPort = 1883,
@@ -55,7 +64,8 @@ namespace IntercomFirmwareTool.Core
         string? HostIpForHosts = null,
         bool AllowRemoteShell = false,
         bool EnableHaDiscovery = false,
-        bool UseJsonPayload = true)
+        bool UseJsonPayload = true,
+        bool MqttRediscovery = true)
     {
         // A record's synthesized ToString() prints EVERY property — which would
         // leak MqttPass and the TLS private key (ClientKeyPem) into any log line
@@ -66,7 +76,8 @@ namespace IntercomFirmwareTool.Core
             $"HasAuth = {HasAuth}, HasTls = {HasTls}, HasMutualTls = {HasMutualTls}, " +
             $"AllowRemoteShell = {AllowRemoteShell}, " +
             $"Payload = {(UseJsonPayload ? "json" : "raw")}, " +
-            $"HaDiscovery = {EnableHaDiscovery} }}";
+            $"HaDiscovery = {EnableHaDiscovery}, " +
+            $"Rediscovery = {MqttRediscovery} }}";
 
         /// <summary>OpenWebNet gateway host for the socket monitor back-end (loopback alias).</summary>
         public string OwnHost { get; init; } = "127.0.0.1";
@@ -762,6 +773,12 @@ namespace IntercomFirmwareTool.Core
             // discovery configs (from the installer-generated manifest under HaDir) on
             // every connect; when 0 it clears them. Reconciled natively (no ha_discovery.sh).
             sb.Append("HA_DISCOVERY=").Append(opts.EnableHaDiscovery ? '1' : '0').Append('\n');
+
+            // Broker rediscovery (#43/#44): when 1, btmqttd recovers the broker after its LAN
+            // IP changes by scanning the broker name's /24 and repointing its /etc/hosts
+            // mapping. It self-gates device-side (needs a hostname config + a trust anchor —
+            // TLS today), so this stays safe even when on by default.
+            sb.Append("MQTT_REDISCOVERY=").Append(opts.MqttRediscovery ? '1' : '0').Append('\n');
             return sb.ToString();
         }
 
