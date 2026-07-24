@@ -13,8 +13,10 @@ using System.Threading.Tasks;
 namespace IntercomFirmwareTool.App
 {
     /// <summary>A broker found on the LAN. <see cref="Hostname"/> is the advertised
-    /// name (mDNS) or a reverse-DNS name (scan), or null when only an IP is known.</summary>
-    public sealed record BrokerCandidate(string? Hostname, string Ip, int Port);
+    /// name (mDNS) or a reverse-DNS name (scan), or null when only an IP is known.
+    /// <see cref="IsTls"/> records the transport EXPLICITLY (set by the discovery method
+    /// that confirmed it), rather than inferring it from the port number.</summary>
+    public sealed record BrokerCandidate(string? Hostname, string Ip, int Port, bool IsTls = false);
 
     /// <summary>
     /// Best-effort discovery of MQTT brokers on the local network, with NO external
@@ -99,7 +101,9 @@ namespace IntercomFirmwareTool.App
                     if (a.TryGetValue(kv.Value.target, out string? ip))
                     {
                         string host = kv.Value.target.TrimEnd('.');
-                        found.Add(new BrokerCandidate(NullIfEmpty(host), ip, kv.Value.port));
+                        // _mqtt._tcp is the plaintext service (TLS brokers advertise a distinct
+                        // service name we don't query), so treat an mDNS hit as plaintext.
+                        found.Add(new BrokerCandidate(NullIfEmpty(host), ip, kv.Value.port, IsTls: false));
                     }
                 }
 
@@ -287,7 +291,9 @@ namespace IntercomFirmwareTool.App
             foreach (var kv in hits.OrderBy(k => k.Key))
             {
                 string? host = await TryReverseDnsAsync(kv.Key, ct).ConfigureAwait(false);
-                results.Add(new BrokerCandidate(host, kv.Key, kv.Value));
+                // The winning port reflects which probe confirmed it: 8883 was validated with a
+                // TLS handshake, 1883 with a plaintext CONNECT — so the transport is known here.
+                results.Add(new BrokerCandidate(host, kv.Key, kv.Value, IsTls: kv.Value == 8883));
             }
             return results;
         }

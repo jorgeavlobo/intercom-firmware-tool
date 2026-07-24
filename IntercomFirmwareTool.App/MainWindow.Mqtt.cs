@@ -188,7 +188,7 @@ namespace IntercomFirmwareTool.App
                 // enabled the bridge within its window)? Give it its full window to answer before
                 // the heavier scan — a candidate may still be arriving. Then re-read.
                 Task? mdns = _mdnsTask;
-                if (!pool.Any(c => c.Port != 8883) && mdns is { IsCompleted: false })
+                if (!pool.Any(c => !c.IsTls) && mdns is { IsCompleted: false })
                 {
                     SetMqttDiscoveryInfo(L("MqttDiscovering"));
                     try { await mdns.WaitAsync(TimeSpan.FromSeconds(4)); } catch { /* window/timeout */ }
@@ -198,18 +198,28 @@ namespace IntercomFirmwareTool.App
 
                 // Still nothing plaintext → the /24 scan, once, cancellable when the bridge is
                 // turned off (via _discoveryScanCts).
-                if (!pool.Any(c => c.Port != 8883) && !_discoveryScanDone)
+                if (!pool.Any(c => !c.IsTls) && !_discoveryScanDone)
                 {
                     SetMqttDiscoveryInfo(L("MqttDiscovering"));
                     _discoveryScanCts?.Cancel();
+                    _discoveryScanCts?.Dispose();   // release the previous linked CTS (no leak on repeat)
                     var scanCts = _discoveryScanCts = CancellationTokenSource.CreateLinkedTokenSource(
                         _discoveryCts?.Token ?? CancellationToken.None);
                     IReadOnlyList<BrokerCandidate> scan;
+                    bool cancelled;
                     try { scan = await _brokerDiscovery.ScanSubnetAsync(scanCts.Token); }
                     catch { scan = System.Array.Empty<BrokerCandidate>(); }
+                    finally
+                    {
+                        cancelled = scanCts.IsCancellationRequested;
+                        // Dispose this scan's CTS; clear the field if it's still the current one
+                        // (the toggle handler's ?.Cancel() then no-ops on null).
+                        if (ReferenceEquals(_discoveryScanCts, scanCts)) _discoveryScanCts = null;
+                        scanCts.Dispose();
+                    }
                     // A cancelled scan (bridge disabled mid-scan, or window closing) stays
                     // RETRYABLE — don't burn the one-shot flag on it.
-                    if (scanCts.IsCancellationRequested) { SetMqttDiscoveryInfo(null); return; }
+                    if (cancelled) { SetMqttDiscoveryInfo(null); return; }
                     _discoveryScanDone = true;   // a full sweep ran — the heavy scan won't repeat
                     // The user may have typed a broker while we scanned.
                     if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
@@ -219,7 +229,7 @@ namespace IntercomFirmwareTool.App
                 }
 
                 // A plaintext broker → pre-fill and mark ready.
-                if (pool.FirstOrDefault(c => c.Port != 8883) is BrokerCandidate plain)
+                if (pool.FirstOrDefault(c => !c.IsTls) is BrokerCandidate plain)
                 {
                     _discoveryPrefillDone = true;
                     PrefillBrokerFields(plain);
