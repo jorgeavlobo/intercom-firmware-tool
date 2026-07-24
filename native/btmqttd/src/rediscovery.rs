@@ -68,18 +68,33 @@ const PROBE_CONCURRENCY: usize = 64;
 
 /// Whether a poll error is consistent with a STALE/UNREACHABLE broker address (as an
 /// IP change produces) rather than an application-level rejection. Only these advance
-/// the rediscovery failure streak: a socket-level failure (connection refused, host
-/// unreachable, reset) or a network timeout means "nothing usable answered at this
-/// address". A `ConnectionRefused` (MQTT CONNACK: bad credentials / not authorized), a
-/// TLS verification failure, or a protocol error mean the host WAS reached and is a
-/// broker that rejected US — the hostname still points at the right box, so we must
-/// NOT wander off and retire it (issue #43 / Codex P2).
+/// the rediscovery failure streak: a socket/transport-level failure (connection
+/// refused, host/network unreachable, reset, timeout, EOF) or rumqttc's own network
+/// timeout means "nothing usable answered at this address". A `ConnectionRefused` (MQTT
+/// CONNACK: bad credentials / not authorized), a TLS verification failure, or a
+/// protocol error are DISTINCT variants meaning the host WAS reached and is a broker
+/// that rejected US — the hostname still points at the right box, so we must NOT wander
+/// off and retire it (issue #43 / Codex P2).
+///
+/// For the `Io` variant we still exclude the few `ErrorKind`s that signal a LOCAL/config
+/// fault rather than an unreachable host (permission denied, invalid data/input,
+/// unsupported), so those don't spuriously trigger a /24 scan (Copilot). Genuinely
+/// socket-level and uncategorised OS errors remain treated as unreachable, so a real
+/// stale-address failure is never missed.
 pub fn is_unreachable(e: &rumqttc::ConnectionError) -> bool {
     use rumqttc::ConnectionError;
-    matches!(
-        e,
-        ConnectionError::Io(_) | ConnectionError::NetworkTimeout | ConnectionError::FlushTimeout
-    )
+    use std::io::ErrorKind;
+    match e {
+        ConnectionError::NetworkTimeout | ConnectionError::FlushTimeout => true,
+        ConnectionError::Io(err) => !matches!(
+            err.kind(),
+            ErrorKind::PermissionDenied
+                | ErrorKind::InvalidData
+                | ErrorKind::InvalidInput
+                | ErrorKind::Unsupported
+        ),
+        _ => false,
+    }
 }
 
 /// Attempt one rediscovery pass: propose a new IP for the broker name and repoint its
@@ -521,11 +536,24 @@ IP address       HW type     Flags       HW address            Mask     Device
         ))));
         assert!(is_unreachable(&ConnectionError::NetworkTimeout));
         assert!(is_unreachable(&ConnectionError::FlushTimeout));
+        assert!(is_unreachable(&ConnectionError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset"
+        ))));
         // A broker-side CONNACK refusal (bad credentials) is NOT unreachable — the host
         // is the real broker, rejecting us; rediscovery must not retire it.
         assert!(!is_unreachable(&ConnectionError::ConnectionRefused(
             ConnectReturnCode::BadUserNamePassword
         )));
+        // Local/config-fault I/O kinds are excluded so they don't trigger a /24 scan.
+        assert!(!is_unreachable(&ConnectionError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied"
+        ))));
+        assert!(!is_unreachable(&ConnectionError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "garbage"
+        ))));
     }
 
     #[test]
