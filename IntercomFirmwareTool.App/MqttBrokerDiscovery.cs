@@ -103,7 +103,12 @@ namespace IntercomFirmwareTool.App
                         string host = kv.Value.target.TrimEnd('.');
                         // _mqtt._tcp is the plaintext service (TLS brokers advertise a distinct
                         // service name we don't query), so treat an mDNS hit as plaintext.
-                        found.Add(new BrokerCandidate(NullIfEmpty(host), ip, kv.Value.port, IsTls: false));
+                        // Mirror the scan path's reverse-DNS validation: an mDNS hit is auto-
+                        // prefilled (IsTls false), so a self-advertised name outside the charset
+                        // Build accepts (underscores are common) must fall back to IP-only — else
+                        // it would be silently written and then rejected by MqttStructuralError().
+                        string? hostname = IsAcceptableHostname(host) ? host : null;
+                        found.Add(new BrokerCandidate(hostname, ip, kv.Value.port, IsTls: false));
                     }
                 }
 
@@ -279,13 +284,20 @@ namespace IntercomFirmwareTool.App
 
             var hits = new System.Collections.Concurrent.ConcurrentDictionary<string, int>(); // ip → port
             using var sem = new SemaphoreSlim(48);
+            // A confirmed plaintext (1883) broker is all the caller consumes (it takes the first
+            // non-TLS candidate), so stop the sweep the moment one lands instead of waiting on the
+            // remaining ~2000 host×port probes (each up to 400ms connect + 1200ms I/O — tens of
+            // seconds of "Searching…" past a broker already found). Linked to ct so a bridge-off /
+            // window-close still cancels; cancelling THIS never signals ct, so the caller still
+            // treats the scan as a completed (non-cancelled) sweep and uses the results.
+            using var earlyStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var tasks = new List<Task>();
             // Every candidate is confirmed to speak MQTT: 1883 with a plaintext CONNECT/CONNACK,
             // 8883 with a TLS handshake THEN the same CONNECT/CONNACK. 1883 wins on a dual-port host.
             foreach (var prefix in prefixes)
                 foreach (var (port, useTls) in new[] { (1883, false), (8883, true) })
                     for (int h = 1; h <= 254; h++)
-                        tasks.Add(ProbeHostAsync($"{prefix}.{h}", port, useTls, sem, hits, ct));
+                        tasks.Add(ProbeHostAsync($"{prefix}.{h}", port, useTls, sem, hits, earlyStop));
 
             try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { /* individual probes already swallow */ }
 
@@ -312,8 +324,9 @@ namespace IntercomFirmwareTool.App
 
         private static async Task ProbeHostAsync(string ip, int port, bool useTls,
             SemaphoreSlim sem, System.Collections.Concurrent.ConcurrentDictionary<string, int> hits,
-            CancellationToken ct)
+            CancellationTokenSource earlyStop)
         {
+            CancellationToken ct = earlyStop.Token;
             // Acquire the throttle outside the main try so a cancellation here can't fault the
             // task — nothing to release if we never got the slot.
             try { await sem.WaitAsync(ct).ConfigureAwait(false); }
@@ -343,7 +356,13 @@ namespace IntercomFirmwareTool.App
                         stream = ssl;
                     }
                     if (await IsMqttOverStreamAsync(stream, ioCts.Token).ConfigureAwait(false))
+                    {
                         hits.AddOrUpdate(ip, port, (_, existing) => Math.Min(existing, port)); // prefer 1883
+                        // A plaintext broker is the best-case result the caller wants — end the
+                        // sweep. (8883 hits keep scanning: the caller needs a plaintext candidate,
+                        // and a TLS-only find is only surfaced as guidance, never auto-prefilled.)
+                        if (port == 1883) { try { earlyStop.Cancel(); } catch { /* already disposed/cancelled */ } }
+                    }
                 }
                 finally { ssl?.Dispose(); }
             }
@@ -496,7 +515,5 @@ namespace IntercomFirmwareTool.App
             "hyper-v", "vethernet", "vmware", "virtualbox", "vbox", "virtual",
             "docker", "wsl", "tap-windows", "pseudo", "loopback", "bluetooth",
         };
-
-        private static string? NullIfEmpty(string s) => string.IsNullOrEmpty(s) ? null : s;
     }
 }
