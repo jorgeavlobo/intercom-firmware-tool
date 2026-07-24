@@ -448,7 +448,26 @@ namespace IntercomFirmwareTool.App
             _mqttTesting = true;
             BtnMqttTest.IsEnabled = false;
             SetMqttTestStatus(L("MqttTest_Testing"), error: false);
+            UpdateBuildEnabled();   // lock Build for the whole test (gate reads _mqttTesting)
             int gen = _mqttTestGen;   // config snapshot; a later edit invalidates this result
+
+            // For a hostname broker with no explicit Host IP, pin the CONNECT to the FIRST
+            // IPv4 — the address the firmware build's ResolveHostIp picks and the one the MAC
+            // capture will ARP. Otherwise the OS resolver could hand MQTTnet a different A
+            // record (or IPv6) than the IPv4 chosen here, giving a ✓ for one endpoint while
+            // the anchor/pin describes another. On resolve failure fall back to the hostname.
+            // Inside the _mqttTesting window, so Build stays locked across the resolve too.
+            if (hostIsName && hostIp == null)
+            {
+                try
+                {
+                    var addrs = await Dns.GetHostAddressesAsync(host).WaitAsync(DnsCaptureTimeout);
+                    if (Array.Find(addrs, a => a.AddressFamily == AddressFamily.InterNetwork) is IPAddress v4)
+                        connectHost = v4.ToString();
+                }
+                catch { /* unresolved here — let MQTTnet resolve the hostname itself */ }
+            }
+
             bool ok = false;
             string? err = null;
             try
@@ -462,7 +481,7 @@ namespace IntercomFirmwareTool.App
             // If a connection-affecting field changed while the CONNECT was in flight,
             // its result no longer describes the visible config — the edit already
             // cleared the status line, so leave it hidden rather than repaint a stale one.
-            if (gen != _mqttTestGen) { BtnMqttTest.IsEnabled = _uiEnabled; return; }
+            if (gen != _mqttTestGen) { BtnMqttTest.IsEnabled = _uiEnabled; UpdateBuildEnabled(); return; }
             SetMqttTestStatus(
                 ok ? LF("Fmt_MqttTest_Ok", host, port)
                    : LF("Fmt_MqttTest_Fail", err ?? L("MqttTest_Refused")),
@@ -484,6 +503,7 @@ namespace IntercomFirmwareTool.App
             }
 
             BtnMqttTest.IsEnabled = _uiEnabled;
+            UpdateBuildEnabled();   // test done: re-open Build now that _mqttTesting is clear
         }
 
         /// <summary>Under TLS, before adopting a reverse-DNS hostname for a bare-IP broker,
@@ -506,6 +526,16 @@ namespace IntercomFirmwareTool.App
             finally { _mqttCapturing = false; }
 
             if (gen != _mqttTestGen) { BtnMqttTest.IsEnabled = _uiEnabled; UpdateBuildEnabled(); return; }
+
+            // Rediscovery turned off during the re-validation → abandon the hostname switch;
+            // the broker stays the IP (unchanged, still the tested endpoint), so restore its ✓.
+            if (ChkMqttRediscovery.IsChecked != true)
+            {
+                SetMqttTestStatus(LF("Fmt_MqttTest_Ok", ip, port), error: false);
+                BtnMqttTest.IsEnabled = _uiEnabled;
+                UpdateBuildEnabled();
+                return;
+            }
 
             if (ok)
             {
@@ -596,10 +626,11 @@ namespace IntercomFirmwareTool.App
                     catch { /* no PTR record / timeout — a MAC-only anchor is fine */ }
                 }
 
-                // Single commit point AFTER all awaits: if a connection-affecting edit
-                // happened while ARP/DNS ran, the generation no longer matches — drop the
-                // whole capture rather than write a MAC for an endpoint no longer on screen.
-                if (gen != _mqttTestGen) return null;
+                // Single commit point AFTER all awaits. Drop the whole capture if a
+                // connection-affecting edit landed (generation moved on) OR the user turned
+                // rediscovery off while ARP/DNS ran — the anchor is its only consumer, so a
+                // disabled option must not store a MAC, mutate fields, or show anchor text.
+                if (gen != _mqttTestGen || ChkMqttRediscovery.IsChecked != true) return null;
 
                 if (mac == null)
                 {
@@ -939,10 +970,11 @@ namespace IntercomFirmwareTool.App
         private bool MqttOkToBuild()
         {
             if (!MqttEnabled) return true;
-            // A broker-MAC capture (ARP + reverse-DNS) is in flight after "Test
-            // connection": block Build until it settles, so the mqttOpts snapshot can't
-            // be taken with a null MAC the finished capture would have filled in.
-            if (_mqttCapturing) return false;
+            // A "Test connection" is in flight — either the CONNECT itself (_mqttTesting)
+            // or the follow-on broker-MAC capture / hostname re-validation (_mqttCapturing).
+            // Block Build for the WHOLE window so the mqttOpts snapshot can't be taken with a
+            // null MAC (or an about-to-change host) that the finishing test would have filled.
+            if (_mqttTesting || _mqttCapturing) return false;
             if (TxtMqttHost.Text.Trim().Length == 0) return false;
             return MqttStructuralError() == null;
         }
