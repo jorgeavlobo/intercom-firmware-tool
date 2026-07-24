@@ -91,7 +91,9 @@ namespace IntercomFirmwareTool.App
         // enabled and mDNS found nothing. The pre-fill happens at most once and never
         // overwrites a broker the user already typed.
         private MqttBrokerDiscovery? _brokerDiscovery;
-        private CancellationTokenSource? _discoveryCts;
+        private CancellationTokenSource? _discoveryCts;      // cancels all discovery on window close
+        private CancellationTokenSource? _discoveryScanCts;  // cancels an in-flight /24 scan (bridge off)
+        private Task? _mdnsTask;                              // the background mDNS run (awaited before a scan)
         private bool _discoveryScanDone;
         private bool _discoveryPrefillDone;
 
@@ -141,8 +143,8 @@ namespace IntercomFirmwareTool.App
             // non-throwing; cancelled when the window closes.
             _brokerDiscovery = new MqttBrokerDiscovery();
             _discoveryCts = new CancellationTokenSource();
-            Closed += (_, _) => { try { _discoveryCts?.Cancel(); } catch { /* shutting down */ } };
-            _ = _brokerDiscovery.RunMdnsAsync(TimeSpan.FromSeconds(3), _discoveryCts.Token);
+            Closed += (_, _) => { try { _discoveryCts?.Cancel(); _discoveryScanCts?.Cancel(); } catch { /* shutting down */ } };
+            _mdnsTask = _brokerDiscovery.RunMdnsAsync(TimeSpan.FromSeconds(3), _discoveryCts.Token);
         }
 
         // ---- Enable toggle + field-change plumbing --------------------------
@@ -157,9 +159,9 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
 
             // Enabling the bridge is the moment to pre-fill the broker from LAN discovery;
-            // disabling it hides the discovery note.
+            // disabling it cancels an in-flight /24 scan and hides the discovery note.
             if (MqttEnabled) _ = TryPrefillBrokerFromDiscoveryAsync();
-            else SetMqttDiscoveryInfo(null);
+            else { try { _discoveryScanCts?.Cancel(); } catch { } SetMqttDiscoveryInfo(null); }
         }
 
         /// <summary>Pre-fill the broker fields from LAN discovery when the bridge is enabled:
@@ -179,16 +181,35 @@ namespace IntercomFirmwareTool.App
                 // Candidate pool, mDNS first (it carries the hostname). Only PLAINTEXT (non-8883)
                 // brokers can be auto-configured: a TLS broker also needs a CA the discovery
                 // can't supply, so pre-filling one would build a plaintext config against a TLS
-                // listener. Run the scan only when no plaintext candidate is known yet.
+                // listener.
                 var pool = new List<BrokerCandidate>(_brokerDiscovery.MdnsCandidates);
+
+                // No plaintext candidate yet, and the background mDNS is still running (the user
+                // enabled the bridge within its window)? Give it its full window to answer before
+                // the heavier scan — a candidate may still be arriving. Then re-read.
+                Task? mdns = _mdnsTask;
+                if (!pool.Any(c => c.Port != 8883) && mdns is { IsCompleted: false })
+                {
+                    SetMqttDiscoveryInfo(L("MqttDiscovering"));
+                    try { await mdns.WaitAsync(TimeSpan.FromSeconds(4)); } catch { /* window/timeout */ }
+                    if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
+                    pool = new List<BrokerCandidate>(_brokerDiscovery.MdnsCandidates);
+                }
+
+                // Still nothing plaintext → the /24 scan, once, cancellable when the bridge is
+                // turned off (via _discoveryScanCts).
                 if (!pool.Any(c => c.Port != 8883) && !_discoveryScanDone)
                 {
                     _discoveryScanDone = true;   // the /24 scan is heavy — attempt it only once
                     SetMqttDiscoveryInfo(L("MqttDiscovering"));
+                    _discoveryScanCts?.Cancel();
+                    _discoveryScanCts = CancellationTokenSource.CreateLinkedTokenSource(
+                        _discoveryCts?.Token ?? CancellationToken.None);
                     IReadOnlyList<BrokerCandidate> scan;
-                    try { scan = await _brokerDiscovery.ScanSubnetAsync(_discoveryCts?.Token ?? CancellationToken.None); }
+                    try { scan = await _brokerDiscovery.ScanSubnetAsync(_discoveryScanCts.Token); }
                     catch { scan = System.Array.Empty<BrokerCandidate>(); }
-                    // The user may have disabled the bridge or typed a broker while we scanned.
+                    // The user may have disabled the bridge (which cancels the scan) or typed a
+                    // broker while we scanned.
                     if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
                     // Re-read mDNS (a hit may have landed during the scan), then add the scan hits.
                     pool = new List<BrokerCandidate>(_brokerDiscovery.MdnsCandidates);

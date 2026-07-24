@@ -61,10 +61,7 @@ namespace IntercomFirmwareTool.App
 
             try
             {
-                using var udp = new UdpClient(AddressFamily.InterNetwork);
-                udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                udp.Client.Bind(new IPEndPoint(IPAddress.Any, 0));   // ephemeral; unicast replies land here
-                udp.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 4);
+                using var udp = CreateMdnsSocket();
 
                 byte[] query = BuildPtrQuery(ServiceName);
                 await udp.SendAsync(query, query.Length, new IPEndPoint(MdnsGroup, MdnsPort)).ConfigureAwait(false);
@@ -108,6 +105,32 @@ namespace IntercomFirmwareTool.App
                     if (!_mdns.Any(x => x.Ip == c.Ip && x.Port == c.Port))
                         _mdns.Add(c);
             }
+        }
+
+        /// <summary>A UDP socket for the mDNS exchange. Preferably bound to port 5353 and
+        /// joined to the group, so it receives BOTH multicast responses (224.0.0.251:5353,
+        /// the common case) and unicast (QU) replies; SO_REUSEADDR lets it coexist with a
+        /// system mDNS responder. Falls back to an ephemeral port (QU-only) when 5353 can't
+        /// be bound.</summary>
+        private static UdpClient CreateMdnsSocket()
+        {
+            UdpClient? m = null;
+            try
+            {
+                m = new UdpClient(AddressFamily.InterNetwork);
+                m.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                m.Client.Bind(new IPEndPoint(IPAddress.Any, MdnsPort));
+                m.JoinMulticastGroup(MdnsGroup);
+                m.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 4);
+                return m;
+            }
+            catch { m?.Dispose(); }
+
+            var e = new UdpClient(AddressFamily.InterNetwork);
+            e.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            e.Client.Bind(new IPEndPoint(IPAddress.Any, 0));   // ephemeral; QU unicast replies land here
+            e.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 4);
+            return e;
         }
 
         /// <summary>Build a standard-query datagram for a single PTR record with the mDNS
