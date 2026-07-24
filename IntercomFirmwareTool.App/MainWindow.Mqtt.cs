@@ -182,7 +182,10 @@ namespace IntercomFirmwareTool.App
                 catch { scan = System.Array.Empty<BrokerCandidate>(); }
                 // The user may have disabled the bridge or typed a broker while we scanned.
                 if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
-                cand = scan.FirstOrDefault();
+                // Prefer a background mDNS hit that may have landed WHILE the scan ran (mDNS
+                // gives the hostname directly and covers ports/subnets the scan doesn't);
+                // fall back to the scan result otherwise.
+                cand = _brokerDiscovery.MdnsCandidates.FirstOrDefault() ?? scan.FirstOrDefault();
             }
 
             if (cand == null) { SetMqttDiscoveryInfo(null); return; }
