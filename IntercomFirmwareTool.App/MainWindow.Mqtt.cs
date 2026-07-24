@@ -399,11 +399,24 @@ namespace IntercomFirmwareTool.App
 
         private async void BtnMqttTest_Click(object sender, RoutedEventArgs e)
         {
+            await RunMqttConnectionTestAsync(captureAnchor: true);
+        }
+
+        /// <summary>Runs one real MQTT CONNECT against the current config and paints the
+        /// result. When <paramref name="captureAnchor"/> is true (the user-initiated test)
+        /// and rediscovery is on, a successful connect also captures the broker MAC and
+        /// canonicalizes the fields to hostname + pinned IP. If that promotion happens under
+        /// TLS the certificate's target host changed, so this re-runs itself once
+        /// (captureAnchor:false) to validate the cert against the hostname — dialing the
+        /// pinned IP — and reports whether the hostname was adopted. Returns the CONNECT
+        /// result.</summary>
+        private async Task<bool> RunMqttConnectionTestAsync(bool captureAnchor)
+        {
             string host = TxtMqttHost.Text.Trim();
             if (host.Length == 0 || !IsValidPortText(TxtMqttPort.Text))
             {
                 SetMqttTestStatus(L("MqttTest_NeedHostPort"), error: true);
-                return;
+                return false;
             }
             // Only test a config that would actually build — otherwise the test could
             // connect anonymously (user without password) or with partial TLS and
@@ -411,7 +424,7 @@ namespace IntercomFirmwareTool.App
             if (MqttStructuralError() is string structuralError)
             {
                 SetMqttTestStatus(structuralError, error: true);
-                return;
+                return false;
             }
             int port = int.Parse(TxtMqttPort.Text.Trim());
 
@@ -429,9 +442,9 @@ namespace IntercomFirmwareTool.App
             // "Connected" can't linger for a config whose retest never ran.
             string? user = NullIfEmpty(TxtMqttUser.Text.Trim());
             string? pass = NullIfEmpty(_mqttPass?.Value ?? "");
-            if (!TryReadPem(_mqttCaPath, out string? caPem)) { ClearMqttTestStatus(); return; }
-            if (!TryReadPem(_mqttCertPath, out string? certPem)) { ClearMqttTestStatus(); return; }
-            if (!TryReadPem(_mqttKeyPath, out string? keyPem)) { ClearMqttTestStatus(); return; }
+            if (!TryReadPem(_mqttCaPath, out string? caPem)) { ClearMqttTestStatus(); return false; }
+            if (!TryReadPem(_mqttCertPath, out string? certPem)) { ClearMqttTestStatus(); return false; }
+            if (!TryReadPem(_mqttKeyPath, out string? keyPem)) { ClearMqttTestStatus(); return false; }
 
             _mqttTesting = true;
             BtnMqttTest.IsEnabled = false;
@@ -450,22 +463,33 @@ namespace IntercomFirmwareTool.App
             // If a connection-affecting field changed while the CONNECT was in flight,
             // its result no longer describes the visible config — the edit already
             // cleared the status line, so leave it hidden rather than repaint a stale one.
-            if (gen != _mqttTestGen) { BtnMqttTest.IsEnabled = _uiEnabled; return; }
+            if (gen != _mqttTestGen) { BtnMqttTest.IsEnabled = _uiEnabled; return false; }
             SetMqttTestStatus(
                 ok ? LF("Fmt_MqttTest_Ok", host, port)
                    : LF("Fmt_MqttTest_Fail", err ?? L("MqttTest_Refused")),
                 error: !ok);
 
-            // On a good connect, capture the broker's MAC as the plaintext rediscovery
-            // anchor and canonicalize the config to a hostname + pinned IP (see
-            // CaptureBrokerMacAsync) — only when rediscovery is enabled, since the MAC is
-            // its anchor and would be unused otherwise. Build stays locked (via
-            // _mqttCapturing) through the async ARP/DNS so the snapshot can't be taken with
-            // a half-filled MAC.
-            if (ok && ChkMqttRediscovery.IsChecked == true)
-                await CaptureBrokerMacAsync(host, connectHost, gen);
+            // On the user-initiated test with rediscovery on, capture the broker's MAC and
+            // canonicalize the config to a hostname + pinned IP (see CaptureBrokerMacAsync).
+            // If that promoted a bare IP to its hostname while TLS is configured, the
+            // certificate's target host changed — re-run once to validate the cert against
+            // the hostname (dialing the pinned IP), with no re-capture, then report whether
+            // the hostname was adopted.
+            if (ok && captureAnchor && ChkMqttRediscovery.IsChecked == true)
+            {
+                bool tlsRetest = await CaptureBrokerMacAsync(host, connectHost, gen);
+                if (tlsRetest)
+                {
+                    bool ok2 = await RunMqttConnectionTestAsync(captureAnchor: false);
+                    if (_mqttBrokerMac != null)   // config not edited away during the retest
+                        SetMqttRediscoveryInfo(ok2
+                            ? LF("Fmt_MqttAnchorPromoted", _mqttBrokerMac, _mqttMacIp ?? "", _mqttMacSuggestedHost ?? "")
+                            : LF("Fmt_MqttAnchorCertMismatch", _mqttBrokerMac, _mqttMacIp ?? "", _mqttMacSuggestedHost ?? ""));
+                }
+            }
 
             BtnMqttTest.IsEnabled = _uiEnabled;
+            return ok;
         }
 
         /// <summary>
@@ -482,7 +506,10 @@ namespace IntercomFirmwareTool.App
         /// The whole method is best-effort and never throws: a broker on another subnet
         /// (ARP can't reach it) simply yields no anchor, with a note saying so.
         /// </summary>
-        private async Task CaptureBrokerMacAsync(string host, string connectHost, int gen)
+        /// <returns>True when it promoted a bare-IP broker to its hostname WHILE TLS is
+        /// configured — signalling the caller to re-run the test so the certificate is
+        /// validated against the hostname. False otherwise.</returns>
+        private async Task<bool> CaptureBrokerMacAsync(string host, string connectHost, int gen)
         {
             _mqttCapturing = true;
             UpdateBuildEnabled();   // lock Build while ARP/reverse-DNS run
@@ -537,7 +564,7 @@ namespace IntercomFirmwareTool.App
                 // Single commit point AFTER all awaits: if a connection-affecting edit
                 // happened while ARP/DNS ran, the generation no longer matches — drop the
                 // whole capture rather than write a MAC for an endpoint no longer on screen.
-                if (gen != _mqttTestGen) return;
+                if (gen != _mqttTestGen) return false;
 
                 if (mac == null)
                 {
@@ -546,7 +573,7 @@ namespace IntercomFirmwareTool.App
                     // no anchor for this broker (TLS would still anchor it).
                     ClearBrokerMac();
                     SetMqttRediscoveryInfo(L("MqttHint_AnchorNoMac"));
-                    return;
+                    return false;
                 }
 
                 _mqttBrokerMac = mac;
@@ -570,17 +597,14 @@ namespace IntercomFirmwareTool.App
                     if (hasTls)
                     {
                         // The test validated the certificate against the IP; the config now
-                        // targets the hostname (a different TLS identity we did not exercise).
-                        // Drop the ✓ and ask for a re-test — it connects via the pinned IP but
-                        // checks the cert against the hostname, so it protects an IP-only cert.
-                        ClearMqttTestStatus();
-                        SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorPromotedRetest", mac, _mqttMacIp, suggested));
+                        // targets the hostname (a different TLS identity). Signal the caller to
+                        // re-run the test — it dials the pinned IP but checks the cert against
+                        // the hostname — so an IP-only certificate is caught, not silently
+                        // shipped. The ✓ is left as-is; the retest repaints it.
+                        return true;
                     }
-                    else
-                    {
-                        // Plaintext: same endpoint, so the ✓ still holds.
-                        SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorPromoted", mac, _mqttMacIp, suggested));
-                    }
+                    // Plaintext: same endpoint, so the ✓ still holds.
+                    SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorPromoted", mac, _mqttMacIp, suggested));
                 }
                 else if (!hostIsIp && TxtMqttHostIp.Text.Trim().Length == 0)
                 {
@@ -594,6 +618,7 @@ namespace IntercomFirmwareTool.App
                 {
                     RefreshMqttRediscoveryInfo();
                 }
+                return false;
             }
             finally
             {
