@@ -349,15 +349,22 @@ async fn run() -> Result<(), String> {
                         // shutdown signals — a plain sleep would block SIGTERM/SIGINT for
                         // up to 5 s while the broker is down.
                         eprintln!("btmqttd: connection: {e}");
-                        // Only failures consistent with a STALE/UNREACHABLE address
-                        // (socket refused/unreachable/reset, network timeout) count
-                        // toward rediscovery. A broker-side refusal (bad credentials,
-                        // not authorized) or a TLS/protocol error means the hostname
-                        // still points at the real broker, which is rejecting US — so we
-                        // must NOT wander off and retire it (issue #43 / Codex P2).
+                        // Only failures consistent with a STALE/WRONG address advance the
+                        // streak (see is_unreachable): a socket-level I/O failure, a
+                        // network timeout, or a TLS failure — the last meaning the peer
+                        // at this address did NOT present our pinned cert, i.e. the IP is
+                        // now a different host (DHCP-reuse). A broker-side MQTT refusal
+                        // (bad credentials / not authorized), reached under TLS only
+                        // AFTER the cert validated, means the hostname still points at the
+                        // REAL broker rejecting US — so it does not advance the streak,
+                        // and RESETS it so the threshold stays truly CONSECUTIVE (issue
+                        // #43 / Codex P2 / Copilot). `rediscovering`, once engaged, is
+                        // driven by its own flag below, not this counter.
                         let unreachable = rediscovery::is_unreachable(&e);
                         if unreachable {
                             conn_failures = conn_failures.saturating_add(1);
+                        } else {
+                            conn_failures = 0;
                         }
                         // Engage rediscovery once an unreachable outage persists, then
                         // KEEP it engaged across the subsequent per-candidate failures
