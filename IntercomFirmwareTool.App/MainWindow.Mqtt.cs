@@ -299,6 +299,13 @@ namespace IntercomFirmwareTool.App
             }
             finally { _suppressMqttBrokerInvalidation = false; }
             TxtMqttPort.Text = c.Port.ToString();
+            // The suppressed writes above bypass MqttBrokerField_TextChanged's anchor check, so a
+            // MAC captured for an EARLIER manually-tested endpoint (host later cleared while its
+            // Host IP lingered) could otherwise carry onto this freshly-discovered broker and get
+            // embedded as the wrong anchor. Apply the same rule here: drop it unless the discovered
+            // endpoint IS the captured one.
+            if (_mqttBrokerMac != null && !BrokerStillAtCapturedMac())
+                ClearBrokerMac();
             UpdateBuildEnabled();
         }
 
