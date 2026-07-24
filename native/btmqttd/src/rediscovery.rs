@@ -110,10 +110,17 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
         }
     };
     let anchor = parse_hosts_ip(&hosts, &cfg.mqtt_host)?;
+    // Retire the CURRENT mapping for the rest of this outage: without this, once we
+    // repoint A -> B, the next pass (anchor now B) would find A eligible again and could
+    // bounce back to an address already shown unusable this outage (CodeRabbit). Proposals
+    // stay monotonic; the memory is cleared only on a successful ConnAck (caller) or when
+    // the whole /24 is exhausted below — so a broker returning to a former address is
+    // still eventually found.
+    tried.insert(anchor);
 
-    // Candidates: the anchor's /24 (the anchor itself excluded), minus anything already
-    // proposed this outage. Exhausting the subnet clears `tried` so the next pass
-    // re-scans from scratch instead of giving up.
+    // Candidates: the anchor's /24, minus every address already proposed this outage.
+    // Exhausting the subnet clears `tried` so the next pass re-scans from scratch (incl.
+    // former anchors) instead of giving up.
     let candidates: Vec<Ipv4Addr> = slash24_candidates(anchor)
         .into_iter()
         .filter(|ip| !tried.contains(ip))
