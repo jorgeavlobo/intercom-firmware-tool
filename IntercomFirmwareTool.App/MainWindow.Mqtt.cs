@@ -169,30 +169,36 @@ namespace IntercomFirmwareTool.App
         /// broker the user already typed, and runs the heavy scan at most once.</summary>
         private async Task TryPrefillBrokerFromDiscoveryAsync()
         {
-            if (_brokerDiscovery == null || _discoveryPrefillDone) return;
-            if (TxtMqttHost.Text.Trim().Length > 0) return;   // user already entered a broker
-
-            BrokerCandidate? cand = _brokerDiscovery.MdnsCandidates.FirstOrDefault();
-            if (cand == null && !_discoveryScanDone)
+            // Wrap the whole body: this runs fire-and-forget from the toggle handler, so it must
+            // never fault (an unobserved exception would surface via UnobservedTaskException).
+            try
             {
-                _discoveryScanDone = true;   // the /24 scan is heavy — attempt it only once
-                SetMqttDiscoveryInfo(L("MqttDiscovering"));
-                IReadOnlyList<BrokerCandidate> scan;
-                try { scan = await _brokerDiscovery.ScanSubnetAsync(_discoveryCts?.Token ?? CancellationToken.None); }
-                catch { scan = System.Array.Empty<BrokerCandidate>(); }
-                // The user may have disabled the bridge or typed a broker while we scanned.
-                if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
-                // Prefer a background mDNS hit that may have landed WHILE the scan ran (mDNS
-                // gives the hostname directly and covers ports/subnets the scan doesn't);
-                // fall back to the scan result otherwise.
-                cand = _brokerDiscovery.MdnsCandidates.FirstOrDefault() ?? scan.FirstOrDefault();
+                if (_brokerDiscovery == null || _discoveryPrefillDone) return;
+                if (TxtMqttHost.Text.Trim().Length > 0) return;   // user already entered a broker
+
+                BrokerCandidate? cand = _brokerDiscovery.MdnsCandidates.FirstOrDefault();
+                if (cand == null && !_discoveryScanDone)
+                {
+                    _discoveryScanDone = true;   // the /24 scan is heavy — attempt it only once
+                    SetMqttDiscoveryInfo(L("MqttDiscovering"));
+                    IReadOnlyList<BrokerCandidate> scan;
+                    try { scan = await _brokerDiscovery.ScanSubnetAsync(_discoveryCts?.Token ?? CancellationToken.None); }
+                    catch { scan = System.Array.Empty<BrokerCandidate>(); }
+                    // The user may have disabled the bridge or typed a broker while we scanned.
+                    if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
+                    // Prefer a background mDNS hit that may have landed WHILE the scan ran (mDNS
+                    // gives the hostname directly and covers ports/subnets the scan doesn't);
+                    // fall back to the scan result otherwise.
+                    cand = _brokerDiscovery.MdnsCandidates.FirstOrDefault() ?? scan.FirstOrDefault();
+                }
+
+                if (cand == null) { SetMqttDiscoveryInfo(null); return; }
+
+                _discoveryPrefillDone = true;
+                PrefillBrokerFields(cand);
+                SetMqttDiscoveryInfo(LF("Fmt_MqttDiscovered", cand.Hostname ?? cand.Ip));
             }
-
-            if (cand == null) { SetMqttDiscoveryInfo(null); return; }
-
-            _discoveryPrefillDone = true;
-            PrefillBrokerFields(cand);
-            SetMqttDiscoveryInfo(LF("Fmt_MqttDiscovered", cand.Hostname ?? cand.Ip));
+            catch { /* discovery pre-fill is best-effort; never fault the fire-and-forget task */ }
         }
 
         /// <summary>Seed the broker/Host IP/port fields from a discovered candidate — a

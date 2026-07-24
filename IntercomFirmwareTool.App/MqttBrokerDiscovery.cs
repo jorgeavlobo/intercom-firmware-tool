@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.IO;                                 // Stream (plaintext or TLS-wrapped probe)
 using System.Linq;
 using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Security;                       // SslStream (confirm an 8883 TLS broker)
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -227,26 +229,25 @@ namespace IntercomFirmwareTool.App
         // ---- /24 scan --------------------------------------------------------
 
         /// <summary>Scan the local /24 for a broker: TCP-probe every host on the two common
-        /// MQTT ports, confirm plaintext brokers (1883) with a real CONNECT/CONNACK, accept a
-        /// bare TCP open on the TLS port (8883), then reverse-DNS each hit. Deduplicated by IP,
-        /// preferring the plaintext port. Never throws; returns an empty list on any failure.</summary>
+        /// MQTT ports, confirm a broker with a real MQTT CONNECT/CONNACK (over TLS on 8883),
+        /// then reverse-DNS each hit. Deduplicated by IP, preferring the plaintext port. Scans
+        /// every gateway-bearing LAN /24 (not virtual/VPN adapters). Never throws; returns an
+        /// empty list on any failure.</summary>
         public async Task<IReadOnlyList<BrokerCandidate>> ScanSubnetAsync(CancellationToken ct)
         {
-            string? prefix = LocalV24Prefix();
-            if (prefix == null) return Array.Empty<BrokerCandidate>();
+            IReadOnlyList<string> prefixes = LocalV24Prefixes();
+            if (prefixes.Count == 0) return Array.Empty<BrokerCandidate>();
 
             var hits = new System.Collections.Concurrent.ConcurrentDictionary<string, int>(); // ip → port
             using var sem = new SemaphoreSlim(48);
             var tasks = new List<Task>();
-            // 1883 (plaintext, MQTT-confirmed) takes precedence over 8883 (TLS, TCP-open only).
-            foreach (var (port, confirmMqtt) in new[] { (1883, true), (8883, false) })
-            {
-                for (int h = 1; h <= 254; h++)
-                {
-                    string ip = $"{prefix}.{h}";
-                    tasks.Add(ProbeHostAsync(ip, port, confirmMqtt, sem, hits, ct));
-                }
-            }
+            // Every candidate is confirmed to speak MQTT: 1883 with a plaintext CONNECT/CONNACK,
+            // 8883 with a TLS handshake THEN the same CONNECT/CONNACK. 1883 wins on a dual-port host.
+            foreach (var prefix in prefixes)
+                foreach (var (port, useTls) in new[] { (1883, false), (8883, true) })
+                    for (int h = 1; h <= 254; h++)
+                        tasks.Add(ProbeHostAsync($"{prefix}.{h}", port, useTls, sem, hits, ct));
+
             try { await Task.WhenAll(tasks); } catch { /* individual probes already swallow */ }
 
             var results = new List<BrokerCandidate>();
@@ -258,11 +259,14 @@ namespace IntercomFirmwareTool.App
             return results;
         }
 
-        private static async Task ProbeHostAsync(string ip, int port, bool confirmMqtt,
+        private static async Task ProbeHostAsync(string ip, int port, bool useTls,
             SemaphoreSlim sem, System.Collections.Concurrent.ConcurrentDictionary<string, int> hits,
             CancellationToken ct)
         {
-            await sem.WaitAsync(ct).ConfigureAwait(false);
+            // Acquire the throttle outside the main try so a cancellation here can't fault the
+            // task — nothing to release if we never got the slot.
+            try { await sem.WaitAsync(ct).ConfigureAwait(false); }
+            catch { return; }
             try
             {
                 using var tcp = new TcpClient();
@@ -271,31 +275,51 @@ namespace IntercomFirmwareTool.App
                 try { await tcp.ConnectAsync(IPAddress.Parse(ip), port, connectCts.Token); }
                 catch { return; }   // closed / filtered / timed out — not a hit
 
-                bool isBroker = !confirmMqtt || await IsPlaintextMqttAsync(tcp, ct);
-                if (isBroker)
-                    hits.AddOrUpdate(ip, port, (_, existing) => Math.Min(existing, port)); // prefer 1883
+                using var ioCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                ioCts.CancelAfter(TimeSpan.FromMilliseconds(1200));
+                Stream stream = tcp.GetStream();
+                SslStream? ssl = null;
+                try
+                {
+                    if (useTls)
+                    {
+                        // Discovery, not a security check — accept any server certificate; we only
+                        // want to know a TLS MQTT broker is listening. The user's Test connection
+                        // (and Build) validate the certificate properly.
+                        ssl = new SslStream(stream, leaveInnerStreamOpen: false, (_, _, _, _) => true);
+                        await ssl.AuthenticateAsClientAsync(
+                            new SslClientAuthenticationOptions { TargetHost = ip }, ioCts.Token);
+                        stream = ssl;
+                    }
+                    if (await IsMqttOverStreamAsync(stream, ioCts.Token))
+                        hits.AddOrUpdate(ip, port, (_, existing) => Math.Min(existing, port)); // prefer 1883
+                }
+                finally { ssl?.Dispose(); }
             }
             catch { /* best-effort */ }
             finally { try { sem.Release(); } catch { } }
         }
 
-        /// <summary>Confirm an open socket speaks MQTT by sending a 3.1.1 CONNECT and checking
-        /// the first response byte is a CONNACK (0x20) — regardless of the return code, since an
-        /// auth-required broker still answers with a CONNACK before refusing.</summary>
-        private static async Task<bool> IsPlaintextMqttAsync(TcpClient tcp, CancellationToken ct)
+        /// <summary>Confirm a stream speaks MQTT by sending a 3.1.1 CONNECT and checking the reply
+        /// begins with the full CONNACK fixed header <c>0x20 0x02</c> (type 2, remaining length 2)
+        /// — regardless of the return code, since an auth-required broker still answers with a
+        /// CONNACK before refusing. Requiring both header bytes avoids a false positive from a
+        /// service whose first byte merely happens to be 0x20.</summary>
+        private static async Task<bool> IsMqttOverStreamAsync(Stream stream, CancellationToken ct)
         {
             try
             {
-                var stream = tcp.GetStream();
-                using var ioCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                ioCts.CancelAfter(TimeSpan.FromMilliseconds(800));
                 byte[] connect = BuildMqttConnect("intercom-fw-tool-scan");
-                await stream.WriteAsync(connect, ioCts.Token);
-                byte[] resp = new byte[1];
-                int n = await stream.ReadAsync(resp, ioCts.Token);
-                // A CONNACK fixed header is exactly 0x20 (type 2, reserved flags all 0);
-                // 0x21–0x2F would be a malformed header, so match 0x20 exactly.
-                return n == 1 && resp[0] == 0x20;
+                await stream.WriteAsync(connect, ct);
+                byte[] hdr = new byte[2];
+                int got = 0;
+                while (got < hdr.Length)
+                {
+                    int n = await stream.ReadAsync(hdr.AsMemory(got, hdr.Length - got), ct);
+                    if (n <= 0) break;   // peer closed
+                    got += n;
+                }
+                return got == 2 && hdr[0] == 0x20 && hdr[1] == 0x02;
             }
             catch { return false; }
         }
@@ -341,29 +365,41 @@ namespace IntercomFirmwareTool.App
             catch { return null; }
         }
 
-        /// <summary>The first three octets of the machine's LAN IPv4 (a private-range address
-        /// on an operational, non-loopback interface), or null if none is found.</summary>
-        private static string? LocalV24Prefix()
+        /// <summary>The /24 prefixes (first three octets) to scan: the private-range IPv4
+        /// networks on operational, non-loopback, non-tunnel interfaces. Interfaces that have an
+        /// IPv4 default gateway (the real LAN) are preferred and scanned together; a gateway-less
+        /// private network is used only as a fallback when none has a gateway — so a Docker/VPN
+        /// adapter can't hijack the scan, and a broker on any active LAN is still reached.
+        /// Distinct and capped so a machine with many adapters can't explode the probe count.</summary>
+        private static IReadOnlyList<string> LocalV24Prefixes()
         {
+            var gatewayed = new List<string>();
+            var others = new List<string>();
             try
             {
                 foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
                 {
                     if (ni.OperationalStatus != OperationalStatus.Up) continue;
-                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
-                    foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                    var t = ni.NetworkInterfaceType;
+                    if (t == NetworkInterfaceType.Loopback || t == NetworkInterfaceType.Tunnel) continue;
+                    var props = ni.GetIPProperties();
+                    bool hasV4Gateway = props.GatewayAddresses.Any(g =>
+                        g.Address.AddressFamily == AddressFamily.InterNetwork && !g.Address.Equals(IPAddress.Any));
+                    foreach (var ua in props.UnicastAddresses)
                     {
                         if (ua.Address.AddressFamily != AddressFamily.InterNetwork) continue;
                         byte[] o = ua.Address.GetAddressBytes();
                         bool isPrivate = o[0] == 10
                             || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)
                             || (o[0] == 192 && o[1] == 168);
-                        if (isPrivate) return $"{o[0]}.{o[1]}.{o[2]}";
+                        if (isPrivate) (hasV4Gateway ? gatewayed : others).Add($"{o[0]}.{o[1]}.{o[2]}");
                     }
                 }
             }
-            catch { /* fall through */ }
-            return null;
+            catch { /* fall through with whatever was collected */ }
+
+            return (gatewayed.Count > 0 ? gatewayed : others)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Take(4).ToList();
         }
 
         private static string? NullIfEmpty(string s) => string.IsNullOrEmpty(s) ? null : s;
