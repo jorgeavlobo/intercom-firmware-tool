@@ -403,8 +403,7 @@ namespace IntercomFirmwareTool.App
                 foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
                 {
                     if (ni.OperationalStatus != OperationalStatus.Up) continue;
-                    var t = ni.NetworkInterfaceType;
-                    if (t == NetworkInterfaceType.Loopback || t == NetworkInterfaceType.Tunnel) continue;
+                    if (IsVirtualOrVpn(ni)) continue;   // never probe a VPN/virtual /24
                     var props = ni.GetIPProperties();
                     bool hasV4Gateway = props.GatewayAddresses.Any(g =>
                         g.Address.AddressFamily == AddressFamily.InterNetwork && !g.Address.Equals(IPAddress.Any));
@@ -424,6 +423,30 @@ namespace IntercomFirmwareTool.App
             return (gatewayed.Count > 0 ? gatewayed : others)
                 .Distinct(StringComparer.OrdinalIgnoreCase).Take(4).ToList();
         }
+
+        /// <summary>Whether an interface is a loopback, tunnel, PPP, or a virtual/VPN adapter
+        /// that merely presents as Ethernet (TAP, Hyper-V, VMware, Docker, WSL, WireGuard,
+        /// Tailscale, …). Such adapters can carry a gateway yet route to a corporate/remote
+        /// network — never a LAN we should port-scan. Matched by type and by well-known
+        /// adapter-name markers, erring toward EXCLUDING (a missed real LAN just means no
+        /// scan there; scanning a VPN would blast probes into a remote network).</summary>
+        private static bool IsVirtualOrVpn(NetworkInterface ni)
+        {
+            var t = ni.NetworkInterfaceType;
+            if (t is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel or NetworkInterfaceType.Ppp)
+                return true;
+            string s = (ni.Description + " " + ni.Name).ToLowerInvariant();
+            foreach (var marker in VirtualAdapterMarkers)
+                if (s.Contains(marker)) return true;
+            return false;
+        }
+
+        private static readonly string[] VirtualAdapterMarkers =
+        {
+            "vpn", "tailscale", "wireguard", "zerotier", "openvpn", "hamachi",
+            "hyper-v", "vethernet", "vmware", "virtualbox", "vbox", "virtual",
+            "docker", "wsl", "tap-windows", "pseudo", "loopback", "bluetooth",
+        };
 
         private static string? NullIfEmpty(string s) => string.IsNullOrEmpty(s) ? null : s;
     }
