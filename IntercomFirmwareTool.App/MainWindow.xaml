@@ -714,6 +714,18 @@
                     <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
                                Text="{loc:Loc Hint_MqttJson}"/>
 
+                    <!-- Broker rediscovery (#43/#44). ON by default (IsChecked set in
+                         InitMqttUi, NOT here — same InitializeComponent ordering reason as
+                         the other toggles). When the broker's LAN IP changes, the device
+                         scans its /24 and repoints the broker name's /etc/hosts mapping. It
+                         self-gates on the device (needs a hostname config + a TLS anchor),
+                         so on-by-default is safe. -->
+                    <CheckBox x:Name="ChkMqttRediscovery" Margin="0,10,0,0"
+                              Content="{loc:Loc Chk_MqttRediscovery}" ToolTip="{loc:Loc Tip_MqttRediscovery}"
+                              Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
+                    <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
+                               Text="{loc:Loc Hint_MqttRediscovery}"/>
+
                     <!-- Home Assistant auto-discovery (Phase 2, #12 item 1). ON by
                          default when the bridge is installed (plug-and-play): publishes
                          retained, read-only discovery configs so the bridge's entities
