@@ -345,7 +345,7 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="Chk_Mqtt" xml:space="preserve"><value>MQTT-Brücke installieren (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Installiert eine optionale MQTT-Brücke, die den OpenWebNet-Bus und die Tasten des Frontpanels über MQTT bereitstellt. Standardmäßig deaktiviert.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>MQTT-Broker:</value></data>
-  <data name="Tip_MqttBroker" xml:space="preserve"><value>Hostname oder IP-Adresse des Brokers.</value></data>
+  <data name="Tip_MqttBroker" xml:space="preserve"><value>Hostname oder IP-Adresse des Brokers. Verwenden Sie Ihren eigenen Broker (z. B. das Mosquitto-Add-on von Home Assistant) — NICHT 127.0.0.1: auf dem Gerät ist diese Adresse der interne Bus der Türsprechanlage (Port 60000, nur Loopback), den Home Assistant nicht erreichen kann.</value></data>
   <data name="Field_MqttPort" xml:space="preserve"><value>Port:</value></data>
   <data name="Tip_MqttPort" xml:space="preserve"><value>TCP-Port des Brokers (1–65535; Standard 1883).</value></data>
   <data name="Field_MqttUser" xml:space="preserve"><value>Benutzername:</value></data>

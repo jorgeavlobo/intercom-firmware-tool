@@ -345,7 +345,7 @@ Open Advanced → Result to see which checks failed.</value></data>
   <data name="Chk_Mqtt" xml:space="preserve"><value>Install MQTT bridge (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Install an optional MQTT bridge that exposes the OpenWebNet bus and the front-panel keys over MQTT. Off by default.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>MQTT Broker:</value></data>
-  <data name="Tip_MqttBroker" xml:space="preserve"><value>Broker hostname or IP address.</value></data>
+  <data name="Tip_MqttBroker" xml:space="preserve"><value>Broker hostname or IP address. Use your own broker (e.g. the Home Assistant Mosquitto add-on) — NOT 127.0.0.1: on the device that address is the intercom's internal bus (port 60000, loopback-only), which Home Assistant can't reach.</value></data>
   <data name="Field_MqttPort" xml:space="preserve"><value>Port:</value></data>
   <data name="Tip_MqttPort" xml:space="preserve"><value>Broker TCP port (1–65535; default 1883).</value></data>
   <data name="Field_MqttUser" xml:space="preserve"><value>Username:</value></data>

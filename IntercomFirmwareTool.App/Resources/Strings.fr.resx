@@ -345,7 +345,7 @@ Ouvrez Avancé → Résultat pour voir quelles vérifications ont échoué.</val
   <data name="Chk_Mqtt" xml:space="preserve"><value>Installer le pont MQTT (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Installe un pont MQTT facultatif qui expose le bus OpenWebNet et les touches du panneau avant via MQTT. Désactivé par défaut.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>Broker MQTT :</value></data>
-  <data name="Tip_MqttBroker" xml:space="preserve"><value>Nom d'hôte ou adresse IP du broker.</value></data>
+  <data name="Tip_MqttBroker" xml:space="preserve"><value>Nom d'hôte ou adresse IP du broker. Utilisez votre propre broker (p. ex. l'add-on Mosquitto de Home Assistant) — PAS 127.0.0.1 : sur l'appareil cette adresse est le bus interne du portier (port 60000, loopback uniquement), que Home Assistant ne peut pas atteindre.</value></data>
   <data name="Field_MqttPort" xml:space="preserve"><value>Port :</value></data>
   <data name="Tip_MqttPort" xml:space="preserve"><value>Port TCP du broker (1–65535 ; par défaut 1883).</value></data>
   <data name="Field_MqttUser" xml:space="preserve"><value>Nom d'utilisateur :</value></data>
