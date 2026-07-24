@@ -345,7 +345,7 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="Chk_Mqtt" xml:space="preserve"><value>Installa il bridge MQTT (Home Assistant)</value></data>
   <data name="Tip_Mqtt" xml:space="preserve"><value>Installa un bridge MQTT opzionale che espone il bus OpenWebNet e i tasti del pannello frontale tramite MQTT. Disattivato per impostazione predefinita.</value></data>
   <data name="Field_MqttBroker" xml:space="preserve"><value>Broker MQTT:</value></data>
-  <data name="Tip_MqttBroker" xml:space="preserve"><value>Nome host o indirizzo IP del broker.</value></data>
+  <data name="Tip_MqttBroker" xml:space="preserve"><value>Nome host o indirizzo IP del broker. Usa il tuo broker (es. l'add-on Mosquitto di Home Assistant) — NON 127.0.0.1: sul dispositivo quell'indirizzo è il bus interno del citofono (porta 60000, solo loopback), che Home Assistant non può raggiungere.</value></data>
   <data name="Field_MqttPort" xml:space="preserve"><value>Porta:</value></data>
   <data name="Tip_MqttPort" xml:space="preserve"><value>Porta TCP del broker (1–65535; predefinita 1883).</value></data>
   <data name="Field_MqttUser" xml:space="preserve"><value>Nome utente:</value></data>

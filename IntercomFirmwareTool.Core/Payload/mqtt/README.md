@@ -31,6 +31,23 @@ Static musl means it needs no interpreter and none of the old runtime tools
 installed bridge still relies on is `pgrep` — used by `bt_service_watchdog` (not
 by `btmqttd` itself) to launch and respawn the daemon.
 
+## Which broker (`MQTT_HOST`) — use an EXTERNAL one, not the device's `:60000`
+
+`btmqttd` connects to **your** MQTT broker — typically the one Home Assistant uses
+(e.g. the Mosquitto add-on). Point `MQTT_HOST` at that broker's LAN address (issue
+`#36`).
+
+Do **not** use `127.0.0.1`. The device *does* run a local `mosquitto`, but it is
+the intercom's **internal IPC bus**, bound to `127.0.0.1:60000` (not `1883`) — the
+gateway/camera/lock/light services talk over it. It is loopback-only, so Home
+Assistant (or any other host) can **never** reach it; pointing the bridge there
+would connect it to the device's private bus instead of your broker. The `1883`
+default is correct for an external broker.
+
+A device-local sanity check therefore targets the internal bus at
+`127.0.0.1:60000`, **not** `127.0.0.1:1883` — but that only proves loopback
+connectivity, not the real Home Assistant path, which requires an external broker.
+
 ## Files in this directory
 
 | File | Role |
