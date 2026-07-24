@@ -49,8 +49,10 @@ namespace IntercomFirmwareTool.Core
     /// broker's address goes stale, btmqttd scans its /24 and repoints the broker name's
     /// <c>/etc/hosts</c> mapping so the bridge reconnects without a re-flash. On by default.
     /// Self-gates on the device: it only acts when the broker is a NAME (the repoint has no
-    /// effect on a bare-IP config) AND there is a trust anchor — TLS (the reconnect validates
-    /// the broker's pinned certificate). Writes <c>MQTT_REDISCOVERY</c>.
+    /// effect on a bare-IP config) AND there is a trust anchor — either TLS (the reconnect
+    /// validates the broker's pinned certificate) OR the broker MAC (see
+    /// <paramref name="MqttBrokerMac"/>), which lets the plaintext path adopt a rescanned
+    /// broker whose ARP MAC matches. Writes <c>MQTT_REDISCOVERY</c>.
     /// </param>
     /// <param name="MqttBrokerMac">
     /// The broker's Ethernet MAC address (six hex octets, ':' or '-' separated), captured in
@@ -797,7 +799,7 @@ namespace IntercomFirmwareTool.Core
             // Broker rediscovery (#43/#44): when 1, btmqttd recovers the broker after its LAN
             // IP changes by scanning the broker name's /24 and repointing its /etc/hosts
             // mapping. It self-gates device-side (needs a hostname config + a trust anchor —
-            // TLS today), so this stays safe even when on by default.
+            // TLS, or the broker MAC written below), so this stays safe even when on by default.
             sb.Append("MQTT_REDISCOVERY=").Append(opts.MqttRediscovery ? '1' : '0').Append('\n');
 
             // Broker MAC anchor (#43): the plaintext trust anchor for rediscovery.
