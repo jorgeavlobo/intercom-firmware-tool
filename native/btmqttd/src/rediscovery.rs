@@ -259,6 +259,26 @@ pub async fn current_broker_ip(name: &str) -> Option<Ipv4Addr> {
     parse_hosts_ip(&hosts, name)
 }
 
+/// Whether `ip` currently answers on `port` AND its `/proc/net/arp` MAC matches
+/// `want_mac`. This is the PLAINTEXT trust gate re-applied before the boot seed restores
+/// a persisted IP (issue #49 item 1 / Codex P1): `rediscover` only ever adopts a plaintext
+/// candidate whose ARP MAC matches, so the boot restore must apply the same check — else
+/// an address DHCP reassigned while the unit was off could take our credentials on the
+/// first connect (a wrong broker would ConnAck and normal rediscovery would never run).
+/// Probing the port both confirms reachability and populates the ARP entry we then read.
+/// Best-effort: any unreachable/read failure ⇒ `false` (don't seed; fall back to the
+/// build-time mapping and let normal rediscovery re-locate under its MAC gate). Under TLS
+/// the reconnect's pinned-cert handshake is the gate, so callers skip this.
+pub async fn arp_mac_matches(ip: Ipv4Addr, port: u16, want_mac: [u8; 6]) -> bool {
+    if probe_open(&[ip], port).await.is_empty() {
+        return false; // nothing answering here — can't confirm the broker's MAC
+    }
+    match tokio::fs::read_to_string("/proc/net/arp").await {
+        Ok(t) => mac_matches(ip, &parse_proc_net_arp(&t), Some(want_mac)),
+        Err(_) => false,
+    }
+}
+
 /// Seed `/etc/hosts` so the broker `name` maps to `ip` — the boot-time restore of a
 /// previously learned, connect-confirmed address (issue #49 item 1). Reuses the SAME
 /// atomic, other-mappings-preserving rewrite as rediscovery, so seeding never disturbs

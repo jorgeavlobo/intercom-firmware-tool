@@ -13,9 +13,10 @@
 //! The rootfs is mounted **read-only** and must never be remounted `rw` (the device's
 //! `dropbear` init is fragile), so we never write there. The unit exposes a SEPARATE
 //! ext4 partition — `/dev/mmcblk2p7` mounted at `/home/bticino/cfg/extra`, `rw,sync` —
-//! for persistent config; `sync` makes each write durable across a power cut. State
-//! lives in a `btmqttd/` subdir there. The location is overridable via
-//! `$BTMQTTD_STATE_DIR` (tests/dev), mirroring `$BTMQTTD_CONF` in `config.rs`.
+//! for persistent config (the vendor's own Azure/Eliot state lives there too); `sync`
+//! makes each write durable across a power cut. State lives in a `btmqttd/` subdir. The
+//! location is overridable via `$BTMQTTD_STATE_DIR` (tests/dev), mirroring `$BTMQTTD_CONF`
+//! in `config.rs`.
 //!
 //! ## What is stored, and why the base IP matters
 //! The record is `<host>\t<base_ip>\t<learned_ip>`:
@@ -27,19 +28,19 @@
 //!     that re-points the broker name to a NEW IP would be silently overridden by a
 //!     stale learned address. A mismatched base ⇒ the record is stale ⇒ ignored.
 //!
-//! The caller also `clear`s the record when the broker returns to the build-time IP, so
-//! a broker that moves back home doesn't leave a stale learned address to seed.
+//! The caller applies the policy (`main`): it also recovers the base from an existing
+//! record across a watchdog respawn, applies the plaintext MAC gate before seeding, and
+//! `clear`s the record when the broker returns to the build-time IP.
 //!
 //! ## Trust boundary (unchanged)
 //! Only an IP **confirmed by a successful authenticated/TLS `ConnAck`** is ever
-//! persisted (`main.rs` writes on `ConnAck`), never a mere scan hit — the same trust
-//! boundary rediscovery already enforces. And the boot seed only *repoints the name*;
-//! the reconnect still validates the broker (pinned TLS / MAC-gated plaintext), so even
-//! a stale persisted IP is safe — it fails to authenticate and normal rediscovery
-//! resumes.
+//! persisted (`main.rs` writes on `ConnAck`), never a mere scan hit. And in plaintext
+//! mode the boot restore re-applies the SAME ARP-MAC gate `rediscover` uses before
+//! seeding (see `main`), so a DHCP-reassigned address can't take our credentials on the
+//! first connect; under TLS the reconnect's pinned-cert handshake is the gate.
 
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The device's writable, reboot-persistent config partition (`/dev/mmcblk2p7`, ext4
 /// `rw,sync`). `btmqttd` state lives in a subdir so it doesn't clutter the vendor's
@@ -57,19 +58,19 @@ fn state_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_STATE_DIR))
 }
 
-fn state_path() -> PathBuf {
-    state_dir().join(STATE_FILE)
+fn state_file_in(dir: &Path) -> PathBuf {
+    dir.join(STATE_FILE)
 }
 
-/// The persisted learned IP to seed for `host`, or `None`. Returned only when the record
-/// is for THIS host (ASCII case-insensitive), its stored base IP still equals the current
-/// build-time mapping `build_ip` (else the firmware was re-flashed with a different broker
-/// IP and the record is stale), and the learned address is a private LAN IPv4 (the same
-/// bound rediscovery enforces). Any mismatch, malformed content, or missing file ⇒ `None`,
-/// so the boot seed falls back to the build-time `/etc/hosts` mapping.
-pub fn load(host: &str, build_ip: Ipv4Addr) -> Option<Ipv4Addr> {
-    let text = std::fs::read_to_string(state_path()).ok()?;
-    parse_state(&text, host, build_ip)
+/// The persisted `(base_ip, learned_ip)` record for `host`, or `None`. Returned when the
+/// record is for THIS host (ASCII case-insensitive) and its learned address is a private
+/// LAN IPv4 (the same bound rediscovery enforces). The caller compares `base_ip` against
+/// the current build-time mapping — a mismatch (a firmware re-flash re-pointed the broker)
+/// means the record is stale. `None` on a different host, a malformed/non-private learned
+/// address, or a missing file. Blocking `std::fs`; call via `spawn_blocking` off the
+/// async runtime.
+pub fn read_record(host: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
+    read_record_in(&state_dir(), host)
 }
 
 /// Persist `host`'s learned IP atomically, recording the `base_ip` (build-time mapping)
@@ -77,14 +78,35 @@ pub fn load(host: &str, build_ip: Ipv4Addr) -> Option<Ipv4Addr> {
 /// it, so a concurrent reader (or a reboot mid-write) never sees a torn file. Best-effort
 /// — a missing/full/unmounted partition just means we can't remember this pass; the
 /// runtime repoint still worked, and the next boot falls back to the build-time seed.
-/// Creates the state dir first.
+/// Blocking; call via `spawn_blocking`.
 pub fn store(host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) {
-    let dir = state_dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
+    store_in(&state_dir(), host, base_ip, learned_ip);
+}
+
+/// Forget any persisted record (best-effort): called when the broker is confirmed back at
+/// its build-time address, so a reboot doesn't seed a now-stale learned IP. A missing file
+/// is success. Blocking; call via `spawn_blocking`.
+pub fn clear() {
+    clear_in(&state_dir());
+}
+
+// ---------------------------------------------------------------------------
+// Directory-injected cores (unit-tested with a temp dir — no process-env
+// mutation, so the tests are parallel-safe). The public fns above just resolve
+// $BTMQTTD_STATE_DIR and delegate.
+// ---------------------------------------------------------------------------
+
+fn read_record_in(dir: &Path, host: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
+    let text = std::fs::read_to_string(state_file_in(dir)).ok()?;
+    parse_record(&text, host)
+}
+
+fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("btmqttd: persist: cannot create {}: {e}", dir.display());
         return;
     }
-    let path = state_path();
+    let path = state_file_in(dir);
     let Some(path_str) = path.to_str() else {
         eprintln!("btmqttd: persist: state path is not valid UTF-8");
         return;
@@ -101,14 +123,12 @@ pub fn store(host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) {
     }
 }
 
-/// Forget any persisted learned IP (best-effort): called when the broker is confirmed
-/// back at its build-time address, so a reboot doesn't seed a now-stale learned IP. A
-/// missing file is success (nothing to forget).
-pub fn clear() {
-    match std::fs::remove_file(state_path()) {
+fn clear_in(dir: &Path) {
+    let path = state_file_in(dir);
+    match std::fs::remove_file(&path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => eprintln!("btmqttd: persist: cannot clear {}: {e}", state_path().display()),
+        Err(e) => eprintln!("btmqttd: persist: cannot clear {}: {e}", path.display()),
     }
 }
 
@@ -122,20 +142,18 @@ fn format_state(host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> String {
     format!("{host}\t{base_ip}\t{learned_ip}\n")
 }
 
-/// Parse the state body, returning the learned IP only when its first line records
-/// `want_host` (ASCII case-insensitive — hostnames are case-insensitive), the stored base
-/// IP equals `build_ip` (the record is for the current firmware, not a stale pre-re-flash
-/// one), and the learned address is a private LAN IPv4. Anything else — a different host,
-/// a base that no longer matches, a non-private/malformed learned address, a short or
-/// empty line — yields `None`.
-fn parse_state(text: &str, want_host: &str, build_ip: Ipv4Addr) -> Option<Ipv4Addr> {
+/// Parse the state body into `(base_ip, learned_ip)`, only when its first line records
+/// `want_host` (ASCII case-insensitive — hostnames are case-insensitive) and the learned
+/// address is a private LAN IPv4. Anything else — a different host, a non-private/malformed
+/// learned address, a short or empty line — yields `None`. The base is returned as-is (the
+/// caller decides whether it still matches the build-time IP).
+fn parse_record(text: &str, want_host: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
     let line = text.lines().next()?.trim();
     let mut cols = line.split_whitespace();
     let host = cols.next()?;
     let base = cols.next()?.parse::<Ipv4Addr>().ok()?;
     let learned = cols.next()?.parse::<Ipv4Addr>().ok()?;
-    (host.eq_ignore_ascii_case(want_host) && base == build_ip && learned.is_private())
-        .then_some(learned)
+    (host.eq_ignore_ascii_case(want_host) && learned.is_private()).then_some((base, learned))
 }
 
 #[cfg(test)]
@@ -146,78 +164,64 @@ mod tests {
     const LEARNED: Ipv4Addr = Ipv4Addr::new(192, 168, 50, 200);
 
     #[test]
-    fn parse_state_returns_learned_when_host_and_base_match() {
+    fn parse_record_returns_base_and_learned_when_host_matches() {
         let body = "Broker.LAN\t192.168.50.64\t192.168.50.200\n";
-        assert_eq!(parse_state(body, "broker.lan", BUILD), Some(LEARNED));
-        assert_eq!(parse_state(body, "BROKER.LAN", BUILD), Some(LEARNED));
+        assert_eq!(parse_record(body, "broker.lan"), Some((BUILD, LEARNED)));
+        assert_eq!(parse_record(body, "BROKER.LAN"), Some((BUILD, LEARNED)));
     }
 
     #[test]
-    fn parse_state_rejects_stale_base_after_reflash() {
-        // The firmware was re-flashed pointing the broker at a NEW build IP; the record
-        // (learned against the OLD base) must be ignored so it can't override the reflash.
-        let body = "broker\t192.168.50.64\t192.168.50.200\n";
-        let new_build = Ipv4Addr::new(192, 168, 50, 77);
-        assert_eq!(parse_state(body, "broker", new_build), None);
-    }
-
-    #[test]
-    fn parse_state_rejects_other_host() {
+    fn parse_record_rejects_other_host() {
         let body = "old-broker\t192.168.50.64\t192.168.50.200\n";
-        assert_eq!(parse_state(body, "new-broker", BUILD), None);
+        assert_eq!(parse_record(body, "new-broker"), None);
     }
 
     #[test]
-    fn parse_state_rejects_non_private_or_malformed_learned() {
-        assert_eq!(parse_state("b\t192.168.50.64\t8.8.8.8\n", "b", BUILD), None); // public
-        assert_eq!(parse_state("b\t192.168.50.64\t127.0.0.1\n", "b", BUILD), None); // loopback
-        assert_eq!(parse_state("b\t192.168.50.64\t169.254.1.1\n", "b", BUILD), None); // link-local
-        assert_eq!(parse_state("b\t192.168.50.64\tnot-an-ip\n", "b", BUILD), None);
-        assert_eq!(parse_state("b\t192.168.50.64\n", "b", BUILD), None); // no learned column
-        assert_eq!(parse_state("b\n", "b", BUILD), None); // no base/learned
-        assert_eq!(parse_state("", "b", BUILD), None); // empty
+    fn parse_record_rejects_non_private_or_malformed_learned() {
+        assert_eq!(parse_record("b\t192.168.50.64\t8.8.8.8\n", "b"), None); // public
+        assert_eq!(parse_record("b\t192.168.50.64\t127.0.0.1\n", "b"), None); // loopback
+        assert_eq!(parse_record("b\t192.168.50.64\t169.254.1.1\n", "b"), None); // link-local
+        assert_eq!(parse_record("b\t192.168.50.64\tnot-an-ip\n", "b"), None);
+        assert_eq!(parse_record("b\t192.168.50.64\n", "b"), None); // no learned column
+        assert_eq!(parse_record("b\n", "b"), None); // no base/learned
+        assert_eq!(parse_record("", "b"), None); // empty
     }
 
     #[test]
-    fn parse_state_accepts_all_private_learned_ranges() {
-        let b10 = Ipv4Addr::new(10, 0, 0, 1);
-        assert_eq!(parse_state("b\t10.0.0.1\t10.1.2.3\n", "b", b10), Some(Ipv4Addr::new(10, 1, 2, 3)));
-        let b172 = Ipv4Addr::new(172, 16, 0, 1);
-        assert_eq!(parse_state("b\t172.16.0.1\t172.16.5.5\n", "b", b172), Some(Ipv4Addr::new(172, 16, 5, 5)));
+    fn parse_record_keeps_base_verbatim_for_the_caller() {
+        // The base is returned even when it differs from any build IP — the caller does
+        // the base-vs-build comparison (a re-flash check), not the parser.
+        let body = "b\t10.0.0.9\t192.168.50.200\n";
+        assert_eq!(parse_record(body, "b"), Some((Ipv4Addr::new(10, 0, 0, 9), LEARNED)));
     }
 
     #[test]
     fn format_then_parse_roundtrips() {
         let body = format_state("broker.lan", BUILD, LEARNED);
         assert_eq!(body, "broker.lan\t192.168.50.64\t192.168.50.200\n");
-        assert_eq!(parse_state(&body, "broker.lan", BUILD), Some(LEARNED));
+        assert_eq!(parse_record(&body, "broker.lan"), Some((BUILD, LEARNED)));
     }
 
     #[test]
-    fn store_load_clear_roundtrip_via_env_override() {
-        // Isolate to a unique temp dir via $BTMQTTD_STATE_DIR; this test owns the var.
+    fn store_read_clear_roundtrip_in_temp_dir() {
+        // Directory-injected cores — no env mutation, so this is parallel-safe (Copilot).
         let dir = std::env::temp_dir().join(format!("btmqttd-persist-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        // SAFETY: single-threaded test; set before any load/store/clear.
-        unsafe { std::env::set_var("BTMQTTD_STATE_DIR", &dir) };
 
-        assert_eq!(load("broker.lan", BUILD), None); // nothing yet
-        store("broker.lan", BUILD, LEARNED);
-        assert_eq!(load("broker.lan", BUILD), Some(LEARNED));
-        // A different build IP (re-flash) ignores the stale record.
-        assert_eq!(load("broker.lan", Ipv4Addr::new(192, 168, 50, 77)), None);
+        assert_eq!(read_record_in(&dir, "broker.lan"), None); // nothing yet
+        store_in(&dir, "broker.lan", BUILD, LEARNED);
+        assert_eq!(read_record_in(&dir, "broker.lan"), Some((BUILD, LEARNED)));
         // A different host does not read the stored value.
-        assert_eq!(load("other", BUILD), None);
+        assert_eq!(read_record_in(&dir, "other"), None);
         // Overwrite updates in place.
         let l2 = Ipv4Addr::new(192, 168, 50, 201);
-        store("broker.lan", BUILD, l2);
-        assert_eq!(load("broker.lan", BUILD), Some(l2));
+        store_in(&dir, "broker.lan", BUILD, l2);
+        assert_eq!(read_record_in(&dir, "broker.lan"), Some((BUILD, l2)));
         // Clear forgets it; clearing again is still fine (missing file is success).
-        clear();
-        assert_eq!(load("broker.lan", BUILD), None);
-        clear();
+        clear_in(&dir);
+        assert_eq!(read_record_in(&dir, "broker.lan"), None);
+        clear_in(&dir);
 
-        unsafe { std::env::remove_var("BTMQTTD_STATE_DIR") };
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

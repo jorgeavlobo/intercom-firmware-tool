@@ -218,32 +218,72 @@ async fn run() -> Result<(), String> {
     // is remembered on a writable, reboot-persistent partition. Seed /etc/hosts from it
     // BEFORE the first connect so a reboot after the broker moved reconnects to the
     // learned IP immediately — instead of re-running the whole failure-count + /24 scan.
-    // Only when rediscovery is active (name broker + trust anchor); the reconnect still
-    // authenticates, so a stale persisted IP is harmless (it fails and rediscovery
-    // resumes). `last_persisted` tracks what's on disk so a stable broker never rewrites
-    // the flash partition on every ConnAck.
+    // Only when rediscovery is active (name broker + trust anchor). `last_persisted`
+    // tracks what's on disk so a stable broker never rewrites the flash partition.
     //
-    // `build_ip` is the broker's /etc/hosts mapping AS SEEDED BY THE BOOT INIT — captured
-    // here BEFORE we seed anything. It is the record's "base": a persisted learned IP is
-    // only trusted while its base still matches this build-time IP, so a firmware re-flash
-    // that re-points the broker (the cfg/extra partition survives a re-flash) invalidates
-    // a stale learned address instead of overriding the new mapping.
-    let build_ip: Option<std::net::Ipv4Addr> = if rediscovery_active {
+    // `current` is the broker's /etc/hosts mapping right now; `record` is any persisted
+    // (base, learned). Persist I/O is blocking std::fs, so it's offloaded to the blocking
+    // pool (the runtime is single-threaded — Copilot).
+    let current = if rediscovery_active {
         rediscovery::current_broker_ip(&cfg.mqtt_host).await
     } else {
         None
     };
+    let record = if rediscovery_active {
+        let host = cfg.mqtt_host.clone();
+        tokio::task::spawn_blocking(move || persist::read_record(&host)).await.ok().flatten()
+    } else {
+        None
+    };
+
+    // The record's "base" is the build-time /etc/hosts IP the move was learned against.
+    // On a fresh reboot that is simply `current` (the boot init just re-seeded it). But
+    // bt_service_watchdog respawns btmqttd WITHOUT a reboot, so on a respawn `current` may
+    // already be a rediscovered IP; if a record's learned matches it, that record's stored
+    // base IS the true build-time IP — recover it, so a later move records the right base
+    // and a future real reboot doesn't reject the record as a stale-base mismatch (Codex P2).
+    let build_ip: Option<std::net::Ipv4Addr> = match (current, record) {
+        (Some(cur), Some((base, learned))) if learned == cur => Some(base),
+        (cur, _) => cur,
+    };
+
     let mut last_persisted: Option<std::net::Ipv4Addr> = None;
-    if let Some(build_ip) = build_ip {
-        if let Some(learned) = persist::load(&cfg.mqtt_host, build_ip) {
-            last_persisted = Some(learned);
-            match rediscovery::seed_hosts(&cfg.mqtt_host, learned).await {
-                Ok(true) => eprintln!(
-                    "btmqttd: seeded '{}' -> {learned} in {} from persisted state",
-                    cfg.mqtt_host, rediscovery::HOSTS_PATH
-                ),
-                Ok(false) => {} // already mapped there (build-time seed agrees) — quiet
-                Err(e) => eprintln!("btmqttd: could not seed persisted broker IP: {e}"),
+    if let (Some(build_ip), Some((base, learned))) = (build_ip, record) {
+        // Apply the record only while its base still matches this firmware's build IP; a
+        // mismatch means a re-flash re-pointed the broker and the record is stale.
+        if base == build_ip {
+            if current == Some(learned) {
+                // Watchdog respawn: /etc/hosts already holds the learned IP — adopt it,
+                // no reseed needed.
+                last_persisted = Some(learned);
+            } else {
+                // Fresh reboot → seed the learned IP. In PLAINTEXT mode re-apply the same
+                // ARP-MAC gate rediscover() uses: a persisted IP that DHCP reassigned while
+                // the unit was off must not receive our credentials on the first connect
+                // (Codex P1). Under TLS the reconnect's pinned-cert handshake is the gate.
+                let trusted = if cfg.uses_tls() {
+                    true
+                } else if let Some(mac) = cfg.broker_mac {
+                    rediscovery::arp_mac_matches(learned, cfg.mqtt_port, mac).await
+                } else {
+                    false // rediscovery_active guarantees TLS or a MAC; belt-and-braces
+                };
+                if trusted {
+                    last_persisted = Some(learned);
+                    match rediscovery::seed_hosts(&cfg.mqtt_host, learned).await {
+                        Ok(true) => eprintln!(
+                            "btmqttd: seeded '{}' -> {learned} in {} from persisted state",
+                            cfg.mqtt_host, rediscovery::HOSTS_PATH
+                        ),
+                        Ok(false) => {} // already mapped there — quiet
+                        Err(e) => eprintln!("btmqttd: could not seed persisted broker IP: {e}"),
+                    }
+                } else {
+                    eprintln!(
+                        "btmqttd: persisted broker IP {learned} did not confirm the broker MAC \
+                         at boot; not seeding (normal rediscovery will re-locate it)"
+                    );
+                }
             }
         }
     }
@@ -265,6 +305,10 @@ async fn run() -> Result<(), String> {
                         // the pinned-TLS handshake, so it is trustworthy to remember for the
                         // next boot. Only meaningful once a name broker has a build-time base
                         // to compare against (`build_ip`).
+                        // The disk work is offloaded to the blocking pool and detached, so the
+                        // single-threaded poll loop never stalls on the sync-mounted partition
+                        // (Copilot). last_persisted is updated in-memory immediately, so the
+                        // change-gate stays correct regardless of when the write lands.
                         if let (Some(build_ip), Some(confirmed)) =
                             (build_ip, rediscovery::current_broker_ip(&cfg.mqtt_host).await)
                         {
@@ -273,14 +317,17 @@ async fn run() -> Result<(), String> {
                                 // the boot init re-seeds anyway. Forget any stale learned record
                                 // so a reboot doesn't seed a now-wrong address.
                                 if last_persisted.is_some() {
-                                    persist::clear();
+                                    tokio::task::spawn_blocking(persist::clear);
                                     last_persisted = None;
                                 }
                             } else if last_persisted != Some(confirmed) {
                                 // A rediscovered IP that just authenticated → remember it against
                                 // the build-time base. Write only on a CHANGE, so a stable broker
                                 // never churns the flash partition.
-                                persist::store(&cfg.mqtt_host, build_ip, confirmed);
+                                let host = cfg.mqtt_host.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    persist::store(&host, build_ip, confirmed)
+                                });
                                 last_persisted = Some(confirmed);
                             }
                         }
