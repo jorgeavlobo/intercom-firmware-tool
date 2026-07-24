@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;                // IReadOnlyList<BrokerCandidate>
 using System.IO;
+using System.Linq;                               // FirstOrDefault over discovery candidates
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -84,6 +86,15 @@ namespace IntercomFirmwareTool.App
         // unchanged (the hostname is pinned to the tested IP), so both must survive.
         private bool _suppressMqttBrokerInvalidation;
 
+        // Active LAN broker discovery (#43, follow-up 2). mDNS runs in the background at
+        // startup; the /24 scan is a heavier fallback run at most once, when the bridge is
+        // enabled and mDNS found nothing. The pre-fill happens at most once and never
+        // overwrites a broker the user already typed.
+        private MqttBrokerDiscovery? _brokerDiscovery;
+        private CancellationTokenSource? _discoveryCts;
+        private bool _discoveryScanDone;
+        private bool _discoveryPrefillDone;
+
         private bool MqttEnabled => ChkMqtt.IsChecked == true;
 
         /// <summary>Wire up the MQTT masked password field + topic defaults. Called
@@ -124,6 +135,14 @@ namespace IntercomFirmwareTool.App
             ChkMqttRediscovery.IsChecked = true;
 
             RefreshMqttPlaceholders();
+
+            // Kick off passive LAN discovery (mDNS) in the background so a candidate is
+            // usually ready by the time the user enables the bridge. Best-effort and
+            // non-throwing; cancelled when the window closes.
+            _brokerDiscovery = new MqttBrokerDiscovery();
+            _discoveryCts = new CancellationTokenSource();
+            Closed += (_, _) => { try { _discoveryCts?.Cancel(); } catch { /* shutting down */ } };
+            _ = _brokerDiscovery.RunMdnsAsync(TimeSpan.FromSeconds(3), _discoveryCts.Token);
         }
 
         // ---- Enable toggle + field-change plumbing --------------------------
@@ -136,6 +155,72 @@ namespace IntercomFirmwareTool.App
             // can't linger for a config that is no longer enabled.
             ClearMqttTestStatus();
             UpdateBuildEnabled();
+
+            // Enabling the bridge is the moment to pre-fill the broker from LAN discovery;
+            // disabling it hides the discovery note.
+            if (MqttEnabled) _ = TryPrefillBrokerFromDiscoveryAsync();
+            else SetMqttDiscoveryInfo(null);
+        }
+
+        /// <summary>Pre-fill the broker fields from LAN discovery when the bridge is enabled:
+        /// use an mDNS candidate found at startup, else run a one-time /24 scan. Fills the
+        /// hostname + pinned IP (or just the IP) — the same canonical shape the Test-connection
+        /// capture produces — then lets the user Test to capture the MAC. Never overwrites a
+        /// broker the user already typed, and runs the heavy scan at most once.</summary>
+        private async Task TryPrefillBrokerFromDiscoveryAsync()
+        {
+            if (_brokerDiscovery == null || _discoveryPrefillDone) return;
+            if (TxtMqttHost.Text.Trim().Length > 0) return;   // user already entered a broker
+
+            BrokerCandidate? cand = _brokerDiscovery.MdnsCandidates.FirstOrDefault();
+            if (cand == null && !_discoveryScanDone)
+            {
+                _discoveryScanDone = true;   // the /24 scan is heavy — attempt it only once
+                SetMqttDiscoveryInfo(L("MqttDiscovering"));
+                IReadOnlyList<BrokerCandidate> scan;
+                try { scan = await _brokerDiscovery.ScanSubnetAsync(_discoveryCts?.Token ?? CancellationToken.None); }
+                catch { scan = System.Array.Empty<BrokerCandidate>(); }
+                // The user may have disabled the bridge or typed a broker while we scanned.
+                if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
+                cand = scan.FirstOrDefault();
+            }
+
+            if (cand == null) { SetMqttDiscoveryInfo(null); return; }
+
+            _discoveryPrefillDone = true;
+            PrefillBrokerFields(cand);
+            SetMqttDiscoveryInfo(LF("Fmt_MqttDiscovered", cand.Hostname ?? cand.Ip));
+        }
+
+        /// <summary>Seed the broker/Host IP/port fields from a discovered candidate — a
+        /// hostname pinned to its IP (or a bare IP). Guarded like the auto-promotion so the
+        /// programmatic writes aren't treated as user edits.</summary>
+        private void PrefillBrokerFields(BrokerCandidate c)
+        {
+            _suppressMqttBrokerInvalidation = true;
+            try
+            {
+                if (c.Hostname != null) { TxtMqttHostIp.Text = c.Ip; TxtMqttHost.Text = c.Hostname; }
+                else { TxtMqttHostIp.Text = ""; TxtMqttHost.Text = c.Ip; }
+            }
+            finally { _suppressMqttBrokerInvalidation = false; }
+            TxtMqttPort.Text = c.Port.ToString();
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>Show (or, with null/empty, hide) the LAN-discovery note above the broker
+        /// fields. Announced to screen readers like the other MQTT live regions.</summary>
+        private void SetMqttDiscoveryInfo(string? text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                TxtMqttDiscovery.Text = "";
+                TxtMqttDiscovery.Visibility = Visibility.Collapsed;
+                return;
+            }
+            TxtMqttDiscovery.Text = text;
+            TxtMqttDiscovery.Visibility = Visibility.Visible;
+            AnnounceLiveRegion(TxtMqttDiscovery);
         }
 
         /// <summary>Any MQTT text field changed — clear a stale test result and

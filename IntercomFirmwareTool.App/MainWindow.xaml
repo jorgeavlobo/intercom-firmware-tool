@@ -575,6 +575,12 @@
                           ToolTip="{loc:Loc Tip_Mqtt}"
                           Checked="ChkMqtt_Toggled" Unchecked="ChkMqtt_Toggled"/>
                 <StackPanel x:Name="MqttPanel" Margin="22,8,0,0" Visibility="Collapsed">
+                    <!-- Network-discovery note (#43): shown while scanning and when a broker
+                         found on the LAN pre-fills the fields below. Live region so a screen
+                         reader announces the auto-fill. -->
+                    <TextBlock x:Name="TxtMqttDiscovery" Margin="0,0,0,6" Foreground="#FF3C7D3C"
+                               FontSize="11" TextWrapping="Wrap" Visibility="Collapsed"
+                               AutomationProperties.LiveSetting="Polite"/>
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
