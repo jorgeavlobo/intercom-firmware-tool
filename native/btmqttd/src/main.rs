@@ -305,10 +305,12 @@ async fn run() -> Result<(), String> {
                         // the pinned-TLS handshake, so it is trustworthy to remember for the
                         // next boot. Only meaningful once a name broker has a build-time base
                         // to compare against (`build_ip`).
-                        // The disk work is offloaded to the blocking pool and detached, so the
-                        // single-threaded poll loop never stalls on the sync-mounted partition
-                        // (Copilot). last_persisted is updated in-memory immediately, so the
-                        // change-gate stays correct regardless of when the write lands.
+                        // The disk work runs on the blocking pool (the runtime is
+                        // single-threaded — Copilot) and is AWAITED there: awaiting a
+                        // spawn_blocking yields the reactor to other tasks rather than stalling
+                        // it, and lets us advance the in-memory change-gate ONLY after the write
+                        // actually lands — so a briefly-unavailable partition is retried on the
+                        // next ConnAck instead of being suppressed forever (Codex/Copilot).
                         if let (Some(build_ip), Some(confirmed)) =
                             (build_ip, rediscovery::current_broker_ip(&cfg.mqtt_host).await)
                         {
@@ -316,8 +318,11 @@ async fn run() -> Result<(), String> {
                                 // The broker is at (or has returned to) its build-time IP, which
                                 // the boot init re-seeds anyway. Forget any stale learned record
                                 // so a reboot doesn't seed a now-wrong address.
-                                if last_persisted.is_some() {
-                                    tokio::task::spawn_blocking(persist::clear);
+                                if last_persisted.is_some()
+                                    && tokio::task::spawn_blocking(persist::clear)
+                                        .await
+                                        .unwrap_or(false)
+                                {
                                     last_persisted = None;
                                 }
                             } else if last_persisted != Some(confirmed) {
@@ -325,10 +330,14 @@ async fn run() -> Result<(), String> {
                                 // the build-time base. Write only on a CHANGE, so a stable broker
                                 // never churns the flash partition.
                                 let host = cfg.mqtt_host.clone();
-                                tokio::task::spawn_blocking(move || {
+                                if tokio::task::spawn_blocking(move || {
                                     persist::store(&host, build_ip, confirmed)
-                                });
-                                last_persisted = Some(confirmed);
+                                })
+                                .await
+                                .unwrap_or(false)
+                                {
+                                    last_persisted = Some(confirmed);
+                                }
                             }
                         }
                         // SUBSCRIBE to the command topic, as its OWN task (not inline):

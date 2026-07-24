@@ -75,19 +75,22 @@ pub fn read_record(host: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
 
 /// Persist `host`'s learned IP atomically, recording the `base_ip` (build-time mapping)
 /// it was learned against. Writes a unique 0600 temp beside the target then renames over
-/// it, so a concurrent reader (or a reboot mid-write) never sees a torn file. Best-effort
-/// — a missing/full/unmounted partition just means we can't remember this pass; the
-/// runtime repoint still worked, and the next boot falls back to the build-time seed.
-/// Blocking; call via `spawn_blocking`.
-pub fn store(host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) {
-    store_in(&state_dir(), host, base_ip, learned_ip);
+/// it, so a concurrent reader (or a reboot mid-write) never sees a torn file. Returns
+/// `true` only when the write landed, so the caller advances its in-memory change-gate
+/// ONLY on success and retries on the next ConnAck if the partition was briefly
+/// unavailable (Codex/Copilot). Blocking; call via `spawn_blocking`.
+#[must_use]
+pub fn store(host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> bool {
+    store_in(&state_dir(), host, base_ip, learned_ip)
 }
 
-/// Forget any persisted record (best-effort): called when the broker is confirmed back at
-/// its build-time address, so a reboot doesn't seed a now-stale learned IP. A missing file
-/// is success. Blocking; call via `spawn_blocking`.
-pub fn clear() {
-    clear_in(&state_dir());
+/// Forget any persisted record: called when the broker is confirmed back at its build-time
+/// address, so a reboot doesn't seed a now-stale learned IP. Returns `true` when the file
+/// is gone (removed, or already absent); `false` on an I/O error so the caller retries.
+/// Blocking; call via `spawn_blocking`.
+#[must_use]
+pub fn clear() -> bool {
+    clear_in(&state_dir())
 }
 
 // ---------------------------------------------------------------------------
@@ -101,34 +104,42 @@ fn read_record_in(dir: &Path, host: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
     parse_record(&text, host)
 }
 
-fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) {
+fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> bool {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("btmqttd: persist: cannot create {}: {e}", dir.display());
-        return;
+        return false;
     }
     let path = state_file_in(dir);
     let Some(path_str) = path.to_str() else {
         eprintln!("btmqttd: persist: state path is not valid UTF-8");
-        return;
+        return false;
     };
     let body = format_state(host, base_ip, learned_ip);
     match crate::receiver::create_unique_temp(path_str, body.as_bytes()) {
-        Ok(tmp) => {
-            if let Err(e) = std::fs::rename(&tmp, path_str) {
+        Ok(tmp) => match std::fs::rename(&tmp, path_str) {
+            Ok(()) => true,
+            Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
                 eprintln!("btmqttd: persist: cannot write {path_str}: {e}");
+                false
             }
+        },
+        Err(e) => {
+            eprintln!("btmqttd: persist: cannot create temp for {path_str}: {e}");
+            false
         }
-        Err(e) => eprintln!("btmqttd: persist: cannot create temp for {path_str}: {e}"),
     }
 }
 
-fn clear_in(dir: &Path) {
+fn clear_in(dir: &Path) -> bool {
     let path = state_file_in(dir);
     match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => eprintln!("btmqttd: persist: cannot clear {}: {e}", path.display()),
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // already gone
+        Err(e) => {
+            eprintln!("btmqttd: persist: cannot clear {}: {e}", path.display());
+            false
+        }
     }
 }
 
@@ -209,18 +220,18 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(read_record_in(&dir, "broker.lan"), None); // nothing yet
-        store_in(&dir, "broker.lan", BUILD, LEARNED);
+        assert!(store_in(&dir, "broker.lan", BUILD, LEARNED));
         assert_eq!(read_record_in(&dir, "broker.lan"), Some((BUILD, LEARNED)));
         // A different host does not read the stored value.
         assert_eq!(read_record_in(&dir, "other"), None);
         // Overwrite updates in place.
         let l2 = Ipv4Addr::new(192, 168, 50, 201);
-        store_in(&dir, "broker.lan", BUILD, l2);
+        assert!(store_in(&dir, "broker.lan", BUILD, l2));
         assert_eq!(read_record_in(&dir, "broker.lan"), Some((BUILD, l2)));
-        // Clear forgets it; clearing again is still fine (missing file is success).
-        clear_in(&dir);
+        // Clear forgets it; clearing again is still success (missing file is success).
+        assert!(clear_in(&dir));
         assert_eq!(read_record_in(&dir, "broker.lan"), None);
-        clear_in(&dir);
+        assert!(clear_in(&dir));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
