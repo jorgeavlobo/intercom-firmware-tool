@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;                // IReadOnlyList<BrokerCandidate>
 using System.IO;
+using System.Linq;                               // FirstOrDefault over discovery candidates
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -84,6 +86,20 @@ namespace IntercomFirmwareTool.App
         // unchanged (the hostname is pinned to the tested IP), so both must survive.
         private bool _suppressMqttBrokerInvalidation;
 
+        // Active LAN broker discovery (#43, follow-up 2). mDNS runs in the background at
+        // startup; the /24 scan is a heavier fallback run at most once, when the bridge is
+        // enabled and mDNS found nothing. The pre-fill happens at most once and never
+        // overwrites a broker the user already typed.
+        private MqttBrokerDiscovery? _brokerDiscovery;
+        private CancellationTokenSource? _discoveryCts;      // cancels all discovery on window close
+        private CancellationTokenSource? _discoveryScanCts;  // cancels an in-flight /24 scan (bridge off)
+        private Task? _mdnsTask;                              // the background mDNS run (awaited before a scan)
+        private readonly List<BrokerCandidate> _lastScanResults = new();  // cached so a re-enable re-evaluates
+        private bool _discoveryScanDone;
+        private bool _discoveryPrefillDone;                  // set ONLY after fields are actually pre-filled
+        private bool _discoveryPrefillInFlight;              // one prefill/scan at a time (reentrancy gate)
+        private bool _discoveryPrefillRerun;                 // an enable arrived while a prefill was in flight
+
         private bool MqttEnabled => ChkMqtt.IsChecked == true;
 
         /// <summary>Wire up the MQTT masked password field + topic defaults. Called
@@ -124,6 +140,14 @@ namespace IntercomFirmwareTool.App
             ChkMqttRediscovery.IsChecked = true;
 
             RefreshMqttPlaceholders();
+
+            // Kick off passive LAN discovery (mDNS) in the background so a candidate is
+            // usually ready by the time the user enables the bridge. Best-effort and
+            // non-throwing; cancelled when the window closes.
+            _brokerDiscovery = new MqttBrokerDiscovery();
+            _discoveryCts = new CancellationTokenSource();
+            Closed += (_, _) => StopBrokerDiscovery();
+            _mdnsTask = _brokerDiscovery.RunMdnsAsync(TimeSpan.FromSeconds(3), _discoveryCts.Token);
         }
 
         // ---- Enable toggle + field-change plumbing --------------------------
@@ -136,6 +160,191 @@ namespace IntercomFirmwareTool.App
             // can't linger for a config that is no longer enabled.
             ClearMqttTestStatus();
             UpdateBuildEnabled();
+
+            // Enabling the bridge is the moment to pre-fill the broker from LAN discovery;
+            // disabling it cancels an in-flight /24 scan and hides the discovery note.
+            if (MqttEnabled) _ = TryPrefillBrokerFromDiscoveryAsync();
+            else { try { _discoveryScanCts?.Cancel(); } catch { } SetMqttDiscoveryInfo(null); }
+        }
+
+        /// <summary>Pre-fill the broker fields from LAN discovery when the bridge is enabled:
+        /// use an mDNS candidate found at startup, else run a one-time /24 scan. Fills the
+        /// hostname + pinned IP (or just the IP) — the same canonical shape the Test-connection
+        /// capture produces — then lets the user Test to capture the MAC. Never overwrites a
+        /// broker the user already typed, and runs the heavy scan at most once.</summary>
+        private async Task TryPrefillBrokerFromDiscoveryAsync()
+        {
+            // One-at-a-time gate. This is fire-and-forget from the toggle handler and reentrant
+            // across awaits: a rapid off→on→off→on could otherwise start a second prefill (and a
+            // second /24 scan) while the first is suspended at an await, and the two would
+            // cancel/dispose each other's scan CTS. Every entry and await-continuation here runs
+            // on the UI thread (no ConfigureAwait(false) in this method), so a plain bool suffices.
+            // A re-enable that arrives while a pass is in flight is NOT dropped: it latches a rerun
+            // so the finally can start a fresh pass — otherwise an off→on during a scan's
+            // cancellation would leave the bridge enabled with no scan (the in-flight task exits
+            // via the cancelled path and this second entry was rejected).
+            if (_discoveryPrefillInFlight) { _discoveryPrefillRerun = true; return; }
+            _discoveryPrefillInFlight = true;
+            // Wrap the whole body: this runs fire-and-forget from the toggle handler, so it must
+            // never fault (an unobserved exception would surface via UnobservedTaskException).
+            try
+            {
+                if (_brokerDiscovery == null || _discoveryPrefillDone) return;
+                if (TxtMqttHost.Text.Trim().Length > 0) return;   // user already entered a broker
+
+                // Candidate pool = live mDNS candidates + the last scan's results (cached, so a
+                // disable→re-enable re-evaluates without re-scanning). Only a PLAINTEXT broker can
+                // be auto-configured: a TLS broker also needs a CA the discovery can't supply, so
+                // pre-filling one would build a plaintext config against a TLS listener.
+                var pool = BuildDiscoveryPool();
+
+                // Nothing at all yet, and the background mDNS is still running (the user
+                // enabled the bridge within its window)? Give it its full window to answer before
+                // the heavier scan — a candidate may still be arriving. Then re-read.
+                Task? mdns = _mdnsTask;
+                if (pool.Count == 0 && mdns is { IsCompleted: false })
+                {
+                    SetMqttDiscoveryInfo(L("MqttDiscovering"));
+                    try { await mdns.WaitAsync(TimeSpan.FromSeconds(4)); } catch { /* window/timeout */ }
+                    if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
+                    pool = BuildDiscoveryPool();
+                }
+
+                // mDNS found NOTHING → the /24 scan, once, cancellable when the bridge is
+                // turned off (via _discoveryScanCts). mDNS advertises only plaintext _mqtt._tcp,
+                // so any mDNS hit is a plaintext broker that is pre-filled below without a scan.
+                if (pool.Count == 0 && !_discoveryScanDone)
+                {
+                    SetMqttDiscoveryInfo(L("MqttDiscovering"));
+                    _discoveryScanCts?.Cancel();
+                    _discoveryScanCts?.Dispose();   // release the previous linked CTS (no leak on repeat)
+                    var scanCts = _discoveryScanCts = CancellationTokenSource.CreateLinkedTokenSource(
+                        _discoveryCts?.Token ?? CancellationToken.None);
+                    IReadOnlyList<BrokerCandidate> scan;
+                    bool cancelled;
+                    try { scan = await _brokerDiscovery.ScanSubnetAsync(scanCts.Token); }
+                    catch { scan = System.Array.Empty<BrokerCandidate>(); }
+                    finally
+                    {
+                        cancelled = scanCts.IsCancellationRequested;
+                        // Dispose this scan's CTS; clear the field if it's still the current one
+                        // (the toggle handler's ?.Cancel() then no-ops on null).
+                        if (ReferenceEquals(_discoveryScanCts, scanCts)) _discoveryScanCts = null;
+                        scanCts.Dispose();
+                    }
+                    // A cancelled scan (bridge disabled mid-scan, or window closing) stays
+                    // RETRYABLE — don't burn the one-shot flag on it.
+                    if (cancelled) { SetMqttDiscoveryInfo(null); return; }
+                    _discoveryScanDone = true;   // a full sweep ran — the heavy scan won't repeat
+                    _lastScanResults.Clear();
+                    _lastScanResults.AddRange(scan);   // cache for a later re-enable
+                    // The user may have typed a broker while we scanned.
+                    if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
+                    pool = BuildDiscoveryPool();
+                }
+
+                // A plaintext broker → pre-fill and mark ready (terminal: fields are now set).
+                if (pool.FirstOrDefault(c => !c.IsTls) is BrokerCandidate plain)
+                {
+                    PrefillBrokerFields(plain);
+                    _discoveryPrefillDone = true;   // set ONLY after the fields are actually written
+                    SetMqttDiscoveryInfo(LF("Fmt_MqttDiscovered", plain.Hostname ?? plain.Ip));
+                    return;
+                }
+                // Only a TLS broker found → surface it but DON'T pre-fill (it needs a CA the
+                // user must add; a plaintext pre-fill would build a broken config).
+                if (pool.FirstOrDefault() is BrokerCandidate tls)
+                {
+                    // NOTE: do NOT set _discoveryPrefillDone here — nothing was pre-filled.
+                    // Leaving it clear lets a later disable→re-enable re-surface this guidance
+                    // (and re-evaluate if a plaintext candidate has since appeared).
+                    SetMqttDiscoveryInfo(LF("Fmt_MqttDiscoveredTls", tls.Hostname ?? tls.Ip, tls.Port));
+                    return;
+                }
+                SetMqttDiscoveryInfo(null);
+            }
+            catch { /* discovery pre-fill is best-effort; never fault the fire-and-forget task */ }
+            finally
+            {
+                _discoveryPrefillInFlight = false;
+                // A re-enable arrived while this pass ran (e.g. off→on during a scan's
+                // cancellation, so this pass exited via the cancelled path). Run one more pass so
+                // the re-enable isn't silently dropped — but only if discovery is still wanted.
+                // Bounded: it re-runs only on an explicit latch, and a completed scan/prefill
+                // (_discoveryScanDone / _discoveryPrefillDone) makes the next pass a quick no-op.
+                if (_discoveryPrefillRerun && MqttEnabled
+                    && TxtMqttHost.Text.Trim().Length == 0 && !_discoveryPrefillDone)
+                {
+                    _discoveryPrefillRerun = false;
+                    _ = TryPrefillBrokerFromDiscoveryAsync();
+                }
+                else
+                {
+                    _discoveryPrefillRerun = false;
+                }
+            }
+        }
+
+        /// <summary>The current candidate pool: live mDNS answers plus the last /24 scan's
+        /// results (cached in <see cref="_lastScanResults"/>). Rebuilt on each read so a
+        /// disable→re-enable, or a late-arriving mDNS answer, re-evaluates without re-scanning.</summary>
+        private List<BrokerCandidate> BuildDiscoveryPool()
+        {
+            var pool = new List<BrokerCandidate>(_brokerDiscovery!.MdnsCandidates);
+            pool.AddRange(_lastScanResults);
+            return pool;
+        }
+
+        /// <summary>Cancel and release every discovery CTS on window close — mirrors
+        /// <see cref="StopFirmwareScan"/> so neither the background mDNS nor an in-flight /24
+        /// scan leaks its WaitHandle for the window's lifetime. Capture-then-null so a scan
+        /// completing concurrently disposes its own linked CTS at most once.</summary>
+        private void StopBrokerDiscovery()
+        {
+            var scan = _discoveryScanCts; _discoveryScanCts = null;
+            var root = _discoveryCts;     _discoveryCts = null;
+            try { scan?.Cancel(); } catch { /* nothing registered can throw; be safe */ }
+            try { root?.Cancel(); } catch { /* shutting down */ }
+            scan?.Dispose();
+            root?.Dispose();
+        }
+
+        /// <summary>Seed the broker/Host IP/port fields from a discovered candidate — a
+        /// hostname pinned to its IP (or a bare IP). Guarded like the auto-promotion so the
+        /// programmatic writes aren't treated as user edits.</summary>
+        private void PrefillBrokerFields(BrokerCandidate c)
+        {
+            _suppressMqttBrokerInvalidation = true;
+            try
+            {
+                if (c.Hostname != null) { TxtMqttHostIp.Text = c.Ip; TxtMqttHost.Text = c.Hostname; }
+                else { TxtMqttHostIp.Text = ""; TxtMqttHost.Text = c.Ip; }
+            }
+            finally { _suppressMqttBrokerInvalidation = false; }
+            TxtMqttPort.Text = c.Port.ToString();
+            // The suppressed writes above bypass MqttBrokerField_TextChanged's anchor check, so a
+            // MAC captured for an EARLIER manually-tested endpoint (host later cleared while its
+            // Host IP lingered) could otherwise carry onto this freshly-discovered broker and get
+            // embedded as the wrong anchor. Apply the same rule here: drop it unless the discovered
+            // endpoint IS the captured one.
+            if (_mqttBrokerMac != null && !BrokerStillAtCapturedMac())
+                ClearBrokerMac();
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>Show (or, with null/empty, hide) the LAN-discovery note above the broker
+        /// fields. Announced to screen readers like the other MQTT live regions.</summary>
+        private void SetMqttDiscoveryInfo(string? text)
+        {
+            if (string.IsNullOrEmpty(text))
+            {
+                TxtMqttDiscovery.Text = "";
+                TxtMqttDiscovery.Visibility = Visibility.Collapsed;
+                return;
+            }
+            TxtMqttDiscovery.Text = text;
+            TxtMqttDiscovery.Visibility = Visibility.Visible;
+            AnnounceLiveRegion(TxtMqttDiscovery);
         }
 
         /// <summary>Any MQTT text field changed — clear a stale test result and
