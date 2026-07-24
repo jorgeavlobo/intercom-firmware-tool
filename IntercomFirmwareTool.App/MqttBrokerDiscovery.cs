@@ -135,7 +135,9 @@ namespace IntercomFirmwareTool.App
                 m.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 m.Client.Bind(new IPEndPoint(IPAddress.Any, MdnsPort));
                 m.JoinMulticastGroup(MdnsGroup);
-                m.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 4);
+                // RFC 6762 §11: mDNS is link-local; send with IP TTL=255 (compliant responders
+                // silently drop queries whose TTL isn't 255, as a same-link-origin check).
+                m.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 255);
                 return m;
             }
             catch { m?.Dispose(); }
@@ -143,7 +145,7 @@ namespace IntercomFirmwareTool.App
             var e = new UdpClient(AddressFamily.InterNetwork);
             e.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
             e.Client.Bind(new IPEndPoint(IPAddress.Any, 0));   // ephemeral; QU unicast replies land here
-            e.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 4);
+            e.Client.SetSocketOption(SocketOptionLevel.IP, SocketOptionName.MulticastTimeToLive, 255);  // RFC 6762 §11
             return e;
         }
 

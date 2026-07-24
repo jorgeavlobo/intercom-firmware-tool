@@ -97,6 +97,7 @@ namespace IntercomFirmwareTool.App
         private readonly List<BrokerCandidate> _lastScanResults = new();  // cached so a re-enable re-evaluates
         private bool _discoveryScanDone;
         private bool _discoveryPrefillDone;                  // set ONLY after fields are actually pre-filled
+        private bool _discoveryPrefillInFlight;              // one prefill/scan at a time (reentrancy gate)
 
         private bool MqttEnabled => ChkMqtt.IsChecked == true;
 
@@ -172,6 +173,13 @@ namespace IntercomFirmwareTool.App
         /// broker the user already typed, and runs the heavy scan at most once.</summary>
         private async Task TryPrefillBrokerFromDiscoveryAsync()
         {
+            // One-at-a-time gate. This is fire-and-forget from the toggle handler and reentrant
+            // across awaits: a rapid off→on→off→on could otherwise start a second prefill (and a
+            // second /24 scan) while the first is suspended at an await, and the two would
+            // cancel/dispose each other's scan CTS. Every entry and await-continuation here runs
+            // on the UI thread (no ConfigureAwait(false) in this method), so a plain bool suffices.
+            if (_discoveryPrefillInFlight) return;
+            _discoveryPrefillInFlight = true;
             // Wrap the whole body: this runs fire-and-forget from the toggle handler, so it must
             // never fault (an unobserved exception would surface via UnobservedTaskException).
             try
@@ -198,8 +206,8 @@ namespace IntercomFirmwareTool.App
                 }
 
                 // mDNS found NOTHING → the /24 scan, once, cancellable when the bridge is
-                // turned off (via _discoveryScanCts). A TLS-only mDNS hit already counts as
-                // "discovery succeeded", so it suppresses the port-scan (surfaced below).
+                // turned off (via _discoveryScanCts). mDNS advertises only plaintext _mqtt._tcp,
+                // so any mDNS hit is a plaintext broker that is pre-filled below without a scan.
                 if (pool.Count == 0 && !_discoveryScanDone)
                 {
                     SetMqttDiscoveryInfo(L("MqttDiscovering"));
@@ -251,6 +259,7 @@ namespace IntercomFirmwareTool.App
                 SetMqttDiscoveryInfo(null);
             }
             catch { /* discovery pre-fill is best-effort; never fault the fire-and-forget task */ }
+            finally { _discoveryPrefillInFlight = false; }
         }
 
         /// <summary>The current candidate pool: live mDNS answers plus the last /24 scan's
