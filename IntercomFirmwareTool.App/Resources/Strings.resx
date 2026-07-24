@@ -415,6 +415,7 @@ Key: {1}</value></data>
   <data name="Fmt_MqttAnchorMac" xml:space="preserve"><value>Broker MAC {0} captured ({1}). Rediscovery can now recover this broker even without TLS.</value></data>
   <data name="Fmt_MqttAnchorHostname" xml:space="preserve"><value>Broker MAC {0} captured ({1}). {1} resolves to “{2}” — enter that hostname above so rediscovery can recover the broker (it repoints a hostname, not a bare IP).</value></data>
   <data name="Fmt_MqttAnchorIpOnly" xml:space="preserve"><value>Broker MAC {0} captured ({1}), but this broker is set by IP. Rediscovery repoints a hostname, so enter the broker as a hostname for it to take effect.</value></data>
+  <data name="Fmt_MqttAnchorPromoted" xml:space="preserve"><value>Broker MAC {0} captured. {1} resolves to “{2}” — filled in above, with the IP moved to the Host IP field, so rediscovery can repoint the hostname if the IP changes.</value></data>
   <data name="MqttHint_AnchorNoMac" xml:space="preserve"><value>Connected, but the broker's MAC could not be read (it may be on another subnet). Plaintext rediscovery needs a same-subnet broker; with TLS it is anchored either way.</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Device id:</value></data>
   <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identifier for the Home Assistant device and its entities. Distinct per unit gives each bridge its own HA device; for several units on one broker, also set distinct topics (else they mirror each other). ASCII letters, digits, '_' or '-' only.</value></data>

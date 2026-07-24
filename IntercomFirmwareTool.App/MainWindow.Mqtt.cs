@@ -78,6 +78,12 @@ namespace IntercomFirmwareTool.App
         // half-filled MAC; cleared in the capture's finally.
         private bool _mqttCapturing;
 
+        // Guards the programmatic IP→hostname auto-promotion (host + host-IP written
+        // together after a good plaintext test) from being seen as a user edit — which
+        // would clear the just-captured MAC and the green test result. The endpoint is
+        // unchanged (the hostname is pinned to the tested IP), so both must survive.
+        private bool _suppressMqttBrokerInvalidation;
+
         private bool MqttEnabled => ChkMqtt.IsChecked == true;
 
         /// <summary>Wire up the MQTT masked password field + topic defaults. Called
@@ -151,6 +157,11 @@ namespace IntercomFirmwareTool.App
         /// about the host, independent of port or credentials.</summary>
         private void MqttBrokerField_TextChanged(object sender, TextChangedEventArgs e)
         {
+            // Programmatic IP→hostname promotion (see CaptureBrokerMacAsync): the endpoint
+            // is unchanged, so keep the captured MAC AND the green test result — only
+            // refresh visibility/gate. The promotion sets the anchor note itself.
+            if (_suppressMqttBrokerInvalidation) { UpdateBuildEnabled(); return; }
+
             if (_mqttBrokerMac != null && !BrokerStillAtCapturedMac())
                 ClearBrokerMac();               // different endpoint → anchor no longer applies
             else
@@ -493,9 +504,11 @@ namespace IntercomFirmwareTool.App
                         // GetHostEntryAsync has no CancellationToken overload, so bound it the
                         // same way — a hung reverse lookup would otherwise pin _mqttCapturing.
                         var entry = await Dns.GetHostEntryAsync(ip!).WaitAsync(DnsCaptureTimeout);
-                        if (!string.IsNullOrWhiteSpace(entry.HostName) &&
-                            !IPAddress.TryParse(entry.HostName, out _))
-                            suggested = entry.HostName.ToLowerInvariant();
+                        // Trim a trailing FQDN dot; accept only a name Core would (not an IP,
+                        // passes the host charset) so promotion can't write a host Build rejects.
+                        string name = (entry.HostName ?? "").TrimEnd('.');
+                        if (name.Length > 0 && !IPAddress.TryParse(name, out _) && IsValidMqttHost(name))
+                            suggested = name.ToLowerInvariant();
                     }
                     catch { /* no PTR record / timeout — a MAC-only anchor is fine */ }
                 }
@@ -518,7 +531,32 @@ namespace IntercomFirmwareTool.App
                 _mqttBrokerMac = mac;
                 _mqttMacIp = ip!.ToString();
                 _mqttMacSuggestedHost = suggested;
-                RefreshMqttRediscoveryInfo();
+
+                // Auto-promote a bare-IP broker to a hostname config when reverse-DNS found a
+                // name — but ONLY on the plaintext path. Move the tested IP into the host-IP
+                // override and put the name in the broker field: the firmware then stores the
+                // hostname (pinned to the IP in the device hosts file) so rediscovery can
+                // repoint it if the IP later changes, with the MAC as anchor — the most robust
+                // config. Suppressed so it keeps the MAC and the green test result (same
+                // endpoint). With TLS configured we do NOT promote: switching the broker to a
+                // hostname changes the certificate's validated target host, which this test
+                // (run against the IP) did not exercise — leave the non-destructive suggestion.
+                bool hasTls = _mqttCaPath != null || (_mqttCertPath != null && _mqttKeyPath != null);
+                if (suggested != null && !hasTls)
+                {
+                    _suppressMqttBrokerInvalidation = true;
+                    try
+                    {
+                        TxtMqttHostIp.Text = _mqttMacIp;   // host-IP row becomes visible (host is now a name)
+                        TxtMqttHost.Text = suggested;
+                    }
+                    finally { _suppressMqttBrokerInvalidation = false; }
+                    SetMqttRediscoveryInfo(LF("Fmt_MqttAnchorPromoted", mac, _mqttMacIp, suggested));
+                }
+                else
+                {
+                    RefreshMqttRediscoveryInfo();
+                }
             }
             finally
             {
