@@ -40,7 +40,6 @@
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::net::TcpStream;
@@ -67,26 +66,60 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 /// while still sweeping the subnet in a fraction of a second.
 const PROBE_CONCURRENCY: usize = 64;
 
+/// Whether a poll error is consistent with a STALE/UNREACHABLE broker address (as an
+/// IP change produces) rather than an application-level rejection. Only these advance
+/// the rediscovery failure streak: a socket-level failure (connection refused, host
+/// unreachable, reset) or a network timeout means "nothing usable answered at this
+/// address". A `ConnectionRefused` (MQTT CONNACK: bad credentials / not authorized), a
+/// TLS verification failure, or a protocol error mean the host WAS reached and is a
+/// broker that rejected US — the hostname still points at the right box, so we must
+/// NOT wander off and retire it (issue #43 / Codex P2).
+pub fn is_unreachable(e: &rumqttc::ConnectionError) -> bool {
+    use rumqttc::ConnectionError;
+    matches!(
+        e,
+        ConnectionError::Io(_) | ConnectionError::NetworkTimeout | ConnectionError::FlushTimeout
+    )
+}
+
 /// Attempt one rediscovery pass: propose a new IP for the broker name and repoint its
-/// `/etc/hosts` line to it, returning the proposed IP. `None` means nothing to do
-/// (broker not name-mapped, or no untried open candidate this pass).
+/// `/etc/hosts` line to it, returning the proposed IP. `None` means nothing was done
+/// (broker not name-mapped, no open/trusted candidate this pass, or the rewrite failed).
 ///
-/// `tried` accumulates addresses already proposed in this process so proposals are
-/// monotonic; the caller CLEARS it on a successful connect (so a broker that later
-/// returns to a former address can be found again). The current anchor is always
-/// added to `tried`, so the stale mapping is never re-proposed.
+/// `tried` accumulates addresses already proposed during this outage so proposals are
+/// monotonic (no oscillation between two open-but-wrong hosts); the caller CLEARS it on
+/// a successful connect, and this function clears it once the whole `/24` is exhausted,
+/// so a broker that returns to a former address (including the original one) can be
+/// found again — the scan is self-healing.
+///
+/// The trust boundary is unchanged: this only PROPOSES an address. When the config uses
+/// TLS, the main client validates the broker's certificate (pinned CA + hostname) on
+/// reconnect, so proposing any open candidate is safe — a wrong one fails the handshake.
+/// WITHOUT TLS there is no way to authenticate the broker on reconnect (a rogue/other
+/// broker would simply accept the connection, and any credentials, in cleartext), so a
+/// candidate is adopted ONLY when its `/proc/net/arp` MAC matches the recorded
+/// `MQTT_BROKER_MAC` hint (issue #43 / Codex P1 / CodeRabbit). `main` additionally
+/// refuses to activate rediscovery at all without one of these anchors.
 pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
     // Read the hosts file and find the IP currently mapped to the broker name.
-    let hosts = std::fs::read_to_string(HOSTS_PATH).ok()?;
+    let hosts = match tokio::fs::read_to_string(HOSTS_PATH).await {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("btmqttd: rediscovery: cannot read {HOSTS_PATH}: {e}");
+            return None;
+        }
+    };
     let anchor = parse_hosts_ip(&hosts, &cfg.mqtt_host)?;
-    tried.insert(anchor);
 
-    // Candidates: the anchor's /24, minus anything already proposed.
+    // Candidates: the anchor's /24 (the anchor itself excluded), minus anything already
+    // proposed this outage. Exhausting the subnet clears `tried` so the next pass
+    // re-scans from scratch instead of giving up.
     let candidates: Vec<Ipv4Addr> = slash24_candidates(anchor)
         .into_iter()
         .filter(|ip| !tried.contains(ip))
         .collect();
     if candidates.is_empty() {
+        tried.clear();
         return None;
     }
 
@@ -94,29 +127,56 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
     let open = probe_open(&candidates, cfg.mqtt_port).await;
     if open.is_empty() {
         eprintln!(
-            "btmqttd: rediscovery: no host in {}/24 has port {} open",
-            anchor, cfg.mqtt_port
+            "btmqttd: rediscovery: no untried host in {anchor}/24 has port {} open",
+            cfg.mqtt_port
         );
         return None;
     }
 
     // MAC hint (best-effort): the ARP table only has entries for hosts contacted
     // recently — probing above just populated it for the open hosts.
-    let arp = std::fs::read_to_string("/proc/net/arp")
+    let arp = tokio::fs::read_to_string("/proc/net/arp")
+        .await
         .map(|t| parse_proc_net_arp(&t))
         .unwrap_or_default();
 
     let ordered = order_candidates(&open, &arp, cfg.broker_mac, tried);
-    let pick = *ordered.first()?;
-    tried.insert(pick);
+    // Trust gate: with TLS the reconnect authenticates the broker, so any open
+    // candidate is fine to propose; without TLS, require a MAC match.
+    let pick = if cfg.uses_tls() {
+        ordered.into_iter().next()
+    } else {
+        ordered
+            .into_iter()
+            .find(|ip| mac_matches(*ip, &arp, cfg.broker_mac))
+    };
+    let pick = match pick {
+        Some(ip) => ip,
+        None => {
+            eprintln!(
+                "btmqttd: rediscovery: no open candidate in {anchor}/24 matches the broker MAC \
+                 (plaintext config needs a MAC match to adopt)"
+            );
+            return None;
+        }
+    };
 
-    // Repoint ONLY the broker's line; the main client validates on reconnect.
+    // Repoint ONLY the broker's mapping; the main client validates on reconnect.
     let rewritten = rewrite_hosts(&hosts, &cfg.mqtt_host, pick);
-    if let Err(e) = write_hosts_atomic(&rewritten) {
-        eprintln!("btmqttd: rediscovery: could not rewrite {HOSTS_PATH}: {e}");
-        return None;
+    match tokio::task::spawn_blocking(move || write_hosts_blocking(&rewritten)).await {
+        Ok(Ok(())) => {
+            tried.insert(pick);
+            Some(pick)
+        }
+        Ok(Err(e)) => {
+            eprintln!("btmqttd: rediscovery: could not rewrite {HOSTS_PATH}: {e}");
+            None
+        }
+        Err(e) => {
+            eprintln!("btmqttd: rediscovery: hosts rewrite task did not complete: {e}");
+            None
+        }
     }
-    Some(pick)
 }
 
 /// TCP-connect-probe `port` on each candidate, returning those that accept. Batched to
@@ -143,16 +203,25 @@ async fn probe_open(candidates: &[Ipv4Addr], port: u16) -> Vec<Ipv4Addr> {
     open
 }
 
-/// Atomically replace the hosts file: write a sibling temp file, then rename over the
-/// target (rename is atomic within the tmpfs the symlink resolves to), so a reader —
-/// including the device's other services — never sees a torn hosts file.
-fn write_hosts_atomic(content: &str) -> std::io::Result<()> {
-    // Follow the symlink to its real target so the temp file lands in the SAME
-    // directory (rename is only atomic within one filesystem).
-    let target = std::fs::canonicalize(HOSTS_PATH).unwrap_or_else(|_| PathBuf::from(HOSTS_PATH));
-    let tmp = target.with_extension("btmqttd.tmp");
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, &target)
+/// Atomically replace the hosts file (runs on the blocking pool): resolve the symlink
+/// to its real target, write a UNIQUE O_EXCL temp beside it, copy the target's
+/// mode/owner onto the temp, then rename over the target — so a concurrent reader (the
+/// device's other services) never sees a torn file and the file keeps its permissions.
+/// If the symlink can't be resolved we return the error rather than fall back to the
+/// literal path, whose rename would replace the `/etc/hosts` symlink itself with a
+/// regular file and break the device's tmpfs indirection.
+fn write_hosts_blocking(content: &str) -> std::io::Result<()> {
+    let target = std::fs::canonicalize(HOSTS_PATH)?;
+    let target = target.to_str().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "hosts path is not valid UTF-8")
+    })?;
+    let tmp = crate::receiver::create_unique_temp(target, content.as_bytes())?;
+    crate::receiver::preserve_mode_owner(target, &tmp);
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -228,6 +297,12 @@ pub fn parse_mac(s: &str) -> Option<[u8; 6]> {
     Some(out)
 }
 
+/// Whether `ip`'s ARP entry matches the recorded broker MAC. `false` when no MAC is
+/// configured or the ARP table has no (matching) entry for `ip`.
+fn mac_matches(ip: Ipv4Addr, arp: &[(Ipv4Addr, [u8; 6])], broker_mac: Option<[u8; 6]>) -> bool {
+    broker_mac.is_some_and(|want| arp.iter().any(|(aip, amac)| *aip == ip && *amac == want))
+}
+
 /// Order the open candidates for adoption: a MAC-matched host first (when a broker MAC
 /// is known and present in the ARP table), then the remaining open hosts in address
 /// order. Anything in `tried` is excluded. The result is what the driver proposes, in
@@ -244,10 +319,7 @@ fn order_candidates(
         if tried.contains(&ip) {
             continue;
         }
-        let is_match = broker_mac.is_some_and(|want| {
-            arp.iter().any(|(aip, amac)| *aip == ip && *amac == want)
-        });
-        if is_match {
+        if mac_matches(ip, arp, broker_mac) {
             matched.push(ip);
         } else {
             rest.push(ip);
@@ -257,24 +329,36 @@ fn order_candidates(
     matched
 }
 
-/// Return a copy of the hosts body with the broker `name` repointed to `ip`: every
-/// existing line naming it is dropped and a single `ip<TAB>name` line is appended.
-/// All other lines (localhost, openserver, the OTA blocks, …) are preserved verbatim,
-/// so rewriting the broker mapping never disturbs the device's other name resolution.
+/// Return a copy of the hosts body with the broker `name` repointed to `ip`. Only the
+/// matched ALIAS moves: on a line that also carries OTHER aliases (e.g.
+/// `192.168.50.64 broker.lan MyBroker`, repointing `broker.lan`), the other aliases
+/// keep their original address (the line is rewritten without the matched name), and a
+/// single `ip<TAB>name` line is appended. Lines that don't name the broker — localhost,
+/// openserver, the OTA blocks, comments, blanks — are preserved verbatim, so rewriting
+/// the broker mapping never disturbs the device's other name resolution.
 fn rewrite_hosts(hosts: &str, name: &str, ip: Ipv4Addr) -> String {
     let mut out = String::with_capacity(hosts.len() + 32);
     for raw in hosts.lines() {
         let body = raw.split('#').next().unwrap_or("").trim();
-        let names_it = !body.is_empty()
-            && body
-                .split_whitespace()
-                .skip(1)
-                .any(|alias| alias.eq_ignore_ascii_case(name));
-        if names_it {
-            continue; // drop the stale mapping for this name
+        let mut cols = body.split_whitespace();
+        let addr = cols.next();
+        let names_it = addr.is_some() && cols.clone().any(|alias| alias.eq_ignore_ascii_case(name));
+        if !names_it {
+            out.push_str(raw);
+            out.push('\n');
+            continue;
         }
-        out.push_str(raw);
-        out.push('\n');
+        // The line maps the broker name. Keep any OTHER aliases at their original
+        // address; drop only the matched name (it is repointed by the appended line).
+        let others: Vec<&str> = cols.filter(|alias| !alias.eq_ignore_ascii_case(name)).collect();
+        if !others.is_empty() {
+            out.push_str(addr.unwrap());
+            for alias in others {
+                out.push('\t');
+                out.push_str(alias);
+            }
+            out.push('\n');
+        }
     }
     out.push_str(&format!("{ip}\t{name}\n"));
     out
@@ -384,10 +468,12 @@ IP address       HW type     Flags       HW address            Mask     Device
 
     #[test]
     fn rewrite_hosts_repoints_only_the_broker_line() {
+        // The device's own mapping is a single alias per line (bt_hosts.sh writes
+        // `<ip>\t<name>`), so the stale line is dropped and the new one appended.
         let hosts = "\
 127.0.0.1\tlocalhost
 127.0.0.1\topenserver
-192.168.50.64\tbroker.lan MyBroker
+192.168.50.64\tbroker.lan
 127.0.0.1\tprodlegrandressourcespkg.blob.core.windows.net
 ";
         let out = rewrite_hosts(hosts, "broker.lan", Ipv4Addr::new(192, 168, 50, 200));
@@ -404,6 +490,46 @@ IP address       HW type     Flags       HW address            Mask     Device
             parse_hosts_ip(&out, "broker.lan"),
             Some(Ipv4Addr::new(192, 168, 50, 200))
         );
+    }
+
+    #[test]
+    fn rewrite_hosts_preserves_other_aliases_on_the_line() {
+        // A line carrying more than the broker name: only the matched alias moves; the
+        // other alias keeps its original address (CodeRabbit).
+        let hosts = "192.168.50.64\tbroker.lan MyBroker\n";
+        let out = rewrite_hosts(hosts, "broker.lan", Ipv4Addr::new(192, 168, 50, 200));
+        // MyBroker stays put; broker.lan is repointed; neither is duplicated.
+        assert_eq!(parse_hosts_ip(&out, "MyBroker"), Some(Ipv4Addr::new(192, 168, 50, 64)));
+        assert_eq!(parse_hosts_ip(&out, "broker.lan"), Some(Ipv4Addr::new(192, 168, 50, 200)));
+        assert_eq!(out.matches("broker.lan").count(), 1);
+        assert_eq!(out.matches("MyBroker").count(), 1);
+    }
+
+    #[test]
+    fn is_unreachable_only_for_network_class_errors() {
+        use rumqttc::{ConnectReturnCode, ConnectionError};
+        assert!(is_unreachable(&ConnectionError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused"
+        ))));
+        assert!(is_unreachable(&ConnectionError::NetworkTimeout));
+        assert!(is_unreachable(&ConnectionError::FlushTimeout));
+        // A broker-side CONNACK refusal (bad credentials) is NOT unreachable — the host
+        // is the real broker, rejecting us; rediscovery must not retire it.
+        assert!(!is_unreachable(&ConnectionError::ConnectionRefused(
+            ConnectReturnCode::BadUserNamePassword
+        )));
+    }
+
+    #[test]
+    fn mac_matches_requires_a_configured_and_present_mac() {
+        let ip = Ipv4Addr::new(192, 168, 50, 9);
+        let mac = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66];
+        let arp = [(ip, mac)];
+        assert!(mac_matches(ip, &arp, Some(mac)));
+        assert!(!mac_matches(ip, &arp, None)); // no MAC configured
+        assert!(!mac_matches(ip, &[], Some(mac))); // not in ARP
+        assert!(!mac_matches(ip, &arp, Some([0; 6]))); // different MAC
     }
 
     #[test]

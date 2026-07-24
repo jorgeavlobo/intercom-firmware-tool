@@ -179,22 +179,39 @@ async fn run() -> Result<(), String> {
         cfg.client_id()
     );
 
-    // Broker rediscovery (issue #43): only when opted in AND the broker is a NAME —
-    // the mechanism repoints the name's /etc/hosts mapping, which a bare-IP config
-    // doesn't use. Warn (once, here) if it was enabled with an IP so the misconfig is
-    // visible rather than silently inert.
+    // Broker rediscovery (issue #43) activates only when ALL of these hold:
+    //   * opted in (MQTT_REDISCOVERY);
+    //   * the broker is a NAME — the mechanism repoints the name's /etc/hosts mapping,
+    //     which a bare-IP config never consults;
+    //   * there is a TRUST ANCHOR — TLS (the reconnect validates the broker's pinned
+    //     cert + hostname, so any proposed host that isn't the broker fails the
+    //     handshake) OR a recorded broker MAC (adoption then requires an ARP match).
+    // Without an anchor, rediscovery could repoint a plaintext bridge at the wrong open
+    // :1883 (the on-box mosquitto, a neighbour's broker) and leak credentials/commands
+    // to it — so we DISABLE it and say why, rather than adopt an unauthenticated host
+    // (issue #43 / Codex P1 / CodeRabbit). Warnings are one-shot (startup only).
     let host_is_ip = cfg.mqtt_host.parse::<std::net::IpAddr>().is_ok();
-    let rediscovery_active = cfg.rediscovery && !host_is_ip;
+    let has_trust_anchor = cfg.uses_tls() || cfg.broker_mac.is_some();
+    let rediscovery_active = cfg.rediscovery && !host_is_ip && has_trust_anchor;
     if cfg.rediscovery && host_is_ip {
         eprintln!(
-            "btmqttd: rediscovery enabled but MQTT_HOST is an IP ({}); rediscovery needs a \
-             hostname to repoint — disabled",
+            "btmqttd: rediscovery enabled but MQTT_HOST is an IP ({}); it needs a hostname to \
+             repoint — disabled",
             cfg.mqtt_host
         );
+    } else if cfg.rediscovery && !has_trust_anchor {
+        eprintln!(
+            "btmqttd: rediscovery enabled but no trust anchor (no TLS CA and no \
+             MQTT_BROKER_MAC); refusing to adopt an unauthenticated broker — disabled. Set \
+             MQTT_CAFILE (TLS) or MQTT_BROKER_MAC to enable it."
+        );
     }
-    // Consecutive poll failures, and the addresses rediscovery has already proposed
-    // (so proposals are monotonic). Both reset once a connection is (re)established.
+    // Rediscovery state: how many consecutive UNREACHABLE poll failures have accrued,
+    // whether a rediscovery is currently engaged (so it keeps proposing across the
+    // per-candidate failures until a reconnect), and the addresses already proposed
+    // this outage (so proposals are monotonic). All reset on a successful connect.
     let mut conn_failures: u32 = 0;
+    let mut rediscovering = false;
     let mut tried_ips: std::collections::HashSet<std::net::Ipv4Addr> =
         std::collections::HashSet::new();
 
@@ -205,10 +222,11 @@ async fn run() -> Result<(), String> {
             ev = eventloop.poll() => {
                 match ev {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
-                        // Connected: clear the rediscovery failure streak and the
-                        // proposed-address memory, so a later outage starts fresh and a
-                        // broker that returns to a former address can be found again.
+                        // Connected: clear the rediscovery failure streak, disengage,
+                        // and forget proposed addresses, so a later outage starts fresh
+                        // and a broker that returns to a former address can be found.
                         conn_failures = 0;
+                        rediscovering = false;
                         tried_ips.clear();
                         // SUBSCRIBE to the command topic, as its OWN task (not inline):
                         // the subscribe enqueues into the same bounded request channel
@@ -331,14 +349,29 @@ async fn run() -> Result<(), String> {
                         // shutdown signals — a plain sleep would block SIGTERM/SIGINT for
                         // up to 5 s while the broker is down.
                         eprintln!("btmqttd: connection: {e}");
-                        conn_failures = conn_failures.saturating_add(1);
-                        // After a sustained outage, try to rediscover the broker on its
-                        // /24 and repoint its /etc/hosts mapping; the next reconnect then
-                        // re-resolves and applies the normal authenticated/TLS-pinned
-                        // connect (the trust gate). RACE it against shutdown so a scan
-                        // can't delay SIGTERM/SIGINT. Reset the streak afterwards so the
-                        // proposed candidate gets a fresh window before the next probe.
-                        if rediscovery_active && conn_failures >= rediscovery::REDISCOVER_AFTER_FAILURES {
+                        // Only failures consistent with a STALE/UNREACHABLE address
+                        // (socket refused/unreachable/reset, network timeout) count
+                        // toward rediscovery. A broker-side refusal (bad credentials,
+                        // not authorized) or a TLS/protocol error means the hostname
+                        // still points at the real broker, which is rejecting US — so we
+                        // must NOT wander off and retire it (issue #43 / Codex P2).
+                        let unreachable = rediscovery::is_unreachable(&e);
+                        if unreachable {
+                            conn_failures = conn_failures.saturating_add(1);
+                        }
+                        // Engage rediscovery once an unreachable outage persists, then
+                        // KEEP it engaged across the subsequent per-candidate failures
+                        // (a wrong candidate rejects us at the app layer) until we
+                        // reconnect. Each pass repoints the broker's /etc/hosts mapping
+                        // to the next candidate; the reconnect applies the normal
+                        // authenticated/TLS-pinned connect (the trust gate). RACE it
+                        // against shutdown so a scan can't delay SIGTERM/SIGINT.
+                        if rediscovery_active
+                            && (rediscovering
+                                || (unreachable
+                                    && conn_failures >= rediscovery::REDISCOVER_AFTER_FAILURES))
+                        {
+                            rediscovering = true;
                             tokio::select! {
                                 _ = sig_term.recv() => break,
                                 _ = sig_int.recv() => break,
@@ -351,7 +384,6 @@ async fn run() -> Result<(), String> {
                                     }
                                 }
                             }
-                            conn_failures = 0;
                         }
                         tokio::select! {
                             _ = sig_term.recv() => break,

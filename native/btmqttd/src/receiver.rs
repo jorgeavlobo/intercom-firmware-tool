@@ -342,8 +342,9 @@ fn write_file_blocking(path: &str, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Create a fresh 0600 temp file (O_EXCL) beside `path` and write `bytes`, retrying
 /// on the vanishingly unlikely name collision. Returns the temp path. Synchronous —
-/// called only from the blocking pool (write_file_blocking).
-fn create_unique_temp(path: &str, bytes: &[u8]) -> std::io::Result<String> {
+/// called only from the blocking pool (write_file_blocking, and rediscovery's hosts
+/// rewrite).
+pub(crate) fn create_unique_temp(path: &str, bytes: &[u8]) -> std::io::Result<String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let pid = std::process::id();
@@ -373,7 +374,7 @@ fn create_unique_temp(path: &str, bytes: &[u8]) -> std::io::Result<String> {
 
 /// Best-effort: copy the existing target's mode and owner/group onto `tmp` so a
 /// replace preserves them (as the shell's stat + chmod/chown did). Silent on error.
-fn preserve_mode_owner(target: &str, tmp: &str) {
+pub(crate) fn preserve_mode_owner(target: &str, tmp: &str) {
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = std::fs::metadata(target) {
