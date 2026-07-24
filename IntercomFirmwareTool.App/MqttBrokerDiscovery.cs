@@ -288,7 +288,9 @@ namespace IntercomFirmwareTool.App
             try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { /* individual probes already swallow */ }
 
             var results = new List<BrokerCandidate>();
-            foreach (var kv in hits.OrderBy(k => k.Key))
+            // Order by the IP numerically (…1.20 before …1.100), not lexicographically —
+            // the UI picks the first plaintext hit, so a stable low-to-high order is intuitive.
+            foreach (var kv in hits.OrderBy(k => IpSortKey(k.Key)))
             {
                 string? host = await TryReverseDnsAsync(kv.Key, ct).ConfigureAwait(false);
                 // The winning port reflects which probe confirmed it: 8883 was validated with a
@@ -296,6 +298,14 @@ namespace IntercomFirmwareTool.App
                 results.Add(new BrokerCandidate(host, kv.Key, kv.Value, IsTls: kv.Value == 8883));
             }
             return results;
+        }
+
+        /// <summary>Big-endian numeric value of a dotted-quad IPv4, so OrderBy sorts by host
+        /// number rather than string (…1.20 before …1.100). All scan hits are valid IPv4.</summary>
+        private static uint IpSortKey(string ip)
+        {
+            byte[] b = IPAddress.Parse(ip).GetAddressBytes();
+            return ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
         }
 
         private static async Task ProbeHostAsync(string ip, int port, bool useTls,

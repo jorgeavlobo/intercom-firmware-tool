@@ -144,7 +144,7 @@ namespace IntercomFirmwareTool.App
             // non-throwing; cancelled when the window closes.
             _brokerDiscovery = new MqttBrokerDiscovery();
             _discoveryCts = new CancellationTokenSource();
-            Closed += (_, _) => { try { _discoveryCts?.Cancel(); _discoveryScanCts?.Cancel(); } catch { /* shutting down */ } };
+            Closed += (_, _) => StopBrokerDiscovery();
             _mdnsTask = _brokerDiscovery.RunMdnsAsync(TimeSpan.FromSeconds(3), _discoveryCts.Token);
         }
 
@@ -185,11 +185,11 @@ namespace IntercomFirmwareTool.App
                 // pre-filling one would build a plaintext config against a TLS listener.
                 var pool = BuildDiscoveryPool();
 
-                // No plaintext candidate yet, and the background mDNS is still running (the user
+                // Nothing at all yet, and the background mDNS is still running (the user
                 // enabled the bridge within its window)? Give it its full window to answer before
                 // the heavier scan — a candidate may still be arriving. Then re-read.
                 Task? mdns = _mdnsTask;
-                if (!pool.Any(c => !c.IsTls) && mdns is { IsCompleted: false })
+                if (pool.Count == 0 && mdns is { IsCompleted: false })
                 {
                     SetMqttDiscoveryInfo(L("MqttDiscovering"));
                     try { await mdns.WaitAsync(TimeSpan.FromSeconds(4)); } catch { /* window/timeout */ }
@@ -197,9 +197,10 @@ namespace IntercomFirmwareTool.App
                     pool = BuildDiscoveryPool();
                 }
 
-                // Still nothing plaintext → the /24 scan, once, cancellable when the bridge is
-                // turned off (via _discoveryScanCts).
-                if (!pool.Any(c => !c.IsTls) && !_discoveryScanDone)
+                // mDNS found NOTHING → the /24 scan, once, cancellable when the bridge is
+                // turned off (via _discoveryScanCts). A TLS-only mDNS hit already counts as
+                // "discovery succeeded", so it suppresses the port-scan (surfaced below).
+                if (pool.Count == 0 && !_discoveryScanDone)
                 {
                     SetMqttDiscoveryInfo(L("MqttDiscovering"));
                     _discoveryScanCts?.Cancel();
@@ -260,6 +261,20 @@ namespace IntercomFirmwareTool.App
             var pool = new List<BrokerCandidate>(_brokerDiscovery!.MdnsCandidates);
             pool.AddRange(_lastScanResults);
             return pool;
+        }
+
+        /// <summary>Cancel and release every discovery CTS on window close — mirrors
+        /// <see cref="StopFirmwareScan"/> so neither the background mDNS nor an in-flight /24
+        /// scan leaks its WaitHandle for the window's lifetime. Capture-then-null so a scan
+        /// completing concurrently disposes its own linked CTS at most once.</summary>
+        private void StopBrokerDiscovery()
+        {
+            var scan = _discoveryScanCts; _discoveryScanCts = null;
+            var root = _discoveryCts;     _discoveryCts = null;
+            try { scan?.Cancel(); } catch { /* nothing registered can throw; be safe */ }
+            try { root?.Cancel(); } catch { /* shutting down */ }
+            scan?.Dispose();
+            root?.Dispose();
         }
 
         /// <summary>Seed the broker/Host IP/port fields from a discovered candidate — a
