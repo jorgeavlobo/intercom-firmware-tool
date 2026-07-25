@@ -401,14 +401,15 @@ const MDNS_WINDOW: Duration = Duration::from_secs(2);
 /// services (`_mqtt._tcp` + the TLS `_secure-mqtt._tcp`), keeps the advertised IPv4s that are
 /// private LAN addresses and not already
 /// tried this outage (in discovery order), and applies the trust gate: under TLS the broker PORT
-/// must be open (the pinned-cert reconnect is then the real trust gate); in plaintext it must
-/// match the recorded `MQTT_BROKER_MAC` in the ARP table (via [`arp_mac_matches`], which itself
-/// probes the port). Requiring an open port under TLS keeps a stale/unrelated mDNS answer from
-/// triggering a repoint, which on a chatty LAN could otherwise keep starving the `/24` fallback.
-/// The TLS port probe is BATCHED across all candidates in one concurrency-limited [`probe_open`]
-/// call, so many mDNS answers don't serialize into `N * PROBE_TIMEOUT` before the fallback
-/// (Copilot); the first OPEN candidate in discovery order wins. Without TLS and without a MAC,
-/// mDNS proposes nothing — same posture as `main`'s activation gate.
+/// must be open (the pinned-cert reconnect is then the real trust gate); in plaintext the broker
+/// PORT must be open AND the host's `/proc/net/arp` MAC must match the recorded `MQTT_BROKER_MAC`.
+/// Requiring an open port under TLS keeps a stale/unrelated mDNS answer from triggering a repoint,
+/// which on a chatty LAN could otherwise keep starving the `/24` fallback. The port probe is
+/// BATCHED across all candidates in one concurrency-limited [`probe_open`] call (both modes), so
+/// many mDNS answers don't serialize into `N * PROBE_TIMEOUT` before the fallback (Copilot); in
+/// plaintext `/proc/net/arp` is then read ONCE and each candidate compared via [`mac_matches`].
+/// The first candidate that passes its mode's gate, in discovery order, wins. Without TLS and
+/// without a MAC, mDNS proposes nothing — same posture as `main`'s activation gate.
 async fn mdns_propose(
     cfg: &Config,
     tried: &HashSet<Ipv4Addr>,
