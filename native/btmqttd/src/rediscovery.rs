@@ -44,12 +44,14 @@
 //! `main` seeds `/etc/hosts` from it at startup, so a reboot after the broker moved reconnects
 //! immediately instead of re-scanning.
 //!
-//! Deliberately OUT of scope (issue #49 item 3): a **cross-subnet** move is recovered by the mDNS
-//! layers above (which find a broker by name across subnets), not by brute-force multi-subnet
-//! scanning; and a **port/transport** move (1883 ↔ 8883, i.e. plaintext ↔ TLS) is a reconfiguration
-//! the user re-runs the tool for, NOT a rediscovery — the client's port/transport is fixed for the
-//! process's life, so rediscovery only recovers an **IP move on the same port/transport** (see the
-//! scan's port comment below).
+//! Deliberately OUT of scope (issue #49 item 3): a move to a different `/24` **on the same L2 link**
+//! is recovered by the mDNS layers above — link-local multicast (`224.0.0.251`) reaches the whole
+//! link, not just one `/24` — but a move to a **routed** subnet/VLAN is NOT: mDNS multicast doesn't
+//! cross a router without an external reflector, and the fallback scan only sweeps the confirmed /
+//! build-time `/24`s (Codex). Routed cross-subnet recovery is unsupported. And a **port/transport**
+//! move (1883 ↔ 8883, i.e. plaintext ↔ TLS) is a reconfiguration the user re-runs the tool for, NOT
+//! a rediscovery — the client's port/transport is fixed for the process's life, so rediscovery only
+//! recovers an **IP move on the same port/transport** (see the scan's port comment below).
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -276,7 +278,8 @@ pub async fn rediscover(
     // forever (Codex). And 1883↔8883 is plaintext↔TLS, a transport/security change (needs a CA, or
     // is a downgrade) — a reconfiguration the user re-runs the tool for, NOT a rediscovery. A broker
     // that moved to a different port/transport is out of scope; an IP move on the same port is what
-    // rediscovery recovers. (Cross-subnet moves are handled by the mDNS layers above — #49 item 3.)
+    // rediscovery recovers. (A move to a different /24 ON THE SAME L2 LINK is handled by the mDNS
+    // layers above; a ROUTED cross-subnet move is unsupported — #49 item 3.)
     let open = probe_open(&candidates, cfg.mqtt_port).await;
     if open.is_empty() {
         eprintln!(
