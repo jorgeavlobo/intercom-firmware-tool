@@ -39,7 +39,8 @@
 //! is a name. A rediscovery pass tries `mdns.rs` FIRST (issue #49 item 2 — the broker's advertised
 //! `_mqtt._tcp` / `_secure-mqtt._tcp` address, found by name across the link), then the Home
 //! Assistant host fallback (issue #52 — probe the broker port on a discovered HA host), then the
-//! same-subnet (`/24`) scan. A learned address is also persisted across a reboot (issue #49 item
+//! anchor `/24`(s) scan (the confirmed and/or build-time subnet(s)). A learned address is also
+//! persisted across a reboot (issue #49 item
 //! 1): `persist.rs` remembers the connect-confirmed IP on the writable `cfg/extra` partition and
 //! `main` seeds `/etc/hosts` from it at startup, so a reboot after the broker moved reconnects
 //! immediately instead of re-scanning.
