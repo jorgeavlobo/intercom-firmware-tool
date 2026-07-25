@@ -731,6 +731,11 @@
                               Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
                     <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
                                Text="{loc:Loc Hint_MqttRediscovery}"/>
+                    <!-- Gold-standard primary fix (issue #43, Layer A): a DHCP reservation +
+                         hostname makes the broker IP stable, so rediscovery above is only a
+                         safety net. Documented in Payload/mqtt/README.md too. -->
+                    <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
+                               Text="{loc:Loc Hint_MqttDhcpReservation}"/>
                     <!-- Captured-anchor note (transient): set by the Test-connection MAC
                          capture, hidden otherwise. Live region so a screen reader announces
                          a fresh capture / suggestion. -->

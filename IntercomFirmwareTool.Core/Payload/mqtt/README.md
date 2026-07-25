@@ -48,6 +48,55 @@ A device-local sanity check therefore targets the internal bus at
 `127.0.0.1:60000`, **not** `127.0.0.1:1883` — but that only proves loopback
 connectivity, not the real Home Assistant path, which requires an external broker.
 
+## Keeping the broker reachable when its IP changes
+
+A home broker's LAN IP can change — a DHCP lease expires, the broker (or its
+host) reboots, the router is power-cycled. If the bridge is pinned to a bare IP
+it then dials a dead address forever and the whole Home Assistant integration
+goes dark. There are two lines of defence; **prefer the first**.
+
+### 1. The reliable fix — a DHCP reservation + a hostname (do this)
+
+The single most robust thing you can do needs **nothing on the device**:
+
+1. On your **router**, add a **DHCP reservation** for the broker — pin its IP to
+   the broker's MAC address, so DHCP always hands it the same address. The
+   broker's IP then simply never changes.
+2. Enter the broker in the tool as a **hostname** (not a bare IP). Most routers
+   register DHCP hostnames in their local DNS, so the name keeps resolving even
+   if anything else moves.
+
+This is the industry-standard approach for a self-hosted service (it is exactly
+what the Home Assistant / Mosquitto docs recommend) and it removes the problem at
+the source rather than recovering from it. With it in place, everything below is
+never exercised.
+
+### 2. The safety net — device-side rediscovery (issue `#43`, opt-in, on by default)
+
+For when a reservation isn't possible (a network you don't control, a broker on
+DHCP that can't be pinned), `btmqttd` can **rediscover** a moved broker on its
+own. It is layered, cheapest-first, and only ever *proposes* an address — the
+main client's authenticated + TLS-pinned reconnect is the trust gate, so it can
+never attach to the wrong broker:
+
+- **mDNS / DNS-SD** — queries `_mqtt._tcp` / `_secure-mqtt._tcp`, then the Home
+  Assistant host (`_home-assistant._tcp`, the broker is commonly co-located with
+  HA). Link-local, so it also finds a broker that moved to a different `/24` on
+  the same L2 link.
+- **Hardened `/24` scan** — only if mDNS finds nothing: a TCP probe of the
+  broker port across the confirmed/build-time subnet(s), capped to a `/24`,
+  rate-limited, and logged. Adoption requires the pinned-TLS handshake to pass
+  or, on a plaintext broker, the host's ARP MAC to match the broker MAC captured
+  by **Test connection** (a trusted-LAN convenience, not authentication).
+- **Persistence** — a connect-confirmed IP is remembered on the writable
+  `cfg/extra` partition, so a reboot reconnects immediately instead of scanning
+  again.
+
+Rediscovery recovers an **IP move on the same port/transport**. A move to a
+**routed** subnet/VLAN (mDNS multicast doesn't cross a router) or a port/
+transport change (`1883` ↔ `8883`, i.e. plaintext ↔ TLS — a reconfiguration you
+re-run the tool for) is out of scope; the reservation above avoids all of it.
+
 ## Files in this directory
 
 | File | Role |
