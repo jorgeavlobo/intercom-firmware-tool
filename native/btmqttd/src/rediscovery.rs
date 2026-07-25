@@ -39,11 +39,10 @@
 //! is a name. A rediscovery pass tries `mdns.rs` FIRST (issue #49 item 2 — the broker's advertised
 //! `_mqtt._tcp` / `_secure-mqtt._tcp` address, found by name across the link), then the Home
 //! Assistant host fallback (issue #52 — probe the broker port on a discovered HA host), then the
-//! anchor `/24`(s) scan (the confirmed and/or build-time subnet(s)). A learned address is also
-//! persisted across a reboot (issue #49 item
-//! 1): `persist.rs` remembers the connect-confirmed IP on the writable `cfg/extra` partition and
-//! `main` seeds `/etc/hosts` from it at startup, so a reboot after the broker moved reconnects
-//! immediately instead of re-scanning.
+//! anchor-`/24` scan (a sweep of the confirmed and/or build-time subnet(s)). A learned address is
+//! also persisted across a reboot (issue #49 item 1): `persist.rs` remembers the connect-confirmed
+//! IP on the writable `cfg/extra` partition and `main` seeds `/etc/hosts` from it at startup, so a
+//! reboot after the broker moved reconnects immediately instead of re-scanning.
 //!
 //! Deliberately OUT of scope (issue #49 item 3): a move to a different `/24` **on the same L2 link**
 //! is recovered by the mDNS layers above — link-local multicast (`224.0.0.251`) reaches the whole
