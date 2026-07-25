@@ -314,10 +314,12 @@ namespace IntercomFirmwareTool.App
             };
             try
             {
+                // Return ProbeHostAsync's Task straight to the loop (wrapped as a ValueTask) instead
+                // of an `async … await` lambda, which would add a redundant state machine per probe.
                 await Parallel.ForEachAsync(EnumerateProbeTargets(prefixes), options,
-                    async (t, probeCt) =>
-                        await ProbeHostAsync(t.Ip, t.Port, t.UseTls, hits, earlyStop, probeCt)
-                            .ConfigureAwait(false)).ConfigureAwait(false);
+                    (t, probeCt) => new ValueTask(
+                        ProbeHostAsync(t.Ip, t.Port, t.UseTls, hits, earlyStop, probeCt)))
+                    .ConfigureAwait(false);
             }
             // Early-stop on a 1883 hit (or the caller cancelling) surfaces here as a cancellation —
             // keep whatever landed in `hits`; the caller tells the two apart via
