@@ -638,6 +638,14 @@ namespace IntercomFirmwareTool.Core
         /// root:root) and makes the boot-time dropbear load it, so a modern OpenSSH
         /// (≥ 8.8) connects without a <c>+ssh-rsa</c> compatibility flag (issue #37).
         /// The key bytes are generated in <see cref="SshKeyGen.GenerateDropbearEcdsaHostKey"/>.
+        ///
+        /// A FRESH random ECDSA identity is generated for each built image (there is no
+        /// factory ECDSA key to preserve, and the tool keeps no per-device key store).
+        /// One image flashed to N units shares that image's key; REBUILDING produces a
+        /// new key, so re-flashing the SAME unit with a fresh build changes its ECDSA
+        /// host key and a client that already trusted the old one must clear it
+        /// (<c>ssh-keygen -R &lt;host&gt;</c>) — the standard host-key-changed step. The
+        /// factory RSA key is left in place, so nothing is lost by adding this.
         /// </summary>
         private static void InstallModernHostKey(ExtFileSystem fs)
         {
@@ -675,7 +683,7 @@ namespace IntercomFirmwareTool.Core
             string appended =
                 "DROPBEAR_EXTRA_ARGS=\"$DROPBEAR_EXTRA_ARGS -r " + EcdsaHostKeyPath + "\"\n";
 
-            string existing = fs.FileExists(DropbearDefaultsPath)
+            string existing = PathPresent(fs, DropbearDefaultsPath)
                 ? ReadAllTextFromFs(fs, DropbearDefaultsPath)
                 : "";
             // Idempotency: the key path only appears once we have patched, so its
@@ -773,7 +781,7 @@ namespace IntercomFirmwareTool.Core
                     checks.Add(new($"{EcdsaHostKeyPath} present (ECDSA host key)",
                         fs.FileExists(EcdsaHostKeyPath) && FileNonEmpty(fs, EcdsaHostKeyPath), ""));
 
-                    string defaults = fs.FileExists(DropbearDefaultsPath)
+                    string defaults = PathPresent(fs, DropbearDefaultsPath)
                         ? ReadAllTextFromFs(fs, DropbearDefaultsPath) : "";
                     checks.Add(new($"{DropbearDefaultsPath} loads it (-r)",
                         defaults.Contains("-r " + EcdsaHostKeyPath, StringComparison.Ordinal), ""));
@@ -1107,6 +1115,22 @@ namespace IntercomFirmwareTool.Core
         {
             using var f = fs.OpenFile(path, FileMode.Open, FileAccess.Read);
             return f.Length > 0;
+        }
+
+        /// <summary>
+        /// True if <paramref name="path"/> resolves to anything in the image — a
+        /// regular file, a directory, OR a symlink. <see cref="ExtFileSystem.FileExists"/>
+        /// alone reports false for a symlink, so a caller that only needs "is something
+        /// already here?" (e.g. whether to read/patch <c>/etc/default/dropbear</c>) must
+        /// also probe <see cref="ExtFileSystem.ReadSymLink"/>, or it would treat a
+        /// symlinked target as missing and overwrite the link with a regular file
+        /// (Copilot). The factory <c>/etc/default/dropbear</c> is a regular file, so
+        /// this is defensive against a non-standard image shape.
+        /// </summary>
+        private static bool PathPresent(ExtFileSystem fs, string path)
+        {
+            if (fs.FileExists(path) || fs.DirectoryExists(path)) return true;
+            try { fs.ReadSymLink(path); return true; } catch { return false; }
         }
 
         private static void EnsureDir(ExtFileSystem fs, string path)
