@@ -782,7 +782,7 @@ namespace IntercomFirmwareTool.Core
                 if (opts.ModernHostKey)
                 {
                     checks.Add(new($"{EcdsaHostKeyPath} present (ECDSA host key)",
-                        fs.FileExists(EcdsaHostKeyPath) && FileNonEmpty(fs, EcdsaHostKeyPath), ""));
+                        FileNonEmpty(fs, EcdsaHostKeyPath), ""));
 
                     string defaults = PathPresent(fs, DropbearDefaultsPath)
                         ? ReadAllTextFromFs(fs, DropbearDefaultsPath) : "";
@@ -1113,11 +1113,24 @@ namespace IntercomFirmwareTool.Core
             f.Write(bytes, 0, bytes.Length);
         }
 
-        /// <summary>True when a file exists in the image and has non-zero length.</summary>
+        /// <summary>
+        /// True when <paramref name="path"/> can be opened for reading and has non-zero
+        /// length. Opening FOLLOWS the path, so a symlinked-but-present target counts —
+        /// unlike <see cref="ExtFileSystem.FileExists"/>, which reports false for a
+        /// symlink; any open failure (missing or unreadable) is treated as false
+        /// (Copilot). Self-contained, so callers need no separate existence guard.
+        /// </summary>
         private static bool FileNonEmpty(ExtFileSystem fs, string path)
         {
-            using var f = fs.OpenFile(path, FileMode.Open, FileAccess.Read);
-            return f.Length > 0;
+            try
+            {
+                using var f = fs.OpenFile(path, FileMode.Open, FileAccess.Read);
+                return f.Length > 0;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         /// <summary>
