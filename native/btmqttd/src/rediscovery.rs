@@ -113,7 +113,9 @@ pub fn is_unreachable(e: &rumqttc::ConnectionError) -> bool {
 ///
 /// Two exclusion sets track what has already been proposed this outage so proposals don't
 /// oscillate between open-but-wrong hosts. `tried` holds the fallback SCAN's picks (plus the
-/// current stale mapping); `mdns_rejected` holds addresses an mDNS proposal adopted-and-lost.
+/// current stale mapping); `mdns_rejected` holds every address mDNS has already proposed this
+/// outage — inserted at proposal time, since a proposal that authenticates is confirmed by a
+/// ConnAck (which clears both sets) and only a proposal that fails needs to stay excluded.
 /// They are kept distinct because they re-arm differently: after a fruitless scan pass
 /// [`retire_scan_subnets`] re-arms ONLY the scanned `/24` addresses in `tried` (so a broker that
 /// returns to a former address is re-probed) while leaving `mdns_rejected` intact (so a wrong
@@ -145,9 +147,10 @@ pub async fn rediscover(
     // client's authenticated + pinned-TLS reconnect is the gate, and in plaintext mode the
     // proposal is additionally ARP-MAC-gated here (mirroring the scan). If mDNS proposes a
     // usable address, repoint and return; otherwise fall through to the subnet scan.
-    // mDNS rejections are tracked in a SEPARATE set (`mdns_rejected`), never in `tried`: an
-    // mDNS proposal we've adopted-and-lost this outage must stay excluded even as the scan
-    // re-arms its `/24`s, because that proposal may sit INSIDE an anchor `/24` — folding it into
+    // mDNS proposals are tracked in a SEPARATE set (`mdns_rejected`), never in `tried`: an
+    // address mDNS has proposed this outage must stay excluded even as the scan re-arms its
+    // `/24`s (a ConnAck clears it if it was right), because that proposal may sit INSIDE an
+    // anchor `/24` — folding it into
     // `tried` would let `retire_scan_subnets` re-arm it every pass, so mDNS would re-propose the
     // same wrong broker forever and each optimistic repoint would reset `dry_cycles`, defeating
     // the periodic full-reset bound (Codex P2). Only the bounded full-reset clears it.

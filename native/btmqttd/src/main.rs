@@ -222,9 +222,10 @@ async fn run() -> Result<(), String> {
         std::collections::HashSet::new();
     // How many consecutive rediscovery rounds have retired their /24 scan set without
     // finding the broker (a "dry" cycle). After FULL_RESET_AFTER_DRY_CYCLES of these,
-    // `retire_scan_subnets` clears the whole `tried` set — including cross-subnet mDNS
-    // rejections — so recovery stays self-healing if a mDNS-advertised broker that was
-    // once (correctly) rejected later becomes reachable (Copilot). Reset on any connect.
+    // `retire_scan_subnets` fully clears BOTH `tried` and `mdns_rejected_ips` (including
+    // cross-subnet mDNS rejections) — so recovery stays self-healing if a mDNS-advertised
+    // broker that was once (correctly) rejected later becomes reachable (Copilot). Reset on
+    // any connect.
     let mut rediscover_dry_cycles: u32 = 0;
 
     // Persisted-IP boot restore (issue #49 item 1): the last connect-confirmed broker IP
