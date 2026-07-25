@@ -230,7 +230,12 @@ namespace IntercomFirmwareTool.App
                     // froze scrolling for the duration of the scan. Task.Run pushes all of it to the
                     // thread pool; the await below still resumes on the UI thread, so the rest of
                     // this method keeps its single-threaded (lock-free) invariant.
-                    try { scan = await Task.Run(() => _brokerDiscovery.ScanSubnetAsync(scanCts.Token)); }
+                    // scanCts.Token is passed to Task.Run too so that if the scan is ALREADY
+                    // cancelled when we get here (bridge toggled off / window closing before the work
+                    // is queued), the delegate is never scheduled — cancellation surfaces at once
+                    // instead of running the prologue only to observe the cancelled token inside
+                    // ScanSubnetAsync. Early-stop uses a separate child CTS, so it never trips this.
+                    try { scan = await Task.Run(() => _brokerDiscovery.ScanSubnetAsync(scanCts.Token), scanCts.Token); }
                     catch { scan = System.Array.Empty<BrokerCandidate>(); }
                     finally
                     {
