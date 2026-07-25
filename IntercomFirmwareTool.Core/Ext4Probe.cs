@@ -686,12 +686,12 @@ namespace IntercomFirmwareTool.Core
             string existing = PathPresent(fs, DropbearDefaultsPath)
                 ? ReadAllTextFromFs(fs, DropbearDefaultsPath)
                 : "";
-            // Idempotency: consider it already patched only when the key is loaded as an
-            // actual `-r <path>` argument on an ACTIVE (non-comment) line — so a stray
-            // occurrence in a comment or other inactive text can't no-op the patch and
-            // leave dropbear without the key (Codex). Matches the token ValidateSsh checks.
-            string loadArg = "-r " + EcdsaHostKeyPath;
-            if (ActiveShellLineContains(existing, loadArg))
+            // Idempotency: consider it already patched only when dropbear is actually told
+            // to load THIS key via `-r <path>` on an ACTIVE (non-comment) line, matched with
+            // token boundaries — so neither a commented occurrence (Codex) nor a different
+            // key whose path merely starts with ours (…host_key.old, Copilot) counts, and a
+            // stray mention can't no-op the patch and leave dropbear without the key.
+            if (DropbearLoadsHostKey(existing, EcdsaHostKeyPath))
                 return;
 
             string updated = existing.Length == 0
@@ -787,7 +787,7 @@ namespace IntercomFirmwareTool.Core
                     string defaults = PathPresent(fs, DropbearDefaultsPath)
                         ? ReadAllTextFromFs(fs, DropbearDefaultsPath) : "";
                     checks.Add(new($"{DropbearDefaultsPath} loads it (-r)",
-                        ActiveShellLineContains(defaults, "-r " + EcdsaHostKeyPath), ""));
+                        DropbearLoadsHostKey(defaults, EcdsaHostKeyPath), ""));
                 }
             }
             finally
@@ -1150,20 +1150,29 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// True if any ACTIVE (non-comment) line of a shell env file body contains
-        /// <paramref name="token"/>. Everything from the first <c>#</c> on a line is a
-        /// comment and is ignored, so a token that appears only in a comment (or other
-        /// inactive text) does not count — matching what the shell actually sources when
-        /// it reads <c>/etc/default/dropbear</c> (Codex). Used both to gate the
-        /// idempotent patch and to validate that dropbear really loads the ECDSA key.
+        /// True if a shell env-file body (e.g. <c>/etc/default/dropbear</c>) tells dropbear
+        /// to load <paramref name="keyPath"/> as a host key — an <c>-r &lt;keyPath&gt;</c>
+        /// argument on an ACTIVE (non-comment) line. Everything from the first <c>#</c> on a
+        /// line is a comment and is ignored (as the shell does when sourcing the file), and
+        /// the path is matched as a WHOLE token — split on whitespace, quotes and <c>=</c> —
+        /// so neither a commented occurrence (Codex) nor a different key whose path merely
+        /// starts with this one (e.g. <c>…host_key.old</c>, Copilot) is mistaken for a real
+        /// load. Both the space form (<c>-r path</c>) and the attached form (<c>-rpath</c>)
+        /// count. Used to gate the idempotent patch AND to validate it, so the two agree.
         /// </summary>
-        private static bool ActiveShellLineContains(string body, string token)
+        private static bool DropbearLoadsHostKey(string body, string keyPath)
         {
+            char[] seps = { ' ', '\t', '"', '\'', '=' };
             foreach (string raw in body.Split('\n'))
             {
                 string active = raw.Split('#', 2)[0];
-                if (active.Contains(token, StringComparison.Ordinal))
-                    return true;
+                string[] tokens = active.Split(seps, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i < tokens.Length; i++)
+                {
+                    if (tokens[i] == "-r" + keyPath) return true;              // -rpath (attached)
+                    if (tokens[i] == "-r" && i + 1 < tokens.Length && tokens[i + 1] == keyPath)
+                        return true;                                           // -r path (separate)
+                }
             }
             return false;
         }
