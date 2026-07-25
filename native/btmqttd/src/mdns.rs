@@ -4,8 +4,11 @@
 //! The statically-linked musl binary's resolver ignores `nsswitch`/system mDNS, so — exactly
 //! as the WPF app does at config time (`MqttBrokerDiscovery.cs`) — we speak the mDNS wire
 //! protocol directly: send a `_mqtt._tcp.local` PTR query to the link-local multicast group
-//! `224.0.0.251:5353` (unicast-response bit set) and parse the PTR/SRV/A records the brokers
-//! answer with, yielding the advertised IPv4 address(es) directly — no `/24` port scan.
+//! `224.0.0.251:5353` and parse the PTR/SRV/A records the brokers answer with, yielding the
+//! advertised IPv4 address(es) directly — no `/24` port scan. The query asks for a MULTICAST
+//! answer when we co-bind the shared 5353 port (so a system responder can't consume a unicast
+//! reply meant for us) and only sets the unicast-response (QU) bit on the solely-owned
+//! ephemeral-port fallback (see `open_socket`).
 //!
 //! Used by `rediscovery::rediscover` as the FIRST (cheap, name-based, cross-`/24`-on-link)
 //! rediscovery layer, before the brute-force subnet scan. The trust boundary is unchanged:
