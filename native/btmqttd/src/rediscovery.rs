@@ -127,6 +127,7 @@ pub async fn rediscover(
     cfg: &Config,
     tried: &mut HashSet<Ipv4Addr>,
     confirmed_anchor: Option<Ipv4Addr>,
+    dry_cycles: &mut u32,
 ) -> Option<Ipv4Addr> {
     // Layer B (issue #49 item 2, #43): mDNS FIRST. A broker that advertises `_mqtt._tcp`
     // announces its IPv4 by name across the whole link — cheaper and broader than the /24
@@ -139,6 +140,7 @@ pub async fn rediscover(
         match seed_hosts(&cfg.mqtt_host, ip).await {
             Ok(true) => {
                 tried.insert(ip);
+                *dry_cycles = 0; // productive pass — reset the dry-cycle self-heal counter
                 eprintln!(
                     "btmqttd: rediscovery: mDNS repointed '{}' -> {ip} in {HOSTS_PATH}",
                     cfg.mqtt_host
@@ -220,7 +222,7 @@ pub async fn rediscover(
             "btmqttd: rediscovery: every address in the anchor /24(s) was already tried this \
              outage; re-arming the scan for the next pass"
         );
-        retire_scan_subnets(&anchors, tried);
+        retire_scan_subnets(&anchors, tried, dry_cycles);
         return None;
     }
 
@@ -247,7 +249,7 @@ pub async fn rediscover(
         // No OPEN untried host this pass — re-arm the scanned /24(s) so the next pass re-probes
         // them (incl. former anchors) in case the real broker returns there, WITHOUT forgetting
         // cross-subnet mDNS proposals already rejected this outage (Codex P2).
-        retire_scan_subnets(&anchors, tried);
+        retire_scan_subnets(&anchors, tried, dry_cycles);
         return None;
     }
 
@@ -289,7 +291,7 @@ pub async fn rediscover(
             // Every open host was untrusted (MAC-mismatched). Like the no-open-host case,
             // re-arm the scanned /24(s) for the next pass (the MAC gate still guards adoption)
             // without forgetting cross-subnet mDNS proposals already rejected (Codex P2).
-            retire_scan_subnets(&anchors, tried);
+            retire_scan_subnets(&anchors, tried, dry_cycles);
             return None;
         }
     };
@@ -299,6 +301,7 @@ pub async fn rediscover(
     match tokio::task::spawn_blocking(move || write_hosts_blocking(&rewritten)).await {
         Ok(Ok(())) => {
             tried.insert(pick);
+            *dry_cycles = 0; // productive pass — reset the dry-cycle self-heal counter
             Some(pick)
         }
         Ok(Err(e)) => {
@@ -558,15 +561,35 @@ fn union_candidates(anchors: &[Ipv4Addr], tried: &HashSet<Ipv4Addr>) -> Vec<Ipv4
         .collect()
 }
 
-/// Re-arm the fallback scan: drop just the scanned `/24` addresses from `tried` so the next pass
-/// re-probes those subnets from scratch (a broker may return to a former address), WITHOUT
-/// forgetting mDNS proposals already rejected this outage. Those proposals may be cross-subnet
-/// (outside every anchor's `/24`); a blanket `tried.clear()` would un-retire them and let the
-/// mDNS layer re-propose the same wrong broker every time the scan resets, so discovery could
-/// oscillate instead of advancing (Codex). `tried` is still fully cleared by the caller on a
-/// successful ConnAck. An in-`/24` mDNS proposal is also a scan candidate, so re-probing it here
-/// is harmless (the trust gate still guards adoption).
-fn retire_scan_subnets(anchors: &[Ipv4Addr], tried: &mut HashSet<Ipv4Addr>) {
+/// After this many consecutive fruitless scan passes, `retire_scan_subnets` forgets EVERYTHING
+/// (not just the scanned `/24`s) so recovery stays self-healing even for cross-subnet mDNS
+/// rejections — bounded, so a wrong mDNS broker isn't re-proposed every pass.
+const FULL_RESET_AFTER_DRY_CYCLES: u32 = 4;
+
+/// Re-arm the fallback scan after a fruitless pass. Normally it drops just the scanned `/24`
+/// addresses from `tried` so the next pass re-probes those subnets from scratch (a broker may
+/// return to a former address), WITHOUT forgetting mDNS proposals already rejected this outage:
+/// those may be cross-subnet (outside every anchor's `/24`), and a blanket clear would let the
+/// mDNS layer re-propose the same wrong broker every reset, so discovery could oscillate instead
+/// of advancing (Codex).
+///
+/// But holding a cross-subnet rejection for the WHOLE outage isn't self-healing either: if the
+/// real broker later takes over that IP (DHCP reassignment / restart) mid-outage, it would stay
+/// excluded (Copilot). So after `FULL_RESET_AFTER_DRY_CYCLES` consecutive fruitless passes
+/// (`dry_cycles`, reset by the caller whenever a candidate is adopted or on a ConnAck) it does a
+/// FULL `tried.clear()` — giving every rejected address another chance, on a bounded cadence that
+/// keeps the anti-oscillation guarantee. The trust gate still guards every adoption regardless.
+fn retire_scan_subnets(
+    anchors: &[Ipv4Addr],
+    tried: &mut HashSet<Ipv4Addr>,
+    dry_cycles: &mut u32,
+) {
+    *dry_cycles += 1;
+    if *dry_cycles >= FULL_RESET_AFTER_DRY_CYCLES {
+        tried.clear();
+        *dry_cycles = 0;
+        return;
+    }
     for a in anchors {
         for ip in slash24_candidates(*a) {
             tried.remove(&ip);
@@ -812,10 +835,29 @@ mod tests {
         tried.insert(Ipv4Addr::new(192, 168, 50, 64)); // in-/24 (scan) address
         tried.insert(Ipv4Addr::new(192, 168, 50, 9)); // another in-/24 address
         tried.insert(Ipv4Addr::new(10, 0, 0, 7)); // cross-subnet mDNS rejection
-        retire_scan_subnets(&[anchor], &mut tried);
+        let mut dry = 0u32;
+        retire_scan_subnets(&[anchor], &mut tried, &mut dry);
+        assert_eq!(dry, 1);
         assert!(!tried.contains(&Ipv4Addr::new(192, 168, 50, 64))); // re-armed
         assert!(!tried.contains(&Ipv4Addr::new(192, 168, 50, 9))); // re-armed
         assert!(tried.contains(&Ipv4Addr::new(10, 0, 0, 7))); // mDNS rejection preserved
+    }
+
+    #[test]
+    fn retire_scan_subnets_full_clears_after_enough_dry_cycles() {
+        // After FULL_RESET_AFTER_DRY_CYCLES fruitless passes it forgets EVERYTHING — including a
+        // cross-subnet mDNS rejection — so recovery self-heals (Copilot), on a bounded cadence.
+        let anchor = Ipv4Addr::new(192, 168, 50, 64);
+        let mut tried = HashSet::new();
+        tried.insert(Ipv4Addr::new(10, 0, 0, 7)); // cross-subnet rejection, out of the /24
+        let mut dry = 0u32;
+        for _ in 0..FULL_RESET_AFTER_DRY_CYCLES - 1 {
+            retire_scan_subnets(&[anchor], &mut tried, &mut dry);
+            assert!(tried.contains(&Ipv4Addr::new(10, 0, 0, 7))); // still preserved
+        }
+        retire_scan_subnets(&[anchor], &mut tried, &mut dry); // the Nth call
+        assert!(tried.is_empty()); // full reset — cross-subnet rejection cleared
+        assert_eq!(dry, 0); // counter reset
     }
 
     #[test]

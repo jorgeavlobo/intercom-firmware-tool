@@ -239,6 +239,29 @@ const QTYPE_A: u16 = 1;
 const QTYPE_PTR: u16 = 12;
 const QTYPE_SRV: u16 = 33;
 
+/// Split a DNS presentation-format name into its wire labels, reversing the `\.`/`\\` escaping
+/// that [`read_name`] applies. A `\` escapes the next character (so an escaped `.` stays inside a
+/// label); an unescaped `.` separates labels. A trailing empty label (from a trailing dot) is
+/// preserved so [`build_query`] can reject it.
+fn presentation_labels(name: &str) -> Vec<String> {
+    let mut labels = Vec::new();
+    let mut cur = String::new();
+    let mut chars = name.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            }
+            '.' => labels.push(std::mem::take(&mut cur)),
+            _ => cur.push(ch),
+        }
+    }
+    labels.push(cur);
+    labels
+}
+
 /// Build a standard-query datagram for a single record of `qtype` (PTR/SRV/A), or `None` if
 /// `name` doesn't fit the DNS wire limits (RFC 1035 §2.3.4): each label 1..=63 bytes and the
 /// encoded QNAME (labels + length octets + root) <= 255. The follow-up SRV/A queries reuse
@@ -250,8 +273,11 @@ const QTYPE_SRV: u16 = 33;
 /// shared 5353 socket it is cleared, i.e. a normal multicast-response (QM) question, so the answer
 /// reaches every co-bound listener (Codex).
 fn build_query(name: &str, qtype: u16, unicast_response: bool) -> Option<Vec<u8>> {
+    // Honour `\.`/`\\` escaping so a label that contained a literal dot round-trips as ONE label
+    // (Codex), rather than splitting on the presentation separator.
+    let labels = presentation_labels(name);
     let mut encoded_len = 1usize; // the terminating root label
-    for label in name.split('.') {
+    for label in &labels {
         let l = label.len();
         if l == 0 || l > 63 {
             return None;
@@ -269,7 +295,7 @@ fn build_query(name: &str, qtype: u16, unicast_response: bool) -> Option<Vec<u8>
         0x00, 0x00, // NSCOUNT
         0x00, 0x00, // ARCOUNT
     ];
-    for label in name.split('.') {
+    for label in &labels {
         b.push(label.len() as u8); // <= 63, checked above
         b.extend_from_slice(label.as_bytes());
     }
@@ -404,7 +430,16 @@ fn read_name(b: &[u8], pos: &mut usize) -> String {
         if !out.is_empty() {
             out.push('.');
         }
-        out.push_str(&String::from_utf8_lossy(&b[p..p + c]).to_ascii_lowercase());
+        // Escape a `.` (and `\`) that occurs INSIDE a wire label — DNS-SD instance labels may
+        // legally contain a literal dot (e.g. "70-35-60-63.1"). Without escaping, a follow-up
+        // query rebuilt by splitting on `.` would break one label into two and ask for a
+        // different name (Codex). `presentation_labels` reverses this.
+        for ch in String::from_utf8_lossy(&b[p..p + c]).to_ascii_lowercase().chars() {
+            if ch == '.' || ch == '\\' {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
         p += c;
     }
     if !jumped {
@@ -676,6 +711,30 @@ mod tests {
         let sock = bind_reuse(0).expect("reuse bind should succeed");
         let addr = sock.local_addr().expect("bound socket has a local address");
         assert!(addr.port() != 0); // the kernel assigned a concrete port
+    }
+
+    #[test]
+    fn dotted_instance_label_round_trips_through_read_name_and_build_query() {
+        // A DNS-SD instance label may contain a literal '.' (e.g. "70-35-60-63.1"). read_name must
+        // escape it so build_query re-encodes it as ONE label, not two — otherwise a follow-up
+        // query would ask for a different name and miss the broker (Codex).
+        // Wire: one label "a.b" (3 bytes) + "local" + root.
+        let mut b = Vec::new();
+        b.push(3);
+        b.extend_from_slice(b"a.b");
+        b.push(5);
+        b.extend_from_slice(b"local");
+        b.push(0);
+        let mut pos = 0;
+        let name = read_name(&b, &mut pos);
+        assert_eq!(name, "a\\.b.local"); // the '.' inside the label is escaped
+        assert_eq!(presentation_labels(&name), vec!["a.b".to_string(), "local".to_string()]);
+        let q = build_query(&name, QTYPE_SRV, false).unwrap();
+        assert_eq!(q[12], 3); // one 3-byte label "a.b", NOT two labels "a"/"b"
+        assert_eq!(&q[13..16], b"a.b");
+        assert_eq!(q[16], 5);
+        assert_eq!(&q[17..22], b"local");
+        assert_eq!(q[22], 0);
     }
 
     #[test]

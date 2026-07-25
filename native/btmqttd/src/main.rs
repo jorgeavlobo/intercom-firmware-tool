@@ -214,6 +214,12 @@ async fn run() -> Result<(), String> {
     let mut conn_failures: u32 = 0;
     let mut tried_ips: std::collections::HashSet<std::net::Ipv4Addr> =
         std::collections::HashSet::new();
+    // How many consecutive rediscovery rounds have retired their /24 scan set without
+    // finding the broker (a "dry" cycle). After FULL_RESET_AFTER_DRY_CYCLES of these,
+    // `retire_scan_subnets` clears the whole `tried` set — including cross-subnet mDNS
+    // rejections — so recovery stays self-healing if a mDNS-advertised broker that was
+    // once (correctly) rejected later becomes reachable (Copilot). Reset on any connect.
+    let mut rediscover_dry_cycles: u32 = 0;
 
     // Persisted-IP boot restore (issue #49 item 1): the last connect-confirmed broker IP
     // is remembered on a writable, reboot-persistent partition. Seed /etc/hosts from it
@@ -316,6 +322,7 @@ async fn run() -> Result<(), String> {
                         // that returns to a former address can be found again.
                         conn_failures = 0;
                         tried_ips.clear();
+                        rediscover_dry_cycles = 0;
                         // Persist the connect-confirmed broker IP (issue #49 item 1): this
                         // ConnAck means the current /etc/hosts mapping authenticated / passed
                         // the pinned-TLS handshake, so it is trustworthy to remember for the
@@ -531,7 +538,7 @@ async fn run() -> Result<(), String> {
                                 // a confirmed cross-subnet move yet never latches onto an
                                 // unconfirmed mDNS proposal or a rejected record (Codex P1 /
                                 // Copilot). `None` ⇒ anchor on the build-time mapping.
-                                r = rediscovery::rediscover(&cfg, &mut tried_ips, last_confirmed_ip) => {
+                                r = rediscovery::rediscover(&cfg, &mut tried_ips, last_confirmed_ip, &mut rediscover_dry_cycles) => {
                                     if let Some(ip) = r {
                                         eprintln!(
                                             "btmqttd: rediscovery: repointed '{}' -> {ip} in {}",
