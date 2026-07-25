@@ -24,8 +24,11 @@ use tokio::net::UdpSocket;
 const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 
-/// The service we look for. Lower-case: all parsed names are lower-cased so correlation is a
-/// plain string match (DNS names are ASCII, case-insensitive).
+/// The service we look for. Lower-case: parsed names are ASCII-case-folded (via
+/// `to_ascii_lowercase`) so correlation against this constant is a plain string match. DNS
+/// compares ASCII letters case-insensitively; any non-ASCII bytes in a DNS-SD instance label
+/// are left as-is, which is harmless here — only the ASCII `_mqtt._tcp.local` service suffix
+/// needs to match.
 const SERVICE: &str = "_mqtt._tcp.local";
 
 /// Query `_mqtt._tcp.local` on the LAN for `window` and return the distinct advertised IPv4
@@ -40,8 +43,8 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
     // a later, unreachable A record for the same host arrives (Codex P2).
     let mut a: HashMap<String, Vec<Ipv4Addr>> = HashMap::new();
 
-    if let Ok(sock) = open_socket().await {
-        let query = build_ptr_query(SERVICE);
+    if let Ok((sock, unicast_response)) = open_socket().await {
+        let query = build_ptr_query(SERVICE, unicast_response);
         let _ = sock.send_to(&query, (MDNS_GROUP, MDNS_PORT)).await;
 
         let deadline = tokio::time::sleep(window);
@@ -64,23 +67,27 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
     correlate(&ptr, &srv, &a)
 }
 
-/// A UDP socket for the exchange: preferably bound to 5353 (with address/port reuse) and joined
-/// to the group, so it receives BOTH multicast responses — the common case — and unicast QU
-/// replies. Reuse (`SO_REUSEADDR` + `SO_REUSEPORT`) lets us co-bind 5353 alongside a system mDNS
-/// responder (e.g. Avahi) that already holds it, so we still catch responders that IGNORE the QU
-/// bit and only ever multicast their answer (Copilot). If the reuse bind can't be set up at all,
-/// fall back to an ephemeral port (QU-only). TTL 255 per RFC 6762 §11.
-async fn open_socket() -> std::io::Result<UdpSocket> {
+/// A UDP socket for the exchange, plus whether to ask for a UNICAST response (the QU bit).
+///
+/// Preferred: bind 5353 (with `SO_REUSEADDR` + `SO_REUSEPORT`) and join the group, so we co-bind
+/// alongside a system mDNS responder (e.g. Avahi) that already holds the port (Copilot). On this
+/// SHARED socket we must ask for a MULTICAST answer (`unicast_response = false`): a unicast reply
+/// to 5353 is delivered to only ONE of the co-bound sockets, so Avahi could consume the broker's
+/// answer and leave us empty-handed (Codex) — a multicast answer, by contrast, is copied to every
+/// socket joined to the group. Fallback: an ephemeral port we solely own, where we did NOT join
+/// the group and so must ask for a UNICAST reply (`unicast_response = true`) to receive anything.
+/// TTL 255 per RFC 6762 §11.
+async fn open_socket() -> std::io::Result<(UdpSocket, bool)> {
     match bind_reuse(MDNS_PORT) {
         Ok(sock) => {
             let _ = sock.join_multicast_v4(MDNS_GROUP, Ipv4Addr::UNSPECIFIED);
             let _ = sock.set_multicast_ttl_v4(255);
-            Ok(sock)
+            Ok((sock, false)) // shared 5353 + joined group → request MULTICAST answers
         }
         Err(_) => {
             let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
             let _ = sock.set_multicast_ttl_v4(255);
-            Ok(sock)
+            Ok((sock, true)) // sole owner of an ephemeral port → request UNICAST answers
         }
     }
 }
@@ -153,9 +160,12 @@ fn bind_reuse(port: u16) -> std::io::Result<UdpSocket> {
 // Pure wire helpers (unit-tested). No I/O — ported from MqttBrokerDiscovery.cs.
 // ---------------------------------------------------------------------------
 
-/// Build a standard-query datagram for a single PTR record with the mDNS unicast-response
-/// (QU) bit set, so responders may reply to our source port.
-fn build_ptr_query(name: &str) -> Vec<u8> {
+/// Build a standard-query datagram for a single PTR record. When `unicast_response` is set, the
+/// mDNS unicast-response (QU) top bit of QCLASS is set so responders reply to our source port —
+/// used ONLY on the solely-owned ephemeral socket. On the shared 5353 socket it is cleared, i.e.
+/// a normal multicast-response (QM) question, so the answer reaches every co-bound listener
+/// (Codex).
+fn build_ptr_query(name: &str, unicast_response: bool) -> Vec<u8> {
     let mut b = vec![
         0x00, 0x00, // ID (0 for mDNS)
         0x00, 0x00, // flags: standard query
@@ -170,7 +180,9 @@ fn build_ptr_query(name: &str) -> Vec<u8> {
     }
     b.push(0x00); // end of QNAME
     b.extend_from_slice(&[0x00, 0x0C]); // QTYPE = PTR (12)
-    b.extend_from_slice(&[0x80, 0x01]); // QCLASS = IN with the QU (unicast response) bit
+    // QCLASS = IN (0x0001); the top bit is the mDNS QU (unicast-response) request.
+    let qclass: u16 = if unicast_response { 0x8001 } else { 0x0001 };
+    b.extend_from_slice(&qclass.to_be_bytes());
     b
 }
 
@@ -325,7 +337,7 @@ mod tests {
 
     #[test]
     fn build_ptr_query_has_the_expected_shape() {
-        let q = build_ptr_query("_mqtt._tcp.local");
+        let q = build_ptr_query("_mqtt._tcp.local", true);
         // Header: QDCOUNT = 1, everything else 0.
         assert_eq!(&q[0..12], &[0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
         // QNAME labels: 5 "_mqtt", 4 "_tcp", 5 "local", 0.
@@ -336,8 +348,16 @@ mod tests {
         assert_eq!(q[23], 5);
         assert_eq!(&q[24..29], b"local");
         assert_eq!(q[29], 0);
-        // QTYPE = PTR (12), QCLASS = IN | QU bit (0x8001).
+        // QTYPE = PTR (12), QCLASS = IN | QU bit (0x8001) when unicast response is requested.
         assert_eq!(&q[30..34], &[0x00, 0x0C, 0x80, 0x01]);
+    }
+
+    #[test]
+    fn build_ptr_query_uses_multicast_qclass_when_not_unicast() {
+        // On the shared 5353 socket we ask for a MULTICAST answer: QCLASS = IN with the QU bit
+        // CLEARED (0x0001), so a co-bound Avahi can't consume a unicast reply meant for us.
+        let q = build_ptr_query("_mqtt._tcp.local", false);
+        assert_eq!(&q[30..34], &[0x00, 0x0C, 0x00, 0x01]);
     }
 
     /// Encode a DNS name as length-prefixed labels + terminator.
