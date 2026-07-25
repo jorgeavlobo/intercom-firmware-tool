@@ -214,6 +214,12 @@ async fn run() -> Result<(), String> {
     let mut conn_failures: u32 = 0;
     let mut tried_ips: std::collections::HashSet<std::net::Ipv4Addr> =
         std::collections::HashSet::new();
+    // mDNS proposals refused this outage, kept SEPARATE from `tried_ips` so the per-pass scan
+    // re-arm (retire_scan_subnets) never re-arms them: a wrong mDNS broker INSIDE an anchor /24
+    // would otherwise be re-proposed every pass, resetting the dry-cycle bound forever (Codex P2).
+    // Only a ConnAck or the bounded full-reset clears it.
+    let mut mdns_rejected_ips: std::collections::HashSet<std::net::Ipv4Addr> =
+        std::collections::HashSet::new();
     // How many consecutive rediscovery rounds have retired their /24 scan set without
     // finding the broker (a "dry" cycle). After FULL_RESET_AFTER_DRY_CYCLES of these,
     // `retire_scan_subnets` clears the whole `tried` set — including cross-subnet mDNS
@@ -322,6 +328,7 @@ async fn run() -> Result<(), String> {
                         // that returns to a former address can be found again.
                         conn_failures = 0;
                         tried_ips.clear();
+                        mdns_rejected_ips.clear();
                         rediscover_dry_cycles = 0;
                         // Persist the connect-confirmed broker IP (issue #49 item 1): this
                         // ConnAck means the current /etc/hosts mapping authenticated / passed
@@ -538,7 +545,7 @@ async fn run() -> Result<(), String> {
                                 // a confirmed cross-subnet move yet never latches onto an
                                 // unconfirmed mDNS proposal or a rejected record (Codex P1 /
                                 // Copilot). `None` ⇒ anchor on the build-time mapping.
-                                r = rediscovery::rediscover(&cfg, &mut tried_ips, last_confirmed_ip, &mut rediscover_dry_cycles) => {
+                                r = rediscovery::rediscover(&cfg, &mut tried_ips, &mut mdns_rejected_ips, last_confirmed_ip, &mut rediscover_dry_cycles) => {
                                     if let Some(ip) = r {
                                         eprintln!(
                                             "btmqttd: rediscovery: repointed '{}' -> {ip} in {}",
