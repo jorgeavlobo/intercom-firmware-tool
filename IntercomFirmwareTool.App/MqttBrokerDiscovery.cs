@@ -37,11 +37,18 @@ namespace IntercomFirmwareTool.App
         private static readonly IPAddress MdnsGroup = IPAddress.Parse("224.0.0.251");
         private const int MdnsPort = 5353;
         private const string ServiceName = "_mqtt._tcp.local";
+        // Home Assistant's own DNS-SD service (issue #52). HA's zeroconf integration is on by
+        // default and always advertises this, whereas the Mosquitto broker add-on does NOT advertise
+        // _mqtt._tcp by default. We learn the HA HOST IP(s) from it and later probe the MQTT port
+        // there — the advertised SRV port is HA's frontend (8123), not the broker, so it is ignored.
+        private const string HaServiceName = "_home-assistant._tcp.local";
 
         // mDNS results, accumulated by RunMdnsAsync. Guarded by _lock (RunMdnsAsync runs on
         // a background task; the UI reads Candidates on the dispatcher thread).
         private readonly object _lock = new();
         private readonly List<BrokerCandidate> _mdns = new();
+        // Home Assistant host IPs discovered via _home-assistant._tcp (issue #52), same guard.
+        private readonly List<string> _haHosts = new();
 
         /// <summary>The mDNS candidates found so far (snapshot copy; safe to enumerate).</summary>
         public IReadOnlyList<BrokerCandidate> MdnsCandidates
@@ -49,15 +56,26 @@ namespace IntercomFirmwareTool.App
             get { lock (_lock) return _mdns.ToArray(); }
         }
 
+        /// <summary>Home Assistant host IPs found via mDNS so far (snapshot copy). The broker is
+        /// commonly co-located with HA, so these are probed on the MQTT port as a fallback source
+        /// between direct MQTT mDNS and the /24 scan (issue #52).</summary>
+        public IReadOnlyList<string> HaHostIps
+        {
+            get { lock (_lock) return _haHosts.ToArray(); }
+        }
+
         // ---- mDNS ------------------------------------------------------------
 
-        /// <summary>Send one <c>_mqtt._tcp.local</c> query and collect responses for
-        /// <paramref name="window"/>. Populates <see cref="MdnsCandidates"/>. Never throws.</summary>
+        /// <summary>Send a <c>_mqtt._tcp.local</c> query AND a <c>_home-assistant._tcp.local</c>
+        /// query, and collect responses for <paramref name="window"/>. Populates
+        /// <see cref="MdnsCandidates"/> (direct brokers) and <see cref="HaHostIps"/> (HA hosts to
+        /// probe as a fallback, issue #52). Never throws.</summary>
         public async Task RunMdnsAsync(TimeSpan window, CancellationToken ct)
         {
-            // PTR (instances of the service), SRV (instance → host:port), A (host → IPv4).
-            // Accumulated across every datagram in the window, then correlated once.
-            var ptr = new List<string>();
+            // SRV (instance → host:port) and A (host → IPv4), accumulated across every datagram in
+            // the window, then correlated once. The PTR record itself isn't needed — correlation is
+            // by the SRV instance's service suffix — so we don't collect it (its only former use,
+            // MQTT-instance membership, would now also match HA instances; see the correlation).
             var srv = new Dictionary<string, (string target, int port)>(StringComparer.OrdinalIgnoreCase);
             var a = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -65,8 +83,13 @@ namespace IntercomFirmwareTool.App
             {
                 using var udp = CreateMdnsSocket();
 
-                byte[] query = BuildPtrQuery(ServiceName);
-                await udp.SendAsync(query, query.Length, new IPEndPoint(MdnsGroup, MdnsPort)).ConfigureAwait(false);
+                // Query the MQTT service AND Home Assistant's service in the same window (issue #52),
+                // so one listen collects both direct broker answers and the HA host(s).
+                foreach (var svc in new[] { ServiceName, HaServiceName })
+                {
+                    byte[] query = BuildPtrQuery(svc);
+                    await udp.SendAsync(query, query.Length, new IPEndPoint(MdnsGroup, MdnsPort)).ConfigureAwait(false);
+                }
 
                 using var winCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 winCts.CancelAfter(window);
@@ -76,7 +99,7 @@ namespace IntercomFirmwareTool.App
                     try { res = await udp.ReceiveAsync(winCts.Token).ConfigureAwait(false); }
                     catch (OperationCanceledException) { break; }
                     catch { break; }
-                    try { ParseDnsResponse(res.Buffer, ptr, srv, a); }
+                    try { ParseDnsResponse(res.Buffer, srv, a); }
                     catch { /* skip a malformed datagram, keep listening */ }
                 }
             }
@@ -86,18 +109,18 @@ namespace IntercomFirmwareTool.App
             // honours its "never throws" contract even on an unexpected failure here.
             try
             {
-                // Correlate — but ONLY SRV records that actually belong to our service, i.e.
-                // an instance the PTR answer pointed to, or a name of the form
-                // "<instance>._mqtt._tcp.local". A chatty responder may include unrelated SRV+A
-                // pairs in the same datagram; those must not be mistaken for MQTT brokers.
-                var instances = new HashSet<string>(ptr, StringComparer.OrdinalIgnoreCase);
+                // Correlate ONLY SRV records that belong to the MQTT service — those whose instance
+                // name is of the form "<instance>._mqtt._tcp.local". A chatty responder may include
+                // unrelated SRV+A pairs in the same datagram; those must not be mistaken for MQTT
+                // brokers. Matching by the service SUFFIX is complete (a genuine DNS-SD instance
+                // name always ends with its service) AND necessary: because we query both
+                // `_mqtt._tcp` and `_home-assistant._tcp`, keying off PTR-instance membership would
+                // let an HA SRV (port 8123) be misclassified as a plaintext MQTT broker — hiding the
+                // whole HA-host fallback below and pre-filling HA's frontend port (Codex P1 / Copilot).
                 var found = new List<BrokerCandidate>();
                 foreach (var kv in srv)
                 {
-                    // Instance names are "<instance>._mqtt._tcp.local" → suffix "." + ServiceName.
-                    bool isMqtt = instances.Contains(kv.Key)
-                        || kv.Key.EndsWith("." + ServiceName, StringComparison.OrdinalIgnoreCase);
-                    if (!isMqtt) continue;
+                    if (!kv.Key.EndsWith("." + ServiceName, StringComparison.OrdinalIgnoreCase)) continue;
                     if (a.TryGetValue(kv.Value.target, out string? ip))
                     {
                         string host = kv.Value.target.TrimEnd('.');
@@ -112,11 +135,27 @@ namespace IntercomFirmwareTool.App
                     }
                 }
 
+                // Correlate HA hosts the same way (issue #52): an SRV whose name is under
+                // _home-assistant._tcp, resolved through its A record, gives the HA host IP. The
+                // advertised port is HA's frontend and is discarded — the caller probes the MQTT
+                // port on the IP instead. The HA suffix check keeps an MQTT instance (both services'
+                // instances share the `srv`/`a` accumulators) from being mis-correlated as an HA host.
+                var foundHa = new List<string>();
+                foreach (var kv in srv)
+                {
+                    if (!kv.Key.EndsWith("." + HaServiceName, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (a.TryGetValue(kv.Value.target, out string? ip) && !foundHa.Contains(ip))
+                        foundHa.Add(ip);
+                }
+
                 lock (_lock)
                 {
                     foreach (var c in found)
                         if (!_mdns.Any(x => x.Ip == c.Ip && x.Port == c.Port))
                             _mdns.Add(c);
+                    foreach (var ip in foundHa)
+                        if (!_haHosts.Contains(ip))
+                            _haHosts.Add(ip);
                 }
             }
             catch { /* correlation failed — no candidates; never fault this fire-and-forget task */ }
@@ -179,9 +218,10 @@ namespace IntercomFirmwareTool.App
             return b.ToArray();
         }
 
-        /// <summary>Parse a DNS response into the PTR/SRV/A accumulators. Bounds-checked
-        /// throughout; a truncated/odd record just stops parsing that datagram.</summary>
-        private static void ParseDnsResponse(byte[] b, List<string> ptr,
+        /// <summary>Parse a DNS response into the SRV/A accumulators. Bounds-checked throughout; a
+        /// truncated/odd record just stops parsing that datagram. PTR records are skipped —
+        /// correlation is by the SRV instance's service suffix, so the PTR content isn't needed.</summary>
+        private static void ParseDnsResponse(byte[] b,
             Dictionary<string, (string, int)> srv, Dictionary<string, string> a)
         {
             int len = b.Length;
@@ -212,12 +252,6 @@ namespace IntercomFirmwareTool.App
 
                 switch (type)
                 {
-                    case 12 when name.Equals(ServiceName, StringComparison.OrdinalIgnoreCase): // PTR
-                    {
-                        int pp = rd;
-                        ptr.Add(ReadName(b, ref pp));
-                        break;
-                    }
                     case 33 when rdlen >= 6: // SRV: priority(2) weight(2) port(2) target(name)
                     {
                         int port = (b[rd + 4] << 8) | b[rd + 5];
@@ -282,18 +316,53 @@ namespace IntercomFirmwareTool.App
             IReadOnlyList<string> prefixes = LocalV24Prefixes();
             if (prefixes.Count == 0) return Array.Empty<BrokerCandidate>();
 
+            // Materialise the /24 host list (…1–…254 of each prefix), parsing each base once.
+            var hosts = new List<IPAddress>(prefixes.Count * 254);
+            foreach (var prefix in prefixes)
+            {
+                byte[] o = IPAddress.Parse(prefix + ".0").GetAddressBytes();
+                for (int h = 1; h <= 254; h++)
+                    hosts.Add(new IPAddress(new[] { o[0], o[1], o[2], (byte)h }));
+            }
+            return await ProbeTargetsAsync(hosts, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>Probe the discovered Home Assistant host(s) on the two MQTT ports and return any
+        /// that answer a real MQTT CONNECT/CONNACK — the broker is commonly co-hosted with HA yet the
+        /// Mosquitto add-on doesn't advertise <c>_mqtt._tcp</c> (issue #52). Same confirm-before-
+        /// suggest rule as the scan: an HA host is returned ONLY once a broker actually answers
+        /// there. Empty when no HA host was found or none runs a broker.</summary>
+        public async Task<IReadOnlyList<BrokerCandidate>> ProbeHomeAssistantHostsAsync(CancellationToken ct)
+        {
+            var hosts = new List<IPAddress>();
+            foreach (var ipStr in HaHostIps)
+                if (IPAddress.TryParse(ipStr, out var ip))
+                    hosts.Add(ip);
+            if (hosts.Count == 0) return Array.Empty<BrokerCandidate>();
+            return await ProbeTargetsAsync(hosts, ct).ConfigureAwait(false);
+        }
+
+        /// <summary>Shared probe engine for the /24 scan and the HA-host fallback: TCP-probe every
+        /// <paramref name="hosts"/> entry on both MQTT ports, confirm a broker with a real MQTT
+        /// CONNECT/CONNACK (over TLS on 8883), reverse-DNS each hit, dedup by IP preferring the
+        /// plaintext port. Never throws; returns an empty list on any failure. Early-stops the moment
+        /// a plaintext (1883) broker is confirmed.</summary>
+        private async Task<IReadOnlyList<BrokerCandidate>> ProbeTargetsAsync(
+            IReadOnlyList<IPAddress> hosts, CancellationToken ct)
+        {
             var hits = new System.Collections.Concurrent.ConcurrentDictionary<string, int>(); // ip → port
             // A confirmed plaintext (1883) broker is all the caller consumes (it takes the first
             // non-TLS candidate), so stop the sweep the moment one lands instead of waiting on the
-            // remaining ~2000 host×port probes (each up to 400ms connect + 1200ms I/O — tens of
-            // seconds of "Searching…" past a broker already found). Linked to ct so a bridge-off /
-            // window-close still cancels; cancelling THIS never signals ct, so the caller still
-            // treats the scan as a completed (non-cancelled) sweep and uses the results.
+            // remaining host×port probes (each up to 400ms connect + 1200ms I/O — for a /24 that's
+            // tens of seconds of "Searching…" past a broker already found). Linked to ct so a
+            // bridge-off / window-close still cancels; cancelling THIS never signals ct, so the
+            // caller still treats the sweep as completed (non-cancelled) and uses the results.
             using var earlyStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
             // Probe every host×port with a bounded worker pool. Parallel.ForEachAsync pulls targets
-            // LAZILY from the generator below, so we never materialise ~2000 Task + CTS objects up
-            // front the way the old List<Task> fan-out did — that burst of allocations spiked GC
+            // LAZILY from the generator below, so we never materialise the whole host×port set as
+            // Task + CTS objects up front the way the old List<Task> fan-out did — for a /24 that
+            // burst of allocations spiked GC
             // (whose collections pause every managed thread) and did its whole fan-out on the
             // caller's thread. Here at most ScanConcurrency probes are live at once. Every candidate
             // is confirmed to speak MQTT: 1883 with a plaintext CONNECT/CONNACK, 8883 with a TLS
@@ -316,7 +385,7 @@ namespace IntercomFirmwareTool.App
             {
                 // Return ProbeHostAsync's Task straight to the loop (wrapped as a ValueTask) instead
                 // of an `async … await` lambda, which would add a redundant state machine per probe.
-                await Parallel.ForEachAsync(EnumerateProbeTargets(prefixes), options,
+                await Parallel.ForEachAsync(EnumerateProbeTargets(hosts), options,
                     (t, probeCt) => new ValueTask(
                         ProbeHostAsync(t.Ip, t.Port, t.UseTls, hits, earlyStop, probeCt)))
                     .ConfigureAwait(false);
@@ -348,21 +417,16 @@ namespace IntercomFirmwareTool.App
             return ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
         }
 
-        /// <summary>Lazily yield every (host, port, TLS) probe target for the given /24 prefixes —
-        /// both MQTT ports across each of the 254 hosts. Enumerated on demand by the scan's bounded
-        /// worker pool, so the full ~2000-target set is never materialised at once.</summary>
+        /// <summary>Lazily yield every (host, port, TLS) probe target for the given hosts — both MQTT
+        /// ports across each host, plaintext (1883) first so a plaintext broker is confirmed (and the
+        /// sweep early-stopped) as soon as possible. Enumerated on demand by the bounded worker pool,
+        /// so a large host set is never materialised into tasks all at once.</summary>
         private static IEnumerable<(IPAddress Ip, int Port, bool UseTls)> EnumerateProbeTargets(
-            IReadOnlyList<string> prefixes)
+            IReadOnlyList<IPAddress> hosts)
         {
-            // Yield IPAddress values directly — parsing each /24 base ONCE — so the hot path never
-            // builds an "a.b.c.d" string per target and then re-parses it inside every probe.
-            foreach (var prefix in prefixes)
-            {
-                byte[] o = IPAddress.Parse(prefix + ".0").GetAddressBytes();
-                foreach (var (port, useTls) in new[] { (1883, false), (8883, true) })
-                    for (int h = 1; h <= 254; h++)
-                        yield return (new IPAddress(new[] { o[0], o[1], o[2], (byte)h }), port, useTls);
-            }
+            foreach (var (port, useTls) in new[] { (1883, false), (8883, true) })
+                foreach (var ip in hosts)
+                    yield return (ip, port, useTls);
         }
 
         private static async Task ProbeHostAsync(IPAddress ip, int port, bool useTls,

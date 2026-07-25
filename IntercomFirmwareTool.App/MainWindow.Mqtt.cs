@@ -96,6 +96,11 @@ namespace IntercomFirmwareTool.App
         private Task? _mdnsTask;                              // the background mDNS run (awaited before a scan)
         private readonly List<BrokerCandidate> _lastScanResults = new();  // cached so a re-enable re-evaluates
         private bool _discoveryScanDone;
+        // Home Assistant host fallback (issue #52): brokers port-confirmed on a discovered HA host,
+        // cached like the scan results so a re-enable re-evaluates without re-probing. _haProbeDone
+        // is the one-shot guard for that probe.
+        private readonly List<BrokerCandidate> _haResults = new();
+        private bool _haProbeDone;
         private bool _discoveryPrefillDone;                  // set ONLY after fields are actually pre-filled
         private bool _discoveryPrefillInFlight;              // one prefill/scan at a time (reentrancy gate)
         private bool _discoveryPrefillRerun;                 // an enable arrived while a prefill was in flight
@@ -210,7 +215,39 @@ namespace IntercomFirmwareTool.App
                     pool = BuildDiscoveryPool();
                 }
 
-                // mDNS found NOTHING → the /24 scan, once, cancellable when the bridge is
+                // Home Assistant host fallback (issue #52), BETWEEN direct MQTT mDNS and the /24
+                // scan: the broker is very commonly co-hosted with HA, but the Mosquitto add-on does
+                // NOT advertise _mqtt._tcp by default, while HA always advertises itself. So when the
+                // MQTT mDNS layer found nothing, probe the configured MQTT port(s) on the discovered
+                // HA host(s) — a candidate is cached ONLY once a broker actually answers there (a
+                // port-confirming probe, never a blind pick) — before the heavier scan. Reuses the
+                // in-flight-discovery CTS so a bridge-off cancels it, like the scan.
+                if (pool.Count == 0 && !_haProbeDone && _brokerDiscovery.HaHostIps.Count > 0)
+                {
+                    SetMqttDiscoveryInfo(L("MqttDiscovering"));
+                    _discoveryScanCts?.Cancel();
+                    _discoveryScanCts?.Dispose();
+                    var haCts = _discoveryScanCts = CancellationTokenSource.CreateLinkedTokenSource(
+                        _discoveryCts?.Token ?? CancellationToken.None);
+                    IReadOnlyList<BrokerCandidate> ha;
+                    bool haCancelled;
+                    try { ha = await Task.Run(() => _brokerDiscovery.ProbeHomeAssistantHostsAsync(haCts.Token), haCts.Token); }
+                    catch { ha = System.Array.Empty<BrokerCandidate>(); }
+                    finally
+                    {
+                        haCancelled = haCts.IsCancellationRequested;
+                        if (ReferenceEquals(_discoveryScanCts, haCts)) _discoveryScanCts = null;
+                        haCts.Dispose();
+                    }
+                    if (haCancelled) { SetMqttDiscoveryInfo(null); return; }   // retryable — don't burn the flag
+                    _haProbeDone = true;
+                    _haResults.Clear();
+                    _haResults.AddRange(ha);
+                    if (!MqttEnabled || TxtMqttHost.Text.Trim().Length > 0) { SetMqttDiscoveryInfo(null); return; }
+                    pool = BuildDiscoveryPool();
+                }
+
+                // mDNS + HA found NOTHING → the /24 scan, once, cancellable when the bridge is
                 // turned off (via _discoveryScanCts). mDNS advertises only plaintext _mqtt._tcp,
                 // so any mDNS hit is a plaintext broker that is pre-filled below without a scan.
                 if (pool.Count == 0 && !_discoveryScanDone)
@@ -256,22 +293,26 @@ namespace IntercomFirmwareTool.App
                     pool = BuildDiscoveryPool();
                 }
 
-                // A plaintext broker → pre-fill and mark ready (terminal: fields are now set).
+                // A plaintext broker → pre-fill and mark ready (terminal: fields are now set). If it
+                // came from the HA-host fallback, label it as HA-derived so the user knows to verify.
                 if (pool.FirstOrDefault(c => !c.IsTls) is BrokerCandidate plain)
                 {
                     PrefillBrokerFields(plain);
                     _discoveryPrefillDone = true;   // set ONLY after the fields are actually written
-                    SetMqttDiscoveryInfo(LF("Fmt_MqttDiscovered", plain.Hostname ?? plain.Ip));
+                    string key = _haResults.Contains(plain) ? "Fmt_MqttDiscoveredViaHa" : "Fmt_MqttDiscovered";
+                    SetMqttDiscoveryInfo(LF(key, plain.Hostname ?? plain.Ip));
                     return;
                 }
                 // Only a TLS broker found → surface it but DON'T pre-fill (it needs a CA the
-                // user must add; a plaintext pre-fill would build a broken config).
+                // user must add; a plaintext pre-fill would build a broken config). An HA-host TLS
+                // find is labelled as HA-derived too.
                 if (pool.FirstOrDefault() is BrokerCandidate tls)
                 {
                     // NOTE: do NOT set _discoveryPrefillDone here — nothing was pre-filled.
                     // Leaving it clear lets a later disable→re-enable re-surface this guidance
                     // (and re-evaluate if a plaintext candidate has since appeared).
-                    SetMqttDiscoveryInfo(LF("Fmt_MqttDiscoveredTls", tls.Hostname ?? tls.Ip, tls.Port));
+                    string key = _haResults.Contains(tls) ? "Fmt_MqttDiscoveredViaHaTls" : "Fmt_MqttDiscoveredTls";
+                    SetMqttDiscoveryInfo(LF(key, tls.Hostname ?? tls.Ip, tls.Port));
                     return;
                 }
                 SetMqttDiscoveryInfo(null);
@@ -298,12 +339,16 @@ namespace IntercomFirmwareTool.App
             }
         }
 
-        /// <summary>The current candidate pool: live mDNS answers plus the last /24 scan's
-        /// results (cached in <see cref="_lastScanResults"/>). Rebuilt on each read so a
-        /// disable→re-enable, or a late-arriving mDNS answer, re-evaluates without re-scanning.</summary>
+        /// <summary>The current candidate pool: live mDNS answers, plus brokers port-confirmed on a
+        /// Home Assistant host (<see cref="_haResults"/>, issue #52), plus the last /24 scan's results
+        /// (<see cref="_lastScanResults"/>). Rebuilt on each read so a disable→re-enable, or a
+        /// late-arriving mDNS answer, re-evaluates without re-probing. Only one of the fallback
+        /// sources is ever populated per outage (each runs only when the pool is still empty), so a
+        /// candidate here maps back to exactly one source — which is how the caller labels it.</summary>
         private List<BrokerCandidate> BuildDiscoveryPool()
         {
             var pool = new List<BrokerCandidate>(_brokerDiscovery!.MdnsCandidates);
+            pool.AddRange(_haResults);
             pool.AddRange(_lastScanResults);
             return pool;
         }

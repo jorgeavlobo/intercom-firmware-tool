@@ -44,11 +44,35 @@ const SERVICE: &str = "_mqtt._tcp.local";
 const SERVICE_TLS: &str = "_secure-mqtt._tcp.local";
 const SERVICES: [&str; 2] = [SERVICE, SERVICE_TLS];
 
+/// Home Assistant's own DNS-SD service (issue #52). HA's `zeroconf` integration is on by default
+/// and always advertises `_home-assistant._tcp.local`; the Mosquitto broker add-on, by contrast,
+/// does NOT advertise `_mqtt._tcp` by default, so on the common "HA OS + Mosquitto add-on" topology
+/// the MQTT services above find nothing. We query HA separately to learn the HA HOST IP(s) — the
+/// advertised SRV port is HA's frontend (8123), NOT the broker, so it is ignored; the caller
+/// port-probes the CONFIGURED MQTT port on each HA host and trust-gates it like any other proposal.
+const HA_SERVICE: &str = "_home-assistant._tcp.local";
+
 /// Query the MQTT DNS-SD services (`_mqtt._tcp` + `_secure-mqtt._tcp`) on the LAN for `window`
 /// and return the distinct advertised IPv4 addresses of MQTT brokers (correlated PTR→SRV→A).
 /// Empty on any socket failure or no answer. Only the IP is returned — the caller repoints the
 /// CONFIGURED broker name to it, so the mDNS-advertised instance/host name is not needed.
 pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
+    discover_service_ips(&SERVICES, window).await
+}
+
+/// Query Home Assistant's DNS-SD service (`_home-assistant._tcp`) on the LAN for `window` and
+/// return the distinct HA HOST IPv4 addresses (correlated PTR→SRV→A). The advertised SRV port is
+/// HA's frontend, not the broker, so it is discarded here — the caller probes the CONFIGURED MQTT
+/// port on each returned host and trust-gates it like any other proposal (issue #52). Empty on any
+/// socket failure or no answer.
+pub async fn discover_ha_hosts(window: Duration) -> Vec<Ipv4Addr> {
+    discover_service_ips(&[HA_SERVICE], window).await
+}
+
+/// Shared engine for [`discover_ips`] and [`discover_ha_hosts`]: send one PTR query per service in
+/// `services`, follow up with SRV/A queries for still-unresolved instances/targets inside the same
+/// window, then return the correlated A-record IPv4s — each service in `services` order, deduped.
+async fn discover_service_ips(services: &[&str], window: Duration) -> Vec<Ipv4Addr> {
     let mut ptr: Vec<String> = Vec::new();
     let mut srv: HashMap<String, (String, u16)> = HashMap::new();
     // A host may advertise MORE THAN ONE A record (a multihomed broker): keep every
@@ -59,7 +83,7 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
     if let Ok((sock, unicast_response)) = open_socket().await {
         // One PTR query per service (plaintext + TLS), so a broker advertising only the secure
         // service is still discovered (Codex).
-        let queries: Vec<Vec<u8>> = SERVICES
+        let queries: Vec<Vec<u8>> = services
             .iter()
             .filter_map(|svc| build_query(svc, QTYPE_PTR, unicast_response))
             .collect();
@@ -88,7 +112,7 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
         // (Codex).
         let mut srv_queried: HashSet<String> = HashSet::new();
         let mut a_queried: HashSet<String> = HashSet::new();
-        let svc_suffixes: Vec<String> = SERVICES.iter().map(|s| format!(".{s}")).collect();
+        let svc_suffixes: Vec<String> = services.iter().map(|s| format!(".{s}")).collect();
         loop {
             tokio::select! {
                 _ = &mut deadline => break,
@@ -100,7 +124,7 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
                 }
                 r = sock.recv_from(&mut buf) => match r {
                     Ok((n, _)) => {
-                        parse_response(&buf[..n], &mut ptr, &mut srv, &mut a);
+                        parse_response(&buf[..n], services, &mut ptr, &mut srv, &mut a);
                         for inst in &ptr {
                             if !srv.contains_key(inst) && srv_queried.insert(inst.clone()) {
                                 if let Some(q) = build_query(inst, QTYPE_SRV, unicast_response) {
@@ -128,11 +152,13 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
             }
         }
     }
-    // Correlate each service; merge, plaintext first, deduped.
-    let mut out = correlate(&ptr, &srv, &a, SERVICE);
-    for ip in correlate(&ptr, &srv, &a, SERVICE_TLS) {
-        if !out.contains(&ip) {
-            out.push(ip);
+    // Correlate each service in order (for MQTT: plaintext first, then TLS); merge, deduped.
+    let mut out: Vec<Ipv4Addr> = Vec::new();
+    for svc in services {
+        for ip in correlate(&ptr, &srv, &a, svc) {
+            if !out.contains(&ip) {
+                out.push(ip);
+            }
         }
     }
     out
@@ -311,6 +337,7 @@ fn build_query(name: &str, qtype: u16, unicast_response: bool) -> Option<Vec<u8>
 /// throughout; a truncated/odd record just stops parsing that datagram.
 fn parse_response(
     b: &[u8],
+    services: &[&str],
     ptr: &mut Vec<String>,
     srv: &mut HashMap<String, (String, u16)>,
     a: &mut HashMap<String, Vec<Ipv4Addr>>,
@@ -345,7 +372,7 @@ fn parse_response(
         }
         let rd = pos;
         match typ {
-            12 if SERVICES.contains(&name.as_str()) => {
+            12 if services.contains(&name.as_str()) => {
                 // PTR: the RDATA is the instance name. Require it to decode WITHIN this record's
                 // RDLENGTH; a malformed datagram whose name has no terminator inside RDATA would
                 // otherwise let read_name splice in bytes from the following record and forge a
@@ -558,14 +585,14 @@ mod tests {
         out.push(0);
     }
 
-    /// Build a minimal mDNS response advertising one `_mqtt._tcp` instance with SRV + A.
-    fn sample_response(instance: &str, host: &str, port: u16, ip: [u8; 4]) -> Vec<u8> {
+    /// Build a minimal mDNS response advertising one `<service>` instance with SRV + A.
+    fn sample_response(service: &str, instance: &str, host: &str, port: u16, ip: [u8; 4]) -> Vec<u8> {
         let mut b = vec![0, 0, 0x84, 0x00]; // id 0, flags = response|AA
         b.extend_from_slice(&[0, 0]); // QDCOUNT
         b.extend_from_slice(&[0, 3]); // ANCOUNT = PTR + SRV + A
         b.extend_from_slice(&[0, 0, 0, 0]); // NS, AR
-        // PTR: _mqtt._tcp.local -> instance
-        enc_name(SERVICE, &mut b);
+        // PTR: <service> -> instance
+        enc_name(service, &mut b);
         b.extend_from_slice(&[0, 12, 0, 1]); // type PTR, class IN
         b.extend_from_slice(&[0, 0, 0, 120]); // TTL
         let mut rd = Vec::new();
@@ -591,11 +618,37 @@ mod tests {
 
     #[test]
     fn parse_and_correlate_extracts_the_broker_ip() {
-        let resp = sample_response("Mosquitto._mqtt._tcp.local", "broker.local", 1883, [192, 168, 50, 40]);
+        let resp = sample_response(SERVICE, "Mosquitto._mqtt._tcp.local", "broker.local", 1883, [192, 168, 50, 40]);
         let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
-        parse_response(&resp, &mut ptr, &mut srv, &mut a);
+        parse_response(&resp, &SERVICES, &mut ptr, &mut srv, &mut a);
         let ips = correlate(&ptr, &srv, &a, SERVICE);
         assert_eq!(ips, vec![Ipv4Addr::new(192, 168, 50, 40)]);
+    }
+
+    #[test]
+    fn discovers_home_assistant_host_ip_and_the_mqtt_query_ignores_the_ha_ptr() {
+        // Issue #52: an HA instance advertises `_home-assistant._tcp` on its frontend port (8123);
+        // we correlate it to the HA HOST IP (the caller discards the SRV port and probes the MQTT
+        // port there instead). The SAME datagram parsed while querying only the MQTT services must
+        // NOT surface the HA PTR as a broker.
+        let resp = sample_response(
+            HA_SERVICE,
+            "Home._home-assistant._tcp.local",
+            "hass.local",
+            8123,
+            [192, 168, 50, 64],
+        );
+
+        // HA query: the PTR is accepted and the host resolves to the HA host IP.
+        let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
+        parse_response(&resp, &[HA_SERVICE], &mut ptr, &mut srv, &mut a);
+        assert_eq!(correlate(&ptr, &srv, &a, HA_SERVICE), vec![Ipv4Addr::new(192, 168, 50, 64)]);
+
+        // MQTT query over the same bytes: the HA PTR is filtered out, so no broker is proposed.
+        let (mut ptr2, mut srv2, mut a2) = (Vec::new(), HashMap::new(), HashMap::new());
+        parse_response(&resp, &SERVICES, &mut ptr2, &mut srv2, &mut a2);
+        assert!(correlate(&ptr2, &srv2, &a2, SERVICE).is_empty());
+        assert!(correlate(&ptr2, &srv2, &a2, SERVICE_TLS).is_empty());
     }
 
     #[test]
@@ -679,7 +732,7 @@ mod tests {
             b.extend_from_slice(&ip);
         }
         let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
-        parse_response(&b, &mut ptr, &mut srv, &mut a);
+        parse_response(&b, &SERVICES, &mut ptr, &mut srv, &mut a);
         assert_eq!(
             a.get("broker.local"),
             Some(&vec![Ipv4Addr::new(192, 168, 50, 40), Ipv4Addr::new(10, 0, 0, 40)])
@@ -753,7 +806,7 @@ mod tests {
     #[test]
     fn parse_response_ignores_truncated_datagram() {
         let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
-        parse_response(&[0, 0, 0], &mut ptr, &mut srv, &mut a); // < 12 bytes
+        parse_response(&[0, 0, 0], &SERVICES, &mut ptr, &mut srv, &mut a); // < 12 bytes
         assert!(ptr.is_empty() && srv.is_empty() && a.is_empty());
     }
 
@@ -772,7 +825,7 @@ mod tests {
         b.extend_from_slice(&[0x06, b'b']); // 6-char label start, only 1 char inside RDATA
         b.extend_from_slice(&[b'r', b'o', b'k', b'e', b'r', 0]); // completes "broker" beyond RDATA
         let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
-        parse_response(&b, &mut ptr, &mut srv, &mut a);
+        parse_response(&b, &SERVICES, &mut ptr, &mut srv, &mut a);
         assert!(ptr.is_empty()); // the overrunning PTR name was rejected
     }
 
@@ -792,7 +845,7 @@ mod tests {
         b.extend_from_slice(&[0, 0, 0, 0, 0x07, 0x5B, 0x06, b'b']);
         b.extend_from_slice(&[b'r', b'o', b'k', b'e', b'r', 0]); // completes "broker" beyond RDATA
         let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
-        parse_response(&b, &mut ptr, &mut srv, &mut a);
+        parse_response(&b, &SERVICES, &mut ptr, &mut srv, &mut a);
         assert!(srv.is_empty()); // the overrunning SRV target was rejected
     }
 }

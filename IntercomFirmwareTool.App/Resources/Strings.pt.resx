@@ -415,6 +415,8 @@ Chave: {1}</value></data>
   <data name="MqttDiscovering" xml:space="preserve"><value>A procurar um broker na rede…</value></data>
   <data name="Fmt_MqttDiscovered" xml:space="preserve"><value>Broker encontrado na rede: {0} — pré-preenchido abaixo.</value></data>
   <data name="Fmt_MqttDiscoveredTls" xml:space="preserve"><value>Broker TLS encontrado na rede: {0} (porta {1}) — indique-o e selecione o certificado CA dele.</value></data>
+  <data name="Fmt_MqttDiscoveredViaHa" xml:space="preserve"><value>Broker encontrado no host do Home Assistant: {0} — pré-preenchido abaixo (confirme).</value></data>
+  <data name="Fmt_MqttDiscoveredViaHaTls" xml:space="preserve"><value>Broker TLS encontrado no host do Home Assistant: {0} (porta {1}) — indique-o e selecione o certificado CA dele.</value></data>
   <data name="Fmt_MqttAnchorMac" xml:space="preserve"><value>MAC do broker {0} capturado ({1}). A redescoberta já consegue recuperar este broker mesmo sem TLS.</value></data>
   <data name="Fmt_MqttAnchorHostname" xml:space="preserve"><value>MAC do broker {0} capturado ({1}). {1} resolve para «{2}» — indique esse hostname acima para a redescoberta poder recuperar o broker (reaponta um hostname, não um IP puro).</value></data>
   <data name="Fmt_MqttAnchorIpOnly" xml:space="preserve"><value>MAC do broker {0} capturado ({1}), mas este broker está indicado por IP. A redescoberta reaponta um hostname, por isso indique o broker como hostname para ter efeito.</value></data>
