@@ -45,10 +45,13 @@
 //! reboot after the broker moved reconnects immediately instead of re-scanning.
 //!
 //! Deliberately OUT of scope (issue #49 item 3): a move to a different `/24` **on the same L2 link**
-//! is recovered by the mDNS layers above — link-local multicast (`224.0.0.251`) reaches the whole
-//! link, not just one `/24` — but a move to a **routed** subnet/VLAN is NOT: mDNS multicast doesn't
-//! cross a router without an external reflector, and the fallback scan only sweeps the confirmed /
-//! build-time `/24`s (Codex). Routed cross-subnet recovery is unsupported. And a **port/transport**
+//! is recovered ONLY while the broker stays mDNS-discoverable — it still advertises
+//! `_mqtt._tcp`/`_secure-mqtt._tcp`, or it runs on an mDNS-discoverable Home Assistant host — because
+//! link-local multicast (`224.0.0.251`) reaches the whole link, not just one `/24`. With no such
+//! advertisement both mDNS layers propose nothing and the fallback scan sweeps only the confirmed /
+//! build-time `/24`s, so a cross-`/24` move to a plain, unadvertised host is NOT recovered (Codex).
+//! A move to a **routed** subnet/VLAN is never recovered: mDNS multicast doesn't cross a router
+//! without an external reflector. And a **port/transport**
 //! move (1883 ↔ 8883, i.e. plaintext ↔ TLS) is a reconfiguration the user re-runs the tool for, NOT
 //! a rediscovery — the client's port/transport is fixed for the process's life, so rediscovery only
 //! recovers an **IP move on the same port/transport** (see the scan's port comment below).
