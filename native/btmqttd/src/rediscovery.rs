@@ -155,28 +155,24 @@ pub async fn rediscover(
     // same wrong broker forever and each optimistic repoint would reset `dry_cycles`, defeating
     // the periodic full-reset bound (Codex P2). Only the bounded full-reset clears it.
     if let Some(ip) = mdns_propose(cfg, tried, mdns_rejected).await {
-        match seed_hosts(&cfg.mqtt_host, ip).await {
-            Ok(true) => {
-                mdns_rejected.insert(ip);
-                // Deliberately do NOT reset `dry_cycles` here: a hosts rewrite is only a PROPOSAL,
-                // not a confirmation — the reconnect may still fail the trust gate. Resetting on
-                // every unconfirmed proposal would let two-or-more spurious open hosts in the
-                // anchor /24 alternate forever, so `dry_cycles` would never reach the bound and
-                // the mDNS-rejection full-reset would never fire (Codex P2). Only a ConnAck (in
-                // `main`) resets the counter.
-                eprintln!(
-                    "btmqttd: rediscovery: mDNS repointed '{}' -> {ip} in {HOSTS_PATH}",
-                    cfg.mqtt_host
-                );
-                return Some(ip);
-            }
-            // Already mapped to `ip` — i.e. the address currently failing. Nothing was
-            // rewritten, so don't claim a repoint or skip the scan: retire it and fall through
-            // to the subnet sweep (CodeRabbit).
-            Ok(false) => {
-                mdns_rejected.insert(ip);
-            }
-            Err(e) => eprintln!("btmqttd: rediscovery: mDNS repoint of {HOSTS_PATH} failed: {e}"),
+        if let Some(done) = seed_proposal(&cfg.mqtt_host, ip, mdns_rejected, "mDNS").await {
+            return Some(done);
+        }
+    }
+
+    // Layer B2 (issue #52): Home Assistant host fallback, BETWEEN the direct MQTT mDNS above and
+    // the /24 scan below. The Mosquitto broker add-on does NOT advertise `_mqtt._tcp` by default,
+    // but HA itself always advertises `_home-assistant._tcp` (zeroconf is on by default), and the
+    // broker is very commonly co-located with HA. So when the MQTT mDNS layer found nothing, learn
+    // the HA host IP(s) and probe the CONFIGURED MQTT port there. Same trust boundary as every
+    // layer: `ha_propose` only PROPOSES the HA host IP after the port probe + the TLS/MAC gate, and
+    // the reconnect is the final authority; if the broker is NOT on the HA host the gate rejects it
+    // and we fall through to the scan. In plaintext the ARP-MAC gate is exactly what distinguishes
+    // "broker ON the HA host" (HA's MAC == MQTT_BROKER_MAC → adopt) from "broker elsewhere" (MAC
+    // mismatch → reject), so we never hand plaintext credentials to HA when it isn't the broker.
+    if let Some(ip) = ha_propose(cfg, tried, mdns_rejected).await {
+        if let Some(done) = seed_proposal(&cfg.mqtt_host, ip, mdns_rejected, "HA-host mDNS").await {
+            return Some(done);
         }
     }
 
@@ -416,19 +412,41 @@ pub async fn seed_hosts(name: &str, ip: Ipv4Addr) -> std::io::Result<bool> {
 /// only delays the fallback subnet scan by a couple of seconds.
 const MDNS_WINDOW: Duration = Duration::from_secs(2);
 
-/// Propose a broker address discovered via mDNS (Layer B), or `None`. Queries the MQTT DNS-SD
-/// services (`_mqtt._tcp` + the TLS `_secure-mqtt._tcp`), keeps the advertised IPv4s that are
-/// private LAN addresses and not already
-/// tried this outage (in discovery order), and applies the trust gate: under TLS the broker PORT
-/// must be open (the pinned-cert reconnect is then the real trust gate); in plaintext the broker
-/// PORT must be open AND the host's `/proc/net/arp` MAC must match the recorded `MQTT_BROKER_MAC`.
-/// Requiring an open port under TLS keeps a stale/unrelated mDNS answer from triggering a repoint,
-/// which on a chatty LAN could otherwise keep starving the `/24` fallback. The port probe is
-/// BATCHED across all candidates in one concurrency-limited [`probe_open`] call (both modes), so
-/// many mDNS answers don't serialize into `N * PROBE_TIMEOUT` before the fallback (Copilot); in
-/// plaintext `/proc/net/arp` is then read ONCE and each candidate compared via [`mac_matches`].
-/// The first candidate that passes its mode's gate, in discovery order, wins. Without TLS and
-/// without a MAC, mDNS proposes nothing — same posture as `main`'s activation gate.
+/// Seed `/etc/hosts` to a discovery proposal `ip` (from `layer`, for the log line) and remember it
+/// in `mdns_rejected` so it isn't re-proposed if it turns out wrong — a proposal that authenticates
+/// is cleared on the next ConnAck. Returns `Some(ip)` when the mapping was actually rewritten (the
+/// caller returns it and lets the reconnect gate decide), `None` when it already pointed there (the
+/// address currently failing — CodeRabbit) or the rewrite failed, so the caller falls through to
+/// the next layer. Deliberately does NOT touch `dry_cycles`: a hosts rewrite is a proposal, not a
+/// confirmation, so only a ConnAck (in `main`) resets that counter — else two-or-more spurious open
+/// hosts could alternate forever and the periodic full-reset would never fire (Codex P2).
+async fn seed_proposal(
+    host: &str,
+    ip: Ipv4Addr,
+    mdns_rejected: &mut HashSet<Ipv4Addr>,
+    layer: &str,
+) -> Option<Ipv4Addr> {
+    match seed_hosts(host, ip).await {
+        Ok(true) => {
+            mdns_rejected.insert(ip);
+            eprintln!("btmqttd: rediscovery: {layer} repointed '{host}' -> {ip} in {HOSTS_PATH}");
+            Some(ip)
+        }
+        Ok(false) => {
+            mdns_rejected.insert(ip);
+            None
+        }
+        Err(e) => {
+            eprintln!("btmqttd: rediscovery: {layer} repoint of {HOSTS_PATH} failed: {e}");
+            None
+        }
+    }
+}
+
+/// Propose a broker address discovered via the MQTT DNS-SD services (Layer B1), or `None`. Queries
+/// `_mqtt._tcp` + the TLS `_secure-mqtt._tcp`, keeps the advertised private-LAN IPv4s not already
+/// proposed this outage (in discovery order), and trust-gates them via [`gate_candidates`]. Without
+/// TLS and without a MAC it proposes nothing — same posture as `main`'s activation gate.
 async fn mdns_propose(
     cfg: &Config,
     tried: &HashSet<Ipv4Addr>,
@@ -439,6 +457,38 @@ async fn mdns_propose(
         .into_iter()
         .filter(|ip| ip.is_private() && !tried.contains(ip) && !mdns_rejected.contains(ip))
         .collect();
+    gate_candidates(cfg, candidates).await
+}
+
+/// Propose the broker via Home Assistant's mDNS host (Layer B2, issue #52), or `None`. Queries
+/// `_home-assistant._tcp` for the HA HOST IP(s), keeps the private-LAN ones not already proposed
+/// this outage, and trust-gates them against the CONFIGURED MQTT port via [`gate_candidates`] — so
+/// an HA host is proposed ONLY if a broker actually answers there (and, in plaintext, its ARP MAC
+/// matches the recorded broker MAC). HA's advertised frontend port is never used. Same no-anchor
+/// posture as `mdns_propose`.
+async fn ha_propose(
+    cfg: &Config,
+    tried: &HashSet<Ipv4Addr>,
+    mdns_rejected: &HashSet<Ipv4Addr>,
+) -> Option<Ipv4Addr> {
+    let candidates: Vec<Ipv4Addr> = mdns::discover_ha_hosts(MDNS_WINDOW)
+        .await
+        .into_iter()
+        .filter(|ip| ip.is_private() && !tried.contains(ip) && !mdns_rejected.contains(ip))
+        .collect();
+    gate_candidates(cfg, candidates).await
+}
+
+/// Trust-gate discovery `candidates` against the configured MQTT port and return the first that
+/// passes, in the given order (or `None`). Under TLS the port must be OPEN — the pinned-cert
+/// reconnect is then the real gate, and requiring an open port keeps a stale/unrelated answer from
+/// triggering a repoint that could starve the `/24` fallback on a chatty LAN. In plaintext the port
+/// must be open AND the host's `/proc/net/arp` MAC must match the recorded `MQTT_BROKER_MAC`.
+/// Without TLS and without a MAC, nothing is proposed. The port probe is BATCHED across all
+/// candidates in one concurrency-limited [`probe_open`] call, so many answers don't serialize into
+/// `N * PROBE_TIMEOUT` before the fallback (Copilot); in plaintext `/proc/net/arp` is read ONCE and
+/// each candidate compared via [`mac_matches`]. Shared by `mdns_propose` and `ha_propose`.
+async fn gate_candidates(cfg: &Config, candidates: Vec<Ipv4Addr>) -> Option<Ipv4Addr> {
     if candidates.is_empty() {
         return None;
     }
@@ -449,9 +499,9 @@ async fn mdns_propose(
         candidates.into_iter().find(|ip| open.contains(ip))
     } else if let Some(mac) = cfg.broker_mac {
         // Plaintext: batch the port probes once (to populate the ARP table for the open hosts),
-        // read /proc/net/arp once, then pick the first discovery-ordered candidate that is open
-        // AND whose ARP entry matches the recorded broker MAC — so many advertisers don't
-        // serialize into N * PROBE_TIMEOUT before the /24 fallback (Copilot).
+        // read /proc/net/arp once, then pick the first candidate that is open AND whose ARP entry
+        // matches the recorded broker MAC — so many advertisers don't serialize into
+        // N * PROBE_TIMEOUT before the /24 fallback (Copilot).
         let open: HashSet<Ipv4Addr> =
             probe_open(&candidates, cfg.mqtt_port).await.into_iter().collect();
         if open.is_empty() {
