@@ -28,6 +28,7 @@ mod dimension;
 mod gate;
 mod ha;
 mod keys;
+mod mdns;
 mod own;
 mod persist;
 mod receiver;
@@ -213,6 +214,19 @@ async fn run() -> Result<(), String> {
     let mut conn_failures: u32 = 0;
     let mut tried_ips: std::collections::HashSet<std::net::Ipv4Addr> =
         std::collections::HashSet::new();
+    // mDNS proposals refused this outage, kept SEPARATE from `tried_ips` so the per-pass scan
+    // re-arm (retire_scan_subnets) never re-arms them: a wrong mDNS broker INSIDE an anchor /24
+    // would otherwise be re-proposed every pass, resetting the dry-cycle bound forever (Codex P2).
+    // Only a ConnAck or the bounded full-reset clears it.
+    let mut mdns_rejected_ips: std::collections::HashSet<std::net::Ipv4Addr> =
+        std::collections::HashSet::new();
+    // How many consecutive rediscovery rounds have retired their /24 scan set without
+    // finding the broker (a "dry" cycle). After FULL_RESET_AFTER_DRY_CYCLES of these,
+    // `retire_scan_subnets` fully clears BOTH `tried` and `mdns_rejected_ips` (including
+    // cross-subnet mDNS rejections) — so recovery stays self-healing if a mDNS-advertised
+    // broker that was once (correctly) rejected later becomes reachable (Copilot). Reset on
+    // any connect.
+    let mut rediscover_dry_cycles: u32 = 0;
 
     // Persisted-IP boot restore (issue #49 item 1): the last connect-confirmed broker IP
     // is remembered on a writable, reboot-persistent partition. Seed /etc/hosts from it
@@ -247,6 +261,13 @@ async fn run() -> Result<(), String> {
 
     let mut last_persisted: Option<std::net::Ipv4Addr> = None;
     let mut persisted_on_disk = persisted_file_exists;
+    // The last address the broker was CONFIRMED at — a ConnAck this session, or a persisted
+    // learned IP we actually SEEDED at boot because it passed the trust gate. This anchors the
+    // fallback /24 scan (rediscover's `confirmed_anchor`). It is deliberately SEPARATE from
+    // `last_persisted`: the "MAC unconfirmed at boot" branch below sets `last_persisted` as a
+    // write-comparison baseline for a REJECTED (un-seeded) record, and that address must never
+    // become a scan anchor — doing so could sweep the wrong subnet (Codex P1 / Copilot).
+    let mut last_confirmed_ip: Option<std::net::Ipv4Addr> = None;
     if let (Some(build_ip), Some((base, learned))) = (build_ip, record) {
         // Apply the record only while its base still matches this firmware's build IP; a
         // mismatch means a re-flash re-pointed the broker and the record is stale (it will
@@ -268,12 +289,16 @@ async fn run() -> Result<(), String> {
                 match rediscovery::seed_hosts(&cfg.mqtt_host, learned).await {
                     Ok(true) => {
                         last_persisted = Some(learned);
+                        last_confirmed_ip = Some(learned); // seeded a trusted, previously-confirmed IP
                         eprintln!(
                             "btmqttd: seeded '{}' -> {learned} in {} from persisted state",
                             cfg.mqtt_host, rediscovery::HOSTS_PATH
                         );
                     }
-                    Ok(false) => last_persisted = Some(learned), // already mapped (respawn)
+                    Ok(false) => {
+                        last_persisted = Some(learned); // already mapped (respawn)
+                        last_confirmed_ip = Some(learned);
+                    }
                     Err(e) => eprintln!("btmqttd: could not seed persisted broker IP: {e}"),
                 }
             } else {
@@ -304,6 +329,8 @@ async fn run() -> Result<(), String> {
                         // that returns to a former address can be found again.
                         conn_failures = 0;
                         tried_ips.clear();
+                        mdns_rejected_ips.clear();
+                        rediscover_dry_cycles = 0;
                         // Persist the connect-confirmed broker IP (issue #49 item 1): this
                         // ConnAck means the current /etc/hosts mapping authenticated / passed
                         // the pinned-TLS handshake, so it is trustworthy to remember for the
@@ -315,9 +342,17 @@ async fn run() -> Result<(), String> {
                         // it, and lets us advance the in-memory change-gate ONLY after the write
                         // actually lands — so a briefly-unavailable partition is retried on the
                         // next ConnAck instead of being suppressed forever (Codex/Copilot).
-                        if let (Some(build_ip), Some(confirmed)) =
-                            (build_ip, rediscovery::current_broker_ip(&cfg.mqtt_host).await)
-                        {
+                        let confirmed_now = rediscovery::current_broker_ip(&cfg.mqtt_host).await;
+                        // This IP just authenticated: record it as the fallback-scan anchor
+                        // regardless of whether a build-time mapping is readable. Gating this on
+                        // `build_ip` (as the persistence block below is) would, when the boot
+                        // script has no broker line, leave the anchor unset — and rediscovery
+                        // would then fall back to the current /etc/hosts value, i.e. possibly an
+                        // unconfirmed mDNS proposal, the very drift the anchor prevents (CodeRabbit).
+                        if let Some(confirmed) = confirmed_now {
+                            last_confirmed_ip = Some(confirmed);
+                        }
+                        if let (Some(build_ip), Some(confirmed)) = (build_ip, confirmed_now) {
                             if confirmed == build_ip {
                                 // The broker is at (or has returned to) its build-time IP, which
                                 // the boot init re-seeds anyway. Forget any on-disk record —
@@ -505,7 +540,13 @@ async fn run() -> Result<(), String> {
                             tokio::select! {
                                 _ = sig_term.recv() => break,
                                 _ = sig_int.recv() => break,
-                                r = rediscovery::rediscover(&cfg, &mut tried_ips) => {
+                                // Anchor the fallback scan on the last CONFIRMED IP
+                                // (`last_confirmed_ip` — a ConnAck, or a trusted seeded persisted
+                                // IP; NEVER the MAC-rejected persistence baseline), so it follows
+                                // a confirmed cross-subnet move yet never latches onto an
+                                // unconfirmed mDNS proposal or a rejected record (Codex P1 /
+                                // Copilot). `None` ⇒ anchor on the build-time mapping.
+                                r = rediscovery::rediscover(&cfg, &mut tried_ips, &mut mdns_rejected_ips, last_confirmed_ip, &mut rediscover_dry_cycles) => {
                                     if let Some(ip) = r {
                                         eprintln!(
                                             "btmqttd: rediscovery: repointed '{}' -> {ip} in {}",
