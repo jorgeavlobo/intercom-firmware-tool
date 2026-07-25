@@ -222,7 +222,15 @@ namespace IntercomFirmwareTool.App
                         _discoveryCts?.Token ?? CancellationToken.None);
                     IReadOnlyList<BrokerCandidate> scan;
                     bool cancelled;
-                    try { scan = await _brokerDiscovery.ScanSubnetAsync(scanCts.Token); }
+                    // Offload the whole /24 sweep to a background thread. ScanSubnetAsync uses
+                    // ConfigureAwait(false) internally, but its SYNCHRONOUS prologue — enumerating
+                    // the LAN interfaces and fanning out ~2000 probe tasks — plus any probe whose
+                    // connect completes synchronously would otherwise run on THIS (UI/dispatcher)
+                    // thread, since we're awaiting it directly from a UI-thread method. That burst
+                    // froze scrolling for the duration of the scan. Task.Run pushes all of it to the
+                    // thread pool; the await below still resumes on the UI thread, so the rest of
+                    // this method keeps its single-threaded (lock-free) invariant.
+                    try { scan = await Task.Run(() => _brokerDiscovery.ScanSubnetAsync(scanCts.Token)); }
                     catch { scan = System.Array.Empty<BrokerCandidate>(); }
                     finally
                     {
