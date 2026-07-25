@@ -106,8 +106,10 @@ pub fn is_unreachable(e: &rumqttc::ConnectionError) -> bool {
 }
 
 /// Attempt one rediscovery pass: propose a new IP for the broker name and repoint its
-/// `/etc/hosts` line to it, returning the proposed IP. `None` means nothing was done
-/// (broker not name-mapped, no open/trusted candidate this pass, or the rewrite failed).
+/// `/etc/hosts` line to it — appending a mapping if none exists (the mDNS-first path can
+/// repoint even when the name was never mapped), returning the proposed IP. `None` means
+/// nothing was done this pass: no open/trusted candidate from either mDNS or the `/24`
+/// scan, no scannable private-LAN anchor for the scan fallback, or the hosts rewrite failed.
 ///
 /// Two exclusion sets track what has already been proposed this outage so proposals don't
 /// oscillate between open-but-wrong hosts. `tried` holds the fallback SCAN's picks (plus the
