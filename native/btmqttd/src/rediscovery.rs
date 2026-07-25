@@ -147,7 +147,12 @@ pub async fn rediscover(
         match seed_hosts(&cfg.mqtt_host, ip).await {
             Ok(true) => {
                 mdns_rejected.insert(ip);
-                *dry_cycles = 0; // productive pass — reset the dry-cycle self-heal counter
+                // Deliberately do NOT reset `dry_cycles` here: a hosts rewrite is only a PROPOSAL,
+                // not a confirmation — the reconnect may still fail the trust gate. Resetting on
+                // every unconfirmed proposal would let two-or-more spurious open hosts in the
+                // anchor /24 alternate forever, so `dry_cycles` would never reach the bound and
+                // the mDNS-rejection full-reset would never fire (Codex P2). Only a ConnAck (in
+                // `main`) resets the counter.
                 eprintln!(
                     "btmqttd: rediscovery: mDNS repointed '{}' -> {ip} in {HOSTS_PATH}",
                     cfg.mqtt_host
@@ -312,7 +317,10 @@ pub async fn rediscover(
     match tokio::task::spawn_blocking(move || write_hosts_blocking(&rewritten)).await {
         Ok(Ok(())) => {
             tried.insert(pick);
-            *dry_cycles = 0; // productive pass — reset the dry-cycle self-heal counter
+            // As in the mDNS branch above, do NOT reset `dry_cycles` on a scan proposal: a rewrite
+            // is not a confirmation, so resetting here would defeat the bound when several
+            // non-broker hosts answer on the port and get picked in turn (Codex P2). Only a
+            // ConnAck resets it.
             Some(pick)
         }
         Ok(Err(e)) => {
@@ -593,10 +601,15 @@ const FULL_RESET_AFTER_DRY_CYCLES: u32 = 4;
 ///
 /// But holding a rejection for the WHOLE outage isn't self-healing either: if the real broker
 /// later takes over that IP (DHCP reassignment / restart) mid-outage, it would stay excluded
-/// (Copilot). So after `FULL_RESET_AFTER_DRY_CYCLES` consecutive fruitless passes (`dry_cycles`,
-/// reset by the caller whenever a candidate is adopted or on a ConnAck) it does a FULL clear of
-/// BOTH sets — giving every rejected address another chance, on a bounded cadence that keeps the
-/// anti-oscillation guarantee. The trust gate still guards every adoption regardless.
+/// (Copilot). So after `FULL_RESET_AFTER_DRY_CYCLES` consecutive fruitless passes it does a FULL
+/// clear of BOTH sets — giving every rejected address another chance, on a bounded cadence that
+/// keeps the anti-oscillation guarantee. The trust gate still guards every adoption regardless.
+///
+/// `dry_cycles` counts consecutive fruitless passes and is reset to 0 ONLY here (on the full
+/// clear) and by `main` on a ConnAck. It is deliberately NOT reset when `rediscover` merely
+/// PROPOSES an address (an mDNS repoint or a scan pick): a hosts rewrite is not a confirmation,
+/// and resetting on unconfirmed proposals would let two-or-more spurious open hosts in the /24
+/// alternate forever without the counter ever reaching the bound (Codex P2).
 fn retire_scan_subnets(
     anchors: &[Ipv4Addr],
     tried: &mut HashSet<Ipv4Addr>,
