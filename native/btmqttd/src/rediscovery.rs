@@ -137,13 +137,19 @@ pub async fn rediscover(
     // usable address, repoint and return; otherwise fall through to the subnet scan.
     if let Some(ip) = mdns_propose(cfg, tried).await {
         match seed_hosts(&cfg.mqtt_host, ip).await {
-            Ok(_) => {
+            Ok(true) => {
                 tried.insert(ip);
                 eprintln!(
                     "btmqttd: rediscovery: mDNS repointed '{}' -> {ip} in {HOSTS_PATH}",
                     cfg.mqtt_host
                 );
                 return Some(ip);
+            }
+            // Already mapped to `ip` — i.e. the address currently failing. Nothing was
+            // rewritten, so don't claim a repoint or skip the scan: retire it and fall through
+            // to the subnet sweep (CodeRabbit).
+            Ok(false) => {
+                tried.insert(ip);
             }
             Err(e) => eprintln!("btmqttd: rediscovery: mDNS repoint of {HOSTS_PATH} failed: {e}"),
         }

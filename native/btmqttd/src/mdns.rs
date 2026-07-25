@@ -52,6 +52,13 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
 
         let deadline = tokio::time::sleep(window);
         tokio::pin!(deadline);
+        // Retransmit the query ONCE partway through the window: a single UDP probe lost on
+        // Wi-Fi would otherwise yield no candidates and push the caller into a full /24 sweep
+        // (RFC 6762 §5.2 querier behaviour retransmits). One extra datagram, same window
+        // (CodeRabbit).
+        let retry = tokio::time::sleep(window / 2);
+        tokio::pin!(retry);
+        let mut retried = false;
         // RFC 6762 §17 caps an mDNS message (incl. IP+UDP headers) at 9000 bytes; a smaller
         // buffer would let the kernel silently TRUNCATE a large datagram (many additional
         // records on a chatty LAN), and the bounds-checked parser would then bail early and
@@ -60,6 +67,10 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
         loop {
             tokio::select! {
                 _ = &mut deadline => break,
+                _ = &mut retry, if !retried => {
+                    retried = true;
+                    let _ = sock.send_to(&query, (MDNS_GROUP, MDNS_PORT)).await;
+                }
                 r = sock.recv_from(&mut buf) => match r {
                     Ok((n, _)) => parse_response(&buf[..n], &mut ptr, &mut srv, &mut a),
                     Err(_) => break,

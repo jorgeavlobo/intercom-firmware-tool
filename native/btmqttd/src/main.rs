@@ -327,12 +327,17 @@ async fn run() -> Result<(), String> {
                         // it, and lets us advance the in-memory change-gate ONLY after the write
                         // actually lands — so a briefly-unavailable partition is retried on the
                         // next ConnAck instead of being suppressed forever (Codex/Copilot).
-                        if let (Some(build_ip), Some(confirmed)) =
-                            (build_ip, rediscovery::current_broker_ip(&cfg.mqtt_host).await)
-                        {
-                            // This IP just authenticated: it is the anchor for any later
-                            // fallback scan (build-time or a rediscovered subnet, uniformly).
+                        let confirmed_now = rediscovery::current_broker_ip(&cfg.mqtt_host).await;
+                        // This IP just authenticated: record it as the fallback-scan anchor
+                        // regardless of whether a build-time mapping is readable. Gating this on
+                        // `build_ip` (as the persistence block below is) would, when the boot
+                        // script has no broker line, leave the anchor unset — and rediscovery
+                        // would then fall back to the current /etc/hosts value, i.e. possibly an
+                        // unconfirmed mDNS proposal, the very drift the anchor prevents (CodeRabbit).
+                        if let Some(confirmed) = confirmed_now {
                             last_confirmed_ip = Some(confirmed);
+                        }
+                        if let (Some(build_ip), Some(confirmed)) = (build_ip, confirmed_now) {
                             if confirmed == build_ip {
                                 // The broker is at (or has returned to) its build-time IP, which
                                 // the boot init re-seeds anyway. Forget any on-disk record —
