@@ -415,6 +415,8 @@ Key: {1}</value></data>
   <data name="MqttDiscovering" xml:space="preserve"><value>Searching the network for a broker…</value></data>
   <data name="Fmt_MqttDiscovered" xml:space="preserve"><value>Found a broker on the network: {0} — pre-filled below.</value></data>
   <data name="Fmt_MqttDiscoveredTls" xml:space="preserve"><value>Found a TLS broker on the network: {0} (port {1}) — enter it and select its CA certificate.</value></data>
+  <data name="Fmt_MqttDiscoveredViaHa" xml:space="preserve"><value>Found a broker on the Home Assistant host: {0} — pre-filled below (verify it).</value></data>
+  <data name="Fmt_MqttDiscoveredViaHaTls" xml:space="preserve"><value>Found a TLS broker on the Home Assistant host: {0} (port {1}) — enter it and select its CA certificate.</value></data>
   <data name="Fmt_MqttAnchorMac" xml:space="preserve"><value>Broker MAC {0} captured ({1}). Rediscovery can now recover this broker even without TLS.</value></data>
   <data name="Fmt_MqttAnchorHostname" xml:space="preserve"><value>Broker MAC {0} captured ({1}). {1} resolves to “{2}” — enter that hostname above so rediscovery can recover the broker (it repoints a hostname, not a bare IP).</value></data>
   <data name="Fmt_MqttAnchorIpOnly" xml:space="preserve"><value>Broker MAC {0} captured ({1}), but this broker is set by IP. Rediscovery repoints a hostname, so enter the broker as a hostname for it to take effect.</value></data>
