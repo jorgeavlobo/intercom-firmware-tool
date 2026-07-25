@@ -222,7 +222,20 @@ namespace IntercomFirmwareTool.App
                         _discoveryCts?.Token ?? CancellationToken.None);
                     IReadOnlyList<BrokerCandidate> scan;
                     bool cancelled;
-                    try { scan = await _brokerDiscovery.ScanSubnetAsync(scanCts.Token); }
+                    // Offload the whole /24 sweep to a background thread. ScanSubnetAsync uses
+                    // ConfigureAwait(false) internally, but its SYNCHRONOUS prologue — enumerating
+                    // the LAN interfaces and starting the bounded parallel probe loop — plus any
+                    // probe whose connect completes synchronously would otherwise run on THIS
+                    // (UI/dispatcher) thread, since we're awaiting it directly from a UI-thread
+                    // method. That froze scrolling for the duration of the scan. Task.Run pushes all
+                    // of it to the thread pool; the await below still resumes on the UI thread, so the
+                    // rest of this method keeps its single-threaded (lock-free) invariant.
+                    // scanCts.Token is passed to Task.Run too so that if the scan is ALREADY
+                    // cancelled when we get here (bridge toggled off / window closing before the work
+                    // is queued), the delegate is never scheduled — cancellation surfaces at once
+                    // instead of running the prologue only to observe the cancelled token inside
+                    // ScanSubnetAsync. Early-stop uses a separate child CTS, so it never trips this.
+                    try { scan = await Task.Run(() => _brokerDiscovery.ScanSubnetAsync(scanCts.Token), scanCts.Token); }
                     catch { scan = System.Array.Empty<BrokerCandidate>(); }
                     finally
                     {
