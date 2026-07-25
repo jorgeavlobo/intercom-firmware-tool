@@ -390,32 +390,42 @@ pub async fn seed_hosts(name: &str, ip: Ipv4Addr) -> std::io::Result<bool> {
 const MDNS_WINDOW: Duration = Duration::from_secs(2);
 
 /// Propose a broker address discovered via mDNS (Layer B), or `None`. Queries
-/// `_mqtt._tcp.local`, then returns the first advertised IPv4 that is a private LAN address,
-/// not already tried this outage, and passes the trust gate: under TLS the broker PORT must
-/// be open (probed here, mirroring the scan — the pinned-cert reconnect is then the real trust
-/// gate); in plaintext it must match the recorded `MQTT_BROKER_MAC` in the ARP table (via
-/// [`arp_mac_matches`], which itself probes the port). Requiring an open port under TLS keeps
-/// a stale/unrelated mDNS answer from triggering a repoint, which on a chatty LAN could
-/// otherwise keep starving the `/24` fallback (Copilot). Without TLS and without a MAC, mDNS
-/// proposes nothing — same posture as `main`'s activation gate.
+/// `_mqtt._tcp.local`, keeps the advertised IPv4s that are private LAN addresses and not already
+/// tried this outage (in discovery order), and applies the trust gate: under TLS the broker PORT
+/// must be open (the pinned-cert reconnect is then the real trust gate); in plaintext it must
+/// match the recorded `MQTT_BROKER_MAC` in the ARP table (via [`arp_mac_matches`], which itself
+/// probes the port). Requiring an open port under TLS keeps a stale/unrelated mDNS answer from
+/// triggering a repoint, which on a chatty LAN could otherwise keep starving the `/24` fallback.
+/// The TLS port probe is BATCHED across all candidates in one concurrency-limited [`probe_open`]
+/// call, so many mDNS answers don't serialize into `N * PROBE_TIMEOUT` before the fallback
+/// (Copilot); the first OPEN candidate in discovery order wins. Without TLS and without a MAC,
+/// mDNS proposes nothing — same posture as `main`'s activation gate.
 async fn mdns_propose(cfg: &Config, tried: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
-    for ip in mdns::discover_ips(MDNS_WINDOW).await {
-        if tried.contains(&ip) || !ip.is_private() {
-            continue;
-        }
-        let trusted = if cfg.uses_tls() {
-            let one = [ip];
-            !probe_open(&one, cfg.mqtt_port).await.is_empty()
-        } else if let Some(mac) = cfg.broker_mac {
-            arp_mac_matches(ip, cfg.mqtt_port, mac).await
-        } else {
-            false
-        };
-        if trusted {
-            return Some(ip);
-        }
+    let candidates: Vec<Ipv4Addr> = mdns::discover_ips(MDNS_WINDOW)
+        .await
+        .into_iter()
+        .filter(|ip| ip.is_private() && !tried.contains(ip))
+        .collect();
+    if candidates.is_empty() {
+        return None;
     }
-    None
+    if cfg.uses_tls() {
+        // One batched probe across every candidate, then the first that answered, in order.
+        let open: HashSet<Ipv4Addr> =
+            probe_open(&candidates, cfg.mqtt_port).await.into_iter().collect();
+        candidates.into_iter().find(|ip| open.contains(ip))
+    } else if let Some(mac) = cfg.broker_mac {
+        // Plaintext: each candidate must match the recorded broker MAC (arp_mac_matches probes
+        // the port to populate the ARP entry, then checks it) — kept per-IP.
+        for ip in candidates {
+            if arp_mac_matches(ip, cfg.mqtt_port, mac).await {
+                return Some(ip);
+            }
+        }
+        None
+    } else {
+        None // no TLS and no MAC → propose nothing
+    }
 }
 
 /// TCP-connect-probe `port` on each candidate, returning those that accept. Batched to
