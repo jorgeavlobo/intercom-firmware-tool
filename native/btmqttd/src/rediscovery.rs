@@ -213,8 +213,7 @@ pub async fn rediscover(
     }
 
     // Candidates: the UNION of every anchor's /24 (deduped), minus every address already
-    // proposed this outage. Exhausting them clears `tried` so the next pass re-scans from
-    // scratch (incl. former anchors) instead of giving up.
+    // proposed this outage. Exhausting them re-arms the next pass (see `retire_scan_subnets`).
     let mut seen: HashSet<Ipv4Addr> = HashSet::new();
     let candidates: Vec<Ipv4Addr> = anchors
         .iter()
@@ -222,7 +221,7 @@ pub async fn rediscover(
         .filter(|ip| seen.insert(*ip) && !tried.contains(ip))
         .collect();
     if candidates.is_empty() {
-        tried.clear();
+        retire_scan_subnets(&anchors, tried);
         return None;
     }
 
@@ -246,12 +245,10 @@ pub async fn rediscover(
             "btmqttd: rediscovery: no untried host in {scanned} has port {} open",
             cfg.mqtt_port
         );
-        // No OPEN untried host this pass — the monotonic memory is now useless (there is
-        // nothing left to propose), and keeping former anchors/candidates retired would
-        // strand us on the wrong mapping if the real broker later returns on one of them
-        // during the same outage. Clear it so the next pass re-probes the whole /24,
-        // including previously-tried addresses (Codex P2).
-        tried.clear();
+        // No OPEN untried host this pass — re-arm the scanned /24(s) so the next pass re-probes
+        // them (incl. former anchors) in case the real broker returns there, WITHOUT forgetting
+        // cross-subnet mDNS proposals already rejected this outage (Codex P2).
+        retire_scan_subnets(&anchors, tried);
         return None;
     }
 
@@ -291,11 +288,9 @@ pub async fn rediscover(
                  (plaintext config needs a MAC match to adopt)"
             );
             // Every open host was untrusted (MAC-mismatched). Like the no-open-host case,
-            // the monotonic memory is now useless — a stray mismatched host staying open
-            // would otherwise keep former anchors retired forever, stranding us if the
-            // real broker returns to one of them. Clear so the next pass re-probes the
-            // whole /24 (Codex P2); the MAC gate still guards adoption.
-            tried.clear();
+            // re-arm the scanned /24(s) for the next pass (the MAC gate still guards adoption)
+            // without forgetting cross-subnet mDNS proposals already rejected (Codex P2).
+            retire_scan_subnets(&anchors, tried);
             return None;
         }
     };
@@ -544,6 +539,22 @@ fn slash24_candidates(anchor: Ipv4Addr) -> Vec<Ipv4Addr> {
         .collect()
 }
 
+/// Re-arm the fallback scan: drop just the scanned `/24` addresses from `tried` so the next pass
+/// re-probes those subnets from scratch (a broker may return to a former address), WITHOUT
+/// forgetting mDNS proposals already rejected this outage. Those proposals may be cross-subnet
+/// (outside every anchor's `/24`); a blanket `tried.clear()` would un-retire them and let the
+/// mDNS layer re-propose the same wrong broker every time the scan resets, so discovery could
+/// oscillate instead of advancing (Codex). `tried` is still fully cleared by the caller on a
+/// successful ConnAck. An in-`/24` mDNS proposal is also a scan candidate, so re-probing it here
+/// is harmless (the trust gate still guards adoption).
+fn retire_scan_subnets(anchors: &[Ipv4Addr], tried: &mut HashSet<Ipv4Addr>) {
+    for a in anchors {
+        for ip in slash24_candidates(*a) {
+            tried.remove(&ip);
+        }
+    }
+}
+
 /// Parse `/proc/net/arp` into `(ip, mac)` pairs, skipping the header and any row whose
 /// MAC is all-zero (an incomplete/unresolved entry).
 fn parse_proc_net_arp(text: &str) -> Vec<(Ipv4Addr, [u8; 6])> {
@@ -782,6 +793,21 @@ mod tests {
         assert!(candidates.contains(&Ipv4Addr::new(192, 168, 50, 1)));
         assert!(candidates.contains(&Ipv4Addr::new(10, 0, 0, 254)));
         assert_eq!(candidates.len(), 254 + 254); // two disjoint /24s
+    }
+
+    #[test]
+    fn retire_scan_subnets_keeps_cross_subnet_mdns_rejections() {
+        // A wrong mDNS broker rejected this outage sits in ANOTHER /24; a scan reset must keep it
+        // retired (so mDNS won't re-propose it) while re-arming the scanned /24 addresses (Codex).
+        let anchor = Ipv4Addr::new(192, 168, 50, 64);
+        let mut tried = HashSet::new();
+        tried.insert(Ipv4Addr::new(192, 168, 50, 64)); // in-/24 (scan) address
+        tried.insert(Ipv4Addr::new(192, 168, 50, 9)); // another in-/24 address
+        tried.insert(Ipv4Addr::new(10, 0, 0, 7)); // cross-subnet mDNS rejection
+        retire_scan_subnets(&[anchor], &mut tried);
+        assert!(!tried.contains(&Ipv4Addr::new(192, 168, 50, 64))); // re-armed
+        assert!(!tried.contains(&Ipv4Addr::new(192, 168, 50, 9))); // re-armed
+        assert!(tried.contains(&Ipv4Addr::new(10, 0, 0, 7))); // mDNS rejection preserved
     }
 
     #[test]
