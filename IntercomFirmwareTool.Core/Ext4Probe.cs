@@ -1168,7 +1168,7 @@ namespace IntercomFirmwareTool.Core
             char[] seps = { ' ', '\t', '\r', '"', '\'', '=' };
             foreach (string raw in body.Split('\n'))
             {
-                string active = raw.Split('#', 2)[0];
+                string active = StripShellComment(raw);
                 string[] tokens = active.Split(seps, StringSplitOptions.RemoveEmptyEntries);
                 for (int i = 0; i < tokens.Length; i++)
                 {
@@ -1178,6 +1178,29 @@ namespace IntercomFirmwareTool.Core
                 }
             }
             return false;
+        }
+
+        /// <summary>
+        /// Returns <paramref name="line"/> with any trailing shell comment removed. A
+        /// <c>#</c> starts a comment ONLY when it is unquoted AND begins a word (at the
+        /// line start or after whitespace) — the actual shell rule. So a <c>#</c> inside
+        /// quotes (e.g. a key path <c>"…host_key#old"</c>, Codex) or in the middle of a
+        /// word is kept as data, not mistaken for a comment; otherwise the check could
+        /// truncate a DIFFERENT key's path down to ours and wrongly skip the patch.
+        /// </summary>
+        private static string StripShellComment(string line)
+        {
+            bool inSingle = false, inDouble = false;
+            for (int i = 0; i < line.Length; i++)
+            {
+                char c = line[i];
+                if (c == '\'' && !inDouble) inSingle = !inSingle;
+                else if (c == '"' && !inSingle) inDouble = !inDouble;
+                else if (c == '#' && !inSingle && !inDouble
+                         && (i == 0 || char.IsWhiteSpace(line[i - 1])))
+                    return line.Substring(0, i);
+            }
+            return line;
         }
 
         private static void EnsureDir(ExtFileSystem fs, string path)
