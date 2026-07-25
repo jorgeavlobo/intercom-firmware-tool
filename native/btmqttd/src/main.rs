@@ -254,7 +254,23 @@ async fn run() -> Result<(), String> {
     };
     let (persisted_file_exists, record) = if rediscovery_active {
         let host = cfg.mqtt_host.clone();
-        tokio::task::spawn_blocking(move || persist::read_state(&host)).await.unwrap_or((false, None))
+        match tokio::task::spawn_blocking(move || persist::read_state(&host)).await {
+            Ok(state) => state,
+            // A JoinError here means the read_state task did NOT complete — it panicked or was
+            // cancelled/aborted. Surface it (it's diagnosable), then fall back conservatively:
+            // `record = None` (we have no valid learned IP to seed), but `persisted_file_exists =
+            // true` — we DON'T know whether the file is there, so assume it MIGHT be, so a later
+            // build-IP ConnAck can still run `persist::clear()` and drop a possibly-stale record
+            // (clear is safe/idempotent when the file is absent). Reporting "absent" (false) could
+            // instead strand a stale record on disk (Copilot).
+            Err(e) => {
+                eprintln!(
+                    "btmqttd: persist: read_state task did not complete ({e}); treating the record \
+                     as unreadable-but-possibly-present"
+                );
+                (true, None)
+            }
+        }
     } else {
         (false, None)
     };

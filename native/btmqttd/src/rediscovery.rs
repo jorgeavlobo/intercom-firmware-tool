@@ -36,13 +36,25 @@
 //! bridge attach to an unauthenticated or mismatched broker.
 //!
 //! Scope of this module: opt-in (`MQTT_REDISCOVERY`, off by default) and only when the broker
-//! is a name. A rediscovery pass now tries `mdns.rs` FIRST (issue #49 item 2 — the broker's
-//! advertised `_mqtt._tcp` address, found by name across the link) and falls back to the
-//! same-subnet (`/24`) scan. A learned address is also persisted across a reboot (issue #49
-//! item 1): `persist.rs` remembers the connect-confirmed IP on the writable `cfg/extra`
-//! partition and `main` seeds `/etc/hosts` from it at startup, so a reboot after the broker
-//! moved reconnects immediately instead of re-scanning. Cross-subnet + port fallback (1883 ↔
-//! 8883) remain follow-ups (#49 item 3).
+//! is a name. A rediscovery pass tries `mdns.rs` FIRST (issue #49 item 2 — the broker's advertised
+//! `_mqtt._tcp` / `_secure-mqtt._tcp` address, found by name across the link), then the Home
+//! Assistant host fallback (issue #52 — probe the broker port on a discovered HA host), then the
+//! anchor-`/24` scan (a sweep of the confirmed and/or build-time subnet(s)). A learned address is
+//! also persisted across a reboot (issue #49 item 1): `persist.rs` remembers the connect-confirmed
+//! IP on the writable `cfg/extra` partition and `main` seeds `/etc/hosts` from it at startup, so a
+//! reboot after the broker moved reconnects immediately instead of re-scanning.
+//!
+//! Deliberately OUT of scope (issue #49 item 3): a move to a different `/24` **on the same L2 link**
+//! is recovered ONLY while the broker stays mDNS-discoverable — it still advertises
+//! `_mqtt._tcp`/`_secure-mqtt._tcp`, or it runs on an mDNS-discoverable Home Assistant host — because
+//! link-local multicast (`224.0.0.251`) reaches the whole link, not just one `/24`. With no such
+//! advertisement both mDNS layers propose nothing and the fallback scan sweeps only the confirmed /
+//! build-time `/24`s, so a cross-`/24` move to a plain, unadvertised host is NOT recovered (Codex).
+//! A move to a **routed** subnet/VLAN is never recovered: mDNS multicast doesn't cross a router
+//! without an external reflector. And a **port/transport**
+//! move (1883 ↔ 8883, i.e. plaintext ↔ TLS) is a reconfiguration the user re-runs the tool for, NOT
+//! a rediscovery — the client's port/transport is fixed for the process's life, so rediscovery only
+//! recovers an **IP move on the same port/transport** (see the scan's port comment below).
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -262,7 +274,15 @@ pub async fn rediscover(
         nets.join(", ")
     };
 
-    // Probe the broker port across the subnet(s); only open hosts advance.
+    // Probe the broker port across the subnet(s); only open hosts advance. We probe ONLY the
+    // configured port: a port fallback (1883↔8883) is not recoverable here, because the client's
+    // MqttOptions is fixed at cfg.mqtt_port for the process's life — repointing to a host that only
+    // serves the OTHER port would just make the reconnect dial the closed configured port and cycle
+    // forever (Codex). And 1883↔8883 is plaintext↔TLS, a transport/security change (needs a CA, or
+    // is a downgrade) — a reconfiguration the user re-runs the tool for, NOT a rediscovery. A broker
+    // that moved to a different port/transport is out of scope; an IP move on the same port is what
+    // rediscovery recovers. (A move to a different /24 ON THE SAME L2 LINK is handled by the mDNS
+    // layers above; a ROUTED cross-subnet move is unsupported — #49 item 3.)
     let open = probe_open(&candidates, cfg.mqtt_port).await;
     if open.is_empty() {
         eprintln!(
