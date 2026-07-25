@@ -60,12 +60,14 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
     correlate(&ptr, &srv, &a)
 }
 
-/// A UDP socket for the exchange: preferably bound to 5353 and joined to the group (so it
-/// receives BOTH multicast responses — the common case — and unicast QU replies); falls back
-/// to an ephemeral port (QU-only) when 5353 can't be bound (a system mDNS responder holds it).
-/// TTL 255 per RFC 6762 §11.
+/// A UDP socket for the exchange: preferably bound to 5353 (with address/port reuse) and joined
+/// to the group, so it receives BOTH multicast responses — the common case — and unicast QU
+/// replies. Reuse (`SO_REUSEADDR` + `SO_REUSEPORT`) lets us co-bind 5353 alongside a system mDNS
+/// responder (e.g. Avahi) that already holds it, so we still catch responders that IGNORE the QU
+/// bit and only ever multicast their answer (Copilot). If the reuse bind can't be set up at all,
+/// fall back to an ephemeral port (QU-only). TTL 255 per RFC 6762 §11.
 async fn open_socket() -> std::io::Result<UdpSocket> {
-    match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, MDNS_PORT)).await {
+    match bind_reuse(MDNS_PORT) {
         Ok(sock) => {
             let _ = sock.join_multicast_v4(MDNS_GROUP, Ipv4Addr::UNSPECIFIED);
             let _ = sock.set_multicast_ttl_v4(255);
@@ -76,6 +78,53 @@ async fn open_socket() -> std::io::Result<UdpSocket> {
             let _ = sock.set_multicast_ttl_v4(255);
             Ok(sock)
         }
+    }
+}
+
+/// Bind a non-blocking UDP socket to `0.0.0.0:port` with `SO_REUSEADDR` + `SO_REUSEPORT` set
+/// BEFORE the bind (std's `UdpSocket` offers no reuse setter, and the crate already depends on
+/// `libc` — used for `chown` in `receiver.rs` — so no new crate is pulled). Returns a tokio
+/// socket registered on the current reactor; call from within the runtime.
+fn bind_reuse(port: u16) -> std::io::Result<UdpSocket> {
+    use std::os::fd::FromRawFd;
+    let err = std::io::Error::last_os_error;
+    // SAFETY: standard socket syscalls. The raw fd is wrapped in an owning std `UdpSocket`
+    // immediately, so every early return closes it via `Drop` — the fd is never leaked.
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        if fd < 0 {
+            return Err(err());
+        }
+        let std_sock = std::net::UdpSocket::from_raw_fd(fd);
+        let on: libc::c_int = 1;
+        for opt in [libc::SO_REUSEADDR, libc::SO_REUSEPORT] {
+            if libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                opt,
+                std::ptr::addr_of!(on).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            ) != 0
+            {
+                return Err(err());
+            }
+        }
+        let addr = libc::sockaddr_in {
+            sin_family: libc::AF_INET as libc::sa_family_t,
+            sin_port: port.to_be(),
+            sin_addr: libc::in_addr { s_addr: 0 }, // INADDR_ANY
+            ..std::mem::zeroed()
+        };
+        if libc::bind(
+            fd,
+            std::ptr::addr_of!(addr).cast(),
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        ) != 0
+        {
+            return Err(err());
+        }
+        std_sock.set_nonblocking(true)?;
+        UdpSocket::from_std(std_sock)
     }
 }
 
@@ -383,6 +432,15 @@ mod tests {
         assert_eq!(read_name(&b, &mut pos), "broker.local");
         // pos advanced past the 2-byte pointer, not into the target.
         assert_eq!(pos, b.len());
+    }
+
+    #[tokio::test]
+    async fn bind_reuse_produces_a_usable_socket() {
+        // Exercise the raw-libc reuse path at runtime (port 0 → kernel-assigned, so it never
+        // clashes with a real mDNS responder). Confirms the sockaddr/setsockopt calls are valid.
+        let sock = bind_reuse(0).expect("reuse bind should succeed");
+        let addr = sock.local_addr().expect("bound socket has a local address");
+        assert!(addr.port() != 0); // the kernel assigned a concrete port
     }
 
     #[test]

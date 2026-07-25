@@ -193,13 +193,18 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
         );
         return None;
     }
-    // Retire the CURRENT mapping for the rest of this outage: without this, once we
-    // repoint A -> B, the next pass (anchor now B) would find A eligible again and could
-    // bounce back to an address already shown unusable this outage (CodeRabbit). Proposals
-    // stay monotonic; the memory is cleared only on a successful ConnAck (caller) or when
-    // the whole /24 is exhausted below — so a broker returning to a former address is
-    // still eventually found.
-    tried.insert(anchor);
+    // Retire the CURRENT (stale) mapping — the address the broker is pinned to now, and that
+    // just failed — for the rest of this outage, so a repoint can't bounce back to it. Do NOT
+    // retire the build-time anchor itself: when /etc/hosts currently points at a learned (or
+    // mDNS-proposed) address and the broker later returns to its build-time IP, that IP must
+    // stay probeable in the /24 scan, so the anchor is only the SUBNET selector here — the
+    // address exclusion rides on `tried` (Codex). A current mapping outside the anchor's /24
+    // (a prior cross-subnet repoint) simply doesn't intersect the candidates, so retiring it
+    // is then a harmless no-op. Proposals stay monotonic; `tried` is cleared only on a
+    // successful ConnAck (caller) or when the whole /24 is exhausted below.
+    if let Some(current) = parse_hosts_ip(&hosts, &cfg.mqtt_host) {
+        tried.insert(current);
+    }
 
     // Candidates: the anchor's /24, minus every address already proposed this outage.
     // Exhausting the subnet clears `tried` so the next pass re-scans from scratch (incl.
@@ -365,18 +370,20 @@ const MDNS_WINDOW: Duration = Duration::from_secs(2);
 
 /// Propose a broker address discovered via mDNS (Layer B), or `None`. Queries
 /// `_mqtt._tcp.local`, then returns the first advertised IPv4 that is a private LAN address,
-/// not already tried this outage, and passes the trust gate: under TLS any such address is
-/// fine (the reconnect validates the pinned cert); in plaintext it must additionally match
-/// the recorded `MQTT_BROKER_MAC` in the ARP table (probed via [`arp_mac_matches`], exactly
-/// as the scan gates a plaintext adoption). Without TLS and without a MAC, mDNS proposes
-/// nothing — same posture as `main`'s activation gate.
+/// not already tried this outage, and passes the trust gate: under TLS the broker PORT must
+/// be open (probed here, mirroring the scan — the pinned-cert reconnect is then the real trust
+/// gate); in plaintext it must match the recorded `MQTT_BROKER_MAC` in the ARP table (via
+/// [`arp_mac_matches`], which itself probes the port). Requiring an open port under TLS keeps
+/// a stale/unrelated mDNS answer from triggering a repoint, which on a chatty LAN could
+/// otherwise keep starving the `/24` fallback (Copilot). Without TLS and without a MAC, mDNS
+/// proposes nothing — same posture as `main`'s activation gate.
 async fn mdns_propose(cfg: &Config, tried: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
     for ip in mdns::discover_ips(MDNS_WINDOW).await {
         if tried.contains(&ip) || !ip.is_private() {
             continue;
         }
         let trusted = if cfg.uses_tls() {
-            true
+            !probe_open(&[ip], cfg.mqtt_port).await.is_empty()
         } else if let Some(mac) = cfg.broker_mac {
             arp_mac_matches(ip, cfg.mqtt_port, mac).await
         } else {
@@ -492,13 +499,15 @@ fn anchor_is_scannable(anchor: Ipv4Addr) -> bool {
     anchor.is_private()
 }
 
-/// Every host address in `anchor`'s `/24` except the network (.0), broadcast (.255)
-/// and the anchor itself — i.e. the addresses worth probing for the moved broker.
+/// Every host address (`.1`–`.254`) in `anchor`'s `/24` — the addresses worth probing for
+/// the moved broker. The network (`.0`) and broadcast (`.255`) fall outside the range. The
+/// anchor address itself is deliberately NOT excluded: with the anchor fixed to the immutable
+/// build-time IP, that address must stay probeable so a broker that RETURNED to it is found
+/// (Codex); the caller excludes the current stale mapping via `tried` instead.
 fn slash24_candidates(anchor: Ipv4Addr) -> Vec<Ipv4Addr> {
     let o = anchor.octets();
     (1u8..=254)
         .map(|h| Ipv4Addr::new(o[0], o[1], o[2], h))
-        .filter(|ip| *ip != anchor)
         .collect()
 }
 
@@ -674,15 +683,47 @@ mod tests {
     }
 
     #[test]
-    fn slash24_candidates_excludes_network_broadcast_and_anchor() {
+    fn slash24_candidates_covers_the_whole_24_including_the_anchor() {
+        // The anchor (build-time IP) is NOT excluded: a broker that returned to it must be
+        // probeable; the caller drops the current stale mapping via `tried` (Codex).
         let c = slash24_candidates(Ipv4Addr::new(192, 168, 50, 64));
-        assert_eq!(c.len(), 253); // 1..=254 minus the anchor
-        assert!(!c.contains(&Ipv4Addr::new(192, 168, 50, 0)));
-        assert!(!c.contains(&Ipv4Addr::new(192, 168, 50, 255)));
-        assert!(!c.contains(&Ipv4Addr::new(192, 168, 50, 64)));
+        assert_eq!(c.len(), 254); // .1..=.254 inclusive
+        assert!(!c.contains(&Ipv4Addr::new(192, 168, 50, 0))); // network excluded by range
+        assert!(!c.contains(&Ipv4Addr::new(192, 168, 50, 255))); // broadcast excluded by range
+        assert!(c.contains(&Ipv4Addr::new(192, 168, 50, 64))); // anchor IS a candidate now
         assert!(c.contains(&Ipv4Addr::new(192, 168, 50, 1)));
         assert!(c.contains(&Ipv4Addr::new(192, 168, 50, 254)));
         assert!(c.iter().all(|ip| ip.octets()[..3] == [192, 168, 50]));
+    }
+
+    #[test]
+    fn scan_keeps_the_build_time_anchor_when_the_current_mapping_differs() {
+        // Codex: /etc/hosts points at a learned address in ANOTHER /24; the build-time
+        // anchor must remain a scan candidate so a broker that returned to it is found.
+        let anchor = Ipv4Addr::new(192, 168, 50, 64); // build-time IP
+        let mut tried = HashSet::new();
+        tried.insert(Ipv4Addr::new(10, 0, 0, 40)); // current mapping, a different subnet
+        let candidates: Vec<Ipv4Addr> = slash24_candidates(anchor)
+            .into_iter()
+            .filter(|ip| !tried.contains(ip))
+            .collect();
+        assert!(candidates.contains(&anchor)); // the build-time IP is probeable
+        assert_eq!(candidates.len(), 254); // the out-of-subnet current mapping dropped nothing
+    }
+
+    #[test]
+    fn scan_drops_the_current_stale_mapping_inside_the_anchor_subnet() {
+        // Common case (no drift): current mapping == build-time anchor and it just failed,
+        // so it is retired as the stale address and not re-probed this pass.
+        let anchor = Ipv4Addr::new(192, 168, 50, 64);
+        let mut tried = HashSet::new();
+        tried.insert(anchor); // current mapping == anchor, the failing address
+        let candidates: Vec<Ipv4Addr> = slash24_candidates(anchor)
+            .into_iter()
+            .filter(|ip| !tried.contains(ip))
+            .collect();
+        assert!(!candidates.contains(&anchor));
+        assert_eq!(candidates.len(), 253);
     }
 
     #[test]
