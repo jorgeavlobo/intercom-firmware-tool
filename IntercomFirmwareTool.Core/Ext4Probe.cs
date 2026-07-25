@@ -23,7 +23,8 @@ namespace IntercomFirmwareTool.Core
     public sealed record EnableSshOptions(
         string? RootPassword = null,
         string? PublicKey = null,
-        bool BlockFirmwareUpdates = false)
+        bool BlockFirmwareUpdates = false,
+        bool ModernHostKey = false)
     {
         /// <summary>True when a non-empty root password is set (else login is key-only).</summary>
         public bool HasPassword => !string.IsNullOrEmpty(RootPassword);
@@ -584,6 +585,19 @@ namespace IntercomFirmwareTool.Core
                 fs.CreateSymLink(linkTarget, linkPath);
             }
 
+            // Phase E — modern host key (OPTIONAL, issue #37). The factory dropbear
+            // ships only an RSA host key, so it offers only the SHA-1 `ssh-rsa`
+            // host-key algorithm — which OpenSSH >= 8.8 disables by default, so a
+            // direct `ssh` fails with "no matching host key type" unless the user
+            // adds `-o HostKeyAlgorithms=+ssh-rsa`. Bake an ECDSA P-256 host key
+            // (which the device's dropbear 2017.75 DOES support — it advertises
+            // ecdsa-sha2-nistp256) and point dropbear at it, so a modern client
+            // negotiates ECDSA out of the box. ECDSA rather than Ed25519 because that
+            // dropbear predates Ed25519 host keys (added upstream in 2018.76) and
+            // ECDSA needs no third-party crypto in the tool.
+            if (opts.ModernHostKey)
+                InstallModernHostKey(fs);
+
             // Optional, independent of SSH/MQTT: stop the unit from silently
             // OTA-updating (which would reflash stock firmware and wipe every edit
             // above). This is the final step of ApplySshEnable; when the MQTT bridge
@@ -607,6 +621,75 @@ namespace IntercomFirmwareTool.Core
         private static void BlockFirmwareUpdates(ExtFileSystem fs) =>
             BtDaemonAppsHosts.AddMappings(fs,
                 FirmwareUpdateHosts.Select(h => (h, "127.0.0.1")).ToList());
+
+        /// <summary>Absolute path of the ECDSA host key baked into the image (issue #37).</summary>
+        internal const string EcdsaHostKeyPath = "/etc/dropbear/dropbear_ecdsa_host_key";
+
+        /// <summary>
+        /// The env file the factory <c>/etc/init.d/dropbear</c> sources for the
+        /// daemon's variables ("Do not configure this file. Edit
+        /// /etc/default/dropbear instead!"). We add the extra host-key argument here
+        /// so the init script itself is never touched.
+        /// </summary>
+        internal const string DropbearDefaultsPath = "/etc/default/dropbear";
+
+        /// <summary>
+        /// Bakes an ECDSA P-256 dropbear host key into <c>/etc/dropbear/</c> (0600
+        /// root:root) and makes the boot-time dropbear load it, so a modern OpenSSH
+        /// (≥ 8.8) connects without a <c>+ssh-rsa</c> compatibility flag (issue #37).
+        /// The key bytes are generated in <see cref="SshKeyGen.GenerateDropbearEcdsaHostKey"/>.
+        /// </summary>
+        private static void InstallModernHostKey(ExtFileSystem fs)
+        {
+            EnsureDir(fs, "/etc/dropbear");
+            byte[] hostKey = SshKeyGen.GenerateDropbearEcdsaHostKey();
+            using (var f = fs.OpenFile(EcdsaHostKeyPath, FileMode.Create, FileAccess.Write))
+            {
+                f.Write(hostKey, 0, hostKey.Length);
+            }
+            fs.SetMode(EcdsaHostKeyPath, ToMode(600));
+            fs.SetOwner(EcdsaHostKeyPath, 0, 0);
+
+            PatchDropbearDefaults(fs);
+        }
+
+        /// <summary>
+        /// Idempotently makes <c>/etc/default/dropbear</c> add
+        /// <c>-r /etc/dropbear/dropbear_ecdsa_host_key</c> to the daemon's arguments.
+        /// The factory init launches dropbear with
+        /// <c>-r $DROPBEAR_RSAKEY … $DROPBEAR_EXTRA_ARGS</c> and sources this file, so
+        /// we append a trailing shell line that EXTENDS whatever
+        /// <c>DROPBEAR_EXTRA_ARGS</c> the file already sets (the factory ships
+        /// <c>DROPBEAR_EXTRA_ARGS="-B"</c>) rather than parsing quotes:
+        /// <code>DROPBEAR_EXTRA_ARGS="$DROPBEAR_EXTRA_ARGS -r /etc/dropbear/dropbear_ecdsa_host_key"</code>
+        /// The file is sourced top-to-bottom, so a final assignment that references
+        /// the previous value preserves the factory <c>-B</c> and any other args.
+        /// dropbear accepts multiple <c>-r</c> host keys, and reading the baked key
+        /// off the read-only rootfs is fine (only key GENERATION needs a writable
+        /// path). Idempotent: a marker check on the key path means re-running the tool
+        /// never stacks duplicate flags. If the file is absent (a non-factory image),
+        /// it is created with just our assignment, 0644 root:root (the factory mode).
+        /// </summary>
+        private static void PatchDropbearDefaults(ExtFileSystem fs)
+        {
+            string appended =
+                "DROPBEAR_EXTRA_ARGS=\"$DROPBEAR_EXTRA_ARGS -r " + EcdsaHostKeyPath + "\"\n";
+
+            string existing = fs.FileExists(DropbearDefaultsPath)
+                ? ReadAllTextFromFs(fs, DropbearDefaultsPath)
+                : "";
+            // Idempotency: the key path only appears once we have patched, so its
+            // presence means the file already loads the ECDSA key — do nothing.
+            if (existing.Contains(EcdsaHostKeyPath, StringComparison.Ordinal))
+                return;
+
+            string updated = existing.Length == 0
+                ? appended
+                : (existing.EndsWith("\n", StringComparison.Ordinal) ? existing : existing + "\n") + appended;
+            WriteTextFile(fs, DropbearDefaultsPath, updated);
+            fs.SetMode(DropbearDefaultsPath, ToMode(644));
+            fs.SetOwner(DropbearDefaultsPath, 0, 0);
+        }
 
         /// <summary>
         /// Reopens a modified bare ext4 and re-reads every expected change,
@@ -680,6 +763,21 @@ namespace IntercomFirmwareTool.Core
                     foreach (var host in FirmwareUpdateHosts)
                         checks.Add(new($"firmware-update host {host} -> 127.0.0.1 (OTA blocked)",
                             BtDaemonAppsHosts.HasMapping(fs, host, "127.0.0.1"), ""));
+
+                // Modern host key (issue #37): only asserted when requested. Verify
+                // the ECDSA host key is present and non-empty, and that
+                // /etc/default/dropbear tells the daemon to load it (-r) — the two
+                // halves that together make a modern client negotiate ECDSA.
+                if (opts.ModernHostKey)
+                {
+                    checks.Add(new($"{EcdsaHostKeyPath} present (ECDSA host key)",
+                        fs.FileExists(EcdsaHostKeyPath) && FileNonEmpty(fs, EcdsaHostKeyPath), ""));
+
+                    string defaults = fs.FileExists(DropbearDefaultsPath)
+                        ? ReadAllTextFromFs(fs, DropbearDefaultsPath) : "";
+                    checks.Add(new($"{DropbearDefaultsPath} loads it (-r)",
+                        defaults.Contains("-r " + EcdsaHostKeyPath, StringComparison.Ordinal), ""));
+                }
             }
             finally
             {
@@ -1002,6 +1100,13 @@ namespace IntercomFirmwareTool.Core
             byte[] bytes = Encoding.UTF8.GetBytes(text);
             using var f = fs.OpenFile(path, FileMode.Create, FileAccess.Write);
             f.Write(bytes, 0, bytes.Length);
+        }
+
+        /// <summary>True when a file exists in the image and has non-zero length.</summary>
+        private static bool FileNonEmpty(ExtFileSystem fs, string path)
+        {
+            using var f = fs.OpenFile(path, FileMode.Open, FileAccess.Read);
+            return f.Length > 0;
         }
 
         private static void EnsureDir(ExtFileSystem fs, string path)

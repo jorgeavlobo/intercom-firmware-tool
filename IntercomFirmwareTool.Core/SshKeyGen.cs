@@ -97,6 +97,60 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
+        /// Generates a fresh <b>ECDSA P-256</b> key pair and serializes the PRIVATE
+        /// key in <b>dropbear's own host-key file format</b> — the bytes that
+        /// <c>dropbearkey -t ecdsa -s 256 -f &lt;file&gt;</c> writes and that
+        /// <c>dropbear -r &lt;file&gt;</c> loads. Used to bake an
+        /// <c>/etc/dropbear/dropbear_ecdsa_host_key</c> into the image so a modern
+        /// OpenSSH (≥ 8.8, which disables the legacy SHA-1 <c>ssh-rsa</c> host-key
+        /// algorithm by default) negotiates <c>ecdsa-sha2-nistp256</c> and connects
+        /// without a <c>-o HostKeyAlgorithms=+ssh-rsa</c> compatibility flag (issue
+        /// #37). ECDSA — not Ed25519 — because the device's dropbear (2017.75)
+        /// predates Ed25519 host-key support (added upstream in 2018.76) but does
+        /// offer <c>ecdsa-sha2-nistp256</c>, and because ECDSA is in the .NET base
+        /// class library (no third-party crypto dependency, matching this class's
+        /// posture).
+        ///
+        /// The file layout is the SSH wire encoding
+        /// (<c>string "ecdsa-sha2-nistp256"</c>, <c>string "nistp256"</c>,
+        /// <c>string</c> the uncompressed point <c>0x04‖X‖Y</c>, then <c>mpint</c>
+        /// the private scalar) — verified byte-for-byte against a real
+        /// <c>dropbearkey</c> reference.
+        /// </summary>
+        public static byte[] GenerateDropbearEcdsaHostKey()
+        {
+            using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            return SerializeDropbearEcdsaHostKey(ecdsa.ExportParameters(includePrivateParameters: true));
+        }
+
+        /// <summary>
+        /// Serializes ECDSA P-256 parameters into dropbear's host-key file format.
+        /// Split out (from <see cref="GenerateDropbearEcdsaHostKey"/>) so a unit
+        /// test can feed a fixed key and assert the exact bytes against a
+        /// <c>dropbearkey</c>-produced reference. For nistP256, .NET returns
+        /// <c>Q.X</c>, <c>Q.Y</c> and <c>D</c> as fixed 32-byte big-endian fields.
+        /// </summary>
+        internal static byte[] SerializeDropbearEcdsaHostKey(ECParameters p)
+        {
+            byte[] x = p.Q.X ?? throw new ArgumentException("EC point X missing", nameof(p));
+            byte[] y = p.Q.Y ?? throw new ArgumentException("EC point Y missing", nameof(p));
+            byte[] d = p.D ?? throw new ArgumentException("EC private scalar missing", nameof(p));
+
+            // Uncompressed point: 0x04 || X || Y — the only form dropbear/SSH use.
+            byte[] q = new byte[1 + x.Length + y.Length];
+            q[0] = 0x04;
+            Array.Copy(x, 0, q, 1, x.Length);
+            Array.Copy(y, 0, q, 1 + x.Length, y.Length);
+
+            using var ms = new MemoryStream();
+            WriteLengthPrefixed(ms, Encoding.ASCII.GetBytes("ecdsa-sha2-nistp256"));
+            WriteLengthPrefixed(ms, Encoding.ASCII.GetBytes("nistp256"));
+            WriteLengthPrefixed(ms, q);
+            WriteMpint(ms, d); // private scalar as an SSH mpint (0x00-padded if top bit set)
+            return ms.ToArray();
+        }
+
+        /// <summary>
         /// Heuristic check that <paramref name="text"/> is an OpenSSH public key
         /// line (<c>type base64 [comment]</c>). It verifies the type token is a
         /// known one AND that the base64 blob decodes to a wire-format key whose

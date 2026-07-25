@@ -554,6 +554,21 @@
                            Text="{loc:Loc Hint_BlockUpdates}"/>
             </StackPanel>
 
+            <!-- Modern SSH host key (advanced, optional, issue #37). The factory
+                 dropbear only has an RSA host key, so it offers only the SHA-1
+                 ssh-rsa host-key algorithm that OpenSSH >= 8.8 rejects by default.
+                 Ticking this bakes an ECDSA host key into the image (the device's
+                 dropbear supports ecdsa-sha2-nistp256) and points dropbear at it, so
+                 a modern `ssh` connects without -o HostKeyAlgorithms=+ssh-rsa. Off by
+                 default; same visibility/lock rule as the OTA-block row. -->
+            <StackPanel x:Name="ModernHostKeySection" Margin="0,12,0,0" Visibility="Collapsed">
+                <CheckBox x:Name="ChkModernHostKey" Content="{loc:Loc Chk_ModernHostKey}"
+                          ToolTip="{loc:Loc Tip_ModernHostKey}"
+                          Checked="ChkModernHostKey_Toggled" Unchecked="ChkModernHostKey_Toggled"/>
+                <TextBlock Margin="22,4,0,0" Foreground="Gray" FontSize="11" TextWrapping="Wrap"
+                           Text="{loc:Loc Hint_ModernHostKey}"/>
+            </StackPanel>
+
             <!-- Keep .sig signature sidecars (advanced, optional). Off by default =
                  remove them, exactly like fquinto (remove_sig='y'). Kept for parity/
                  research; the sidecar for the modified payload is stale, so a
