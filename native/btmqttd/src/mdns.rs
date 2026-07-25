@@ -229,16 +229,26 @@ fn parse_response(
         let rd = pos;
         match typ {
             12 if name == SERVICE => {
-                // PTR: the RDATA is the instance name.
+                // PTR: the RDATA is the instance name. Require it to decode WITHIN this record's
+                // RDLENGTH; a malformed datagram whose name has no terminator inside RDATA would
+                // otherwise let read_name splice in bytes from the following record and forge a
+                // false instance name (Copilot).
                 let mut pp = rd;
-                ptr.push(read_name(b, &mut pp));
+                let instance = read_name(b, &mut pp);
+                if !instance.is_empty() && pp <= rd + rdlen {
+                    ptr.push(instance);
+                }
             }
             33 if rdlen >= 6 => {
-                // SRV: priority(2) weight(2) port(2) target(name).
+                // SRV: priority(2) weight(2) port(2) target(name). The target must decode WITHIN
+                // this record's RDATA; if it overran `rd + rdlen` (a malformed datagram with no
+                // terminator inside RDLENGTH), reject it rather than accept a target spliced from
+                // the following record's bytes (Copilot). A compression pointer advances `pp` by
+                // only its 2 bytes, so a legitimate target always lands at or before rd + rdlen.
                 let port = ((b[rd + 4] as u16) << 8) | b[rd + 5] as u16;
                 let mut pp = rd + 6;
                 let target = read_name(b, &mut pp);
-                if !target.is_empty() && port > 0 {
+                if !target.is_empty() && port > 0 && pp <= rd + rdlen {
                     srv.insert(name, (target, port));
                 }
             }
@@ -493,5 +503,44 @@ mod tests {
         let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
         parse_response(&[0, 0, 0], &mut ptr, &mut srv, &mut a); // < 12 bytes
         assert!(ptr.is_empty() && srv.is_empty() && a.is_empty());
+    }
+
+    #[test]
+    fn parse_response_rejects_ptr_name_overrunning_rdlength() {
+        // A PTR whose instance name has no terminator inside RDLENGTH would let read_name splice
+        // in bytes from following records; the rd+rdlen guard must drop it (Copilot).
+        let mut b = vec![0, 0, 0x84, 0x00];
+        b.extend_from_slice(&[0, 0]); // QDCOUNT
+        b.extend_from_slice(&[0, 1]); // ANCOUNT = 1
+        b.extend_from_slice(&[0, 0, 0, 0]); // NS, AR
+        enc_name(SERVICE, &mut b); // record name = _mqtt._tcp.local → PTR branch runs
+        b.extend_from_slice(&[0, 12, 0, 1]); // type PTR, class IN
+        b.extend_from_slice(&[0, 0, 0, 120]); // TTL
+        b.extend_from_slice(&[0, 2]); // RDLENGTH = 2 (too short for the label below)
+        b.extend_from_slice(&[0x06, b'b']); // 6-char label start, only 1 char inside RDATA
+        b.extend_from_slice(&[b'r', b'o', b'k', b'e', b'r', 0]); // completes "broker" beyond RDATA
+        let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
+        parse_response(&b, &mut ptr, &mut srv, &mut a);
+        assert!(ptr.is_empty()); // the overrunning PTR name was rejected
+    }
+
+    #[test]
+    fn parse_response_rejects_srv_target_overrunning_rdlength() {
+        // Likewise an SRV target that overruns its RDLENGTH must not be spliced from the next
+        // record's bytes (Copilot).
+        let mut b = vec![0, 0, 0x84, 0x00];
+        b.extend_from_slice(&[0, 0]); // QDCOUNT
+        b.extend_from_slice(&[0, 1]); // ANCOUNT = 1
+        b.extend_from_slice(&[0, 0, 0, 0]); // NS, AR
+        enc_name("svc._mqtt._tcp.local", &mut b); // record name
+        b.extend_from_slice(&[0, 33, 0, 1]); // type SRV, class IN
+        b.extend_from_slice(&[0, 0, 0, 120]); // TTL
+        b.extend_from_slice(&[0, 8]); // RDLENGTH = 8
+        // prio, weight, port=1883, then a truncated target start (0x06, 'b') — 8 bytes total.
+        b.extend_from_slice(&[0, 0, 0, 0, 0x07, 0x5B, 0x06, b'b']);
+        b.extend_from_slice(&[b'r', b'o', b'k', b'e', b'r', 0]); // completes "broker" beyond RDATA
+        let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
+        parse_response(&b, &mut ptr, &mut srv, &mut a);
+        assert!(srv.is_empty()); // the overrunning SRV target was rejected
     }
 }
