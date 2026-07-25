@@ -277,6 +277,13 @@ async fn run() -> Result<(), String> {
                     Err(e) => eprintln!("btmqttd: could not seed persisted broker IP: {e}"),
                 }
             } else {
+                // MAC unconfirmed at boot (broker unreachable, or its IP was reassigned): do
+                // NOT seed /etc/hosts. But the record (base, learned) is already on disk, so
+                // keep `learned` as the write-comparison baseline — if normal rediscovery later
+                // confirms the broker AT that same learned IP, the ConnAck sees no change and
+                // skips a redundant rewrite/fsync of the identical record; if it's elsewhere,
+                // the ConnAck still updates it (Codex).
+                last_persisted = Some(learned);
                 eprintln!(
                     "btmqttd: persisted broker IP {learned} did not confirm the broker MAC \
                      at boot; not seeding (normal rediscovery will re-locate it)"
