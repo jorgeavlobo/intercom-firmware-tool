@@ -124,7 +124,17 @@ fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> 
     let body = format_state(host, base_ip, learned_ip);
     match crate::receiver::create_unique_temp(path_str, body.as_bytes()) {
         Ok(tmp) => match std::fs::rename(&tmp, path_str) {
-            Ok(()) => true,
+            Ok(()) => {
+                // fsync the directory so the rename itself (the dir entry now pointing at
+                // the new inode) is durable, not just the file bytes — otherwise a crash
+                // just after a returning-true store could still lose the mapping
+                // (CodeRabbit). Best-effort: a fs that can't fsync a dir mustn't fail the
+                // store, whose bytes are already synced.
+                if let Ok(dirf) = std::fs::File::open(dir) {
+                    let _ = dirf.sync_all();
+                }
+                true
+            }
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
                 eprintln!("btmqttd: persist: cannot write {path_str}: {e}");
@@ -167,10 +177,18 @@ fn format_state(host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> String {
 /// caller decides whether it still matches the build-time IP).
 fn parse_record(text: &str, want_host: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
     let line = text.lines().next()?.trim();
+    // format_state writes EXACTLY one line of three fields, so reject anything extra as
+    // corrupt: a non-empty trailing line, or a 4th token on the first line (CodeRabbit).
+    if text.lines().skip(1).any(|rest| !rest.trim().is_empty()) {
+        return None;
+    }
     let mut cols = line.split_whitespace();
     let host = cols.next()?;
     let base = cols.next()?.parse::<Ipv4Addr>().ok()?;
     let learned = cols.next()?.parse::<Ipv4Addr>().ok()?;
+    if cols.next().is_some() {
+        return None; // extra field on the line → corrupt
+    }
     (host.eq_ignore_ascii_case(want_host) && learned.is_private()).then_some((base, learned))
 }
 
@@ -203,6 +221,15 @@ mod tests {
         assert_eq!(parse_record("b\t192.168.50.64\n", "b"), None); // no learned column
         assert_eq!(parse_record("b\n", "b"), None); // no base/learned
         assert_eq!(parse_record("", "b"), None); // empty
+    }
+
+    #[test]
+    fn parse_record_rejects_extra_fields_or_trailing_lines() {
+        // format_state writes exactly three fields on one line; anything extra is corrupt.
+        assert_eq!(parse_record("b\t192.168.50.64\t192.168.50.200\tjunk\n", "b"), None);
+        assert_eq!(parse_record("b\t192.168.50.64\t192.168.50.200\nextra line\n", "b"), None);
+        // A single trailing newline (what format_state emits) is fine.
+        assert_eq!(parse_record("b\t192.168.50.64\t192.168.50.200\n", "b"), Some((BUILD, LEARNED)));
     }
 
     #[test]

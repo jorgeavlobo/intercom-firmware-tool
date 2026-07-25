@@ -360,6 +360,11 @@ pub(crate) fn create_unique_temp(path: &str, bytes: &[u8]) -> std::io::Result<St
             Ok(mut f) => {
                 f.write_all(bytes)?;
                 f.flush()?;
+                // Flush the bytes to stable storage BEFORE the caller renames over the
+                // target, so a crash right after the rename can't leave the new name
+                // pointing at unwritten/zeroed data (CodeRabbit). A no-op on tmpfs (the
+                // hosts rewrite), a durability guarantee on the persistent cfg partition.
+                f.sync_all()?;
                 return Ok(tmp);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
