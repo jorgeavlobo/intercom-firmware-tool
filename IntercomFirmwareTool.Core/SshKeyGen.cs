@@ -132,22 +132,47 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static byte[] SerializeDropbearEcdsaHostKey(ECParameters p)
         {
-            byte[] x = p.Q.X ?? throw new ArgumentException("EC point X missing", nameof(p));
-            byte[] y = p.Q.Y ?? throw new ArgumentException("EC point Y missing", nameof(p));
+            // P-256 coordinate width: X and Y are fixed at 32 bytes each. .NET's
+            // named-curve export already left-pads to this width, but pad defensively in
+            // case a provider trims leading zeros — a short X/Y would make the point the
+            // wrong length and dropbear would reject the host key (Copilot).
+            const int fieldSize = 32;
+            byte[] x = LeftPad(p.Q.X ?? throw new ArgumentException("EC point X missing", nameof(p)), fieldSize);
+            byte[] y = LeftPad(p.Q.Y ?? throw new ArgumentException("EC point Y missing", nameof(p)), fieldSize);
             byte[] d = p.D ?? throw new ArgumentException("EC private scalar missing", nameof(p));
 
             // Uncompressed point: 0x04 || X || Y — the only form dropbear/SSH use.
-            byte[] q = new byte[1 + x.Length + y.Length];
+            byte[] q = new byte[1 + fieldSize + fieldSize];
             q[0] = 0x04;
-            Array.Copy(x, 0, q, 1, x.Length);
-            Array.Copy(y, 0, q, 1 + x.Length, y.Length);
+            Array.Copy(x, 0, q, 1, fieldSize);
+            Array.Copy(y, 0, q, 1 + fieldSize, fieldSize);
 
             using var ms = new MemoryStream();
             WriteLengthPrefixed(ms, Encoding.ASCII.GetBytes("ecdsa-sha2-nistp256"));
             WriteLengthPrefixed(ms, Encoding.ASCII.GetBytes("nistp256"));
             WriteLengthPrefixed(ms, q);
-            WriteMpint(ms, d); // private scalar as an SSH mpint (0x00-padded if top bit set)
+            // Private scalar as an SSH mpint. Unlike the fixed-width point, an mpint is
+            // variable length with its own leading-zero/sign handling, so a trimmed D is
+            // already correct here.
+            WriteMpint(ms, d);
             return ms.ToArray();
+        }
+
+        /// <summary>
+        /// Left-pads a big-endian byte string with leading zeros to exactly
+        /// <paramref name="length"/> bytes — used to normalize a fixed-width EC coordinate
+        /// that a provider may have returned with leading zeros trimmed. Throws if the
+        /// value is already longer than <paramref name="length"/>.
+        /// </summary>
+        private static byte[] LeftPad(byte[] value, int length)
+        {
+            if (value.Length == length) return value;
+            if (value.Length > length)
+                throw new ArgumentException(
+                    $"value is {value.Length} bytes, expected at most {length}.", nameof(value));
+            byte[] padded = new byte[length];
+            Array.Copy(value, 0, padded, length - value.Length, value.Length);
+            return padded;
         }
 
         /// <summary>

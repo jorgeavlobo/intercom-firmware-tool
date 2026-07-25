@@ -686,9 +686,12 @@ namespace IntercomFirmwareTool.Core
             string existing = PathPresent(fs, DropbearDefaultsPath)
                 ? ReadAllTextFromFs(fs, DropbearDefaultsPath)
                 : "";
-            // Idempotency: the key path only appears once we have patched, so its
-            // presence means the file already loads the ECDSA key — do nothing.
-            if (existing.Contains(EcdsaHostKeyPath, StringComparison.Ordinal))
+            // Idempotency: consider it already patched only when the key is loaded as an
+            // actual `-r <path>` argument — not merely mentioned (e.g. in a comment) — so a
+            // stray occurrence can't no-op the patch and leave dropbear without the key
+            // (Copilot). Matches the token ValidateSsh checks for.
+            string loadArg = "-r " + EcdsaHostKeyPath;
+            if (existing.Contains(loadArg, StringComparison.Ordinal))
                 return;
 
             string updated = existing.Length == 0
