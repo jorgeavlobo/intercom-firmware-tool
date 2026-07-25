@@ -126,14 +126,17 @@ fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> 
         Ok(tmp) => match std::fs::rename(&tmp, path_str) {
             Ok(()) => {
                 // fsync the directory so the rename itself (the dir entry now pointing at
-                // the new inode) is durable, not just the file bytes — otherwise a crash
-                // just after a returning-true store could still lose the mapping
-                // (CodeRabbit). Best-effort: a fs that can't fsync a dir mustn't fail the
-                // store, whose bytes are already synced.
-                if let Ok(dirf) = std::fs::File::open(dir) {
-                    let _ = dirf.sync_all();
+                // the new inode) is durable, not just the file bytes. Report a dir-sync
+                // failure as a FAILED store (false) so the caller doesn't advance its
+                // change-gate and retries on the next ConnAck, rather than claiming a
+                // durability it didn't get (CodeRabbit).
+                match std::fs::File::open(dir).and_then(|dirf| dirf.sync_all()) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
+                        false
+                    }
                 }
-                true
             }
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
