@@ -97,16 +97,33 @@ fn bind_reuse(port: u16) -> std::io::Result<UdpSocket> {
         }
         let std_sock = std::net::UdpSocket::from_raw_fd(fd);
         let on: libc::c_int = 1;
-        for opt in [libc::SO_REUSEADDR, libc::SO_REUSEPORT] {
-            if libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                opt,
-                std::ptr::addr_of!(on).cast(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            ) != 0
-            {
-                return Err(err());
+        let optlen = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        // SO_REUSEADDR is required to co-bind the mDNS group/port; treat its failure as fatal
+        // (fall back to the ephemeral port).
+        if libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEADDR,
+            std::ptr::addr_of!(on).cast(),
+            optlen,
+        ) != 0
+        {
+            return Err(err());
+        }
+        // SO_REUSEPORT is an ADDITIONAL sharing hint that older/embedded kernels may not know;
+        // treat `ENOPROTOOPT` as best-effort so the reuse bind still succeeds with just
+        // SO_REUSEADDR (Copilot). Any other error is still surfaced.
+        if libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEPORT,
+            std::ptr::addr_of!(on).cast(),
+            optlen,
+        ) != 0
+        {
+            let e = err();
+            if e.raw_os_error() != Some(libc::ENOPROTOOPT) {
+                return Err(e);
             }
         }
         let addr = libc::sockaddr_in {

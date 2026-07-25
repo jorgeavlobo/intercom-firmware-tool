@@ -18,11 +18,11 @@
 //! the client. Instead we reuse the indirection the device already has: when the
 //! broker is configured by **name**, the installer maps `name -> IP` in `/etc/hosts`
 //! (a tmpfs symlink, writable at runtime). Rediscovery:
-//!   1. anchors on the broker name's **build-time** IP (from the immutable boot init
-//!      script, not the runtime-mutated `/etc/hosts`) and scans that IP's `/24` (the
-//!      broker moved WITHIN its home subnet: the DHCP case). Anchoring on the immutable
-//!      mapping keeps an earlier, unconfirmed mDNS proposal from drifting the scan onto
-//!      the wrong subnet;
+//!   1. anchors on the **last connect-confirmed** broker IP (the caller's persisted learned
+//!      IP, or the build-time mapping when none) and scans that IP's `/24` (the broker moved
+//!      WITHIN its home subnet: the DHCP case). Anchoring on a CONFIRMED mapping — never an
+//!      unconfirmed mDNS proposal — keeps the scan from drifting onto the wrong subnet while
+//!      still following the broker to a subnet it legitimately moved to and connected on;
 //!   2. TCP-probes the broker port across the subnet, and (when a broker MAC was
 //!      recorded at config time) prefers a candidate whose `/proc/net/arp` MAC
 //!      matches — the MAC is a HINT/tie-breaker, never the trust gate;
@@ -123,7 +123,11 @@ pub fn is_unreachable(e: &rumqttc::ConnectionError) -> bool {
 /// candidate is adopted ONLY when its `/proc/net/arp` MAC matches the recorded
 /// `MQTT_BROKER_MAC` hint (issue #43 / Codex P1 / CodeRabbit). `main` additionally
 /// refuses to activate rediscovery at all without one of these anchors.
-pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
+pub async fn rediscover(
+    cfg: &Config,
+    tried: &mut HashSet<Ipv4Addr>,
+    confirmed_anchor: Option<Ipv4Addr>,
+) -> Option<Ipv4Addr> {
     // Layer B (issue #49 item 2, #43): mDNS FIRST. A broker that advertises `_mqtt._tcp`
     // announces its IPv4 by name across the whole link — cheaper and broader than the /24
     // port scan below, and it finds a broker that moved to a DIFFERENT subnet on the same L2
@@ -154,33 +158,37 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
             return None;
         }
     };
-    // Anchor the /24 scan on the IMMUTABLE build-time mapping (the boot init script), NOT
-    // the current /etc/hosts value (Copilot). A prior mDNS pass may have repointed the
-    // broker name to an UNCONFIRMED address in a DIFFERENT subnet; anchoring the scan on
-    // that could strand it sweeping the wrong /24 forever — and, after each exhaustion
-    // clears `tried`, mDNS would re-propose the same wrong address, so the real broker's
-    // home subnet would never be scanned again. The build-time mapping is the broker's
-    // wired home subnet, which is exactly what the /24 scan is for (a broker that moved to
-    // another subnet advertises mDNS — Layer B above — or it is unreachable to the scan
-    // regardless). Fall back to the current /etc/hosts mapping only when the boot script is
-    // unreadable.
-    let anchor = match build_time_ip(&cfg.mqtt_host).await {
-        Some(a) => a,
-        None => match parse_hosts_ip(&hosts, &cfg.mqtt_host) {
-            Some(a) => a,
-            None => {
-                // The name is pinned nowhere we can read — a misconfiguration (the
-                // installer normally seeds both the boot script and /etc/hosts). Say so
-                // instead of returning silently, which otherwise looks like rediscovery
-                // just never triggering.
-                eprintln!(
-                    "btmqttd: rediscovery: broker name '{}' has no IPv4 mapping in \
-                     {BOOT_HOSTS_SCRIPT} or {HOSTS_PATH}; cannot rediscover (is it pinned?)",
-                    cfg.mqtt_host
-                );
-                return None;
-            }
-        },
+    // Anchor the /24 scan on the LAST CONFIRMED broker mapping — `confirmed_anchor`, the
+    // caller's last connect-confirmed learned IP (or `None` when the broker last connected at
+    // its build-time IP). Two review findings converge on this choice:
+    //   * the anchor must NOT be an UNCONFIRMED mDNS proposal that a prior pass wrote into
+    //     /etc/hosts — anchoring on that could strand the scan sweeping the wrong /24 while,
+    //     after each `tried` clear, mDNS re-proposes the same wrong address (Copilot); yet
+    //   * it MUST follow the broker to a subnet it legitimately moved to and CONFIRMED — if
+    //     mDNS relocated the broker to another /24, that connected, and mDNS is later
+    //     unavailable, a DHCP move WITHIN that subnet is only recoverable by scanning it, not
+    //     the original build-time /24 (Codex).
+    // The confirmed learned IP satisfies both: only a ConnAck advances it, so an mDNS proposal
+    // never becomes the anchor, but a confirmed cross-subnet move does. Fall back to the
+    // immutable build-time mapping when there is no confirmed learned IP (the broker is at, or
+    // returning to, its build-time address), and to the current /etc/hosts mapping only when
+    // the boot script has no readable mapping for the name either.
+    let anchor = if let Some(a) = confirmed_anchor {
+        a
+    } else if let Some(a) = build_time_ip(&cfg.mqtt_host).await {
+        a
+    } else if let Some(a) = parse_hosts_ip(&hosts, &cfg.mqtt_host) {
+        a
+    } else {
+        // The name is pinned nowhere we can read — a misconfiguration (the installer normally
+        // seeds both the boot script and /etc/hosts). Say so instead of returning silently,
+        // which otherwise looks like rediscovery just never triggering.
+        eprintln!(
+            "btmqttd: rediscovery: broker name '{}' has no IPv4 mapping in \
+             {BOOT_HOSTS_SCRIPT} or {HOSTS_PATH}; cannot rediscover (is it pinned?)",
+            cfg.mqtt_host
+        );
+        return None;
     };
     // Only ever scan a private LAN /24. If the broker name is pinned to a public,
     // loopback or link-local address, probing its whole /24 would be off-scope outbound

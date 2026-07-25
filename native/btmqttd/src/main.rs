@@ -506,7 +506,11 @@ async fn run() -> Result<(), String> {
                             tokio::select! {
                                 _ = sig_term.recv() => break,
                                 _ = sig_int.recv() => break,
-                                r = rediscovery::rediscover(&cfg, &mut tried_ips) => {
+                                // Anchor the fallback scan on the last connect-confirmed IP
+                                // (`last_persisted`), so it follows a confirmed cross-subnet
+                                // move yet never latches onto an unconfirmed mDNS proposal
+                                // (Codex/Copilot). `None` ⇒ anchor on the build-time mapping.
+                                r = rediscovery::rediscover(&cfg, &mut tried_ips, last_persisted) => {
                                     if let Some(ip) = r {
                                         eprintln!(
                                             "btmqttd: rediscovery: repointed '{}' -> {ip} in {}",
