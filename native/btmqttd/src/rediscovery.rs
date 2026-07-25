@@ -36,13 +36,20 @@
 //! bridge attach to an unauthenticated or mismatched broker.
 //!
 //! Scope of this module: opt-in (`MQTT_REDISCOVERY`, off by default) and only when the broker
-//! is a name. A rediscovery pass now tries `mdns.rs` FIRST (issue #49 item 2 — the broker's
-//! advertised `_mqtt._tcp` address, found by name across the link) and falls back to the
-//! same-subnet (`/24`) scan. A learned address is also persisted across a reboot (issue #49
-//! item 1): `persist.rs` remembers the connect-confirmed IP on the writable `cfg/extra`
-//! partition and `main` seeds `/etc/hosts` from it at startup, so a reboot after the broker
-//! moved reconnects immediately instead of re-scanning. Cross-subnet + port fallback (1883 ↔
-//! 8883) remain follow-ups (#49 item 3).
+//! is a name. A rediscovery pass tries `mdns.rs` FIRST (issue #49 item 2 — the broker's advertised
+//! `_mqtt._tcp` / `_secure-mqtt._tcp` address, found by name across the link), then the Home
+//! Assistant host fallback (issue #52 — probe the broker port on a discovered HA host), then the
+//! same-subnet (`/24`) scan. A learned address is also persisted across a reboot (issue #49 item
+//! 1): `persist.rs` remembers the connect-confirmed IP on the writable `cfg/extra` partition and
+//! `main` seeds `/etc/hosts` from it at startup, so a reboot after the broker moved reconnects
+//! immediately instead of re-scanning.
+//!
+//! Deliberately OUT of scope (issue #49 item 3): a **cross-subnet** move is recovered by the mDNS
+//! layers above (which find a broker by name across subnets), not by brute-force multi-subnet
+//! scanning; and a **port/transport** move (1883 ↔ 8883, i.e. plaintext ↔ TLS) is a reconfiguration
+//! the user re-runs the tool for, NOT a rediscovery — the client's port/transport is fixed for the
+//! process's life, so rediscovery only recovers an **IP move on the same port/transport** (see the
+//! scan's port comment below).
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
