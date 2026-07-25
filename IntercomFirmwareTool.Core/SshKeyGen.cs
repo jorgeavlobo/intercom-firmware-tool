@@ -132,6 +132,16 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static byte[] SerializeDropbearEcdsaHostKey(ECParameters p)
         {
+            // Guard: this serializer is P-256-only (the field widths and the hard-coded
+            // "ecdsa-sha2-nistp256"/"nistp256" labels below). Fail with a clear message if
+            // handed another named curve (e.g. P-384) rather than an opaque padding/length
+            // error later (Copilot). Only reject a curve we can POSITIVELY identify as
+            // non-P-256, so an unnamed/unidentifiable curve still falls through to the
+            // field-width check and a valid P-256 key is never rejected.
+            if (IsDefinitelyNotNistP256(p.Curve))
+                throw new ArgumentException(
+                    "Only ECDSA P-256 (nistP256/prime256v1) is supported.", nameof(p));
+
             // P-256 coordinate width: X and Y are fixed at 32 bytes each. .NET's
             // named-curve export already left-pads to this width, but pad defensively in
             // case a provider trims leading zeros — a short X/Y would make the point the
@@ -156,6 +166,28 @@ namespace IntercomFirmwareTool.Core
             // already correct here.
             WriteMpint(ms, d);
             return ms.ToArray();
+        }
+
+        /// <summary>
+        /// True only when <paramref name="curve"/> can be POSITIVELY identified as a
+        /// named curve other than P-256 (nistP256 / secp256r1 / prime256v1, OID
+        /// <c>1.2.840.10045.3.1.7</c>). An unnamed or unidentifiable curve returns false
+        /// so the caller's field-width check still runs and a valid P-256 key is never
+        /// rejected on a platform that populates the curve metadata differently.
+        /// </summary>
+        private static bool IsDefinitelyNotNistP256(ECCurve curve)
+        {
+            if (!curve.IsNamed) return false;
+            string? oid = curve.Oid?.Value;
+            if (!string.IsNullOrEmpty(oid))
+                return oid != "1.2.840.10045.3.1.7";
+            string? name = curve.Oid?.FriendlyName;
+            if (!string.IsNullOrEmpty(name))
+                return !(name.Equals("nistP256", StringComparison.OrdinalIgnoreCase)
+                      || name.Equals("ECDSA_P256", StringComparison.OrdinalIgnoreCase)
+                      || name.Equals("prime256v1", StringComparison.OrdinalIgnoreCase)
+                      || name.Equals("secp256r1", StringComparison.OrdinalIgnoreCase));
+            return false; // named but no readable identity → don't reject here
         }
 
         /// <summary>
