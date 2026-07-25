@@ -3,9 +3,10 @@
 //! ## Why hand-rolled
 //! The statically-linked musl binary's resolver ignores `nsswitch`/system mDNS, so — exactly
 //! as the WPF app does at config time (`MqttBrokerDiscovery.cs`) — we speak the mDNS wire
-//! protocol directly: send a `_mqtt._tcp.local` PTR query to the link-local multicast group
-//! `224.0.0.251:5353` and parse the PTR/SRV/A records the brokers answer with, yielding the
-//! advertised IPv4 address(es) directly — no `/24` port scan. The query asks for a MULTICAST
+//! protocol directly: send PTR queries for the MQTT DNS-SD services (`_mqtt._tcp.local` plus the
+//! TLS `_secure-mqtt._tcp.local`) to the link-local multicast group `224.0.0.251:5353` and parse
+//! the PTR/SRV/A records the brokers answer with, yielding the advertised IPv4 address(es)
+//! directly — no `/24` port scan. The query asks for a MULTICAST
 //! answer when we co-bind the shared 5353 port (so a system responder can't consume a unicast
 //! reply meant for us) and only sets the unicast-response (QU) bit on the solely-owned
 //! ephemeral-port fallback (see `open_socket`).
@@ -27,17 +28,26 @@ use tokio::net::UdpSocket;
 const MDNS_GROUP: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
 const MDNS_PORT: u16 = 5353;
 
-/// The service we look for. Lower-case: parsed names are ASCII-case-folded (via
-/// `to_ascii_lowercase`) so correlation against this constant is a plain string match. DNS
-/// compares ASCII letters case-insensitively; any non-ASCII bytes in a DNS-SD instance label
-/// are left as-is, which is harmless here — only the ASCII `_mqtt._tcp.local` service suffix
-/// needs to match.
+/// The DNS-SD services we look for, both IANA-registered: `_mqtt._tcp` is plaintext MQTT
+/// (port 1883) and `_secure-mqtt._tcp` is MQTT over TLS (port 8883). A TLS-configured broker
+/// commonly advertises ONLY the secure service, so querying just `_mqtt._tcp` would miss it and
+/// leave a moved TLS broker undiscoverable across subnets (Codex). We query both and merge; the
+/// caller's trust gate (pinned-cert reconnect under TLS, ARP-MAC under plaintext) still decides
+/// what is adopted, so an advertised service that doesn't match the configured transport is
+/// simply filtered out downstream.
+///
+/// Lower-case: parsed names are ASCII-case-folded (via `to_ascii_lowercase`) so correlation
+/// against these constants is a plain string match. DNS compares ASCII letters
+/// case-insensitively; any non-ASCII bytes in a DNS-SD instance label are left as-is, which is
+/// harmless here — only the ASCII service suffix needs to match.
 const SERVICE: &str = "_mqtt._tcp.local";
+const SERVICE_TLS: &str = "_secure-mqtt._tcp.local";
+const SERVICES: [&str; 2] = [SERVICE, SERVICE_TLS];
 
-/// Query `_mqtt._tcp.local` on the LAN for `window` and return the distinct advertised IPv4
-/// addresses of MQTT brokers (correlated PTR→SRV→A). Empty on any socket failure or no answer.
-/// Only the IP is returned — the caller repoints the CONFIGURED broker name to it, so the
-/// mDNS-advertised instance/host name is not needed.
+/// Query the MQTT DNS-SD services (`_mqtt._tcp` + `_secure-mqtt._tcp`) on the LAN for `window`
+/// and return the distinct advertised IPv4 addresses of MQTT brokers (correlated PTR→SRV→A).
+/// Empty on any socket failure or no answer. Only the IP is returned — the caller repoints the
+/// CONFIGURED broker name to it, so the mDNS-advertised instance/host name is not needed.
 pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
     let mut ptr: Vec<String> = Vec::new();
     let mut srv: HashMap<String, (String, u16)> = HashMap::new();
@@ -47,15 +57,22 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
     let mut a: HashMap<String, Vec<Ipv4Addr>> = HashMap::new();
 
     if let Ok((sock, unicast_response)) = open_socket().await {
-        let query = build_ptr_query(SERVICE, unicast_response);
-        let _ = sock.send_to(&query, (MDNS_GROUP, MDNS_PORT)).await;
+        // One PTR query per service (plaintext + TLS), so a broker advertising only the secure
+        // service is still discovered (Codex).
+        let queries: Vec<Vec<u8>> = SERVICES
+            .iter()
+            .map(|svc| build_ptr_query(svc, unicast_response))
+            .collect();
+        for q in &queries {
+            let _ = sock.send_to(q, (MDNS_GROUP, MDNS_PORT)).await;
+        }
 
         let deadline = tokio::time::sleep(window);
         tokio::pin!(deadline);
-        // Retransmit the query ONCE partway through the window: a single UDP probe lost on
+        // Retransmit the queries ONCE partway through the window: a single UDP probe lost on
         // Wi-Fi would otherwise yield no candidates and push the caller into a full /24 sweep
-        // (RFC 6762 §5.2 querier behaviour retransmits). One extra datagram, same window
-        // (CodeRabbit).
+        // (RFC 6762 §5.2 querier behaviour retransmits). One extra datagram per service, same
+        // window (CodeRabbit).
         let retry = tokio::time::sleep(window / 2);
         tokio::pin!(retry);
         let mut retried = false;
@@ -69,7 +86,9 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
                 _ = &mut deadline => break,
                 _ = &mut retry, if !retried => {
                     retried = true;
-                    let _ = sock.send_to(&query, (MDNS_GROUP, MDNS_PORT)).await;
+                    for q in &queries {
+                        let _ = sock.send_to(q, (MDNS_GROUP, MDNS_PORT)).await;
+                    }
                 }
                 r = sock.recv_from(&mut buf) => match r {
                     Ok((n, _)) => parse_response(&buf[..n], &mut ptr, &mut srv, &mut a),
@@ -78,7 +97,14 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
             }
         }
     }
-    correlate(&ptr, &srv, &a)
+    // Correlate each service; merge, plaintext first, deduped.
+    let mut out = correlate(&ptr, &srv, &a, SERVICE);
+    for ip in correlate(&ptr, &srv, &a, SERVICE_TLS) {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
 }
 
 /// A UDP socket for the exchange, plus whether to ask for a UNICAST response (the QU bit).
@@ -241,7 +267,7 @@ fn parse_response(
         }
         let rd = pos;
         match typ {
-            12 if name == SERVICE => {
+            12 if SERVICES.contains(&name.as_str()) => {
                 // PTR: the RDATA is the instance name. Require it to decode WITHIN this record's
                 // RDLENGTH; a malformed datagram whose name has no terminator inside RDATA would
                 // otherwise let read_name splice in bytes from the following record and forge a
@@ -330,29 +356,57 @@ fn read_name(b: &[u8], pos: &mut usize) -> String {
 }
 
 /// Correlate the accumulated records into the advertised broker IPv4s: keep only SRV records
-/// that actually belong to `_mqtt._tcp` (an instance the PTR pointed to, or a name of the form
-/// `<instance>._mqtt._tcp.local`), resolve each SRV target through the A records (every A record
-/// the target carries, not just one — a multihomed broker has several), and return the distinct
-/// IPs. A chatty responder's unrelated SRV+A pairs are ignored.
+/// that actually belong to `service` (an instance the PTR pointed to, or a name of the form
+/// `<instance>.<service>`), resolve each SRV target through the A records (every A record the
+/// target carries, not just one — a multihomed broker has several), and return the distinct IPs.
+/// A chatty responder's unrelated SRV+A pairs are ignored.
+///
+/// The order is DETERMINISTIC (so `mdns_propose`'s "first open candidate" is reproducible across
+/// runs, unlike raw `HashMap` iteration — Copilot): SRV targets named by a PTR come first, in PTR
+/// discovery order; then any remaining `<instance>.<service>` SRV records with no PTR, sorted by
+/// name.
 fn correlate(
     ptr: &[String],
     srv: &HashMap<String, (String, u16)>,
     a: &HashMap<String, Vec<Ipv4Addr>>,
+    service: &str,
 ) -> Vec<Ipv4Addr> {
-    let instances: HashSet<&String> = ptr.iter().collect();
-    let suffix = format!(".{SERVICE}");
+    let suffix = format!(".{service}");
     let mut out: Vec<Ipv4Addr> = Vec::new();
-    for (name, (target, _port)) in srv {
-        let is_mqtt = instances.contains(name) || name.ends_with(&suffix);
-        if !is_mqtt {
-            continue;
-        }
+
+    // Resolve one SRV target's A records into `out`, de-duplicating.
+    fn add_target(target: &str, a: &HashMap<String, Vec<Ipv4Addr>>, out: &mut Vec<Ipv4Addr>) {
         if let Some(ips) = a.get(target) {
             for ip in ips {
                 if !out.contains(ip) {
                     out.push(*ip);
                 }
             }
+        }
+    }
+
+    // 1) SRV targets named by a PTR for THIS service (its instances end with the suffix), in PTR
+    //    discovery order (the order the responder advertised). The suffix check keeps a PTR for the
+    //    OTHER service — the accumulators hold both — from resolving here.
+    let mut resolved: HashSet<&String> = HashSet::new();
+    for inst in ptr {
+        if inst.ends_with(&suffix) {
+            if let Some((target, _port)) = srv.get(inst) {
+                resolved.insert(inst);
+                add_target(target, a, &mut out);
+            }
+        }
+    }
+    // 2) Remaining `<instance>.<service>` SRV records with no PTR, sorted by name so the result
+    //    is stable across runs.
+    let mut rest: Vec<&String> = srv
+        .keys()
+        .filter(|name| !resolved.contains(*name) && name.ends_with(&suffix))
+        .collect();
+    rest.sort_unstable();
+    for name in rest {
+        if let Some((target, _port)) = srv.get(name) {
+            add_target(target, a, &mut out);
         }
     }
     out
@@ -432,8 +486,48 @@ mod tests {
         let resp = sample_response("Mosquitto._mqtt._tcp.local", "broker.local", 1883, [192, 168, 50, 40]);
         let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
         parse_response(&resp, &mut ptr, &mut srv, &mut a);
-        let ips = correlate(&ptr, &srv, &a);
+        let ips = correlate(&ptr, &srv, &a, SERVICE);
         assert_eq!(ips, vec![Ipv4Addr::new(192, 168, 50, 40)]);
+    }
+
+    #[test]
+    fn correlate_resolves_the_tls_secure_mqtt_service() {
+        // A TLS broker advertising only `_secure-mqtt._tcp` must still be found via that service
+        // (Codex). Its instance/target under the secure suffix resolves through the A records.
+        let ptr = vec!["Mosquitto._secure-mqtt._tcp.local".to_string()];
+        let mut srv = HashMap::new();
+        srv.insert(
+            "Mosquitto._secure-mqtt._tcp.local".to_string(),
+            ("brokertls.local".to_string(), 8883u16),
+        );
+        let mut a = HashMap::new();
+        a.insert("brokertls.local".to_string(), vec![Ipv4Addr::new(192, 168, 50, 41)]);
+        // The plaintext service finds nothing here; the TLS service finds the broker.
+        assert!(correlate(&ptr, &srv, &a, SERVICE).is_empty());
+        assert_eq!(correlate(&ptr, &srv, &a, SERVICE_TLS), vec![Ipv4Addr::new(192, 168, 50, 41)]);
+    }
+
+    #[test]
+    fn correlate_order_is_deterministic() {
+        // PTR names instance B; A and C are extra `_mqtt._tcp` SRV records with no PTR. The result
+        // is B first (PTR order) then A, C by sorted name — stable regardless of HashMap order.
+        let ptr = vec!["b._mqtt._tcp.local".to_string()];
+        let mut srv = HashMap::new();
+        srv.insert("b._mqtt._tcp.local".to_string(), ("hb.local".to_string(), 1883u16));
+        srv.insert("a._mqtt._tcp.local".to_string(), ("ha.local".to_string(), 1883u16));
+        srv.insert("c._mqtt._tcp.local".to_string(), ("hc.local".to_string(), 1883u16));
+        let mut a = HashMap::new();
+        a.insert("hb.local".to_string(), vec![Ipv4Addr::new(192, 168, 50, 2)]);
+        a.insert("ha.local".to_string(), vec![Ipv4Addr::new(192, 168, 50, 1)]);
+        a.insert("hc.local".to_string(), vec![Ipv4Addr::new(192, 168, 50, 3)]);
+        assert_eq!(
+            correlate(&ptr, &srv, &a, SERVICE),
+            vec![
+                Ipv4Addr::new(192, 168, 50, 2), // b, via PTR
+                Ipv4Addr::new(192, 168, 50, 1), // a, sorted
+                Ipv4Addr::new(192, 168, 50, 3), // c, sorted
+            ]
+        );
     }
 
     #[test]
@@ -444,7 +538,7 @@ mod tests {
         let mut a = HashMap::new();
         a.insert("printer.local".to_string(), vec![Ipv4Addr::new(192, 168, 50, 99)]);
         // No PTR for our service, and the SRV name isn't under _mqtt._tcp → dropped.
-        assert!(correlate(&[], &srv, &a).is_empty());
+        assert!(correlate(&[], &srv, &a, SERVICE).is_empty());
     }
 
     #[test]
@@ -458,7 +552,7 @@ mod tests {
             "broker.local".to_string(),
             vec![Ipv4Addr::new(192, 168, 50, 40), Ipv4Addr::new(10, 0, 0, 40)],
         );
-        let ips = correlate(&["Mosquitto._mqtt._tcp.local".to_string()], &srv, &a);
+        let ips = correlate(&["Mosquitto._mqtt._tcp.local".to_string()], &srv, &a, SERVICE);
         assert_eq!(ips, vec![Ipv4Addr::new(192, 168, 50, 40), Ipv4Addr::new(10, 0, 0, 40)]);
     }
 
