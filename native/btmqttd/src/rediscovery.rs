@@ -214,13 +214,12 @@ pub async fn rediscover(
 
     // Candidates: the UNION of every anchor's /24 (deduped), minus every address already
     // proposed this outage. Exhausting them re-arms the next pass (see `retire_scan_subnets`).
-    let mut seen: HashSet<Ipv4Addr> = HashSet::new();
-    let candidates: Vec<Ipv4Addr> = anchors
-        .iter()
-        .flat_map(|a| slash24_candidates(*a))
-        .filter(|ip| seen.insert(*ip) && !tried.contains(ip))
-        .collect();
+    let candidates = union_candidates(&anchors, tried);
     if candidates.is_empty() {
+        eprintln!(
+            "btmqttd: rediscovery: every address in the anchor /24(s) was already tried this \
+             outage; re-arming the scan for the next pass"
+        );
         retire_scan_subnets(&anchors, tried);
         return None;
     }
@@ -547,6 +546,18 @@ fn slash24_candidates(anchor: Ipv4Addr) -> Vec<Ipv4Addr> {
         .collect()
 }
 
+/// The candidate set for the fallback scan: the UNION of every anchor's `/24` (deduped), minus
+/// every address already proposed this outage (`tried`). Shared by `rediscover` and its tests so
+/// the two can't silently drift.
+fn union_candidates(anchors: &[Ipv4Addr], tried: &HashSet<Ipv4Addr>) -> Vec<Ipv4Addr> {
+    let mut seen: HashSet<Ipv4Addr> = HashSet::new();
+    anchors
+        .iter()
+        .flat_map(|a| slash24_candidates(*a))
+        .filter(|ip| seen.insert(*ip) && !tried.contains(ip))
+        .collect()
+}
+
 /// Re-arm the fallback scan: drop just the scanned `/24` addresses from `tried` so the next pass
 /// re-probes those subnets from scratch (a broker may return to a former address), WITHOUT
 /// forgetting mDNS proposals already rejected this outage. Those proposals may be cross-subnet
@@ -776,17 +787,6 @@ mod tests {
             .collect();
         assert!(!candidates.contains(&anchor));
         assert_eq!(candidates.len(), 253);
-    }
-
-    // The union of the two anchor /24s, deduped and minus `tried` — the exact candidate
-    // construction `rediscover` runs, exercised here without I/O.
-    fn union_candidates(anchors: &[Ipv4Addr], tried: &HashSet<Ipv4Addr>) -> Vec<Ipv4Addr> {
-        let mut seen = HashSet::new();
-        anchors
-            .iter()
-            .flat_map(|a| slash24_candidates(*a))
-            .filter(|ip| seen.insert(*ip) && !tried.contains(ip))
-            .collect()
     }
 
     #[test]

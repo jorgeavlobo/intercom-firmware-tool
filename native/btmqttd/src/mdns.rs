@@ -88,6 +88,7 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
         // (Codex).
         let mut srv_queried: HashSet<String> = HashSet::new();
         let mut a_queried: HashSet<String> = HashSet::new();
+        let svc_suffixes: Vec<String> = SERVICES.iter().map(|s| format!(".{s}")).collect();
         loop {
             tokio::select! {
                 _ = &mut deadline => break,
@@ -107,7 +108,14 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
                                 }
                             }
                         }
-                        for (target, _port) in srv.values() {
+                        for (name, (target, _port)) in &srv {
+                            // Only chase A records for SRV entries under OUR MQTT services: `srv`
+                            // accumulates every service seen on the shared socket, and A-querying
+                            // all of them would be needless multicast amplification on the device
+                            // (CodeRabbit). `correlate` filters the final output regardless.
+                            if !svc_suffixes.iter().any(|suf| name.ends_with(suf)) {
+                                continue;
+                            }
                             if !a.contains_key(target) && a_queried.insert(target.clone()) {
                                 if let Some(q) = build_query(target, QTYPE_A, unicast_response) {
                                     let _ = sock.send_to(&q, (MDNS_GROUP, MDNS_PORT)).await;
