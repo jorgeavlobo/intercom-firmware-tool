@@ -79,10 +79,10 @@ own. It is layered, cheapest-first, and only ever *proposes* an address — the
 main client's authenticated + TLS-pinned reconnect is the trust gate, so it can
 never attach to the wrong broker:
 
-- **mDNS / DNS-SD** — queries `_mqtt._tcp` / `_secure-mqtt._tcp`, then the Home
-  Assistant host (`_home-assistant._tcp`, the broker is commonly co-located with
-  HA). Link-local, so it also finds a broker that moved to a different `/24` on
-  the same L2 link.
+- **mDNS / DNS-SD** — queries `_mqtt._tcp.local` / `_secure-mqtt._tcp.local`,
+  then the Home Assistant host (`_home-assistant._tcp.local`, the broker is
+  commonly co-located with HA). Link-local, so it also finds a broker that moved
+  to a different `/24` on the same L2 link.
 - **Hardened `/24` scan** — only if mDNS finds nothing: a TCP probe of the
   broker port across the confirmed/build-time subnet(s), capped to a `/24`,
   rate-limited, and logged. Adoption requires the pinned-TLS handshake to pass
