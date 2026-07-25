@@ -250,7 +250,13 @@ mod tests {
     #[test]
     fn store_read_clear_roundtrip_in_temp_dir() {
         // Directory-injected cores — no env mutation, so this is parallel-safe (Copilot).
-        let dir = std::env::temp_dir().join(format!("btmqttd-persist-{}", std::process::id()));
+        // A per-call nonce (atop the pid) keeps the temp dir unique even if this pattern is
+        // reused by another parallel test or a rerun in the same process (Copilot).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(0);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("btmqttd-persist-{}-{uniq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(read_state_in(&dir, "broker.lan"), (false, None)); // no file yet
