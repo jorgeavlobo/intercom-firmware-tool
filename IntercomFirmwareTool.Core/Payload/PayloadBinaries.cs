@@ -64,7 +64,7 @@ namespace IntercomFirmwareTool.Core
             Name: "btmqttd",
             InstallPath: "/usr/bin/btmqttd",
             Length: 1_321_264,
-            Sha256Hex: "762159ab7da96bd551cb2fc216f902d0c38a184c74366752cf53fc28053b0941",
+            Sha256Hex: "656c5e12a0d3ee657ac958fc742170c8018d9410aae3d97b7c21c0a55d5e7c09",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.btmqttd",
             LicenseResourceName:
                 "IntercomFirmwareTool.Core.Payload.vendor.licenses.btmqttd-THIRD-PARTY-LICENSES.txt",

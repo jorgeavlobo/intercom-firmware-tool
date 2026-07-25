@@ -109,11 +109,17 @@ pub fn is_unreachable(e: &rumqttc::ConnectionError) -> bool {
 /// `/etc/hosts` line to it, returning the proposed IP. `None` means nothing was done
 /// (broker not name-mapped, no open/trusted candidate this pass, or the rewrite failed).
 ///
-/// `tried` accumulates addresses already proposed during this outage so proposals are
-/// monotonic (no oscillation between two open-but-wrong hosts); the caller CLEARS it on
-/// a successful connect, and this function clears it once the whole `/24` is exhausted,
-/// so a broker that returns to a former address (including the original one) can be
-/// found again — the scan is self-healing.
+/// Two exclusion sets track what has already been proposed this outage so proposals don't
+/// oscillate between open-but-wrong hosts. `tried` holds the fallback SCAN's picks (plus the
+/// current stale mapping); `mdns_rejected` holds addresses an mDNS proposal adopted-and-lost.
+/// They are kept distinct because they re-arm differently: after a fruitless scan pass
+/// [`retire_scan_subnets`] re-arms ONLY the scanned `/24` addresses in `tried` (so a broker that
+/// returns to a former address is re-probed) while leaving `mdns_rejected` intact (so a wrong
+/// advertiser inside an anchor `/24` isn't re-proposed every pass). To stay self-healing, after
+/// `FULL_RESET_AFTER_DRY_CYCLES` consecutive fruitless passes it does a bounded FULL clear of
+/// both sets. `dry_cycles` counts those fruitless passes and is reset ONLY on that full clear and
+/// by the caller on a successful connect — never on a mere proposal (a hosts rewrite is not a
+/// confirmation). The caller also clears both sets on a ConnAck.
 ///
 /// The trust boundary is unchanged: this only PROPOSES an address. When the config uses
 /// TLS, the main client validates the broker's certificate (pinned CA + hostname) on
