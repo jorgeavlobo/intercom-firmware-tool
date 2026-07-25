@@ -256,11 +256,15 @@ async fn run() -> Result<(), String> {
         let host = cfg.mqtt_host.clone();
         match tokio::task::spawn_blocking(move || persist::read_state(&host)).await {
             Ok(state) => state,
-            // A JoinError here means read_state PANICKED — surface it (it's diagnosable) instead of
-            // silently reporting "no persisted state", then fall back to that safe default so boot
-            // still proceeds on the build-time mapping (Copilot).
+            // A JoinError here means the read_state task did NOT complete — it panicked or was
+            // cancelled/aborted. Surface it (it's diagnosable) instead of silently reporting "no
+            // persisted state", then fall back to that safe default so boot still proceeds on the
+            // build-time mapping (Copilot).
             Err(e) => {
-                eprintln!("btmqttd: persist: read_state task failed ({e}); assuming no persisted state");
+                eprintln!(
+                    "btmqttd: persist: read_state task did not complete ({e}); assuming no \
+                     persisted state"
+                );
                 (false, None)
             }
         }
