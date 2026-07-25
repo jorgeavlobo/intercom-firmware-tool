@@ -77,22 +77,23 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
 /// SHARED socket we must ask for a MULTICAST answer (`unicast_response = false`): a unicast reply
 /// to 5353 is delivered to only ONE of the co-bound sockets, so Avahi could consume the broker's
 /// answer and leave us empty-handed (Codex) — a multicast answer, by contrast, is copied to every
-/// socket joined to the group. Fallback: an ephemeral port we solely own, where we did NOT join
-/// the group and so must ask for a UNICAST reply (`unicast_response = true`) to receive anything.
-/// TTL 255 per RFC 6762 §11.
+/// socket joined to the group. The preferred socket is usable ONLY if the JOIN also succeeds —
+/// otherwise we would request a multicast answer on a socket not subscribed to receive it and
+/// hear nothing (Codex/Copilot), so a failed join falls through to the fallback like a failed
+/// bind. Fallback: an ephemeral port we solely own, where we did NOT join the group and so must
+/// ask for a UNICAST reply (`unicast_response = true`) to receive anything. TTL 255 per §11.
 async fn open_socket() -> std::io::Result<(UdpSocket, bool)> {
-    match bind_reuse(MDNS_PORT) {
-        Ok(sock) => {
-            let _ = sock.join_multicast_v4(MDNS_GROUP, Ipv4Addr::UNSPECIFIED);
+    // Preferred: co-bind 5353 AND join the group — both must succeed to request multicast answers.
+    if let Ok(sock) = bind_reuse(MDNS_PORT) {
+        if sock.join_multicast_v4(MDNS_GROUP, Ipv4Addr::UNSPECIFIED).is_ok() {
             let _ = sock.set_multicast_ttl_v4(255);
-            Ok((sock, false)) // shared 5353 + joined group → request MULTICAST answers
-        }
-        Err(_) => {
-            let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
-            let _ = sock.set_multicast_ttl_v4(255);
-            Ok((sock, true)) // sole owner of an ephemeral port → request UNICAST answers
+            return Ok((sock, false)); // shared 5353 + joined group → request MULTICAST answers
         }
     }
+    // Fallback: an ephemeral port we solely own → request UNICAST answers (QU).
+    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
+    let _ = sock.set_multicast_ttl_v4(255);
+    Ok((sock, true))
 }
 
 /// Bind a non-blocking UDP socket to `0.0.0.0:port` with `SO_REUSEADDR` + `SO_REUSEPORT` set

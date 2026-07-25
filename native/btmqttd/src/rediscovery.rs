@@ -398,7 +398,8 @@ async fn mdns_propose(cfg: &Config, tried: &HashSet<Ipv4Addr>) -> Option<Ipv4Add
             continue;
         }
         let trusted = if cfg.uses_tls() {
-            !probe_open(&[ip], cfg.mqtt_port).await.is_empty()
+            let one = [ip];
+            !probe_open(&one, cfg.mqtt_port).await.is_empty()
         } else if let Some(mac) = cfg.broker_mac {
             arp_mac_matches(ip, cfg.mqtt_port, mac).await
         } else {
