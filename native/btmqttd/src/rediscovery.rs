@@ -32,12 +32,14 @@
 //! monotonic). So rediscovery only ever *proposes* an address; it can never make the
 //! bridge attach to an unauthenticated or mismatched broker.
 //!
-//! Scope of this module: same-subnet (`/24`) rediscovery, opt-in (`MQTT_REDISCOVERY`,
-//! off by default) and only when the broker is a name. A learned address IS now persisted
-//! across a reboot (issue #49 item 1): `persist.rs` remembers the connect-confirmed IP on
-//! the writable `cfg/extra` partition and `main` seeds `/etc/hosts` from it at startup, so
-//! a reboot after the broker moved reconnects immediately instead of re-scanning. Device
-//! mDNS discovery and cross-subnet / port fallback remain follow-ups (#49 items 2–3).
+//! Scope of this module: opt-in (`MQTT_REDISCOVERY`, off by default) and only when the broker
+//! is a name. A rediscovery pass now tries `mdns.rs` FIRST (issue #49 item 2 — the broker's
+//! advertised `_mqtt._tcp` address, found by name across the link) and falls back to the
+//! same-subnet (`/24`) scan. A learned address is also persisted across a reboot (issue #49
+//! item 1): `persist.rs` remembers the connect-confirmed IP on the writable `cfg/extra`
+//! partition and `main` seeds `/etc/hosts` from it at startup, so a reboot after the broker
+//! moved reconnects immediately instead of re-scanning. Cross-subnet + port fallback (1883 ↔
+//! 8883) remain follow-ups (#49 item 3).
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -46,6 +48,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 
 use crate::config::Config;
+use crate::mdns;
 
 /// The hosts file (a tmpfs symlink on the device, so writable at runtime). Rewriting
 /// only the broker's line here repoints the name for our musl resolver on the next
@@ -118,6 +121,27 @@ pub fn is_unreachable(e: &rumqttc::ConnectionError) -> bool {
 /// `MQTT_BROKER_MAC` hint (issue #43 / Codex P1 / CodeRabbit). `main` additionally
 /// refuses to activate rediscovery at all without one of these anchors.
 pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
+    // Layer B (issue #49 item 2, #43): mDNS FIRST. A broker that advertises `_mqtt._tcp`
+    // announces its IPv4 by name across the whole link — cheaper and broader than the /24
+    // port scan below, and it finds a broker that moved to a DIFFERENT subnet on the same L2
+    // segment. Trust boundary unchanged: this only PROPOSES the advertised address; the main
+    // client's authenticated + pinned-TLS reconnect is the gate, and in plaintext mode the
+    // proposal is additionally ARP-MAC-gated here (mirroring the scan). If mDNS proposes a
+    // usable address, repoint and return; otherwise fall through to the subnet scan.
+    if let Some(ip) = mdns_propose(cfg, tried).await {
+        match seed_hosts(&cfg.mqtt_host, ip).await {
+            Ok(_) => {
+                tried.insert(ip);
+                eprintln!(
+                    "btmqttd: rediscovery: mDNS repointed '{}' -> {ip} in {HOSTS_PATH}",
+                    cfg.mqtt_host
+                );
+                return Some(ip);
+            }
+            Err(e) => eprintln!("btmqttd: rediscovery: mDNS repoint of {HOSTS_PATH} failed: {e}"),
+        }
+    }
+
     // Read the hosts file and find the IP currently mapped to the broker name.
     let hosts = match tokio::fs::read_to_string(HOSTS_PATH).await {
         Ok(t) => t,
@@ -314,6 +338,37 @@ pub async fn seed_hosts(name: &str, ip: Ipv4Addr) -> std::io::Result<bool> {
         .await
         .map_err(std::io::Error::other)??;
     Ok(true)
+}
+
+/// How long to listen for mDNS answers per rediscovery pass. Long enough for LAN responders
+/// to reply (they answer in ~ms), short enough that a broker which doesn't advertise mDNS
+/// only delays the fallback subnet scan by a couple of seconds.
+const MDNS_WINDOW: Duration = Duration::from_secs(2);
+
+/// Propose a broker address discovered via mDNS (Layer B), or `None`. Queries
+/// `_mqtt._tcp.local`, then returns the first advertised IPv4 that is a private LAN address,
+/// not already tried this outage, and passes the trust gate: under TLS any such address is
+/// fine (the reconnect validates the pinned cert); in plaintext it must additionally match
+/// the recorded `MQTT_BROKER_MAC` in the ARP table (probed via [`arp_mac_matches`], exactly
+/// as the scan gates a plaintext adoption). Without TLS and without a MAC, mDNS proposes
+/// nothing — same posture as `main`'s activation gate.
+async fn mdns_propose(cfg: &Config, tried: &HashSet<Ipv4Addr>) -> Option<Ipv4Addr> {
+    for ip in mdns::discover_ips(MDNS_WINDOW).await {
+        if tried.contains(&ip) || !ip.is_private() {
+            continue;
+        }
+        let trusted = if cfg.uses_tls() {
+            true
+        } else if let Some(mac) = cfg.broker_mac {
+            arp_mac_matches(ip, cfg.mqtt_port, mac).await
+        } else {
+            false
+        };
+        if trusted {
+            return Some(ip);
+        }
+    }
+    None
 }
 
 /// TCP-connect-probe `port` on each candidate, returning those that accept. Batched to

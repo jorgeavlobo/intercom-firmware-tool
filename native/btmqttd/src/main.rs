@@ -28,6 +28,7 @@ mod dimension;
 mod gate;
 mod ha;
 mod keys;
+mod mdns;
 mod own;
 mod persist;
 mod receiver;
