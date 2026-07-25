@@ -248,6 +248,13 @@ async fn run() -> Result<(), String> {
 
     let mut last_persisted: Option<std::net::Ipv4Addr> = None;
     let mut persisted_on_disk = persisted_file_exists;
+    // The last address the broker was CONFIRMED at — a ConnAck this session, or a persisted
+    // learned IP we actually SEEDED at boot because it passed the trust gate. This anchors the
+    // fallback /24 scan (rediscover's `confirmed_anchor`). It is deliberately SEPARATE from
+    // `last_persisted`: the "MAC unconfirmed at boot" branch below sets `last_persisted` as a
+    // write-comparison baseline for a REJECTED (un-seeded) record, and that address must never
+    // become a scan anchor — doing so could sweep the wrong subnet (Codex P1 / Copilot).
+    let mut last_confirmed_ip: Option<std::net::Ipv4Addr> = None;
     if let (Some(build_ip), Some((base, learned))) = (build_ip, record) {
         // Apply the record only while its base still matches this firmware's build IP; a
         // mismatch means a re-flash re-pointed the broker and the record is stale (it will
@@ -269,12 +276,16 @@ async fn run() -> Result<(), String> {
                 match rediscovery::seed_hosts(&cfg.mqtt_host, learned).await {
                     Ok(true) => {
                         last_persisted = Some(learned);
+                        last_confirmed_ip = Some(learned); // seeded a trusted, previously-confirmed IP
                         eprintln!(
                             "btmqttd: seeded '{}' -> {learned} in {} from persisted state",
                             cfg.mqtt_host, rediscovery::HOSTS_PATH
                         );
                     }
-                    Ok(false) => last_persisted = Some(learned), // already mapped (respawn)
+                    Ok(false) => {
+                        last_persisted = Some(learned); // already mapped (respawn)
+                        last_confirmed_ip = Some(learned);
+                    }
                     Err(e) => eprintln!("btmqttd: could not seed persisted broker IP: {e}"),
                 }
             } else {
@@ -319,6 +330,9 @@ async fn run() -> Result<(), String> {
                         if let (Some(build_ip), Some(confirmed)) =
                             (build_ip, rediscovery::current_broker_ip(&cfg.mqtt_host).await)
                         {
+                            // This IP just authenticated: it is the anchor for any later
+                            // fallback scan (build-time or a rediscovered subnet, uniformly).
+                            last_confirmed_ip = Some(confirmed);
                             if confirmed == build_ip {
                                 // The broker is at (or has returned to) its build-time IP, which
                                 // the boot init re-seeds anyway. Forget any on-disk record —
@@ -506,11 +520,13 @@ async fn run() -> Result<(), String> {
                             tokio::select! {
                                 _ = sig_term.recv() => break,
                                 _ = sig_int.recv() => break,
-                                // Anchor the fallback scan on the last connect-confirmed IP
-                                // (`last_persisted`), so it follows a confirmed cross-subnet
-                                // move yet never latches onto an unconfirmed mDNS proposal
-                                // (Codex/Copilot). `None` ⇒ anchor on the build-time mapping.
-                                r = rediscovery::rediscover(&cfg, &mut tried_ips, last_persisted) => {
+                                // Anchor the fallback scan on the last CONFIRMED IP
+                                // (`last_confirmed_ip` — a ConnAck, or a trusted seeded persisted
+                                // IP; NEVER the MAC-rejected persistence baseline), so it follows
+                                // a confirmed cross-subnet move yet never latches onto an
+                                // unconfirmed mDNS proposal or a rejected record (Codex P1 /
+                                // Copilot). `None` ⇒ anchor on the build-time mapping.
+                                r = rediscovery::rediscover(&cfg, &mut tried_ips, last_confirmed_ip) => {
                                     if let Some(ip) = r {
                                         eprintln!(
                                             "btmqttd: rediscovery: repointed '{}' -> {ip} in {}",
