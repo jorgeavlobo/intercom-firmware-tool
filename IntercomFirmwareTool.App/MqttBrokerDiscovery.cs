@@ -295,12 +295,21 @@ namespace IntercomFirmwareTool.App
             // LAZILY from the generator below, so we never materialise ~2000 Task + CTS objects up
             // front the way the old List<Task> fan-out did — that burst of allocations spiked GC
             // (whose collections pause every managed thread) and did its whole fan-out on the
-            // caller's thread. Here at most MaxDegreeOfParallelism probes are live at once. Every
-            // candidate is confirmed to speak MQTT: 1883 with a plaintext CONNECT/CONNACK, 8883 with
-            // a TLS handshake THEN the same CONNECT/CONNACK. 1883 wins on a dual-port host.
+            // caller's thread. Here at most ScanConcurrency probes are live at once. Every candidate
+            // is confirmed to speak MQTT: 1883 with a plaintext CONNECT/CONNACK, 8883 with a TLS
+            // handshake THEN the same CONNECT/CONNACK. 1883 wins on a dual-port host.
+            //
+            // ScanConcurrency is intentionally moderate, not maximal. The probes are I/O-bound, but a
+            // batch of dead-host connect timeouts fires its ~N continuations (parse/cleanup/alloc) in
+            // near-synchronised bursts; each burst is a CPU + GC spike that competes with WPF's
+            // render/dispatcher threads at equal priority (async continuations can't cheaply run at
+            // lower priority), which shows as scroll stutter. A smaller pool shrinks each burst — the
+            // common case still finishes fast because the sweep early-stops on the first plaintext
+            // broker; only a no-broker-present sweep pays the extra wall-clock.
+            const int ScanConcurrency = 24;
             var options = new ParallelOptions
             {
-                MaxDegreeOfParallelism = 48,
+                MaxDegreeOfParallelism = ScanConcurrency,
                 CancellationToken = earlyStop.Token,
             };
             try
