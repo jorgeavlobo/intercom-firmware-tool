@@ -117,7 +117,9 @@ fn bind_reuse(port: u16) -> std::io::Result<UdpSocket> {
     // SAFETY: standard socket syscalls. The raw fd is wrapped in an owning std `UdpSocket`
     // immediately, so every early return closes it via `Drop` — the fd is never leaked.
     unsafe {
-        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        // SOCK_CLOEXEC so this fd is not leaked into the shells btmqttd spawns per command
+        // (std/tokio set it on their own sockets; the raw path must too — Copilot).
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
         if fd < 0 {
             return Err(err());
         }
