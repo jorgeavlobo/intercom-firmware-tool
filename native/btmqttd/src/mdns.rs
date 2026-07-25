@@ -390,6 +390,12 @@ fn read_name(b: &[u8], pos: &mut usize) -> String {
             p = target;
             continue;
         }
+        // Ordinary label: the top two bits must be 00 (0x40/0x80 are RFC 1035 reserved), so a
+        // length octet > 63 here is malformed — stop rather than decode a garbage label from
+        // untrusted LAN input (Copilot). Pointers (0xC0) are already handled above.
+        if c > 63 {
+            break;
+        }
         // ordinary label
         p += 1;
         if p + c > len {
@@ -670,6 +676,19 @@ mod tests {
         let sock = bind_reuse(0).expect("reuse bind should succeed");
         let addr = sock.local_addr().expect("bound socket has a local address");
         assert!(addr.port() != 0); // the kernel assigned a concrete port
+    }
+
+    #[test]
+    fn read_name_stops_on_reserved_length_octet() {
+        // A length octet with top bits 10 (0x80) is RFC 1035 reserved — not a valid label length
+        // and not a compression pointer (0xC0). read_name must stop, not read a 128-byte label
+        // from untrusted input (Copilot).
+        let mut b = vec![3u8];
+        b.extend_from_slice(b"abc"); // valid label "abc"
+        b.push(0x80); // reserved length octet
+        b.extend_from_slice(&[0u8; 4]);
+        let mut pos = 0;
+        assert_eq!(read_name(&b, &mut pos), "abc");
     }
 
     #[test]
