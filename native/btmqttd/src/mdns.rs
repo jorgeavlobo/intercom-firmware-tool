@@ -61,7 +61,7 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
         // service is still discovered (Codex).
         let queries: Vec<Vec<u8>> = SERVICES
             .iter()
-            .map(|svc| build_query(svc, QTYPE_PTR, unicast_response))
+            .filter_map(|svc| build_query(svc, QTYPE_PTR, unicast_response))
             .collect();
         for q in &queries {
             let _ = sock.send_to(q, (MDNS_GROUP, MDNS_PORT)).await;
@@ -102,14 +102,16 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
                         parse_response(&buf[..n], &mut ptr, &mut srv, &mut a);
                         for inst in &ptr {
                             if !srv.contains_key(inst) && srv_queried.insert(inst.clone()) {
-                                let q = build_query(inst, QTYPE_SRV, unicast_response);
-                                let _ = sock.send_to(&q, (MDNS_GROUP, MDNS_PORT)).await;
+                                if let Some(q) = build_query(inst, QTYPE_SRV, unicast_response) {
+                                    let _ = sock.send_to(&q, (MDNS_GROUP, MDNS_PORT)).await;
+                                }
                             }
                         }
                         for (target, _port) in srv.values() {
                             if !a.contains_key(target) && a_queried.insert(target.clone()) {
-                                let q = build_query(target, QTYPE_A, unicast_response);
-                                let _ = sock.send_to(&q, (MDNS_GROUP, MDNS_PORT)).await;
+                                if let Some(q) = build_query(target, QTYPE_A, unicast_response) {
+                                    let _ = sock.send_to(&q, (MDNS_GROUP, MDNS_PORT)).await;
+                                }
                             }
                         }
                     }
@@ -229,12 +231,28 @@ const QTYPE_A: u16 = 1;
 const QTYPE_PTR: u16 = 12;
 const QTYPE_SRV: u16 = 33;
 
-/// Build a standard-query datagram for a single record of `qtype` (PTR/SRV/A). When
-/// `unicast_response` is set, the mDNS unicast-response (QU) top bit of QCLASS is set so responders
-/// reply to our source port — used ONLY on the solely-owned ephemeral socket. On the shared 5353
-/// socket it is cleared, i.e. a normal multicast-response (QM) question, so the answer reaches
-/// every co-bound listener (Codex).
-fn build_query(name: &str, qtype: u16, unicast_response: bool) -> Vec<u8> {
+/// Build a standard-query datagram for a single record of `qtype` (PTR/SRV/A), or `None` if
+/// `name` doesn't fit the DNS wire limits (RFC 1035 §2.3.4): each label 1..=63 bytes and the
+/// encoded QNAME (labels + length octets + root) <= 255. The follow-up SRV/A queries reuse
+/// instance/target names parsed from UNTRUSTED responses, so an out-of-range name yields `None`
+/// (the caller skips it) instead of a malformed datagram (Copilot).
+///
+/// When `unicast_response` is set, the mDNS unicast-response (QU) top bit of QCLASS is set so
+/// responders reply to our source port — used ONLY on the solely-owned ephemeral socket. On the
+/// shared 5353 socket it is cleared, i.e. a normal multicast-response (QM) question, so the answer
+/// reaches every co-bound listener (Codex).
+fn build_query(name: &str, qtype: u16, unicast_response: bool) -> Option<Vec<u8>> {
+    let mut encoded_len = 1usize; // the terminating root label
+    for label in name.split('.') {
+        let l = label.len();
+        if l == 0 || l > 63 {
+            return None;
+        }
+        encoded_len += 1 + l; // length octet + label bytes
+    }
+    if encoded_len > 255 {
+        return None;
+    }
     let mut b = vec![
         0x00, 0x00, // ID (0 for mDNS)
         0x00, 0x00, // flags: standard query
@@ -244,7 +262,7 @@ fn build_query(name: &str, qtype: u16, unicast_response: bool) -> Vec<u8> {
         0x00, 0x00, // ARCOUNT
     ];
     for label in name.split('.') {
-        b.push(label.len() as u8);
+        b.push(label.len() as u8); // <= 63, checked above
         b.extend_from_slice(label.as_bytes());
     }
     b.push(0x00); // end of QNAME
@@ -252,7 +270,7 @@ fn build_query(name: &str, qtype: u16, unicast_response: bool) -> Vec<u8> {
     // QCLASS = IN (0x0001); the top bit is the mDNS QU (unicast-response) request.
     let qclass: u16 = if unicast_response { 0x8001 } else { 0x0001 };
     b.extend_from_slice(&qclass.to_be_bytes());
-    b
+    Some(b)
 }
 
 /// Parse a DNS response into the PTR/SRV/A accumulators (names lower-cased). Bounds-checked
@@ -444,7 +462,7 @@ mod tests {
 
     #[test]
     fn build_ptr_query_has_the_expected_shape() {
-        let q = build_query("_mqtt._tcp.local", QTYPE_PTR, true);
+        let q = build_query("_mqtt._tcp.local", QTYPE_PTR, true).unwrap();
         // Header: QDCOUNT = 1, everything else 0.
         assert_eq!(&q[0..12], &[0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
         // QNAME labels: 5 "_mqtt", 4 "_tcp", 5 "local", 0.
@@ -463,10 +481,23 @@ mod tests {
     fn build_query_uses_multicast_qclass_when_not_unicast() {
         // On the shared 5353 socket we ask for a MULTICAST answer: QCLASS = IN with the QU bit
         // CLEARED (0x0001), so a co-bound Avahi can't consume a unicast reply meant for us.
-        let q = build_query("_mqtt._tcp.local", QTYPE_SRV, false);
+        let q = build_query("_mqtt._tcp.local", QTYPE_SRV, false).unwrap();
         assert_eq!(&q[30..34], &[0x00, 0x21, 0x00, 0x01]); // QTYPE=SRV(33), QCLASS=IN, QU cleared
-        let q = build_query("_mqtt._tcp.local", QTYPE_PTR, false);
+        let q = build_query("_mqtt._tcp.local", QTYPE_PTR, false).unwrap();
         assert_eq!(&q[30..34], &[0x00, 0x0C, 0x00, 0x01]);
+    }
+
+    #[test]
+    fn build_query_rejects_out_of_range_names() {
+        // Follow-up SRV/A queries reuse names parsed from untrusted responses; a label > 63 bytes,
+        // an empty label, or a name > 255 bytes must yield None (no datagram) rather than a
+        // malformed query (Copilot).
+        let long_label = "a".repeat(64);
+        assert!(build_query(&format!("{long_label}._tcp.local"), QTYPE_SRV, true).is_none());
+        assert!(build_query("a..local", QTYPE_A, true).is_none()); // empty label
+        let long_name = vec!["abcdefghij"; 30].join("."); // 30 valid labels, > 255 bytes total
+        assert!(build_query(&long_name, QTYPE_A, true).is_none());
+        assert!(build_query("broker.local", QTYPE_A, true).is_some()); // a valid name still builds
     }
 
     /// Encode a DNS name as length-prefixed labels + terminator.
