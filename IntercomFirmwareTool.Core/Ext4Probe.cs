@@ -1162,7 +1162,10 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         private static bool DropbearLoadsHostKey(string body, string keyPath)
         {
-            char[] seps = { ' ', '\t', '"', '\'', '=' };
+            // Include '\r' so a CRLF file doesn't leave a trailing '\r' stuck to the last
+            // token on a line (which would make the key path compare unequal and duplicate
+            // the patch) — Copilot.
+            char[] seps = { ' ', '\t', '\r', '"', '\'', '=' };
             foreach (string raw in body.Split('\n'))
             {
                 string active = raw.Split('#', 2)[0];
