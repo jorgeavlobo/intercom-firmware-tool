@@ -687,11 +687,11 @@ namespace IntercomFirmwareTool.Core
                 ? ReadAllTextFromFs(fs, DropbearDefaultsPath)
                 : "";
             // Idempotency: consider it already patched only when the key is loaded as an
-            // actual `-r <path>` argument — not merely mentioned (e.g. in a comment) — so a
-            // stray occurrence can't no-op the patch and leave dropbear without the key
-            // (Copilot). Matches the token ValidateSsh checks for.
+            // actual `-r <path>` argument on an ACTIVE (non-comment) line — so a stray
+            // occurrence in a comment or other inactive text can't no-op the patch and
+            // leave dropbear without the key (Codex). Matches the token ValidateSsh checks.
             string loadArg = "-r " + EcdsaHostKeyPath;
-            if (existing.Contains(loadArg, StringComparison.Ordinal))
+            if (ActiveShellLineContains(existing, loadArg))
                 return;
 
             string updated = existing.Length == 0
@@ -787,7 +787,7 @@ namespace IntercomFirmwareTool.Core
                     string defaults = PathPresent(fs, DropbearDefaultsPath)
                         ? ReadAllTextFromFs(fs, DropbearDefaultsPath) : "";
                     checks.Add(new($"{DropbearDefaultsPath} loads it (-r)",
-                        defaults.Contains("-r " + EcdsaHostKeyPath, StringComparison.Ordinal), ""));
+                        ActiveShellLineContains(defaults, "-r " + EcdsaHostKeyPath), ""));
                 }
             }
             finally
@@ -1147,6 +1147,25 @@ namespace IntercomFirmwareTool.Core
         {
             if (fs.FileExists(path) || fs.DirectoryExists(path)) return true;
             try { fs.ReadSymLink(path); return true; } catch { return false; }
+        }
+
+        /// <summary>
+        /// True if any ACTIVE (non-comment) line of a shell env file body contains
+        /// <paramref name="token"/>. Everything from the first <c>#</c> on a line is a
+        /// comment and is ignored, so a token that appears only in a comment (or other
+        /// inactive text) does not count — matching what the shell actually sources when
+        /// it reads <c>/etc/default/dropbear</c> (Codex). Used both to gate the
+        /// idempotent patch and to validate that dropbear really loads the ECDSA key.
+        /// </summary>
+        private static bool ActiveShellLineContains(string body, string token)
+        {
+            foreach (string raw in body.Split('\n'))
+            {
+                string active = raw.Split('#', 2)[0];
+                if (active.Contains(token, StringComparison.Ordinal))
+                    return true;
+            }
+            return false;
         }
 
         private static void EnsureDir(ExtFileSystem fs, string path)
