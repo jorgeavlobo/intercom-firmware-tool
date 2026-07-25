@@ -18,11 +18,11 @@
 //! the client. Instead we reuse the indirection the device already has: when the
 //! broker is configured by **name**, the installer maps `name -> IP` in `/etc/hosts`
 //! (a tmpfs symlink, writable at runtime). Rediscovery:
-//!   1. anchors on the **last connect-confirmed** broker IP (the caller's persisted learned
-//!      IP, or the build-time mapping when none) and scans that IP's `/24` (the broker moved
-//!      WITHIN its home subnet: the DHCP case). Anchoring on a CONFIRMED mapping — never an
-//!      unconfirmed mDNS proposal — keeps the scan from drifting onto the wrong subnet while
-//!      still following the broker to a subnet it legitimately moved to and connected on;
+//!   1. scans the UNION of the **last connect-confirmed** broker `/24` (the caller's persisted
+//!      learned IP) and the immutable **build-time** `/24` — the same subnet when the broker
+//!      never left (the DHCP case). Using only CONFIRMED anchors — never an unconfirmed mDNS
+//!      proposal — keeps the scan from drifting, while covering both a subnet the broker
+//!      legitimately moved to and its original one should it return there with mDNS down;
 //!   2. TCP-probes the broker port across the subnet, and (when a broker MAC was
 //!      recorded at config time) prefers a candidate whose `/proc/net/arp` MAC
 //!      matches — the MAC is a HINT/tie-breaker, never the trust gate;
@@ -158,79 +158,86 @@ pub async fn rediscover(
             return None;
         }
     };
-    // Anchor the /24 scan on the LAST CONFIRMED broker mapping — `confirmed_anchor`, the
-    // caller's last connect-confirmed learned IP (or `None` when the broker last connected at
-    // its build-time IP). Two review findings converge on this choice:
-    //   * the anchor must NOT be an UNCONFIRMED mDNS proposal that a prior pass wrote into
-    //     /etc/hosts — anchoring on that could strand the scan sweeping the wrong /24 while,
-    //     after each `tried` clear, mDNS re-proposes the same wrong address (Copilot); yet
-    //   * it MUST follow the broker to a subnet it legitimately moved to and CONFIRMED — if
-    //     mDNS relocated the broker to another /24, that connected, and mDNS is later
-    //     unavailable, a DHCP move WITHIN that subnet is only recoverable by scanning it, not
-    //     the original build-time /24 (Codex).
-    // The confirmed learned IP satisfies both: only a ConnAck advances it, so an mDNS proposal
-    // never becomes the anchor, but a confirmed cross-subnet move does. Fall back to the
-    // immutable build-time mapping when there is no confirmed learned IP (the broker is at, or
-    // returning to, its build-time address), and to the current /etc/hosts mapping only when
-    // the boot script has no readable mapping for the name either.
-    let anchor = if let Some(a) = confirmed_anchor {
-        a
-    } else if let Some(a) = build_time_ip(&cfg.mqtt_host).await {
-        a
-    } else if let Some(a) = parse_hosts_ip(&hosts, &cfg.mqtt_host) {
-        a
-    } else {
-        // The name is pinned nowhere we can read — a misconfiguration (the installer normally
-        // seeds both the boot script and /etc/hosts). Say so instead of returning silently,
-        // which otherwise looks like rediscovery just never triggering.
+    // Gather the subnets to scan. Three review findings converge here:
+    //   * NEVER anchor on an UNCONFIRMED mDNS proposal sitting in /etc/hosts — that could
+    //     strand the scan on the wrong /24 (Copilot);
+    //   * DO follow the broker to a subnet it legitimately moved to and CONFIRMED
+    //     (`confirmed_anchor`, advanced only by a ConnAck) — a DHCP move WITHIN that subnet is
+    //     only recoverable by scanning it (Codex);
+    //   * but ALSO keep scanning the immutable build-time subnet, so a broker that RETURNED to
+    //     its original subnet while mDNS is unavailable is still found once the confirmed
+    //     subnet is exhausted (Codex).
+    // So the fallback scans the UNION of the last-confirmed /24 and the build-time /24 — the
+    // same /24 (deduped) when the broker never left. Neither is an unconfirmed proposal, so
+    // there is no drift. Fall back to the current /etc/hosts mapping only when neither a
+    // confirmed IP nor a readable build-time mapping exists.
+    let mut anchors: Vec<Ipv4Addr> = Vec::new();
+    if let Some(a) = confirmed_anchor {
+        anchors.push(a);
+    }
+    if let Some(a) = build_time_ip(&cfg.mqtt_host).await {
+        anchors.push(a);
+    }
+    if anchors.is_empty() {
+        if let Some(a) = parse_hosts_ip(&hosts, &cfg.mqtt_host) {
+            anchors.push(a);
+        }
+    }
+    // Only ever scan a private LAN /24: drop any anchor pinned to a public, loopback or
+    // link-local address rather than probe a non-local subnet (Copilot).
+    anchors.retain(|a| anchor_is_scannable(*a));
+    if anchors.is_empty() {
         eprintln!(
-            "btmqttd: rediscovery: broker name '{}' has no IPv4 mapping in \
-             {BOOT_HOSTS_SCRIPT} or {HOSTS_PATH}; cannot rediscover (is it pinned?)",
+            "btmqttd: rediscovery: broker name '{}' has no private-LAN IPv4 anchor in \
+             {BOOT_HOSTS_SCRIPT} or {HOSTS_PATH}; cannot rediscover (is it pinned to a \
+             local address?)",
             cfg.mqtt_host
         );
         return None;
-    };
-    // Only ever scan a private LAN /24. If the broker name is pinned to a public,
-    // loopback or link-local address, probing its whole /24 would be off-scope outbound
-    // scanning — refuse (Copilot). A moved LAN broker is, by definition, on a private
-    // subnet, so this loses nothing legitimate.
-    if !anchor_is_scannable(anchor) {
-        eprintln!(
-            "btmqttd: rediscovery: broker anchor {anchor} is not a private LAN address; \
-             refusing to scan a non-local /24"
-        );
-        return None;
     }
+
     // Retire the CURRENT (stale) mapping — the address the broker is pinned to now, and that
-    // just failed — for the rest of this outage, so a repoint can't bounce back to it. Do NOT
-    // retire the build-time anchor itself: when /etc/hosts currently points at a learned (or
-    // mDNS-proposed) address and the broker later returns to its build-time IP, that IP must
-    // stay probeable in the /24 scan, so the anchor is only the SUBNET selector here — the
-    // address exclusion rides on `tried` (Codex). A current mapping outside the anchor's /24
-    // (a prior cross-subnet repoint) simply doesn't intersect the candidates, so retiring it
-    // is then a harmless no-op. Proposals stay monotonic; `tried` is cleared only on a
-    // successful ConnAck (caller) or when the whole /24 is exhausted below.
+    // just failed — so a repoint can't bounce back to it. The anchors themselves stay
+    // probeable (the build-time or confirmed address must be findable if the broker returned
+    // there); only the current mapping is excluded, via `tried` (Codex). A current mapping
+    // outside every anchor's /24 (a prior cross-subnet repoint) simply doesn't intersect the
+    // candidates, so retiring it is then a harmless no-op.
     if let Some(current) = parse_hosts_ip(&hosts, &cfg.mqtt_host) {
         tried.insert(current);
     }
 
-    // Candidates: the anchor's /24, minus every address already proposed this outage.
-    // Exhausting the subnet clears `tried` so the next pass re-scans from scratch (incl.
-    // former anchors) instead of giving up.
-    let candidates: Vec<Ipv4Addr> = slash24_candidates(anchor)
-        .into_iter()
-        .filter(|ip| !tried.contains(ip))
+    // Candidates: the UNION of every anchor's /24 (deduped), minus every address already
+    // proposed this outage. Exhausting them clears `tried` so the next pass re-scans from
+    // scratch (incl. former anchors) instead of giving up.
+    let mut seen: HashSet<Ipv4Addr> = HashSet::new();
+    let candidates: Vec<Ipv4Addr> = anchors
+        .iter()
+        .flat_map(|a| slash24_candidates(*a))
+        .filter(|ip| seen.insert(*ip) && !tried.contains(ip))
         .collect();
     if candidates.is_empty() {
         tried.clear();
         return None;
     }
 
-    // Probe the broker port across the subnet; only open hosts advance.
+    // A human-readable list of the /24(s) being swept, for the log lines below.
+    let scanned = {
+        let mut nets: Vec<String> = Vec::new();
+        for a in &anchors {
+            let o = a.octets();
+            let net = format!("{}.{}.{}.0/24", o[0], o[1], o[2]);
+            if !nets.contains(&net) {
+                nets.push(net);
+            }
+        }
+        nets.join(", ")
+    };
+
+    // Probe the broker port across the subnet(s); only open hosts advance.
     let open = probe_open(&candidates, cfg.mqtt_port).await;
     if open.is_empty() {
         eprintln!(
-            "btmqttd: rediscovery: no untried host in {anchor}/24 has port {} open",
+            "btmqttd: rediscovery: no untried host in {scanned} has port {} open",
             cfg.mqtt_port
         );
         // No OPEN untried host this pass — the monotonic memory is now useless (there is
@@ -274,7 +281,7 @@ pub async fn rediscover(
         Some(ip) => ip,
         None => {
             eprintln!(
-                "btmqttd: rediscovery: no open candidate in {anchor}/24 matches the broker MAC \
+                "btmqttd: rediscovery: no open candidate in {scanned} matches the broker MAC \
                  (plaintext config needs a MAC match to adopt)"
             );
             // Every open host was untrusted (MAC-mismatched). Like the no-open-host case,
@@ -732,6 +739,42 @@ mod tests {
             .collect();
         assert!(!candidates.contains(&anchor));
         assert_eq!(candidates.len(), 253);
+    }
+
+    // The union of the two anchor /24s, deduped and minus `tried` — the exact candidate
+    // construction `rediscover` runs, exercised here without I/O.
+    fn union_candidates(anchors: &[Ipv4Addr], tried: &HashSet<Ipv4Addr>) -> Vec<Ipv4Addr> {
+        let mut seen = HashSet::new();
+        anchors
+            .iter()
+            .flat_map(|a| slash24_candidates(*a))
+            .filter(|ip| seen.insert(*ip) && !tried.contains(ip))
+            .collect()
+    }
+
+    #[test]
+    fn scan_union_covers_both_confirmed_and_build_time_subnets() {
+        // Codex: sweep the union of the last-confirmed /24 and the build-time /24, so a broker
+        // that RETURNED to its original subnet (mDNS down) is found alongside the confirmed one.
+        let confirmed = Ipv4Addr::new(10, 0, 0, 40);
+        let build_time = Ipv4Addr::new(192, 168, 50, 64);
+        let candidates = union_candidates(&[confirmed, build_time], &HashSet::new());
+        assert!(candidates.contains(&build_time)); // original address probeable
+        assert!(candidates.contains(&confirmed)); // confirmed address too
+        assert!(candidates.contains(&Ipv4Addr::new(192, 168, 50, 1)));
+        assert!(candidates.contains(&Ipv4Addr::new(10, 0, 0, 254)));
+        assert_eq!(candidates.len(), 254 + 254); // two disjoint /24s
+    }
+
+    #[test]
+    fn scan_union_dedups_when_both_anchors_share_a_subnet() {
+        // The common case (broker never left): confirmed and build-time are the same /24, so
+        // the union collapses to a single sweep.
+        let candidates = union_candidates(
+            &[Ipv4Addr::new(192, 168, 50, 64), Ipv4Addr::new(192, 168, 50, 200)],
+            &HashSet::new(),
+        );
+        assert_eq!(candidates.len(), 254);
     }
 
     #[test]

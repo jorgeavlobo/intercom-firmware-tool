@@ -46,7 +46,11 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
 
         let deadline = tokio::time::sleep(window);
         tokio::pin!(deadline);
-        let mut buf = [0u8; 4096];
+        // RFC 6762 §17 caps an mDNS message (incl. IP+UDP headers) at 9000 bytes; a smaller
+        // buffer would let the kernel silently TRUNCATE a large datagram (many additional
+        // records on a chatty LAN), and the bounds-checked parser would then bail early and
+        // miss an otherwise-valid broker answer (Copilot). Size for the RFC maximum.
+        let mut buf = [0u8; 9000];
         loop {
             tokio::select! {
                 _ = &mut deadline => break,
