@@ -283,7 +283,6 @@ namespace IntercomFirmwareTool.App
             if (prefixes.Count == 0) return Array.Empty<BrokerCandidate>();
 
             var hits = new System.Collections.Concurrent.ConcurrentDictionary<string, int>(); // ip → port
-            using var sem = new SemaphoreSlim(48);
             // A confirmed plaintext (1883) broker is all the caller consumes (it takes the first
             // non-TLS candidate), so stop the sweep the moment one lands instead of waiting on the
             // remaining ~2000 host×port probes (each up to 400ms connect + 1200ms I/O — tens of
@@ -291,15 +290,31 @@ namespace IntercomFirmwareTool.App
             // window-close still cancels; cancelling THIS never signals ct, so the caller still
             // treats the scan as a completed (non-cancelled) sweep and uses the results.
             using var earlyStop = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            var tasks = new List<Task>();
-            // Every candidate is confirmed to speak MQTT: 1883 with a plaintext CONNECT/CONNACK,
-            // 8883 with a TLS handshake THEN the same CONNECT/CONNACK. 1883 wins on a dual-port host.
-            foreach (var prefix in prefixes)
-                foreach (var (port, useTls) in new[] { (1883, false), (8883, true) })
-                    for (int h = 1; h <= 254; h++)
-                        tasks.Add(ProbeHostAsync($"{prefix}.{h}", port, useTls, sem, hits, earlyStop));
 
-            try { await Task.WhenAll(tasks).ConfigureAwait(false); } catch { /* individual probes already swallow */ }
+            // Probe every host×port with a bounded worker pool. Parallel.ForEachAsync pulls targets
+            // LAZILY from the generator below, so we never materialise ~2000 Task + CTS objects up
+            // front the way the old List<Task> fan-out did — that burst of allocations spiked GC
+            // (whose collections pause every managed thread) and did its whole fan-out on the
+            // caller's thread. Here at most MaxDegreeOfParallelism probes are live at once. Every
+            // candidate is confirmed to speak MQTT: 1883 with a plaintext CONNECT/CONNACK, 8883 with
+            // a TLS handshake THEN the same CONNECT/CONNACK. 1883 wins on a dual-port host.
+            var options = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = 48,
+                CancellationToken = earlyStop.Token,
+            };
+            try
+            {
+                await Parallel.ForEachAsync(EnumerateProbeTargets(prefixes), options,
+                    async (t, probeCt) =>
+                        await ProbeHostAsync(t.Ip, t.Port, t.UseTls, hits, earlyStop, probeCt)
+                            .ConfigureAwait(false)).ConfigureAwait(false);
+            }
+            // Early-stop on a 1883 hit (or the caller cancelling) surfaces here as a cancellation —
+            // keep whatever landed in `hits`; the caller tells the two apart via
+            // scanCts.IsCancellationRequested (a plaintext-hit stop never signalled its ct).
+            catch (OperationCanceledException) { }
+            catch { /* individual probes already swallow; be safe */ }
 
             var results = new List<BrokerCandidate>();
             // Order by the IP numerically (…1.20 before …1.100), not lexicographically —
@@ -322,15 +337,25 @@ namespace IntercomFirmwareTool.App
             return ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
         }
 
-        private static async Task ProbeHostAsync(string ip, int port, bool useTls,
-            SemaphoreSlim sem, System.Collections.Concurrent.ConcurrentDictionary<string, int> hits,
-            CancellationTokenSource earlyStop)
+        /// <summary>Lazily yield every (host, port, TLS) probe target for the given /24 prefixes —
+        /// both MQTT ports across each of the 254 hosts. Enumerated on demand by the scan's bounded
+        /// worker pool, so the full ~2000-target set is never materialised at once.</summary>
+        private static IEnumerable<(string Ip, int Port, bool UseTls)> EnumerateProbeTargets(
+            IReadOnlyList<string> prefixes)
         {
-            CancellationToken ct = earlyStop.Token;
-            // Acquire the throttle outside the main try so a cancellation here can't fault the
-            // task — nothing to release if we never got the slot.
-            try { await sem.WaitAsync(ct).ConfigureAwait(false); }
-            catch { return; }
+            foreach (var prefix in prefixes)
+                foreach (var (port, useTls) in new[] { (1883, false), (8883, true) })
+                    for (int h = 1; h <= 254; h++)
+                        yield return ($"{prefix}.{h}", port, useTls);
+        }
+
+        private static async Task ProbeHostAsync(string ip, int port, bool useTls,
+            System.Collections.Concurrent.ConcurrentDictionary<string, int> hits,
+            CancellationTokenSource earlyStop, CancellationToken ct)
+        {
+            // Concurrency is bounded by Parallel.ForEachAsync's MaxDegreeOfParallelism, so there is
+            // no semaphore here. `ct` is the loop's token (linked to earlyStop): it trips when a
+            // plaintext broker is found or the caller cancels, ending in-flight probes promptly.
             try
             {
                 using var tcp = new TcpClient();
@@ -367,7 +392,6 @@ namespace IntercomFirmwareTool.App
                 finally { ssl?.Dispose(); }
             }
             catch { /* best-effort */ }
-            finally { try { sem.Release(); } catch { } }
         }
 
         /// <summary>Confirm a stream speaks MQTT by sending a 3.1.1 CONNECT and checking the reply
