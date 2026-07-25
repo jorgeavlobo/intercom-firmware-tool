@@ -340,16 +340,21 @@ namespace IntercomFirmwareTool.App
         /// <summary>Lazily yield every (host, port, TLS) probe target for the given /24 prefixes —
         /// both MQTT ports across each of the 254 hosts. Enumerated on demand by the scan's bounded
         /// worker pool, so the full ~2000-target set is never materialised at once.</summary>
-        private static IEnumerable<(string Ip, int Port, bool UseTls)> EnumerateProbeTargets(
+        private static IEnumerable<(IPAddress Ip, int Port, bool UseTls)> EnumerateProbeTargets(
             IReadOnlyList<string> prefixes)
         {
+            // Yield IPAddress values directly — parsing each /24 base ONCE — so the hot path never
+            // builds an "a.b.c.d" string per target and then re-parses it inside every probe.
             foreach (var prefix in prefixes)
+            {
+                byte[] o = IPAddress.Parse(prefix + ".0").GetAddressBytes();
                 foreach (var (port, useTls) in new[] { (1883, false), (8883, true) })
                     for (int h = 1; h <= 254; h++)
-                        yield return ($"{prefix}.{h}", port, useTls);
+                        yield return (new IPAddress(new[] { o[0], o[1], o[2], (byte)h }), port, useTls);
+            }
         }
 
-        private static async Task ProbeHostAsync(string ip, int port, bool useTls,
+        private static async Task ProbeHostAsync(IPAddress ip, int port, bool useTls,
             System.Collections.Concurrent.ConcurrentDictionary<string, int> hits,
             CancellationTokenSource earlyStop, CancellationToken ct)
         {
@@ -361,7 +366,7 @@ namespace IntercomFirmwareTool.App
                 using var tcp = new TcpClient();
                 using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 connectCts.CancelAfter(TimeSpan.FromMilliseconds(400));
-                try { await tcp.ConnectAsync(IPAddress.Parse(ip), port, connectCts.Token).ConfigureAwait(false); }
+                try { await tcp.ConnectAsync(ip, port, connectCts.Token).ConfigureAwait(false); }
                 catch { return; }   // closed / filtered / timed out — not a hit
 
                 using var ioCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -377,12 +382,12 @@ namespace IntercomFirmwareTool.App
                         // (and Build) validate the certificate properly.
                         ssl = new SslStream(stream, leaveInnerStreamOpen: false, (_, _, _, _) => true);
                         await ssl.AuthenticateAsClientAsync(
-                            new SslClientAuthenticationOptions { TargetHost = ip }, ioCts.Token).ConfigureAwait(false);
+                            new SslClientAuthenticationOptions { TargetHost = ip.ToString() }, ioCts.Token).ConfigureAwait(false);
                         stream = ssl;
                     }
                     if (await IsMqttOverStreamAsync(stream, ioCts.Token).ConfigureAwait(false))
                     {
-                        hits.AddOrUpdate(ip, port, (_, existing) => Math.Min(existing, port)); // prefer 1883
+                        hits.AddOrUpdate(ip.ToString(), port, (_, existing) => Math.Min(existing, port)); // prefer 1883
                         // A plaintext broker is the best-case result the caller wants — end the
                         // sweep. (8883 hits keep scanning: the caller needs a plaintext candidate,
                         // and a TLS-only find is only surfaced as guidance, never auto-prefilled.)
@@ -399,12 +404,16 @@ namespace IntercomFirmwareTool.App
         /// — regardless of the return code, since an auth-required broker still answers with a
         /// CONNACK before refusing. Requiring both header bytes avoids a false positive from a
         /// service whose first byte merely happens to be 0x20.</summary>
+        // The scan's CONNECT is constant (fixed anonymous client id), so encode it ONCE and reuse
+        // the bytes across every probe instead of rebuilding a List<byte> per host. WriteAsync only
+        // READS the buffer, so sharing this immutable array across concurrent probes is safe.
+        private static readonly byte[] ScanConnectPacket = BuildMqttConnect("intercom-fw-tool-scan");
+
         private static async Task<bool> IsMqttOverStreamAsync(Stream stream, CancellationToken ct)
         {
             try
             {
-                byte[] connect = BuildMqttConnect("intercom-fw-tool-scan");
-                await stream.WriteAsync(connect, ct).ConfigureAwait(false);
+                await stream.WriteAsync(ScanConnectPacket, ct).ConfigureAwait(false);
                 byte[] hdr = new byte[2];
                 int got = 0;
                 while (got < hdr.Length)
