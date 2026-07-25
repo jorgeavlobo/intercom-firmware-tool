@@ -48,6 +48,72 @@ A device-local sanity check therefore targets the internal bus at
 `127.0.0.1:60000`, **not** `127.0.0.1:1883` — but that only proves loopback
 connectivity, not the real Home Assistant path, which requires an external broker.
 
+## Keeping the broker reachable when its IP changes
+
+A home broker's LAN IP can change — a DHCP lease expires, the broker (or its
+host) reboots, the router is power-cycled. If the bridge is pinned to a bare IP
+it then dials a dead address forever and the whole Home Assistant integration
+goes dark. There are two lines of defence; **prefer the first**.
+
+### 1. The reliable fix — a DHCP reservation + a hostname (do this)
+
+The single most robust thing you can do needs **nothing on the device**:
+
+1. On your **router**, add a **DHCP reservation** for the broker — pin its IP to
+   the broker's MAC address, so DHCP always hands it the same address. The
+   broker's IP then simply never changes.
+2. Enter the broker in the tool as a **hostname** (not a bare IP). Note the name
+   is *not* re-resolved through your router's DNS at runtime: the installer pins
+   the hostname to its build-time IP in the device's `/etc/hosts`, and the
+   daemon's musl resolver consults `/etc/hosts` then only public DNS — never the
+   LAN resolver. So the hostname's real job is to give **rediscovery** (below) a
+   name whose `/etc/hosts` mapping it can repoint if the IP ever changes; the
+   **DHCP reservation** is what actually keeps the address stable.
+
+This is the industry-standard approach for a self-hosted service (it is exactly
+what the Home Assistant / Mosquitto docs recommend): the reservation keeps the
+broker's IP fixed, so the pinned mapping stays correct and everything below is
+never exercised.
+
+### 2. The safety net — device-side rediscovery (issue `#43`)
+
+For when a reservation isn't possible (a network you don't control, a broker on
+DHCP that can't be pinned), `btmqttd` can **rediscover** a moved broker on its
+own. It is **opt-in** via `MQTT_REDISCOVERY` — off in the daemon unless the flag
+is set, though the tool ticks it on by default when you install the bridge — and
+it self-gates on the device: it needs the broker set as a **hostname** plus a
+**trust anchor** (TLS, or a broker MAC captured by Test connection), else it
+disables itself.
+
+It is layered, cheapest-first, and only ever *proposes* an address — the
+reconnect that follows is the trust gate:
+
+- **With TLS**, the reconnect validates the broker's pinned certificate, so a
+  proposed host that isn't the real broker fails the handshake and can never be
+  adopted.
+- **Without TLS** (a plaintext broker) nothing can authenticate the server, so a
+  candidate is adopted only when its ARP MAC matches the broker MAC captured by
+  Test connection — a **trusted-LAN convenience, not authentication**.
+
+The layers:
+
+- **mDNS / DNS-SD** — queries `_mqtt._tcp.local` / `_secure-mqtt._tcp.local`,
+  then the Home Assistant host (`_home-assistant._tcp.local`, the broker is
+  commonly co-located with HA). Link-local, so it also finds a broker that moved
+  to a different `/24` on the same L2 link.
+- **Hardened `/24` scan** — only if mDNS finds nothing: a TCP probe of the
+  broker port across the confirmed/build-time subnet(s), capped to a `/24`,
+  rate-limited, and logged. Every candidate still passes the trust gate above
+  before it is adopted.
+- **Persistence** — a connect-confirmed IP is remembered on the writable
+  `cfg/extra` partition, so a reboot reconnects immediately instead of scanning
+  again.
+
+Rediscovery recovers an **IP move on the same port/transport**. A move to a
+**routed** subnet/VLAN (mDNS multicast doesn't cross a router) or a port/
+transport change (`1883` ↔ `8883`, i.e. plaintext ↔ TLS — a reconfiguration you
+re-run the tool for) is out of scope; the reservation above avoids all of it.
+
 ## Files in this directory
 
 | File | Role |
