@@ -72,9 +72,10 @@ namespace IntercomFirmwareTool.App
         /// probe as a fallback, issue #52). Never throws.</summary>
         public async Task RunMdnsAsync(TimeSpan window, CancellationToken ct)
         {
-            // PTR (instances of the service), SRV (instance → host:port), A (host → IPv4).
-            // Accumulated across every datagram in the window, then correlated once.
-            var ptr = new List<string>();
+            // SRV (instance → host:port) and A (host → IPv4), accumulated across every datagram in
+            // the window, then correlated once. The PTR record itself isn't needed — correlation is
+            // by the SRV instance's service suffix — so we don't collect it (its only former use,
+            // MQTT-instance membership, would now also match HA instances; see the correlation).
             var srv = new Dictionary<string, (string target, int port)>(StringComparer.OrdinalIgnoreCase);
             var a = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -98,7 +99,7 @@ namespace IntercomFirmwareTool.App
                     try { res = await udp.ReceiveAsync(winCts.Token).ConfigureAwait(false); }
                     catch (OperationCanceledException) { break; }
                     catch { break; }
-                    try { ParseDnsResponse(res.Buffer, ptr, srv, a); }
+                    try { ParseDnsResponse(res.Buffer, srv, a); }
                     catch { /* skip a malformed datagram, keep listening */ }
                 }
             }
@@ -108,18 +109,18 @@ namespace IntercomFirmwareTool.App
             // honours its "never throws" contract even on an unexpected failure here.
             try
             {
-                // Correlate — but ONLY SRV records that actually belong to our service, i.e.
-                // an instance the PTR answer pointed to, or a name of the form
-                // "<instance>._mqtt._tcp.local". A chatty responder may include unrelated SRV+A
-                // pairs in the same datagram; those must not be mistaken for MQTT brokers.
-                var instances = new HashSet<string>(ptr, StringComparer.OrdinalIgnoreCase);
+                // Correlate ONLY SRV records that belong to the MQTT service — those whose instance
+                // name is of the form "<instance>._mqtt._tcp.local". A chatty responder may include
+                // unrelated SRV+A pairs in the same datagram; those must not be mistaken for MQTT
+                // brokers. Matching by the service SUFFIX is complete (a genuine DNS-SD instance
+                // name always ends with its service) AND necessary: because we query both
+                // `_mqtt._tcp` and `_home-assistant._tcp`, keying off PTR-instance membership would
+                // let an HA SRV (port 8123) be misclassified as a plaintext MQTT broker — hiding the
+                // whole HA-host fallback below and pre-filling HA's frontend port (Codex P1 / Copilot).
                 var found = new List<BrokerCandidate>();
                 foreach (var kv in srv)
                 {
-                    // Instance names are "<instance>._mqtt._tcp.local" → suffix "." + ServiceName.
-                    bool isMqtt = instances.Contains(kv.Key)
-                        || kv.Key.EndsWith("." + ServiceName, StringComparison.OrdinalIgnoreCase);
-                    if (!isMqtt) continue;
+                    if (!kv.Key.EndsWith("." + ServiceName, StringComparison.OrdinalIgnoreCase)) continue;
                     if (a.TryGetValue(kv.Value.target, out string? ip))
                     {
                         string host = kv.Value.target.TrimEnd('.');
@@ -217,9 +218,10 @@ namespace IntercomFirmwareTool.App
             return b.ToArray();
         }
 
-        /// <summary>Parse a DNS response into the PTR/SRV/A accumulators. Bounds-checked
-        /// throughout; a truncated/odd record just stops parsing that datagram.</summary>
-        private static void ParseDnsResponse(byte[] b, List<string> ptr,
+        /// <summary>Parse a DNS response into the SRV/A accumulators. Bounds-checked throughout; a
+        /// truncated/odd record just stops parsing that datagram. PTR records are skipped —
+        /// correlation is by the SRV instance's service suffix, so the PTR content isn't needed.</summary>
+        private static void ParseDnsResponse(byte[] b,
             Dictionary<string, (string, int)> srv, Dictionary<string, string> a)
         {
             int len = b.Length;
@@ -250,13 +252,6 @@ namespace IntercomFirmwareTool.App
 
                 switch (type)
                 {
-                    case 12 when name.Equals(ServiceName, StringComparison.OrdinalIgnoreCase)
-                              || name.Equals(HaServiceName, StringComparison.OrdinalIgnoreCase): // PTR
-                    {
-                        int pp = rd;
-                        ptr.Add(ReadName(b, ref pp));
-                        break;
-                    }
                     case 33 when rdlen >= 6: // SRV: priority(2) weight(2) port(2) target(name)
                     {
                         int port = (b[rd + 4] << 8) | b[rd + 5];
