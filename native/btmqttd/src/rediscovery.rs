@@ -389,8 +389,9 @@ pub async fn seed_hosts(name: &str, ip: Ipv4Addr) -> std::io::Result<bool> {
 /// only delays the fallback subnet scan by a couple of seconds.
 const MDNS_WINDOW: Duration = Duration::from_secs(2);
 
-/// Propose a broker address discovered via mDNS (Layer B), or `None`. Queries
-/// `_mqtt._tcp.local`, keeps the advertised IPv4s that are private LAN addresses and not already
+/// Propose a broker address discovered via mDNS (Layer B), or `None`. Queries the MQTT DNS-SD
+/// services (`_mqtt._tcp` + the TLS `_secure-mqtt._tcp`), keeps the advertised IPv4s that are
+/// private LAN addresses and not already
 /// tried this outage (in discovery order), and applies the trust gate: under TLS the broker PORT
 /// must be open (the pinned-cert reconnect is then the real trust gate); in plaintext it must
 /// match the recorded `MQTT_BROKER_MAC` in the ARP table (via [`arp_mac_matches`], which itself
