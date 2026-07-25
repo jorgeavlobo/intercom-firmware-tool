@@ -29,6 +29,7 @@ mod gate;
 mod ha;
 mod keys;
 mod own;
+mod persist;
 mod receiver;
 mod rediscovery;
 mod sender;
@@ -213,6 +214,84 @@ async fn run() -> Result<(), String> {
     let mut tried_ips: std::collections::HashSet<std::net::Ipv4Addr> =
         std::collections::HashSet::new();
 
+    // Persisted-IP boot restore (issue #49 item 1): the last connect-confirmed broker IP
+    // is remembered on a writable, reboot-persistent partition. Seed /etc/hosts from it
+    // BEFORE the first connect so a reboot after the broker moved reconnects to the
+    // learned IP immediately — instead of re-running the whole failure-count + /24 scan.
+    // Only when rediscovery is active (name broker + trust anchor).
+    //
+    // `build_ip` — the record's "base" — is read from the IMMUTABLE boot init script
+    // (rediscovery::build_time_ip), NOT the mutable /etc/hosts mapping. That is what makes
+    // this correct across a bt_service_watchdog RESPAWN (where /etc/hosts may already hold
+    // a rediscovered IP) and a firmware RE-FLASH (which the rootfs script reflects but the
+    // surviving cfg/extra record does not) — Codex.
+    //
+    // Two independent flags: `last_persisted` is the ADOPTED learned IP (what /etc/hosts is
+    // seeded to), so a stable broker never rewrites the flash partition; `persisted_on_disk`
+    // is whether the state FILE exists at all — even one holding a record for a DIFFERENT host
+    // or a corrupt one (neither parses), so a build-IP ConnAck clears it and a later switch
+    // back to that host can't resurrect its obsolete learned IP (Codex/Copilot). Persist I/O
+    // is blocking std::fs, so it's offloaded to the blocking pool (single-threaded runtime —
+    // Copilot).
+    let build_ip = if rediscovery_active {
+        rediscovery::build_time_ip(&cfg.mqtt_host).await
+    } else {
+        None
+    };
+    let (persisted_file_exists, record) = if rediscovery_active {
+        let host = cfg.mqtt_host.clone();
+        tokio::task::spawn_blocking(move || persist::read_state(&host)).await.unwrap_or((false, None))
+    } else {
+        (false, None)
+    };
+
+    let mut last_persisted: Option<std::net::Ipv4Addr> = None;
+    let mut persisted_on_disk = persisted_file_exists;
+    if let (Some(build_ip), Some((base, learned))) = (build_ip, record) {
+        // Apply the record only while its base still matches this firmware's build IP; a
+        // mismatch means a re-flash re-pointed the broker and the record is stale (it will
+        // be cleared on the first build-IP ConnAck via `persisted_on_disk`).
+        if base == build_ip {
+            // Seed the learned IP. In PLAINTEXT mode re-apply the same ARP-MAC gate
+            // rediscover() uses: a persisted IP that DHCP reassigned while the unit was off
+            // must not receive our credentials on the first connect (Codex). Under TLS the
+            // reconnect's pinned-cert handshake is the gate. seed_hosts is idempotent, so a
+            // respawn whose /etc/hosts already holds the learned IP just no-ops.
+            let trusted = if cfg.uses_tls() {
+                true
+            } else if let Some(mac) = cfg.broker_mac {
+                rediscovery::arp_mac_matches(learned, cfg.mqtt_port, mac).await
+            } else {
+                false // rediscovery_active guarantees TLS or a MAC; belt-and-braces
+            };
+            if trusted {
+                match rediscovery::seed_hosts(&cfg.mqtt_host, learned).await {
+                    Ok(true) => {
+                        last_persisted = Some(learned);
+                        eprintln!(
+                            "btmqttd: seeded '{}' -> {learned} in {} from persisted state",
+                            cfg.mqtt_host, rediscovery::HOSTS_PATH
+                        );
+                    }
+                    Ok(false) => last_persisted = Some(learned), // already mapped (respawn)
+                    Err(e) => eprintln!("btmqttd: could not seed persisted broker IP: {e}"),
+                }
+            } else {
+                // MAC unconfirmed at boot (broker unreachable, or its IP was reassigned): do
+                // NOT seed /etc/hosts. But the record (base, learned) is already on disk, so
+                // keep `learned` as the write-comparison baseline — if normal rediscovery later
+                // confirms the broker AT that same learned IP, the ConnAck sees no change and
+                // skips a redundant rewrite/fsync of the identical record; if it's elsewhere,
+                // the ConnAck still updates it (Codex).
+                last_persisted = Some(learned);
+                eprintln!(
+                    "btmqttd: persisted broker IP {learned} did not confirm the broker MAC \
+                     at boot; not seeding (normal rediscovery will re-locate it)"
+                );
+            }
+        }
+    }
+
     loop {
         tokio::select! {
             _ = sig_term.recv() => break,
@@ -225,6 +304,50 @@ async fn run() -> Result<(), String> {
                         // that returns to a former address can be found again.
                         conn_failures = 0;
                         tried_ips.clear();
+                        // Persist the connect-confirmed broker IP (issue #49 item 1): this
+                        // ConnAck means the current /etc/hosts mapping authenticated / passed
+                        // the pinned-TLS handshake, so it is trustworthy to remember for the
+                        // next boot. Only meaningful once a name broker has a build-time base
+                        // to compare against (`build_ip`).
+                        // The disk work runs on the blocking pool (the runtime is
+                        // single-threaded — Copilot) and is AWAITED there: awaiting a
+                        // spawn_blocking yields the reactor to other tasks rather than stalling
+                        // it, and lets us advance the in-memory change-gate ONLY after the write
+                        // actually lands — so a briefly-unavailable partition is retried on the
+                        // next ConnAck instead of being suppressed forever (Codex/Copilot).
+                        if let (Some(build_ip), Some(confirmed)) =
+                            (build_ip, rediscovery::current_broker_ip(&cfg.mqtt_host).await)
+                        {
+                            if confirmed == build_ip {
+                                // The broker is at (or has returned to) its build-time IP, which
+                                // the boot init re-seeds anyway. Forget any on-disk record —
+                                // including one boot restore REJECTED (base mismatch / MAC gate),
+                                // so `persisted_on_disk`, not `last_persisted`, drives the clear
+                                // (CodeRabbit) — so a reboot doesn't seed a now-wrong address.
+                                if persisted_on_disk
+                                    && tokio::task::spawn_blocking(persist::clear)
+                                        .await
+                                        .unwrap_or(false)
+                                {
+                                    last_persisted = None;
+                                    persisted_on_disk = false;
+                                }
+                            } else if last_persisted != Some(confirmed) {
+                                // A rediscovered IP that just authenticated → remember it against
+                                // the build-time base. Write only on a CHANGE, so a stable broker
+                                // never churns the flash partition.
+                                let host = cfg.mqtt_host.clone();
+                                if tokio::task::spawn_blocking(move || {
+                                    persist::store(&host, build_ip, confirmed)
+                                })
+                                .await
+                                .unwrap_or(false)
+                                {
+                                    last_persisted = Some(confirmed);
+                                    persisted_on_disk = true;
+                                }
+                            }
+                        }
                         // SUBSCRIBE to the command topic, as its OWN task (not inline):
                         // the subscribe enqueues into the same bounded request channel
                         // THIS poll loop drains, so awaiting it here could deadlock if

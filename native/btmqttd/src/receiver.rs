@@ -358,8 +358,22 @@ pub(crate) fn create_unique_temp(path: &str, bytes: &[u8]) -> std::io::Result<St
             .open(&tmp)
         {
             Ok(mut f) => {
-                f.write_all(bytes)?;
-                f.flush()?;
+                // Write + flush + fsync BEFORE the caller renames over the target, so a crash
+                // right after the rename can't leave the new name pointing at unwritten/zeroed
+                // data (CodeRabbit). A no-op on tmpfs (the hosts rewrite), a durability
+                // guarantee on the persistent cfg partition. On ANY failure, remove the temp
+                // before returning so repeated retries can't accumulate .tmp files and fill
+                // the partition (CodeRabbit).
+                let write = (|| -> std::io::Result<()> {
+                    f.write_all(bytes)?;
+                    f.flush()?;
+                    f.sync_all()
+                })();
+                if let Err(e) = write {
+                    drop(f);
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
                 return Ok(tmp);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,

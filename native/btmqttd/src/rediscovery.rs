@@ -33,10 +33,11 @@
 //! bridge attach to an unauthenticated or mismatched broker.
 //!
 //! Scope of this module: same-subnet (`/24`) rediscovery, opt-in (`MQTT_REDISCOVERY`,
-//! off by default) and only when the broker is a name. Learned addresses are NOT yet
-//! persisted across a reboot (the boot-time hosts seed re-pins the original IP); that
-//! persistence, mDNS discovery, and config-time MAC capture in the installer are
-//! tracked as follow-ups on #43.
+//! off by default) and only when the broker is a name. A learned address IS now persisted
+//! across a reboot (issue #49 item 1): `persist.rs` remembers the connect-confirmed IP on
+//! the writable `cfg/extra` partition and `main` seeds `/etc/hosts` from it at startup, so
+//! a reboot after the broker moved reconnects immediately instead of re-scanning. Device
+//! mDNS discovery and cross-subnet / port fallback remain follow-ups (#49 items 2–3).
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -249,6 +250,72 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
     }
 }
 
+/// The IPv4 currently mapped to the broker `name` in `/etc/hosts`, if any. Async I/O
+/// wrapper over the pure [`parse_hosts_ip`] used by the persist-on-connect path
+/// (issue #49 item 1): on a successful `ConnAck`, `main` reads this confirmed-good IP
+/// and remembers it. `None` if the file can't be read or the name isn't pinned.
+pub async fn current_broker_ip(name: &str) -> Option<Ipv4Addr> {
+    let hosts = tokio::fs::read_to_string(HOSTS_PATH).await.ok()?;
+    parse_hosts_ip(&hosts, name)
+}
+
+/// The boot init script that re-seeds `/etc/hosts` at EVERY boot (installer-written by
+/// `BtDaemonAppsHosts`, on the read-ONLY rootfs). Its `bt_hosts.sh add <host> <ip>` line
+/// for the broker is the IMMUTABLE build-time mapping — unlike `/etc/hosts` (tmpfs,
+/// mutated at runtime by rediscovery and the persistence seed).
+pub const BOOT_HOSTS_SCRIPT: &str = "/etc/init.d/bt_daemon-apps.sh";
+
+/// The build-time IPv4 the boot init seeds for broker `name`, read from
+/// [`BOOT_HOSTS_SCRIPT`] — the IMMUTABLE source of the record's "base" (issue #49 item 1 /
+/// Codex). Reading the build IP from here rather than the mutable `/etc/hosts` mapping is
+/// what makes the persistence correct across a `bt_service_watchdog` respawn (where
+/// `/etc/hosts` may already hold a rediscovered IP) and a firmware re-flash (which the
+/// rootfs script reflects but tmpfs does not). `None` if the script can't be read or has
+/// no mapping for the name.
+pub async fn build_time_ip(name: &str) -> Option<Ipv4Addr> {
+    let script = tokio::fs::read_to_string(BOOT_HOSTS_SCRIPT).await.ok()?;
+    parse_boot_hosts_ip(&script, name)
+}
+
+/// Whether `ip` currently answers on `port` AND its `/proc/net/arp` MAC matches
+/// `want_mac`. This is the PLAINTEXT trust gate re-applied before the boot seed restores
+/// a persisted IP (issue #49 item 1 / Codex P1): `rediscover` only ever adopts a plaintext
+/// candidate whose ARP MAC matches, so the boot restore must apply the same check — else
+/// an address DHCP reassigned while the unit was off could take our credentials on the
+/// first connect (a wrong broker would ConnAck and normal rediscovery would never run).
+/// Probing the port both confirms reachability and populates the ARP entry we then read.
+/// Best-effort: any unreachable/read failure ⇒ `false` (don't seed; fall back to the
+/// build-time mapping and let normal rediscovery re-locate under its MAC gate). Under TLS
+/// the reconnect's pinned-cert handshake is the gate, so callers skip this.
+pub async fn arp_mac_matches(ip: Ipv4Addr, port: u16, want_mac: [u8; 6]) -> bool {
+    if probe_open(&[ip], port).await.is_empty() {
+        return false; // nothing answering here — can't confirm the broker's MAC
+    }
+    match tokio::fs::read_to_string("/proc/net/arp").await {
+        Ok(t) => mac_matches(ip, &parse_proc_net_arp(&t), Some(want_mac)),
+        Err(_) => false,
+    }
+}
+
+/// Seed `/etc/hosts` so the broker `name` maps to `ip` — the boot-time restore of a
+/// previously learned, connect-confirmed address (issue #49 item 1). Reuses the SAME
+/// atomic, other-mappings-preserving rewrite as rediscovery, so seeding never disturbs
+/// the device's other name resolution. Returns `Ok(true)` when the mapping was changed,
+/// `Ok(false)` when it already pointed at `ip` (so `main` can skip a redundant rewrite
+/// and log nothing). The reconnect still authenticates the broker, so seeding a stale
+/// persisted IP is safe — it just fails and normal rediscovery resumes.
+pub async fn seed_hosts(name: &str, ip: Ipv4Addr) -> std::io::Result<bool> {
+    let hosts = tokio::fs::read_to_string(HOSTS_PATH).await?;
+    if parse_hosts_ip(&hosts, name) == Some(ip) {
+        return Ok(false); // already mapped there — nothing to do
+    }
+    let rewritten = rewrite_hosts(&hosts, name, ip);
+    tokio::task::spawn_blocking(move || write_hosts_blocking(&rewritten))
+        .await
+        .map_err(std::io::Error::other)??;
+    Ok(true)
+}
+
 /// TCP-connect-probe `port` on each candidate, returning those that accept. Batched to
 /// `PROBE_CONCURRENCY` so a /24 sweep never floats hundreds of sockets at once.
 async fn probe_open(candidates: &[Ipv4Addr], port: u16) -> Vec<Ipv4Addr> {
@@ -313,6 +380,32 @@ fn parse_hosts_ip(hosts: &str, name: &str) -> Option<Ipv4Addr> {
         let Ok(ip) = addr.parse::<Ipv4Addr>() else { continue };
         if cols.any(|alias| alias.eq_ignore_ascii_case(name)) {
             return Some(ip);
+        }
+    }
+    None
+}
+
+/// The IPv4 a `bt_hosts.sh add <host> <ip>` line in the boot init script maps `name` to,
+/// if any. Matches the installer's line shape (`BtDaemonAppsHosts.MappingLine`:
+/// `/bin/bt_hosts.sh add <host> <ip>`), host case-insensitively; commented lines and any
+/// non-IPv4 address are ignored. The first matching line wins.
+fn parse_boot_hosts_ip(script: &str, name: &str) -> Option<Ipv4Addr> {
+    for raw in script.lines() {
+        let line = raw.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let toks: Vec<&str> = line.split_whitespace().collect();
+        // Look for the `<…>bt_hosts.sh add <host> <ip>` shape anywhere on the line.
+        for w in toks.windows(4) {
+            if w[0].ends_with("bt_hosts.sh")
+                && w[1] == "add"
+                && w[2].eq_ignore_ascii_case(name)
+            {
+                if let Ok(ip) = w[3].parse::<Ipv4Addr>() {
+                    return Some(ip);
+                }
+            }
         }
     }
     None
@@ -472,6 +565,22 @@ mod tests {
         assert_eq!(parse_hosts_ip(hosts, "localhost"), Some(Ipv4Addr::new(127, 0, 0, 1)));
         assert_eq!(parse_hosts_ip(hosts, "commented.host"), None);
         assert_eq!(parse_hosts_ip(hosts, "absent"), None);
+    }
+
+    #[test]
+    fn parse_boot_hosts_ip_reads_the_installer_line() {
+        // The installer writes tab-indented `/bin/bt_hosts.sh add <host> <ip>` lines.
+        let script = "\
+#!/bin/sh
+\t/bin/bt_hosts.sh add openserver 127.0.0.1
+\t/bin/bt_hosts.sh add broker.lan 192.168.50.64
+# /bin/bt_hosts.sh add commented.host 10.0.0.1
+";
+        assert_eq!(parse_boot_hosts_ip(script, "broker.lan"), Some(Ipv4Addr::new(192, 168, 50, 64)));
+        assert_eq!(parse_boot_hosts_ip(script, "BROKER.LAN"), Some(Ipv4Addr::new(192, 168, 50, 64)));
+        assert_eq!(parse_boot_hosts_ip(script, "openserver"), Some(Ipv4Addr::new(127, 0, 0, 1)));
+        assert_eq!(parse_boot_hosts_ip(script, "commented.host"), None); // commented out
+        assert_eq!(parse_boot_hosts_ip(script, "absent"), None);
     }
 
     #[test]
