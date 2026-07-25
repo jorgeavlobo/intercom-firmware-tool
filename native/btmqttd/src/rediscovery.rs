@@ -73,6 +73,21 @@ const PROBE_TIMEOUT: Duration = Duration::from_millis(300);
 /// while still sweeping the subnet in a fraction of a second.
 const PROBE_CONCURRENCY: usize = 64;
 
+/// The two IANA-registered MQTT ports: plaintext and TLS.
+const MQTT_PLAINTEXT_PORT: u16 = 1883;
+const MQTT_TLS_PORT: u16 = 8883;
+
+/// The OTHER standard MQTT port paired with `port` (1883 ↔ 8883), or `None` for a non-standard
+/// port. Used by the `/24` scan's port fallback (#49 item 3): if nothing answers on the configured
+/// port, the broker host may currently expose only the other standard port, so probe that too.
+fn alt_mqtt_port(port: u16) -> Option<u16> {
+    match port {
+        MQTT_PLAINTEXT_PORT => Some(MQTT_TLS_PORT),
+        MQTT_TLS_PORT => Some(MQTT_PLAINTEXT_PORT),
+        _ => None,
+    }
+}
+
 /// Whether a poll error is consistent with a STALE/WRONG broker address (as an IP
 /// change produces) rather than the REAL broker rejecting us at the application layer.
 /// Only these advance the rediscovery failure streak:
@@ -262,12 +277,32 @@ pub async fn rediscover(
         nets.join(", ")
     };
 
-    // Probe the broker port across the subnet(s); only open hosts advance.
-    let open = probe_open(&candidates, cfg.mqtt_port).await;
+    // Probe the broker port across the subnet(s); only open hosts advance. Port fallback (#49
+    // item 3): if NOTHING answers on the configured port, also probe the OTHER standard MQTT port
+    // (1883 ↔ 8883) — the broker host may currently expose only that one. The trust gate below is
+    // unchanged: plaintext still requires a MAC match, and the client always reconnects on the
+    // CONFIGURED port, so a host located only on the alt port that doesn't also serve the configured
+    // port simply fails that reconnect and is retired. (Cross-subnet moves are handled by the mDNS
+    // layers above, not brute-forced here — #49 item 3.)
+    let mut open = probe_open(&candidates, cfg.mqtt_port).await;
+    if open.is_empty() {
+        if let Some(alt) = alt_mqtt_port(cfg.mqtt_port) {
+            let alt_open = probe_open(&candidates, alt).await;
+            if !alt_open.is_empty() {
+                eprintln!(
+                    "btmqttd: rediscovery: nothing on port {} in {scanned}; located host(s) on \
+                     the alternate MQTT port {alt}",
+                    cfg.mqtt_port
+                );
+                open = alt_open;
+            }
+        }
+    }
     if open.is_empty() {
         eprintln!(
-            "btmqttd: rediscovery: no untried host in {scanned} has port {} open",
-            cfg.mqtt_port
+            "btmqttd: rediscovery: no untried host in {scanned} has an MQTT port open (tried {}{})",
+            cfg.mqtt_port,
+            alt_mqtt_port(cfg.mqtt_port).map_or_else(String::new, |a| format!(" and {a}"))
         );
         // No OPEN untried host this pass — re-arm the scanned /24(s) so the next pass re-probes
         // them (incl. former anchors) in case the real broker returns there, WITHOUT forgetting
@@ -849,6 +884,14 @@ mod tests {
     fn parse_hosts_ip_ignores_ipv6_mapping() {
         let hosts = "fe80::1 broker.lan\n";
         assert_eq!(parse_hosts_ip(hosts, "broker.lan"), None);
+    }
+
+    #[test]
+    fn alt_mqtt_port_pairs_the_two_standard_ports_only() {
+        assert_eq!(alt_mqtt_port(1883), Some(8883)); // plaintext → TLS
+        assert_eq!(alt_mqtt_port(8883), Some(1883)); // TLS → plaintext
+        assert_eq!(alt_mqtt_port(1234), None); // non-standard: no fallback
+        assert_eq!(alt_mqtt_port(0), None);
     }
 
     #[test]
