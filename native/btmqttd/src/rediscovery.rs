@@ -411,14 +411,22 @@ async fn mdns_propose(cfg: &Config, tried: &HashSet<Ipv4Addr>) -> Option<Ipv4Add
             probe_open(&candidates, cfg.mqtt_port).await.into_iter().collect();
         candidates.into_iter().find(|ip| open.contains(ip))
     } else if let Some(mac) = cfg.broker_mac {
-        // Plaintext: each candidate must match the recorded broker MAC (arp_mac_matches probes
-        // the port to populate the ARP entry, then checks it) — kept per-IP.
-        for ip in candidates {
-            if arp_mac_matches(ip, cfg.mqtt_port, mac).await {
-                return Some(ip);
-            }
+        // Plaintext: batch the port probes once (to populate the ARP table for the open hosts),
+        // read /proc/net/arp once, then pick the first discovery-ordered candidate that is open
+        // AND whose ARP entry matches the recorded broker MAC — so many advertisers don't
+        // serialize into N * PROBE_TIMEOUT before the /24 fallback (Copilot).
+        let open: HashSet<Ipv4Addr> =
+            probe_open(&candidates, cfg.mqtt_port).await.into_iter().collect();
+        if open.is_empty() {
+            return None;
         }
-        None
+        let arp = match tokio::fs::read_to_string("/proc/net/arp").await {
+            Ok(t) => parse_proc_net_arp(&t),
+            Err(_) => return None, // no ARP table ⇒ no candidate can be MAC-confirmed this pass
+        };
+        candidates
+            .into_iter()
+            .find(|ip| open.contains(ip) && mac_matches(*ip, &arp, Some(mac)))
     } else {
         None // no TLS and no MAC → propose nothing
     }

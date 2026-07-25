@@ -61,7 +61,7 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
         // service is still discovered (Codex).
         let queries: Vec<Vec<u8>> = SERVICES
             .iter()
-            .map(|svc| build_ptr_query(svc, unicast_response))
+            .map(|svc| build_query(svc, QTYPE_PTR, unicast_response))
             .collect();
         for q in &queries {
             let _ = sock.send_to(q, (MDNS_GROUP, MDNS_PORT)).await;
@@ -81,6 +81,13 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
         // records on a chatty LAN), and the bounds-checked parser would then bail early and
         // miss an otherwise-valid broker answer (Copilot). Size for the RFC maximum.
         let mut buf = [0u8; 9000];
+        // A minimal responder may answer a PTR query with ONLY the PTR record (SRV/A are
+        // recommended additional answers, not guaranteed — RFC 6763 §12), leaving nothing to
+        // correlate. So follow up within the same window: query SRV for each PTR instance still
+        // missing one, and A for each SRV target still missing one, each sent at most once
+        // (Codex).
+        let mut srv_queried: HashSet<String> = HashSet::new();
+        let mut a_queried: HashSet<String> = HashSet::new();
         loop {
             tokio::select! {
                 _ = &mut deadline => break,
@@ -91,7 +98,21 @@ pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
                     }
                 }
                 r = sock.recv_from(&mut buf) => match r {
-                    Ok((n, _)) => parse_response(&buf[..n], &mut ptr, &mut srv, &mut a),
+                    Ok((n, _)) => {
+                        parse_response(&buf[..n], &mut ptr, &mut srv, &mut a);
+                        for inst in &ptr {
+                            if !srv.contains_key(inst) && srv_queried.insert(inst.clone()) {
+                                let q = build_query(inst, QTYPE_SRV, unicast_response);
+                                let _ = sock.send_to(&q, (MDNS_GROUP, MDNS_PORT)).await;
+                            }
+                        }
+                        for (target, _port) in srv.values() {
+                            if !a.contains_key(target) && a_queried.insert(target.clone()) {
+                                let q = build_query(target, QTYPE_A, unicast_response);
+                                let _ = sock.send_to(&q, (MDNS_GROUP, MDNS_PORT)).await;
+                            }
+                        }
+                    }
                     Err(_) => break,
                 }
             }
@@ -203,12 +224,17 @@ fn bind_reuse(port: u16) -> std::io::Result<UdpSocket> {
 // Pure wire helpers (unit-tested). No I/O — ported from MqttBrokerDiscovery.cs.
 // ---------------------------------------------------------------------------
 
-/// Build a standard-query datagram for a single PTR record. When `unicast_response` is set, the
-/// mDNS unicast-response (QU) top bit of QCLASS is set so responders reply to our source port —
-/// used ONLY on the solely-owned ephemeral socket. On the shared 5353 socket it is cleared, i.e.
-/// a normal multicast-response (QM) question, so the answer reaches every co-bound listener
-/// (Codex).
-fn build_ptr_query(name: &str, unicast_response: bool) -> Vec<u8> {
+/// DNS record types we query/parse.
+const QTYPE_A: u16 = 1;
+const QTYPE_PTR: u16 = 12;
+const QTYPE_SRV: u16 = 33;
+
+/// Build a standard-query datagram for a single record of `qtype` (PTR/SRV/A). When
+/// `unicast_response` is set, the mDNS unicast-response (QU) top bit of QCLASS is set so responders
+/// reply to our source port — used ONLY on the solely-owned ephemeral socket. On the shared 5353
+/// socket it is cleared, i.e. a normal multicast-response (QM) question, so the answer reaches
+/// every co-bound listener (Codex).
+fn build_query(name: &str, qtype: u16, unicast_response: bool) -> Vec<u8> {
     let mut b = vec![
         0x00, 0x00, // ID (0 for mDNS)
         0x00, 0x00, // flags: standard query
@@ -222,7 +248,7 @@ fn build_ptr_query(name: &str, unicast_response: bool) -> Vec<u8> {
         b.extend_from_slice(label.as_bytes());
     }
     b.push(0x00); // end of QNAME
-    b.extend_from_slice(&[0x00, 0x0C]); // QTYPE = PTR (12)
+    b.extend_from_slice(&qtype.to_be_bytes()); // QTYPE
     // QCLASS = IN (0x0001); the top bit is the mDNS QU (unicast-response) request.
     let qclass: u16 = if unicast_response { 0x8001 } else { 0x0001 };
     b.extend_from_slice(&qclass.to_be_bytes());
@@ -418,7 +444,7 @@ mod tests {
 
     #[test]
     fn build_ptr_query_has_the_expected_shape() {
-        let q = build_ptr_query("_mqtt._tcp.local", true);
+        let q = build_query("_mqtt._tcp.local", QTYPE_PTR, true);
         // Header: QDCOUNT = 1, everything else 0.
         assert_eq!(&q[0..12], &[0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
         // QNAME labels: 5 "_mqtt", 4 "_tcp", 5 "local", 0.
@@ -434,10 +460,12 @@ mod tests {
     }
 
     #[test]
-    fn build_ptr_query_uses_multicast_qclass_when_not_unicast() {
+    fn build_query_uses_multicast_qclass_when_not_unicast() {
         // On the shared 5353 socket we ask for a MULTICAST answer: QCLASS = IN with the QU bit
         // CLEARED (0x0001), so a co-bound Avahi can't consume a unicast reply meant for us.
-        let q = build_ptr_query("_mqtt._tcp.local", false);
+        let q = build_query("_mqtt._tcp.local", QTYPE_SRV, false);
+        assert_eq!(&q[30..34], &[0x00, 0x21, 0x00, 0x01]); // QTYPE=SRV(33), QCLASS=IN, QU cleared
+        let q = build_query("_mqtt._tcp.local", QTYPE_PTR, false);
         assert_eq!(&q[30..34], &[0x00, 0x0C, 0x00, 0x01]);
     }
 
