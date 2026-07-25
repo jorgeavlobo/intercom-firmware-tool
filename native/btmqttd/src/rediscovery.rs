@@ -18,8 +18,11 @@
 //! the client. Instead we reuse the indirection the device already has: when the
 //! broker is configured by **name**, the installer maps `name -> IP` in `/etc/hosts`
 //! (a tmpfs symlink, writable at runtime). Rediscovery:
-//!   1. reads the IP currently mapped to the broker name — the **anchor** — and scans
-//!      that IP's `/24` (the broker moved WITHIN its subnet: the DHCP case);
+//!   1. anchors on the broker name's **build-time** IP (from the immutable boot init
+//!      script, not the runtime-mutated `/etc/hosts`) and scans that IP's `/24` (the
+//!      broker moved WITHIN its home subnet: the DHCP case). Anchoring on the immutable
+//!      mapping keeps an earlier, unconfirmed mDNS proposal from drifting the scan onto
+//!      the wrong subnet;
 //!   2. TCP-probes the broker port across the subnet, and (when a broker MAC was
 //!      recorded at config time) prefers a candidate whose `/proc/net/arp` MAC
 //!      matches — the MAC is a HINT/tie-breaker, never the trust gate;
@@ -142,7 +145,8 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
         }
     }
 
-    // Read the hosts file and find the IP currently mapped to the broker name.
+    // Read the hosts file — needed to REWRITE it below while preserving the device's
+    // other mappings (localhost, openserver, the OTA blocks, …).
     let hosts = match tokio::fs::read_to_string(HOSTS_PATH).await {
         Ok(t) => t,
         Err(e) => {
@@ -150,19 +154,33 @@ pub async fn rediscover(cfg: &Config, tried: &mut HashSet<Ipv4Addr>) -> Option<I
             return None;
         }
     };
-    let anchor = match parse_hosts_ip(&hosts, &cfg.mqtt_host) {
+    // Anchor the /24 scan on the IMMUTABLE build-time mapping (the boot init script), NOT
+    // the current /etc/hosts value (Copilot). A prior mDNS pass may have repointed the
+    // broker name to an UNCONFIRMED address in a DIFFERENT subnet; anchoring the scan on
+    // that could strand it sweeping the wrong /24 forever — and, after each exhaustion
+    // clears `tried`, mDNS would re-propose the same wrong address, so the real broker's
+    // home subnet would never be scanned again. The build-time mapping is the broker's
+    // wired home subnet, which is exactly what the /24 scan is for (a broker that moved to
+    // another subnet advertises mDNS — Layer B above — or it is unreachable to the scan
+    // regardless). Fall back to the current /etc/hosts mapping only when the boot script is
+    // unreadable.
+    let anchor = match build_time_ip(&cfg.mqtt_host).await {
         Some(a) => a,
-        None => {
-            // The name isn't pinned to an IPv4 in the hosts file — a misconfiguration
-            // (the installer normally pins it). Say so instead of returning silently,
-            // which otherwise looks like rediscovery just never triggering.
-            eprintln!(
-                "btmqttd: rediscovery: broker name '{}' has no IPv4 mapping in {HOSTS_PATH}; \
-                 cannot rediscover (is it pinned there?)",
-                cfg.mqtt_host
-            );
-            return None;
-        }
+        None => match parse_hosts_ip(&hosts, &cfg.mqtt_host) {
+            Some(a) => a,
+            None => {
+                // The name is pinned nowhere we can read — a misconfiguration (the
+                // installer normally seeds both the boot script and /etc/hosts). Say so
+                // instead of returning silently, which otherwise looks like rediscovery
+                // just never triggering.
+                eprintln!(
+                    "btmqttd: rediscovery: broker name '{}' has no IPv4 mapping in \
+                     {BOOT_HOSTS_SCRIPT} or {HOSTS_PATH}; cannot rediscover (is it pinned?)",
+                    cfg.mqtt_host
+                );
+                return None;
+            }
+        },
     };
     // Only ever scan a private LAN /24. If the broker name is pinned to a public,
     // loopback or link-local address, probing its whole /24 would be off-scope outbound

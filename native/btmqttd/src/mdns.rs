@@ -35,7 +35,10 @@ const SERVICE: &str = "_mqtt._tcp.local";
 pub async fn discover_ips(window: Duration) -> Vec<Ipv4Addr> {
     let mut ptr: Vec<String> = Vec::new();
     let mut srv: HashMap<String, (String, u16)> = HashMap::new();
-    let mut a: HashMap<String, Ipv4Addr> = HashMap::new();
+    // A host may advertise MORE THAN ONE A record (a multihomed broker): keep every
+    // distinct address per name so a target reachable on one interface is not lost when
+    // a later, unreachable A record for the same host arrives (Codex P2).
+    let mut a: HashMap<String, Vec<Ipv4Addr>> = HashMap::new();
 
     if let Ok(sock) = open_socket().await {
         let query = build_ptr_query(SERVICE);
@@ -107,7 +110,7 @@ fn parse_response(
     b: &[u8],
     ptr: &mut Vec<String>,
     srv: &mut HashMap<String, (String, u16)>,
-    a: &mut HashMap<String, Ipv4Addr>,
+    a: &mut HashMap<String, Vec<Ipv4Addr>>,
 ) {
     let len = b.len();
     if len < 12 {
@@ -154,8 +157,12 @@ fn parse_response(
                 }
             }
             1 if rdlen == 4 => {
-                // A: 4-byte IPv4.
-                a.insert(name, Ipv4Addr::new(b[rd], b[rd + 1], b[rd + 2], b[rd + 3]));
+                // A: 4-byte IPv4. Accumulate (deduped) — a host may carry several.
+                let ip = Ipv4Addr::new(b[rd], b[rd + 1], b[rd + 2], b[rd + 3]);
+                let ips = a.entry(name).or_default();
+                if !ips.contains(&ip) {
+                    ips.push(ip);
+                }
             }
             _ => {}
         }
@@ -215,12 +222,13 @@ fn read_name(b: &[u8], pos: &mut usize) -> String {
 
 /// Correlate the accumulated records into the advertised broker IPv4s: keep only SRV records
 /// that actually belong to `_mqtt._tcp` (an instance the PTR pointed to, or a name of the form
-/// `<instance>._mqtt._tcp.local`), resolve each SRV target through the A records, and return
-/// the distinct IPs. A chatty responder's unrelated SRV+A pairs are ignored.
+/// `<instance>._mqtt._tcp.local`), resolve each SRV target through the A records (every A record
+/// the target carries, not just one — a multihomed broker has several), and return the distinct
+/// IPs. A chatty responder's unrelated SRV+A pairs are ignored.
 fn correlate(
     ptr: &[String],
     srv: &HashMap<String, (String, u16)>,
-    a: &HashMap<String, Ipv4Addr>,
+    a: &HashMap<String, Vec<Ipv4Addr>>,
 ) -> Vec<Ipv4Addr> {
     let instances: HashSet<&String> = ptr.iter().collect();
     let suffix = format!(".{SERVICE}");
@@ -230,9 +238,11 @@ fn correlate(
         if !is_mqtt {
             continue;
         }
-        if let Some(ip) = a.get(target) {
-            if !out.contains(ip) {
-                out.push(*ip);
+        if let Some(ips) = a.get(target) {
+            for ip in ips {
+                if !out.contains(ip) {
+                    out.push(*ip);
+                }
             }
         }
     }
@@ -315,9 +325,46 @@ mod tests {
         let mut srv = HashMap::new();
         srv.insert("printer._ipp._tcp.local".to_string(), ("printer.local".to_string(), 631u16));
         let mut a = HashMap::new();
-        a.insert("printer.local".to_string(), Ipv4Addr::new(192, 168, 50, 99));
+        a.insert("printer.local".to_string(), vec![Ipv4Addr::new(192, 168, 50, 99)]);
         // No PTR for our service, and the SRV name isn't under _mqtt._tcp → dropped.
         assert!(correlate(&[], &srv, &a).is_empty());
+    }
+
+    #[test]
+    fn correlate_returns_every_a_record_of_a_multihomed_broker() {
+        // A broker advertising two A records for its SRV target must yield BOTH addresses,
+        // in first-seen order, so the caller can try each (Codex P2).
+        let mut srv = HashMap::new();
+        srv.insert("Mosquitto._mqtt._tcp.local".to_string(), ("broker.local".to_string(), 1883u16));
+        let mut a = HashMap::new();
+        a.insert(
+            "broker.local".to_string(),
+            vec![Ipv4Addr::new(192, 168, 50, 40), Ipv4Addr::new(10, 0, 0, 40)],
+        );
+        let ips = correlate(&["Mosquitto._mqtt._tcp.local".to_string()], &srv, &a);
+        assert_eq!(ips, vec![Ipv4Addr::new(192, 168, 50, 40), Ipv4Addr::new(10, 0, 0, 40)]);
+    }
+
+    #[test]
+    fn parse_response_accumulates_multiple_a_records_for_one_host() {
+        // Two A records for the same host in one datagram must both survive (not overwrite).
+        let mut b = vec![0, 0, 0x84, 0x00];
+        b.extend_from_slice(&[0, 0]); // QDCOUNT
+        b.extend_from_slice(&[0, 2]); // ANCOUNT = two A records
+        b.extend_from_slice(&[0, 0, 0, 0]); // NS, AR
+        for ip in [[192u8, 168, 50, 40], [10, 0, 0, 40]] {
+            enc_name("broker.local", &mut b);
+            b.extend_from_slice(&[0, 1, 0, 1]); // type A, class IN
+            b.extend_from_slice(&[0, 0, 0, 120]); // TTL
+            b.extend_from_slice(&[0, 4]); // RDLENGTH
+            b.extend_from_slice(&ip);
+        }
+        let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
+        parse_response(&b, &mut ptr, &mut srv, &mut a);
+        assert_eq!(
+            a.get("broker.local"),
+            Some(&vec![Ipv4Addr::new(192, 168, 50, 40), Ipv4Addr::new(10, 0, 0, 40)])
+        );
     }
 
     #[test]
