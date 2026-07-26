@@ -11,14 +11,31 @@
 //! monitor broadcasts, so a short-lived session per set/read is simpler and robust
 //! (no keepalive / stale-session handling), and mirrors the per-command `:30006` path.
 //!
-//! Volume is WHO=8 dimension `41`, value = percent (0..=100, step 10 in the UI):
-//! ```text
-//!   read  request : *#8**41##       -> reply *#8**41*<N>##
-//!   write command : *#8**#41*<N>##  -> reply *#8**41*<N>##
-//! ```
-//! Verified on a live Classe 100X: `*99*0##` -> `*#*1##`, then the frame; the gateway
-//! answers `*#*1##` (accepted) / `*#*0##` (rejected) and, for a read/write, the
-//! `*#8**41*<N>##` dimension report (which the monitor also broadcasts).
+//! Two independent WHO=8 dimensions are driven here (both reverse-engineered against a
+//! live unit and captured with `strace` on `bt_answering_machine`, which owns them):
+//!
+//! * Ringtone VOLUME — dimension `41`, value = percent (0..=100, step 10 in the UI):
+//!   ```text
+//!     read  request : *#8**41##       -> reply *#8**41*<N>##
+//!     write command : *#8**#41*<N>##  -> reply *#8**41*<N>##
+//!   ```
+//!   The write persists to `aswm_settings.ini` `[Volumes] Ring=<N>` and sets the real
+//!   ringtone loudness (proven audibly at the door station); it does NOT move the unit's
+//!   on-screen volume indicator, which the GUI caches in RAM and cannot be synced from
+//!   the bus.
+//!
+//! * Ringtone MUTE — dimension `33`, value = the device's `RingEnable` flag (boolean):
+//!   ```text
+//!     read  request : *#8**33##       -> reply *#8**33*<0|1>##
+//!     write command : *#8**#33*<0|1>##  -> reply *#8**33*<0|1>##
+//!   ```
+//!   `1` = ringtone ENABLED (audible), `0` = ringtone DISABLED (silenced) — persisted to
+//!   `aswm_settings.ini` `RingEnable=<0|1>`. This is the unit's own "do not disturb"
+//!   toggle and is INDEPENDENT of the volume: muting leaves the volume level untouched.
+//!
+//! Verified on a live Classe 300X (`imx6dl-shark-zl380tw`): `*99*0##` -> `*#*1##`, then
+//! the frame; the gateway answers `*#*1##` (accepted) / `*#*0##` (rejected) and, for a
+//! read/write, the dimension report (which the monitor also broadcasts).
 
 use std::time::Duration;
 
@@ -39,8 +56,12 @@ const SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// one burst, so a short idle gap reliably marks the end without hanging.
 const REPLY_IDLE: Duration = Duration::from_millis(500);
 
-/// WHO=8 dimension carrying the ringtone/speaker volume (issue #40 RE).
+/// WHO=8 dimension carrying the ringtone volume, 0..=100 (issue #40 RE).
 const VOLUME_DIM: &str = "41";
+
+/// WHO=8 dimension carrying the ringtone-enabled (`RingEnable`) flag, `0`/`1` — the
+/// device's own "do not disturb"/mute, independent of the volume (issue #40 RE).
+const MUTE_DIM: &str = "33";
 
 /// The maximum volume percent the device accepts.
 pub const VOLUME_MAX: u8 = 100;
@@ -69,6 +90,39 @@ pub fn parse_volume_report(frame: &str) -> Option<u8> {
     }
     // A single numeric value only: reject multi-field dimensions like "41*1*2".
     val.parse::<u8>().ok().filter(|&n| n <= VOLUME_MAX)
+}
+
+/// The dimension-REQUEST frame that asks the gateway for the current mute state.
+pub fn mute_read_request() -> String {
+    format!("*#8**{MUTE_DIM}##")
+}
+
+/// The dimension-WRITE frame that mutes (`muted == true`) or unmutes the ringtone.
+///
+/// The value is the device's `RingEnable` flag, so it is INVERTED from `muted`:
+/// muted → `RingEnable=0` (disabled), unmuted → `RingEnable=1` (enabled).
+pub fn mute_write_frame(muted: bool) -> String {
+    let ring_enable = u8::from(!muted);
+    format!("*#8**#{MUTE_DIM}*{ring_enable}##")
+}
+
+/// Parse a WHO=8 mute dimension report `*#8**33*<0|1>##` into `muted` (`RingEnable==0`).
+///
+/// Returns `None` for any other frame (so the monitor stream can be filtered) and for
+/// out-of-range values — only the booleans `0`/`1` are accepted, which is what makes the
+/// earlier "dim33 with a percent value did nothing" behaviour make sense: the device
+/// silently rejects non-boolean writes to this dimension.
+pub fn parse_mute_report(frame: &str) -> Option<bool> {
+    let body = frame.strip_prefix("*#8**")?.strip_suffix("##")?;
+    let (dim, val) = body.split_once('*')?;
+    if dim != MUTE_DIM {
+        return None;
+    }
+    match val {
+        "0" => Some(true),  // RingEnable=0 -> muted
+        "1" => Some(false), // RingEnable=1 -> not muted
+        _ => None,
+    }
 }
 
 /// Run ONE command-session operation: connect to `host:port`, open the command
@@ -132,6 +186,28 @@ pub async fn write_volume(host: &str, port: u16, pct: u8) -> std::io::Result<u8>
     })
 }
 
+/// Read the current mute state via a dimension request. Returns `Some(muted)`, or `None`
+/// if the gateway gave no valid mute report (session refused / dimension unsupported).
+pub async fn read_mute(host: &str, port: u16) -> std::io::Result<Option<bool>> {
+    let replies = session(host, port, &mute_read_request()).await?;
+    Ok(replies.iter().find_map(|f| parse_mute_report(f)))
+}
+
+/// Mute/unmute the ringtone and return the state the device ECHOES back. Mirrors
+/// [`write_volume`]: a successful write replies with the `*#8**33*<0|1>##` report; a
+/// REFUSED write yields only the NACK `*#*0##` (dropped by the framer), surfaced as an
+/// error rather than a silent success. Returning the echoed state lets the caller update
+/// from the device's confirmation immediately instead of racing the monitor broadcast.
+pub async fn write_mute(host: &str, port: u16, muted: bool) -> std::io::Result<bool> {
+    let replies = session(host, port, &mute_write_frame(muted)).await?;
+    replies.iter().find_map(|f| parse_mute_report(f)).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "mute write not acknowledged (no dimension report in reply)",
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +252,37 @@ mod tests {
     fn write_clamps_are_the_callers_job_but_frame_builder_is_literal() {
         // volume_write_frame does not clamp (write_volume does); it renders the value.
         assert_eq!(volume_write_frame(90), "*#8**#41*90##");
+    }
+
+    #[test]
+    fn mute_request_frame() {
+        assert_eq!(mute_read_request(), "*#8**33##");
+    }
+
+    #[test]
+    fn mute_write_frame_inverts_muted_into_ring_enable() {
+        // muted -> RingEnable=0 (silenced); unmuted -> RingEnable=1 (audible).
+        assert_eq!(mute_write_frame(true), "*#8**#33*0##");
+        assert_eq!(mute_write_frame(false), "*#8**#33*1##");
+    }
+
+    #[test]
+    fn parses_who8_dim33_reports_as_muted() {
+        assert_eq!(parse_mute_report("*#8**33*0##"), Some(true)); // RingEnable=0 -> muted
+        assert_eq!(parse_mute_report("*#8**33*1##"), Some(false)); // RingEnable=1 -> audible
+    }
+
+    #[test]
+    fn rejects_non_mute_frames() {
+        // The volume dimension is not the mute dimension.
+        assert_eq!(parse_mute_report("*#8**41*50##"), None);
+        // Only the booleans 0/1 are valid RingEnable values.
+        assert_eq!(parse_mute_report("*#8**33*2##"), None);
+        assert_eq!(parse_mute_report("*#8**33*88##"), None);
+        // The request, not a report; and malformed input.
+        assert_eq!(parse_mute_report("*#8**33##"), None);
+        assert_eq!(parse_mute_report("garbage"), None);
+        // And the volume parser rejects the mute dimension, keeping the two streams apart.
+        assert_eq!(parse_volume_report("*#8**33*1##"), None);
     }
 }
