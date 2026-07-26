@@ -97,6 +97,117 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
+        /// Generates a fresh <b>ECDSA P-256</b> key pair and serializes the PRIVATE
+        /// key in <b>dropbear's own host-key file format</b> — the bytes that
+        /// <c>dropbearkey -t ecdsa -s 256 -f &lt;file&gt;</c> writes and that
+        /// <c>dropbear -r &lt;file&gt;</c> loads. Used to bake an
+        /// <c>/etc/dropbear/dropbear_ecdsa_host_key</c> into the image so a modern
+        /// OpenSSH (≥ 8.8, which disables the legacy SHA-1 <c>ssh-rsa</c> host-key
+        /// algorithm by default) negotiates <c>ecdsa-sha2-nistp256</c> and connects
+        /// without a <c>-o HostKeyAlgorithms=+ssh-rsa</c> compatibility flag (issue
+        /// #37). ECDSA — not Ed25519 — because the device's dropbear (2017.75)
+        /// predates Ed25519 host-key support (added upstream in 2018.76) but does
+        /// offer <c>ecdsa-sha2-nistp256</c>, and because ECDSA is in the .NET base
+        /// class library (no third-party crypto dependency, matching this class's
+        /// posture).
+        ///
+        /// The file layout is the SSH wire encoding
+        /// (<c>string "ecdsa-sha2-nistp256"</c>, <c>string "nistp256"</c>,
+        /// <c>string</c> the uncompressed point <c>0x04‖X‖Y</c>, then <c>mpint</c>
+        /// the private scalar) — verified byte-for-byte against a real
+        /// <c>dropbearkey</c> reference.
+        /// </summary>
+        public static byte[] GenerateDropbearEcdsaHostKey()
+        {
+            using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            return SerializeDropbearEcdsaHostKey(ecdsa.ExportParameters(includePrivateParameters: true));
+        }
+
+        /// <summary>
+        /// Serializes ECDSA P-256 parameters into dropbear's host-key file format.
+        /// Split out (from <see cref="GenerateDropbearEcdsaHostKey"/>) so a unit
+        /// test can feed a fixed key and assert the exact bytes against a
+        /// <c>dropbearkey</c>-produced reference. For nistP256, .NET returns
+        /// <c>Q.X</c>, <c>Q.Y</c> and <c>D</c> as fixed 32-byte big-endian fields.
+        /// </summary>
+        internal static byte[] SerializeDropbearEcdsaHostKey(ECParameters p)
+        {
+            // Guard: this serializer is P-256-only (the field widths and the hard-coded
+            // "ecdsa-sha2-nistp256"/"nistp256" labels below). Fail with a clear message if
+            // handed another named curve (e.g. P-384) rather than an opaque padding/length
+            // error later (Copilot). Only reject a curve we can POSITIVELY identify as
+            // non-P-256, so an unnamed/unidentifiable curve still falls through to the
+            // field-width check and a valid P-256 key is never rejected.
+            if (IsDefinitelyNotNistP256(p.Curve))
+                throw new ArgumentException(
+                    "Only ECDSA P-256 (nistP256/prime256v1) is supported.", nameof(p));
+
+            // P-256 coordinate width: X and Y are fixed at 32 bytes each. .NET's
+            // named-curve export already left-pads to this width, but pad defensively in
+            // case a provider trims leading zeros — a short X/Y would make the point the
+            // wrong length and dropbear would reject the host key (Copilot).
+            const int fieldSize = 32;
+            byte[] x = LeftPad(p.Q.X ?? throw new ArgumentException("EC point X missing", nameof(p)), fieldSize);
+            byte[] y = LeftPad(p.Q.Y ?? throw new ArgumentException("EC point Y missing", nameof(p)), fieldSize);
+            byte[] d = p.D ?? throw new ArgumentException("EC private scalar missing", nameof(p));
+
+            // Uncompressed point: 0x04 || X || Y — the only form dropbear/SSH use.
+            byte[] q = new byte[1 + fieldSize + fieldSize];
+            q[0] = 0x04;
+            Array.Copy(x, 0, q, 1, fieldSize);
+            Array.Copy(y, 0, q, 1 + fieldSize, fieldSize);
+
+            using var ms = new MemoryStream();
+            WriteLengthPrefixed(ms, Encoding.ASCII.GetBytes("ecdsa-sha2-nistp256"));
+            WriteLengthPrefixed(ms, Encoding.ASCII.GetBytes("nistp256"));
+            WriteLengthPrefixed(ms, q);
+            // Private scalar as an SSH mpint. Unlike the fixed-width point, an mpint is
+            // variable length with its own leading-zero/sign handling, so a trimmed D is
+            // already correct here.
+            WriteMpint(ms, d);
+            return ms.ToArray();
+        }
+
+        /// <summary>
+        /// True only when <paramref name="curve"/> can be POSITIVELY identified as a
+        /// named curve other than P-256 (nistP256 / secp256r1 / prime256v1, OID
+        /// <c>1.2.840.10045.3.1.7</c>). An unnamed or unidentifiable curve returns false
+        /// so the caller's field-width check still runs and a valid P-256 key is never
+        /// rejected on a platform that populates the curve metadata differently.
+        /// </summary>
+        private static bool IsDefinitelyNotNistP256(ECCurve curve)
+        {
+            if (!curve.IsNamed) return false;
+            string? oid = curve.Oid?.Value;
+            if (!string.IsNullOrEmpty(oid))
+                return oid != "1.2.840.10045.3.1.7";
+            string? name = curve.Oid?.FriendlyName;
+            if (!string.IsNullOrEmpty(name))
+                return !(name.Equals("nistP256", StringComparison.OrdinalIgnoreCase)
+                      || name.Equals("ECDSA_P256", StringComparison.OrdinalIgnoreCase)
+                      || name.Equals("prime256v1", StringComparison.OrdinalIgnoreCase)
+                      || name.Equals("secp256r1", StringComparison.OrdinalIgnoreCase));
+            return false; // named but no readable identity → don't reject here
+        }
+
+        /// <summary>
+        /// Left-pads a big-endian byte string with leading zeros to exactly
+        /// <paramref name="length"/> bytes — used to normalize a fixed-width EC coordinate
+        /// that a provider may have returned with leading zeros trimmed. Throws if the
+        /// value is already longer than <paramref name="length"/>.
+        /// </summary>
+        private static byte[] LeftPad(byte[] value, int length)
+        {
+            if (value.Length == length) return value;
+            if (value.Length > length)
+                throw new ArgumentException(
+                    $"value is {value.Length} bytes, expected at most {length}.", nameof(value));
+            byte[] padded = new byte[length];
+            Array.Copy(value, 0, padded, length - value.Length, value.Length);
+            return padded;
+        }
+
+        /// <summary>
         /// Heuristic check that <paramref name="text"/> is an OpenSSH public key
         /// line (<c>type base64 [comment]</c>). It verifies the type token is a
         /// known one AND that the base64 blob decodes to a wire-format key whose

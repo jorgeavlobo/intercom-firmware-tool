@@ -776,6 +776,11 @@ namespace IntercomFirmwareTool.App
         private void ChkKeepSig_Toggled(object sender, RoutedEventArgs e)
             => UpdateAdvancedVisibility();
 
+        // Same as above for the modern-host-key option (issue #37): recompute
+        // visibility so an unticked box doesn't linger, and it never gates Build.
+        private void ChkModernHostKey_Toggled(object sender, RoutedEventArgs e)
+            => UpdateAdvancedVisibility();
+
         /// <summary>The current password value (real text, held by the masked field).</summary>
         private string CurrentPassword() => _pw.Value;
 
@@ -925,6 +930,12 @@ namespace IntercomFirmwareTool.App
             KeepSigSection.Visibility = (advanced || ChkKeepSig.IsChecked == true)
                 ? Visibility.Visible : Visibility.Collapsed;
             ChkKeepSig.IsEnabled = _uiEnabled;
+
+            // The modern SSH host-key option (issue #37) is another advanced build
+            // toggle; same visibility/lock rule as the OTA-block and keep-.sig rows.
+            ModernHostKeySection.Visibility = (advanced || ChkModernHostKey.IsChecked == true)
+                ? Visibility.Visible : Visibility.Collapsed;
+            ChkModernHostKey.IsEnabled = _uiEnabled;
 
             // The optional MQTT bridge section lives in Advanced too; it stays visible
             // while enabled so an active build option isn't hidden by the toggle.
@@ -1479,7 +1490,8 @@ namespace IntercomFirmwareTool.App
 
             SetStatus(""); // clear any stale status; the build reports via its popup
             var opts = new EnableSshOptions(password, publicKey,
-                BlockFirmwareUpdates: ChkBlockUpdates.IsChecked == true);
+                BlockFirmwareUpdates: ChkBlockUpdates.IsChecked == true,
+                ModernHostKey: ChkModernHostKey.IsChecked == true);
 
             // Optional MQTT bridge: collect + validate its options (null when the
             // bridge is off). A file-read failure or invalid config shows a popup and
@@ -1607,6 +1619,8 @@ namespace IntercomFirmwareTool.App
             sb.AppendLine(opts.HasKey ? LF("Fmt_Result_Build_PubKey", keyPath) : L("Result_Build_PubKey_None"));
             if (opts.BlockFirmwareUpdates)
                 sb.AppendLine(L("Result_Build_BlockUpdates_On"));
+            if (opts.ModernHostKey)
+                sb.AppendLine(L("Result_Build_ModernHostKey_On"));
             sb.AppendLine(LF("Fmt_Result_Build_Output", output));
         }
 
