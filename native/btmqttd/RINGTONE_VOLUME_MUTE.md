@@ -10,7 +10,7 @@ Assistant. This is the durable record of a long investigation; read it before to
 | Control | OWN frame (openserver `:20000`, `*99*0##` session) | Persists to | Range |
 |---|---|---|---|
 | **Ringtone volume** | `*#8**#41*<N>##` (write), `*#8**41##` (read) | `aswm_settings.ini` `[Volumes] Ring=<N>` | `0..=100`, 1:1 |
-| **Ringtone mute** | `*#8**#33*<0\|1>##` (write), `*#8**33##` (read) | `aswm_settings.ini` `RingEnable=<0\|1>` | `0`=muted, `1`=audible |
+| **Ringtone mute** | `*#8**#33*<0/1>##` (write), `*#8**33##` (read) | `aswm_settings.ini` `RingEnable=<0/1>` | `0`=muted, `1`=audible |
 
 - Volume and mute are **independent**: muting (`RingEnable=0`) does **not** change `Ring=`,
   so unmute rings again at the same level. Volume `0` is a low volume, **not** a mute.

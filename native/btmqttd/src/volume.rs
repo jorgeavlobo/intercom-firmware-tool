@@ -119,6 +119,27 @@ impl VolumeCtl {
         self.publish_mute().await;
     }
 
+    /// Force a fresh read of BOTH volume and mute from the device and apply them,
+    /// OVERWRITING any cached value. Called on each monitor (re)connect: while the
+    /// monitor stream was down, a change made on the unit emits a one-shot broadcast that
+    /// is lost, and the `ensure_*` "only if unknown" guard would otherwise keep the stale
+    /// cached value indefinitely (the retained HA switch/slider staying wrong until the
+    /// next event or command). A concurrent monitor broadcast is equally
+    /// device-authoritative, so last-writer-wins between it and this read is harmless.
+    /// Best-effort: a refused/unreachable gateway leaves the current value in place.
+    pub async fn resync(&self) {
+        match dimension::read_volume(&self.host, self.port).await {
+            Ok(Some(n)) => self.observe_volume(n).await,
+            Ok(None) => {}
+            Err(e) => eprintln!("btmqttd: volume read (resync) failed: {e}"),
+        }
+        match dimension::read_mute(&self.host, self.port).await {
+            Ok(Some(m)) => self.observe_mute(m).await,
+            Ok(None) => {}
+            Err(e) => eprintln!("btmqttd: mute read (resync) failed: {e}"),
+        }
+    }
+
     /// Publish the retained `volume` (0..=100) state, reading the LATEST `current` at
     /// publish time under a serialising lock. `publish_lock` serialises retained writes so
     /// a slow publish (broker backpressure) can't finish AFTER a newer one and leave the
@@ -229,7 +250,7 @@ impl VolumeCtl {
             Ok(Some(m)) => m,
             Ok(None) => return,
             Err(e) => {
-                eprintln!("btmqttd: mute read (seed) failed: {e}");
+                eprintln!("btmqttd: mute read (ensure_muted) failed: {e}");
                 return;
             }
         };
