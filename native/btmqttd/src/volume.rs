@@ -53,6 +53,14 @@ struct State {
     current: Option<u8>,
     /// Ringtone muted, i.e. `RingEnable == 0` (dimension 33) — independent of `current`.
     muted: Option<bool>,
+    /// Monotonic counters bumped on EVERY authoritative write to the field above. A
+    /// [`resync`] read snapshots the counter before its (slow) command-session read and
+    /// applies the reply only if the counter is unchanged — so a monitor broadcast that
+    /// landed a newer value while the read was in flight is not clobbered by the older
+    /// reply. Wrap on overflow (harmless: a false match needs exactly 2^64 intervening
+    /// observations during one read).
+    vol_gen: u64,
+    mute_gen: u64,
 }
 
 /// Owns the volume/mute state machine and the OWN command-session endpoint used to write
@@ -79,7 +87,7 @@ impl VolumeCtl {
     /// first observation (monitor broadcast or on-connect read).
     pub fn new(cfg: &Arc<Config>, client: AsyncClient) -> Arc<Self> {
         Arc::new(VolumeCtl {
-            st: Mutex::new(State { current: None, muted: None }),
+            st: Mutex::new(State { current: None, muted: None, vol_gen: 0, mute_gen: 0 }),
             publish_lock: Mutex::new(()),
             host: cfg.own_host.clone(),
             port: cfg.own_port_mon,
@@ -94,14 +102,22 @@ impl VolumeCtl {
     /// are independent.
     pub async fn observe_volume(&self, pct: u8) {
         let pct = pct.min(100);
-        self.st.lock().await.current = Some(pct);
+        {
+            let mut st = self.st.lock().await;
+            st.current = Some(pct);
+            st.vol_gen = st.vol_gen.wrapping_add(1);
+        }
         self.publish_volume().await;
     }
 
     /// Learn an AUTHORITATIVE mute state (a monitor broadcast or an on-demand read):
     /// update `muted` and republish the retained `mute` state. Volume is untouched.
     pub async fn observe_mute(&self, muted: bool) {
-        self.st.lock().await.muted = Some(muted);
+        {
+            let mut st = self.st.lock().await;
+            st.muted = Some(muted);
+            st.mute_gen = st.mute_gen.wrapping_add(1);
+        }
         self.publish_mute().await;
     }
 
@@ -128,15 +144,57 @@ impl VolumeCtl {
     /// device-authoritative, so last-writer-wins between it and this read is harmless.
     /// Best-effort: a refused/unreachable gateway leaves the current value in place.
     pub async fn resync(&self) {
+        // Snapshot the generation BEFORE each read; apply the reply only if no newer
+        // authoritative observation (a monitor broadcast) bumped it while the read was in
+        // flight — otherwise this slow reply would clobber the fresher value. Volume and
+        // mute use separate counters so a change to one never discards the other's read.
+        let vol_gen = { self.st.lock().await.vol_gen };
         match dimension::read_volume(&self.host, self.port).await {
-            Ok(Some(n)) => self.observe_volume(n).await,
+            Ok(Some(n)) => self.apply_resync_volume(n, vol_gen).await,
             Ok(None) => {}
             Err(e) => eprintln!("btmqttd: volume read (resync) failed: {e}"),
         }
+        let mute_gen = { self.st.lock().await.mute_gen };
         match dimension::read_mute(&self.host, self.port).await {
-            Ok(Some(m)) => self.observe_mute(m).await,
+            Ok(Some(m)) => self.apply_resync_mute(m, mute_gen).await,
             Ok(None) => {}
             Err(e) => eprintln!("btmqttd: mute read (resync) failed: {e}"),
+        }
+    }
+
+    /// Apply a resync volume read iff no newer observation landed during it (see
+    /// [`resync`]). The generation check and the write are atomic under the lock, so a
+    /// monitor broadcast can't slip between them; publish happens off the lock.
+    async fn apply_resync_volume(&self, pct: u8, gen_before: u64) {
+        let applied = {
+            let mut st = self.st.lock().await;
+            if st.vol_gen == gen_before {
+                st.current = Some(pct.min(100));
+                st.vol_gen = st.vol_gen.wrapping_add(1);
+                true
+            } else {
+                false
+            }
+        };
+        if applied {
+            self.publish_volume().await;
+        }
+    }
+
+    /// Apply a resync mute read iff no newer observation landed during it (see [`resync`]).
+    async fn apply_resync_mute(&self, muted: bool, gen_before: u64) {
+        let applied = {
+            let mut st = self.st.lock().await;
+            if st.mute_gen == gen_before {
+                st.muted = Some(muted);
+                st.mute_gen = st.mute_gen.wrapping_add(1);
+                true
+            } else {
+                false
+            }
+        };
+        if applied {
+            self.publish_mute().await;
         }
     }
 
@@ -226,6 +284,7 @@ impl VolumeCtl {
             let mut st = self.st.lock().await;
             if st.current.is_none() {
                 st.current = Some(n);
+                st.vol_gen = st.vol_gen.wrapping_add(1);
                 true
             } else {
                 false
@@ -258,6 +317,7 @@ impl VolumeCtl {
             let mut st = self.st.lock().await;
             if st.muted.is_none() {
                 st.muted = Some(m);
+                st.mute_gen = st.mute_gen.wrapping_add(1);
                 true
             } else {
                 false
@@ -290,21 +350,34 @@ mod tests {
     // `State` logic without a live gateway/broker (the network writes are thin wrappers
     // over dimension::write_volume / write_mute, covered by dimension.rs's frame tests).
 
-    /// Mirror of observe_volume()'s state update, in isolation.
+    /// Mirror of observe_volume()'s state update, in isolation (bumps the generation).
     fn observe_volume(st: &mut State, pct: u8) {
         st.current = Some(pct);
+        st.vol_gen = st.vol_gen.wrapping_add(1);
     }
 
-    /// Mirror of observe_mute()'s state update, in isolation.
+    /// Mirror of observe_mute()'s state update, in isolation (bumps the generation).
     fn observe_mute(st: &mut State, muted: bool) {
         st.muted = Some(muted);
+        st.mute_gen = st.mute_gen.wrapping_add(1);
+    }
+
+    /// Mirror of apply_resync_volume()'s generation-guarded apply.
+    fn apply_resync_volume(st: &mut State, pct: u8, gen_before: u64) -> bool {
+        if st.vol_gen == gen_before {
+            st.current = Some(pct.min(100));
+            st.vol_gen = st.vol_gen.wrapping_add(1);
+            true
+        } else {
+            false
+        }
     }
 
     #[test]
     fn volume_and_mute_are_independent() {
         // Muting must NOT disturb the learned volume, and vice-versa — the whole point of
         // driving the real RingEnable dimension instead of faking mute with volume 0.
-        let mut st = State { current: None, muted: None };
+        let mut st = State { current: None, muted: None, vol_gen: 0, mute_gen: 0 };
         observe_volume(&mut st, 80);
         observe_mute(&mut st, true); // mute on
         assert_eq!(st.current, Some(80)); // volume preserved while muted
@@ -317,15 +390,36 @@ mod tests {
     fn zero_volume_is_not_mute() {
         // A slider/down-button 0 is a low volume, not a mute: `muted` tracks RingEnable
         // only, so it stays whatever the device last reported.
-        let mut st = State { current: None, muted: Some(false) };
+        let mut st = State { current: None, muted: Some(false), vol_gen: 0, mute_gen: 0 };
         observe_volume(&mut st, 0);
         assert_eq!(st.current, Some(0));
         assert_eq!(st.muted, Some(false)); // NOT flipped to muted by volume reaching 0
     }
 
     #[test]
+    fn resync_read_is_discarded_when_a_newer_observation_landed_during_it() {
+        // A monitor broadcast (90) lands after resync snapshots the generation but before
+        // its slower read reply (80) is applied — the stale reply must be discarded.
+        let mut st = State { current: Some(50), muted: None, vol_gen: 3, mute_gen: 0 };
+        let gen_before = st.vol_gen; // snapshot taken before the read
+        observe_volume(&mut st, 90); // newer value observed while the read is in flight
+        let applied = apply_resync_volume(&mut st, 80, gen_before);
+        assert!(!applied);
+        assert_eq!(st.current, Some(90)); // fresher monitor value preserved
+    }
+
+    #[test]
+    fn resync_read_applies_when_nothing_changed_during_it() {
+        let mut st = State { current: Some(50), muted: None, vol_gen: 3, mute_gen: 0 };
+        let gen_before = st.vol_gen;
+        let applied = apply_resync_volume(&mut st, 80, gen_before);
+        assert!(applied);
+        assert_eq!(st.current, Some(80));
+    }
+
+    #[test]
     fn state_starts_unknown() {
-        let st = State { current: None, muted: None };
+        let st = State { current: None, muted: None, vol_gen: 0, mute_gen: 0 };
         assert_eq!(st.current, None);
         assert_eq!(st.muted, None);
     }
