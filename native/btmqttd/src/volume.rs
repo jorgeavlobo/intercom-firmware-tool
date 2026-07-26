@@ -71,6 +71,20 @@ pub struct VolumeCtl {
     /// Serialises the retained-state publishes so two concurrent observations can't
     /// interleave and leave the older value retained (see `publish_volume`/`publish_mute`).
     publish_lock: Mutex<()>,
+    /// Serialises command-session operations (`set`/`mute`/`step`/`seed`/`resync`) against
+    /// each other, so a slow READ can't interleave with a WRITE and make the generation
+    /// guard misfire — a read that sampled the old value before the write could bump the
+    /// generation mid-write and cause the device-confirmed echo to be discarded as if the
+    /// read were a newer observation. The monitor path (`observe_*`) deliberately does NOT
+    /// take this lock: its broadcasts stay concurrent and authoritative, which is exactly
+    /// what the generation guard exists for. Command ops are low-frequency and the monitor
+    /// stream is a separate task, so holding it across the round trip blocks nothing
+    /// user-visible.
+    cmd_lock: Mutex<()>,
+    /// Dedups reconnect resyncs. A flapping monitor would otherwise `spawn` overlapping
+    /// resync tasks; [`resync`] `try_lock`s this and returns early if another resync is
+    /// already running (or queued on `cmd_lock`), so only one is ever in flight.
+    resync_lock: Mutex<()>,
     /// OWN gateway for DIMENSION read/write — the openserver main gateway
     /// (`own_host:own_port_mon`, default `127.0.0.1:20000`), NOT the `:30006` command
     /// port `receiver` uses for actions (which does not handle dimensions).
@@ -89,6 +103,8 @@ impl VolumeCtl {
         Arc::new(VolumeCtl {
             st: Mutex::new(State { current: None, muted: None, vol_gen: 0, mute_gen: 0 }),
             publish_lock: Mutex::new(()),
+            cmd_lock: Mutex::new(()),
+            resync_lock: Mutex::new(()),
             host: cfg.own_host.clone(),
             port: cfg.own_port_mon,
             topic_volume: cfg.topic_volume.clone(),
@@ -129,6 +145,7 @@ impl VolumeCtl {
     /// would otherwise stay stateless until the next report even when state was known.
     /// Each publish is a no-op while its value is still unknown.
     pub async fn seed(&self) {
+        let _cmd = self.cmd_lock.lock().await;
         self.ensure_current().await;
         self.ensure_muted().await;
         self.publish_volume().await;
@@ -144,6 +161,15 @@ impl VolumeCtl {
     /// device-authoritative, so last-writer-wins between it and this read is harmless.
     /// Best-effort: a refused/unreachable gateway leaves the current value in place.
     pub async fn resync(&self) {
+        // Dedup: skip if another resync is already running or queued — a flapping monitor
+        // would otherwise stack overlapping resync tasks (extra command-session load).
+        let _resync = match self.resync_lock.try_lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        // Serialise against writes so a set()/mute() in flight can't interleave with these
+        // reads (the monitor path stays concurrent — see `cmd_lock`).
+        let _cmd = self.cmd_lock.lock().await;
         // Snapshot the generation BEFORE each read; apply the reply only if no newer
         // authoritative observation (a monitor broadcast) bumped it while the read was in
         // flight — otherwise this slow reply would clobber the fresher value. Volume and
@@ -246,13 +272,20 @@ impl VolumeCtl {
     /// gateway refuses returns an error here and leaves state untouched. `pct == 0` is now
     /// just a low volume, not a mute — mute is the separate [`mute`] dimension.
     pub async fn set(&self, pct: u8) -> std::io::Result<()> {
+        let _cmd = self.cmd_lock.lock().await;
+        self.set_inner(pct).await
+    }
+
+    /// The volume write + generation-guarded echo apply, WITHOUT taking `cmd_lock` —
+    /// callers ([`set`], [`step`]) already hold it so a read can't interleave with the
+    /// write. Snapshot the generation before the (slow) write so its echo is applied only
+    /// if no newer observation landed meanwhile: if the unit changed the volume during our
+    /// write, the monitor already learned that fresher value and our older echo must not
+    /// clobber it (the device broadcasts our own write too, so nothing is lost when the
+    /// echo is discarded). The common no-contention case still applies the echo at once, so
+    /// a rapid follow-up step/set computes from the confirmed value.
+    async fn set_inner(&self, pct: u8) -> std::io::Result<()> {
         let pct = pct.min(100);
-        // Snapshot the generation before the (slow) write so its echo is applied only if no
-        // newer observation landed meanwhile: if the unit changed the volume during our
-        // write, the monitor already learned that fresher value and our older echo must not
-        // clobber it (the device broadcasts our own write too, so nothing is lost when the
-        // echo is discarded). The common no-contention case still applies the echo at once,
-        // so a rapid follow-up step/set computes from the confirmed value.
         let gen_before = { self.st.lock().await.vol_gen };
         let confirmed = dimension::write_volume(&self.host, self.port, pct).await?;
         self.apply_volume_if_unchanged(confirmed, gen_before).await;
@@ -265,6 +298,7 @@ impl VolumeCtl {
     /// the state the device ECHOES back via [`observe_mute`]; a refused write errors and
     /// leaves state untouched.
     pub async fn mute(&self, on: bool) -> std::io::Result<()> {
+        let _cmd = self.cmd_lock.lock().await;
         // Same generation guard as set(): if the unit toggled mute during our write, the
         // monitor already learned it, so the older echo must not overwrite the fresher
         // value. Discarding the echo is safe — the device broadcasts our own write too.
@@ -348,13 +382,16 @@ impl VolumeCtl {
     /// 0..=100. Uses the last known `current`; if it's still unknown, reads it on demand
     /// first so the very first press steps from the real level, not a guess.
     pub async fn step(&self, up: bool) -> std::io::Result<()> {
+        // Hold cmd_lock across the read-base + write so the whole step is atomic against
+        // other command ops (and calls set_inner, which does NOT re-take the lock).
+        let _cmd = self.cmd_lock.lock().await;
         let base = self.ensure_current().await.unwrap_or(0);
         let next = if up {
             base.saturating_add(STEP).min(100)
         } else {
             base.saturating_sub(STEP)
         };
-        self.set(next).await
+        self.set_inner(next).await
     }
 }
 
@@ -383,6 +420,17 @@ mod tests {
         if st.vol_gen == gen_before {
             st.current = Some(pct.min(100));
             st.vol_gen = st.vol_gen.wrapping_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mirror of apply_mute_if_unchanged()'s generation-guarded apply.
+    fn apply_mute_if_unchanged(st: &mut State, muted: bool, gen_before: u64) -> bool {
+        if st.mute_gen == gen_before {
+            st.muted = Some(muted);
+            st.mute_gen = st.mute_gen.wrapping_add(1);
             true
         } else {
             false
@@ -431,6 +479,27 @@ mod tests {
         let applied = apply_volume_if_unchanged(&mut st, 80, gen_before);
         assert!(applied);
         assert_eq!(st.current, Some(80));
+    }
+
+    #[test]
+    fn resync_mute_read_is_discarded_when_a_newer_observation_landed_during_it() {
+        // Mute twin of the volume test: RingEnable is inverted (muted == RingEnable 0) and
+        // uses its own counter, so pin the discard behaviour down separately.
+        let mut st = State { current: None, muted: Some(false), vol_gen: 0, mute_gen: 5 };
+        let gen_before = st.mute_gen; // snapshot before the read
+        observe_mute(&mut st, true); // unit muted while the read is in flight
+        let applied = apply_mute_if_unchanged(&mut st, false, gen_before); // stale reply
+        assert!(!applied);
+        assert_eq!(st.muted, Some(true)); // fresher mute state preserved
+    }
+
+    #[test]
+    fn resync_mute_read_applies_when_nothing_changed_during_it() {
+        let mut st = State { current: None, muted: Some(false), vol_gen: 0, mute_gen: 5 };
+        let gen_before = st.mute_gen;
+        let applied = apply_mute_if_unchanged(&mut st, true, gen_before);
+        assert!(applied);
+        assert_eq!(st.muted, Some(true));
     }
 
     #[test]
