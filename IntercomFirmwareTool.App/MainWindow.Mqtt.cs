@@ -1113,7 +1113,8 @@ namespace IntercomFirmwareTool.App
                         // A PEM-loaded cert must be round-tripped through PKCS#12 or the
                         // private key is unusable for the handshake on Windows SChannel.
                         using var ephemeral = X509Certificate2.CreateFromPem(certPem, keyPem);
-                        clientCert = new X509Certificate2(ephemeral.Export(X509ContentType.Pkcs12));
+                        clientCert = X509CertificateLoader.LoadPkcs12(
+                            ephemeral.Export(X509ContentType.Pkcs12), null);
                         tls = tls.WithClientCertificates(new X509Certificate2Collection { clientCert });
                     }
 
