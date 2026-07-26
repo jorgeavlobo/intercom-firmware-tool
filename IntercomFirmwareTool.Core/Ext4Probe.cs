@@ -626,6 +626,13 @@ namespace IntercomFirmwareTool.Core
         internal const string EcdsaHostKeyPath = "/etc/dropbear/dropbear_ecdsa_host_key";
 
         /// <summary>
+        /// Absolute path of the factory RSA host key on the read-only rootfs (issue #38).
+        /// It is baked, stable and always present; the fix pins <c>DROPBEAR_RSAKEY</c> here
+        /// so dropbear stops regenerating a fresh RSA key into a volatile path every boot.
+        /// </summary>
+        internal const string RsaHostKeyPath = "/etc/dropbear/dropbear_rsa_host_key";
+
+        /// <summary>
         /// The env file the factory <c>/etc/init.d/dropbear</c> sources for the
         /// daemon's variables ("Do not configure this file. Edit
         /// /etc/default/dropbear instead!"). We add the extra host-key argument here
@@ -644,8 +651,12 @@ namespace IntercomFirmwareTool.Core
         /// One image flashed to N units shares that image's key; REBUILDING produces a
         /// new key, so re-flashing the SAME unit with a fresh build changes its ECDSA
         /// host key and a client that already trusted the old one must clear it
-        /// (<c>ssh-keygen -R &lt;host&gt;</c>) — the standard host-key-changed step. The
-        /// factory RSA key is left in place, so nothing is lost by adding this.
+        /// (<c>ssh-keygen -R &lt;host&gt;</c>) — the standard host-key-changed step.
+        ///
+        /// This ALSO fixes issue #38 (the RSA host key changing on every boot): the same
+        /// option pins <c>DROPBEAR_RSAKEY</c> to the stable factory RSA key so dropbear
+        /// stops regenerating one into a volatile path each boot. The factory RSA key is
+        /// reused as-is (not replaced), so both host keys end up stable.
         /// </summary>
         private static void InstallModernHostKey(ExtFileSystem fs)
         {
@@ -658,45 +669,65 @@ namespace IntercomFirmwareTool.Core
             fs.SetMode(EcdsaHostKeyPath, ToMode(600));
             fs.SetOwner(EcdsaHostKeyPath, 0, 0);
 
-            PatchDropbearDefaults(fs);
+            // #38: only pin the RSA key when the factory key is actually present, so a
+            // non-standard image without it isn't left pointing DROPBEAR_RSAKEY at a
+            // missing file (which the init would then try to regenerate on the ro rootfs).
+            bool pinRsa = FileNonEmpty(fs, RsaHostKeyPath);
+            PatchDropbearDefaults(fs, pinRsa);
         }
 
         /// <summary>
-        /// Idempotently makes <c>/etc/default/dropbear</c> add
-        /// <c>-r /etc/dropbear/dropbear_ecdsa_host_key</c> to the daemon's arguments.
-        /// The factory init launches dropbear with
-        /// <c>-r $DROPBEAR_RSAKEY … $DROPBEAR_EXTRA_ARGS</c> and sources this file, so
-        /// we append a trailing shell line that EXTENDS whatever
-        /// <c>DROPBEAR_EXTRA_ARGS</c> the file already sets (the factory ships
-        /// <c>DROPBEAR_EXTRA_ARGS="-B"</c>) rather than parsing quotes:
-        /// <code>DROPBEAR_EXTRA_ARGS="$DROPBEAR_EXTRA_ARGS -r /etc/dropbear/dropbear_ecdsa_host_key"</code>
-        /// The file is sourced top-to-bottom, so a final assignment that references
-        /// the previous value preserves the factory <c>-B</c> and any other args.
-        /// dropbear accepts multiple <c>-r</c> host keys, and reading the baked key
-        /// off the read-only rootfs is fine (only key GENERATION needs a writable
-        /// path). Idempotent: a marker check on the key path means re-running the tool
-        /// never stacks duplicate flags. If the file is absent (a non-factory image),
-        /// it is created with just our assignment, 0644 root:root (the factory mode).
+        /// Idempotently configures <c>/etc/default/dropbear</c> (which the factory init
+        /// sources) with up to two directives:
+        /// <list type="bullet">
+        ///   <item>
+        ///     <b>#37</b> — appends <c>DROPBEAR_EXTRA_ARGS="$DROPBEAR_EXTRA_ARGS -r
+        ///     /etc/dropbear/dropbear_ecdsa_host_key"</c> so dropbear ALSO loads the baked
+        ///     ECDSA host key. Extending <c>$DROPBEAR_EXTRA_ARGS</c> (rather than parsing
+        ///     quotes) preserves the factory <c>-B</c>; dropbear accepts multiple
+        ///     <c>-r</c> host keys.
+        ///   </item>
+        ///   <item>
+        ///     <b>#38</b> (only when <paramref name="pinRsa"/>) — appends
+        ///     <c>DROPBEAR_RSAKEY=/etc/dropbear/dropbear_rsa_host_key</c>. The init picks
+        ///     a VOLATILE default (<c>/var/lib/dropbear/…</c>) on the read-only rootfs and
+        ///     only copies the stable factory key there at runlevel 4 — but the unit boots
+        ///     to runlevel 5, so it regenerates a fresh RSA key every boot. Pinning
+        ///     <c>DROPBEAR_RSAKEY</c> to the always-present factory key stops that: the
+        ///     init's <c>test -n "$DROPBEAR_RSAKEY"</c> keeps our value and its
+        ///     <c>test -f</c> passes, so no regeneration and the same key every boot.
+        ///   </item>
+        /// </list>
+        /// The file is sourced top-to-bottom, so trailing assignments that reference the
+        /// previous value compose with the factory ones. Each directive is added only when
+        /// an ACTIVE (non-comment) line doesn't already carry it — matched with token
+        /// boundaries so a commented occurrence or a look-alike path (…host_key.old) never
+        /// suppresses the patch. If the file is absent (a non-factory image) it is created;
+        /// mode/owner are set to the factory 0644 root:root (WriteTextFile truncates via
+        /// FileMode.Create, so the canonical mode must be asserted for this init-sourced file).
         /// </summary>
-        private static void PatchDropbearDefaults(ExtFileSystem fs)
+        private static void PatchDropbearDefaults(ExtFileSystem fs, bool pinRsa)
         {
-            string appended =
-                "DROPBEAR_EXTRA_ARGS=\"$DROPBEAR_EXTRA_ARGS -r " + EcdsaHostKeyPath + "\"\n";
-
             string existing = PathPresent(fs, DropbearDefaultsPath)
                 ? ReadAllTextFromFs(fs, DropbearDefaultsPath)
                 : "";
-            // Idempotency: consider it already patched only when dropbear is actually told
-            // to load THIS key via `-r <path>` on an ACTIVE (non-comment) line, matched with
-            // token boundaries — so neither a commented occurrence (Codex) nor a different
-            // key whose path merely starts with ours (…host_key.old, Copilot) counts, and a
-            // stray mention can't no-op the patch and leave dropbear without the key.
-            if (DropbearLoadsHostKey(existing, EcdsaHostKeyPath))
-                return;
+
+            var toAppend = new System.Text.StringBuilder();
+            // #38 first, so the RSA pin is set before anything that might read it.
+            if (pinRsa && !DropbearPinsRsaKey(existing, RsaHostKeyPath))
+                toAppend.Append("DROPBEAR_RSAKEY=").Append(RsaHostKeyPath).Append('\n');
+            // #37: load the ECDSA host key as an additional -r argument.
+            if (!DropbearLoadsHostKey(existing, EcdsaHostKeyPath))
+                toAppend.Append("DROPBEAR_EXTRA_ARGS=\"$DROPBEAR_EXTRA_ARGS -r ")
+                        .Append(EcdsaHostKeyPath).Append("\"\n");
+
+            if (toAppend.Length == 0)
+                return; // already fully configured — nothing to add
 
             string updated = existing.Length == 0
-                ? appended
-                : (existing.EndsWith("\n", StringComparison.Ordinal) ? existing : existing + "\n") + appended;
+                ? toAppend.ToString()
+                : (existing.EndsWith("\n", StringComparison.Ordinal) ? existing : existing + "\n")
+                  + toAppend;
             WriteTextFile(fs, DropbearDefaultsPath, updated);
             fs.SetMode(DropbearDefaultsPath, ToMode(644));
             fs.SetOwner(DropbearDefaultsPath, 0, 0);
@@ -778,7 +809,10 @@ namespace IntercomFirmwareTool.Core
                 // Modern host key (issue #37): only asserted when requested. Verify
                 // the ECDSA host key is present and non-empty, and that
                 // /etc/default/dropbear tells the daemon to load it (-r) — the two
-                // halves that together make a modern client negotiate ECDSA.
+                // halves that together make a modern client negotiate ECDSA. The same
+                // option also stabilizes the RSA key (issue #38): when the factory RSA
+                // key is present, assert /etc/default/dropbear pins DROPBEAR_RSAKEY to it
+                // so it stops being regenerated every boot.
                 if (opts.ModernHostKey)
                 {
                     checks.Add(new($"{EcdsaHostKeyPath} present (ECDSA host key)",
@@ -788,6 +822,10 @@ namespace IntercomFirmwareTool.Core
                         ? ReadAllTextFromFs(fs, DropbearDefaultsPath) : "";
                     checks.Add(new($"{DropbearDefaultsPath} loads it (-r)",
                         DropbearLoadsHostKey(defaults, EcdsaHostKeyPath), ""));
+
+                    if (FileNonEmpty(fs, RsaHostKeyPath))
+                        checks.Add(new($"{DropbearDefaultsPath} pins the RSA host key (no per-boot regen)",
+                            DropbearPinsRsaKey(defaults, RsaHostKeyPath), ""));
                 }
             }
             finally
@@ -1176,6 +1214,28 @@ namespace IntercomFirmwareTool.Core
                     if (tokens[i] == "-r" && i + 1 < tokens.Length && tokens[i + 1] == keyPath)
                         return true;                                           // -r path (separate)
                 }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// True if a shell env-file body assigns <c>DROPBEAR_RSAKEY=&lt;keyPath&gt;</c> on an
+        /// ACTIVE (non-comment) line — the #38 pin. Uses the same comment-stripping and
+        /// whole-token matching as <see cref="DropbearLoadsHostKey"/> (the tokenizer splits
+        /// on <c>=</c>, so <c>DROPBEAR_RSAKEY=/path</c> yields the two tokens
+        /// <c>DROPBEAR_RSAKEY</c> and <c>/path</c>). Matching the variable name as a whole
+        /// token means the factory <c>DROPBEAR_RSAKEY_DIR=…</c> line is NOT mistaken for it.
+        /// </summary>
+        private static bool DropbearPinsRsaKey(string body, string keyPath)
+        {
+            char[] seps = { ' ', '\t', '\r', '"', '\'', '=' };
+            foreach (string raw in body.Split('\n'))
+            {
+                string active = StripShellComment(raw);
+                string[] tokens = active.Split(seps, StringSplitOptions.RemoveEmptyEntries);
+                for (int i = 0; i + 1 < tokens.Length; i++)
+                    if (tokens[i] == "DROPBEAR_RSAKEY" && tokens[i + 1] == keyPath)
+                        return true;
             }
             return false;
         }
