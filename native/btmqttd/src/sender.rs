@@ -112,18 +112,6 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
             ))
         }
     }
-    // Monitor (re)connected: force a fresh read of volume + mute so a change made on the
-    // unit WHILE the stream was down — whose one-shot broadcast (`*#8**41*<N>##` for
-    // volume, `*#8**33*<0|1>##` for mute) we missed — is reconciled, instead of leaving
-    // the retained HA state stale until the next event. Spawned so it never delays draining
-    // frames already buffered in `pre` (the read uses a separate command session); a
-    // broadcast racing the read is equally device-authoritative, so last-writer-wins
-    // between them is harmless.
-    tokio::spawn({
-        let volume = volume.clone();
-        async move { volume.resync().await }
-    });
-
     // Feed ONLY the bytes AFTER the ACK to the framer, so any bus frames that arrived
     // in the same read(s) as the ACK are published while the handshake ACK and any
     // pre-ACK banner/chatter are NOT framed (feeding all of `pre` could otherwise let
@@ -135,6 +123,20 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
             publish_frame(cfg, client, volume, &frame).await;
         }
     }
+
+    // Monitor (re)connected: force a fresh read of volume + mute so a change made on the
+    // unit WHILE the stream was down — whose one-shot broadcast (`*#8**41*<N>##` for
+    // volume, `*#8**33*<0|1>##` for mute) we missed — is reconciled, instead of leaving
+    // the retained HA state stale until the next event. Spawned AFTER draining the frames
+    // buffered with the ACK above, so those (unconditional `observe_*`) updates can't land
+    // AFTER the resync read and clobber it with an already-buffered report — resync is the
+    // FINAL reconciliation. Spawned (not awaited) so it never blocks the read loop below;
+    // the read uses a separate command session, and a genuinely newer frame arriving in the
+    // loop still wins via the generation guard.
+    tokio::spawn({
+        let volume = volume.clone();
+        async move { volume.resync().await }
+    });
 
     loop {
         let n = sock.read(&mut buf).await?;
