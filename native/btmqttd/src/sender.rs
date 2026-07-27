@@ -124,6 +124,20 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
         }
     }
 
+    // Monitor (re)connected: force a fresh read of volume + mute so a change made on the
+    // unit WHILE the stream was down — whose one-shot broadcast (`*#8**41*<N>##` for
+    // volume, `*#8**33*<0|1>##` for mute) we missed — is reconciled, instead of leaving
+    // the retained HA state stale until the next event. Spawned AFTER draining the frames
+    // buffered with the ACK above, so those (unconditional `observe_*`) updates can't land
+    // AFTER the resync read and clobber it with an already-buffered report — resync is the
+    // FINAL reconciliation. Spawned (not awaited) so it never blocks the read loop below;
+    // the read uses a separate command session, and a genuinely newer frame arriving in the
+    // loop still wins via the generation guard.
+    tokio::spawn({
+        let volume = volume.clone();
+        async move { volume.resync().await }
+    });
+
     loop {
         let n = sock.read(&mut buf).await?;
         if n == 0 {
@@ -141,13 +155,16 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
 /// json, the default) or the raw frame. QoS 0, not retained, as the shell's
 /// `mqtt_pub -l` did.
 async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl>, frame: &str) {
-    // Learn the real volume from the bus (issue #40): the unit broadcasts
-    // `*#8**41*<N>##` on the monitor whenever the volume changes by ANY path (slider,
-    // up/down, mute, or the unit's own menu), so this is the single source of truth for
-    // `current`/`muted`. Parse BEFORE the format branch so it works in raw mode too;
-    // non-volume frames parse to None and are ignored.
+    // Learn the real volume AND mute from the bus (issue #40): the unit broadcasts
+    // `*#8**41*<N>##` (volume) and `*#8**33*<0|1>##` (mute/RingEnable) on the monitor
+    // whenever either changes by ANY path (slider, up/down, mute, or the unit's own menu),
+    // so this is the single source of truth for `current`/`muted`. Parse BEFORE the format
+    // branch so it works in raw mode too; a frame is at most one of the two, and any other
+    // frame parses to None and is ignored.
     if let Some(pct) = dimension::parse_volume_report(frame) {
-        volume.observe(pct).await;
+        volume.observe_volume(pct).await;
+    } else if let Some(muted) = dimension::parse_mute_report(frame) {
+        volume.observe_mute(muted).await;
     }
     let payload: Vec<u8> = if cfg.payload_json {
         match own::frame_to_json(frame) {
