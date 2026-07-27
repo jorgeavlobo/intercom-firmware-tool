@@ -145,9 +145,12 @@ impl VolumeCtl {
     /// would otherwise stay stateless until the next report even when state was known.
     /// Each publish is a no-op while its value is still unknown.
     pub async fn seed(&self) {
-        let _cmd = self.cmd_lock.lock().await;
-        self.ensure_current().await;
-        self.ensure_muted().await;
+        {
+            let _cmd = self.cmd_lock.lock().await;
+            self.ensure_current().await;
+            self.ensure_muted().await;
+        }
+        // Publish AFTER releasing cmd_lock so broker latency doesn't stall other commands.
         self.publish_volume().await;
         self.publish_mute().await;
     }
@@ -167,25 +170,30 @@ impl VolumeCtl {
             Ok(g) => g,
             Err(_) => return,
         };
-        // Serialise against writes so a set()/mute() in flight can't interleave with these
-        // reads (the monitor path stays concurrent — see `cmd_lock`).
-        let _cmd = self.cmd_lock.lock().await;
-        // Snapshot the generation BEFORE each read; apply the reply only if no newer
-        // authoritative observation (a monitor broadcast) bumped it while the read was in
-        // flight — otherwise this slow reply would clobber the fresher value. Volume and
-        // mute use separate counters so a change to one never discards the other's read.
-        let vol_gen = { self.st.lock().await.vol_gen };
-        match dimension::read_volume(&self.host, self.port).await {
-            Ok(Some(n)) => self.apply_volume_if_unchanged(n, vol_gen).await,
-            Ok(None) => {}
-            Err(e) => eprintln!("btmqttd: volume read (resync) failed: {e}"),
+        {
+            // Serialise against writes so a set()/mute() in flight can't interleave with
+            // these reads (the monitor path stays concurrent — see `cmd_lock`).
+            let _cmd = self.cmd_lock.lock().await;
+            // Snapshot the generation BEFORE each read; apply the reply only if no newer
+            // authoritative observation (a monitor broadcast) bumped it while the read was
+            // in flight — otherwise this slow reply would clobber the fresher value. Volume
+            // and mute use separate counters so a change to one never discards the other's.
+            let vol_gen = { self.st.lock().await.vol_gen };
+            match dimension::read_volume(&self.host, self.port).await {
+                Ok(Some(n)) => self.apply_volume_if_unchanged(n, vol_gen).await,
+                Ok(None) => {}
+                Err(e) => eprintln!("btmqttd: volume read (resync) failed: {e}"),
+            }
+            let mute_gen = { self.st.lock().await.mute_gen };
+            match dimension::read_mute(&self.host, self.port).await {
+                Ok(Some(m)) => self.apply_mute_if_unchanged(m, mute_gen).await,
+                Ok(None) => {}
+                Err(e) => eprintln!("btmqttd: mute read (resync) failed: {e}"),
+            }
         }
-        let mute_gen = { self.st.lock().await.mute_gen };
-        match dimension::read_mute(&self.host, self.port).await {
-            Ok(Some(m)) => self.apply_mute_if_unchanged(m, mute_gen).await,
-            Ok(None) => {}
-            Err(e) => eprintln!("btmqttd: mute read (resync) failed: {e}"),
-        }
+        // Publish AFTER releasing cmd_lock (broker latency must not stall commands).
+        self.publish_volume().await;
+        self.publish_mute().await;
     }
 
     /// Apply a device-read volume value (a [`resync`] read or a [`set`] write echo) iff no
@@ -193,39 +201,24 @@ impl VolumeCtl {
     /// flight — i.e. `vol_gen` is unchanged since the caller's snapshot. Otherwise the
     /// monitor already learned a fresher value (which the device also broadcasts), so the
     /// older reply is discarded. The generation check and the write are atomic under the
-    /// lock, so a monitor broadcast can't slip between them; publish happens off the lock.
+    /// state lock. Does NOT publish — the caller republishes AFTER releasing `cmd_lock`, so
+    /// broker latency never extends the command-serialisation critical section.
     async fn apply_volume_if_unchanged(&self, pct: u8, gen_before: u64) {
-        let applied = {
-            let mut st = self.st.lock().await;
-            if st.vol_gen == gen_before {
-                st.current = Some(pct.min(100));
-                st.vol_gen = st.vol_gen.wrapping_add(1);
-                true
-            } else {
-                false
-            }
-        };
-        if applied {
-            self.publish_volume().await;
+        let mut st = self.st.lock().await;
+        if st.vol_gen == gen_before {
+            st.current = Some(pct.min(100));
+            st.vol_gen = st.vol_gen.wrapping_add(1);
         }
     }
 
     /// Apply a device-read mute value (a [`resync`] read or a [`mute`] write echo) iff no
     /// newer observation landed while the command session was in flight — the mute twin of
-    /// [`apply_volume_if_unchanged`].
+    /// [`apply_volume_if_unchanged`] (and likewise does not publish).
     async fn apply_mute_if_unchanged(&self, muted: bool, gen_before: u64) {
-        let applied = {
-            let mut st = self.st.lock().await;
-            if st.mute_gen == gen_before {
-                st.muted = Some(muted);
-                st.mute_gen = st.mute_gen.wrapping_add(1);
-                true
-            } else {
-                false
-            }
-        };
-        if applied {
-            self.publish_mute().await;
+        let mut st = self.st.lock().await;
+        if st.mute_gen == gen_before {
+            st.muted = Some(muted);
+            st.mute_gen = st.mute_gen.wrapping_add(1);
         }
     }
 
@@ -272,8 +265,14 @@ impl VolumeCtl {
     /// gateway refuses returns an error here and leaves state untouched. `pct == 0` is now
     /// just a low volume, not a mute — mute is the separate [`mute`] dimension.
     pub async fn set(&self, pct: u8) -> std::io::Result<()> {
-        let _cmd = self.cmd_lock.lock().await;
-        self.set_inner(pct).await
+        {
+            let _cmd = self.cmd_lock.lock().await;
+            self.set_inner(pct).await?;
+        }
+        // Publish AFTER releasing cmd_lock so broker latency/backpressure can't stall the
+        // next command; publish_volume reads the LATEST state, so ordering stays correct.
+        self.publish_volume().await;
+        Ok(())
     }
 
     /// The volume write + generation-guarded echo apply, WITHOUT taking `cmd_lock` —
@@ -298,13 +297,17 @@ impl VolumeCtl {
     /// the state the device ECHOES back via [`observe_mute`]; a refused write errors and
     /// leaves state untouched.
     pub async fn mute(&self, on: bool) -> std::io::Result<()> {
-        let _cmd = self.cmd_lock.lock().await;
-        // Same generation guard as set(): if the unit toggled mute during our write, the
-        // monitor already learned it, so the older echo must not overwrite the fresher
-        // value. Discarding the echo is safe — the device broadcasts our own write too.
-        let gen_before = { self.st.lock().await.mute_gen };
-        let confirmed = dimension::write_mute(&self.host, self.port, on).await?;
-        self.apply_mute_if_unchanged(confirmed, gen_before).await;
+        {
+            let _cmd = self.cmd_lock.lock().await;
+            // Same generation guard as set(): if the unit toggled mute during our write, the
+            // monitor already learned it, so the older echo must not overwrite the fresher
+            // value. Discarding the echo is safe — the device broadcasts our own write too.
+            let gen_before = { self.st.lock().await.mute_gen };
+            let confirmed = dimension::write_mute(&self.host, self.port, on).await?;
+            self.apply_mute_if_unchanged(confirmed, gen_before).await;
+        }
+        // Publish AFTER releasing cmd_lock (see set()).
+        self.publish_mute().await;
         Ok(())
     }
 
@@ -329,23 +332,14 @@ impl VolumeCtl {
         // Apply the read ONLY if `current` is STILL unknown: the monitor is the source of
         // truth and may have learned a newer value while our read was in flight — don't
         // revert to the now-stale read. The check-and-set is atomic under the lock (the
-        // monitor can't interleave between them); publish happens off the lock.
-        let applied = {
-            let mut st = self.st.lock().await;
-            if st.current.is_none() {
-                st.current = Some(n);
-                st.vol_gen = st.vol_gen.wrapping_add(1);
-                true
-            } else {
-                false
-            }
-        };
-        if applied {
-            self.publish_volume().await;
-            Some(n)
-        } else {
-            self.st.lock().await.current
+        // monitor can't interleave between them). Does NOT publish — the caller republishes
+        // after releasing `cmd_lock`. Returns the resulting `current`.
+        let mut st = self.st.lock().await;
+        if st.current.is_none() {
+            st.current = Some(n);
+            st.vol_gen = st.vol_gen.wrapping_add(1);
         }
+        st.current
     }
 
     /// Learn the mute state on demand if still unknown (used by [`seed`]). Mirrors
@@ -363,18 +357,12 @@ impl VolumeCtl {
                 return;
             }
         };
-        let applied = {
-            let mut st = self.st.lock().await;
-            if st.muted.is_none() {
-                st.muted = Some(m);
-                st.mute_gen = st.mute_gen.wrapping_add(1);
-                true
-            } else {
-                false
-            }
-        };
-        if applied {
-            self.publish_mute().await;
+        // Apply only while still unknown (monitor stays authoritative). Does NOT publish —
+        // [`seed`] republishes after releasing `cmd_lock`.
+        let mut st = self.st.lock().await;
+        if st.muted.is_none() {
+            st.muted = Some(m);
+            st.mute_gen = st.mute_gen.wrapping_add(1);
         }
     }
 
@@ -382,16 +370,21 @@ impl VolumeCtl {
     /// 0..=100. Uses the last known `current`; if it's still unknown, reads it on demand
     /// first so the very first press steps from the real level, not a guess.
     pub async fn step(&self, up: bool) -> std::io::Result<()> {
-        // Hold cmd_lock across the read-base + write so the whole step is atomic against
-        // other command ops (and calls set_inner, which does NOT re-take the lock).
-        let _cmd = self.cmd_lock.lock().await;
-        let base = self.ensure_current().await.unwrap_or(0);
-        let next = if up {
-            base.saturating_add(STEP).min(100)
-        } else {
-            base.saturating_sub(STEP)
-        };
-        self.set_inner(next).await
+        {
+            // Hold cmd_lock across the read-base + write so the whole step is atomic against
+            // other command ops (and calls set_inner, which does NOT re-take the lock).
+            let _cmd = self.cmd_lock.lock().await;
+            let base = self.ensure_current().await.unwrap_or(0);
+            let next = if up {
+                base.saturating_add(STEP).min(100)
+            } else {
+                base.saturating_sub(STEP)
+            };
+            self.set_inner(next).await?;
+        }
+        // Publish AFTER releasing cmd_lock (see set()).
+        self.publish_volume().await;
+        Ok(())
     }
 }
 
