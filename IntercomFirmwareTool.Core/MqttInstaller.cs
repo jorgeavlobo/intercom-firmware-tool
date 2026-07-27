@@ -869,11 +869,11 @@ namespace IntercomFirmwareTool.Core
         /// the volume-control set (#40): a <c>number</c> slider, a <c>switch</c> for
         /// mute (the device's real RingEnable toggle, independent of the volume), and
         /// two <c>button</c>s for ±10%, plus a gate <c>button</c>
-        /// (#41). All grouped under one HA device. The volume/gate command entities
+        /// (#41). All grouped under one HA device. The volume/mute/gate command entities
         /// publish small JSON ACTIONS to <see cref="MqttOptions.TopicRx"/> (the
         /// existing command channel — no new subscription), so they exercise the same
         /// OWN-bus capability a raw frame on that topic already has; btmqttd owns all
-        /// volume state (survives HA restarts). Discovery stays opt-in
+        /// volume/mute state (survives HA restarts). Discovery stays opt-in
         /// (<see cref="MqttOptions.EnableHaDiscovery"/>): when off, btmqttd CLEARS
         /// these retained configs. Topics/prefix/node are baked in here, so the
         /// on-device publisher just sends each payload retained.

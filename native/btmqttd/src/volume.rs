@@ -19,7 +19,7 @@
 //!     for free — no need to save/restore a "pre-mute" level.
 //!
 //! ## Authoritative state: device-confirmed values only
-//! `current` (volume) and `muted` and the retained state topics are written ONLY from
+//! `current` (volume), `muted`, and the retained state topics are written ONLY from
 //! values the DEVICE confirmed, funnelled through [`observe_volume`] / [`observe_mute`]:
 //!   * the monitor broadcasts `*#8**41*<N>##` (volume) and `*#8**33*<0|1>##` (mute) —
 //!     emitted whenever either changes by ANY path (slider, up/down, mute, or the unit's

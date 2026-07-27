@@ -113,12 +113,12 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
         }
     }
     // Monitor (re)connected: force a fresh read of volume + mute so a change made on the
-    // unit WHILE the stream was down — whose one-shot broadcast (`*#8**41*<N>##` for volume,
-    // `*#8**33*<0|1>##` for mute) we missed — is reconciled, instead of leaving the retained
-    // HA state stale until the
-    // next event. Spawned so it never delays draining frames already buffered in `pre`
-    // (the read uses a separate command session); a broadcast racing the read is equally
-    // device-authoritative, so last-writer-wins between them is harmless.
+    // unit WHILE the stream was down — whose one-shot broadcast (`*#8**41*<N>##` for
+    // volume, `*#8**33*<0|1>##` for mute) we missed — is reconciled, instead of leaving
+    // the retained HA state stale until the next event. Spawned so it never delays draining
+    // frames already buffered in `pre` (the read uses a separate command session); a
+    // broadcast racing the read is equally device-authoritative, so last-writer-wins
+    // between them is harmless.
     tokio::spawn({
         let volume = volume.clone();
         async move { volume.resync().await }
