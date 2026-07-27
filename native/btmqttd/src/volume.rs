@@ -256,14 +256,15 @@ impl VolumeCtl {
         }
     }
 
-    /// Set the volume to `pct` (clamped 0..=100). Writes the dimension to the device and
-    /// applies the level the device ECHOES back via [`observe_volume`], so a rapid
-    /// follow-up [`step`]/[`set`] computes from the CONFIRMED value instead of racing the
-    /// monitor broadcast (which could otherwise let consecutive up/down presses skip or
-    /// repeat a step). The monitor broadcast reaffirms the same value shortly after;
-    /// `observe_volume` is idempotent, so the double update is harmless. A write the
-    /// gateway refuses returns an error here and leaves state untouched. `pct == 0` is now
-    /// just a low volume, not a mute — mute is the separate [`mute`] dimension.
+    /// Set the volume to `pct` (clamped 0..=100). Writes the dimension (under `cmd_lock`)
+    /// and applies the level the device ECHOES back via the generation-guarded
+    /// [`apply_volume_if_unchanged`], so a rapid follow-up [`step`]/[`set`] computes from the
+    /// CONFIRMED value instead of racing the monitor broadcast (which could otherwise let
+    /// consecutive up/down presses skip or repeat a step). The monitor broadcast reaffirms
+    /// the same value shortly after; the apply is idempotent, so the double update is
+    /// harmless. Publishes the retained state AFTER releasing `cmd_lock`. A write the gateway
+    /// refuses returns an error here and leaves state untouched. `pct == 0` is now just a low
+    /// volume, not a mute — mute is the separate [`mute`] dimension.
     pub async fn set(&self, pct: u8) -> std::io::Result<()> {
         {
             let _cmd = self.cmd_lock.lock().await;
@@ -294,8 +295,9 @@ impl VolumeCtl {
     /// Mute (`on == true`) or unmute the ringtone via the independent `RingEnable`
     /// dimension. Unlike a volume-to-zero fake mute, this leaves the volume level
     /// untouched, so unmute restores sound at the same level with no bookkeeping. Applies
-    /// the state the device ECHOES back via [`observe_mute`]; a refused write errors and
-    /// leaves state untouched.
+    /// the state the device ECHOES back via the generation-guarded
+    /// [`apply_mute_if_unchanged`] and publishes AFTER releasing `cmd_lock`; a refused write
+    /// errors and leaves state untouched.
     pub async fn mute(&self, on: bool) -> std::io::Result<()> {
         {
             let _cmd = self.cmd_lock.lock().await;
