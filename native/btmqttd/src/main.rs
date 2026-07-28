@@ -119,13 +119,25 @@ async fn run() -> Result<(), String> {
     // readable state, so we track the toggle and PERSIST it across reboots — restore the
     // last known on/off here so a reboot keeps the switch correct (issue: light). `None`
     // (feature off) threads through as no-op everywhere.
-    let light: Option<Arc<light::LightCtl>> = if let Some(where_) = cfg.light_where.clone() {
-        let initial = tokio::task::spawn_blocking(move || persist::read_light(&where_))
+    // The controller does the RETAINED-MQTT + forward I/O; durable persistence runs on its
+    // OWN task (`run_persist`), fed by a watch channel. That task is DRAINED at shutdown (via
+    // the oneshot below) so a toggle actuated the instant before SIGTERM is still written —
+    // the command worker is aborted, but the persist task is signalled + awaited.
+    #[allow(clippy::type_complexity)]
+    let (light, light_persist): (
+        Option<Arc<light::LightCtl>>,
+        Option<(tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>)>,
+    ) = if let Some(where_) = cfg.light_where.clone() {
+        let where_for_read = where_.clone();
+        let initial = tokio::task::spawn_blocking(move || persist::read_light(&where_for_read))
             .await
             .unwrap_or(None);
-        Some(light::LightCtl::new(&cfg, client.clone(), initial))
+        let (ctl, persist_rx) = light::LightCtl::new(&cfg, client.clone(), initial);
+        let (persist_shutdown_tx, persist_shutdown_rx) = tokio::sync::oneshot::channel();
+        let persist_task = tokio::spawn(light::run_persist(where_, persist_rx, persist_shutdown_rx));
+        (Some(ctl), Some((persist_shutdown_tx, persist_task)))
     } else {
-        None
+        (None, None)
     };
 
     // Locks (issue #41) run on their OWN task, fed by a small channel: the command worker
@@ -620,6 +632,14 @@ async fn run() -> Result<(), String> {
     stop(sender_task).await;
     stop(keys_task).await;
     stop(cmd_worker).await;
+    // Drain the stair-light persist task LAST among the state producers: `command()` (on
+    // cmd_worker) and `observe()` (on sender_task) are now stopped, so no further state can be
+    // enqueued. Signal the task and await its final flush (bounded) so a toggle actuated in the
+    // last instant reaches disk instead of being lost with the aborted worker.
+    if let Some((persist_shutdown_tx, persist_task)) = light_persist {
+        let _ = persist_shutdown_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(2), persist_task).await;
+    }
     // Lock task: DRAIN rather than abort. Signal `stopping` FIRST so the task finishes
     // the pulse IN PROGRESS (its release is sent) but discards queued, not-yet-started
     // presses (which emitted nothing, so dropping them strands nothing). Then drop this

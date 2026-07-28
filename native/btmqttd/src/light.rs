@@ -18,15 +18,25 @@
 //! stays equal to initial-XOR-(total toggles). An echo guard, armed BEFORE forwarding,
 //! stops our own toggle's monitor echo from double-flipping the cache.
 //!
+//! Persistence is handled by a DEDICATED task ([`run_persist`]): the tracked state lives
+//! behind a plain `std::sync::Mutex` (never held across an `.await`), so the stretch from a
+//! successful forward to enqueuing the new state onto the persist channel is fully
+//! SYNCHRONOUS — there is no `.await` at which a shutdown could abort the command worker
+//! after the relay toggled but before the state was queued. `main` DRAINS the persist task
+//! at shutdown (signals it after aborting the workers, then awaits it), so a toggle actuated
+//! moments before SIGTERM is still written to disk.
+//!
 //! Residual imperfection (inherent to a stateless toggle): on the very FIRST cold boot the
-//! cache is unknown, so the first command is optimistic; and a toggle made while the daemon
-//! is DOWN is missed. Persistence removes the common reboot case; the rest is documented.
+//! cache is unknown, so the first command is optimistic; a toggle made while the daemon is
+//! DOWN is missed; and — irreducibly — if SIGTERM lands DURING the forward itself (the frame
+//! reached the bus but the `.await` hasn't returned) that single toggle can be lost.
+//! Persistence + the drained task remove the common cases; the rest is documented.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rumqttc::{AsyncClient, QoS};
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
 use tokio::time::Instant;
 
 use crate::config::Config;
@@ -105,19 +115,24 @@ impl State {
 /// Owns the stair-light toggle state. Shared (`Arc`) between the command worker
 /// ([`command`]) and the monitor task ([`observe`]).
 pub struct LightCtl {
+    /// Tracked state — a PLAIN (sync) mutex, deliberately NOT a tokio mutex: it is only ever
+    /// held for short synchronous sections and NEVER across an `.await`, which is what makes
+    /// the post-forward "commit + enqueue persist" stretch free of any abort point (see the
+    /// module doc). Do not `.await` while holding it.
     st: Mutex<State>,
-    /// Serializes the publish+persist side effect ([`commit_and_persist`]). `command()` and
-    /// `observe()` run on separate tasks and each mutates `st` then publishes/persists; the
-    /// blocking write is offloaded to the (multi-threaded) blocking pool, so without this
-    /// two writes could finish OUT OF ORDER and leave a stale value on the retained topic and
-    /// the reboot-persistent record. Held while re-reading the latest state and writing, so
-    /// the last writer always wins with the final state (Codex).
-    io_lock: Mutex<()>,
-    /// The configured actuator WHERE — persistence is keyed by it so a later WHERE change
-    /// can't restore an unrelated relay's state.
-    where_: String,
+    /// Serializes the retained MQTT PUBLISH ([`publish_current`]) so `command()`, `observe()`
+    /// and a reconnect `seed()` — on separate tasks — can't interleave their publishes and
+    /// momentarily retain a stale value; each re-reads the latest state under the lock.
+    /// (Durable persistence is separate: it goes through `persist_tx` to [`run_persist`].)
+    io_lock: AsyncMutex<()>,
+    /// Latest state to PERSIST, handed to the dedicated [`run_persist`] task. A `watch` send
+    /// is synchronous and coalescing (last value wins), so `command()`/`observe()` enqueue
+    /// the new state with no `.await` — it can't be lost to a task abort — and the drained
+    /// task guarantees it reaches disk even at shutdown.
+    persist_tx: watch::Sender<Option<bool>>,
     /// The exact `*8*21*<WHERE>##` frame — sent to toggle AND matched on the monitor to
-    /// detect a physical press. Built once from the configured WHERE.
+    /// detect a physical press. Built once from the configured WHERE. (Persistence is keyed
+    /// by WHERE inside [`run_persist`], which owns its own copy.)
     press_frame: String,
     /// Retained state topic HA reads back (`on`/`off`).
     topic_light: String,
@@ -127,17 +142,24 @@ pub struct LightCtl {
 impl LightCtl {
     /// Build from config, restoring the persisted on/off (`initial`) so the switch keeps
     /// the right state across a reboot. `cfg.light_where` MUST be set (the caller only
-    /// constructs this when the feature is enabled).
-    pub fn new(cfg: &Arc<Config>, client: AsyncClient, initial: Option<bool>) -> Arc<Self> {
+    /// constructs this when the feature is enabled). Returns the controller AND the `watch`
+    /// receiver the caller must hand to [`run_persist`] (spawned as the drained persist task).
+    pub fn new(
+        cfg: &Arc<Config>,
+        client: AsyncClient,
+        initial: Option<bool>,
+    ) -> (Arc<Self>, watch::Receiver<Option<bool>>) {
         let where_ = cfg.light_where.clone().unwrap_or_default();
-        Arc::new(LightCtl {
+        let (persist_tx, persist_rx) = watch::channel(initial);
+        let ctl = Arc::new(LightCtl {
             st: Mutex::new(State { on: initial, expect_echo_until: None }),
-            io_lock: Mutex::new(()),
+            io_lock: AsyncMutex::new(()),
+            persist_tx,
             press_frame: format!("*8*21*{where_}##"),
-            where_,
             topic_light: cfg.topic_light.clone(),
             client,
-        })
+        });
+        (ctl, persist_rx)
     }
 
     /// Publish the cached state, RETAINED, so HA reflects it. `on`/`off` for a known state;
@@ -165,38 +187,27 @@ impl LightCtl {
     /// On-connect (re)publish of the retained state — a restarted broker dropped retained
     /// topics, so re-send the known state (or, while unknown, an empty retained payload that
     /// clears any stale value the broker still holds — e.g. from a previous `LIGHT_WHERE`).
-    /// Serialized with the command/observe side effect so a reconnect seed can't interleave
-    /// with a live toggle's publish and momentarily retain a stale value.
     pub async fn seed(&self) {
+        self.publish_current().await;
+    }
+
+    /// Publish the CURRENT cached state (retained), SERIALIZED via `io_lock` so a physical
+    /// `observe()`, an MQTT `command()` and a reconnect `seed()` can't interleave their
+    /// publishes; the state is RE-READ under the lock so whichever call runs last retains the
+    /// FINAL state. This is the RETAINED-MQTT side only — durable disk persistence goes
+    /// through `persist_tx` to [`run_persist`], independently (and abort-safely).
+    async fn publish_current(&self) {
         let _io = self.io_lock.lock().await;
-        let on = self.st.lock().await.on;
+        let on = self.st.lock().expect("light state mutex poisoned").on;
         self.publish(on).await;
     }
 
-    /// Publish the CURRENT cached state (retained) and persist it (keyed by WHERE),
-    /// SERIALIZED via `io_lock` so a physical `observe()` and an MQTT `command()` can't
-    /// reorder their writes. Crucially the state is RE-READ under the lock rather than
-    /// passed in as a snapshot, so whichever call runs last writes the FINAL state to both
-    /// the retained topic and the on-disk record — no older snapshot can finish last and
-    /// leave a stale value that a reboot would then restore (Codex). Persist I/O is
-    /// best-effort and offloaded to the blocking pool; a failed write just means a reboot
-    /// may restore a slightly older state, which the next toggle corrects.
-    ///
-    /// The persist is SPAWNED before the publish: a spawned blocking task runs to completion
-    /// even if THIS (`cmd_worker`) task is aborted at shutdown, and the stretch from a
-    /// successful `forward` to this spawn is yield-free under uncontended locks — so once a
-    /// command has toggled the relay the on-disk record is written even if SIGTERM lands
-    /// right after, closing the window where the relay toggled but the persisted state didn't
-    /// catch up (Codex). The blocking write finishes within `main`'s shutdown drive-loop,
-    /// while the runtime is still alive. Publishing (network I/O, the first real yield point)
-    /// happens after the write is already in flight.
-    async fn commit_and_persist(&self) {
-        let _io = self.io_lock.lock().await;
-        let on = self.st.lock().await.on;
-        let where_ = self.where_.clone();
-        let persist = tokio::task::spawn_blocking(move || crate::persist::store_light(&where_, on));
-        self.publish(on).await;
-        let _ = persist.await;
+    /// Enqueue the current cached state for durable persistence. A `watch` send is
+    /// SYNCHRONOUS (no `.await`), so callers must invoke this with no await between the state
+    /// mutation and here — that is what keeps the toggle→persist path free of an abort point.
+    fn enqueue_persist(&self) {
+        let on = self.st.lock().expect("light state mutex poisoned").on;
+        let _ = self.persist_tx.send(on);
     }
 
     /// HA commanded a desired ABSOLUTE state (`on`/`off`). Toggle the relay ONLY when it
@@ -208,7 +219,7 @@ impl LightCtl {
     /// must COMPOSE with our injection, not be clobbered.
     pub async fn command(&self, desired_on: bool) {
         {
-            let mut st = self.st.lock().await;
+            let mut st = self.st.lock().expect("light state mutex poisoned");
             if !st.needs_toggle(desired_on) {
                 return; // already in the desired state — nothing to actuate
             }
@@ -219,26 +230,84 @@ impl LightCtl {
             // Actuation FAILED: don't publish/persist a state the relay never reached, and
             // clear the guard so it can't swallow a later genuine physical press. The command
             // stays retryable (the cache is unchanged).
-            self.st.lock().await.disarm_guard();
+            self.st.lock().expect("light state mutex poisoned").disarm_guard();
             return;
         }
-        self.st.lock().await.commit_actuation(desired_on);
-        self.commit_and_persist().await;
+        // Post-forward: commit the toggle and ENQUEUE persistence with NO `.await` in between
+        // (the state mutex is sync), so even if SIGTERM fires the instant the forward returns,
+        // the new state is already on the persist channel and the drained task will write it.
+        self.st
+            .lock()
+            .expect("light state mutex poisoned")
+            .commit_actuation(desired_on);
+        self.enqueue_persist();
+        // Retained publish is best-effort and comes after (network I/O is the first yield).
+        self.publish_current().await;
     }
 
     /// Feed a monitor frame. When it is our WHERE's press (`*8*21*<WHERE>##`): if it is our
     /// own injected toggle's echo (within the guard) ignore it; otherwise it is a PHYSICAL
-    /// panel press → flip the cache, republish + persist. Any other frame is ignored, so the
-    /// caller can hand every monitor frame here cheaply.
+    /// panel press → flip the cache, enqueue persistence + republish. Any other frame is
+    /// ignored, so the caller can hand every monitor frame here cheaply.
     pub async fn observe(&self, frame: &str) {
         if frame != self.press_frame {
             return;
         }
-        let flipped = self.st.lock().await.apply_observe(Instant::now());
+        let flipped = self
+            .st
+            .lock()
+            .expect("light state mutex poisoned")
+            .apply_observe(Instant::now());
         if flipped.is_some() {
-            self.commit_and_persist().await;
+            self.enqueue_persist();
+            self.publish_current().await;
         }
     }
+}
+
+/// Dedicated stair-light persistence task. `command()`/`observe()` enqueue the latest state
+/// via `persist_tx` (a synchronous `watch` send, so it can't be lost to a task abort); this
+/// task writes it to the reboot-persistent record off the runtime thread. It is DRAINED at
+/// shutdown: `main` signals `shutdown` AFTER aborting the command/monitor tasks (so no
+/// further state can be produced) and then awaits this task, whose final flush persists any
+/// state queued in the last instant — so a toggle actuated moments before SIGTERM is durable
+/// rather than lost with the aborted worker (Codex). Redundant writes are skipped.
+pub async fn run_persist(
+    where_: String,
+    mut rx: watch::Receiver<Option<bool>>,
+    shutdown: oneshot::Receiver<()>,
+) {
+    // The initial value came FROM disk (the restore), so it is already durable — mark it seen
+    // so an idle shutdown doesn't rewrite it.
+    let mut written = *rx.borrow_and_update();
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            changed = rx.changed() => {
+                if changed.is_err() {
+                    break; // all senders dropped
+                }
+                let v = *rx.borrow_and_update();
+                if v != written {
+                    write_light(&where_, v).await;
+                    written = v;
+                }
+            }
+        }
+    }
+    // Final flush: a value enqueued right before the shutdown signal (or a sender drop) may
+    // not have been observed by the loop; persist it now, while the runtime is still alive.
+    let v = *rx.borrow();
+    if v != written {
+        write_light(&where_, v).await;
+    }
+}
+
+/// Persist one light state off the runtime thread (blocking fs). Best-effort.
+async fn write_light(where_: &str, on: Option<bool>) {
+    let w = where_.to_string();
+    let _ = tokio::task::spawn_blocking(move || crate::persist::store_light(&w, on)).await;
 }
 
 #[cfg(test)]
