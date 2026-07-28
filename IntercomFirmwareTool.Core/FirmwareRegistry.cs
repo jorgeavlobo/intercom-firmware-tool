@@ -32,7 +32,7 @@ namespace IntercomFirmwareTool.Core
         {
             var sb = new StringBuilder();
             sb.AppendLine(CoreStrings.Format("FR_LabelLine", Line));
-            if (!string.IsNullOrEmpty(App))
+            if (!string.IsNullOrWhiteSpace(App))
                 sb.AppendLine(CoreStrings.Format("FR_LabelApp", App));
             sb.AppendLine(CoreStrings.Format("FR_LabelVersion", Version));
             if (Models.Count == 1)

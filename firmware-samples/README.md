@@ -71,8 +71,8 @@ Decoding the folder `C100X_010508__Classe-100X16E-DoorEntry-v1.5.8`:
 | `C100XR_020012__Classe-100X16E-HomeSecurity-v2.0.12/` | `C100XR_020012.fwz`  | BTicino Classe 100X16E  | Home + Security | v2.0.12  |
 | `C100XR_020311__Classe-100X16E-HomeSecurity-v2.3.11/` | `C100XR_020311.fwz`  | BTicino Classe 100X16E  | Home + Security | v2.3.11  |
 | `C300X_010719__Classe-300X13E-DoorEntry-v1.7.19/`     | `C300X_010719.fwz`   | BTicino Classe 300X13E  | Door Entry      | v1.7.19  |
-| `C3X2_010105__Classe-300X-HomeSecurity-v1.1.5/`       | `C3X2_010105.fwz`    | BTicino Classe 300X (344742) | Home + Security | v1.1.5   |
-| `MX_040012__Classe-300EOS-HomeSecurity-v4.0.12/`      | `MX_040012.fwz`      | BTicino Classe 300 EOS (344842) | Home + Security | v4.0.12  |
+| `C3X2_010105__Classe-300X-HomeSecurity-v1.1.5/`       | `C3X2_010105.fwz`    | BTicino Classe 300X (344742/344743) | Home + Security | v1.1.5   |
+| `MX_040012__Classe-300EOS-HomeSecurity-v4.0.12/`      | `MX_040012.fwz`      | BTicino Classe 300 EOS (344842/344884) | Home + Security | v4.0.12  |
 
 _(Add a row per image. Same hardware + different app = a **separate** row, since
 the firmware differs — see the App axis above. The **App** column shows the
