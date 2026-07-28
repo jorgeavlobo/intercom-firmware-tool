@@ -1,9 +1,10 @@
 //! Gate momentary-press pulse (issue #41), on its OWN tracked task.
 //!
-//! A single Home Assistant `button` press is a press-then-release pulse on WHERE=20:
-//! `*8*19*20##` (press), a short hold, then `*8*20*20##` (release) — both WHO=8
-//! actions via the `:30006` command port (unlike volume dimensions, which need
-//! `:20000`). Verified frames on the unit.
+//! A single Home Assistant `button` press is a press-then-release pulse on a WHO=8
+//! actuator: `*8*19*<WHERE>##` (press), a short hold, then `*8*20*<WHERE>##` (release),
+//! via the `:30006` command port (unlike volume dimensions, which need `:20000`). Two
+//! actuators are exposed (see [`Lock`]): the main entrance lock (WHERE=20) and a
+//! secondary actuator (WHERE=21 — e.g. a second gate/door). Verified frames on the unit.
 //!
 //! ## Why a dedicated task (not inline in the command worker, nor a detached spawn)
 //! Running the pulse here, fed by a small channel, resolves three competing needs at
@@ -35,8 +36,33 @@ use crate::receiver::forward_to_gateway;
 /// this is dropped with a log line rather than growing unboundedly.
 pub const QUEUE_DEPTH: usize = 4;
 
-const GATE_PRESS: &str = "*8*19*20##";
-const GATE_RELEASE: &str = "*8*20*20##";
+/// Which door-entry actuator a momentary pulse targets. Both are WHO=8 press/release
+/// actuators reached the same way on the `:30006` command port; only the WHERE differs.
+/// Verified on the unit: `Main` = WHERE 20 (the entrance-panel lock), `Secondary` =
+/// WHERE 21 (an auxiliary actuator, e.g. a second gate/door).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lock {
+    Main,
+    Secondary,
+}
+
+impl Lock {
+    /// The `(press, release)` frames for this actuator.
+    const fn frames(self) -> (&'static str, &'static str) {
+        match self {
+            Lock::Main => ("*8*19*20##", "*8*20*20##"),
+            Lock::Secondary => ("*8*19*21##", "*8*20*21##"),
+        }
+    }
+
+    /// Human-readable label for log lines.
+    const fn label(self) -> &'static str {
+        match self {
+            Lock::Main => "main lock",
+            Lock::Secondary => "secondary lock",
+        }
+    }
+}
 
 // The three timings below are defined ONCE in milliseconds and every Duration
 // (including MAX_PULSE) is derived from them, so changing one can't leave MAX_PULSE —
@@ -72,24 +98,25 @@ pub const MAX_PULSE: Duration =
 /// This keeps the shutdown drain bounded to ONE pulse ([`MAX_PULSE`]) regardless of
 /// how many were queued, instead of processing the whole backlog while the runtime
 /// tears down (which could cancel a later pulse between its press and release).
-pub async fn run(mut rx: Receiver<()>, stopping: Arc<AtomicBool>) {
-    while rx.recv().await.is_some() {
+pub async fn run(mut rx: Receiver<Lock>, stopping: Arc<AtomicBool>) {
+    while let Some(lock) = rx.recv().await {
         if stopping.load(Ordering::Relaxed) {
             break; // shutdown began: don't START another pulse (the in-flight one is done)
         }
-        pulse().await;
+        pulse(lock).await;
     }
 }
 
 /// One momentary pulse: press, hold [`GATE_PULSE`], release. Each frame failure is
 /// logged. The release is ALWAYS attempted — even if the press errored — so we never
 /// leave a half-actuated button; a redundant release on a failed press is harmless.
-async fn pulse() {
-    if let Err(e) = forward_to_gateway(GATE_PRESS, GATE_FORWARD_TIMEOUT).await {
-        eprintln!("btmqttd: gate press failed: {e}");
+async fn pulse(lock: Lock) {
+    let (press, release) = lock.frames();
+    if let Err(e) = forward_to_gateway(press, GATE_FORWARD_TIMEOUT).await {
+        eprintln!("btmqttd: {} press failed: {e}", lock.label());
     }
     tokio::time::sleep(GATE_PULSE).await;
-    if let Err(e) = forward_to_gateway(GATE_RELEASE, GATE_FORWARD_TIMEOUT).await {
-        eprintln!("btmqttd: gate release failed: {e}");
+    if let Err(e) = forward_to_gateway(release, GATE_FORWARD_TIMEOUT).await {
+        eprintln!("btmqttd: {} release failed: {e}", lock.label());
     }
 }

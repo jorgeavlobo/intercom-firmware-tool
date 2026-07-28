@@ -118,7 +118,7 @@ async fn run() -> Result<(), String> {
     // enqueues a press request and moves on (no 300 ms block), the gate task serialises
     // each press→hold→release, and shutdown DRAINS it (drops the sender + awaits) so a
     // press is never left without its release. See gate.rs.
-    let (gate_tx, gate_rx) = tokio::sync::mpsc::channel::<()>(gate::QUEUE_DEPTH);
+    let (gate_tx, gate_rx) = tokio::sync::mpsc::channel::<gate::Lock>(gate::QUEUE_DEPTH);
     // Set at shutdown so the gate task finishes the pulse in progress but discards
     // queued (not-yet-started) presses — bounding the drain to one pulse.
     let gate_stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));

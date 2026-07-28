@@ -24,6 +24,7 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc::Sender;
 
 use crate::config::{Config, OWN_PORT_CMD};
+use crate::gate::Lock;
 use crate::own;
 use crate::volume::VolumeCtl;
 
@@ -70,7 +71,7 @@ pub async fn dispatch(
     cfg: &Arc<Config>,
     client: &AsyncClient,
     vol: &Arc<VolumeCtl>,
-    gate: &Sender<()>,
+    gate: &Sender<Lock>,
     payload: &[u8],
 ) {
     let text = match std::str::from_utf8(payload) {
@@ -93,7 +94,7 @@ async fn dispatch_record(
     cfg: &Arc<Config>,
     client: &AsyncClient,
     vol: &Arc<VolumeCtl>,
-    gate: &Sender<()>,
+    gate: &Sender<Lock>,
     record: &str,
 ) {
     // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
@@ -133,7 +134,7 @@ async fn handle_json(
     cfg: &Arc<Config>,
     client: &AsyncClient,
     vol: &Arc<VolumeCtl>,
-    gate: &Sender<()>,
+    gate: &Sender<Lock>,
     msg: &str,
 ) {
     let v: Value = match serde_json::from_str(msg) {
@@ -209,8 +210,9 @@ enum Action {
     /// Relative step: up (`true`) / down (`false`) — the ± `button`s. Only the SIGN of
     /// the JSON value matters (the step size is owned device-side).
     Step(bool),
-    /// Momentary gate pulse (issue #41) — the gate `button`.
-    Gate,
+    /// Momentary door-entry lock pulse (issue #41) — the Main/Secondary Lock `button`s.
+    /// The variant carries WHICH actuator so one queue/task serialises both.
+    Lock(Lock),
 }
 
 /// Classify a JSON action object (`{"action":<name>,"value":…}`) into an [`Action`], or
@@ -229,26 +231,27 @@ fn parse_action(action: &str, v: &Value) -> Option<Action> {
             Some(d) if d < 0 => Some(Action::Step(false)),
             _ => None,
         },
-        "gate" => Some(Action::Gate),
+        "main_lock" => Some(Action::Lock(Lock::Main)),
+        "secondary_lock" => Some(Action::Lock(Lock::Secondary)),
         _ => None,
     }
 }
 
-async fn handle_action(vol: &Arc<VolumeCtl>, gate: &Sender<()>, action: &str, v: &Value) {
+async fn handle_action(vol: &Arc<VolumeCtl>, gate: &Sender<Lock>, action: &str, v: &Value) {
     match parse_action(action, v) {
         Some(Action::Volume(n)) => log_action_err("volume", vol.set(n).await),
         Some(Action::Mute(on)) => log_action_err("mute", vol.mute(on).await),
         Some(Action::Step(up)) => log_action_err("volume_step", vol.step(up).await),
-        // Enqueue a pulse request to the dedicated gate task (gate.rs), which serialises
-        // press→hold→release off the command worker and is drained on shutdown so the
-        // release always follows. Full => a burst faster than the gate can pulse (drop,
-        // don't block the worker); Closed => the gate task is gone (shutting down).
-        Some(Action::Gate) => match gate.try_send(()) {
+        // Enqueue a pulse request (WHICH lock) to the dedicated gate task (gate.rs),
+        // which serialises press→hold→release off the command worker and is drained on
+        // shutdown so the release always follows. Full => a burst faster than it can
+        // pulse (drop, don't block the worker); Closed => the task is gone (shutting down).
+        Some(Action::Lock(which)) => match gate.try_send(which) {
             Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
-                eprintln!("btmqttd: gate press dropped — pulse queue full");
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                eprintln!("btmqttd: lock press dropped — pulse queue full");
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
         },
         None => eprintln!(
             "btmqttd: ignored action {action:?} (unknown, or missing/invalid value {:?})",
@@ -637,9 +640,16 @@ mod tests {
         assert_eq!(parse_action("volume_step", &json!({"value": 10})), Some(Action::Step(true)));
         assert_eq!(parse_action("volume_step", &json!({"value": -10})), Some(Action::Step(false)));
         assert_eq!(parse_action("volume_step", &json!({"value": -1})), Some(Action::Step(false)));
-        // gate: no value needed.
-        assert_eq!(parse_action("gate", &json!({})), Some(Action::Gate));
-        assert_eq!(parse_action("gate", &json!({"value": "ignored"})), Some(Action::Gate));
+        // locks: no value needed; each name maps to its actuator.
+        assert_eq!(parse_action("main_lock", &json!({})), Some(Action::Lock(Lock::Main)));
+        assert_eq!(
+            parse_action("main_lock", &json!({"value": "ignored"})),
+            Some(Action::Lock(Lock::Main))
+        );
+        assert_eq!(
+            parse_action("secondary_lock", &json!({})),
+            Some(Action::Lock(Lock::Secondary))
+        );
     }
 
     #[test]

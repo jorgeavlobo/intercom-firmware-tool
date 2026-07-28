@@ -896,13 +896,13 @@ namespace IntercomFirmwareTool.Core
         };
 
         /// <summary>
-        /// The five volume/gate CONTROL entities' identity — (JSON filename, discovery
+        /// The six volume/lock CONTROL entities' identity — (JSON filename, discovery
         /// component, object id). Used by the TOMBSTONE path in
         /// <see cref="GenerateHaDiscovery"/> (when there is no concrete command topic) to
         /// emit the exact same config topics with an empty payload, so a previous build's
         /// controls are cleared. The real-config path builds each entity inline (their
         /// JSON bodies differ: number vs switch vs button), so this list MUST be kept in
-        /// step with those five entities' filenames/components/object ids — it is the
+        /// step with those six entities' filenames/components/object ids — it is the
         /// single definition of WHICH config topics the controls occupy (constant across
         /// builds; they depend only on the node id, not on TopicRx).
         /// </summary>
@@ -912,7 +912,8 @@ namespace IntercomFirmwareTool.Core
             ("mute.json", "switch", "mute"),
             ("volume_up.json", "button", "volume_up"),
             ("volume_down.json", "button", "volume_down"),
-            ("gate.json", "button", "gate"),
+            ("main_lock.json", "button", "main_lock"),
+            ("secondary_lock.json", "button", "secondary_lock"),
         };
 
         /// <summary>
@@ -1270,31 +1271,39 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
-            // Gate button (#41): a single press performs the full momentary press/release
-            // pulse (btmqttd sends *8*19*20## then *8*20*20## via the :30006 command port).
-            entities.Add(new HaEntity(
-                "gate.json",
-                Topic("button", "gate"),
-                JsonSerializer.Serialize(new
-                {
-                    name = "Gate",
-                    unique_id = $"{node}_gate",
-                    default_entity_id = EntId("button", "gate"),
-                    command_topic = controlTopic,
-                    // QoS 0 (the default): opening the gate is a NON-idempotent side
-                    // effect, and QoS 1 may legitimately REDELIVER a publish (DUP on a lost
-                    // PUBACK), pulsing the gate twice from one press. A press lost during a
-                    // brief reconnect is self-correcting — the user just presses again — so
-                    // avoiding an unintended double actuation wins here, unlike the absolute
-                    // volume/mute commands above (idempotent, QoS 1).
-                    qos = 0,
-                    payload_press = "{\"action\":\"gate\"}",
-                    icon = "mdi:gate",
-                    availability_topic = opts.TopicLastWill,
-                    payload_available = "online",
-                    payload_not_available = "offline",
-                    device,
-                }, HaJson)));
+            // Lock buttons (#41): each press performs the full momentary press/release
+            // pulse on a WHO=8 actuator via the :30006 command port — Main = WHERE 20
+            // (*8*19*20## / *8*20*20##), Secondary = WHERE 21 (*8*19*21## / *8*20*21##).
+            // btmqttd maps the action name to the WHERE; the two entities are identical in
+            // shape, so build them from one template that varies only object id / name /
+            // icon / action.
+            void AddLock(string objectId, string friendlyName, string action, string icon) =>
+                entities.Add(new HaEntity(
+                    $"{objectId}.json",
+                    Topic("button", objectId),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = friendlyName,
+                        unique_id = $"{node}_{objectId}",
+                        default_entity_id = EntId("button", objectId),
+                        command_topic = controlTopic,
+                        // QoS 0 (the default): a lock pulse is a NON-idempotent side effect,
+                        // and QoS 1 may legitimately REDELIVER a publish (DUP on a lost
+                        // PUBACK), pulsing the actuator twice from one press. A press lost
+                        // during a brief reconnect is self-correcting — the user just presses
+                        // again — so avoiding an unintended double actuation wins here, unlike
+                        // the absolute volume/mute commands above (idempotent, QoS 1).
+                        qos = 0,
+                        payload_press = $"{{\"action\":\"{action}\"}}",
+                        icon,
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson));
+
+            AddLock("main_lock", "Main Lock", "main_lock", "mdi:lock");
+            AddLock("secondary_lock", "Secondary Lock", "secondary_lock", "mdi:lock-outline");
 
             return entities;
         }
