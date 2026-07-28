@@ -23,7 +23,7 @@ namespace IntercomFirmwareTool.Core
         bool IsFwzContainer,
         string Line,            // product line, e.g. "Classe 300X" / "Classe 100X"
         string Version,         // firmware version, e.g. "1.7.19"
-        string? Edition,        // paired app / firmware family: "Home + Security" / "Door Entry" (null if unknown)
+        string? App,            // paired app / firmware family: "Home + Security" / "Door Entry" (null if unknown)
         IReadOnlyList<FirmwareModel> Models,
         string? DownloadUrl = null) // official download URL, where known
     {
@@ -32,8 +32,8 @@ namespace IntercomFirmwareTool.Core
         {
             var sb = new StringBuilder();
             sb.AppendLine(CoreStrings.Format("FR_LabelLine", Line));
-            if (!string.IsNullOrEmpty(Edition))
-                sb.AppendLine(CoreStrings.Format("FR_LabelEdition", Edition));
+            if (!string.IsNullOrEmpty(App))
+                sb.AppendLine(CoreStrings.Format("FR_LabelApp", App));
             sb.AppendLine(CoreStrings.Format("FR_LabelVersion", Version));
             if (Models.Count == 1)
             {
@@ -87,12 +87,16 @@ namespace IntercomFirmwareTool.Core
         // Classe 300X13E — same unit, two finishes (light 344642, dark 344643).
         private static readonly FirmwareModel M300X_Light = new("344642", "Classe 300X13E (light finish)");
         private static readonly FirmwareModel M300X_Dark  = new("344643", "Classe 300X13E (dark finish)");
-        // Classe 300X (344742) — the newer Wi-Fi 6 "smart connected" 300X, a
-        // distinct unit from the 300X13E above; Home + Security firmware.
+        // Classe 300X (344742 light / 344743 dark) — the newer Wi-Fi 6 "smart
+        // connected" 300X, a distinct unit from the 300X13E above; Home + Security.
         private static readonly FirmwareModel M300X_344742 = new("344742", "Classe 300X (light finish)");
-        // Classe 300 EOS with Netatmo (344842) — Home + Security firmware.
-        private static readonly FirmwareModel M300EOS      = new("344842", "Classe 300 EOS with Netatmo");
-        // Classe 100X16E — one reference, two firmware families (Home+Security / Door Entry).
+        private static readonly FirmwareModel M300X_344743 = new("344743", "Classe 300X (dark finish)");
+        // Classe 300 EOS with Netatmo (344842 white / 344884 black) — Home + Security.
+        private static readonly FirmwareModel M300EOS_344842 = new("344842", "Classe 300 EOS with Netatmo (white finish)");
+        private static readonly FirmwareModel M300EOS_344884 = new("344884", "Classe 300 EOS with Netatmo (black finish)");
+        // Classe 100X16E — BTicino reused article 344682 for TWO different units:
+        // one Door Entry, one Home + Security (incompatible firmware). The paired
+        // app (the App field) is the discriminator, not the article number.
         private static readonly FirmwareModel M100X        = new("344682", "Classe 100X16E");
 
         // Recorded from the official Legrand/BTicino downloads (size + SHA-256 +
@@ -156,14 +160,14 @@ namespace IntercomFirmwareTool.Core
             new KnownFirmware("C3X2_010105.fwz", 220525872,
                 "282592C93C99E5C162B61165FB3F6C055C5B00D2B8B8691C16FA97AA63C9B978",
                 "BB02C980FAD478C00747E0A9AD0FD4BF", true,
-                "Classe 300X", "1.1.5", "Home + Security", new[] { M300X_344742 },
+                "Classe 300X", "1.1.5", "Home + Security", new[] { M300X_344742, M300X_344743 },
                 "https://assets.legrand.com/pim/AUTRE/C3X2_010105.fwz"),
 
             // ---- Classe 300 EOS (344842, with Netatmo) — Home + Security ----
             new KnownFirmware("MX_040012.fwz", 340343202,
                 "2BFA4A4DA4618707CFCECF7C37DD9AD3178D155B2C3C2D81D554F27AD2E2CAF6",
                 "D641242E002B73F3AB1C0E785D2FC27F", true,
-                "Classe 300 EOS", "4.0.12", "Home + Security", new[] { M300EOS },
+                "Classe 300 EOS", "4.0.12", "Home + Security", new[] { M300EOS_344842, M300EOS_344884 },
                 "https://assets.legrand.com/pim/AUTRE/MX_040012.fwz"),
         });
 

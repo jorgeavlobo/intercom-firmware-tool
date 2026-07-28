@@ -17,8 +17,8 @@
   <data name="FR_LabelLine" xml:space="preserve">
     <value>  Linea    : BTicino {0}</value>
   </data>
-  <data name="FR_LabelEdition" xml:space="preserve">
-    <value>  Edizione : {0}</value>
+  <data name="FR_LabelApp" xml:space="preserve">
+    <value>  App      : {0}</value>
   </data>
   <data name="FR_LabelVersion" xml:space="preserve">
     <value>  Versione : {0}</value>
