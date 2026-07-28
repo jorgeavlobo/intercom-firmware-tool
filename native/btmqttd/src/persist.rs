@@ -103,19 +103,22 @@ pub fn clear() -> bool {
     clear_in(&state_dir())
 }
 
-/// Read the tracked stair-light state (`Some(true)`=on / `Some(false)`=off), or `None`
-/// when unknown (no file, or unparseable). Blocking; call via `spawn_blocking`.
-pub fn read_light() -> Option<bool> {
-    read_light_in(&state_dir())
+/// Read the tracked stair-light state for the actuator at `want_where`
+/// (`Some(true)`=on / `Some(false)`=off), or `None` when unknown — no file, unparseable,
+/// or a record for a DIFFERENT WHERE (a build that changed `LIGHT_WHERE` must not inherit
+/// the previous actuator's state). Blocking; call via `spawn_blocking`.
+pub fn read_light(want_where: &str) -> Option<bool> {
+    read_light_in(&state_dir(), want_where)
 }
 
-/// Persist the tracked stair-light state; `None` clears it (an unknown state, e.g. after a
-/// physical toggle from an unknown baseline). Atomic write + dir fsync like [`store`], so a
-/// reboot mid-write never sees a torn file. Returns `true` on success. Blocking; call via
-/// `spawn_blocking`.
+/// Persist the tracked stair-light state, KEYED by the actuator `where_` so a later WHERE
+/// change can't restore an unrelated relay's state. `None` clears it (an unknown state,
+/// e.g. after a physical toggle from an unknown baseline). Atomic write + dir fsync like
+/// [`store`], so a reboot mid-write never sees a torn file. Returns `true` on success.
+/// Blocking; call via `spawn_blocking`.
 #[must_use]
-pub fn store_light(on: Option<bool>) -> bool {
-    store_light_in(&state_dir(), on)
+pub fn store_light(where_: &str, on: Option<bool>) -> bool {
+    store_light_in(&state_dir(), where_, on)
 }
 
 // ---------------------------------------------------------------------------
@@ -187,21 +190,26 @@ fn clear_in(dir: &Path) -> bool {
     }
 }
 
-fn read_light_in(dir: &Path) -> Option<bool> {
-    match std::fs::read_to_string(light_file_in(dir)) {
-        Ok(text) => match text.trim() {
-            "on" => Some(true),
-            "off" => Some(false),
-            _ => None,
-        },
-        Err(_) => None,
+fn read_light_in(dir: &Path, want_where: &str) -> Option<bool> {
+    let text = std::fs::read_to_string(light_file_in(dir)).ok()?;
+    let line = text.lines().next()?.trim();
+    // Record is `<where>\t<on|off>`. A record for a DIFFERENT WHERE (a build that changed
+    // LIGHT_WHERE — the cfg/extra partition survives reflashes) must NOT be inherited.
+    let (where_, token) = line.split_once('\t')?;
+    if where_ != want_where {
+        return None;
+    }
+    match token.trim() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
     }
 }
 
-fn store_light_in(dir: &Path, on: Option<bool>) -> bool {
+fn store_light_in(dir: &Path, where_: &str, on: Option<bool>) -> bool {
     let path = light_file_in(dir);
     // Unknown → remove the file (a missing file reads back as None).
-    let Some(token) = on.map(|b| if b { "on" } else { "off" }) else {
+    let Some(state) = on.map(|b| if b { "on" } else { "off" }) else {
         return match std::fs::remove_file(&path) {
             Ok(()) => true,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
@@ -219,7 +227,7 @@ fn store_light_in(dir: &Path, on: Option<bool>) -> bool {
         eprintln!("btmqttd: persist: light path is not valid UTF-8");
         return false;
     };
-    let body = format!("{token}\n");
+    let body = format!("{where_}\t{state}\n");
     match crate::receiver::create_unique_temp(path_str, body.as_bytes()) {
         Ok(tmp) => match std::fs::rename(&tmp, path_str) {
             Ok(()) => match std::fs::File::open(dir).and_then(|d| d.sync_all()) {
@@ -366,15 +374,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("btmqttd-light-{}-{uniq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!(read_light_in(&dir), None); // no file yet
-        assert!(store_light_in(&dir, Some(true)));
-        assert_eq!(read_light_in(&dir), Some(true));
-        assert!(store_light_in(&dir, Some(false)));
-        assert_eq!(read_light_in(&dir), Some(false));
+        assert_eq!(read_light_in(&dir, "112"), None); // no file yet
+        assert!(store_light_in(&dir, "112", Some(true)));
+        assert_eq!(read_light_in(&dir, "112"), Some(true));
+        assert!(store_light_in(&dir, "112", Some(false)));
+        assert_eq!(read_light_in(&dir, "112"), Some(false));
+        // A record for a DIFFERENT WHERE is NOT inherited (a changed LIGHT_WHERE).
+        assert_eq!(read_light_in(&dir, "999"), None);
         // None clears the file → reads back as unknown.
-        assert!(store_light_in(&dir, None));
-        assert_eq!(read_light_in(&dir), None);
-        assert!(store_light_in(&dir, None)); // clearing an absent file is still success
+        assert!(store_light_in(&dir, "112", None));
+        assert_eq!(read_light_in(&dir, "112"), None);
+        assert!(store_light_in(&dir, "112", None)); // clearing an absent file is still success
 
         let _ = std::fs::remove_dir_all(&dir);
     }

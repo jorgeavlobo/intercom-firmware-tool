@@ -119,8 +119,8 @@ async fn run() -> Result<(), String> {
     // readable state, so we track the toggle and PERSIST it across reboots — restore the
     // last known on/off here so a reboot keeps the switch correct (issue: light). `None`
     // (feature off) threads through as no-op everywhere.
-    let light: Option<Arc<light::LightCtl>> = if cfg.light_where.is_some() {
-        let initial = tokio::task::spawn_blocking(persist::read_light)
+    let light: Option<Arc<light::LightCtl>> = if let Some(where_) = cfg.light_where.clone() {
+        let initial = tokio::task::spawn_blocking(move || persist::read_light(&where_))
             .await
             .unwrap_or(None);
         Some(light::LightCtl::new(&cfg, client.clone(), initial))
