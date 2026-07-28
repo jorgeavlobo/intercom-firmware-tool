@@ -47,14 +47,14 @@ Decoding the stem `C100X_010508`:
 
 | Part      | Meaning                          |
 | --------- | -------------------------------- |
-| `C100X`   | BTicino **Classe 100 X** (model) |
+| `C100X`   | BTicino **Classe 100X16E** (model) |
 | `010508`  | firmware **v1.5.8** (`01.05.08`) |
 
 ## Catalog
 
 | Folder                                   | Source `.fwz`        | Device                         | Firmware |
 | ---------------------------------------- | -------------------- | ------------------------------ | -------- |
-| `C100X_010508__Classe-100X-v1.5.8/`      | `C100X_010508.fwz`   | BTicino Classe 100 X           | v1.5.8   |
+| `C100X_010508__Classe-100X16E-v1.5.8/`      | `C100X_010508.fwz`   | BTicino Classe 100X16E           | v1.5.8   |
 
 _(Add a row per image.)_
 
@@ -70,7 +70,7 @@ _(Add a row per image.)_
 ## Extracting / inspecting the ext4 (Linux / WSL)
 
 ```sh
-cd firmware-samples/C100X_010508__Classe-100X-v1.5.8
+cd firmware-samples/C100X_010508__Classe-100X16E-v1.5.8
 gunzip -k btweb_only.ext4.gz                 # -> btweb_only.ext4 (keeps the .gz)
 mkdir -p mnt
 sudo mount -o loop,ro btweb_only.ext4 mnt    # read-only
