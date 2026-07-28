@@ -39,10 +39,15 @@ pub struct Config {
     pub topic_cmd_result: String,
     pub topic_file_content: String,
     // Volume control (issue #40): RETAINED state topics HA reads back. The volume /
-    // mute / gate COMMANDS reuse TOPIC_RX (delivered as small JSON actions), so no
+    // mute / lock COMMANDS reuse TOPIC_RX (delivered as small JSON actions), so no
     // extra subscription is needed — only these two state topics are new.
     pub topic_volume: String,
     pub topic_mute: String,
+    // Door-entry events: the entrance-panel CALL ("doorbell") is published
+    // as a momentary event (NOT retained), and the call STATE as a retained sensor. Both
+    // are learned for free from the same WHO=8 monitor stream — no extra subscription.
+    pub topic_doorbell: String,
+    pub topic_call_state: String,
     // OpenWebNet monitor endpoint (bus -> MQTT)
     pub own_host: String,
     pub own_port_mon: u16,
@@ -104,6 +109,8 @@ impl Config {
             topic_file_content: get("TOPIC_FILE_CONTENT", "Bticino/file_content_topic"),
             topic_volume: get("TOPIC_VOLUME", "Bticino/volume"),
             topic_mute: get("TOPIC_MUTE", "Bticino/mute"),
+            topic_doorbell: get("TOPIC_DOORBELL", "Bticino/doorbell"),
+            topic_call_state: get("TOPIC_CALL_STATE", "Bticino/call_state"),
             own_host: get("OWN_HOST", "127.0.0.1"),
             own_port_mon: opt("OWN_PORT_MON").and_then(|s| s.parse().ok()).unwrap_or(20000),
             // PAYLOAD_FORMAT defaults to json (mqtt_common.sh); anything but "raw" is json.
@@ -318,6 +325,8 @@ EMPTY=
         assert_eq!(c.own_port_mon, 20000);
         assert_eq!(c.topic_volume, "Bticino/volume");
         assert_eq!(c.topic_mute, "Bticino/mute");
+        assert_eq!(c.topic_doorbell, "Bticino/doorbell");
+        assert_eq!(c.topic_call_state, "Bticino/call_state");
     }
 
     #[test]

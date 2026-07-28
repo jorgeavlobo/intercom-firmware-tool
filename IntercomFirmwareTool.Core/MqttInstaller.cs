@@ -109,8 +109,34 @@ namespace IntercomFirmwareTool.Core
         /// deployment must ALSO give each unit distinct topics, or the HA devices will mirror
         /// each other's bus/key/availability. (Auto-scoping topics from the node id is future
         /// work — see #12.)
+        /// <para>MIGRATION: changing the node id (e.g. a reflash where the model-derived
+        /// default replaces a previous value) leaves the PREVIOUS node's RETAINED discovery
+        /// configs on the broker, which HA keeps showing as an orphan device. To remove it,
+        /// clear those retained topics ON THE BROKER. The old configs live at
+        /// <c>&lt;prefix&gt;/&lt;component&gt;/&lt;old-node&gt;/&lt;object&gt;/config</c> — the
+        /// <c>&lt;prefix&gt;/+/&lt;old-node&gt;/+/config</c> form is only a SELECTION pattern for
+        /// finding them (<c>+</c> is a subscribe-only wildcard and is invalid in a publish
+        /// topic). Publish an empty retained payload to each CONCRETE config topic that was
+        /// generated — e.g. <c>mosquitto_pub -r -n -t &lt;prefix&gt;/sensor/&lt;old-node&gt;/bus/config</c>,
+        /// once per entity — or delete them in MQTT Explorer. Deleting the device inside Home
+        /// Assistant is NOT sufficient: the retained config survives on the broker and HA
+        /// re-creates the device on the next MQTT reconnect or restart. The installer does
+        /// NOT auto-clear the old node: it can't tell whether the default
+        /// <c>bticino_intercom</c> belongs to THIS bridge or to another unit sharing the
+        /// broker, and blindly clearing it would wipe that other unit's entities.</para>
         /// </summary>
         public string HaNodeId { get; init; } = "bticino_intercom";
+
+        /// <summary>
+        /// Friendly name of the Home Assistant DEVICE the entities group under. The App
+        /// sets it from the firmware being customized (<c>BTicino Classe 100X</c> /
+        /// <c>BTicino Classe 300X</c>); the record default is a model-neutral fallback for
+        /// a firmware with no model mapping. Distinct from <see cref="HaNodeId"/>, which is
+        /// the machine id that scopes the discovery topics, unique_ids and (via each
+        /// entity's <c>object_id</c>) the <c>entity_id</c> prefix — HA lowercases that, so
+        /// the node id must already be lower-case (e.g. <c>bticino_c100x</c>).
+        /// </summary>
+        public string HaDeviceName { get; init; } = "BTicino intercom bridge";
 
         public string TopicRx { get; init; } = "Bticino/rx";
         public string TopicDump { get; init; } = "Bticino/tx";
@@ -136,12 +162,25 @@ namespace IntercomFirmwareTool.Core
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicMute"/>.</summary>
         public string? TopicMute { get; init; }
 
+        /// <summary>Momentary doorbell-event topic HA's event entity reads.
+        /// NULL (default) derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicDoorbell"/>.</summary>
+        public string? TopicDoorbell { get; init; }
+        /// <summary>Retained call-state topic HA's sensor reads. NULL (default)
+        /// derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicCallState"/>.</summary>
+        public string? TopicCallState { get; init; }
+
         /// <summary>The volume state topic actually used: the explicit
         /// <see cref="TopicVolume"/>, or one derived from the <see cref="TopicLastWill"/>
         /// namespace so multi-unit deployments auto-scope without extra UI.</summary>
         public string EffectiveTopicVolume => TopicVolume ?? (TopicNamespace(TopicLastWill) + "volume");
         /// <summary>The mute state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicMute => TopicMute ?? (TopicNamespace(TopicLastWill) + "mute");
+        /// <summary>The doorbell-event topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicDoorbell => TopicDoorbell ?? (TopicNamespace(TopicLastWill) + "doorbell");
+        /// <summary>The call-state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicCallState => TopicCallState ?? (TopicNamespace(TopicLastWill) + "call_state");
 
         /// <summary>The namespace prefix of <paramref name="topic"/> — everything up to
         /// and INCLUDING the last '/', or "" when the topic has no '/'. Scopes the
@@ -430,7 +469,8 @@ namespace IntercomFirmwareTool.Core
             // .conf and used as MQTT topic filters).
             foreach (var t in new[] { opts.TopicRx, opts.TopicDump, opts.TopicStartDate,
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
-                                      opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
+                                      opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
+                                      opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
@@ -441,7 +481,8 @@ namespace IntercomFirmwareTool.Core
             // publish at runtime. TopicRx may keep them (a valid subscription).
             foreach (var t in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
-                                      opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
+                                      opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
+                                      opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
                 // prefix — both are subscription-only and invalid to PUBLISH to (a broker
                 // rejects the publish), so no publish topic (including the derived volume/
@@ -489,7 +530,8 @@ namespace IntercomFirmwareTool.Core
             // replay them to the gateway — a feedback loop that floods the bus.
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
-                                        opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
+                                        opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
+                                        opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
@@ -785,6 +827,11 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_VOLUME", opts.EffectiveTopicVolume));
             sb.Append(Conf("TOPIC_MUTE", opts.EffectiveTopicMute));
 
+            // Door-entry events: the momentary doorbell event and the retained
+            // call-state sensor btmqttd publishes from the WHO=8 monitor stream.
+            sb.Append(Conf("TOPIC_DOORBELL", opts.EffectiveTopicDoorbell));
+            sb.Append(Conf("TOPIC_CALL_STATE", opts.EffectiveTopicCallState));
+
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 
             // OpenWebNet gateway endpoint for the bus MONITOR session (btmqttd opens it
@@ -849,13 +896,13 @@ namespace IntercomFirmwareTool.Core
         };
 
         /// <summary>
-        /// The five volume/gate CONTROL entities' identity — (JSON filename, discovery
+        /// The six volume/lock CONTROL entities' identity — (JSON filename, discovery
         /// component, object id). Used by the TOMBSTONE path in
         /// <see cref="GenerateHaDiscovery"/> (when there is no concrete command topic) to
         /// emit the exact same config topics with an empty payload, so a previous build's
         /// controls are cleared. The real-config path builds each entity inline (their
         /// JSON bodies differ: number vs switch vs button), so this list MUST be kept in
-        /// step with those five entities' filenames/components/object ids — it is the
+        /// step with those six entities' filenames/components/object ids — it is the
         /// single definition of WHICH config topics the controls occupy (constant across
         /// builds; they depend only on the node id, not on TopicRx).
         /// </summary>
@@ -865,8 +912,29 @@ namespace IntercomFirmwareTool.Core
             ("mute.json", "switch", "mute"),
             ("volume_up.json", "button", "volume_up"),
             ("volume_down.json", "button", "volume_down"),
-            ("gate.json", "button", "gate"),
+            ("main_lock.json", "button", "main_lock"),
+            ("secondary_lock.json", "button", "secondary_lock"),
         };
+
+        /// <summary>
+        /// Slugify a node id into the object part of an HA <c>entity_id</c>: lower-case, with
+        /// any character outside <c>[a-z0-9_]</c> replaced by <c>'_'</c>. HA accepts only
+        /// <c>[a-z0-9_]</c> there and <b>rejects</b> (rather than normalises) a
+        /// <c>default_entity_id</c> that violates it, so a custom node with uppercase or
+        /// <c>'-'</c> (both permitted by <c>BadNode</c>) must be normalised first. The
+        /// model-derived nodes (<c>bticino_c100x</c>/<c>c300x</c>) are already valid.
+        /// </summary>
+        private static string EntityIdSlug(string node)
+        {
+            var sb = new StringBuilder(node.Length);
+            foreach (char c in node)
+            {
+                if (c is >= 'a' and <= 'z' or >= '0' and <= '9' or '_') sb.Append(c);
+                else if (c is >= 'A' and <= 'Z') sb.Append((char)(c + 32));
+                else sb.Append('_');
+            }
+            return sb.ToString();
+        }
 
         /// <summary>
         /// Builds the Home Assistant MQTT discovery configs for the bridge: a
@@ -890,17 +958,35 @@ namespace IntercomFirmwareTool.Core
             string prefix = opts.HaDiscoveryPrefix;
             string node = opts.HaNodeId;
 
-            // Shared device block so every entity groups under one HA device.
+            // Shared device block so every entity groups under one HA device. The friendly
+            // name is model-dependent (BTicino Classe 100X / 300X), set by the App from the
+            // firmware being customized.
             var device = new
             {
                 identifiers = new[] { node },
-                name = "BTicino intercom bridge",
+                name = opts.HaDeviceName,
                 manufacturer = "BTicino",
                 model = "OpenWebNet MQTT bridge",
             };
 
             string Topic(string component, string objectId) =>
                 $"{prefix}/{component}/{node}/{objectId}/config";
+
+            // HA's default_entity_id SUGGESTS the entity_id; it must be FULLY QUALIFIED
+            // ("<domain>.<object>"). Deriving it as "<component>.<node>_<objectId>" (e.g.
+            // sensor.bticino_c100x_bus) forces the entity_id prefix to follow the node,
+            // independent of the device's model-dependent friendly name. (The older
+            // `object_id` field is deprecated and removed in HA 2026.4, so it is not used.)
+            //
+            // HA entity_ids allow only [a-z0-9_] in the object part, but a CUSTOM node id may
+            // contain uppercase or '-' (BadNode permits [A-Za-z0-9_-]) — HA would REJECT such a
+            // default_entity_id rather than normalise it. Slugify the node here (lowercase;
+            // any other char -> '_') so e.g. "Front-Door" yields sensor.front_door_bus. The
+            // model-derived nodes (bticino_c100x/c300x) are already valid and pass through
+            // unchanged. Only the entity_id is slugged; the discovery topic and unique_id keep
+            // the raw node.
+            string nodeSlug = EntityIdSlug(node);
+            string EntId(string component, string objectId) => $"{component}.{nodeSlug}_{objectId}";
 
             // Availability (TopicLastWill): btmqttd is a single-connection MQTT client,
             // so availability is ATOMIC (issue #32). It registers the retained 'offline'
@@ -912,6 +998,21 @@ namespace IntercomFirmwareTool.Core
             // per-entity availability blocks below reflect the bridge's real state.
             var entities = new List<HaEntity>();
 
+            // Legacy migration (one release, #41 → Main/Secondary Lock): the single "Gate"
+            // button (object id `gate`) that shipped in an earlier release was replaced by
+            // main_lock/secondary_lock. ha::reconcile only touches config topics present in
+            // the NEW manifest, so a prior install's retained `button/<node>/gate/config`
+            // would linger — HA would keep showing a "Gate" button whose {"action":"gate"}
+            // btmqttd no longer handles (a dead control). Tombstone it: same config topic,
+            // EMPTY retained payload = cleared. Emitted UNCONDITIONALLY (even with a concrete
+            // command topic, unlike the control tombstones below) so the migration also runs
+            // on a normal working install. SAFE — unlike a whole-node migration, this stays
+            // within THIS bridge's OWN current node/object (the multi-unit contract already
+            // requires distinct node ids), so it can't reach another bridge's device. On a
+            // fresh install the topic holds nothing, so the empty publish is a harmless
+            // no-op. Remove this entry a release after the rename has propagated.
+            entities.Add(new HaEntity("gate.json", Topic("button", "gate"), ""));
+
             // Connectivity: reports online/offline itself, so it carries NO
             // availability block (else HA would show it "unavailable" when offline
             // instead of "off").
@@ -922,6 +1023,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Bridge",
                     unique_id = $"{node}_status",
+                    default_entity_id = EntId("binary_sensor", "status"),
                     device_class = "connectivity",
                     state_topic = opts.TopicLastWill,
                     payload_on = "online",
@@ -946,6 +1048,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "OpenWebNet bus",
                     unique_id = $"{node}_bus",
+                    default_entity_id = EntId("sensor", "bus"),
                     state_topic = opts.TopicDump,
                     value_template = "{{ value_json.frame if value_json is defined else value }}",
                     json_attributes_topic = opts.TopicDump,
@@ -961,6 +1064,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "OpenWebNet bus",
                     unique_id = $"{node}_bus",
+                    default_entity_id = EntId("sensor", "bus"),
                     state_topic = opts.TopicDump,
                     icon = "mdi:bus",
                     entity_category = "diagnostic",
@@ -979,10 +1083,57 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Last key",
                     unique_id = $"{node}_key",
+                    default_entity_id = EntId("sensor", "key"),
                     state_topic = opts.TopicKey,
                     value_template = "{{ value_json.key }}",
                     json_attributes_topic = opts.TopicKey,
                     icon = "mdi:gesture-tap-button",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Doorbell: a momentary EVENT fired when the entrance-panel call is
+            // seen on the bus (WHO=8 `*8*1#1#4#21*<WHERE>##`). `event_types` lists "pressed";
+            // btmqttd publishes {"event_type":"pressed","where":…} NON-retained, so it fires
+            // once per ring and never re-fires on an HA reconnect. HA reads `event_type` from
+            // the JSON and exposes the extra `where` key as an attribute.
+            entities.Add(new HaEntity(
+                "doorbell.json",
+                Topic("event", "doorbell"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Doorbell",
+                    unique_id = $"{node}_doorbell",
+                    default_entity_id = EntId("event", "doorbell"),
+                    state_topic = opts.EffectiveTopicDoorbell,
+                    event_types = new[] { "pressed" },
+                    device_class = "doorbell",
+                    icon = "mdi:bell-ring",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Call state: a SENSOR reflecting the WHO=8 dim-35 call state. btmqttd publishes
+            // it RETAINED as {"state":<idle|ringing|in_call|active>,"code":<N>} (mapping
+            // confirmed against live answered + unanswered calls); the template tolerates a
+            // non-JSON payload, and the raw `code` is exposed as an attribute for granularity.
+            entities.Add(new HaEntity(
+                "call_state.json",
+                Topic("sensor", "call_state"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Call state",
+                    unique_id = $"{node}_call_state",
+                    default_entity_id = EntId("sensor", "call_state"),
+                    state_topic = opts.EffectiveTopicCallState,
+                    value_template = "{{ value_json.state if value_json is defined else value }}",
+                    json_attributes_topic = opts.EffectiveTopicCallState,
+                    json_attributes_template = "{{ value if value_json is defined else '{}' }}",
+                    icon = "mdi:phone-in-talk",
                     availability_topic = opts.TopicLastWill,
                     payload_available = "online",
                     payload_not_available = "offline",
@@ -1029,6 +1180,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume",
                     unique_id = $"{node}_volume",
+                    default_entity_id = EntId("number", "volume"),
                     command_topic = controlTopic,
                     // QoS 1: an ABSOLUTE, idempotent command (set to N / mute on|off), so a
                     // QoS-1 redelivery is harmless, while the durable QoS-1 command
@@ -1064,6 +1216,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Mute",
                     unique_id = $"{node}_mute",
+                    default_entity_id = EntId("switch", "mute"),
                     command_topic = controlTopic,
                     // QoS 1: an ABSOLUTE, idempotent command (set to N / mute on|off), so a
                     // QoS-1 redelivery is harmless, while the durable QoS-1 command
@@ -1092,6 +1245,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume up",
                     unique_id = $"{node}_volume_up",
+                    default_entity_id = EntId("button", "volume_up"),
                     command_topic = controlTopic,
                     // QoS 0 (the default): a relative step is NON-idempotent, and QoS 1
                     // may legitimately REDELIVER a publish (DUP on a lost PUBACK), applying
@@ -1115,6 +1269,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume down",
                     unique_id = $"{node}_volume_down",
+                    default_entity_id = EntId("button", "volume_down"),
                     command_topic = controlTopic,
                     // QoS 0 (the default): a relative step is NON-idempotent, and QoS 1
                     // may legitimately REDELIVER a publish (DUP on a lost PUBACK), applying
@@ -1131,30 +1286,39 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
-            // Gate button (#41): a single press performs the full momentary press/release
-            // pulse (btmqttd sends *8*19*20## then *8*20*20## via the :30006 command port).
-            entities.Add(new HaEntity(
-                "gate.json",
-                Topic("button", "gate"),
-                JsonSerializer.Serialize(new
-                {
-                    name = "Gate",
-                    unique_id = $"{node}_gate",
-                    command_topic = controlTopic,
-                    // QoS 0 (the default): opening the gate is a NON-idempotent side
-                    // effect, and QoS 1 may legitimately REDELIVER a publish (DUP on a lost
-                    // PUBACK), pulsing the gate twice from one press. A press lost during a
-                    // brief reconnect is self-correcting — the user just presses again — so
-                    // avoiding an unintended double actuation wins here, unlike the absolute
-                    // volume/mute commands above (idempotent, QoS 1).
-                    qos = 0,
-                    payload_press = "{\"action\":\"gate\"}",
-                    icon = "mdi:gate",
-                    availability_topic = opts.TopicLastWill,
-                    payload_available = "online",
-                    payload_not_available = "offline",
-                    device,
-                }, HaJson)));
+            // Lock buttons (#41): each press performs the full momentary press/release
+            // pulse on a WHO=8 actuator via the :30006 command port — Main = WHERE 20
+            // (*8*19*20## / *8*20*20##), Secondary = WHERE 21 (*8*19*21## / *8*20*21##).
+            // btmqttd maps the action name to the WHERE; the two entities are identical in
+            // shape, so build them from one template that varies only object id / name /
+            // icon / action.
+            void AddLock(string objectId, string friendlyName, string action, string icon) =>
+                entities.Add(new HaEntity(
+                    $"{objectId}.json",
+                    Topic("button", objectId),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = friendlyName,
+                        unique_id = $"{node}_{objectId}",
+                        default_entity_id = EntId("button", objectId),
+                        command_topic = controlTopic,
+                        // QoS 0 (the default): a lock pulse is a NON-idempotent side effect,
+                        // and QoS 1 may legitimately REDELIVER a publish (DUP on a lost
+                        // PUBACK), pulsing the actuator twice from one press. A press lost
+                        // during a brief reconnect is self-correcting — the user just presses
+                        // again — so avoiding an unintended double actuation wins here, unlike
+                        // the absolute volume/mute commands above (idempotent, QoS 1).
+                        qos = 0,
+                        payload_press = $"{{\"action\":\"{action}\"}}",
+                        icon,
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+
+            AddLock("main_lock", "Main Lock", "main_lock", "mdi:lock");
+            AddLock("secondary_lock", "Secondary Lock", "secondary_lock", "mdi:lock-outline");
 
             return entities;
         }

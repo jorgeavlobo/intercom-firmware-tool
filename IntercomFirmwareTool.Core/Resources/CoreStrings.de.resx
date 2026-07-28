@@ -64,6 +64,9 @@
     <value>Erstellung wird verweigert: die Eingabe ist keine erkannte Original-Firmware.
 </value>
   </data>
+  <data name="Fwz_RefuseHomeSecurity" xml:space="preserve">
+    <value>Erstellung wird verweigert: {0} verwendet die App Home + Security, die nicht mit der Anpassung kompatibel ist. Nur Door-Entry-Firmware kann geändert werden.</value>
+  </data>
   <data name="Fwz_BuiltButNotWritten" xml:space="preserve">
     <value>Die Firmware wurde erstellt und verifiziert, konnte aber nicht geschrieben werden nach:
 {0}

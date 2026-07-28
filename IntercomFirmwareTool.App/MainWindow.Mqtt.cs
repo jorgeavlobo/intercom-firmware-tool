@@ -1428,6 +1428,10 @@ namespace IntercomFirmwareTool.App
                 // the HA standard ("homeassistant"), which virtually no one changes, so
                 // exposing it would only add clutter. Library callers can still set it.
                 HaNodeId = NullIfEmpty(TxtMqttHaNodeId.Text.Trim()) ?? new MqttOptions("x").HaNodeId,
+                // Friendly HA device name from the selected firmware's model (BTicino Classe
+                // 100X/300X); the record default is a model-neutral fallback. The node id
+                // above is the machine id (auto-filled from the same model, editable).
+                HaDeviceName = _fwzMatch?.HaDeviceName ?? new MqttOptions("x").HaDeviceName,
             };
 
             // Surface the Core validator's exact (localized) message as a clean

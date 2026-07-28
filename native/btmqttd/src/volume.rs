@@ -1,4 +1,4 @@
-//! Device-side ringtone volume + mute state machine (issue #40). (The gate pulse of #41
+//! Device-side ringtone volume + mute state machine (issue #40). (The lock pulse of #41
 //! lives in `receiver.rs`, next to the other WHO=8 command-port actions.)
 //!
 //! All volume/mute STATE and logic live here — Home Assistant stays "dumb": it renders

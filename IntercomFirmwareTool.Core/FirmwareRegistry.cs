@@ -47,6 +47,39 @@ namespace IntercomFirmwareTool.Core
             }
             return sb.ToString().TrimEnd('\r', '\n');
         }
+
+        /// <summary>
+        /// Whether this firmware may be CUSTOMIZED/flashed by the tool. Only the
+        /// <b>Door Entry</b> units are compatible: the <b>Home + Security</b> firmwares are
+        /// a different (2.x) generation whose rootfs layout the on-device payloads
+        /// (<c>btmqttd</c>, init patches) assume, so flashing one would break the unit.
+        /// <b>Fails closed</b> — allows ONLY an explicit "Door Entry" app, so a null or a
+        /// future/unknown <see cref="App"/> value is refused rather than reaching the build.
+        /// </summary>
+        public bool IsCustomizable =>
+            string.Equals(App, "Door Entry", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Lower-case Home Assistant node id for this model — scopes the discovery topics,
+        /// <c>unique_id</c>s and the <c>entity_id</c> prefix (e.g. <c>bticino_c100x</c>).
+        /// Null when the product line has no mapping (only the two customizable Door Entry
+        /// lines are mapped). HA lowercases entity ids, so this is already lower-case.
+        /// </summary>
+        public string? HaNodeId => Line switch
+        {
+            "Classe 100X" => "bticino_c100x",
+            "Classe 300X" => "bticino_c300x",
+            _ => null,
+        };
+
+        /// <summary>The friendly Home Assistant device name for this model
+        /// (e.g. <c>BTicino Classe 100X</c>), or null when the line has no mapping.</summary>
+        public string? HaDeviceName => Line switch
+        {
+            "Classe 100X" => "BTicino Classe 100X",
+            "Classe 300X" => "BTicino Classe 300X",
+            _ => null,
+        };
     }
 
     /// <summary>

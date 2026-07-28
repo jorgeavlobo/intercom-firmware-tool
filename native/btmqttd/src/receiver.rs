@@ -1,7 +1,7 @@
 //! MQTT -> bus: dispatch a message received on TOPIC_RX. A raw OpenWebNet frame is
 //! forwarded to the local gateway (127.0.0.1:30006). A JSON payload is one of two
 //! things:
-//!   * an UNGATED device-control ACTION (volume / mute / volume_step / gate — issues
+//!   * an UNGATED device-control ACTION (volume / mute / volume_step / lock — issues
 //!     #40/#41): these actuate the OWN bus the same way a raw frame on TOPIC_RX
 //!     already can (the broker ACL on TOPIC_RX is the trust boundary), so they are
 //!     not behind the remote-shell gate; see handle_action for the posture note;
@@ -24,6 +24,7 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc::Sender;
 
 use crate::config::{Config, OWN_PORT_CMD};
+use crate::lock::Lock;
 use crate::own;
 use crate::volume::VolumeCtl;
 
@@ -70,7 +71,7 @@ pub async fn dispatch(
     cfg: &Arc<Config>,
     client: &AsyncClient,
     vol: &Arc<VolumeCtl>,
-    gate: &Sender<()>,
+    lock: &Sender<Lock>,
     payload: &[u8],
 ) {
     let text = match std::str::from_utf8(payload) {
@@ -81,7 +82,7 @@ pub async fn dispatch(
         }
     };
     for record in text.split('\n') {
-        dispatch_record(cfg, client, vol, gate, record).await;
+        dispatch_record(cfg, client, vol, lock, record).await;
     }
 }
 
@@ -93,7 +94,7 @@ async fn dispatch_record(
     cfg: &Arc<Config>,
     client: &AsyncClient,
     vol: &Arc<VolumeCtl>,
-    gate: &Sender<()>,
+    lock: &Sender<Lock>,
     record: &str,
 ) {
     // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
@@ -105,14 +106,14 @@ async fn dispatch_record(
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
-        handle_json(cfg, client, vol, gate, record).await;
+        handle_json(cfg, client, vol, lock, record).await;
     }
 }
 
 /// Forward a raw OpenWebNet frame to the gateway's command-injection port. Always
 /// the LOOPBACK gateway (127.0.0.1:30006), as StartMqttReceive did — OWN_HOST is
 /// only the monitor (read) endpoint, not the command (write) endpoint. `pub(crate)`
-/// so the gate task (`gate.rs`) can send its press/release frames the same way; it
+/// so the lock task (`lock.rs`) can send its press/release frames the same way; it
 /// passes a TIGHTER `timeout` so a full press+hold+release pulse fits inside the
 /// shutdown drain window (the raw-command path passes [`FORWARD_TIMEOUT`]).
 pub(crate) async fn forward_to_gateway(frame: &str, timeout: Duration) -> std::io::Result<()> {
@@ -133,7 +134,7 @@ async fn handle_json(
     cfg: &Arc<Config>,
     client: &AsyncClient,
     vol: &Arc<VolumeCtl>,
-    gate: &Sender<()>,
+    lock: &Sender<Lock>,
     msg: &str,
 ) {
     let v: Value = match serde_json::from_str(msg) {
@@ -143,21 +144,21 @@ async fn handle_json(
             return;
         }
     };
-    // Device-control ACTIONS (volume / mute / gate) are UNGATED — the broker ACL on
+    // Device-control ACTIONS (volume / mute / lock) are UNGATED — the broker ACL on
     // TOPIC_RX is the trust boundary. TOPIC_RX is ALREADY a privileged control channel:
     // a raw frame on it is forwarded to the gateway (:30006) with no gate, so a
-    // publisher can already actuate WHO=8 commands — including opening the gate
-    // (*8*19*20##). The `gate` action here is exactly that same :30006 capability.
-    // `volume`/`mute` additionally reach WHO=8 DIMENSION writes on openserver (:20000),
-    // a capability a raw :30006 frame does NOT have — but volume is low-stakes and
-    // strictly less sensitive than the gate a raw frame can already trigger, so gating
-    // only the volume path (while raw frames stay ungated) would add no real security.
-    // The arbitrary-shell channel below (read_file/write_file/execute_command) is the
-    // one that stays behind ALLOW_REMOTE_SHELL, because it is categorically more
-    // dangerous (code execution). These are the payloads the HA volume/gate entities
-    // publish (via command_template / payload_press).
+    // publisher can already actuate WHO=8 commands — including opening a lock
+    // (*8*19*20##). The `main_lock`/`secondary_lock` actions here are exactly that same
+    // :30006 capability. `volume`/`mute` additionally reach WHO=8 DIMENSION writes on
+    // openserver (:20000), a capability a raw :30006 frame does NOT have — but volume is
+    // low-stakes and strictly less sensitive than the lock a raw frame can already
+    // trigger, so gating only the volume path (while raw frames stay ungated) would add
+    // no real security. The arbitrary-shell channel below (read_file/write_file/
+    // execute_command) is the one that stays behind ALLOW_REMOTE_SHELL, because it is
+    // categorically more dangerous (code execution). These are the payloads the HA
+    // volume/lock entities publish (via command_template / payload_press).
     if let Some(action) = v.get("action").and_then(Value::as_str) {
-        handle_action(vol, gate, action, &v).await;
+        handle_action(vol, lock, action, &v).await;
         return;
     }
 
@@ -191,7 +192,7 @@ async fn handle_json(
     }
 }
 
-/// Handle an ungated device-control action (issue #40 volume, #41 gate). `v` is the
+/// Handle an ungated device-control action (issue #40 volume, #41 lock). `v` is the
 /// already-parsed action object; `action` is its `action` field. Unknown actions are
 /// logged and ignored. A volume op that fails (gateway refused/unreachable) is logged;
 /// the retained state stays whatever the monitor last observed, so HA is never left
@@ -209,13 +210,14 @@ enum Action {
     /// Relative step: up (`true`) / down (`false`) — the ± `button`s. Only the SIGN of
     /// the JSON value matters (the step size is owned device-side).
     Step(bool),
-    /// Momentary gate pulse (issue #41) — the gate `button`.
-    Gate,
+    /// Momentary door-entry lock pulse (issue #41) — the Main/Secondary Lock `button`s.
+    /// The variant carries WHICH actuator so one queue/task serialises both.
+    Lock(Lock),
 }
 
 /// Classify a JSON action object (`{"action":<name>,"value":…}`) into an [`Action`], or
 /// `None` when the action name is unknown or its value is missing/invalid. Pure — the
-/// async dispatch (device write / gate enqueue) lives in [`handle_action`].
+/// async dispatch (device write / lock enqueue) lives in [`handle_action`].
 fn parse_action(action: &str, v: &Value) -> Option<Action> {
     match action {
         "volume" => v.get("value").and_then(json_percent).map(Action::Volume),
@@ -229,26 +231,27 @@ fn parse_action(action: &str, v: &Value) -> Option<Action> {
             Some(d) if d < 0 => Some(Action::Step(false)),
             _ => None,
         },
-        "gate" => Some(Action::Gate),
+        "main_lock" => Some(Action::Lock(Lock::Main)),
+        "secondary_lock" => Some(Action::Lock(Lock::Secondary)),
         _ => None,
     }
 }
 
-async fn handle_action(vol: &Arc<VolumeCtl>, gate: &Sender<()>, action: &str, v: &Value) {
+async fn handle_action(vol: &Arc<VolumeCtl>, lock: &Sender<Lock>, action: &str, v: &Value) {
     match parse_action(action, v) {
         Some(Action::Volume(n)) => log_action_err("volume", vol.set(n).await),
         Some(Action::Mute(on)) => log_action_err("mute", vol.mute(on).await),
         Some(Action::Step(up)) => log_action_err("volume_step", vol.step(up).await),
-        // Enqueue a pulse request to the dedicated gate task (gate.rs), which serialises
-        // press→hold→release off the command worker and is drained on shutdown so the
-        // release always follows. Full => a burst faster than the gate can pulse (drop,
-        // don't block the worker); Closed => the gate task is gone (shutting down).
-        Some(Action::Gate) => match gate.try_send(()) {
+        // Enqueue a pulse request (WHICH lock) to the dedicated lock task (lock.rs),
+        // which serialises press→hold→release off the command worker and is drained on
+        // shutdown so the release always follows. Full => a burst faster than it can
+        // pulse (drop, don't block the worker); Closed => the task is gone (shutting down).
+        Some(Action::Lock(which)) => match lock.try_send(which) {
             Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {
-                eprintln!("btmqttd: gate press dropped — pulse queue full");
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                eprintln!("btmqttd: lock press dropped — pulse queue full");
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
         },
         None => eprintln!(
             "btmqttd: ignored action {action:?} (unknown, or missing/invalid value {:?})",
@@ -637,9 +640,16 @@ mod tests {
         assert_eq!(parse_action("volume_step", &json!({"value": 10})), Some(Action::Step(true)));
         assert_eq!(parse_action("volume_step", &json!({"value": -10})), Some(Action::Step(false)));
         assert_eq!(parse_action("volume_step", &json!({"value": -1})), Some(Action::Step(false)));
-        // gate: no value needed.
-        assert_eq!(parse_action("gate", &json!({})), Some(Action::Gate));
-        assert_eq!(parse_action("gate", &json!({"value": "ignored"})), Some(Action::Gate));
+        // locks: no value needed; each name maps to its actuator.
+        assert_eq!(parse_action("main_lock", &json!({})), Some(Action::Lock(Lock::Main)));
+        assert_eq!(
+            parse_action("main_lock", &json!({"value": "ignored"})),
+            Some(Action::Lock(Lock::Main))
+        );
+        assert_eq!(
+            parse_action("secondary_lock", &json!({})),
+            Some(Action::Lock(Lock::Secondary))
+        );
     }
 
     #[test]

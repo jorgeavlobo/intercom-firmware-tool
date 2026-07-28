@@ -35,6 +35,10 @@ namespace IntercomFirmwareTool.App
     public partial class MainWindow : Window
     {
         private string? _fwzPath;
+        // The registry entry the selected firmware matched (set on a successful verify),
+        // so the build can read its model — used to name the Home Assistant device
+        // (BTicino Classe 100X/300X) and to gate customization (Home + Security is refused).
+        private KnownFirmware? _fwzMatch;
         private string? _keyPath;
         private string? _outputPath;
 
@@ -374,10 +378,46 @@ namespace IntercomFirmwareTool.App
                 return;
             }
 
+            // Recognized, but only Door Entry firmware can be customized. A Home + Security
+            // firmware is a different (2.x) generation the on-device payloads don't fit, so
+            // refuse it here too (the build path re-checks — this is the friendly UI gate).
+            if (!check.Match!.IsCustomizable)
+            {
+                string hsName = check.Match!.OriginalName;
+                string HsMsg() =>
+                    IntercomFirmwareTool.Core.Localization.CoreStrings.Format(
+                        "Fwz_RefuseHomeSecurity", hsName);
+
+                _fwzPath = null;
+                _fwzMatch = null;
+                _outputPath = null;
+                _fwzRejected = true;
+                TxtFwzPath.Text = L("Ph_Firmware_Invalid");
+                TxtFwzPath.Foreground = Brushes.Firebrick;
+                TxtOutputPath.Text = L("Ph_Output");
+                TxtOutputPath.Foreground = Brushes.Gray;
+                LblOutput.IsEnabled = false;
+                TxtOutputPath.IsEnabled = false;
+                UpdateBuildEnabled();
+
+                SetResult(() => LF("Fmt_Result_Rejected", HsMsg()));
+                SetStatus("");
+                MessageBox.Show(this,
+                    LF("Fmt_Msg_FirmwareNotAccepted", HsMsg()),
+                    L("Cap_FirmwareNotAccepted"), MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
             // Accepted: record the path and enable the output row (BtnClearOutput is
             // driven by UpdateBuildEnabled once _outputPath is set, below).
             _fwzPath = chosen;
+            _fwzMatch = check.Match;
             _fwzRejected = false;
+            // Auto-fill the HA node id from the model (editable), so the entities appear
+            // as bticino_c100x_* / bticino_c300x_* and the device is named after the model.
+            // Overwriting on each selection mirrors the output-path re-suggestion below.
+            if (check.Match!.HaNodeId is string modelNode)
+                TxtMqttHaNodeId.Text = modelNode;
             StopFirmwareScan(); // a firmware is chosen — stop and release the scan
             SetPathText(TxtFwzPath, chosen);
             LblOutput.IsEnabled = true;
@@ -403,6 +443,7 @@ namespace IntercomFirmwareTool.App
         private void BtnClearFwz_Click(object sender, RoutedEventArgs e)
         {
             _fwzPath = null;
+            _fwzMatch = null;
             _outputPath = null;
             _fwzRejected = false;
             TxtFwzPath.Text = L("Ph_Firmware");

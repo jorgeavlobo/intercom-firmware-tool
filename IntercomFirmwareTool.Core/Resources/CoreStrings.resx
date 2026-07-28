@@ -64,6 +64,9 @@
     <value>Refusing to build: the input is not a recognized original firmware.
 </value>
   </data>
+  <data name="Fwz_RefuseHomeSecurity" xml:space="preserve">
+    <value>Refusing to build: {0} uses the Home + Security app, which is not compatible with customization. Only Door Entry firmware can be modified.</value>
+  </data>
   <data name="Fwz_BuiltButNotWritten" xml:space="preserve">
     <value>The firmware was built and verified, but could not be written to:
 {0}

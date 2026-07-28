@@ -268,6 +268,14 @@ namespace IntercomFirmwareTool.Core
                     CoreStrings.Get("Fwz_RefuseBuildUnrecognized").TrimEnd('\r', '\n') +
                     "\n" + verified.Message);
 
+            // Compatibility gate: only Door Entry firmware can be customized. The
+            // Home + Security firmwares are a different (2.x) generation whose rootfs the
+            // on-device payloads don't fit, so building one would break the unit. Refuse
+            // here — the authoritative gate — even though the file IS a recognized original.
+            if (verified.Match is { IsCustomizable: false })
+                throw new InvalidOperationException(
+                    CoreStrings.Format("Fwz_RefuseHomeSecurity", verified.Match.OriginalName));
+
             FwzExtractResult ex = ExtractBareImage(realInput);
             string? modifiedBare = null;
             string? modifiedGz = null;
