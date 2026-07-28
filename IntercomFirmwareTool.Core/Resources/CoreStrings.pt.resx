@@ -82,7 +82,7 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
     <value>O conteúdo '.gz' dentro do .fwz não está cifrado com ZipCrypto (esperava-se a cifra tradicional PKWARE).</value>
   </data>
   <data name="Fwz_NoPasswordOpened" xml:space="preserve">
-    <value>Nenhuma das palavras-passe conhecidas (C300X, C100X, SMARTDES) abriu o .fwz.</value>
+    <value>Nenhuma das palavras-passe conhecidas (C300X, C100X, SMARTDES, C3X2, MX) abriu o .fwz.</value>
   </data>
 
   <!-- ================= Ext4Probe (Ext4_) ================= -->

@@ -82,7 +82,7 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
     <value>Il payload '.gz' all'interno del .fwz non è cifrato con ZipCrypto (attesa la cifratura tradizionale PKWARE).</value>
   </data>
   <data name="Fwz_NoPasswordOpened" xml:space="preserve">
-    <value>Nessuna delle password note (C300X, C100X, SMARTDES) ha aperto il .fwz.</value>
+    <value>Nessuna delle password note (C300X, C100X, SMARTDES, C3X2, MX) ha aperto il .fwz.</value>
   </data>
 
   <!-- ================= Ext4Probe (Ext4_) ================= -->
