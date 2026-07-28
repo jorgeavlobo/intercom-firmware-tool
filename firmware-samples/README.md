@@ -75,7 +75,9 @@ Decoding the folder `C100X_010508__Classe-100X16E-DoorEntry-v1.5.8`:
 | `MX_040012__Classe-300EOS-HomeSecurity-v4.0.12/`      | `MX_040012.fwz`      | BTicino Classe 300 EOS (344842) | Home + Security | v4.0.12  |
 
 _(Add a row per image. Same hardware + different app = a **separate** row, since
-the firmware differs — see the App axis above.)_
+the firmware differs — see the App axis above. The **App** column shows the
+human-readable app name — `Door Entry` / `Home + Security` — while the **folder**
+name uses the filesystem-safe PascalCase token `DoorEntry` / `HomeSecurity`.)_
 
 > ℹ️ **300X13E Door Entry v1.7.19** — the tool-recognised source is
 > **`C300X_010719.fwz`**, registered in
