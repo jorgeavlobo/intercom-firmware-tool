@@ -69,16 +69,13 @@ watchdog_loop() {
 		ensure mosquitto /etc/init.d/mosquitto start
 
 		# btmqttd is the native single-connection MQTT bridge daemon (issue #32),
-		# managed by its own init script (/etc/init.d/btmqttd), which reads
-		# /etc/btmqttd/btmqttd.conf. The watchdog only SUPERVISES it: if the process
-		# is gone, (re)start it via the init script — the single control point —
-		# exactly as scsserver and mosquitto are handled above. Honor an operator's
-		# intentional stop: `/etc/init.d/btmqttd stop` leaves a DISABLED marker that
-		# suppresses respawn until the next `start` (or a reboot). The init script's
-		# `start` takes an atomic lock, so this never races the S99zbtmqttd boot start.
-		if [ ! -e /var/run/btmqttd.disabled ]; then
-			ensure btmqttd /etc/init.d/btmqttd start
-		fi
+		# managed by its own init script (/etc/init.d/btmqttd). Delegate supervision
+		# to the init script's `respawn`, which — atomically under its own lock —
+		# reconciles the process to the desired state: (re)launch if it is enabled
+		# and down, or enforce an operator's `stop` (DISABLED marker) by terminating
+		# any lingering instance. Running it every pass (not only when down) is what
+		# honors a maintenance stop and heals any boot-time start race.
+		/etc/init.d/btmqttd respawn >> "$LOGFILE" 2>&1
 
 		# Keep the log from growing without bound: trim to 50 KB past 100 KB.
 		if [ -f "$LOGFILE" ]; then
