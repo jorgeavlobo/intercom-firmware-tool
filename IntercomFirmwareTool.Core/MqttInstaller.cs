@@ -1315,7 +1315,7 @@ namespace IntercomFirmwareTool.Core
                         payload_available = "online",
                         payload_not_available = "offline",
                         device,
-                    }, HaJson));
+                    }, HaJson)));
 
             AddLock("main_lock", "Main Lock", "main_lock", "mdi:lock");
             AddLock("secondary_lock", "Secondary Lock", "secondary_lock", "mdi:lock-outline");
