@@ -200,7 +200,7 @@ async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<Vol
 
 /// Publish a momentary doorbell "pressed" event to TOPIC_DOORBELL. NOT retained: an
 /// event fires once, and a retained event would spuriously re-fire on every HA
-/// reconnect. QoS 0 (like the non-idempotent gate/step actions): a doorbell press is
+/// reconnect. QoS 0 (like the non-idempotent lock/step actions): a doorbell press is
 /// NON-idempotent, and QoS 1 may legitimately REDELIVER a publish (DUP on a lost PUBACK),
 /// which would fire the HA event — and any doorbell automation — twice for one ring. A
 /// press lost during a brief broker reconnect is preferable to a double actuation. The

@@ -39,7 +39,7 @@ pub struct Config {
     pub topic_cmd_result: String,
     pub topic_file_content: String,
     // Volume control (issue #40): RETAINED state topics HA reads back. The volume /
-    // mute / gate COMMANDS reuse TOPIC_RX (delivered as small JSON actions), so no
+    // mute / lock COMMANDS reuse TOPIC_RX (delivered as small JSON actions), so no
     // extra subscription is needed — only these two state topics are new.
     pub topic_volume: String,
     pub topic_mute: String,
