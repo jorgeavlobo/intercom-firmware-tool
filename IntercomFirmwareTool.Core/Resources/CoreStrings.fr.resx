@@ -64,6 +64,9 @@
     <value>Génération refusée : l'entrée n'est pas un firmware d'origine reconnu.
 </value>
   </data>
+  <data name="Fwz_RefuseHomeSecurity" xml:space="preserve">
+    <value>Génération refusée : {0} utilise l'application Home + Security, non compatible avec la personnalisation. Seul le firmware Door Entry peut être modifié.</value>
+  </data>
   <data name="Fwz_BuiltButNotWritten" xml:space="preserve">
     <value>Le firmware a été généré et vérifié, mais n'a pas pu être écrit dans :
 {0}

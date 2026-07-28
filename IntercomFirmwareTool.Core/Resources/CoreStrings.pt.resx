@@ -64,6 +64,9 @@
     <value>Recusada a compilação: a entrada não é um firmware original reconhecido.
 </value>
   </data>
+  <data name="Fwz_RefuseHomeSecurity" xml:space="preserve">
+    <value>Recusada a compilação: {0} usa a aplicação Home + Security, que não é compatível com a customização. Só firmware Door Entry pode ser modificado.</value>
+  </data>
   <data name="Fwz_BuiltButNotWritten" xml:space="preserve">
     <value>O firmware foi compilado e verificado, mas não foi possível escrevê-lo em:
 {0}

@@ -112,6 +112,17 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         public string HaNodeId { get; init; } = "bticino_intercom";
 
+        /// <summary>
+        /// Friendly name of the Home Assistant DEVICE the entities group under. The App
+        /// sets it from the firmware being customized (<c>BTicino Classe 100X</c> /
+        /// <c>BTicino Classe 300X</c>); the record default is a model-neutral fallback for
+        /// a firmware with no model mapping. Distinct from <see cref="HaNodeId"/>, which is
+        /// the machine id that scopes the discovery topics, unique_ids and (via each
+        /// entity's <c>object_id</c>) the <c>entity_id</c> prefix — HA lowercases that, so
+        /// the node id must already be lower-case (e.g. <c>bticino_c100x</c>).
+        /// </summary>
+        public string HaDeviceName { get; init; } = "BTicino intercom bridge";
+
         public string TopicRx { get; init; } = "Bticino/rx";
         public string TopicDump { get; init; } = "Bticino/tx";
         public string TopicStartDate { get; init; } = "Bticino/start_date";
@@ -136,12 +147,25 @@ namespace IntercomFirmwareTool.Core
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicMute"/>.</summary>
         public string? TopicMute { get; init; }
 
+        /// <summary>Momentary doorbell-event topic HA's event entity reads (issue #61).
+        /// NULL (default) derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicDoorbell"/>.</summary>
+        public string? TopicDoorbell { get; init; }
+        /// <summary>Retained call-state topic HA's sensor reads (issue #61). NULL (default)
+        /// derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicCallState"/>.</summary>
+        public string? TopicCallState { get; init; }
+
         /// <summary>The volume state topic actually used: the explicit
         /// <see cref="TopicVolume"/>, or one derived from the <see cref="TopicLastWill"/>
         /// namespace so multi-unit deployments auto-scope without extra UI.</summary>
         public string EffectiveTopicVolume => TopicVolume ?? (TopicNamespace(TopicLastWill) + "volume");
         /// <summary>The mute state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicMute => TopicMute ?? (TopicNamespace(TopicLastWill) + "mute");
+        /// <summary>The doorbell-event topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicDoorbell => TopicDoorbell ?? (TopicNamespace(TopicLastWill) + "doorbell");
+        /// <summary>The call-state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicCallState => TopicCallState ?? (TopicNamespace(TopicLastWill) + "call_state");
 
         /// <summary>The namespace prefix of <paramref name="topic"/> — everything up to
         /// and INCLUDING the last '/', or "" when the topic has no '/'. Scopes the
@@ -430,7 +454,8 @@ namespace IntercomFirmwareTool.Core
             // .conf and used as MQTT topic filters).
             foreach (var t in new[] { opts.TopicRx, opts.TopicDump, opts.TopicStartDate,
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
-                                      opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
+                                      opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
+                                      opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
@@ -441,7 +466,8 @@ namespace IntercomFirmwareTool.Core
             // publish at runtime. TopicRx may keep them (a valid subscription).
             foreach (var t in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
-                                      opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
+                                      opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
+                                      opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
                 // prefix — both are subscription-only and invalid to PUBLISH to (a broker
                 // rejects the publish), so no publish topic (including the derived volume/
@@ -489,7 +515,8 @@ namespace IntercomFirmwareTool.Core
             // replay them to the gateway — a feedback loop that floods the bus.
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
-                                        opts.EffectiveTopicVolume, opts.EffectiveTopicMute })
+                                        opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
+                                        opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
@@ -785,6 +812,11 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_VOLUME", opts.EffectiveTopicVolume));
             sb.Append(Conf("TOPIC_MUTE", opts.EffectiveTopicMute));
 
+            // Door-entry events (#61): the momentary doorbell event and the retained
+            // call-state sensor btmqttd publishes from the WHO=8 monitor stream.
+            sb.Append(Conf("TOPIC_DOORBELL", opts.EffectiveTopicDoorbell));
+            sb.Append(Conf("TOPIC_CALL_STATE", opts.EffectiveTopicCallState));
+
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 
             // OpenWebNet gateway endpoint for the bus MONITOR session (btmqttd opens it
@@ -890,17 +922,25 @@ namespace IntercomFirmwareTool.Core
             string prefix = opts.HaDiscoveryPrefix;
             string node = opts.HaNodeId;
 
-            // Shared device block so every entity groups under one HA device.
+            // Shared device block so every entity groups under one HA device. The friendly
+            // name is model-dependent (BTicino Classe 100X / 300X), set by the App from the
+            // firmware being customized.
             var device = new
             {
                 identifiers = new[] { node },
-                name = "BTicino intercom bridge",
+                name = opts.HaDeviceName,
                 manufacturer = "BTicino",
                 model = "OpenWebNet MQTT bridge",
             };
 
             string Topic(string component, string objectId) =>
                 $"{prefix}/{component}/{node}/{objectId}/config";
+
+            // The HA object_id forces the entity_id to "<node>_<objectId>" (e.g.
+            // bticino_c100x_bus), independent of the device's friendly name — otherwise HA
+            // would derive the entity_id from the (model-dependent) device name. HA lowercases
+            // it, so `node` is already lower-case. Kept equal to each unique_id.
+            string ObjId(string objectId) => $"{node}_{objectId}";
 
             // Availability (TopicLastWill): btmqttd is a single-connection MQTT client,
             // so availability is ATOMIC (issue #32). It registers the retained 'offline'
@@ -922,6 +962,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Bridge",
                     unique_id = $"{node}_status",
+                    object_id = ObjId("status"),
                     device_class = "connectivity",
                     state_topic = opts.TopicLastWill,
                     payload_on = "online",
@@ -946,6 +987,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "OpenWebNet bus",
                     unique_id = $"{node}_bus",
+                    object_id = ObjId("bus"),
                     state_topic = opts.TopicDump,
                     value_template = "{{ value_json.frame if value_json is defined else value }}",
                     json_attributes_topic = opts.TopicDump,
@@ -961,6 +1003,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "OpenWebNet bus",
                     unique_id = $"{node}_bus",
+                    object_id = ObjId("bus"),
                     state_topic = opts.TopicDump,
                     icon = "mdi:bus",
                     entity_category = "diagnostic",
@@ -979,10 +1022,58 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Last key",
                     unique_id = $"{node}_key",
+                    object_id = ObjId("key"),
                     state_topic = opts.TopicKey,
                     value_template = "{{ value_json.key }}",
                     json_attributes_topic = opts.TopicKey,
                     icon = "mdi:gesture-tap-button",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Doorbell (issue #61): a momentary EVENT fired when the entrance-panel call is
+            // seen on the bus (WHO=8 `*8*1#1#4#21*<WHERE>##`). `event_types` lists "pressed";
+            // btmqttd publishes {"event_type":"pressed","where":…} NON-retained, so it fires
+            // once per ring and never re-fires on an HA reconnect. HA reads `event_type` from
+            // the JSON and exposes the extra `where` key as an attribute.
+            entities.Add(new HaEntity(
+                "doorbell.json",
+                Topic("event", "doorbell"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Doorbell",
+                    unique_id = $"{node}_doorbell",
+                    object_id = ObjId("doorbell"),
+                    state_topic = opts.EffectiveTopicDoorbell,
+                    event_types = new[] { "pressed" },
+                    device_class = "doorbell",
+                    icon = "mdi:bell-ring",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Call state (issue #61): a diagnostic SENSOR reflecting the WHO=8 dim-35 call
+            // state. btmqttd publishes it RETAINED as {"state":<idle|ringing|active>,
+            // "code":<N>}; the template tolerates a non-JSON payload, and the raw `code` is
+            // exposed as an attribute so the 2/4 -> "active" mapping can be refined once an
+            // ANSWERED call is captured.
+            entities.Add(new HaEntity(
+                "call_state.json",
+                Topic("sensor", "call_state"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Call state",
+                    unique_id = $"{node}_call_state",
+                    object_id = ObjId("call_state"),
+                    state_topic = opts.EffectiveTopicCallState,
+                    value_template = "{{ value_json.state if value_json is defined else value }}",
+                    json_attributes_topic = opts.EffectiveTopicCallState,
+                    json_attributes_template = "{{ value if value_json is defined else '{}' }}",
+                    icon = "mdi:phone-in-talk",
                     availability_topic = opts.TopicLastWill,
                     payload_available = "online",
                     payload_not_available = "offline",
@@ -1029,6 +1120,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume",
                     unique_id = $"{node}_volume",
+                    object_id = ObjId("volume"),
                     command_topic = controlTopic,
                     // QoS 1: an ABSOLUTE, idempotent command (set to N / mute on|off), so a
                     // QoS-1 redelivery is harmless, while the durable QoS-1 command
@@ -1064,6 +1156,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Mute",
                     unique_id = $"{node}_mute",
+                    object_id = ObjId("mute"),
                     command_topic = controlTopic,
                     // QoS 1: an ABSOLUTE, idempotent command (set to N / mute on|off), so a
                     // QoS-1 redelivery is harmless, while the durable QoS-1 command
@@ -1092,6 +1185,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume up",
                     unique_id = $"{node}_volume_up",
+                    object_id = ObjId("volume_up"),
                     command_topic = controlTopic,
                     // QoS 0 (the default): a relative step is NON-idempotent, and QoS 1
                     // may legitimately REDELIVER a publish (DUP on a lost PUBACK), applying
@@ -1115,6 +1209,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume down",
                     unique_id = $"{node}_volume_down",
+                    object_id = ObjId("volume_down"),
                     command_topic = controlTopic,
                     // QoS 0 (the default): a relative step is NON-idempotent, and QoS 1
                     // may legitimately REDELIVER a publish (DUP on a lost PUBACK), applying
@@ -1140,6 +1235,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Gate",
                     unique_id = $"{node}_gate",
+                    object_id = ObjId("gate"),
                     command_topic = controlTopic,
                     // QoS 0 (the default): opening the gate is a NON-idempotent side
                     // effect, and QoS 1 may legitimately REDELIVER a publish (DUP on a lost
