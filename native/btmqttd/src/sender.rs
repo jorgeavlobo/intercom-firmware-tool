@@ -57,6 +57,39 @@ pub async fn run(cfg: Arc<Config>, client: AsyncClient, volume: Arc<VolumeCtl>) 
 /// How long to wait for the monitor ACK before giving up on this connection.
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How often the read loop wakes to run the call-state watchdog when no frames arrive.
+/// Bounds the extra latency on top of each cap; short enough to be prompt, long enough
+/// that a quiet bus costs almost nothing.
+const WATCHDOG_TICK: Duration = Duration::from_secs(30);
+
+/// Caps after which a non-idle RETAINED call state is force-reset to idle — a safety net
+/// for a missed terminal `idle` frame on a LIVE monitor session (a DROPPED session is
+/// already handled by the reconnect reset in [`session`]). Without this, a lost
+/// `*#8**35*0*…` would leave HA showing ringing/in-call until the next call. Generous so a
+/// real ring/call is NEVER cut short: a panel stops ringing in ~45–60 s, and no door call
+/// runs for 30 min.
+const RINGING_MAX: Duration = Duration::from_secs(3 * 60);
+const IN_CALL_MAX: Duration = Duration::from_secs(30 * 60);
+
+/// The force-idle cap for a non-idle call-state `code`: the ringing phases (`1`/`2`/`4`)
+/// use [`RINGING_MAX`]; in-call (`6`) and any unmapped ("active") code use [`IN_CALL_MAX`].
+const fn call_state_cap(code: u8) -> Duration {
+    match code {
+        1 | 2 | 4 => RINGING_MAX,
+        _ => IN_CALL_MAX,
+    }
+}
+
+/// Arm/disarm the call-state watchdog from a freshly-published state `code`: idle (`0`)
+/// disarms it; any non-idle code (re)arms it, stamping the current instant.
+fn update_call_watch(watch: &mut Option<(u8, tokio::time::Instant)>, code: u8) {
+    *watch = if code == 0 {
+        None
+    } else {
+        Some((code, tokio::time::Instant::now()))
+    };
+}
+
 /// One monitor session: connect, handshake, VALIDATE the monitor ACK, then read +
 /// publish until the socket closes (Ok) or errors. run() decides healthy-vs-backoff
 /// from how long this ran.
@@ -122,6 +155,10 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
     // preferable to a permanently stuck state. (Volume/mute reconcile via resync() below.)
     publish_call_state(cfg, client, 0).await;
 
+    // Call-state watchdog arming point: (state code, when it was published). We just reset
+    // to idle, so start disarmed; it is (re)armed by every non-idle call-state frame below.
+    let mut call_watch: Option<(u8, tokio::time::Instant)> = None;
+
     // Feed ONLY the bytes AFTER the ACK to the framer, so any bus frames that arrived
     // in the same read(s) as the ACK are published while the handshake ACK and any
     // pre-ACK banner/chatter are NOT framed (feeding all of `pre` could otherwise let
@@ -130,7 +167,9 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
     if let Some(pos) = pre.windows(own::ACK.len()).position(|w| w == own::ACK) {
         framer.push(&pre[pos + own::ACK.len()..], &mut frames);
         for frame in frames.drain(..) {
-            publish_frame(cfg, client, volume, &frame).await;
+            if let Some(code) = publish_frame(cfg, client, volume, &frame).await {
+                update_call_watch(&mut call_watch, code);
+            }
         }
     }
 
@@ -149,14 +188,41 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
     });
 
     loop {
-        let n = sock.read(&mut buf).await?;
-        if n == 0 {
-            return Ok(()); // gateway closed the monitor session
+        // Read with a WATCHDOG_TICK cap so we still wake to run the call-state watchdog on a
+        // QUIET bus (no frames). A read that completes is handled; a tick timeout just falls
+        // through to the watchdog check below.
+        match tokio::time::timeout(WATCHDOG_TICK, sock.read(&mut buf)).await {
+            Ok(read) => {
+                let n = read?;
+                if n == 0 {
+                    return Ok(()); // gateway closed the monitor session
+                }
+                frames.clear();
+                framer.push(&buf[..n], &mut frames);
+                for frame in frames.drain(..) {
+                    if let Some(code) = publish_frame(cfg, client, volume, &frame).await {
+                        update_call_watch(&mut call_watch, code);
+                    }
+                }
+            }
+            Err(_) => {} // tick elapsed with no data — fall through to the watchdog
         }
-        frames.clear();
-        framer.push(&buf[..n], &mut frames);
-        for frame in frames.drain(..) {
-            publish_frame(cfg, client, volume, &frame).await;
+
+        // Call-state watchdog: if a non-idle state has persisted implausibly long, force
+        // idle. This covers a missed terminal `idle` frame on a LIVE session (a DROPPED
+        // session is handled by the reconnect reset above); without it, HA could show
+        // ringing/in-call until the next call. The caps are generous enough never to cut a
+        // real ring/call (see RINGING_MAX / IN_CALL_MAX).
+        if let Some((code, since)) = call_watch {
+            if since.elapsed() >= call_state_cap(code) {
+                eprintln!(
+                    "btmqttd: call-state watchdog — '{}' persisted > {:?}, forcing idle",
+                    dimension::call_state_label(code),
+                    call_state_cap(code)
+                );
+                publish_call_state(cfg, client, 0).await;
+                call_watch = None;
+            }
         }
     }
 }
@@ -164,13 +230,21 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
 /// Publish one framed OWN string to TOPIC_DUMP — as compact JSON (PAYLOAD_FORMAT=
 /// json, the default) or the raw frame. QoS 0, not retained, as the shell's
 /// `mqtt_pub -l` did.
-async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl>, frame: &str) {
+/// Returns the call-state `code` when this frame was a call-state transition (so the
+/// caller can arm/disarm the watchdog), else `None`.
+async fn publish_frame(
+    cfg: &Arc<Config>,
+    client: &AsyncClient,
+    volume: &Arc<VolumeCtl>,
+    frame: &str,
+) -> Option<u8> {
     // Learn the real volume AND mute from the bus (issue #40): the unit broadcasts
     // `*#8**41*<N>##` (volume) and `*#8**33*<0|1>##` (mute/RingEnable) on the monitor
     // whenever either changes by ANY path (slider, up/down, mute, or the unit's own menu),
     // so this is the single source of truth for `current`/`muted`. Parse BEFORE the format
     // branch so it works in raw mode too; a frame is at most one of the two, and any other
     // frame parses to None and is ignored.
+    let mut call_code = None;
     if let Some(pct) = dimension::parse_volume_report(frame) {
         volume.observe_volume(pct).await;
     } else if let Some(muted) = dimension::parse_mute_report(frame) {
@@ -180,13 +254,14 @@ async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<Vol
         publish_doorbell(cfg, client, where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
         // Call STATE transition (idle/ringing/in_call, or "active" fallback): update the
-        // retained sensor.
+        // retained sensor and report the code so the caller can (dis)arm the watchdog.
         publish_call_state(cfg, client, code).await;
+        call_code = Some(code);
     }
     let payload: Vec<u8> = if cfg.payload_json {
         match own::frame_to_json(frame) {
             Some(v) => v.to_string().into_bytes(),
-            None => return, // ACK/NACK dropped
+            None => return call_code, // ACK/NACK dropped (never a call-state frame)
         }
     } else {
         frame.as_bytes().to_vec()
@@ -197,6 +272,7 @@ async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<Vol
     {
         eprintln!("btmqttd: publish bus frame failed: {e}");
     }
+    call_code
 }
 
 /// Publish a momentary doorbell "pressed" event to TOPIC_DOORBELL. NOT retained: an
@@ -228,5 +304,37 @@ async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
         .await
     {
         eprintln!("btmqttd: publish call state failed: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn call_state_cap_by_phase() {
+        // Ringing phases share the short cap...
+        assert_eq!(call_state_cap(1), RINGING_MAX);
+        assert_eq!(call_state_cap(2), RINGING_MAX);
+        assert_eq!(call_state_cap(4), RINGING_MAX);
+        // ...in-call and any unmapped ("active") code use the long cap.
+        assert_eq!(call_state_cap(6), IN_CALL_MAX);
+        assert_eq!(call_state_cap(9), IN_CALL_MAX);
+        // Sanity: ringing recovers faster than in-call, and both are non-zero.
+        assert!(RINGING_MAX < IN_CALL_MAX);
+    }
+
+    #[test]
+    fn watchdog_arms_on_non_idle_and_disarms_on_idle() {
+        let mut watch = None;
+        // A non-idle state arms the watchdog...
+        update_call_watch(&mut watch, 6);
+        assert!(matches!(watch, Some((6, _))));
+        // ...a ringing phase re-arms it with the new code...
+        update_call_watch(&mut watch, 2);
+        assert!(matches!(watch, Some((2, _))));
+        // ...and idle (0) disarms it.
+        update_call_watch(&mut watch, 0);
+        assert!(watch.is_none());
     }
 }
