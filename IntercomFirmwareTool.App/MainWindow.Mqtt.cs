@@ -1432,6 +1432,12 @@ namespace IntercomFirmwareTool.App
                 // 100X/300X); the record default is a model-neutral fallback. The node id
                 // above is the machine id (auto-filled from the same model, editable).
                 HaDeviceName = _fwzMatch?.HaDeviceName ?? new MqttOptions("x").HaDeviceName,
+                // Stair-light SWITCH (opt-in): the WHO=8 actuator WHERE (digits) is
+                // installation-specific — the "light button" WHAT (21/22) is universal, but
+                // the WHERE the building wired is not, so each user enters their own (captured
+                // as `*8*21*<WHERE>##`). Empty ⇒ no light entity is emitted (feature off);
+                // Core validates it is digits-only.
+                LightWhere = NullIfEmpty(TxtMqttLightWhere.Text.Trim()),
             };
 
             // Surface the Core validator's exact (localized) message as a clean

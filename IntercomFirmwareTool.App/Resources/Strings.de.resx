@@ -431,6 +431,8 @@ Schlüssel: {1}</value></data>
   <data name="MqttHint_AnchorNoMac" xml:space="preserve"><value>Verbunden, aber die MAC des Brokers konnte nicht gelesen werden (er ist möglicherweise in einem anderen Subnetz). Die Klartext-Wiederentdeckung benötigt einen Broker im selben Subnetz; mit TLS ist er ohnehin verankert.</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Geräte-ID:</value></data>
   <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Kennung des Home-Assistant-Geräts und seiner Entitäten. Pro Einheit eigener Wert gibt jeder Bridge ihr eigenes HA-Gerät; für mehrere Einheiten an einem Broker auch eigene Topics festlegen (sonst spiegeln sie sich). Nur ASCII-Buchstaben, ASCII-Ziffern, '_' oder '-'.</value></data>
+  <data name="Field_MqttLightWhere" xml:space="preserve"><value>Lichtadresse (WHERE):</value></data>
+  <data name="Tip_MqttLightWhere" xml:space="preserve"><value>Optional. Die OpenWebNet-Adresse (WHERE) des Treppenlicht-Tasters in IHRER Installation — die Ziffern im Rahmen *8*21*&lt;WHERE&gt;##, den das Panel beim Drücken der Lichttaste sendet (per Bus erfassen). Leer deaktiviert den Licht-Schalter. Nur Ziffern.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Empfang (Befehle):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Bus-Dump:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Startdatum:</value></data>

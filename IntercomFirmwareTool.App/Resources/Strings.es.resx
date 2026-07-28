@@ -431,6 +431,8 @@ Clave: {1}</value></data>
   <data name="MqttHint_AnchorNoMac" xml:space="preserve"><value>Conectado, pero no se pudo leer la MAC del broker (puede estar en otra subred). La redetección en texto plano necesita un broker en la misma subred; con TLS queda anclado igualmente.</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Id del dispositivo:</value></data>
   <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identificador del dispositivo de Home Assistant y sus entidades. Distinto por unidad da a cada puente su propio dispositivo HA; para varias unidades en un mismo broker, define también topics distintos (o se reflejan entre sí). Solo letras y dígitos ASCII, '_' o '-'.</value></data>
+  <data name="Field_MqttLightWhere" xml:space="preserve"><value>Dirección de la luz (WHERE):</value></data>
+  <data name="Tip_MqttLightWhere" xml:space="preserve"><value>Opcional. La dirección OpenWebNet (WHERE) del botón de luz de escalera EN TU instalación — los dígitos de la trama *8*21*&lt;WHERE&gt;## que el panel envía al pulsar el botón de luz (captúralo del bus). Vacío desactiva el interruptor de Luz. Solo dígitos.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Recepción (comandos):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Volcado del bus:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Fecha de inicio:</value></data>

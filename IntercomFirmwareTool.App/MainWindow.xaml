@@ -791,6 +791,19 @@
                                  TextChanged="MqttField_TextChanged"/>
                     </StackPanel>
 
+                    <!-- Stair-light SWITCH (opt-in). The WHO=8 actuator WHERE (digits) captured
+                         as *8*21*<WHERE>## on the bus. The "light button" WHAT (21/22) is
+                         universal but the WHERE is installation-specific, so each user enters
+                         their own. Empty disables the feature (no entity). See Tip_MqttLightWhere. -->
+                    <StackPanel Orientation="Horizontal" Margin="22,4,0,0">
+                        <TextBlock x:Name="LblMqttLightWhere" Text="{loc:Loc Field_MqttLightWhere}"
+                                   VerticalAlignment="Center" Margin="0,0,6,0"/>
+                        <TextBox x:Name="TxtMqttLightWhere" Width="200"
+                                 AutomationProperties.LabeledBy="{Binding ElementName=LblMqttLightWhere}"
+                                 ToolTip="{loc:Loc Tip_MqttLightWhere}"
+                                 TextChanged="MqttField_TextChanged"/>
+                    </StackPanel>
+
                     <!-- Topics (collapsible, prefilled with the Home Assistant defaults) -->
                     <CheckBox x:Name="ChkMqttTopics" Margin="0,10,0,0"
                               Content="{loc:Loc Chk_MqttTopics}" ToolTip="{loc:Loc Tip_MqttTopics}"

@@ -431,6 +431,8 @@ Clé : {1}</value></data>
   <data name="MqttHint_AnchorNoMac" xml:space="preserve"><value>Connecté, mais la MAC du broker n'a pas pu être lue (il est peut-être sur un autre sous-réseau). La redécouverte en clair nécessite un broker sur le même sous-réseau ; avec TLS, il est ancré de toute façon.</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Id de l'appareil :</value></data>
   <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identifiant de l'appareil Home Assistant et de ses entités. Distinct par unité donne à chaque pont son propre appareil HA ; pour plusieurs unités sur un même broker, définissez aussi des topics distincts (sinon ils se reflètent). Uniquement lettres et chiffres ASCII, « _ » ou « - ».</value></data>
+  <data name="Field_MqttLightWhere" xml:space="preserve"><value>Adresse de la lumière (WHERE) :</value></data>
+  <data name="Tip_MqttLightWhere" xml:space="preserve"><value>Facultatif. L'adresse OpenWebNet (WHERE) du bouton de lumière d'escalier SUR VOTRE installation — les chiffres de la trame *8*21*&lt;WHERE&gt;## que le panneau envoie quand vous appuyez sur le bouton lumière (capturez-la sur le bus). Vide désactive l'interrupteur Lumière. Chiffres uniquement.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Réception (commandes) :</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Vidage du bus :</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Date de début :</value></data>
