@@ -446,5 +446,6 @@ Ne l'activez que sur un broker authentifié et de confiance. Activer le canal de
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de commandes à distance</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Un sujet est vide, s'étend sur plusieurs lignes, ou un sujet de publication contient un caractère générique MQTT ('+' ou '#').</value></data>
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>L'id du nœud Home Assistant ne peut contenir que des lettres et chiffres ASCII, « _ » ou « - ».</value></data>
+  <data name="MqttHint_LightWhere" xml:space="preserve"><value>L'adresse de la lumière (WHERE) ne peut contenir que des chiffres, ou être laissée vide pour désactiver l'interrupteur Lumière.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>connexion refusée ou aucune réponse.</value></data>
 </root>

@@ -138,33 +138,31 @@ fn read_state_in(dir: &Path, host: &str) -> (bool, Option<(Ipv4Addr, Ipv4Addr)>)
     }
 }
 
-fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> bool {
+/// Durably write `body` to `path` via a temp file + rename + directory fsync — the shared
+/// atomicity-critical path for every persisted record (broker IP, light state). Creating
+/// `dir` first, then writing a unique temp, renaming it over `path`, and fsync'ing the
+/// DIRECTORY so the rename (the dir entry now pointing at the new inode) is durable, not
+/// just the file bytes. A dir-sync failure is reported as a FAILED write (`false`) so the
+/// caller doesn't advance its change-gate and retries later, rather than claiming a
+/// durability it didn't get (CodeRabbit). Kept in ONE place so the two records can't drift.
+fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("btmqttd: persist: cannot create {}: {e}", dir.display());
         return false;
     }
-    let path = state_file_in(dir);
     let Some(path_str) = path.to_str() else {
-        eprintln!("btmqttd: persist: state path is not valid UTF-8");
+        eprintln!("btmqttd: persist: path is not valid UTF-8");
         return false;
     };
-    let body = format_state(host, base_ip, learned_ip);
-    match crate::receiver::create_unique_temp(path_str, body.as_bytes()) {
+    match crate::receiver::create_unique_temp(path_str, body) {
         Ok(tmp) => match std::fs::rename(&tmp, path_str) {
-            Ok(()) => {
-                // fsync the directory so the rename itself (the dir entry now pointing at
-                // the new inode) is durable, not just the file bytes. Report a dir-sync
-                // failure as a FAILED store (false) so the caller doesn't advance its
-                // change-gate and retries on the next ConnAck, rather than claiming a
-                // durability it didn't get (CodeRabbit).
-                match std::fs::File::open(dir).and_then(|dirf| dirf.sync_all()) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
-                        false
-                    }
+            Ok(()) => match std::fs::File::open(dir).and_then(|dirf| dirf.sync_all()) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
+                    false
                 }
-            }
+            },
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
                 eprintln!("btmqttd: persist: cannot write {path_str}: {e}");
@@ -178,9 +176,10 @@ fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> 
     }
 }
 
-fn clear_in(dir: &Path) -> bool {
-    let path = state_file_in(dir);
-    match std::fs::remove_file(&path) {
+/// Remove `path`, treating an already-absent file as success — the shared "clear a record"
+/// path (broker IP, light state → unknown). Only a real removal error is a failure.
+fn remove_or_absent(path: &Path) -> bool {
+    match std::fs::remove_file(path) {
         Ok(()) => true,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // already gone
         Err(e) => {
@@ -188,6 +187,15 @@ fn clear_in(dir: &Path) -> bool {
             false
         }
     }
+}
+
+fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> bool {
+    let body = format_state(host, base_ip, learned_ip);
+    atomic_write_in(dir, &state_file_in(dir), body.as_bytes())
+}
+
+fn clear_in(dir: &Path) -> bool {
+    remove_or_absent(&state_file_in(dir))
 }
 
 fn read_light_in(dir: &Path, want_where: &str) -> Option<bool> {
@@ -210,44 +218,10 @@ fn store_light_in(dir: &Path, where_: &str, on: Option<bool>) -> bool {
     let path = light_file_in(dir);
     // Unknown → remove the file (a missing file reads back as None).
     let Some(state) = on.map(|b| if b { "on" } else { "off" }) else {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-            Err(e) => {
-                eprintln!("btmqttd: persist: cannot clear {}: {e}", path.display());
-                false
-            }
-        };
-    };
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        eprintln!("btmqttd: persist: cannot create {}: {e}", dir.display());
-        return false;
-    }
-    let Some(path_str) = path.to_str() else {
-        eprintln!("btmqttd: persist: light path is not valid UTF-8");
-        return false;
+        return remove_or_absent(&path);
     };
     let body = format!("{where_}\t{state}\n");
-    match crate::receiver::create_unique_temp(path_str, body.as_bytes()) {
-        Ok(tmp) => match std::fs::rename(&tmp, path_str) {
-            Ok(()) => match std::fs::File::open(dir).and_then(|d| d.sync_all()) {
-                Ok(()) => true,
-                Err(e) => {
-                    eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
-                    false
-                }
-            },
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                eprintln!("btmqttd: persist: cannot write {path_str}: {e}");
-                false
-            }
-        },
-        Err(e) => {
-            eprintln!("btmqttd: persist: cannot create temp for {path_str}: {e}");
-            false
-        }
-    }
+    atomic_write_in(dir, &path, body.as_bytes())
 }
 
 // ---------------------------------------------------------------------------

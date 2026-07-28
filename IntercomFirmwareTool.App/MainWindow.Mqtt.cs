@@ -1339,6 +1339,16 @@ namespace IntercomFirmwareTool.App
                             return L("MqttHint_HaNodeId");
             }
 
+            // Stair-light WHERE — mirror the Core validator (Mqtt_InvalidLightWhere):
+            // opt-in, so an empty field is valid (feature off), but a non-empty value
+            // must be digits only (it becomes the *8*21*<WHERE>## actuator address). Fail
+            // here rather than let Build enable and then abort with the Core popup.
+            {
+                string where = TxtMqttLightWhere.Text.Trim();
+                if (where.Length > 0 && !where.All(char.IsAsciiDigit))
+                    return L("MqttHint_LightWhere");
+            }
+
             return null;
         }
 

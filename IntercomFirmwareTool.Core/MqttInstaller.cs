@@ -175,7 +175,9 @@ namespace IntercomFirmwareTool.Core
         /// Stair-light SWITCH (opt-in): the WHO=8 actuator WHERE, digits only (e.g.
         /// <c>112</c>). Installation-specific — the same door-entry "light button" WHAT
         /// (21/22) drives whatever WHERE the building wired. NULL/empty ⇒ the light entity
-        /// is NOT emitted and no light conf is written (feature off). The actuator is a
+        /// is DISABLED (no active switch): <c>LIGHT_WHERE</c> is still written (empty) and
+        /// <c>TOPIC_LIGHT</c> stays configured, and the retained <c>light.json</c> discovery
+        /// config is tombstoned so btmqttd clears any stale entity. The actuator is a
         /// stateless toggle (firmware-confirmed), so btmqttd tracks + persists the state;
         /// there is no readable state to poll.
         /// </summary>
