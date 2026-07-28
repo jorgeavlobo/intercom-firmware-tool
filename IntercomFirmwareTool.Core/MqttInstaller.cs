@@ -189,7 +189,7 @@ namespace IntercomFirmwareTool.Core
         //  - btmqttd: the daemon's OWN init script (start|stop|restart|status) — the
         //    single control point for the native MQTT bridge daemon.
         //  - bt_service_watchdog: supervises dropbear/scsserver/mosquitto and
-        //    respawns btmqttd via `/etc/init.d/btmqttd start`.
+        //    reconciles btmqttd via `/etc/init.d/btmqttd respawn` each pass.
         // (The whole shell bridge — StartMqttSend/Receive, keypress.sh, filter.py,
         // ha_discovery.sh, mqtt_common.sh, TcpDump2Mqtt[.sh] — is replaced by
         // btmqttd, installed as an ARM binary via PayloadBinaries. btmqttd.conf is

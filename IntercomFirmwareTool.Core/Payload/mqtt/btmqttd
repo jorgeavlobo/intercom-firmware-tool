@@ -119,7 +119,7 @@ case "$1" in
 		;;
 	status)
 		if is_running; then
-			echo "$NAME is running (PID $(daemon_pids | head -1))"
+			echo "$NAME is running (PID $(daemon_pids | head -n 1))"
 		elif [ -e "$DISABLED" ]; then
 			echo "$NAME is stopped (disabled for maintenance)"
 			exit 3
@@ -134,7 +134,7 @@ case "$1" in
 		"$0" start
 		;;
 	*)
-		echo "Usage: $0 {start|stop|status|restart}"
+		echo "Usage: $0 {start|stop|status|restart|respawn}"
 		exit 1
 		;;
 esac
