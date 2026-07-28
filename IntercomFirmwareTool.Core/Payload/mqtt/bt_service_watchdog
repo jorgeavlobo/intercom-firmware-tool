@@ -17,9 +17,8 @@
 # than a predictable world-writable /tmp path (symlink-attack safe).
 PATH=/sbin:/usr/sbin:/usr/bin:/bin
 PIDFILE=/var/run/bt_service_watchdog.pid
-LOGDIR=/var/log/tcpdump2mqtt
+LOGDIR=/var/log/btmqttd
 LOGFILE=$LOGDIR/bt_watchdog.log
-TCPLOG=$LOGDIR/tcp_log.txt
 INTERVAL=60
 
 log() { echo "$(date): $1" >> "$LOGFILE"; }
@@ -62,7 +61,6 @@ watchdog_loop() {
 	mkdir -p "$LOGDIR" 2>/dev/null
 	chmod 700 "$LOGDIR" 2>/dev/null
 	[ -L "$LOGFILE" ] && rm -f "$LOGFILE"
-	[ -L "$TCPLOG" ] && rm -f "$TCPLOG"
 
 	log "BTicino service watchdog started (PID $$)"
 	while : ; do
@@ -70,15 +68,12 @@ watchdog_loop() {
 		ensure scsserver /etc/init.d/bt_daemon-apps.sh start
 		ensure mosquitto /etc/init.d/mosquitto start
 
-		# btmqttd is the native single-connection MQTT bridge daemon (issue #32).
-		# It reads /etc/tcpdump2mqtt/TcpDump2Mqtt.conf, self-heals internally
-		# (MQTT reconnect, keypad reopen), and replaces the whole shell bridge; the
-		# watchdog only needs to (re)launch the PROCESS. `pgrep -x` matches the exact
-		# binary name.
-		if ! /usr/bin/pgrep -x btmqttd > /dev/null 2>&1; then
-			log "btmqttd not running - restarting"
-			/usr/bin/btmqttd >> "$TCPLOG" 2>&1 &
-		fi
+		# btmqttd is the native single-connection MQTT bridge daemon (issue #32),
+		# managed by its own init script (/etc/init.d/btmqttd), which reads
+		# /etc/btmqttd/btmqttd.conf. The watchdog only SUPERVISES it: if the process
+		# is gone, (re)start it via the init script — the single control point —
+		# exactly as scsserver and mosquitto are handled above.
+		ensure btmqttd /etc/init.d/btmqttd start
 
 		# Keep the log from growing without bound: trim to 50 KB past 100 KB.
 		if [ -f "$LOGFILE" ]; then

@@ -1,7 +1,7 @@
 //! Home Assistant MQTT discovery: reconcile the retained discovery configs from the
 //! installer-generated manifest. Native replacement for ha_discovery.sh.
 //!
-//! The installer writes `/etc/tcpdump2mqtt/ha/manifest` — one
+//! The installer writes `/etc/btmqttd/ha/manifest` — one
 //! `config-topic<TAB>filename` line per entity — plus the JSON payload files. When
 //! HA_DISCOVERY=1 we PUBLISH each config retained (HA auto-creates the entities);
 //! when 0 we CLEAR them (empty retained payload) so an opt-out removes them.
@@ -49,7 +49,7 @@ pub async fn reconcile(cfg: &Arc<Config>, client: &AsyncClient) {
             continue;
         }
         // Defence-in-depth: require a plain basename so a tampered filename can't
-        // escape HA_DIR (e.g. "../TcpDump2Mqtt.conf" leaking config).
+        // escape HA_DIR (e.g. "../btmqttd.conf" leaking config).
         if file.contains('/') || file == ".." {
             eprintln!("btmqttd: ha unsafe filename in manifest: {file}");
             continue;

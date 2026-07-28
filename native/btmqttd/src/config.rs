@@ -1,5 +1,5 @@
-//! Configuration: parse the same `/etc/tcpdump2mqtt/TcpDump2Mqtt.conf` the shell
-//! bridge used, so the App UI and `MqttInstaller` config generation don't change.
+//! Configuration: parse the `/etc/btmqttd/btmqttd.conf` the installer writes, so
+//! the App UI and `MqttInstaller` config generation stay in lock-step.
 //!
 //! The file is a POSIX-sh `KEY=value` fragment (the shell `source`d it). We do NOT
 //! run a shell — we parse the small, fixed set of keys the installer writes:
@@ -10,14 +10,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-pub const DEFAULT_CFG_PATH: &str = "/etc/tcpdump2mqtt/TcpDump2Mqtt.conf";
+pub const DEFAULT_CFG_PATH: &str = "/etc/btmqttd/btmqttd.conf";
 
 /// The OpenWebNet gateway's command-injection port (raw frames received over MQTT
 /// are forwarded here). Fixed, as in StartMqttReceive (`OWN_PORT=30006`).
 pub const OWN_PORT_CMD: u16 = 30006;
 
 /// Directory holding the Home Assistant discovery manifest + payloads.
-pub const HA_DIR: &str = "/etc/tcpdump2mqtt/ha";
+pub const HA_DIR: &str = "/etc/btmqttd/ha";
 
 #[derive(Debug, Clone)]
 pub struct Config {
