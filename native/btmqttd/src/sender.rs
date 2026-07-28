@@ -66,14 +66,20 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// exactly the missed-terminal-frame case.
 const CALL_STATE_POLL: Duration = Duration::from_secs(30);
 
-/// Arm/disarm the call-state reconcile marker from a freshly-known state `code`: idle (`0`)
-/// disarms it; any non-idle code (re)arms it with the code and the current instant (which
-/// also resets the poll timer).
-fn update_call_watch(watch: &mut Option<(u8, tokio::time::Instant)>, code: u8) {
+/// The call-state reconcile marker: `(last-known state, poll instant)`, or `None` when
+/// idle (disarmed). The inner `Option<u8>` is `Some(code)` for a known non-idle state and
+/// `None` for "unknown" — armed after a reconnect whose authoritative read failed, so the
+/// poll loop reconciles without ever publishing a state we didn't actually read.
+type CallWatch = Option<(Option<u8>, tokio::time::Instant)>;
+
+/// Arm/disarm the reconcile marker from a freshly-KNOWN state `code`: idle (`0`) disarms
+/// it; any non-idle code (re)arms it with the code and the current instant (which also
+/// resets the poll timer).
+fn update_call_watch(watch: &mut CallWatch, code: u8) {
     *watch = if code == 0 {
         None
     } else {
-        Some((code, tokio::time::Instant::now()))
+        Some((Some(code), tokio::time::Instant::now()))
     };
 }
 
@@ -136,23 +142,26 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
     // Reconcile the retained call state AUTHORITATIVELY on every (re)connect: query the
     // gateway (`*#8**35##`) for the REAL state rather than blindly assuming idle, so a call
     // genuinely in progress across a monitor reconnect is preserved instead of being wrongly
-    // cleared. Fall back to idle only if the query yields nothing (session refused / no
-    // reply) — the safe default. Done BEFORE draining the buffered frames below, so a newer
-    // transition that arrived with the ACK still wins. (Volume/mute reconcile via resync().)
-    let initial_state = match dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await {
-        Ok(Some(code)) => code,
-        Ok(None) | Err(_) => 0,
-    };
-    publish_call_state(cfg, client, initial_state).await;
-
-    // Reconcile marker: (last-known state code, poll instant). Armed while non-idle so the
-    // read loop below periodically re-queries the authoritative state and corrects a missed
-    // transition; idle starts it disarmed.
-    let mut call_watch: Option<(u8, tokio::time::Instant)> = if initial_state == 0 {
-        None
-    } else {
-        Some((initial_state, tokio::time::Instant::now()))
-    };
+    // cleared. Done BEFORE draining the buffered frames below, so a newer transition that
+    // arrived with the ACK still wins. (Volume/mute reconcile via resync() below.)
+    //
+    // On a FAILED read (session refused / no reply) do NOT fabricate a state — publishing
+    // idle here would clobber a real ringing/in_call retained from before the drop, the very
+    // case this preserves. Instead leave the retained value untouched and arm an "unknown"
+    // marker so the poll loop below re-queries and reconciles (resolving on the first
+    // successful poll or the next transition frame).
+    let mut call_watch: CallWatch =
+        match dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await {
+            Ok(Some(code)) => {
+                publish_call_state(cfg, client, code).await;
+                if code == 0 {
+                    None
+                } else {
+                    Some((Some(code), tokio::time::Instant::now()))
+                }
+            }
+            Ok(None) | Err(_) => Some((None, tokio::time::Instant::now())),
+        };
 
     // Feed ONLY the bytes AFTER the ACK to the framer, so any bus frames that arrived
     // in the same read(s) as the ACK are published while the handshake ACK and any
@@ -210,7 +219,9 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
             if since.elapsed() >= CALL_STATE_POLL {
                 match dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await {
                     Ok(Some(code)) => {
-                        if code != known {
+                        // Publish only on a real change — `known` is None ("unknown", from a
+                        // failed reconnect read) so the first successful poll always writes.
+                        if known != Some(code) {
                             publish_call_state(cfg, client, code).await;
                         }
                         update_call_watch(&mut call_watch, code);
@@ -311,12 +322,12 @@ mod tests {
     #[test]
     fn call_watch_arms_on_non_idle_and_disarms_on_idle() {
         let mut watch = None;
-        // A non-idle state arms the reconcile marker...
+        // A non-idle state arms the reconcile marker with the KNOWN code...
         update_call_watch(&mut watch, 6);
-        assert!(matches!(watch, Some((6, _))));
+        assert!(matches!(watch, Some((Some(6), _))));
         // ...a ringing phase re-arms it with the new code...
         update_call_watch(&mut watch, 2);
-        assert!(matches!(watch, Some((2, _))));
+        assert!(matches!(watch, Some((Some(2), _))));
         // ...and idle (0) disarms it (so the loop stops polling once the call ends).
         update_call_watch(&mut watch, 0);
         assert!(watch.is_none());
