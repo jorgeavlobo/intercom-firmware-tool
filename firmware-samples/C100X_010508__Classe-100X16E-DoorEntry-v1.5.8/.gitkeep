@@ -1,2 +1,15 @@
-# Placeholder so the (git-ignored) firmware folder is tracked in git.
-# Drop btweb_only.ext4.gz here — see ../README.md.
+# Placeholder so this (otherwise binary-only) firmware folder is tracked in git.
+#
+# Device : BTicino Classe 100X16E
+# App    : Door Entry
+# Version: v1.5.8 (01.05.08)
+#
+# Source : C100X_010508.fwz — the tool-recognised artifact, registered in
+#          IntercomFirmwareTool.Core/FirmwareRegistry.cs (exact size +
+#          SHA-256/MD5). https://assets.legrand.com/pim/AUTRE/C100X_010508.fwz
+#          Extract btweb_only.ext4.gz from it and drop it here.
+#
+# This is the reference image behind the sibling VERIFICATION report
+# (VERIFICATION__Classe-100X16E-DoorEntry-v1.5.8.md).
+#
+# See ../README.md ("App axis" + "Adding a new sample").

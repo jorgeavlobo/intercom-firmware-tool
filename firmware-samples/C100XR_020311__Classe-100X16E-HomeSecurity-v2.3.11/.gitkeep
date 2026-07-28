@@ -9,7 +9,10 @@
 #          SHA-256/MD5). https://assets.legrand.com/pim/AUTRE/C100XR_020311.fwz
 #          Extract btweb_only.ext4.gz from it and drop it here.
 #
-# Note   : Home + Security firmware uses the "C100XR" stem (vs "C100X" for the
-#          Door Entry app) — same 100X16E hardware, different firmware per app.
+# Note   : Determine the app from the BTicino download page / image metadata,
+#          NOT from the .fwz stem — the stem is not a reliable discriminator
+#          (e.g. C100X_010501.fwz is also Home + Security). These v2.x releases
+#          just happen to use the "C100XR" stem; same 100X16E hardware,
+#          different firmware per app.
 #
 # See ../README.md ("App axis" + "Adding a new sample").
