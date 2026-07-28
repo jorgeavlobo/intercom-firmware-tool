@@ -29,7 +29,18 @@ LOGFILE=$LOGDIR/btmqttd.log
 LOCKDIR=/var/run/btmqttd.lock
 DISABLED=/var/run/btmqttd.disabled
 
-is_running() { /usr/bin/pgrep -x "$NAME" > /dev/null 2>&1; }
+# PIDs of the actual daemon. `pgrep -x btmqttd` ALSO matches this init script's
+# own shell process — Linux sets a shebang script's comm to the script name
+# ("btmqttd") — so a bare match would make is_running find the script itself and
+# never launch the daemon. Filter the candidates to those whose executable is the
+# daemon binary; the init script's /proc/PID/exe resolves to the shell, never
+# $DAEMON.
+daemon_pids() {
+	for p in $(/usr/bin/pgrep -x "$NAME" 2>/dev/null); do
+		[ "$(readlink /proc/"$p"/exe 2>/dev/null)" = "$DAEMON" ] && echo "$p"
+	done
+}
+is_running() { [ -n "$(daemon_pids)" ]; }
 
 # Acquire the mutex (mkdir is atomic). Critical sections are short (never a
 # kill+wait), so retry briefly; steal a stale lock after ~10s so a process killed
@@ -43,9 +54,12 @@ acquire() {
 }
 release() { rmdir "$LOCKDIR" 2>/dev/null; }
 
-# Send SIGTERM (or, with "-9", SIGKILL) to every btmqttd instance.
+# Signal every daemon instance. Defaults to SIGTERM; pass "-9" to force. (Without
+# a default an argument-less call would run `kill "" <pid>` — an invalid signal
+# operand that silently signals nothing.)
 kill_all() {
-	for p in $(/usr/bin/pgrep -x "$NAME" 2>/dev/null); do kill "$1" "$p" 2>/dev/null; done
+	sig=${1:--TERM}
+	for p in $(daemon_pids); do kill "$sig" "$p" 2>/dev/null; done
 }
 
 # Launch the daemon iff enabled (no marker) and not already running. Caller holds
@@ -105,7 +119,7 @@ case "$1" in
 		;;
 	status)
 		if is_running; then
-			echo "$NAME is running (PID $(/usr/bin/pgrep -x "$NAME" | head -1))"
+			echo "$NAME is running (PID $(daemon_pids | head -1))"
 		elif [ -e "$DISABLED" ]; then
 			echo "$NAME is stopped (disabled for maintenance)"
 			exit 3
