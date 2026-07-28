@@ -274,40 +274,87 @@ impl LightCtl {
 /// rather than lost with the aborted worker (Codex). Redundant writes are skipped.
 pub async fn run_persist(
     where_: String,
-    mut rx: watch::Receiver<Option<bool>>,
+    rx: watch::Receiver<Option<bool>>,
     shutdown: oneshot::Receiver<()>,
 ) {
-    // The initial value came FROM disk (the restore), so it is already durable — mark it seen
-    // so an idle shutdown doesn't rewrite it.
+    run_persist_with(rx, shutdown, move |on| {
+        let where_ = where_.clone();
+        async move { write_light(&where_, on).await }
+    })
+    .await;
+}
+
+/// The persist loop, generic over the WRITER so the durability transitions are unit-tested
+/// without touching the filesystem. Advances the "durable" marker ONLY on a successful write
+/// and retries a failed one — on a timer while idle, and again at the final flush — so a
+/// transient partition outage can't leave the on-disk record stale while the loop believes it
+/// is durable (CodeRabbit). `write(v)` returns `true` on a durable write.
+async fn run_persist_with<F, Fut>(
+    mut rx: watch::Receiver<Option<bool>>,
+    shutdown: oneshot::Receiver<()>,
+    mut write: F,
+) where
+    F: FnMut(Option<bool>) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    // How long to wait before re-attempting a failed write while otherwise idle.
+    const RETRY: Duration = Duration::from_secs(5);
+    // `written` = the value known to be DURABLE on disk. The initial came FROM disk (the
+    // restore), so it is already durable — mark it seen so an idle shutdown doesn't rewrite it.
     let mut written = *rx.borrow_and_update();
+    // Set when the latest write FAILED, so we keep retrying until it lands or a newer value
+    // supersedes it — a failed write is NEVER mistaken for durable.
+    let mut retry_pending = false;
     tokio::pin!(shutdown);
     loop {
+        let retry = async {
+            if retry_pending {
+                tokio::time::sleep(RETRY).await;
+            } else {
+                std::future::pending::<()>().await; // nothing to retry → this arm never fires
+            }
+        };
         tokio::select! {
             _ = &mut shutdown => break,
             changed = rx.changed() => {
                 if changed.is_err() {
                     break; // all senders dropped
                 }
-                let v = *rx.borrow_and_update();
-                if v != written {
-                    write_light(&where_, v).await;
-                    written = v;
-                }
+            }
+            _ = retry => {}
+        }
+        // Woken by a new value or a retry tick (shutdown / channel-close break out above).
+        let v = *rx.borrow_and_update();
+        if v != written {
+            if write(v).await {
+                written = v;
+                retry_pending = false;
+            } else {
+                retry_pending = true;
+            }
+        } else {
+            retry_pending = false;
+        }
+    }
+    // Final flush: the process is exiting, so there is no future tick — persist the latest if
+    // it isn't known-durable, retrying a few times to ride out a brief outage.
+    let v = *rx.borrow();
+    if v != written {
+        for _ in 0..3 {
+            if write(v).await {
+                break;
             }
         }
     }
-    // Final flush: a value enqueued right before the shutdown signal (or a sender drop) may
-    // not have been observed by the loop; persist it now, while the runtime is still alive.
-    let v = *rx.borrow();
-    if v != written {
-        write_light(&where_, v).await;
-    }
 }
 
-/// Persist one light state off the runtime thread (blocking fs). Best-effort.
-async fn write_light(where_: &str, on: Option<bool>) {
+/// Persist one light state off the runtime thread (blocking fs). Returns `true` on a durable
+/// write (a dropped/failed blocking task counts as a failure so it is retried).
+async fn write_light(where_: &str, on: Option<bool>) -> bool {
     let w = where_.to_string();
-    let _ = tokio::task::spawn_blocking(move || crate::persist::store_light(&w, on)).await;
+    tokio::task::spawn_blocking(move || crate::persist::store_light(&w, on))
+        .await
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -402,5 +449,38 @@ mod tests {
         // command()'s success commit runs LAST, flipping — not clobbering — the observation.
         assert_eq!(st.commit_actuation(true), Some(false));
         assert_eq!(st.on, Some(false)); // equals the relay after two toggles
+    }
+
+    #[tokio::test]
+    async fn persist_worker_retries_a_failed_write_and_never_marks_it_durable() {
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        // A writer that ALWAYS fails (simulated partition outage), counting attempts.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = watch::channel::<Option<bool>>(None);
+        let (sd_tx, sd_rx) = oneshot::channel();
+        let a = attempts.clone();
+        let worker = tokio::spawn(run_persist_with(rx, sd_rx, move |_on| {
+            let a = a.clone();
+            async move {
+                a.fetch_add(1, Relaxed);
+                false // never durable
+            }
+        }));
+        // Let the worker capture its initial (None) as the durable baseline BEFORE we enqueue
+        // a new value — otherwise it would start up already seeing Some(true) and never write.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Enqueue a toggled state; the worker attempts to persist it and fails.
+        tx.send(Some(true)).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await; // let the worker attempt once
+        // Shut down BEFORE the 5 s retry timer: the final flush must RE-attempt the still
+        // unwritten value (it was never marked durable), proving a failed write isn't mistaken
+        // for persisted — a reboot would otherwise restore a stale state.
+        let _ = sd_tx.send(());
+        let _ = worker.await;
+        assert!(
+            attempts.load(Relaxed) >= 2,
+            "a failed write must be retried (loop + shutdown-flush), got {}",
+            attempts.load(Relaxed)
+        );
     }
 }
