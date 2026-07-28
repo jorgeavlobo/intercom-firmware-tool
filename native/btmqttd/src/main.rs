@@ -27,6 +27,7 @@ mod config;
 mod dimension;
 mod ha;
 mod keys;
+mod light;
 mod lock;
 mod mdns;
 mod own;
@@ -114,6 +115,19 @@ async fn run() -> Result<(), String> {
     // volume from the bus broadcasts). All volume STATE lives here — HA is dumb.
     let volume = volume::VolumeCtl::new(&cfg, client.clone());
 
+    // Stair-light SWITCH (opt-in; only when a WHERE is configured). The actuator has no
+    // readable state, so we track the toggle and PERSIST it across reboots — restore the
+    // last known on/off here so a reboot keeps the switch correct (issue: light). `None`
+    // (feature off) threads through as no-op everywhere.
+    let light: Option<Arc<light::LightCtl>> = if cfg.light_where.is_some() {
+        let initial = tokio::task::spawn_blocking(persist::read_light)
+            .await
+            .unwrap_or(None);
+        Some(light::LightCtl::new(&cfg, client.clone(), initial))
+    } else {
+        None
+    };
+
     // Locks (issue #41) run on their OWN task, fed by a small channel: the command worker
     // enqueues a press request (which actuator) and moves on (no 300 ms block), the lock
     // task serialises each press→hold→release, and shutdown DRAINS it (drops the sender +
@@ -149,9 +163,10 @@ async fn run() -> Result<(), String> {
         let client = client.clone();
         let volume = volume.clone();
         let lock_tx = lock_tx.clone();
+        let light = light.clone();
         async move {
             while let Some(payload) = cmd_rx.recv().await {
-                receiver::dispatch(&cfg, &client, &volume, &lock_tx, &payload).await;
+                receiver::dispatch(&cfg, &client, &volume, &lock_tx, light.as_ref(), &payload).await;
             }
         }
     });
@@ -161,7 +176,8 @@ async fn run() -> Result<(), String> {
     // Keep their handles so shutdown can ABORT every MQTT-producing task before it
     // publishes the final retained `offline` — otherwise a task still in flight could
     // enqueue a publish AFTER `offline` and leave stale state retained on the broker.
-    let sender_task = tokio::spawn(sender::run(cfg.clone(), client.clone(), volume.clone()));
+    let sender_task =
+        tokio::spawn(sender::run(cfg.clone(), client.clone(), volume.clone(), light.clone()));
     let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone()));
     // Birth is split across two events: SUBSCRIBE to the command topic on ConnAck,
     // then ANNOUNCE (online + start_date + HA) only after the broker confirms the
@@ -463,6 +479,7 @@ async fn run() -> Result<(), String> {
                                 client.clone(),
                                 start_iso.clone(),
                                 volume.clone(),
+                                light.clone(),
                             )));
                         }
                     }
@@ -664,6 +681,7 @@ async fn announce(
     client: AsyncClient,
     start_iso: Arc<str>,
     volume: Arc<volume::VolumeCtl>,
+    light: Option<Arc<light::LightCtl>>,
 ) {
     if let Err(e) = client
         .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
@@ -685,6 +703,10 @@ async fn announce(
     // round-trip when discovery is off.
     if cfg.ha_discovery {
         volume.seed().await;
+        // Re-publish the tracked light state (a restarted broker dropped retained topics).
+        if let Some(light) = &light {
+            light.seed().await;
+        }
     }
 }
 

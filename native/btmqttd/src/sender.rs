@@ -14,6 +14,7 @@ use tokio::net::TcpStream;
 
 use crate::config::Config;
 use crate::dimension;
+use crate::light::LightCtl;
 use crate::own::{self, Framer};
 use crate::volume::VolumeCtl;
 
@@ -30,11 +31,16 @@ const HEALTHY_SESSION: Duration = Duration::from_secs(60);
 
 /// Run forever: (re)connect to the monitor, stream + publish frames, and on any
 /// drop back off (capped) and reconnect. Never returns under normal operation.
-pub async fn run(cfg: Arc<Config>, client: AsyncClient, volume: Arc<VolumeCtl>) {
+pub async fn run(
+    cfg: Arc<Config>,
+    client: AsyncClient,
+    volume: Arc<VolumeCtl>,
+    light: Option<Arc<LightCtl>>,
+) {
     let mut backoff = 0u64;
     loop {
         let start = tokio::time::Instant::now();
-        if let Err(e) = session(&cfg, &client, &volume).await {
+        if let Err(e) = session(&cfg, &client, &volume, light.as_ref()).await {
             eprintln!(
                 "btmqttd: monitor {}:{} unavailable: {e}",
                 cfg.own_host, cfg.own_port_mon
@@ -86,7 +92,12 @@ fn update_call_watch(watch: &mut CallWatch, code: u8) {
 /// One monitor session: connect, handshake, VALIDATE the monitor ACK, then read +
 /// publish until the socket closes (Ok) or errors. run() decides healthy-vs-backoff
 /// from how long this ran.
-async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl>) -> std::io::Result<()> {
+async fn session(
+    cfg: &Arc<Config>,
+    client: &AsyncClient,
+    volume: &Arc<VolumeCtl>,
+    light: Option<&Arc<LightCtl>>,
+) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
     sock.flush().await?;
@@ -149,7 +160,7 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
     if let Some(pos) = pre.windows(own::ACK.len()).position(|w| w == own::ACK) {
         framer.push(&pre[pos + own::ACK.len()..], &mut frames);
         for frame in frames.drain(..) {
-            if let Some(code) = publish_frame(cfg, client, volume, &frame).await {
+            if let Some(code) = publish_frame(cfg, client, volume, light, &frame).await {
                 update_call_watch(&mut call_watch, code);
             }
         }
@@ -205,7 +216,7 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
             frames.clear();
             framer.push(&buf[..n], &mut frames);
             for frame in frames.drain(..) {
-                if let Some(code) = publish_frame(cfg, client, volume, &frame).await {
+                if let Some(code) = publish_frame(cfg, client, volume, light, &frame).await {
                     update_call_watch(&mut call_watch, code);
                 }
             }
@@ -251,8 +262,17 @@ async fn publish_frame(
     cfg: &Arc<Config>,
     client: &AsyncClient,
     volume: &Arc<VolumeCtl>,
+    light: Option<&Arc<LightCtl>>,
     frame: &str,
 ) -> Option<u8> {
+    // Stair-light SWITCH state tracking: a physical panel press of the light button appears
+    // on the monitor as `*8*21*<WHERE>##`. Feed EVERY frame to the controller — it matches
+    // its own WHERE and flips the tracked state (ignoring our own toggle's echo). Cheap: a
+    // non-matching frame returns immediately. No-op when the feature is off.
+    if let Some(light) = light {
+        light.observe(frame).await;
+    }
+
     // Learn the real volume AND mute from the bus (issue #40): the unit broadcasts
     // `*#8**41*<N>##` (volume) and `*#8**33*<0|1>##` (mute/RingEnable) on the monitor
     // whenever either changes by ANY path (slider, up/down, mute, or the unit's own menu),

@@ -50,6 +50,11 @@ const DEFAULT_STATE_DIR: &str = "/home/bticino/cfg/extra/btmqttd";
 /// The state file: one line, `<host>\t<base_ip>\t<learned_ip>`.
 const STATE_FILE: &str = "broker-ip";
 
+/// The tracked stair-light on/off, one token `on`/`off` (issue: light switch). Persisted
+/// on the same reboot-persistent partition so the switch survives a reboot with the right
+/// state instead of guessing — the actuator has no readable state to re-query.
+const LIGHT_FILE: &str = "light-state";
+
 /// The state directory, honouring `$BTMQTTD_STATE_DIR` (tests/dev) like `config.rs`
 /// honours `$BTMQTTD_CONF`.
 fn state_dir() -> PathBuf {
@@ -60,6 +65,10 @@ fn state_dir() -> PathBuf {
 
 fn state_file_in(dir: &Path) -> PathBuf {
     dir.join(STATE_FILE)
+}
+
+fn light_file_in(dir: &Path) -> PathBuf {
+    dir.join(LIGHT_FILE)
 }
 
 /// The persisted state as `(file_exists, record)`, read in one pass. `file_exists` is
@@ -92,6 +101,21 @@ pub fn store(host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> bool {
 #[must_use]
 pub fn clear() -> bool {
     clear_in(&state_dir())
+}
+
+/// Read the tracked stair-light state (`Some(true)`=on / `Some(false)`=off), or `None`
+/// when unknown (no file, or unparseable). Blocking; call via `spawn_blocking`.
+pub fn read_light() -> Option<bool> {
+    read_light_in(&state_dir())
+}
+
+/// Persist the tracked stair-light state; `None` clears it (an unknown state, e.g. after a
+/// physical toggle from an unknown baseline). Atomic write + dir fsync like [`store`], so a
+/// reboot mid-write never sees a torn file. Returns `true` on success. Blocking; call via
+/// `spawn_blocking`.
+#[must_use]
+pub fn store_light(on: Option<bool>) -> bool {
+    store_light_in(&state_dir(), on)
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +182,61 @@ fn clear_in(dir: &Path) -> bool {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // already gone
         Err(e) => {
             eprintln!("btmqttd: persist: cannot clear {}: {e}", path.display());
+            false
+        }
+    }
+}
+
+fn read_light_in(dir: &Path) -> Option<bool> {
+    match std::fs::read_to_string(light_file_in(dir)) {
+        Ok(text) => match text.trim() {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        },
+        Err(_) => None,
+    }
+}
+
+fn store_light_in(dir: &Path, on: Option<bool>) -> bool {
+    let path = light_file_in(dir);
+    // Unknown → remove the file (a missing file reads back as None).
+    let Some(token) = on.map(|b| if b { "on" } else { "off" }) else {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => {
+                eprintln!("btmqttd: persist: cannot clear {}: {e}", path.display());
+                false
+            }
+        };
+    };
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        eprintln!("btmqttd: persist: cannot create {}: {e}", dir.display());
+        return false;
+    }
+    let Some(path_str) = path.to_str() else {
+        eprintln!("btmqttd: persist: light path is not valid UTF-8");
+        return false;
+    };
+    let body = format!("{token}\n");
+    match crate::receiver::create_unique_temp(path_str, body.as_bytes()) {
+        Ok(tmp) => match std::fs::rename(&tmp, path_str) {
+            Ok(()) => match std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
+                    false
+                }
+            },
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                eprintln!("btmqttd: persist: cannot write {path_str}: {e}");
+                false
+            }
+        },
+        Err(e) => {
+            eprintln!("btmqttd: persist: cannot create temp for {path_str}: {e}");
             false
         }
     }
@@ -275,6 +354,27 @@ mod tests {
         assert!(clear_in(&dir));
         assert_eq!(read_state_in(&dir, "broker.lan"), (false, None));
         assert!(clear_in(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn light_state_store_read_clear_roundtrip() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(1000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-light-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(read_light_in(&dir), None); // no file yet
+        assert!(store_light_in(&dir, Some(true)));
+        assert_eq!(read_light_in(&dir), Some(true));
+        assert!(store_light_in(&dir, Some(false)));
+        assert_eq!(read_light_in(&dir), Some(false));
+        // None clears the file → reads back as unknown.
+        assert!(store_light_in(&dir, None));
+        assert_eq!(read_light_in(&dir), None);
+        assert!(store_light_in(&dir, None)); // clearing an absent file is still success
 
         let _ = std::fs::remove_dir_all(&dir);
     }

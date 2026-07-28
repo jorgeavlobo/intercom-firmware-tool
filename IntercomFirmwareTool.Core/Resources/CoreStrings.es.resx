@@ -194,6 +194,9 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_InvalidTopic" xml:space="preserve">
     <value>Un tema MQTT está vacío o contiene un salto de línea.</value>
   </data>
+  <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
+    <value>La dirección de la luz (WHERE) debe contener solo dígitos.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} no existe en la imagen; no se puede aplicar el parche del puente MQTT.</value>
   </data>

@@ -194,6 +194,9 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_InvalidTopic" xml:space="preserve">
     <value>Ein MQTT-Topic ist leer oder enthält einen Zeilenumbruch.</value>
   </data>
+  <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
+    <value>Die Lichtadresse (WHERE) darf nur Ziffern enthalten.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} existiert im Abbild nicht; der MQTT-Brücken-Patch kann nicht angewendet werden.</value>
   </data>

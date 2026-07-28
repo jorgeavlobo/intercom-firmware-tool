@@ -24,6 +24,7 @@ use tokio::sync::Semaphore;
 use tokio::sync::mpsc::Sender;
 
 use crate::config::{Config, OWN_PORT_CMD};
+use crate::light::LightCtl;
 use crate::lock::Lock;
 use crate::own;
 use crate::volume::VolumeCtl;
@@ -72,6 +73,7 @@ pub async fn dispatch(
     client: &AsyncClient,
     vol: &Arc<VolumeCtl>,
     lock: &Sender<Lock>,
+    light: Option<&Arc<LightCtl>>,
     payload: &[u8],
 ) {
     let text = match std::str::from_utf8(payload) {
@@ -82,7 +84,7 @@ pub async fn dispatch(
         }
     };
     for record in text.split('\n') {
-        dispatch_record(cfg, client, vol, lock, record).await;
+        dispatch_record(cfg, client, vol, lock, light, record).await;
     }
 }
 
@@ -95,6 +97,7 @@ async fn dispatch_record(
     client: &AsyncClient,
     vol: &Arc<VolumeCtl>,
     lock: &Sender<Lock>,
+    light: Option<&Arc<LightCtl>>,
     record: &str,
 ) {
     // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
@@ -106,7 +109,7 @@ async fn dispatch_record(
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
-        handle_json(cfg, client, vol, lock, record).await;
+        handle_json(cfg, client, vol, lock, light, record).await;
     }
 }
 
@@ -135,6 +138,7 @@ async fn handle_json(
     client: &AsyncClient,
     vol: &Arc<VolumeCtl>,
     lock: &Sender<Lock>,
+    light: Option<&Arc<LightCtl>>,
     msg: &str,
 ) {
     let v: Value = match serde_json::from_str(msg) {
@@ -158,7 +162,7 @@ async fn handle_json(
     // categorically more dangerous (code execution). These are the payloads the HA
     // volume/lock entities publish (via command_template / payload_press).
     if let Some(action) = v.get("action").and_then(Value::as_str) {
-        handle_action(vol, lock, action, &v).await;
+        handle_action(vol, lock, light, action, &v).await;
         return;
     }
 
@@ -213,6 +217,9 @@ enum Action {
     /// Momentary door-entry lock pulse (issue #41) — the Main/Secondary Lock `button`s.
     /// The variant carries WHICH actuator so one queue/task serialises both.
     Lock(Lock),
+    /// Stair-light SWITCH desired state — `on` (`true`) / `off` (`false`). The daemon
+    /// toggles the actuator only when the tracked state differs (see `light.rs`).
+    Light(bool),
 }
 
 /// Classify a JSON action object (`{"action":<name>,"value":…}`) into an [`Action`], or
@@ -233,11 +240,22 @@ fn parse_action(action: &str, v: &Value) -> Option<Action> {
         },
         "main_lock" => Some(Action::Lock(Lock::Main)),
         "secondary_lock" => Some(Action::Lock(Lock::Secondary)),
+        "light" => match v.get("value").and_then(Value::as_str) {
+            Some("on") => Some(Action::Light(true)),
+            Some("off") => Some(Action::Light(false)),
+            _ => None,
+        },
         _ => None,
     }
 }
 
-async fn handle_action(vol: &Arc<VolumeCtl>, lock: &Sender<Lock>, action: &str, v: &Value) {
+async fn handle_action(
+    vol: &Arc<VolumeCtl>,
+    lock: &Sender<Lock>,
+    light: Option<&Arc<LightCtl>>,
+    action: &str,
+    v: &Value,
+) {
     match parse_action(action, v) {
         Some(Action::Volume(n)) => log_action_err("volume", vol.set(n).await),
         Some(Action::Mute(on)) => log_action_err("mute", vol.mute(on).await),
@@ -252,6 +270,14 @@ async fn handle_action(vol: &Arc<VolumeCtl>, lock: &Sender<Lock>, action: &str, 
                 eprintln!("btmqttd: lock press dropped — pulse queue full");
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        },
+        // Stair-light SWITCH: set the desired absolute state. The controller toggles the
+        // actuator only when the tracked state differs (no-op when already there). Ignored
+        // if the feature is off (no WHERE configured) — the action shouldn't arrive then,
+        // as the installer omits the entity, but stay defensive.
+        Some(Action::Light(on)) => match light {
+            Some(l) => l.command(on).await,
+            None => eprintln!("btmqttd: ignored 'light' action — light feature not configured"),
         },
         None => eprintln!(
             "btmqttd: ignored action {action:?} (unknown, or missing/invalid value {:?})",
@@ -650,6 +676,9 @@ mod tests {
             parse_action("secondary_lock", &json!({})),
             Some(Action::Lock(Lock::Secondary))
         );
+        // light: on/off only.
+        assert_eq!(parse_action("light", &json!({"value": "on"})), Some(Action::Light(true)));
+        assert_eq!(parse_action("light", &json!({"value": "off"})), Some(Action::Light(false)));
     }
 
     #[test]
