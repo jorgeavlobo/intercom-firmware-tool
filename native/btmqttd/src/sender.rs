@@ -139,40 +139,42 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
         }
     }
 
-    // Reconcile the retained call state AUTHORITATIVELY on every (re)connect: query the
-    // gateway (`*#8**35##`) for the REAL state rather than blindly assuming idle, so a call
-    // genuinely in progress across a monitor reconnect is preserved instead of being wrongly
-    // cleared. Done BEFORE draining the buffered frames below, so a newer transition that
-    // arrived with the ACK still wins. (Volume/mute reconcile via resync() below.)
-    //
-    // On a FAILED read (session refused / no reply) do NOT fabricate a state — publishing
-    // idle here would clobber a real ringing/in_call retained from before the drop, the very
-    // case this preserves. Instead leave the retained value untouched and arm an "unknown"
-    // marker so the poll loop below re-queries and reconciles (resolving on the first
-    // successful poll or the next transition frame).
-    let mut call_watch: CallWatch =
-        match dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await {
-            Ok(Some(code)) => {
-                publish_call_state(cfg, client, code).await;
-                if code == 0 {
-                    None
-                } else {
-                    Some((Some(code), tokio::time::Instant::now()))
-                }
-            }
-            Ok(None) | Err(_) => Some((None, tokio::time::Instant::now())),
-        };
-
-    // Feed ONLY the bytes AFTER the ACK to the framer, so any bus frames that arrived
-    // in the same read(s) as the ACK are published while the handshake ACK and any
-    // pre-ACK banner/chatter are NOT framed (feeding all of `pre` could otherwise let
-    // stray pre-ACK bytes merge into a garbage frame). We got here only on ACK, so the
-    // search succeeds; slice past the first ACK occurrence.
+    // Drain the ACK-buffered frames FIRST. Any bus frame that arrived in the same read(s)
+    // as the ACK is framed and published here; the handshake ACK and any pre-ACK banner are
+    // NOT framed (feeding all of `pre` could let stray pre-ACK bytes merge into a garbage
+    // frame). We got here only on ACK, so the search succeeds; slice past the first ACK.
+    // These bytes were read BEFORE the authoritative GET below, so the GET must run AFTER
+    // them to have the FINAL say — a stale pre-GET call-state frame must not override it.
+    let mut call_watch: CallWatch = None;
     if let Some(pos) = pre.windows(own::ACK.len()).position(|w| w == own::ACK) {
         framer.push(&pre[pos + own::ACK.len()..], &mut frames);
         for frame in frames.drain(..) {
             if let Some(code) = publish_frame(cfg, client, volume, &frame).await {
                 update_call_watch(&mut call_watch, code);
+            }
+        }
+    }
+
+    // Reconcile the retained call state AUTHORITATIVELY on every (re)connect: query the
+    // gateway (`*#8**35##`) for the REAL state rather than trusting the possibly-stale
+    // buffered frames above (or blindly assuming idle), so a call genuinely in progress
+    // across a monitor reconnect is preserved. Runs AFTER the buffered drain, so it is the
+    // FINAL reconciliation (like resync() for volume/mute). Publish unconditionally — this
+    // reconnect reconcile is one-shot and authoritative; the poll loop below dedups the
+    // periodic case.
+    //
+    // On a FAILED read (session refused / no reply) do NOT fabricate a state — publishing
+    // idle would clobber a real ringing/in_call. Keep whatever the buffered frames (or the
+    // pre-existing retained value) left, and ensure the poll can still reconcile: if the
+    // buffered frames left us disarmed, arm an "unknown" marker so a later poll re-queries.
+    match dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await {
+        Ok(Some(code)) => {
+            publish_call_state(cfg, client, code).await;
+            update_call_watch(&mut call_watch, code);
+        }
+        Ok(None) | Err(_) => {
+            if call_watch.is_none() {
+                call_watch = Some((None, tokio::time::Instant::now()));
             }
         }
     }
