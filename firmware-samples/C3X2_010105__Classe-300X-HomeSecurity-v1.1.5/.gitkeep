@@ -1,0 +1,18 @@
+# Placeholder so this (otherwise binary-only) firmware folder is tracked in git.
+#
+# Device : BTicino Classe 300X (article 344742, light finish; Wi-Fi 6,
+#          "smart connected") — distinct from the older Classe 300X13E (344642).
+# App    : Home + Security
+# Version: v1.1.5 (01.01.05)
+#
+# Source : C3X2_010105.fwz — download from the BTicino product / firmware page.
+#          https://www.bticino.com/products/video-door-entry-systems/2-wires-internal-solutions/classe-300x-smart-connected-video-internal-unit/bt-344742
+#          Extract btweb_only.ext4.gz from it and drop it here.
+#
+# Notes  : NOT yet registered in IntercomFirmwareTool.Core/FirmwareRegistry.cs
+#          (no size / SHA-256 on record yet — consider adding once the file is
+#          in hand). This unit also supports the Door Entry app, which ships as
+#          a separate firmware; determine the app from the download page /
+#          image metadata, not from the .fwz stem.
+#
+# See ../README.md ("App axis" + "Adding a new sample").
