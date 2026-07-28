@@ -1,0 +1,15 @@
+# Placeholder so this (otherwise binary-only) firmware folder is tracked in git.
+#
+# Device : BTicino Classe 300 EOS with Netatmo (article 344842)
+# App    : Home + Security
+# Version: v4.0.12 (04.00.12)
+#
+# Source : MX_040012.fwz — the tool-recognised artifact, registered in
+#          IntercomFirmwareTool.Core/FirmwareRegistry.cs (exact size +
+#          SHA-256/MD5). https://assets.legrand.com/pim/AUTRE/MX_040012.fwz
+#          Extract btweb_only.ext4.gz from it and drop it here.
+#
+# Notes  : "MX" is a shared platform stem, not an app discriminator — determine
+#          the app from the download page / image metadata.
+#
+# See ../README.md ("App axis" + "Adding a new sample").

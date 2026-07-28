@@ -17,8 +17,8 @@
   <data name="FR_LabelLine" xml:space="preserve">
     <value>  Line     : BTicino {0}</value>
   </data>
-  <data name="FR_LabelEdition" xml:space="preserve">
-    <value>  Edition  : {0}</value>
+  <data name="FR_LabelApp" xml:space="preserve">
+    <value>  App      : {0}</value>
   </data>
   <data name="FR_LabelVersion" xml:space="preserve">
     <value>  Version  : {0}</value>
@@ -82,7 +82,7 @@ The verified build was kept here — move/rename it manually:
     <value>The '.gz' payload inside the .fwz is not ZipCrypto-encrypted (expected traditional PKWARE encryption).</value>
   </data>
   <data name="Fwz_NoPasswordOpened" xml:space="preserve">
-    <value>None of the known passwords (C300X, C100X, SMARTDES) opened the .fwz.</value>
+    <value>None of the known passwords ({0}) opened the .fwz.</value>
   </data>
 
   <!-- ================= Ext4Probe (Ext4_) ================= -->

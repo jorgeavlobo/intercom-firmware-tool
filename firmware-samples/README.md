@@ -35,42 +35,78 @@ One sub-folder per firmware image, holding its `btweb_only.ext4.gz`:
 firmware-samples/
 ├── README.md                                   ← this file
 ├── .gitignore                                  ← keeps binaries out of git
-└── <FWZ-STEM>__<Line>-<Model>-v<Version>/
+└── <FWZ-STEM>__<Commercial-Ref>-<App>-v<Version>/
     └── btweb_only.ext4.gz                       (git-ignored)
 ```
 
-- **`<FWZ-STEM>`** — the original `.fwz` filename without extension, so the
-  folder always ties back to the exact source file.
-- **`<Line>-<Model>-v<Version>`** — the human-readable decode of that stem.
+- **`<FWZ-STEM>`** — the original `.fwz`/`.bin` filename stem (e.g.
+  `C100X_010508`), so the folder always ties back to the exact source file.
+- **`<Commercial-Ref>`** — the full commercial reference (e.g. `Classe-100X16E`,
+  `Classe-300X13E`), **not** just the short model code.
+- **`<App>`** — the paired mobile app (`DoorEntry` or `HomeSecurity`), PascalCase.
+- **`v<Version>`** — the firmware version.
 
-Decoding the stem `C100X_010508`:
+> **App axis (important).** BTicino ships the **same hardware** (e.g. Classe
+> 100X16E / 300X13E) with **different firmware depending on the paired mobile
+> app** — **Door Entry** or **Home + Security**. The `.fwz`/`.bin` stem does
+> **not** encode the app, so the folder name carries it explicitly
+> (`DoorEntry` / `HomeSecurity`). Determine it from the BTicino download page and
+> confirm it in the image — e.g. the GUI's `MainPage.qml` shows `"Door Entry …
+> App"`, and `etc/init.d/fwr_upgrade.sh` names the hardware bin (`C100X16E_hw*.bin`).
 
-| Part      | Meaning                          |
-| --------- | -------------------------------- |
-| `C100X`   | BTicino **Classe 100X16E** (model) |
-| `010508`  | firmware **v1.5.8** (`01.05.08`) |
+Decoding the folder `C100X_010508__Classe-100X16E-DoorEntry-v1.5.8`:
+
+| Part             | Meaning                                             |
+| ---------------- | --------------------------------------------------- |
+| `C100X_010508`   | FWZ stem — model code `C100X`, firmware `010508`    |
+| `Classe-100X16E` | commercial reference **Classe 100X16E**             |
+| `DoorEntry`      | paired app **Door Entry** (vs `HomeSecurity`)       |
+| `v1.5.8`         | firmware **v1.5.8** (`01.05.08`)                    |
 
 ## Catalog
 
-| Folder                                   | Source `.fwz`        | Device                         | Firmware |
-| ---------------------------------------- | -------------------- | ------------------------------ | -------- |
-| `C100X_010508__Classe-100X16E-v1.5.8/`      | `C100X_010508.fwz`   | BTicino Classe 100X16E           | v1.5.8   |
+| Folder                                                | Source               | Device                  | App             | Firmware |
+| ----------------------------------------------------- | -------------------- | ----------------------- | --------------- | -------- |
+| `C100X_010508__Classe-100X16E-DoorEntry-v1.5.8/`      | `C100X_010508.fwz`   | BTicino Classe 100X16E  | Door Entry      | v1.5.8   |
+| `C100XR_020012__Classe-100X16E-HomeSecurity-v2.0.12/` | `C100XR_020012.fwz`  | BTicino Classe 100X16E  | Home + Security | v2.0.12  |
+| `C100XR_020311__Classe-100X16E-HomeSecurity-v2.3.11/` | `C100XR_020311.fwz`  | BTicino Classe 100X16E  | Home + Security | v2.3.11  |
+| `C300X_010719__Classe-300X13E-DoorEntry-v1.7.19/`     | `C300X_010719.fwz`   | BTicino Classe 300X13E  | Door Entry      | v1.7.19  |
+| `C3X2_010105__Classe-300X-HomeSecurity-v1.1.5/`       | `C3X2_010105.fwz`    | BTicino Classe 300X (344742/344743) | Home + Security | v1.1.5   |
+| `MX_040012__Classe-300EOS-HomeSecurity-v4.0.12/`      | `MX_040012.fwz`      | BTicino Classe 300 EOS (344842/344884) | Home + Security | v4.0.12  |
 
-_(Add a row per image.)_
+_(Add a row per image. Same hardware + different app = a **separate** row, since
+the firmware differs — see the App axis above. The **App** column shows the
+human-readable app name — `Door Entry` / `Home + Security` — while the **folder**
+name uses the filesystem-safe PascalCase token `DoorEntry` / `HomeSecurity`.)_
+
+> ℹ️ **300X13E Door Entry v1.7.19** — the tool-recognised source is
+> **`C300X_010719.fwz`**, registered in
+> [`IntercomFirmwareTool.Core/FirmwareRegistry.cs`](../IntercomFirmwareTool.Core/FirmwareRegistry.cs)
+> with its exact size + SHA-256/MD5. The folder is a placeholder awaiting the
+> extracted `btweb_only.ext4.gz`. (Legrand also publishes the same release as an
+> OTA `.bin`, `bt_344642_3_0_0-c300x_010719_1_7_19.bin` — but use the registered
+> `.fwz`, which is the artifact the tool verifies.)
+
+> ℹ️ **`C3X2_010105` (Classe 300X 344742)** and **`MX_040012` (Classe 300 EOS
+> 344842)** are registered in `FirmwareRegistry.cs` (exact size + SHA-256/MD5),
+> both **Home + Security**. (344742's `Classe 300X` is the newer Wi-Fi 6 unit,
+> distinct from the older `Classe 300X13E` at 344642.)
 
 ## Adding a new sample
 
-1. Take the original `<NAME>.fwz`.
+1. Take the original `<NAME>.fwz` (or `.bin` for OTA images).
 2. Open it with 7-Zip (or any ZIP tool) using the password (the model code, e.g.
    `C100X`) and extract **`btweb_only.ext4.gz`**.
-3. Create `firmware-samples/<NAME>__<Line>-<Model>-vX.Y.Z/` and drop the
+3. Identify the paired **app** (`DoorEntry` / `HomeSecurity`) — from the BTicino
+   download page and/or the image (see the App axis above).
+4. Create `firmware-samples/<NAME>__<Commercial-Ref>-<App>-vX.Y.Z/` and drop the
    `btweb_only.ext4.gz` inside.
-4. Add a row to the [Catalog](#catalog) above.
+5. Add a row to the [Catalog](#catalog) above.
 
 ## Extracting / inspecting the ext4 (Linux / WSL)
 
 ```sh
-cd firmware-samples/C100X_010508__Classe-100X16E-v1.5.8
+cd firmware-samples/C100X_010508__Classe-100X16E-DoorEntry-v1.5.8
 gunzip -k btweb_only.ext4.gz                 # -> btweb_only.ext4 (keeps the .gz)
 mkdir -p mnt
 sudo mount -o loop,ro btweb_only.ext4 mnt    # read-only

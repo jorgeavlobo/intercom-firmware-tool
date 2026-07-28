@@ -1,0 +1,17 @@
+# Placeholder so this (otherwise binary-only) firmware folder is tracked in git.
+#
+# Device : BTicino Classe 300X (article 344742, light finish; Wi-Fi 6,
+#          "smart connected") — distinct from the older Classe 300X13E (344642).
+# App    : Home + Security
+# Version: v1.1.5 (01.01.05)
+#
+# Source : C3X2_010105.fwz — the tool-recognised artifact, registered in
+#          IntercomFirmwareTool.Core/FirmwareRegistry.cs (exact size +
+#          SHA-256/MD5). https://assets.legrand.com/pim/AUTRE/C3X2_010105.fwz
+#          Extract btweb_only.ext4.gz from it and drop it here.
+#
+# Notes  : This unit also supports the Door Entry app, which ships as a separate
+#          firmware; determine the app from the download page / image metadata,
+#          not from the .fwz stem.
+#
+# See ../README.md ("App axis" + "Adding a new sample").

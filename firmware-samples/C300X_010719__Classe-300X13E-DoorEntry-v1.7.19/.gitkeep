@@ -1,0 +1,14 @@
+# Placeholder so this (otherwise binary-only) firmware folder is tracked in git.
+#
+# Device : BTicino Classe 300X13E
+# App    : Door Entry
+# Version: v1.7.19 (01.07.19)
+#
+# Source : C300X_010719.fwz — the tool-recognised artifact, registered in
+#          IntercomFirmwareTool.Core/FirmwareRegistry.cs (exact size +
+#          SHA-256/MD5). https://assets.legrand.com/pim/AUTRE/C300X_010719.fwz
+#          Extract btweb_only.ext4.gz from it and drop it here.
+#          (Legrand also publishes an OTA .bin of the same release,
+#          bt_344642_3_0_0-c300x_010719_1_7_19.bin — prefer the registered .fwz.)
+#
+# See ../README.md ("App axis" + "Adding a new sample").

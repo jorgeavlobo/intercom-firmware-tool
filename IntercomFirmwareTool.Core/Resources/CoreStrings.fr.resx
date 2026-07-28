@@ -17,8 +17,8 @@
   <data name="FR_LabelLine" xml:space="preserve">
     <value>  Ligne    : BTicino {0}</value>
   </data>
-  <data name="FR_LabelEdition" xml:space="preserve">
-    <value>  Édition  : {0}</value>
+  <data name="FR_LabelApp" xml:space="preserve">
+    <value>  App      : {0}</value>
   </data>
   <data name="FR_LabelVersion" xml:space="preserve">
     <value>  Version  : {0}</value>
@@ -82,7 +82,7 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
     <value>La charge utile '.gz' à l'intérieur du .fwz n'est pas chiffrée en ZipCrypto (chiffrement PKWARE traditionnel attendu).</value>
   </data>
   <data name="Fwz_NoPasswordOpened" xml:space="preserve">
-    <value>Aucun des mots de passe connus (C300X, C100X, SMARTDES) n'a ouvert le .fwz.</value>
+    <value>Aucun des mots de passe connus ({0}) n'a ouvert le .fwz.</value>
   </data>
 
   <!-- ================= Ext4Probe (Ext4_) ================= -->
