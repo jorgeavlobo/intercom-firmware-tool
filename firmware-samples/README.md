@@ -69,6 +69,7 @@ Decoding the folder `C100X_010508__Classe-100X16E-DoorEntry-v1.5.8`:
 | ----------------------------------------------------- | -------------------- | ----------------------- | --------------- | -------- |
 | `C100X_010508__Classe-100X16E-DoorEntry-v1.5.8/`      | `C100X_010508.fwz`   | BTicino Classe 100X16E  | Door Entry      | v1.5.8   |
 | `C100XR_020012__Classe-100X16E-HomeSecurity-v2.0.12/` | `C100XR_020012.fwz`  | BTicino Classe 100X16E  | Home + Security | v2.0.12  |
+| `C100XR_020308__Classe-100X16E-HomeSecurity-v2.3.8/`  | `C100XR_020308.fwz`  | BTicino Classe 100X16E  | Home + Security | v2.3.8   |
 | `C100XR_020311__Classe-100X16E-HomeSecurity-v2.3.11/` | `C100XR_020311.fwz`  | BTicino Classe 100X16E  | Home + Security | v2.3.11  |
 | `C300X_010719__Classe-300X13E-DoorEntry-v1.7.19/`     | `C300X_010719.fwz`   | BTicino Classe 300X13E  | Door Entry      | v1.7.19  |
 | `C3X2_010105__Classe-300X-HomeSecurity-v1.1.5/`       | `C3X2_010105.fwz`    | BTicino Classe 300X (344742/344743) | Home + Security | v1.1.5   |
