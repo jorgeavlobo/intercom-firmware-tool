@@ -140,14 +140,18 @@ impl LightCtl {
         })
     }
 
-    /// Publish the cached state, RETAINED, so HA reflects it. `on`/`off`; an unknown
-    /// (`None`) state publishes nothing, leaving HA to show the switch unavailable until the
-    /// first command or observed toggle establishes it.
+    /// Publish the cached state, RETAINED, so HA reflects it. `on`/`off` for a known state;
+    /// an unknown (`None`) state publishes an EMPTY retained payload, which DELETES the
+    /// broker's retained value (MQTT: a zero-length retained message clears the topic) so HA
+    /// shows the switch as unknown. Clearing on unknown matters after a `LIGHT_WHERE` change:
+    /// `read_light` returns `None` for the new actuator, and without this the broker would
+    /// keep serving the OLD actuator's retained `on`/`off`, so HA would display a stale state
+    /// instead of unknown until the first toggle (Codex).
     async fn publish(&self, on: Option<bool>) {
         let payload = match on {
             Some(true) => "on",
             Some(false) => "off",
-            None => return,
+            None => "", // empty retained → clears any stale retained value; HA shows unknown
         };
         if let Err(e) = self
             .client
@@ -159,9 +163,10 @@ impl LightCtl {
     }
 
     /// On-connect (re)publish of the retained state — a restarted broker dropped retained
-    /// topics, so re-send the known state (no-op while still unknown). Serialized with the
-    /// command/observe side effect so a reconnect seed can't interleave with a live toggle's
-    /// publish and momentarily retain a stale value.
+    /// topics, so re-send the known state (or, while unknown, an empty retained payload that
+    /// clears any stale value the broker still holds — e.g. from a previous `LIGHT_WHERE`).
+    /// Serialized with the command/observe side effect so a reconnect seed can't interleave
+    /// with a live toggle's publish and momentarily retain a stale value.
     pub async fn seed(&self) {
         let _io = self.io_lock.lock().await;
         let on = self.st.lock().await.on;
@@ -176,12 +181,22 @@ impl LightCtl {
     /// leave a stale value that a reboot would then restore (Codex). Persist I/O is
     /// best-effort and offloaded to the blocking pool; a failed write just means a reboot
     /// may restore a slightly older state, which the next toggle corrects.
+    ///
+    /// The persist is SPAWNED before the publish: a spawned blocking task runs to completion
+    /// even if THIS (`cmd_worker`) task is aborted at shutdown, and the stretch from a
+    /// successful `forward` to this spawn is yield-free under uncontended locks — so once a
+    /// command has toggled the relay the on-disk record is written even if SIGTERM lands
+    /// right after, closing the window where the relay toggled but the persisted state didn't
+    /// catch up (Codex). The blocking write finishes within `main`'s shutdown drive-loop,
+    /// while the runtime is still alive. Publishing (network I/O, the first real yield point)
+    /// happens after the write is already in flight.
     async fn commit_and_persist(&self) {
         let _io = self.io_lock.lock().await;
         let on = self.st.lock().await.on;
-        self.publish(on).await;
         let where_ = self.where_.clone();
-        let _ = tokio::task::spawn_blocking(move || crate::persist::store_light(&where_, on)).await;
+        let persist = tokio::task::spawn_blocking(move || crate::persist::store_light(&where_, on));
+        self.publish(on).await;
+        let _ = persist.await;
     }
 
     /// HA commanded a desired ABSOLUTE state (`on`/`off`). Toggle the relay ONLY when it
