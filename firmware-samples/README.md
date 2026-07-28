@@ -6,10 +6,12 @@ and other on-device payloads (e.g. confirming which runtime tools a given model
 / firmware version actually ships, before a build is accepted by
 `MqttInstaller.ValidateMqtt`).
 
-> ⚠️ **The firmware binaries themselves are NOT committed to this repository** —
-> see [Redistribution & git](#redistribution--git) below. This folder tracks
-> only the **structure + this documentation**; each person drops their own
-> extracted files into the matching sub-folder locally.
+> ⚠️ **These are proprietary BTicino firmware images.** The extracted
+> `btweb_only.ext4.gz` reference samples **are committed to this repository by a
+> deliberate maintainer choice** (see [Redistribution & git](#redistribution--git)
+> below), so analysis — and a remote Claude Code session, which works from a fresh
+> clone — has them on hand. Anyone forking / redistributing should be aware the
+> images are proprietary.
 
 ## What a `.fwz` actually is
 
@@ -34,9 +36,9 @@ One sub-folder per firmware image, holding its `btweb_only.ext4.gz`:
 ```
 firmware-samples/
 ├── README.md                                   ← this file
-├── .gitignore                                  ← keeps binaries out of git
+├── .gitignore                                  ← tracks structure + docs (binary-ignore rules disabled)
 └── <FWZ-STEM>__<Commercial-Ref>-<App>-v<Version>/
-    └── btweb_only.ext4.gz                       (git-ignored)
+    └── btweb_only.ext4.gz                       (committed reference sample)
 ```
 
 - **`<FWZ-STEM>`** — the original `.fwz`/`.bin` filename stem (e.g.
@@ -118,32 +120,33 @@ sudo umount mnt
 (On Windows without WSL, the app's own **Inspect** function reads the ext4 via
 DiscUtils; or use a tool like `ext2read`/`7-Zip` with an ext4 plugin.)
 
-The uncompressed `btweb_only.ext4` and the `mnt/` mount point are **also
-git-ignored** — only the compressed `.gz` sample is meant to live here, and even
-that is ignored by default (below).
+The uncompressed `btweb_only.ext4` and the `mnt/` mount point are **git-ignored**
+— only the compressed `.gz` sample is committed here; the uncompressed image and
+the mount point stay local (see below).
 
 ## Redistribution & git
 
-BTicino firmware is **proprietary, copyrighted software**. It must **not** be
-committed to a public repository (redistribution), and large binary blobs bloat
-git history permanently. Therefore:
+BTicino firmware is **proprietary, copyrighted software**. By a **deliberate
+maintainer choice**, the extracted `btweb_only.ext4.gz` reference samples are
+nonetheless **committed to this repository**, so analysis — and a remote Claude
+Code session, which works from a *fresh clone* — has the images on hand without a
+separate transfer. Be aware of the trade-offs of that choice:
 
-- `.gitignore` in this folder excludes `*.gz`, `*.ext4`, `*.fwz`, `*.img` — the
-  firmware binaries **stay local** and are never pushed.
-- Only this `README.md`, the `.gitignore`, and the (empty) folder structure are
-  tracked.
+- The binaries are **proprietary** — anyone **forking or redistributing** this
+  repo redistributes them too.
+- Large binary blobs live in git history **permanently**.
 
-**For Claude to analyze an image in a session:** because a remote Claude Code
-session works from a *fresh clone*, git-ignored local files never reach it. So
-sharing an image for analysis needs one of:
+Accordingly, the `.gitignore` in this folder **intentionally leaves the `*.fwz` /
+`*.gz` / `*.ext4` / `*.ext4.gz` rules disabled** (commented out) so the `.gz`
+samples are tracked; it still ignores `*.img` and the local `mnt/` mount point,
+and always keeps `README.md`, `.gitignore` and each `.gitkeep`.
+
+**For Claude to analyze an image in a session:** because the `.gz` samples are
+committed, a fresh-clone session already has them — no extra step is needed. If
+you would rather **not** commit a particular image, re-enable the ignore rules for
+it and instead either:
 
 1. **Paste inspection output** — run the commands above (or the firmware-audit
-   prompt) and paste the results. Best for a public repo; no firmware leaves your
-   machine.
-2. **A private data repo** — if you want Claude to read the raw ext4 directly,
-   put the images in a **private** repository (never this public one) and add it
-   to the session. Only do this where redistribution of the proprietary image is
-   acceptable to you.
-
-Do **not** remove the `.gitignore` entries to "just commit them" on the public
-repo.
+   prompt) and paste the results; no firmware leaves your machine.
+2. **Add a private data repo** — put that image in a **private** repository and
+   add it to the session.

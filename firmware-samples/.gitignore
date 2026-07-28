@@ -1,14 +1,17 @@
-# Proprietary BTicino firmware images must never be committed (copyright /
-# redistribution) and would bloat git history. Keep only the folder structure
-# and docs; the extracted binaries stay local. See README.md → "Redistribution & git".
+# The extracted `btweb_only.ext4.gz` reference samples ARE committed to this repo
+# by deliberate maintainer choice (so analysis / a fresh-clone session has them on
+# hand). The binary-ignore rules for the BTicino images are therefore intentionally
+# left DISABLED (commented out) below. Note these are proprietary BTicino images —
+# anyone forking / redistributing should be aware. See README.md → "Redistribution & git".
 #*.fwz
 #*.gz
 #*.ext4
 #*.ext4.gz
+# Still ignored: the uncompressed image (kept local) and the local mount point.
 *.img
 mnt/
 
-# ...but keep the structure and docs tracked.
+# Always keep the structure and docs tracked.
 !.gitignore
 !README.md
 !**/.gitkeep
