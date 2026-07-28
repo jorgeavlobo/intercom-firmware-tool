@@ -82,7 +82,7 @@ The verified build was kept here — move/rename it manually:
     <value>The '.gz' payload inside the .fwz is not ZipCrypto-encrypted (expected traditional PKWARE encryption).</value>
   </data>
   <data name="Fwz_NoPasswordOpened" xml:space="preserve">
-    <value>None of the known passwords (C300X, C100X, SMARTDES, C3X2, MX) opened the .fwz.</value>
+    <value>None of the known passwords ({0}) opened the .fwz.</value>
   </data>
 
   <!-- ================= Ext4Probe (Ext4_) ================= -->

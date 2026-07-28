@@ -649,7 +649,7 @@ namespace IntercomFirmwareTool.Core
             }
             if (goodPassword is null)
                 throw new InvalidOperationException(
-                    CoreStrings.Get("Fwz_NoPasswordOpened"));
+                    CoreStrings.Format("Fwz_NoPasswordOpened", string.Join(", ", Passwords)));
 
             zip.Password = goodPassword;
 

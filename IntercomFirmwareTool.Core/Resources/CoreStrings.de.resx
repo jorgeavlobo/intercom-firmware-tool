@@ -82,7 +82,7 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
     <value>Die '.gz'-Nutzlast in der .fwz ist nicht ZipCrypto-verschlüsselt (erwartet wurde die traditionelle PKWARE-Verschlüsselung).</value>
   </data>
   <data name="Fwz_NoPasswordOpened" xml:space="preserve">
-    <value>Keines der bekannten Passwörter (C300X, C100X, SMARTDES, C3X2, MX) öffnete die .fwz.</value>
+    <value>Keines der bekannten Passwörter ({0}) öffnete die .fwz.</value>
   </data>
 
   <!-- ================= Ext4Probe (Ext4_) ================= -->

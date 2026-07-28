@@ -82,7 +82,7 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
     <value>La charge utile '.gz' à l'intérieur du .fwz n'est pas chiffrée en ZipCrypto (chiffrement PKWARE traditionnel attendu).</value>
   </data>
   <data name="Fwz_NoPasswordOpened" xml:space="preserve">
-    <value>Aucun des mots de passe connus (C300X, C100X, SMARTDES, C3X2, MX) n'a ouvert le .fwz.</value>
+    <value>Aucun des mots de passe connus ({0}) n'a ouvert le .fwz.</value>
   </data>
 
   <!-- ================= Ext4Probe (Ext4_) ================= -->

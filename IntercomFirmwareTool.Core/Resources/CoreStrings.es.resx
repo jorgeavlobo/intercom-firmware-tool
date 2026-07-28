@@ -82,7 +82,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
     <value>La carga útil '.gz' dentro del .fwz no está cifrada con ZipCrypto (se esperaba el cifrado tradicional PKWARE).</value>
   </data>
   <data name="Fwz_NoPasswordOpened" xml:space="preserve">
-    <value>Ninguna de las contraseñas conocidas (C300X, C100X, SMARTDES, C3X2, MX) abrió el .fwz.</value>
+    <value>Ninguna de las contraseñas conocidas ({0}) abrió el .fwz.</value>
   </data>
 
   <!-- ================= Ext4Probe (Ext4_) ================= -->
