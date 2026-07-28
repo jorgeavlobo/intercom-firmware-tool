@@ -179,7 +179,8 @@ async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<Vol
         // Entrance-panel CALL: fire a momentary "pressed" event.
         publish_doorbell(cfg, client, where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
-        // Call STATE transition (ringing/active/idle): update the retained sensor.
+        // Call STATE transition (idle/ringing/in_call, or "active" fallback): update the
+        // retained sensor.
         publish_call_state(cfg, client, code).await;
     }
     let payload: Vec<u8> = if cfg.payload_json {
@@ -216,8 +217,9 @@ async fn publish_doorbell(cfg: &Arc<Config>, client: &AsyncClient, where_: &str)
 }
 
 /// Publish the call STATE to TOPIC_CALL_STATE, RETAINED so HA shows the current state
-/// after a reconnect/restart. The payload carries the mapped label (idle/ringing/active)
-/// plus the raw code, so the mapping can be refined once an answered call is captured.
+/// after a reconnect/restart. The payload carries the mapped label (idle/ringing/in_call,
+/// or "active" for an unmapped code — see [`dimension::call_state_label`]) plus the raw
+/// code as an attribute for finer protocol detail.
 async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
     let payload =
         serde_json::json!({ "state": dimension::call_state_label(code), "code": code }).to_string();
