@@ -4,13 +4,12 @@
 # App    : Home + Security
 # Version: v4.0.12 (04.00.12)
 #
-# Source : MX_040012.fwz — download from the BTicino product / firmware page.
-#          https://www.bticino.com/products/video-door-entry-systems/2-wires-internal-solutions/classe-300eos-smart-connected-video-internal-unit-with-netatmo/bt-344842
+# Source : MX_040012.fwz — the tool-recognised artifact, registered in
+#          IntercomFirmwareTool.Core/FirmwareRegistry.cs (exact size +
+#          SHA-256/MD5). https://assets.legrand.com/pim/AUTRE/MX_040012.fwz
 #          Extract btweb_only.ext4.gz from it and drop it here.
 #
-# Notes  : NOT yet registered in IntercomFirmwareTool.Core/FirmwareRegistry.cs
-#          (no size / SHA-256 on record yet — consider adding once the file is
-#          in hand). "MX" is a shared platform stem, not an app discriminator —
-#          determine the app from the download page / image metadata.
+# Notes  : "MX" is a shared platform stem, not an app discriminator — determine
+#          the app from the download page / image metadata.
 #
 # See ../README.md ("App axis" + "Adding a new sample").

@@ -86,9 +86,8 @@ the firmware differs — see the App axis above.)_
 > `.fwz`, which is the artifact the tool verifies.)
 
 > ℹ️ **`C3X2_010105` (Classe 300X 344742)** and **`MX_040012` (Classe 300 EOS
-> 344842)** are **not yet in `FirmwareRegistry.cs`** — no size/SHA-256 on record.
-> Their `.gitkeep` files carry the download source; consider registering them
-> once the files are in hand. (344742's `Classe 300X` is the newer Wi-Fi 6 unit,
+> 344842)** are registered in `FirmwareRegistry.cs` (exact size + SHA-256/MD5),
+> both **Home + Security**. (344742's `Classe 300X` is the newer Wi-Fi 6 unit,
 > distinct from the older `Classe 300X13E` at 344642.)
 
 ## Adding a new sample
