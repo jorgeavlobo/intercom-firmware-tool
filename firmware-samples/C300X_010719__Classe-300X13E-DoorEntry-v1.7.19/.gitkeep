@@ -1,0 +1,11 @@
+# Placeholder so this (otherwise binary-only) firmware folder is tracked in git.
+#
+# Device : BTicino Classe 300X13E
+# App    : Door Entry
+# Version: v1.7.19 (01.07.19)
+#
+# Source : OTA .bin from Legrand (extract btweb_only.ext4.gz from it and drop
+#          it here) — bt_344642_3_0_0-c300x_010719_1_7_19.bin
+#          https://prodlegrandressourcespkg.blob.core.windows.net/binarycontainer/bt_344642_3_0_0-c300x_010719_1_7_19.bin
+#
+# See ../README.md ("App axis" + "Adding a new sample").

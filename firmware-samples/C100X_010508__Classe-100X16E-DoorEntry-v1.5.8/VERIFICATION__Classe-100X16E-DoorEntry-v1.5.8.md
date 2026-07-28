@@ -1,8 +1,8 @@
-# MQTT bridge — verification against C100X v1.5.8 firmware
+# MQTT bridge — verification against Classe 100X16E (Door Entry) v1.5.8 firmware
 
 This document records an **offline, end-to-end validation** of the MQTT bridge
 (`MqttInstaller` + payload scripts + embedded ARM binaries) against the **real
-device root filesystem** of a factory **Classe 100X, firmware `010508` (v1.5.8)**.
+device root filesystem** of a factory **Classe 100X16E (Door Entry app), firmware `010508` (v1.5.8)**.
 
 The `btweb_only.ext4` in this folder was mounted read-only and every assumption
 the installer and payload make about the target was checked against what the
@@ -120,7 +120,7 @@ builtin, not a binary.
 
 ## Conclusion
 
-Against the real C100X v1.5.8 rootfs, **every** install target, patch anchor,
+Against the real Classe 100X16E (Door Entry) v1.5.8 rootfs, **every** install target, patch anchor,
 boot hook, runtime dependency, gateway path and embedded-binary ABI checks out.
 The PR #20 fix resolves the exact 5 symlinked deps that failed the build, and no
 new blocker was found. A VS2026 build of this firmware with the MQTT bridge
