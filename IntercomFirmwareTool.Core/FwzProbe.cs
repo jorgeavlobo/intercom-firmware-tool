@@ -83,8 +83,10 @@ namespace IntercomFirmwareTool.Core
     /// </summary>
     public static class FwzProbe
     {
-        // .fwz passwords per model (they are the model names themselves in fquinto).
-        private static readonly string[] Passwords = { "C300X", "C100X", "SMARTDES" };
+        // .fwz passwords per model: the model code, i.e. the alphabetic stem
+        // prefix of the .fwz name (e.g. C100X_010508.fwz -> "C100X"), as in
+        // fquinto. C3X2 = Classe 300X (344742); MX = Classe 300 EOS (344842).
+        private static readonly string[] Passwords = { "C300X", "C100X", "SMARTDES", "C3X2", "MX" };
 
         // Upper bound on the decompressed ext4 image, so a malformed/malicious
         // .gz cannot expand until the temp disk is exhausted.
