@@ -125,8 +125,8 @@ pub fn parse_mute_report(frame: &str) -> Option<bool> {
     }
 }
 
-/// WHO=8 entrance-panel CALL ("doorbell") command: `*8*1#1#4#21*<WHERE>##` (issue #61
-/// RE — captured on a live Classe 100X, matching fquinto's Classe 300X
+/// WHO=8 entrance-panel CALL ("doorbell") command: `*8*1#1#4#21*<WHERE>##` (RE —
+/// captured on a live Classe 100X, matching fquinto's Classe 300X
 /// `*8*1#1#4#21*16##`). The WHAT (`1#1#4#21`) is the stable doorbell signature; the
 /// WHERE (the entrance-panel address, e.g. `112`/`16`) varies per install, so it is
 /// NOT matched — it is returned for information.
@@ -135,7 +135,7 @@ const DOORBELL_WHAT: &str = "1#1#4#21";
 /// WHO=8 dimension carrying the CALL STATE, broadcast as a call progresses:
 /// `*#8**35*<N>*0*0##`. N = `0` idle/ended, `1` ringing (incoming); `2`/`4` were seen on
 /// an UNANSWERED call and are mapped as "active" (see [`call_state_label`]) with the raw
-/// code exposed for later refinement (issue #61 RE).
+/// code exposed for later refinement (door-entry RE).
 const CALL_STATE_DIM: &str = "35";
 
 /// Match the entrance-panel call ("doorbell") `*8*1#1#4#21*<WHERE>##` and return the
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn parses_doorbell_call_and_returns_where() {
-        // Captured on a live Classe 100X (issue #61); WHERE varies per install.
+        // Captured on a live Classe 100X; WHERE varies per install.
         assert_eq!(parse_doorbell("*8*1#1#4#21*112##"), Some("112"));
         // fquinto's Classe 300X used the SAME WHAT, a different WHERE.
         assert_eq!(parse_doorbell("*8*1#1#4#21*16##"), Some("16"));

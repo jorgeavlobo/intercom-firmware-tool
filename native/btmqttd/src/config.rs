@@ -43,7 +43,7 @@ pub struct Config {
     // extra subscription is needed — only these two state topics are new.
     pub topic_volume: String,
     pub topic_mute: String,
-    // Door-entry events (issue #61): the entrance-panel CALL ("doorbell") is published
+    // Door-entry events: the entrance-panel CALL ("doorbell") is published
     // as a momentary event (NOT retained), and the call STATE as a retained sensor. Both
     // are learned for free from the same WHO=8 monitor stream — no extra subscription.
     pub topic_doorbell: String,

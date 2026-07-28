@@ -166,7 +166,7 @@ async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<Vol
     } else if let Some(muted) = dimension::parse_mute_report(frame) {
         volume.observe_mute(muted).await;
     } else if let Some(where_) = dimension::parse_doorbell(frame) {
-        // Entrance-panel CALL (issue #61): fire a momentary "pressed" event.
+        // Entrance-panel CALL: fire a momentary "pressed" event.
         publish_doorbell(cfg, client, where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
         // Call STATE transition (ringing/active/idle): update the retained sensor.

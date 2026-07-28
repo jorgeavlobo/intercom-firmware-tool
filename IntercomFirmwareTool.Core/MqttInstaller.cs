@@ -147,11 +147,11 @@ namespace IntercomFirmwareTool.Core
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicMute"/>.</summary>
         public string? TopicMute { get; init; }
 
-        /// <summary>Momentary doorbell-event topic HA's event entity reads (issue #61).
+        /// <summary>Momentary doorbell-event topic HA's event entity reads.
         /// NULL (default) derives from the <see cref="TopicLastWill"/> namespace — see
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicDoorbell"/>.</summary>
         public string? TopicDoorbell { get; init; }
-        /// <summary>Retained call-state topic HA's sensor reads (issue #61). NULL (default)
+        /// <summary>Retained call-state topic HA's sensor reads. NULL (default)
         /// derives from the <see cref="TopicLastWill"/> namespace — see
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicCallState"/>.</summary>
         public string? TopicCallState { get; init; }
@@ -812,7 +812,7 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_VOLUME", opts.EffectiveTopicVolume));
             sb.Append(Conf("TOPIC_MUTE", opts.EffectiveTopicMute));
 
-            // Door-entry events (#61): the momentary doorbell event and the retained
+            // Door-entry events: the momentary doorbell event and the retained
             // call-state sensor btmqttd publishes from the WHO=8 monitor stream.
             sb.Append(Conf("TOPIC_DOORBELL", opts.EffectiveTopicDoorbell));
             sb.Append(Conf("TOPIC_CALL_STATE", opts.EffectiveTopicCallState));
@@ -1033,7 +1033,7 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
-            // Doorbell (issue #61): a momentary EVENT fired when the entrance-panel call is
+            // Doorbell: a momentary EVENT fired when the entrance-panel call is
             // seen on the bus (WHO=8 `*8*1#1#4#21*<WHERE>##`). `event_types` lists "pressed";
             // btmqttd publishes {"event_type":"pressed","where":…} NON-retained, so it fires
             // once per ring and never re-fires on an HA reconnect. HA reads `event_type` from
@@ -1056,7 +1056,7 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
-            // Call state (issue #61): a diagnostic SENSOR reflecting the WHO=8 dim-35 call
+            // Call state: a SENSOR reflecting the WHO=8 dim-35 call
             // state. btmqttd publishes it RETAINED as {"state":<idle|ringing|active>,
             // "code":<N>}; the template tolerates a non-JSON payload, and the raw `code` is
             // exposed as an attribute so the 2/4 -> "active" mapping can be refined once an
