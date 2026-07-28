@@ -110,11 +110,16 @@ namespace IntercomFirmwareTool.Core
         /// each other's bus/key/availability. (Auto-scoping topics from the node id is future
         /// work — see #12.)
         /// <para>MIGRATION: changing the node id (e.g. a reflash where the model-derived
-        /// default replaces a previous value) leaves the PREVIOUS node's retained discovery
-        /// configs on the broker as an orphan HA device — delete that stale device once in
-        /// HA. The installer does NOT auto-tombstone the old node: it can't tell whether the
-        /// default <c>bticino_intercom</c> belongs to THIS bridge or to another unit sharing
-        /// the broker, and blindly clearing it would wipe that other unit's entities.</para>
+        /// default replaces a previous value) leaves the PREVIOUS node's RETAINED discovery
+        /// configs on the broker, which HA keeps showing as an orphan device. To remove it,
+        /// clear those retained topics ON THE BROKER — publish an empty retained payload to
+        /// each <c>&lt;prefix&gt;/+/&lt;old-node&gt;/+/config</c> (e.g. <c>mosquitto_pub -r -n -t
+        /// …</c> per topic, or delete them in MQTT Explorer). Deleting the device inside Home
+        /// Assistant is NOT sufficient: the retained config survives on the broker and HA
+        /// re-creates the device on the next MQTT reconnect or restart. The installer does
+        /// NOT auto-clear the old node: it can't tell whether the default
+        /// <c>bticino_intercom</c> belongs to THIS bridge or to another unit sharing the
+        /// broker, and blindly clearing it would wipe that other unit's entities.</para>
         /// </summary>
         public string HaNodeId { get; init; } = "bticino_intercom";
 
