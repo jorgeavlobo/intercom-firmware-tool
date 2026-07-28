@@ -125,6 +125,52 @@ pub fn parse_mute_report(frame: &str) -> Option<bool> {
     }
 }
 
+/// WHO=8 entrance-panel CALL ("doorbell") command: `*8*1#1#4#21*<WHERE>##` (issue #61
+/// RE — captured on a live Classe 100X, matching fquinto's Classe 300X
+/// `*8*1#1#4#21*16##`). The WHAT (`1#1#4#21`) is the stable doorbell signature; the
+/// WHERE (the entrance-panel address, e.g. `112`/`16`) varies per install, so it is
+/// NOT matched — it is returned for information.
+const DOORBELL_WHAT: &str = "1#1#4#21";
+
+/// WHO=8 dimension carrying the CALL STATE, broadcast as a call progresses:
+/// `*#8**35*<N>*0*0##`. N = `0` idle/ended, `1` ringing (incoming); `2`/`4` were seen on
+/// an UNANSWERED call and are mapped as "active" (see [`call_state_label`]) with the raw
+/// code exposed for later refinement (issue #61 RE).
+const CALL_STATE_DIM: &str = "35";
+
+/// Match the entrance-panel call ("doorbell") `*8*1#1#4#21*<WHERE>##` and return the
+/// WHERE (the panel address). Returns `None` for any other frame — a different WHO=8
+/// WHAT (`*8*9#1#4*20##`), a dimension report (`*#8**…`), a command, etc.
+pub fn parse_doorbell(frame: &str) -> Option<&str> {
+    let body = frame.strip_prefix("*8*")?.strip_suffix("##")?;
+    // `*8*<WHAT>*<WHERE>##`: require the exact doorbell WHAT, then the '*' before WHERE.
+    body.strip_prefix(DOORBELL_WHAT)?.strip_prefix('*')
+}
+
+/// Parse a WHO=8 call-state report `*#8**35*<N>*0*0##` into `N`. Returns `None` for any
+/// other frame (other WHO=8 dimensions like volume `41`/mute `33`, commands, malformed).
+pub fn parse_call_state(frame: &str) -> Option<u8> {
+    let body = frame.strip_prefix("*#8**")?.strip_suffix("##")?;
+    let (dim, rest) = body.split_once('*')?;
+    if dim != CALL_STATE_DIM {
+        return None;
+    }
+    // The state is the first value field; the trailing `*0*0` sub-fields are ignored.
+    let code = rest.split('*').next()?;
+    code.parse::<u8>().ok()
+}
+
+/// Human-readable label for a call-state code (see [`parse_call_state`]): `0` idle,
+/// `1` ringing, anything else "active" (an in-progress call). The raw code travels
+/// alongside so the mapping can be refined once an ANSWERED call is captured.
+pub fn call_state_label(code: u8) -> &'static str {
+    match code {
+        0 => "idle",
+        1 => "ringing",
+        _ => "active",
+    }
+}
+
 /// Run ONE command-session operation: connect to `host:port`, open the command
 /// session, send `frame`, and collect the gateway's reply frames (dimension reports;
 /// the `*#*1##`/`*#*0##` ACK/NACK control frames are dropped by the framer) until the
@@ -284,5 +330,57 @@ mod tests {
         assert_eq!(parse_mute_report("garbage"), None);
         // And the volume parser rejects the mute dimension, keeping the two streams apart.
         assert_eq!(parse_volume_report("*#8**33*1##"), None);
+    }
+
+    #[test]
+    fn parses_doorbell_call_and_returns_where() {
+        // Captured on a live Classe 100X (issue #61); WHERE varies per install.
+        assert_eq!(parse_doorbell("*8*1#1#4#21*112##"), Some("112"));
+        // fquinto's Classe 300X used the SAME WHAT, a different WHERE.
+        assert_eq!(parse_doorbell("*8*1#1#4#21*16##"), Some("16"));
+    }
+
+    #[test]
+    fn rejects_non_doorbell_frames() {
+        // Other WHO=8 commands seen in the same capture must NOT trigger the doorbell.
+        assert_eq!(parse_doorbell("*8*9#1#4*20##"), None);
+        assert_eq!(parse_doorbell("*8*3#1#4*420##"), None);
+        assert_eq!(parse_doorbell("*8*19*20##"), None);
+        // A near-miss WHAT must not match (prefix guard).
+        assert_eq!(parse_doorbell("*8*1#1#4#210*112##"), None);
+        // Dimension reports and other WHOs are not doorbell commands.
+        assert_eq!(parse_doorbell("*#8**35*1*0*0##"), None);
+        assert_eq!(parse_doorbell("*7*55*##"), None);
+        assert_eq!(parse_doorbell("garbage"), None);
+    }
+
+    #[test]
+    fn parses_call_state_reports() {
+        // The full call sequence captured (unanswered call): 1 -> 2 -> 4 -> 0.
+        assert_eq!(parse_call_state("*#8**35*1*0*0##"), Some(1));
+        assert_eq!(parse_call_state("*#8**35*2*0*0##"), Some(2));
+        assert_eq!(parse_call_state("*#8**35*4*0*0##"), Some(4));
+        assert_eq!(parse_call_state("*#8**35*0*0*0##"), Some(0));
+    }
+
+    #[test]
+    fn rejects_non_call_state_frames() {
+        // Other WHO=8 dimensions (volume 41 / mute 33) are not the call-state dimension.
+        assert_eq!(parse_call_state("*#8**41*50##"), None);
+        assert_eq!(parse_call_state("*#8**33*1##"), None);
+        // The doorbell command is not a dimension report.
+        assert_eq!(parse_call_state("*8*1#1#4#21*112##"), None);
+        assert_eq!(parse_call_state("garbage"), None);
+        // And the volume/mute parsers reject the call-state dimension.
+        assert_eq!(parse_volume_report("*#8**35*1*0*0##"), None);
+        assert_eq!(parse_mute_report("*#8**35*1*0*0##"), None);
+    }
+
+    #[test]
+    fn call_state_labels() {
+        assert_eq!(call_state_label(0), "idle");
+        assert_eq!(call_state_label(1), "ringing");
+        assert_eq!(call_state_label(2), "active");
+        assert_eq!(call_state_label(4), "active");
     }
 }

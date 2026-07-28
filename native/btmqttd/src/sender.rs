@@ -165,6 +165,12 @@ async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<Vol
         volume.observe_volume(pct).await;
     } else if let Some(muted) = dimension::parse_mute_report(frame) {
         volume.observe_mute(muted).await;
+    } else if let Some(where_) = dimension::parse_doorbell(frame) {
+        // Entrance-panel CALL (issue #61): fire a momentary "pressed" event.
+        publish_doorbell(cfg, client, where_).await;
+    } else if let Some(code) = dimension::parse_call_state(frame) {
+        // Call STATE transition (ringing/active/idle): update the retained sensor.
+        publish_call_state(cfg, client, code).await;
     }
     let payload: Vec<u8> = if cfg.payload_json {
         match own::frame_to_json(frame) {
@@ -179,5 +185,33 @@ async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<Vol
         .await
     {
         eprintln!("btmqttd: publish bus frame failed: {e}");
+    }
+}
+
+/// Publish a momentary doorbell "pressed" event to TOPIC_DOORBELL. NOT retained: an
+/// event fires once, and a retained event would spuriously re-fire on every HA
+/// reconnect. QoS 1 so the single press is not dropped. The payload carries the HA
+/// `event_type` plus the entrance-panel WHERE (informational — it varies per install).
+async fn publish_doorbell(cfg: &Arc<Config>, client: &AsyncClient, where_: &str) {
+    let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
+    if let Err(e) = client
+        .publish(&cfg.topic_doorbell, QoS::AtLeastOnce, false, payload.into_bytes())
+        .await
+    {
+        eprintln!("btmqttd: publish doorbell event failed: {e}");
+    }
+}
+
+/// Publish the call STATE to TOPIC_CALL_STATE, RETAINED so HA shows the current state
+/// after a reconnect/restart. The payload carries the mapped label (idle/ringing/active)
+/// plus the raw code, so the mapping can be refined once an answered call is captured.
+async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
+    let payload =
+        serde_json::json!({ "state": dimension::call_state_label(code), "code": code }).to_string();
+    if let Err(e) = client
+        .publish(&cfg.topic_call_state, QoS::AtLeastOnce, true, payload.into_bytes())
+        .await
+    {
+        eprintln!("btmqttd: publish call state failed: {e}");
     }
 }
