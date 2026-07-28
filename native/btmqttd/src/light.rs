@@ -106,6 +106,13 @@ impl State {
 /// ([`command`]) and the monitor task ([`observe`]).
 pub struct LightCtl {
     st: Mutex<State>,
+    /// Serializes the publish+persist side effect ([`commit_and_persist`]). `command()` and
+    /// `observe()` run on separate tasks and each mutates `st` then publishes/persists; the
+    /// blocking write is offloaded to the (multi-threaded) blocking pool, so without this
+    /// two writes could finish OUT OF ORDER and leave a stale value on the retained topic and
+    /// the reboot-persistent record. Held while re-reading the latest state and writing, so
+    /// the last writer always wins with the final state (Codex).
+    io_lock: Mutex<()>,
     /// The configured actuator WHERE — persistence is keyed by it so a later WHERE change
     /// can't restore an unrelated relay's state.
     where_: String,
@@ -125,6 +132,7 @@ impl LightCtl {
         let where_ = cfg.light_where.clone().unwrap_or_default();
         Arc::new(LightCtl {
             st: Mutex::new(State { on: initial, expect_echo_until: None }),
+            io_lock: Mutex::new(()),
             press_frame: format!("*8*21*{where_}##"),
             where_,
             topic_light: cfg.topic_light.clone(),
@@ -151,10 +159,29 @@ impl LightCtl {
     }
 
     /// On-connect (re)publish of the retained state — a restarted broker dropped retained
-    /// topics, so re-send the known state (no-op while still unknown).
+    /// topics, so re-send the known state (no-op while still unknown). Serialized with the
+    /// command/observe side effect so a reconnect seed can't interleave with a live toggle's
+    /// publish and momentarily retain a stale value.
     pub async fn seed(&self) {
+        let _io = self.io_lock.lock().await;
         let on = self.st.lock().await.on;
         self.publish(on).await;
+    }
+
+    /// Publish the CURRENT cached state (retained) and persist it (keyed by WHERE),
+    /// SERIALIZED via `io_lock` so a physical `observe()` and an MQTT `command()` can't
+    /// reorder their writes. Crucially the state is RE-READ under the lock rather than
+    /// passed in as a snapshot, so whichever call runs last writes the FINAL state to both
+    /// the retained topic and the on-disk record — no older snapshot can finish last and
+    /// leave a stale value that a reboot would then restore (Codex). Persist I/O is
+    /// best-effort and offloaded to the blocking pool; a failed write just means a reboot
+    /// may restore a slightly older state, which the next toggle corrects.
+    async fn commit_and_persist(&self) {
+        let _io = self.io_lock.lock().await;
+        let on = self.st.lock().await.on;
+        self.publish(on).await;
+        let where_ = self.where_.clone();
+        let _ = tokio::task::spawn_blocking(move || crate::persist::store_light(&where_, on)).await;
     }
 
     /// HA commanded a desired ABSOLUTE state (`on`/`off`). Toggle the relay ONLY when it
@@ -180,9 +207,8 @@ impl LightCtl {
             self.st.lock().await.disarm_guard();
             return;
         }
-        let committed = self.st.lock().await.commit_actuation(desired_on);
-        self.publish(committed).await;
-        persist(self.where_.clone(), committed).await;
+        self.st.lock().await.commit_actuation(desired_on);
+        self.commit_and_persist().await;
     }
 
     /// Feed a monitor frame. When it is our WHERE's press (`*8*21*<WHERE>##`): if it is our
@@ -194,18 +220,10 @@ impl LightCtl {
             return;
         }
         let flipped = self.st.lock().await.apply_observe(Instant::now());
-        if let Some(new_state) = flipped {
-            self.publish(new_state).await;
-            persist(self.where_.clone(), new_state).await;
+        if flipped.is_some() {
+            self.commit_and_persist().await;
         }
     }
-}
-
-/// Persist the tracked state (keyed by WHERE) off the async runtime (blocking fs).
-/// Best-effort: a failed write just means a reboot may restore a slightly older state,
-/// which the next toggle corrects.
-async fn persist(where_: String, on: Option<bool>) {
-    let _ = tokio::task::spawn_blocking(move || crate::persist::store_light(&where_, on)).await;
 }
 
 #[cfg(test)]
