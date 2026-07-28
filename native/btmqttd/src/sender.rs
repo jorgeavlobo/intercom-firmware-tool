@@ -229,6 +229,11 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
                         update_call_watch(&mut call_watch, code);
                     }
                     Ok(None) | Err(_) => {
+                        // Retry after the interval, preserving `known` either way. The two
+                        // cases are semantically distinct but handled identically: a
+                        // `Some(code)` retry just refreshes a known non-idle probe, whereas a
+                        // `None` retry is a reconcile OBLIGATION left by a failed reconnect
+                        // read — both must keep polling until an authoritative read succeeds.
                         call_watch = Some((known, tokio::time::Instant::now()));
                     }
                 }
