@@ -998,6 +998,21 @@ namespace IntercomFirmwareTool.Core
             // per-entity availability blocks below reflect the bridge's real state.
             var entities = new List<HaEntity>();
 
+            // Legacy migration (one release, #41 → Main/Secondary Lock): the single "Gate"
+            // button (object id `gate`) that shipped in an earlier release was replaced by
+            // main_lock/secondary_lock. ha::reconcile only touches config topics present in
+            // the NEW manifest, so a prior install's retained `button/<node>/gate/config`
+            // would linger — HA would keep showing a "Gate" button whose {"action":"gate"}
+            // btmqttd no longer handles (a dead control). Tombstone it: same config topic,
+            // EMPTY retained payload = cleared. Emitted UNCONDITIONALLY (even with a concrete
+            // command topic, unlike the control tombstones below) so the migration also runs
+            // on a normal working install. SAFE — unlike a whole-node migration, this stays
+            // within THIS bridge's OWN current node/object (the multi-unit contract already
+            // requires distinct node ids), so it can't reach another bridge's device. On a
+            // fresh install the topic holds nothing, so the empty publish is a harmless
+            // no-op. Remove this entry a release after the rename has propagated.
+            entities.Add(new HaEntity("gate.json", Topic("button", "gate"), ""));
+
             // Connectivity: reports online/offline itself, so it carries NO
             // availability block (else HA would show it "unavailable" when offline
             // instead of "off").
