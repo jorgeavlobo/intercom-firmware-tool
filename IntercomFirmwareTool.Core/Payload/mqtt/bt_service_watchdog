@@ -72,8 +72,13 @@ watchdog_loop() {
 		# managed by its own init script (/etc/init.d/btmqttd), which reads
 		# /etc/btmqttd/btmqttd.conf. The watchdog only SUPERVISES it: if the process
 		# is gone, (re)start it via the init script — the single control point —
-		# exactly as scsserver and mosquitto are handled above.
-		ensure btmqttd /etc/init.d/btmqttd start
+		# exactly as scsserver and mosquitto are handled above. Honor an operator's
+		# intentional stop: `/etc/init.d/btmqttd stop` leaves a DISABLED marker that
+		# suppresses respawn until the next `start` (or a reboot). The init script's
+		# `start` takes an atomic lock, so this never races the S99zbtmqttd boot start.
+		if [ ! -e /var/run/btmqttd.disabled ]; then
+			ensure btmqttd /etc/init.d/btmqttd start
+		fi
 
 		# Keep the log from growing without bound: trim to 50 KB past 100 KB.
 		if [ -f "$LOGFILE" ]; then

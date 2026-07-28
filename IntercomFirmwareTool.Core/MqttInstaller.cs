@@ -184,7 +184,8 @@ namespace IntercomFirmwareTool.Core
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
 
-        // Two embedded payload SysV init scripts (installed 0775):
+        // Two embedded payload SysV init scripts (installed 0755 root:root — an
+        // init script needs no group-write; only the daemon binary is 0775):
         //  - btmqttd: the daemon's OWN init script (start|stop|restart|status) — the
         //    single control point for the native MQTT bridge daemon.
         //  - bt_service_watchdog: supervises dropbear/scsserver/mosquitto and
@@ -195,8 +196,8 @@ namespace IntercomFirmwareTool.Core
         // generated, not a resource.)
         private static readonly ScriptFile[] Scripts =
         {
-            new(ResourcePrefix + "btmqttd", "/etc/init.d/btmqttd", 775),
-            new(ResourcePrefix + "bt_service_watchdog", "/etc/init.d/bt_service_watchdog", 775),
+            new(ResourcePrefix + "btmqttd", "/etc/init.d/btmqttd", 755),
+            new(ResourcePrefix + "bt_service_watchdog", "/etc/init.d/bt_service_watchdog", 755),
         };
 
         // Home Assistant discovery configs: one JSON file per entity plus a manifest

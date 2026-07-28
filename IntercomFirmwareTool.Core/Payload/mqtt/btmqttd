@@ -11,7 +11,8 @@
 #                    MQTT, Home Assistant discovery, TLS. Reads
 #                    /etc/btmqttd/btmqttd.conf and self-heals internally (MQTT
 #                    reconnect, keypad reopen). Respawn across crashes is handled
-#                    by bt_service_watchdog, which invokes this script's `start`.
+#                    by bt_service_watchdog, which invokes this script's `start`
+#                    (unless the daemon was intentionally stopped - see DISABLED).
 ### END INIT INFO
 #
 # MIT-licensed, part of IntercomFirmwareTool. This init script is the single
@@ -21,11 +22,29 @@ DAEMON=/usr/sbin/btmqttd
 NAME=btmqttd
 LOGDIR=/var/log/btmqttd
 LOGFILE=$LOGDIR/btmqttd.log
+# Start mutex (atomic mkdir): serialises concurrent `start` invocations - e.g.
+# the S99zbtmqttd boot symlink racing bt_service_watchdog's first pass - so the
+# check-and-fork can never double-launch the daemon (two instances would fight
+# over the same MQTT client id).
+LOCKDIR=/var/run/btmqttd.start.lock
+# "Intentionally stopped" marker: `stop` creates it and `start` removes it; the
+# watchdog SKIPS respawn while it exists, so an operator can stop the service for
+# maintenance. On tmpfs (/var/run), so a reboot clears it and the service comes
+# back up - the standard SysV "stop is not persistent across reboot" semantic.
+DISABLED=/var/run/btmqttd.disabled
 
 is_running() { /usr/bin/pgrep -x "$NAME" > /dev/null 2>&1; }
 
 case "$1" in
 	start)
+		# Clear the maintenance stop first, so `start` (and `restart`) always
+		# re-enables the service.
+		rm -f "$DISABLED" 2>/dev/null
+		# Serialise: if another `start` holds the lock, let it win and exit.
+		if ! mkdir "$LOCKDIR" 2>/dev/null; then
+			exit 0
+		fi
+		trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT INT TERM
 		if is_running; then
 			echo "$NAME already running"
 			exit 0
@@ -44,10 +63,24 @@ case "$1" in
 		echo "done (PID $!)"
 		;;
 	stop)
+		# Record the intentional stop so the watchdog does not respawn it.
+		touch "$DISABLED" 2>/dev/null
 		printf '%s' "Stopping $NAME... "
 		pid=$(/usr/bin/pgrep -x "$NAME" 2>/dev/null)
 		if [ -n "$pid" ]; then
 			kill $pid 2>/dev/null
+			# Wait for graceful shutdown (main.rs::shutdown may flush MQTT state
+			# for a few seconds) so a following start/restart never sees a
+			# lingering PID and skips the relaunch. Bounded, then force-kill.
+			i=0
+			while is_running && [ "$i" -lt 5 ]; do
+				sleep 1
+				i=$((i + 1))
+			done
+			if is_running; then
+				kill -9 $pid 2>/dev/null
+				sleep 1
+			fi
 			echo "done"
 		else
 			echo "not running"
@@ -56,14 +89,18 @@ case "$1" in
 	status)
 		if is_running; then
 			echo "$NAME is running (PID $(/usr/bin/pgrep -x "$NAME" | head -1))"
+		elif [ -e "$DISABLED" ]; then
+			echo "$NAME is stopped (disabled for maintenance)"
+			exit 3
 		else
 			echo "$NAME is NOT running"
 			exit 1
 		fi
 		;;
 	restart)
+		# `stop` waits for the old process to exit and `start` clears the
+		# maintenance marker, so no fixed sleep or lingering-PID race here.
 		"$0" stop
-		sleep 1
 		"$0" start
 		;;
 	*)
