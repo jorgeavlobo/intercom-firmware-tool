@@ -68,14 +68,18 @@ Decoding the folder `C100X_010508__Classe-100X16E-DoorEntry-v1.5.8`:
 | Folder                                            | Source               | Device                  | App         | Firmware |
 | ------------------------------------------------- | -------------------- | ----------------------- | ----------- | -------- |
 | `C100X_010508__Classe-100X16E-DoorEntry-v1.5.8/`  | `C100X_010508.fwz`   | BTicino Classe 100X16E  | Door Entry  | v1.5.8   |
-| `C300X_010719__Classe-300X13E-DoorEntry-v1.7.19/` | `C300X_010719` (`.bin`) | BTicino Classe 300X13E | Door Entry  | v1.7.19  |
+| `C300X_010719__Classe-300X13E-DoorEntry-v1.7.19/` | `C300X_010719.fwz`   | BTicino Classe 300X13E  | Door Entry  | v1.7.19  |
 
 _(Add a row per image. Same hardware + different app = a **separate** row, since
 the firmware differs — see the App axis above.)_
 
-> ℹ️ **300X13E Door Entry v1.7.19** is distributed as an OTA `.bin`
-> (`bt_344642_3_0_0-c300x_010719_1_7_19.bin`) rather than a `.fwz`. The folder is
-> a placeholder awaiting the extracted `btweb_only.ext4.gz`.
+> ℹ️ **300X13E Door Entry v1.7.19** — the tool-recognised source is
+> **`C300X_010719.fwz`**, registered in
+> [`IntercomFirmwareTool.Core/FirmwareRegistry.cs`](../IntercomFirmwareTool.Core/FirmwareRegistry.cs)
+> with its exact size + SHA-256/MD5. The folder is a placeholder awaiting the
+> extracted `btweb_only.ext4.gz`. (Legrand also publishes the same release as an
+> OTA `.bin`, `bt_344642_3_0_0-c300x_010719_1_7_19.bin` — but use the registered
+> `.fwz`, which is the artifact the tool verifies.)
 
 ## Adding a new sample
 
