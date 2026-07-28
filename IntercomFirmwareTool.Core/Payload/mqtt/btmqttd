@@ -1,0 +1,142 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          btmqttd
+# Required-Start:    $network $remote_fs
+# Required-Stop:     $network $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: btmqttd - BTicino MQTT bridge daemon
+# Description:       Starts/stops the native single-connection MQTT bridge daemon
+#                    (issue #32): OpenWebNet bus <-> MQTT, front-panel keypad ->
+#                    MQTT, Home Assistant discovery, TLS. Reads
+#                    /etc/btmqttd/btmqttd.conf and self-heals internally. The
+#                    desired state is a marker file (DISABLED); bt_service_watchdog
+#                    reconciles the running process to it each pass via `respawn`.
+### END INIT INFO
+#
+# MIT-licensed, part of IntercomFirmwareTool. Single control point for the daemon.
+# Concurrency model: an atomic mkdir mutex (LOCKDIR) serialises the check-and-act
+# in start/stop/respawn, and the DISABLED marker records operator intent. Only an
+# explicit `start` clears the marker; the supervisor's `respawn` never does, so a
+# `stop` for maintenance is honoured until the operator starts it again (or a
+# reboot clears the tmpfs marker - the standard SysV "stop isn't persistent"
+# semantic).
+PATH=/sbin:/usr/sbin:/usr/bin:/bin
+DAEMON=/usr/sbin/btmqttd
+NAME=btmqttd
+LOGDIR=/var/log/btmqttd
+LOGFILE=$LOGDIR/btmqttd.log
+LOCKDIR=/var/run/btmqttd.lock
+DISABLED=/var/run/btmqttd.disabled
+
+# PIDs of the actual daemon. `pgrep -x btmqttd` ALSO matches this init script's
+# own shell process — Linux sets a shebang script's comm to the script name
+# ("btmqttd") — so a bare match would make is_running find the script itself and
+# never launch the daemon. Filter the candidates to those whose executable is the
+# daemon binary; the init script's /proc/PID/exe resolves to the shell, never
+# $DAEMON.
+daemon_pids() {
+	for p in $(/usr/bin/pgrep -x "$NAME" 2>/dev/null); do
+		[ "$(readlink /proc/"$p"/exe 2>/dev/null)" = "$DAEMON" ] && echo "$p"
+	done
+}
+is_running() { [ -n "$(daemon_pids)" ]; }
+
+# Acquire the mutex (mkdir is atomic). Critical sections are short (never a
+# kill+wait), so retry briefly; steal a stale lock after ~10s so a process killed
+# mid-operation cannot wedge the service forever.
+acquire() {
+	i=0
+	while ! mkdir "$LOCKDIR" 2>/dev/null; do
+		i=$((i + 1))
+		if [ "$i" -ge 10 ]; then rmdir "$LOCKDIR" 2>/dev/null; else sleep 1; fi
+	done
+}
+release() { rmdir "$LOCKDIR" 2>/dev/null; }
+
+# Signal every daemon instance. Defaults to SIGTERM; pass "-9" to force. (Without
+# a default an argument-less call would run `kill "" <pid>` — an invalid signal
+# operand that silently signals nothing.)
+kill_all() {
+	sig=${1:--TERM}
+	for p in $(daemon_pids); do kill "$sig" "$p" 2>/dev/null; done
+}
+
+# Launch the daemon iff enabled (no marker) and not already running. Caller holds
+# the lock, so this cannot race a concurrent start/stop/respawn.
+launch_if_enabled() {
+	[ -e "$DISABLED" ] && return 0
+	is_running && return 0
+	if [ -L "$LOGDIR" ] || { [ -e "$LOGDIR" ] && [ ! -d "$LOGDIR" ]; }; then
+		rm -f "$LOGDIR"
+	fi
+	mkdir -p "$LOGDIR" 2>/dev/null
+	chmod 700 "$LOGDIR" 2>/dev/null
+	[ -L "$LOGFILE" ] && rm -f "$LOGFILE"
+	"$DAEMON" >> "$LOGFILE" 2>&1 &
+}
+
+case "$1" in
+	start)
+		# Operator/boot intent: enable the service, then launch.
+		acquire
+		rm -f "$DISABLED" 2>/dev/null
+		launch_if_enabled
+		release
+		echo "$NAME started"
+		;;
+	respawn)
+		# Supervisor-only reconcile (bt_service_watchdog). Under the lock: enforce
+		# the desired state - if stopped (marker present) kill any lingering or
+		# racily-started instance; otherwise (re)launch if it is down. Never clears
+		# the marker, so it cannot undo an operator's `stop`.
+		acquire
+		if [ -e "$DISABLED" ]; then
+			kill_all
+		else
+			launch_if_enabled
+		fi
+		release
+		;;
+	stop)
+		# Operator intent: disable, then terminate. Set the marker FIRST (under the
+		# lock) so no concurrent respawn relaunches, then kill every instance and
+		# wait for graceful shutdown (main.rs::shutdown may flush MQTT for a few
+		# seconds), escalating to SIGKILL. Killing outside the lock keeps the lock
+		# hold short; the marker already suppresses respawn.
+		acquire
+		touch "$DISABLED" 2>/dev/null
+		release
+		printf '%s' "Stopping $NAME... "
+		i=0
+		while is_running && [ "$i" -lt 8 ]; do
+			kill_all
+			sleep 1
+			i=$((i + 1))
+		done
+		is_running && kill_all -9
+		echo "done"
+		;;
+	status)
+		if is_running; then
+			echo "$NAME is running (PID $(daemon_pids | head -n 1))"
+		elif [ -e "$DISABLED" ]; then
+			echo "$NAME is stopped (disabled for maintenance)"
+			exit 3
+		else
+			echo "$NAME is NOT running"
+			exit 1
+		fi
+		;;
+	restart)
+		# `stop` sets the marker + waits for exit; `start` clears it + relaunches.
+		"$0" stop
+		"$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|status|restart|respawn}"
+		exit 1
+		;;
+esac
+
+exit 0

@@ -12,7 +12,7 @@ namespace IntercomFirmwareTool.Core
     /// Options for installing the optional MQTT bridge into a firmware image.
     /// The bridge is <b>off by default</b>; the installer only runs when the user
     /// opts in. Mirrors the variables <c>btmqttd</c> reads from
-    /// <c>TcpDump2Mqtt.conf</c>.
+    /// <c>btmqttd.conf</c>.
     /// </summary>
     /// <param name="MqttHost">Broker IP (preferred) or hostname. Required.</param>
     /// <param name="MqttPort">Broker port (1..65535, default 1883).</param>
@@ -171,28 +171,33 @@ namespace IntercomFirmwareTool.Core
     /// SharpExt4 — the same offline, no-mount, verify-by-read-back approach as
     /// <see cref="Ext4Probe.EnableSsh"/>. Writes the payload scripts (from
     /// embedded resources, LF-normalized), the ARM binaries (from
-    /// <see cref="PayloadBinaries"/>), a generated <c>TcpDump2Mqtt.conf</c>, the
+    /// <see cref="PayloadBinaries"/>), a generated <c>btmqttd.conf</c>, the
     /// boot symlinks, and the two idempotent init-script patches. The input image
     /// is never touched; callers operate on a modified copy.
     /// </summary>
     public static class MqttInstaller
     {
-        private const string EtcDir = "/etc/tcpdump2mqtt";
+        private const string EtcDir = "/etc/btmqttd";
         private const string ResourcePrefix = "IntercomFirmwareTool.Core.Payload.mqtt.";
         private const long MaxEditFileBytes = 4L * 1024 * 1024; // init scripts are tiny
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
 
-        // The only embedded payload script is the SysV watchdog init: it launches
-        // and respawns the native btmqttd daemon (the whole shell bridge —
-        // StartMqttSend/Receive, keypress.sh, filter.py, ha_discovery.sh,
-        // mqtt_common.sh, TcpDump2Mqtt[.sh] — is replaced by btmqttd, installed as an
-        // ARM binary via PayloadBinaries). TcpDump2Mqtt.conf is generated (not a
-        // resource). Installed 0775.
+        // Two embedded payload SysV init scripts (installed 0755 root:root — an
+        // init script needs no group-write; only the daemon binary is 0775):
+        //  - btmqttd: the daemon's OWN init script (start|stop|restart|status) — the
+        //    single control point for the native MQTT bridge daemon.
+        //  - bt_service_watchdog: supervises dropbear/scsserver/mosquitto and
+        //    reconciles btmqttd via `/etc/init.d/btmqttd respawn` each pass.
+        // (The whole shell bridge — StartMqttSend/Receive, keypress.sh, filter.py,
+        // ha_discovery.sh, mqtt_common.sh, TcpDump2Mqtt[.sh] — is replaced by
+        // btmqttd, installed as an ARM binary via PayloadBinaries. btmqttd.conf is
+        // generated, not a resource.)
         private static readonly ScriptFile[] Scripts =
         {
-            new(ResourcePrefix + "bt_service_watchdog", "/etc/init.d/bt_service_watchdog", 775),
+            new(ResourcePrefix + "btmqttd", "/etc/init.d/btmqttd", 755),
+            new(ResourcePrefix + "bt_service_watchdog", "/etc/init.d/bt_service_watchdog", 755),
         };
 
         // Home Assistant discovery configs: one JSON file per entity plus a manifest
@@ -201,13 +206,15 @@ namespace IntercomFirmwareTool.Core
         // or clear the retained configs (HA_DISCOVERY=0).
         private const string HaDir = EtcDir + "/ha";
 
-        // Boot symlink in rc5.d. The 'z' after S99 sorts this AFTER the factory
-        // S99<Capital…> services (ASCII 'z' > any capital), so it starts once the
-        // network, dbus/avahi and the BTicino apps are already up. Only the watchdog
-        // needs a boot symlink now: its first loop iteration launches btmqttd (and it
-        // respawns it if it dies), so there is no separate bridge boot service.
+        // Boot symlinks in rc5.d. The 'z' after S99 sorts these AFTER the factory
+        // S99<Capital…> services (ASCII 'z' > any capital), so they start once the
+        // network, dbus/avahi and the BTicino apps are already up. Two services:
+        // btmqttd (its own init script) and the watchdog that supervises + respawns
+        // it. Both `start` are idempotent (they no-op if the process is already up),
+        // so the boot order between the two symlinks does not matter.
         private static readonly (string Link, string Target)[] Symlinks =
         {
+            ("/etc/rc5.d/S99zbtmqttd", "../init.d/btmqttd"),
             ("/etc/rc5.d/S99zBtServiceWatchdog", "../init.d/bt_service_watchdog"),
         };
 
@@ -272,7 +279,7 @@ namespace IntercomFirmwareTool.Core
             }
 
             // --- generated config (0600 — holds MQTT_PASS) ----------------------
-            WriteConfigFile(fs, EtcDir + "/TcpDump2Mqtt.conf", GenerateConf(opts), 600);
+            WriteConfigFile(fs, EtcDir + "/btmqttd.conf", GenerateConf(opts), 600);
 
             // --- Home Assistant discovery configs -------------------------------
             // One retained-config JSON per entity + a manifest of
@@ -562,9 +569,9 @@ namespace IntercomFirmwareTool.Core
                 // exact options generate — a true read-back. Checking only that
                 // keys are present would pass a partial/stale write or a
                 // pre-existing config with different values.
-                CheckFile(fs, checks, EtcDir + "/TcpDump2Mqtt.conf", 600);
-                string conf = fs.FileExists(EtcDir + "/TcpDump2Mqtt.conf")
-                    ? ReadAllText(fs, EtcDir + "/TcpDump2Mqtt.conf") : "";
+                CheckFile(fs, checks, EtcDir + "/btmqttd.conf", 600);
+                string conf = fs.FileExists(EtcDir + "/btmqttd.conf")
+                    ? ReadAllText(fs, EtcDir + "/btmqttd.conf") : "";
                 checks.Add(new(".conf matches the generated config for these options",
                     conf == GenerateConf(opts), ""));
 
@@ -749,7 +756,7 @@ namespace IntercomFirmwareTool.Core
         private static string GenerateConf(MqttOptions opts)
         {
             var sb = new StringBuilder();
-            sb.Append("# TcpDump2Mqtt - configuration (generated by IntercomFirmwareTool)\n");
+            sb.Append("# btmqttd - configuration (generated by IntercomFirmwareTool)\n");
             sb.Append("# Sourced by POSIX sh; installed 0600 root:root. Do not hand-edit on-device.\n\n");
 
             sb.Append(Conf("MQTT_HOST", opts.MqttHost));

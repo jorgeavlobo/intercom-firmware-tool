@@ -54,6 +54,10 @@
          fully replaced by btmqttd and no longer shipped. LF-pinned via .gitattributes;
          MqttInstaller also normalizes to LF defensively. Same Remove-then-
          EmbeddedResource + explicit LogicalName pattern as the vendor binary above. -->
+    <None Remove="Payload\mqtt\btmqttd" />
+    <EmbeddedResource Include="Payload\mqtt\btmqttd">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.btmqttd</LogicalName>
+    </EmbeddedResource>
     <None Remove="Payload\mqtt\bt_service_watchdog" />
     <EmbeddedResource Include="Payload\mqtt\bt_service_watchdog">
       <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.bt_service_watchdog</LogicalName>
