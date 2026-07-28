@@ -112,9 +112,13 @@ namespace IntercomFirmwareTool.Core
         /// <para>MIGRATION: changing the node id (e.g. a reflash where the model-derived
         /// default replaces a previous value) leaves the PREVIOUS node's RETAINED discovery
         /// configs on the broker, which HA keeps showing as an orphan device. To remove it,
-        /// clear those retained topics ON THE BROKER — publish an empty retained payload to
-        /// each <c>&lt;prefix&gt;/+/&lt;old-node&gt;/+/config</c> (e.g. <c>mosquitto_pub -r -n -t
-        /// …</c> per topic, or delete them in MQTT Explorer). Deleting the device inside Home
+        /// clear those retained topics ON THE BROKER. The old configs live at
+        /// <c>&lt;prefix&gt;/&lt;component&gt;/&lt;old-node&gt;/&lt;object&gt;/config</c> — the
+        /// <c>&lt;prefix&gt;/+/&lt;old-node&gt;/+/config</c> form is only a SELECTION pattern for
+        /// finding them (<c>+</c> is a subscribe-only wildcard and is invalid in a publish
+        /// topic). Publish an empty retained payload to each CONCRETE config topic that was
+        /// generated — e.g. <c>mosquitto_pub -r -n -t &lt;prefix&gt;/sensor/&lt;old-node&gt;/bus/config</c>,
+        /// once per entity — or delete them in MQTT Explorer. Deleting the device inside Home
         /// Assistant is NOT sufficient: the retained config survives on the broker and HA
         /// re-creates the device on the next MQTT reconnect or restart. The installer does
         /// NOT auto-clear the old node: it can't tell whether the default
