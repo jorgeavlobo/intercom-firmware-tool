@@ -10,9 +10,12 @@
 //! So HA cannot READ the state; we TRACK it. Every observed toggle — ours or a PHYSICAL
 //! panel press seen on the monitor as `*8*21*<WHERE>##` — flips a cached on/off, which is
 //! PERSISTED (keyed by WHERE) across reboots. A command TOGGLES only when the desired
-//! absolute state differs from the cache, and — crucially — commits the new state ONLY
-//! after the frame is successfully forwarded, so a failed actuation stays retryable and
-//! never shows HA a state the relay didn't reach. An echo guard, armed BEFORE forwarding,
+//! absolute state differs from the cache, and — crucially — commits ONLY after the frame
+//! is successfully forwarded, so a failed actuation stays retryable and never shows HA a
+//! state the relay didn't reach. The commit FLIPS the cache once (our injection is one
+//! relay toggle) rather than absolute-setting it, so a physical press observed while the
+//! forward is in flight COMPOSES with our toggle instead of being clobbered — the cache
+//! stays equal to initial-XOR-(total toggles). An echo guard, armed BEFORE forwarding,
 //! stops our own toggle's monitor echo from double-flipping the cache.
 //!
 //! Residual imperfection (inherent to a stateless toggle): on the very FIRST cold boot the
@@ -66,9 +69,22 @@ impl State {
         self.expect_echo_until = None;
     }
 
-    /// Commit the desired state after a SUCCESSFUL forward.
-    fn set(&mut self, on: bool) {
-        self.on = Some(on);
+    /// Commit OUR injected toggle after a SUCCESSFUL forward, returning the new cached
+    /// state to publish + persist. A KNOWN state FLIPS exactly once — our injection is one
+    /// relay toggle — rather than being absolute-`set` to `desired_on`: an absolute set
+    /// would CLOBBER a physical press that `observe()` applied concurrently while the
+    /// forward was awaiting (the state lock is released across the forward), leaving the
+    /// cache one toggle out of step with the relay. Flipping composes with that observation
+    /// so the cache still equals initial-XOR-(total toggles). An UNKNOWN state (first cold
+    /// boot) can't be flipped, so it is optimistically established at `desired_on` — and the
+    /// gate only injects from a known state when it already differs, so a flip there reaches
+    /// `desired_on` in the common (no concurrent press) case.
+    fn commit_actuation(&mut self, desired_on: bool) -> Option<bool> {
+        self.on = match self.on {
+            Some(cur) => Some(!cur), // our injection = one toggle; compose, don't clobber
+            None => Some(desired_on), // unknown → establish optimistically
+        };
+        self.on
     }
 
     /// Apply an observed `*8*21*<WHERE>##` press. Returns `Some(new_state)` to publish +
@@ -142,9 +158,12 @@ impl LightCtl {
     }
 
     /// HA commanded a desired ABSOLUTE state (`on`/`off`). Toggle the relay ONLY when it
-    /// differs from the cache — and commit the new state ONLY after the forward SUCCEEDS, so
-    /// a failed actuation leaves the cache (and HA) unchanged and the command retryable. The
-    /// echo guard is armed before forwarding and disarmed on failure.
+    /// differs from the cache — and commit ONLY after the forward SUCCEEDS, so a failed
+    /// actuation leaves the cache (and HA) unchanged and the command retryable. The echo
+    /// guard is armed before forwarding and disarmed on failure. The commit FLIPS the cache
+    /// (via [`State::commit_actuation`]) rather than absolute-setting it: the state lock is
+    /// released across the forward, so a physical press `observe()` applies in that window
+    /// must COMPOSE with our injection, not be clobbered.
     pub async fn command(&self, desired_on: bool) {
         {
             let mut st = self.st.lock().await;
@@ -161,9 +180,9 @@ impl LightCtl {
             self.st.lock().await.disarm_guard();
             return;
         }
-        self.st.lock().await.set(desired_on);
-        self.publish(Some(desired_on)).await;
-        persist(self.where_.clone(), Some(desired_on)).await;
+        let committed = self.st.lock().await.commit_actuation(desired_on);
+        self.publish(committed).await;
+        persist(self.where_.clone(), committed).await;
     }
 
     /// Feed a monitor frame. When it is our WHERE's press (`*8*21*<WHERE>##`): if it is our
@@ -240,11 +259,46 @@ mod tests {
     #[test]
     fn failed_forward_leaves_state_and_guard_clean() {
         // Mirrors command()'s failure path on the pure State: arm the guard, then (forward
-        // failed) disarm it WITHOUT set() — the cache is unchanged, so the command retries.
+        // failed) disarm it WITHOUT committing — the cache is unchanged, so the command retries.
         let mut st = state(Some(false));
         st.arm_guard(Instant::now());
         st.disarm_guard();
         assert_eq!(st.on, Some(false)); // NOT mutated to the desired state
         assert!(st.expect_echo_until.is_none()); // no stale guard to swallow a real press
+    }
+
+    #[test]
+    fn commit_actuation_flips_a_known_state() {
+        // The common case: a successful forward from a known state that DIFFERED reaches
+        // desired_on by flipping once.
+        let mut st = state(Some(false));
+        assert_eq!(st.commit_actuation(true), Some(true));
+        assert_eq!(st.on, Some(true));
+    }
+
+    #[test]
+    fn commit_actuation_establishes_from_unknown() {
+        // First cold boot: unknown can't be flipped, so it's optimistically set to desired.
+        let mut st = state(None);
+        assert_eq!(st.commit_actuation(true), Some(true));
+        assert_eq!(st.on, Some(true));
+    }
+
+    #[test]
+    fn commit_actuation_composes_with_a_concurrent_physical_press() {
+        // The race Codex flagged: cache=off, HA commands ON. Our echo consumed the guard,
+        // then a PHYSICAL press was observed while forward_to_gateway() was still awaiting —
+        // observe() flipped the cache to on. The relay has now taken TWO toggles (ours +
+        // the physical one) and is back OFF. A flip-commit composes correctly (on → off),
+        // matching the relay; an absolute set(on) would have clobbered it and lied `on`.
+        let now = Instant::now();
+        let mut st = state(Some(false));
+        st.arm_guard(now); // command() armed before forwarding
+        assert_eq!(st.apply_observe(now + Duration::from_millis(10)), None); // our echo, guarded
+        assert_eq!(st.apply_observe(now + Duration::from_millis(20)), Some(Some(true))); // physical
+        assert_eq!(st.on, Some(true));
+        // command()'s success commit runs LAST, flipping — not clobbering — the observation.
+        assert_eq!(st.commit_actuation(true), Some(false));
+        assert_eq!(st.on, Some(false)); // equals the relay after two toggles
     }
 }
