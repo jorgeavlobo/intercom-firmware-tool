@@ -936,11 +936,13 @@ namespace IntercomFirmwareTool.Core
             string Topic(string component, string objectId) =>
                 $"{prefix}/{component}/{node}/{objectId}/config";
 
-            // The HA object_id forces the entity_id to "<node>_<objectId>" (e.g.
-            // bticino_c100x_bus), independent of the device's friendly name — otherwise HA
-            // would derive the entity_id from the (model-dependent) device name. HA lowercases
-            // it, so `node` is already lower-case. Kept equal to each unique_id.
-            string ObjId(string objectId) => $"{node}_{objectId}";
+            // HA's default_entity_id SUGGESTS the entity_id; it must be FULLY QUALIFIED
+            // ("<domain>.<object>"). Deriving it as "<component>.<node>_<objectId>" (e.g.
+            // sensor.bticino_c100x_bus) forces the entity_id prefix to follow the node,
+            // independent of the device's model-dependent friendly name. HA lowercases the
+            // entity_id, so `node` is already lower-case. (The older `object_id` field is
+            // deprecated and removed in HA 2026.4, so it is not used.)
+            string EntId(string component, string objectId) => $"{component}.{node}_{objectId}";
 
             // Availability (TopicLastWill): btmqttd is a single-connection MQTT client,
             // so availability is ATOMIC (issue #32). It registers the retained 'offline'
@@ -952,6 +954,33 @@ namespace IntercomFirmwareTool.Core
             // per-entity availability blocks below reflect the bridge's real state.
             var entities = new List<HaEntity>();
 
+            // Legacy-node migration cleanup: before model-specific naming, the default node
+            // was "bticino_intercom". When the effective node differs (a model node, or any
+            // custom id), the OLD node's retained discovery configs would linger on the broker
+            // as an orphan HA device, because ha::reconcile only touches config topics in the
+            // NEW manifest. Tombstone them here (empty retained config = cleared) so HA drops
+            // the stale device on reflash. Only the pre-existing entity set — the doorbell/
+            // call_state entities are new, so no legacy copy exists. The "legacy_" filename
+            // prefix avoids colliding with the current node's per-entity config files.
+            // (A single-unit install on the old default is exactly the migration target; a
+            // multi-unit setup used distinct custom node ids, so "bticino_intercom" holds no
+            // configs for it and the tombstones are a harmless no-op.)
+            const string LegacyNode = "bticino_intercom";
+            if (node != LegacyNode)
+            {
+                (string Component, string ObjectId)[] legacy =
+                {
+                    ("binary_sensor", "status"), ("sensor", "bus"), ("sensor", "key"),
+                    ("number", "volume"), ("switch", "mute"),
+                    ("button", "volume_up"), ("button", "volume_down"), ("button", "gate"),
+                };
+                foreach (var (component, objectId) in legacy)
+                    entities.Add(new HaEntity(
+                        $"legacy_{objectId}.json",
+                        $"{prefix}/{component}/{LegacyNode}/{objectId}/config",
+                        ""));
+            }
+
             // Connectivity: reports online/offline itself, so it carries NO
             // availability block (else HA would show it "unavailable" when offline
             // instead of "off").
@@ -962,7 +991,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Bridge",
                     unique_id = $"{node}_status",
-                    object_id = ObjId("status"),
+                    default_entity_id = EntId("binary_sensor", "status"),
                     device_class = "connectivity",
                     state_topic = opts.TopicLastWill,
                     payload_on = "online",
@@ -987,7 +1016,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "OpenWebNet bus",
                     unique_id = $"{node}_bus",
-                    object_id = ObjId("bus"),
+                    default_entity_id = EntId("sensor", "bus"),
                     state_topic = opts.TopicDump,
                     value_template = "{{ value_json.frame if value_json is defined else value }}",
                     json_attributes_topic = opts.TopicDump,
@@ -1003,7 +1032,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "OpenWebNet bus",
                     unique_id = $"{node}_bus",
-                    object_id = ObjId("bus"),
+                    default_entity_id = EntId("sensor", "bus"),
                     state_topic = opts.TopicDump,
                     icon = "mdi:bus",
                     entity_category = "diagnostic",
@@ -1022,7 +1051,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Last key",
                     unique_id = $"{node}_key",
-                    object_id = ObjId("key"),
+                    default_entity_id = EntId("sensor", "key"),
                     state_topic = opts.TopicKey,
                     value_template = "{{ value_json.key }}",
                     json_attributes_topic = opts.TopicKey,
@@ -1045,7 +1074,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Doorbell",
                     unique_id = $"{node}_doorbell",
-                    object_id = ObjId("doorbell"),
+                    default_entity_id = EntId("event", "doorbell"),
                     state_topic = opts.EffectiveTopicDoorbell,
                     event_types = new[] { "pressed" },
                     device_class = "doorbell",
@@ -1068,7 +1097,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Call state",
                     unique_id = $"{node}_call_state",
-                    object_id = ObjId("call_state"),
+                    default_entity_id = EntId("sensor", "call_state"),
                     state_topic = opts.EffectiveTopicCallState,
                     value_template = "{{ value_json.state if value_json is defined else value }}",
                     json_attributes_topic = opts.EffectiveTopicCallState,
@@ -1120,7 +1149,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume",
                     unique_id = $"{node}_volume",
-                    object_id = ObjId("volume"),
+                    default_entity_id = EntId("number", "volume"),
                     command_topic = controlTopic,
                     // QoS 1: an ABSOLUTE, idempotent command (set to N / mute on|off), so a
                     // QoS-1 redelivery is harmless, while the durable QoS-1 command
@@ -1156,7 +1185,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Mute",
                     unique_id = $"{node}_mute",
-                    object_id = ObjId("mute"),
+                    default_entity_id = EntId("switch", "mute"),
                     command_topic = controlTopic,
                     // QoS 1: an ABSOLUTE, idempotent command (set to N / mute on|off), so a
                     // QoS-1 redelivery is harmless, while the durable QoS-1 command
@@ -1185,7 +1214,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume up",
                     unique_id = $"{node}_volume_up",
-                    object_id = ObjId("volume_up"),
+                    default_entity_id = EntId("button", "volume_up"),
                     command_topic = controlTopic,
                     // QoS 0 (the default): a relative step is NON-idempotent, and QoS 1
                     // may legitimately REDELIVER a publish (DUP on a lost PUBACK), applying
@@ -1209,7 +1238,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Volume down",
                     unique_id = $"{node}_volume_down",
-                    object_id = ObjId("volume_down"),
+                    default_entity_id = EntId("button", "volume_down"),
                     command_topic = controlTopic,
                     // QoS 0 (the default): a relative step is NON-idempotent, and QoS 1
                     // may legitimately REDELIVER a publish (DUP on a lost PUBACK), applying
@@ -1235,7 +1264,7 @@ namespace IntercomFirmwareTool.Core
                 {
                     name = "Gate",
                     unique_id = $"{node}_gate",
-                    object_id = ObjId("gate"),
+                    default_entity_id = EntId("button", "gate"),
                     command_topic = controlTopic,
                     // QoS 0 (the default): opening the gate is a NON-idempotent side
                     // effect, and QoS 1 may legitimately REDELIVER a publish (DUP on a lost

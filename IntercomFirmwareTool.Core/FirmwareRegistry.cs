@@ -52,11 +52,12 @@ namespace IntercomFirmwareTool.Core
         /// Whether this firmware may be CUSTOMIZED/flashed by the tool. Only the
         /// <b>Door Entry</b> units are compatible: the <b>Home + Security</b> firmwares are
         /// a different (2.x) generation whose rootfs layout the on-device payloads
-        /// (<c>btmqttd</c>, init patches) assume, so flashing one would break the unit — the
-        /// tool refuses them.
+        /// (<c>btmqttd</c>, init patches) assume, so flashing one would break the unit.
+        /// <b>Fails closed</b> — allows ONLY an explicit "Door Entry" app, so a null or a
+        /// future/unknown <see cref="App"/> value is refused rather than reaching the build.
         /// </summary>
         public bool IsCustomizable =>
-            !string.Equals(App, "Home + Security", StringComparison.OrdinalIgnoreCase);
+            string.Equals(App, "Door Entry", StringComparison.OrdinalIgnoreCase);
 
         /// <summary>
         /// Lower-case Home Assistant node id for this model — scopes the discovery topics,

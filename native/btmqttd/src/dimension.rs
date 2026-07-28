@@ -144,7 +144,14 @@ const CALL_STATE_DIM: &str = "35";
 pub fn parse_doorbell(frame: &str) -> Option<&str> {
     let body = frame.strip_prefix("*8*")?.strip_suffix("##")?;
     // `*8*<WHAT>*<WHERE>##`: require the exact doorbell WHAT, then the '*' before WHERE.
-    body.strip_prefix(DOORBELL_WHAT)?.strip_prefix('*')
+    let where_ = body.strip_prefix(DOORBELL_WHAT)?.strip_prefix('*')?;
+    // WHERE must be a single non-empty field: reject `*8*1#1#4#21*##` (empty) and an
+    // extended frame `*8*1#1#4#21*112*X##` (extra '*'-separated fields) so neither fires
+    // a spurious doorbell event.
+    if where_.is_empty() || where_.contains('*') {
+        return None;
+    }
+    Some(where_)
 }
 
 /// Parse a WHO=8 call-state report `*#8**35*<N>*0*0##` into `N`. Returns `None` for any
@@ -348,6 +355,9 @@ mod tests {
         assert_eq!(parse_doorbell("*8*19*20##"), None);
         // A near-miss WHAT must not match (prefix guard).
         assert_eq!(parse_doorbell("*8*1#1#4#210*112##"), None);
+        // An empty WHERE or an extended frame with extra '*' fields must not match.
+        assert_eq!(parse_doorbell("*8*1#1#4#21*##"), None);
+        assert_eq!(parse_doorbell("*8*1#1#4#21*112*X##"), None);
         // Dimension reports and other WHOs are not doorbell commands.
         assert_eq!(parse_doorbell("*#8**35*1*0*0##"), None);
         assert_eq!(parse_doorbell("*7*55*##"), None);

@@ -112,6 +112,16 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
             ))
         }
     }
+
+    // Reset the retained call state to idle on every (re)connect. If the monitor dropped
+    // mid-call — after a ringing/active frame but before the idle (`*#8**35*0*…`)
+    // transition — the retained sensor would otherwise stay stuck at ringing/active
+    // forever. Done BEFORE draining the buffered frames below, so a call frame that arrived
+    // with the ACK still re-sets the real state; a genuinely-active call that produced no
+    // new frame across the reconnect (rare) shows idle until its next transition —
+    // preferable to a permanently stuck state. (Volume/mute reconcile via resync() below.)
+    publish_call_state(cfg, client, 0).await;
+
     // Feed ONLY the bytes AFTER the ACK to the framer, so any bus frames that arrived
     // in the same read(s) as the ACK are published while the handshake ACK and any
     // pre-ACK banner/chatter are NOT framed (feeding all of `pre` could otherwise let
@@ -190,12 +200,15 @@ async fn publish_frame(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<Vol
 
 /// Publish a momentary doorbell "pressed" event to TOPIC_DOORBELL. NOT retained: an
 /// event fires once, and a retained event would spuriously re-fire on every HA
-/// reconnect. QoS 1 so the single press is not dropped. The payload carries the HA
-/// `event_type` plus the entrance-panel WHERE (informational — it varies per install).
+/// reconnect. QoS 0 (like the non-idempotent gate/step actions): a doorbell press is
+/// NON-idempotent, and QoS 1 may legitimately REDELIVER a publish (DUP on a lost PUBACK),
+/// which would fire the HA event — and any doorbell automation — twice for one ring. A
+/// press lost during a brief broker reconnect is preferable to a double actuation. The
+/// payload carries the HA `event_type` plus the entrance-panel WHERE (informational).
 async fn publish_doorbell(cfg: &Arc<Config>, client: &AsyncClient, where_: &str) {
     let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
     if let Err(e) = client
-        .publish(&cfg.topic_doorbell, QoS::AtLeastOnce, false, payload.into_bytes())
+        .publish(&cfg.topic_doorbell, QoS::AtMostOnce, false, payload.into_bytes())
         .await
     {
         eprintln!("btmqttd: publish doorbell event failed: {e}");
