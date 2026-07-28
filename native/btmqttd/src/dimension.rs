@@ -169,6 +169,13 @@ pub fn parse_call_state(frame: &str) -> Option<u8> {
     code.parse::<u8>().ok()
 }
 
+/// The dimension-REQUEST frame that asks the gateway for the current call state.
+/// Confirmed on a live Classe 300X: `*#8**35##` -> `*#8**35*<N>*0*0##` (e.g. `*35*0*…`
+/// idle, `*35*6*…` in-call), i.e. dim-35 answers a GET authoritatively (not push-only).
+pub fn call_state_read_request() -> String {
+    format!("*#8**{CALL_STATE_DIM}##")
+}
+
 /// Human-readable label for a call-state code (see [`parse_call_state`]), from live
 /// captures: `0` idle, `1`/`2`/`4` the pre-answer ringing phases, `6` answered/in-call.
 /// Any other (unobserved) code maps to "active" as a safe fallback; the raw code travels
@@ -248,6 +255,15 @@ pub async fn write_volume(host: &str, port: u16, pct: u8) -> std::io::Result<u8>
 pub async fn read_mute(host: &str, port: u16) -> std::io::Result<Option<bool>> {
     let replies = session(host, port, &mute_read_request()).await?;
     Ok(replies.iter().find_map(|f| parse_mute_report(f)))
+}
+
+/// Read the current call state via a dimension request (`*#8**35##`). Returns the
+/// reported code, or `None` if the gateway gave no valid call-state report (session
+/// refused). This is the AUTHORITATIVE source used to reconcile the retained sensor,
+/// so a missed transition frame (or a reconnect mid-call) can't leave HA stuck.
+pub async fn read_call_state(host: &str, port: u16) -> std::io::Result<Option<u8>> {
+    let replies = session(host, port, &call_state_read_request()).await?;
+    Ok(replies.iter().find_map(|f| parse_call_state(f)))
 }
 
 /// Mute/unmute the ringtone and return the state the device ECHOES back. Mirrors

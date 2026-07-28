@@ -57,31 +57,18 @@ pub async fn run(cfg: Arc<Config>, client: AsyncClient, volume: Arc<VolumeCtl>) 
 /// How long to wait for the monitor ACK before giving up on this connection.
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often the read loop wakes to run the call-state watchdog when no frames arrive.
-/// Bounds the extra latency on top of each cap; short enough to be prompt, long enough
-/// that a quiet bus costs almost nothing.
-const WATCHDOG_TICK: Duration = Duration::from_secs(30);
+/// While a call is non-idle, the read loop re-queries the AUTHORITATIVE call state
+/// (`*#8**35##`, confirmed answerable on the gateway) this often, so a missed transition
+/// frame — e.g. a lost terminal `idle` — is corrected within one interval instead of
+/// lingering until the next call. Also caps the monitor read so the loop still wakes to
+/// poll on a QUIET bus. Every frame transition re-stamps the marker, so during a call WITH
+/// flowing frames we rarely poll — only once the bus has gone silent while still non-idle,
+/// exactly the missed-terminal-frame case.
+const CALL_STATE_POLL: Duration = Duration::from_secs(30);
 
-/// Caps after which a non-idle RETAINED call state is force-reset to idle — a safety net
-/// for a missed terminal `idle` frame on a LIVE monitor session (a DROPPED session is
-/// already handled by the reconnect reset in [`session`]). Without this, a lost
-/// `*#8**35*0*…` would leave HA showing ringing/in-call until the next call. Generous so a
-/// real ring/call is NEVER cut short: a panel stops ringing in ~45–60 s, and no door call
-/// runs for 30 min.
-const RINGING_MAX: Duration = Duration::from_secs(3 * 60);
-const IN_CALL_MAX: Duration = Duration::from_secs(30 * 60);
-
-/// The force-idle cap for a non-idle call-state `code`: the ringing phases (`1`/`2`/`4`)
-/// use [`RINGING_MAX`]; in-call (`6`) and any unmapped ("active") code use [`IN_CALL_MAX`].
-const fn call_state_cap(code: u8) -> Duration {
-    match code {
-        1 | 2 | 4 => RINGING_MAX,
-        _ => IN_CALL_MAX,
-    }
-}
-
-/// Arm/disarm the call-state watchdog from a freshly-published state `code`: idle (`0`)
-/// disarms it; any non-idle code (re)arms it, stamping the current instant.
+/// Arm/disarm the call-state reconcile marker from a freshly-known state `code`: idle (`0`)
+/// disarms it; any non-idle code (re)arms it with the code and the current instant (which
+/// also resets the poll timer).
 fn update_call_watch(watch: &mut Option<(u8, tokio::time::Instant)>, code: u8) {
     *watch = if code == 0 {
         None
@@ -146,18 +133,26 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
         }
     }
 
-    // Reset the retained call state to idle on every (re)connect. If the monitor dropped
-    // mid-call — after a ringing/active frame but before the idle (`*#8**35*0*…`)
-    // transition — the retained sensor would otherwise stay stuck at ringing/active
-    // forever. Done BEFORE draining the buffered frames below, so a call frame that arrived
-    // with the ACK still re-sets the real state; a genuinely-active call that produced no
-    // new frame across the reconnect (rare) shows idle until its next transition —
-    // preferable to a permanently stuck state. (Volume/mute reconcile via resync() below.)
-    publish_call_state(cfg, client, 0).await;
+    // Reconcile the retained call state AUTHORITATIVELY on every (re)connect: query the
+    // gateway (`*#8**35##`) for the REAL state rather than blindly assuming idle, so a call
+    // genuinely in progress across a monitor reconnect is preserved instead of being wrongly
+    // cleared. Fall back to idle only if the query yields nothing (session refused / no
+    // reply) — the safe default. Done BEFORE draining the buffered frames below, so a newer
+    // transition that arrived with the ACK still wins. (Volume/mute reconcile via resync().)
+    let initial_state = match dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await {
+        Ok(Some(code)) => code,
+        Ok(None) | Err(_) => 0,
+    };
+    publish_call_state(cfg, client, initial_state).await;
 
-    // Call-state watchdog arming point: (state code, when it was published). We just reset
-    // to idle, so start disarmed; it is (re)armed by every non-idle call-state frame below.
-    let mut call_watch: Option<(u8, tokio::time::Instant)> = None;
+    // Reconcile marker: (last-known state code, poll instant). Armed while non-idle so the
+    // read loop below periodically re-queries the authoritative state and corrects a missed
+    // transition; idle starts it disarmed.
+    let mut call_watch: Option<(u8, tokio::time::Instant)> = if initial_state == 0 {
+        None
+    } else {
+        Some((initial_state, tokio::time::Instant::now()))
+    };
 
     // Feed ONLY the bytes AFTER the ACK to the framer, so any bus frames that arrived
     // in the same read(s) as the ACK are published while the handshake ACK and any
@@ -188,40 +183,42 @@ async fn session(cfg: &Arc<Config>, client: &AsyncClient, volume: &Arc<VolumeCtl
     });
 
     loop {
-        // Read with a WATCHDOG_TICK cap so we still wake to run the call-state watchdog on a
-        // QUIET bus (no frames). A read that completes is handled; a tick timeout just falls
-        // through to the watchdog check below.
-        match tokio::time::timeout(WATCHDOG_TICK, sock.read(&mut buf)).await {
-            Ok(read) => {
-                let n = read?;
-                if n == 0 {
-                    return Ok(()); // gateway closed the monitor session
-                }
-                frames.clear();
-                framer.push(&buf[..n], &mut frames);
-                for frame in frames.drain(..) {
-                    if let Some(code) = publish_frame(cfg, client, volume, &frame).await {
-                        update_call_watch(&mut call_watch, code);
-                    }
+        // Read with a CALL_STATE_POLL cap so the loop still wakes to run the reconcile below
+        // on a QUIET bus (no frames). A completed read is handled; on a timeout the `if let`
+        // simply falls through to the reconcile.
+        if let Ok(read) = tokio::time::timeout(CALL_STATE_POLL, sock.read(&mut buf)).await {
+            let n = read?;
+            if n == 0 {
+                return Ok(()); // gateway closed the monitor session
+            }
+            frames.clear();
+            framer.push(&buf[..n], &mut frames);
+            for frame in frames.drain(..) {
+                if let Some(code) = publish_frame(cfg, client, volume, &frame).await {
+                    update_call_watch(&mut call_watch, code);
                 }
             }
-            Err(_) => {} // tick elapsed with no data — fall through to the watchdog
         }
 
-        // Call-state watchdog: if a non-idle state has persisted implausibly long, force
-        // idle. This covers a missed terminal `idle` frame on a LIVE session (a DROPPED
-        // session is handled by the reconnect reset above); without it, HA could show
-        // ringing/in-call until the next call. The caps are generous enough never to cut a
-        // real ring/call (see RINGING_MAX / IN_CALL_MAX).
-        if let Some((code, since)) = call_watch {
-            if since.elapsed() >= call_state_cap(code) {
-                eprintln!(
-                    "btmqttd: call-state watchdog — '{}' persisted > {:?}, forcing idle",
-                    dimension::call_state_label(code),
-                    call_state_cap(code)
-                );
-                publish_call_state(cfg, client, 0).await;
-                call_watch = None;
+        // Authoritative reconcile: while a call is non-idle and no transition frame has
+        // refreshed it for CALL_STATE_POLL, re-query dim-35 for the REAL state and publish
+        // it if changed. This corrects a missed terminal `idle` (or any missed transition)
+        // PRECISELY — no heuristic timeout and no risk of cutting a real call, because the
+        // gateway reports the truth (`*#8**35*<N>*0*0##`). A failed query keeps the last
+        // state and retries next interval rather than fabricating idle.
+        if let Some((known, since)) = call_watch {
+            if since.elapsed() >= CALL_STATE_POLL {
+                match dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await {
+                    Ok(Some(code)) => {
+                        if code != known {
+                            publish_call_state(cfg, client, code).await;
+                        }
+                        update_call_watch(&mut call_watch, code);
+                    }
+                    Ok(None) | Err(_) => {
+                        call_watch = Some((known, tokio::time::Instant::now()));
+                    }
+                }
             }
         }
     }
@@ -312,28 +309,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn call_state_cap_by_phase() {
-        // Ringing phases share the short cap...
-        assert_eq!(call_state_cap(1), RINGING_MAX);
-        assert_eq!(call_state_cap(2), RINGING_MAX);
-        assert_eq!(call_state_cap(4), RINGING_MAX);
-        // ...in-call and any unmapped ("active") code use the long cap.
-        assert_eq!(call_state_cap(6), IN_CALL_MAX);
-        assert_eq!(call_state_cap(9), IN_CALL_MAX);
-        // Sanity: ringing recovers faster than in-call, and both are non-zero.
-        assert!(RINGING_MAX < IN_CALL_MAX);
-    }
-
-    #[test]
-    fn watchdog_arms_on_non_idle_and_disarms_on_idle() {
+    fn call_watch_arms_on_non_idle_and_disarms_on_idle() {
         let mut watch = None;
-        // A non-idle state arms the watchdog...
+        // A non-idle state arms the reconcile marker...
         update_call_watch(&mut watch, 6);
         assert!(matches!(watch, Some((6, _))));
         // ...a ringing phase re-arms it with the new code...
         update_call_watch(&mut watch, 2);
         assert!(matches!(watch, Some((2, _))));
-        // ...and idle (0) disarms it.
+        // ...and idle (0) disarms it (so the loop stops polling once the call ends).
         update_call_watch(&mut watch, 0);
         assert!(watch.is_none());
     }
