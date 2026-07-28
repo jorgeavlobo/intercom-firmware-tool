@@ -109,6 +109,12 @@ namespace IntercomFirmwareTool.Core
         /// deployment must ALSO give each unit distinct topics, or the HA devices will mirror
         /// each other's bus/key/availability. (Auto-scoping topics from the node id is future
         /// work — see #12.)
+        /// <para>MIGRATION: changing the node id (e.g. a reflash where the model-derived
+        /// default replaces a previous value) leaves the PREVIOUS node's retained discovery
+        /// configs on the broker as an orphan HA device — delete that stale device once in
+        /// HA. The installer does NOT auto-tombstone the old node: it can't tell whether the
+        /// default <c>bticino_intercom</c> belongs to THIS bridge or to another unit sharing
+        /// the broker, and blindly clearing it would wipe that other unit's entities.</para>
         /// </summary>
         public string HaNodeId { get; init; } = "bticino_intercom";
 
@@ -901,6 +907,26 @@ namespace IntercomFirmwareTool.Core
         };
 
         /// <summary>
+        /// Slugify a node id into the object part of an HA <c>entity_id</c>: lower-case, with
+        /// any character outside <c>[a-z0-9_]</c> replaced by <c>'_'</c>. HA accepts only
+        /// <c>[a-z0-9_]</c> there and <b>rejects</b> (rather than normalises) a
+        /// <c>default_entity_id</c> that violates it, so a custom node with uppercase or
+        /// <c>'-'</c> (both permitted by <c>BadNode</c>) must be normalised first. The
+        /// model-derived nodes (<c>bticino_c100x</c>/<c>c300x</c>) are already valid.
+        /// </summary>
+        private static string EntityIdSlug(string node)
+        {
+            var sb = new StringBuilder(node.Length);
+            foreach (char c in node)
+            {
+                if (c is >= 'a' and <= 'z' or >= '0' and <= '9' or '_') sb.Append(c);
+                else if (c is >= 'A' and <= 'Z') sb.Append((char)(c + 32));
+                else sb.Append('_');
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>
         /// Builds the Home Assistant MQTT discovery configs for the bridge: a
         /// connectivity <c>binary_sensor</c> (online/offline via the last-will
         /// topic), a diagnostic <c>sensor</c> for the last OpenWebNet bus frame, a
@@ -939,10 +965,18 @@ namespace IntercomFirmwareTool.Core
             // HA's default_entity_id SUGGESTS the entity_id; it must be FULLY QUALIFIED
             // ("<domain>.<object>"). Deriving it as "<component>.<node>_<objectId>" (e.g.
             // sensor.bticino_c100x_bus) forces the entity_id prefix to follow the node,
-            // independent of the device's model-dependent friendly name. HA lowercases the
-            // entity_id, so `node` is already lower-case. (The older `object_id` field is
-            // deprecated and removed in HA 2026.4, so it is not used.)
-            string EntId(string component, string objectId) => $"{component}.{node}_{objectId}";
+            // independent of the device's model-dependent friendly name. (The older
+            // `object_id` field is deprecated and removed in HA 2026.4, so it is not used.)
+            //
+            // HA entity_ids allow only [a-z0-9_] in the object part, but a CUSTOM node id may
+            // contain uppercase or '-' (BadNode permits [A-Za-z0-9_-]) — HA would REJECT such a
+            // default_entity_id rather than normalise it. Slugify the node here (lowercase;
+            // any other char -> '_') so e.g. "Front-Door" yields sensor.front_door_bus. The
+            // model-derived nodes (bticino_c100x/c300x) are already valid and pass through
+            // unchanged. Only the entity_id is slugged; the discovery topic and unique_id keep
+            // the raw node.
+            string nodeSlug = EntityIdSlug(node);
+            string EntId(string component, string objectId) => $"{component}.{nodeSlug}_{objectId}";
 
             // Availability (TopicLastWill): btmqttd is a single-connection MQTT client,
             // so availability is ATOMIC (issue #32). It registers the retained 'offline'
@@ -953,33 +987,6 @@ namespace IntercomFirmwareTool.Core
             // watchdog refresh and no birth/will race: the connectivity sensor and the
             // per-entity availability blocks below reflect the bridge's real state.
             var entities = new List<HaEntity>();
-
-            // Legacy-node migration cleanup: before model-specific naming, the default node
-            // was "bticino_intercom". When the effective node differs (a model node, or any
-            // custom id), the OLD node's retained discovery configs would linger on the broker
-            // as an orphan HA device, because ha::reconcile only touches config topics in the
-            // NEW manifest. Tombstone them here (empty retained config = cleared) so HA drops
-            // the stale device on reflash. Only the pre-existing entity set — the doorbell/
-            // call_state entities are new, so no legacy copy exists. The "legacy_" filename
-            // prefix avoids colliding with the current node's per-entity config files.
-            // (A single-unit install on the old default is exactly the migration target; a
-            // multi-unit setup used distinct custom node ids, so "bticino_intercom" holds no
-            // configs for it and the tombstones are a harmless no-op.)
-            const string LegacyNode = "bticino_intercom";
-            if (node != LegacyNode)
-            {
-                (string Component, string ObjectId)[] legacy =
-                {
-                    ("binary_sensor", "status"), ("sensor", "bus"), ("sensor", "key"),
-                    ("number", "volume"), ("switch", "mute"),
-                    ("button", "volume_up"), ("button", "volume_down"), ("button", "gate"),
-                };
-                foreach (var (component, objectId) in legacy)
-                    entities.Add(new HaEntity(
-                        $"legacy_{objectId}.json",
-                        $"{prefix}/{component}/{LegacyNode}/{objectId}/config",
-                        ""));
-            }
 
             // Connectivity: reports online/offline itself, so it carries NO
             // availability block (else HA would show it "unavailable" when offline
@@ -1085,11 +1092,10 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
-            // Call state: a SENSOR reflecting the WHO=8 dim-35 call
-            // state. btmqttd publishes it RETAINED as {"state":<idle|ringing|active>,
-            // "code":<N>}; the template tolerates a non-JSON payload, and the raw `code` is
-            // exposed as an attribute so the 2/4 -> "active" mapping can be refined once an
-            // ANSWERED call is captured.
+            // Call state: a SENSOR reflecting the WHO=8 dim-35 call state. btmqttd publishes
+            // it RETAINED as {"state":<idle|ringing|in_call|active>,"code":<N>} (mapping
+            // confirmed against live answered + unanswered calls); the template tolerates a
+            // non-JSON payload, and the raw `code` is exposed as an attribute for granularity.
             entities.Add(new HaEntity(
                 "call_state.json",
                 Topic("sensor", "call_state"),

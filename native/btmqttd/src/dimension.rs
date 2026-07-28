@@ -133,9 +133,11 @@ pub fn parse_mute_report(frame: &str) -> Option<bool> {
 const DOORBELL_WHAT: &str = "1#1#4#21";
 
 /// WHO=8 dimension carrying the CALL STATE, broadcast as a call progresses:
-/// `*#8**35*<N>*0*0##`. N = `0` idle/ended, `1` ringing (incoming); `2`/`4` were seen on
-/// an UNANSWERED call and are mapped as "active" (see [`call_state_label`]) with the raw
-/// code exposed for later refinement (door-entry RE).
+/// `*#8**35*<N>*0*0##`. Confirmed against live captures of both an ANSWERED and an
+/// unanswered call: `0` idle/ended, `1`/`2`/`4` the pre-answer ringing phases, `6`
+/// answered/in-call (it appeared exactly when the call was picked up, and never on the
+/// unanswered call which went `1->2->4->0`). See [`call_state_label`]; the raw code also
+/// travels as an attribute for finer granularity (door-entry RE).
 const CALL_STATE_DIM: &str = "35";
 
 /// Match the entrance-panel call ("doorbell") `*8*1#1#4#21*<WHERE>##` and return the
@@ -167,13 +169,15 @@ pub fn parse_call_state(frame: &str) -> Option<u8> {
     code.parse::<u8>().ok()
 }
 
-/// Human-readable label for a call-state code (see [`parse_call_state`]): `0` idle,
-/// `1` ringing, anything else "active" (an in-progress call). The raw code travels
-/// alongside so the mapping can be refined once an ANSWERED call is captured.
+/// Human-readable label for a call-state code (see [`parse_call_state`]), from live
+/// captures: `0` idle, `1`/`2`/`4` the pre-answer ringing phases, `6` answered/in-call.
+/// Any other (unobserved) code maps to "active" as a safe fallback; the raw code travels
+/// alongside as an attribute for finer granularity.
 pub fn call_state_label(code: u8) -> &'static str {
     match code {
         0 => "idle",
-        1 => "ringing",
+        1 | 2 | 4 => "ringing",
+        6 => "in_call",
         _ => "active",
     }
 }
@@ -366,10 +370,11 @@ mod tests {
 
     #[test]
     fn parses_call_state_reports() {
-        // The full call sequence captured (unanswered call): 1 -> 2 -> 4 -> 0.
+        // The full ANSWERED-call sequence captured: 1 -> 2 -> 4 -> 6 (answered) -> 0.
         assert_eq!(parse_call_state("*#8**35*1*0*0##"), Some(1));
         assert_eq!(parse_call_state("*#8**35*2*0*0##"), Some(2));
         assert_eq!(parse_call_state("*#8**35*4*0*0##"), Some(4));
+        assert_eq!(parse_call_state("*#8**35*6*0*0##"), Some(6));
         assert_eq!(parse_call_state("*#8**35*0*0*0##"), Some(0));
     }
 
@@ -390,7 +395,9 @@ mod tests {
     fn call_state_labels() {
         assert_eq!(call_state_label(0), "idle");
         assert_eq!(call_state_label(1), "ringing");
-        assert_eq!(call_state_label(2), "active");
-        assert_eq!(call_state_label(4), "active");
+        assert_eq!(call_state_label(2), "ringing");
+        assert_eq!(call_state_label(4), "ringing");
+        assert_eq!(call_state_label(6), "in_call"); // answered (confirmed on a live call)
+        assert_eq!(call_state_label(3), "active");   // unobserved code -> safe fallback
     }
 }
