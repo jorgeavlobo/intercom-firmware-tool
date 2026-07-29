@@ -19,6 +19,15 @@
     <!-- ZipCrypto (the traditional ZIP password) is not supported by
          System.IO.Compression; SharpZipLib supports it. -->
     <PackageReference Include="SharpZipLib" Version="1.4.2" />
+    <!-- Optional "download official firmware" flow (issue #23): a fast, resumable,
+         multipart downloader (MIT, no external deps) for fetching a registry entry, and
+         Polly v8 (BSD-3-Clause) for the industry-standard resilience pipeline (exponential
+         backoff + jitter, honoring Retry-After) on the startup availability probes. Both
+         permissive, no copyleft. Pinned to exact versions for reproducible restores, matching
+         the repo convention; bump deliberately. The downloaded bytes are always re-verified
+         against the registry's size + SHA-256 before use — the libraries are transport only. -->
+    <PackageReference Include="Downloader" Version="5.9.0" />
+    <PackageReference Include="Polly.Core" Version="8.6.6" />
   </ItemGroup>
 
   <ItemGroup>
