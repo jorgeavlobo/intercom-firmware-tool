@@ -387,18 +387,21 @@ async fn run_persist_with<F, Fut>(
     // deliberately do NOT `borrow_and_update`: leaving any pending value unseen lets the first
     // loop iteration persist it (it differs from this disk baseline).
     let mut written = initial;
-    // Set when the on-disk value is NOT known to equal `written`: either the RESTORE read failed
-    // (`initial_uncertain` — a valid record may still be on disk we couldn't read, so an observed
-    // value equal to `initial` must still be written to overwrite it), or a later write did not
-    // confirm durability (the spawn_blocking failed, or `atomic_write_in` renamed the new file but
-    // its directory fsync failed, possibly leaving an intermediate value). While uncertain, keep
-    // rewriting the latest until a write confirms; an unconfirmed write is NEVER mistaken for
-    // durable (Codex).
-    let mut uncertain = initial_uncertain;
+    // A prior WRITE did not confirm durability (the spawn_blocking failed, or `atomic_write_in`
+    // renamed the new file but its directory fsync failed, possibly leaving an intermediate value).
+    // Arm the retry timer and keep rewriting the LATEST value until a write confirms; an
+    // unconfirmed write is NEVER mistaken for durable (Codex).
+    let mut write_unconfirmed = false;
+    // The RESTORED disk value could not be READ (`initial_uncertain`): a valid on/off record may
+    // still be on disk. Force the FIRST genuine observation to be written even if it equals the
+    // `None` baseline (to overwrite that unread record) — but do NOT arm the retry timer or
+    // proactively write the initial `None`, or we would DELETE the record ~RETRY after boot even
+    // though nothing was pressed/commanded (CodeRabbit). Cleared once any write confirms.
+    let mut baseline_unreadable = initial_uncertain;
     tokio::pin!(shutdown);
     loop {
         let retry = async {
-            if uncertain {
+            if write_unconfirmed {
                 tokio::time::sleep(RETRY).await;
             } else {
                 std::future::pending::<()>().await; // nothing to retry → this arm never fires
@@ -415,23 +418,27 @@ async fn run_persist_with<F, Fut>(
         }
         // Woken by a new value or a retry tick (shutdown / channel-close break out above).
         let v = *rx.borrow_and_update();
-        // Write when the latest differs from the last CONFIRMED value, OR the disk is uncertain: a
-        // prior failed write may have left an intermediate value on disk even when `v` now equals
-        // `written`, so `v == written` alone is not proof the disk is correct.
-        if v != written || uncertain {
+        // Write when the latest differs from the last CONFIRMED value, OR a prior write is
+        // unconfirmed (the disk may hold an intermediate value even when `v == written`), OR the
+        // restored baseline was unreadable and THIS is a genuine observation that must overwrite
+        // the unread record. `baseline_unreadable` only forces a write here — where we were woken
+        // by an actual change (or a failed-write retry) — never a proactive write of the initial value.
+        if v != written || write_unconfirmed || baseline_unreadable {
             if write(v).await {
                 written = v;
-                uncertain = false;
+                write_unconfirmed = false;
+                baseline_unreadable = false;
             } else {
-                uncertain = true;
+                write_unconfirmed = true;
             }
         }
     }
     // Final flush: the process is exiting, so there is no future tick — persist the latest if it
-    // isn't known-durable (differs from the confirmed value, or the disk is uncertain), retrying a
-    // few times to ride out a brief outage.
+    // isn't known-durable (differs from the confirmed value, or a write is unconfirmed), retrying a
+    // few times to ride out a brief outage. NOT forced by `baseline_unreadable` alone: with no
+    // observation the unread record must be PRESERVED, not overwritten with the `None` baseline.
     let v = *rx.borrow();
-    if v != written || uncertain {
+    if v != written || write_unconfirmed {
         for _ in 0..3 {
             if write(v).await {
                 break;
@@ -653,6 +660,43 @@ mod tests {
             attempts.load(Relaxed) >= 2,
             "a failed write must be retried (loop + shutdown-flush), got {}",
             attempts.load(Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn unreadable_baseline_preserves_the_record_until_an_observation() {
+        use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+        // An unreadable restore (`initial_uncertain = true`, baseline `None`): a valid on/off
+        // record may still be on disk. With NO press/command, the worker must NOT write — writing
+        // the `None` baseline would DELETE that record (CodeRabbit). The FIRST genuine observation
+        // IS written, to overwrite the unread record.
+        let writes = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = watch::channel::<Option<bool>>(None);
+        let (sd_tx, sd_rx) = oneshot::channel();
+        let w = writes.clone();
+        let worker = tokio::spawn(run_persist_with(None, true, rx, sd_rx, move |_on| {
+            let w = w.clone();
+            async move {
+                w.fetch_add(1, Relaxed);
+                true
+            }
+        }));
+        // No observation yet (well under the 5 s retry timer, which must NOT be armed here).
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            writes.load(Relaxed),
+            0,
+            "an unreadable baseline must not write (delete) the record before any observation"
+        );
+        // A genuine observation must be written, overwriting the unread record.
+        tx.send(Some(true)).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = sd_tx.send(());
+        let _ = worker.await;
+        assert!(
+            writes.load(Relaxed) >= 1,
+            "the first observation must be written to overwrite the unread record, got {}",
+            writes.load(Relaxed)
         );
     }
 }
