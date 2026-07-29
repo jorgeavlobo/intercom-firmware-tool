@@ -143,8 +143,22 @@ async fn run() -> Result<(), String> {
     } else {
         // Feature DISABLED: forget any persisted light-state, so that re-enabling the same
         // WHERE later starts from an UNKNOWN baseline instead of restoring a value that may
-        // have gone stale while untracked (a physical toggle we didn't see) — Codex.
-        let _ = tokio::task::spawn_blocking(persist::clear_light).await;
+        // have gone stale while untracked (a physical toggle we didn't see) — Codex. Retry a
+        // few times so a transient partition hiccup doesn't leave a stale record behind, and
+        // log if it ultimately fails rather than silently dropping the result (CodeRabbit).
+        let mut cleared = false;
+        for _ in 0..3 {
+            if tokio::task::spawn_blocking(persist::clear_light).await.unwrap_or(false) {
+                cleared = true;
+                break;
+            }
+        }
+        if !cleared {
+            eprintln!(
+                "btmqttd: could not clear persisted light-state while the feature is disabled; \
+                 re-enabling the same LIGHT_WHERE later may restore a stale value"
+            );
+        }
         (None, None)
     };
 

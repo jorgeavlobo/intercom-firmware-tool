@@ -128,7 +128,7 @@ pub fn store_light(where_: &str, on: Option<bool>) -> bool {
 /// `spawn_blocking`.
 #[must_use]
 pub fn clear_light() -> bool {
-    remove_or_absent(&light_file_in(&state_dir()))
+    clear_light_in(&state_dir())
 }
 
 // ---------------------------------------------------------------------------
@@ -187,10 +187,29 @@ fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
 }
 
 /// Remove `path`, treating an already-absent file as success — the shared "clear a record"
-/// path (broker IP, light state → unknown). Only a real removal error is a failure.
+/// path (broker IP, light state → unknown). After a real unlink, fsync the PARENT directory
+/// so the removal (a dir-entry change) is DURABLE, not just cached — otherwise a power loss
+/// could restore the "deleted" file on reboot and resurrect a stale record (CodeRabbit);
+/// symmetric with [`atomic_write_in`]'s dir fsync. A dir-sync failure is reported as a FAILED
+/// clear (`false`) so the caller retries, rather than claiming a durability it didn't get.
+/// Only a real removal error (or that dir-sync failure) is a failure; an already-absent file
+/// is success (nothing to make durable).
 fn remove_or_absent(path: &Path) -> bool {
     match std::fs::remove_file(path) {
-        Ok(()) => true,
+        Ok(()) => match path.parent() {
+            Some(dir) => match std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!(
+                        "btmqttd: persist: cannot sync dir {} after clearing {}: {e}",
+                        dir.display(),
+                        path.display()
+                    );
+                    false
+                }
+            },
+            None => true, // no parent to sync (shouldn't happen for our joined paths)
+        },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // already gone
         Err(e) => {
             eprintln!("btmqttd: persist: cannot clear {}: {e}", path.display());
@@ -206,6 +225,10 @@ fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> 
 
 fn clear_in(dir: &Path) -> bool {
     remove_or_absent(&state_file_in(dir))
+}
+
+fn clear_light_in(dir: &Path) -> bool {
+    remove_or_absent(&light_file_in(dir))
 }
 
 fn read_light_in(dir: &Path, want_where: &str) -> Option<bool> {
@@ -369,6 +392,27 @@ mod tests {
         assert!(store_light_in(&dir, "112", None));
         assert_eq!(read_light_in(&dir, "112"), None);
         assert!(store_light_in(&dir, "112", None)); // clearing an absent file is still success
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_light_in_removes_the_record_and_is_idempotent() {
+        // The disabled-mode cleanup path: an existing light-state record is removed (durably —
+        // remove_or_absent fsyncs the dir), so a later re-enable reads back unknown; clearing
+        // an already-absent record is still success.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(2000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("btmqttd-clearlight-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(store_light_in(&dir, "112", Some(true)));
+        assert_eq!(read_light_in(&dir, "112"), Some(true));
+        assert!(clear_light_in(&dir)); // disabled-mode cleanup removes it
+        assert_eq!(read_light_in(&dir, "112"), None); // re-enable would start unknown
+        assert!(clear_light_in(&dir)); // already absent → still success
 
         let _ = std::fs::remove_dir_all(&dir);
     }
