@@ -141,6 +141,10 @@ async fn run() -> Result<(), String> {
             tokio::spawn(light::run_persist(where_, initial, persist_rx, persist_shutdown_rx));
         (Some(ctl), Some((persist_shutdown_tx, persist_task)))
     } else {
+        // Feature DISABLED: forget any persisted light-state, so that re-enabling the same
+        // WHERE later starts from an UNKNOWN baseline instead of restoring a value that may
+        // have gone stale while untracked (a physical toggle we didn't see) — Codex.
+        let _ = tokio::task::spawn_blocking(persist::clear_light).await;
         (None, None)
     };
 

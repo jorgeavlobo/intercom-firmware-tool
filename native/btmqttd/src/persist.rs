@@ -121,6 +121,16 @@ pub fn store_light(where_: &str, on: Option<bool>) -> bool {
     store_light_in(&state_dir(), where_, on)
 }
 
+/// Forget any persisted stair-light record — called when the feature is DISABLED, so
+/// re-enabling the same WHERE later starts from an UNKNOWN baseline instead of restoring a
+/// value that may have gone stale (physical toggles while tracking was off) — Codex. Returns
+/// `true` when the file is gone (removed, or already absent). Blocking; call via
+/// `spawn_blocking`.
+#[must_use]
+pub fn clear_light() -> bool {
+    remove_or_absent(&light_file_in(&state_dir()))
+}
+
 // ---------------------------------------------------------------------------
 // Directory-injected cores (unit-tested with a temp dir — no process-env
 // mutation, so the tests are parallel-safe). The public fns above just resolve
