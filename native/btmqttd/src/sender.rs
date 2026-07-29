@@ -166,6 +166,18 @@ async fn session(
         }
     }
 
+    // Monitor (re)connected: any of OUR still-pending light-toggle echoes may have had their
+    // echo delivered while the stream was DOWN (and thus missed), which would leave a stale
+    // expectation that wrongly absorbs the first physical press after reconnect. Drop them here
+    // — AFTER draining the frames buffered with the ACK (so an echo that DID arrive buffered is
+    // consumed first), and crucially BEFORE the read_call_state()/resync awaits below: during
+    // those awaits the command worker could arm a FRESH expectation and its echo could queue on
+    // the now-live socket, and clearing after that would misclassify it as a physical press and
+    // double-flip. Clearing here discards only the stale pre-reconnect expectations (Codex).
+    if let Some(light) = light {
+        light.on_monitor_reconnect().await;
+    }
+
     // Reconcile the retained call state AUTHORITATIVELY on every (re)connect: query the
     // gateway (`*#8**35##`) for the REAL state rather than trusting the possibly-stale
     // buffered frames above (or blindly assuming idle), so a call genuinely in progress
@@ -188,15 +200,6 @@ async fn session(
                 call_watch = Some((None, tokio::time::Instant::now()));
             }
         }
-    }
-
-    // Monitor (re)connected: any of OUR still-pending light-toggle echoes may have had their
-    // echo delivered while the stream was DOWN (and thus missed), which would leave a stale
-    // expectation that wrongly absorbs the first physical press after reconnect. Drop them —
-    // runs AFTER the ACK-buffered drain above, so an echo that DID arrive buffered with the ACK
-    // is still consumed normally; only genuinely-missed expectations are cleared (Copilot).
-    if let Some(light) = light {
-        light.on_monitor_reconnect().await;
     }
 
     // Monitor (re)connected: force a fresh read of volume + mute so a change made on the
