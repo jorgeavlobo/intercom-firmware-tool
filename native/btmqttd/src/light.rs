@@ -346,13 +346,17 @@ impl LightCtl {
 /// further state can be produced) and then awaits this task, whose final flush persists any
 /// state queued in the last instant — so a toggle actuated moments before SIGTERM is durable
 /// rather than lost with the aborted worker (Codex). Redundant writes are skipped.
+/// `initial_uncertain` marks the disk baseline as NOT known to match `initial`: used when the
+/// restore read FAILED (a valid record may still be on disk that we couldn't read), so the first
+/// value — even one equal to `initial` — is durably written rather than assumed already on disk.
 pub async fn run_persist(
     where_: String,
     initial: Option<bool>,
+    initial_uncertain: bool,
     rx: watch::Receiver<Option<bool>>,
     shutdown: oneshot::Receiver<()>,
 ) {
-    run_persist_with(initial, rx, shutdown, move |on| {
+    run_persist_with(initial, initial_uncertain, rx, shutdown, move |on| {
         let where_ = where_.clone();
         async move { write_light(&where_, on).await }
     })
@@ -366,6 +370,7 @@ pub async fn run_persist(
 /// is durable (CodeRabbit). `write(v)` returns `true` on a durable write.
 async fn run_persist_with<F, Fut>(
     initial: Option<bool>,
+    initial_uncertain: bool,
     mut rx: watch::Receiver<Option<bool>>,
     shutdown: oneshot::Receiver<()>,
     mut write: F,
@@ -382,12 +387,14 @@ async fn run_persist_with<F, Fut>(
     // deliberately do NOT `borrow_and_update`: leaving any pending value unseen lets the first
     // loop iteration persist it (it differs from this disk baseline).
     let mut written = initial;
-    // Set when the latest write did NOT confirm durability (the spawn_blocking failed, or
-    // `atomic_write_in` renamed the new file but its directory fsync failed). The on-disk value is
-    // then UNCERTAIN — it may hold an intermediate value even if the tracked state later returns to
-    // `written` — so keep rewriting the latest until a write confirms; an unconfirmed write is
-    // NEVER mistaken for durable (Codex).
-    let mut uncertain = false;
+    // Set when the on-disk value is NOT known to equal `written`: either the RESTORE read failed
+    // (`initial_uncertain` — a valid record may still be on disk we couldn't read, so an observed
+    // value equal to `initial` must still be written to overwrite it), or a later write did not
+    // confirm durability (the spawn_blocking failed, or `atomic_write_in` renamed the new file but
+    // its directory fsync failed, possibly leaving an intermediate value). While uncertain, keep
+    // rewriting the latest until a write confirms; an unconfirmed write is NEVER mistaken for
+    // durable (Codex).
+    let mut uncertain = initial_uncertain;
     tokio::pin!(shutdown);
     loop {
         let retry = async {
@@ -629,7 +636,7 @@ mod tests {
         // explicitly (None), the worker must still persist this pre-existing value rather than
         // mistaking it for the restored baseline (the race Codex flagged).
         tx.send(Some(true)).unwrap();
-        let worker = tokio::spawn(run_persist_with(None, rx, sd_rx, move |_on| {
+        let worker = tokio::spawn(run_persist_with(None, false, rx, sd_rx, move |_on| {
             let a = a.clone();
             async move {
                 a.fetch_add(1, Relaxed);

@@ -311,10 +311,35 @@ async fn session(
                 light.seed().await;
             }
             volume.reseed().await;
-            match call_watch {
-                None => publish_call_state(cfg, client, 0).await, // confirmed idle
-                Some((Some(code), _)) => publish_call_state(cfg, client, code).await,
-                Some((None, _)) => {} // unknown (failed reconnect read) — nothing authoritative
+            // Re-QUERY call state AUTHORITATIVELY here (not just republish the cache). This is the
+            // guaranteed backstop for the cross-connection ordering residual (CodeRabbit): even if
+            // a stale idle frame disarmed the poll, this unconditional re-query re-checks dim-35
+            // within one interval and re-arms/corrects, so the call-state sensor can't remain stuck.
+            match read_call_state_draining(
+                cfg, client, volume, light, &mut sock, &mut framer, &mut buf, &mut frames,
+                &mut call_watch,
+            )
+            .await?
+            {
+                Reconcile::SocketClosed => return Ok(()),
+                // A live transition during the drain already published + updated the watch.
+                Reconcile::Done { saw_transition: true, .. } => {}
+                Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
+                    publish_call_state(cfg, client, code).await;
+                    update_call_watch(&mut call_watch, code);
+                }
+                Reconcile::Done { result: Ok(None) | Err(_), saw_transition: false } => {
+                    // Query failed — best-effort republish the last cached value (the original
+                    // reseed behavior), so a dropped retained update is still recovered.
+                    match call_watch {
+                        None => publish_call_state(cfg, client, 0).await, // confirmed idle
+                        Some((Some(code), _)) => publish_call_state(cfg, client, code).await,
+                        Some((None, _)) => {} // unknown — nothing authoritative to republish
+                    }
+                }
+                Reconcile::Exhausted => {
+                    call_watch = Some((None, tokio::time::Instant::now()));
+                }
             }
             last_reseed = tokio::time::Instant::now();
         }
@@ -431,11 +456,11 @@ async fn read_call_state_draining(
         }
         // A query that saw no transition — neither before it completed nor already-ready at
         // completion — is applied. This is BEST-EFFORT: the monitor and dim-35 use separate
-        // connections with no gateway-provided sequence marker (CodeRabbit), so a monitor frame
-        // could still become readable in the instant AFTER this check and before the caller
-        // publishes. That residual is self-healing, though: monitor frames are an ORDERED TCP
-        // stream, so a stale idle is followed by the real transition that re-arms, and a genuinely
-        // missed transition is corrected by the next periodic poll or the next reconnect reconcile.
+        // connections with no gateway sequence marker (CodeRabbit), so a monitor frame could still
+        // become readable in the instant AFTER this check and before the caller publishes, and such
+        // a stale frame could even disarm the poll. The call-state sensor still self-heals, though:
+        // the reseed loop RE-QUERIES dim-35 authoritatively every RETAINED_RESEED_INTERVAL
+        // REGARDLESS of call_watch, so a stuck state is re-checked and corrected within one interval.
         if !saw_transition {
             return Ok(Reconcile::Done { result, saw_transition: false });
         }

@@ -134,24 +134,29 @@ async fn run() -> Result<(), String> {
             // A JOIN failure (the blocking read panicked) is "couldn't read" — treat as Unreadable
             // so we KEEP the record rather than deleting it.
             .unwrap_or(persist::LightRestore::Unreadable);
-        let initial = match restore {
-            // Normal reboot restore: a valid on/off record for THIS WHERE.
-            persist::LightRestore::State(on) => Some(on),
+        // `initial` seeds the in-memory cache; `initial_uncertain` tells the persist task whether
+        // the on-disk value is known to match `initial` (so an observed value equal to it must
+        // still be durably written to overwrite a possibly-different record we couldn't read).
+        let (initial, initial_uncertain) = match restore {
+            // Normal reboot restore: a valid on/off record for THIS WHERE — disk matches `initial`.
+            persist::LightRestore::State(on) => (Some(on), false),
             // No usable record (absent, a DIFFERENT WHERE's, or corrupt). Forget it, so a later
             // switch BACK to an old WHERE starts unknown instead of restoring a stale value (Codex).
+            // Disk is now confirmed absent (= None), so the baseline is certain.
             persist::LightRestore::Absent => {
                 clear_persisted_light("no valid state for the configured WHERE").await;
-                None
+                (None, false)
             }
             // Present but UNREADABLE (transient I/O). Do NOT clear — a valid state may still be on
-            // disk; keep it and retry next boot. Start unknown for now rather than DELETING a
-            // possibly-good record (Codex).
+            // disk; keep it and retry next boot. Start the cache unknown, and mark the disk baseline
+            // UNCERTAIN so the first observed value is durably written (overwriting whatever record
+            // we couldn't read) rather than skipped as already-durable (Codex).
             persist::LightRestore::Unreadable => {
                 eprintln!(
                     "btmqttd: light: persisted state unreadable (I/O error) — keeping the record, \
                      starting from unknown"
                 );
-                None
+                (None, true)
             }
         };
         let (ctl, persist_rx) = light::LightCtl::new(&cfg, client.clone(), initial);
@@ -159,8 +164,13 @@ async fn run() -> Result<(), String> {
         // Pass the restored disk value as the persist task's durable BASELINE explicitly, so a
         // command/observe that bumps the channel before the task is first polled is still
         // persisted (not mistaken for the restored value).
-        let persist_task =
-            tokio::spawn(light::run_persist(where_, initial, persist_rx, persist_shutdown_rx));
+        let persist_task = tokio::spawn(light::run_persist(
+            where_,
+            initial,
+            initial_uncertain,
+            persist_rx,
+            persist_shutdown_rx,
+        ));
         (Some(ctl), Some((persist_shutdown_tx, persist_task)))
     } else {
         // Feature DISABLED: forget any persisted light-state, so that re-enabling the same
