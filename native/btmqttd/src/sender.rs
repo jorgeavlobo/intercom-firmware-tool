@@ -72,6 +72,11 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// exactly the missed-terminal-frame case.
 const CALL_STATE_POLL: Duration = Duration::from_secs(30);
 
+/// While the one-shot reconnect call-state query runs, re-poll the monitor socket this
+/// often so buffered/live frames — notably a light echo whose ≤3 s guard is already
+/// ticking — are drained promptly instead of waiting out the up-to-5 s query.
+const RECONNECT_DRAIN_TICK: Duration = Duration::from_millis(200);
+
 /// The call-state reconcile marker: `(last-known state, poll instant)`, or `None` when
 /// idle (disarmed). The inner `Option<u8>` is `Some(code)` for a known non-idle state and
 /// `None` for "unknown" — armed after a reconnect whose authoritative read failed, so the
@@ -169,23 +174,63 @@ async fn session(
     // Reconcile the retained call state AUTHORITATIVELY on every (re)connect: query the
     // gateway (`*#8**35##`) for the REAL state rather than trusting the possibly-stale
     // buffered frames above (or blindly assuming idle), so a call genuinely in progress
-    // across a monitor reconnect is preserved. Runs AFTER the buffered drain, so it is the
-    // FINAL reconciliation (like resync() for volume/mute). Publish unconditionally — this
-    // reconnect reconcile is one-shot and authoritative; the poll loop below dedups the
-    // periodic case.
+    // across a monitor reconnect is preserved.
     //
-    // On a FAILED read (session refused / no reply) do NOT fabricate a state — publishing
-    // idle would clobber a real ringing/in_call. Keep whatever the buffered frames (or the
-    // pre-existing retained value) left, and ensure the poll can still reconcile: if the
-    // buffered frames left us disarmed, arm an "unknown" marker so a later poll re-queries.
-    match dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await {
-        Ok(Some(code)) => {
-            publish_call_state(cfg, client, code).await;
-            update_call_watch(&mut call_watch, code);
-        }
-        Ok(None) | Err(_) => {
-            if call_watch.is_none() {
-                call_watch = Some((None, tokio::time::Instant::now()));
+    // Do NOT await this query in isolation: it can take up to `dimension::SESSION_TIMEOUT`
+    // (5 s) — longer than the light `ECHO_GUARD` (3 s). If a light command's echo lands on
+    // the fresh session while we sit here, blocking the monitor read would delay observe()
+    // past the guard, and apply_observe would misread our OWN echo as a physical press —
+    // committing a second flip and inverting the cache (Codex). So keep draining the
+    // monitor socket CONCURRENTLY while the query runs: every frame (light echoes included)
+    // is processed the moment it arrives, within its guard window. This also cuts general
+    // reconnect frame latency, which previously waited out the whole query.
+    //
+    // The query's result stays authoritative for call state over the BUFFERED frames drained
+    // above, with one exception: a LIVE call-state transition read from the socket DURING the
+    // drain is newer than this snapshot, so it must not be clobbered by it. On a FAILED read
+    // (session refused / no reply) do NOT fabricate a state — publishing idle would clobber a
+    // real ringing/in_call; keep what the frames left and, if still disarmed, arm an "unknown"
+    // marker so a later poll re-queries.
+    let reconcile = dimension::read_call_state(&cfg.own_host, cfg.own_port_mon);
+    tokio::pin!(reconcile);
+    let mut live_call_state = false;
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut reconcile => {
+                match result {
+                    // Skip if a live transition already superseded this snapshot.
+                    Ok(Some(code)) if !live_call_state => {
+                        publish_call_state(cfg, client, code).await;
+                        update_call_watch(&mut call_watch, code);
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => {
+                        if call_watch.is_none() {
+                            call_watch = Some((None, tokio::time::Instant::now()));
+                        }
+                    }
+                }
+                break;
+            }
+            read = tokio::time::timeout(RECONNECT_DRAIN_TICK, sock.read(&mut buf)) => {
+                // A completed read is drained now; a tick timeout just re-polls the select.
+                if let Ok(read) = read {
+                    let n = read?;
+                    if n == 0 {
+                        return Ok(()); // gateway closed the monitor session
+                    }
+                    frames.clear();
+                    framer.push(&buf[..n], &mut frames);
+                    for frame in frames.drain(..) {
+                        if let Some(code) =
+                            publish_frame(cfg, client, volume, light, &frame).await
+                        {
+                            update_call_watch(&mut call_watch, code);
+                            live_call_state = true;
+                        }
+                    }
+                }
             }
         }
     }

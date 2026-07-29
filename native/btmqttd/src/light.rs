@@ -30,12 +30,16 @@
 //! cache is unknown, so the first command is optimistic; a toggle made while the daemon is
 //! DOWN is missed; if SIGTERM lands DURING the forward itself (the frame reached the bus but
 //! the `.await` hasn't returned) that single toggle can be lost; and if a command's echo is
-//! MISSED across a monitor reconnect, its expectation lingers until its [`ECHO_GUARD`] deadline
-//! (≤3 s), during which a physical press could be absorbed as that echo. These are bounded and
-//! rare; deliberately NOT special-cased at reconnect, because the tracker cannot distinguish a
-//! command whose echo was lost on the dead socket (should be forgotten) from one still
-//! in-flight whose echo arrives on the new socket (must be kept), so any reconnect-time
-//! clearing would either strand stale guards or double-count an in-flight command.
+//! LOST across a monitor reconnect (it was in flight on the socket that died), its expectation
+//! lingers until its [`ECHO_GUARD`] deadline (≤3 s), during which a physical press is absorbed
+//! as that (never-arriving) echo — the relay toggles but the cache does not, leaving it one
+//! toggle behind until a later frame (another press, or the next command) rebalances it. The
+//! EXPOSURE WINDOW is bounded (≤3 s) but the resulting desync can persist. This is deliberately
+//! NOT special-cased at reconnect, because the tracker cannot distinguish a command whose echo
+//! was lost on the dead socket (should be forgotten) from one still in-flight whose echo arrives
+//! on the new socket (must be kept), so any reconnect-time clearing would either strand stale
+//! guards or double-count an in-flight command — a worse, unbounded failure than this rare,
+//! bounded-window residual.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -276,8 +280,8 @@ impl LightCtl {
             // Actuation FAILED. If THIS command's echo was already absorbed during the forward,
             // its frame reached the bus (a real toggle) — reclaim it (flip + persist + publish).
             // Otherwise drop its expectation and leave the cache unchanged (retryable). Keyed by
-            // `gen`, so neither an earlier command's delayed echo NOR a mid-forward monitor
-            // reconnect (which parks the gen in `cleared`) is mistaken for our own observed toggle.
+            // `gen`, so an earlier command's delayed echo is never mistaken for our own observed
+            // toggle: only THIS command's slot can be reclaimed.
             let reclaimed = self
                 .st
                 .lock()
