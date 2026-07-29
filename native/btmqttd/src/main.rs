@@ -134,7 +134,11 @@ async fn run() -> Result<(), String> {
             .unwrap_or(None);
         let (ctl, persist_rx) = light::LightCtl::new(&cfg, client.clone(), initial);
         let (persist_shutdown_tx, persist_shutdown_rx) = tokio::sync::oneshot::channel();
-        let persist_task = tokio::spawn(light::run_persist(where_, persist_rx, persist_shutdown_rx));
+        // Pass the restored disk value as the persist task's durable BASELINE explicitly, so a
+        // command/observe that bumps the channel before the task is first polled is still
+        // persisted (not mistaken for the restored value).
+        let persist_task =
+            tokio::spawn(light::run_persist(where_, initial, persist_rx, persist_shutdown_rx));
         (Some(ctl), Some((persist_shutdown_tx, persist_task)))
     } else {
         (None, None)

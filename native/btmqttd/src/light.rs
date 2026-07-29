@@ -274,10 +274,11 @@ impl LightCtl {
 /// rather than lost with the aborted worker (Codex). Redundant writes are skipped.
 pub async fn run_persist(
     where_: String,
+    initial: Option<bool>,
     rx: watch::Receiver<Option<bool>>,
     shutdown: oneshot::Receiver<()>,
 ) {
-    run_persist_with(rx, shutdown, move |on| {
+    run_persist_with(initial, rx, shutdown, move |on| {
         let where_ = where_.clone();
         async move { write_light(&where_, on).await }
     })
@@ -290,6 +291,7 @@ pub async fn run_persist(
 /// transient partition outage can't leave the on-disk record stale while the loop believes it
 /// is durable (CodeRabbit). `write(v)` returns `true` on a durable write.
 async fn run_persist_with<F, Fut>(
+    initial: Option<bool>,
     mut rx: watch::Receiver<Option<bool>>,
     shutdown: oneshot::Receiver<()>,
     mut write: F,
@@ -299,9 +301,13 @@ async fn run_persist_with<F, Fut>(
 {
     // How long to wait before re-attempting a failed write while otherwise idle.
     const RETRY: Duration = Duration::from_secs(5);
-    // `written` = the value known to be DURABLE on disk. The initial came FROM disk (the
-    // restore), so it is already durable — mark it seen so an idle shutdown doesn't rewrite it.
-    let mut written = *rx.borrow_and_update();
+    // `written` = the value known to be DURABLE on disk: the value RESTORED from disk, passed
+    // in EXPLICITLY. It must NOT be read from the watch channel here — a `command()`/`observe()`
+    // can bump the channel before this task is first polled, and capturing that as the baseline
+    // would make us skip persisting it, so a reboot would restore the older state (Codex). We
+    // deliberately do NOT `borrow_and_update`: leaving any pending value unseen lets the first
+    // loop iteration persist it (it differs from this disk baseline).
+    let mut written = initial;
     // Set when the latest write FAILED, so we keep retrying until it lands or a newer value
     // supersedes it — a failed write is NEVER mistaken for durable.
     let mut retry_pending = false;
@@ -459,18 +465,17 @@ mod tests {
         let (tx, rx) = watch::channel::<Option<bool>>(None);
         let (sd_tx, sd_rx) = oneshot::channel();
         let a = attempts.clone();
-        let worker = tokio::spawn(run_persist_with(rx, sd_rx, move |_on| {
+        // Enqueue a toggled state BEFORE the worker is spawned: with the disk baseline passed
+        // explicitly (None), the worker must still persist this pre-existing value rather than
+        // mistaking it for the restored baseline (the race Codex flagged).
+        tx.send(Some(true)).unwrap();
+        let worker = tokio::spawn(run_persist_with(None, rx, sd_rx, move |_on| {
             let a = a.clone();
             async move {
                 a.fetch_add(1, Relaxed);
                 false // never durable
             }
         }));
-        // Let the worker capture its initial (None) as the durable baseline BEFORE we enqueue
-        // a new value — otherwise it would start up already seeing Some(true) and never write.
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        // Enqueue a toggled state; the worker attempts to persist it and fails.
-        tx.send(Some(true)).unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await; // let the worker attempt once
         // Shut down BEFORE the 5 s retry timer: the final flush must RE-attempt the still
         // unwritten value (it was never marked durable), proving a failed write isn't mistaken
