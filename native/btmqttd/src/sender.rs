@@ -84,6 +84,13 @@ const RECONNECT_DRAIN_TICK: Duration = Duration::from_millis(200);
 /// the reader. Bounds such staleness to at most one interval.
 const RETAINED_RESEED_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How many times a call-state reconcile may RE-QUERY when a monitor transition is observed
+/// while its dim-35 snapshot is in flight. The monitor and the query use separate connections,
+/// so a drained transition can't be ordered against the snapshot by local receipt time; re-query
+/// until one completes transition-free (unambiguously current). Bounded so a rapid transition
+/// burst can't loop forever — at the cap the drained transitions have kept the state current.
+const MAX_RECONCILE_REQUERIES: usize = 5;
+
 /// The call-state reconcile marker: `(last-known state, poll instant)`, or `None` when
 /// idle (disarmed). The inner `Option<u8>` is `Some(code)` for a known non-idle state and
 /// `None` for "unknown" — armed after a reconnect whose authoritative read failed, so the
@@ -346,36 +353,55 @@ async fn read_call_state_draining(
             saw_transition: false,
         });
     };
-    let reconcile = dimension::read_call_state(&cfg.own_host, cfg.own_port_mon);
-    tokio::pin!(reconcile);
-    let mut saw_transition = false;
-    loop {
-        tokio::select! {
-            biased;
-            result = &mut reconcile => return Ok(Reconcile::Done { result, saw_transition }),
-            read = tokio::time::timeout(RECONNECT_DRAIN_TICK, sock.read(buf)) => {
-                // A completed read is processed now; a timeout re-polls.
-                if let Ok(read) = read {
-                    let n = read?;
-                    if n == 0 {
-                        return Ok(Reconcile::SocketClosed);
-                    }
-                    frames.clear();
-                    framer.push(&buf[..n], frames);
-                    for frame in frames.drain(..) {
-                        // A live call-state transition here is applied IN ORDER (published + watch
-                        // updated) and flagged so the snapshot doesn't overwrite it.
-                        if let Some(code) =
-                            publish_frame(cfg, client, volume, Some(light), &frame).await
-                        {
-                            update_call_watch(call_watch, code);
-                            saw_transition = true;
+    // Cross-connection ordering can't be inferred from local receipt time — a monitor frame drained
+    // during the query may PREDATE or POSTDATE the dim-35 snapshot. So whenever a live call-state
+    // transition IS drained (published + applied in order below), the snapshot is ambiguous:
+    // RE-QUERY for a clean one. This converges — once the call settles, a query completes with no
+    // transition during it and its snapshot is unambiguously current. Bounded so a rapid transition
+    // burst can't loop forever; at the cap the drained transitions have kept `call_watch` current.
+    for _ in 0..MAX_RECONCILE_REQUERIES {
+        let reconcile = dimension::read_call_state(&cfg.own_host, cfg.own_port_mon);
+        tokio::pin!(reconcile);
+        let mut saw_transition = false;
+        let result = loop {
+            tokio::select! {
+                biased;
+                r = &mut reconcile => break r,
+                read = tokio::time::timeout(RECONNECT_DRAIN_TICK, sock.read(buf)) => {
+                    // A completed read is processed now; a timeout re-polls.
+                    if let Ok(read) = read {
+                        let n = read?;
+                        if n == 0 {
+                            return Ok(Reconcile::SocketClosed);
+                        }
+                        frames.clear();
+                        framer.push(&buf[..n], frames);
+                        for frame in frames.drain(..) {
+                            // A live call-state transition is applied IN ORDER (published + watch
+                            // updated); it marks this snapshot ambiguous, so we re-query below.
+                            if let Some(code) =
+                                publish_frame(cfg, client, volume, Some(light), &frame).await
+                            {
+                                update_call_watch(call_watch, code);
+                                saw_transition = true;
+                            }
                         }
                     }
                 }
             }
+        };
+        // A transition-free snapshot is unambiguously current — apply it. Otherwise re-query.
+        if !saw_transition {
+            return Ok(Reconcile::Done { result, saw_transition: false });
         }
     }
+    // Transitions kept arriving through every attempt: the monitor is live and `call_watch` already
+    // reflects the latest drained transition, so keep it (do not overwrite with an ambiguous
+    // snapshot). `saw_transition: true` tells the caller to leave `call_watch` as the drain left it.
+    Ok(Reconcile::Done {
+        result: Ok(None),
+        saw_transition: true,
+    })
 }
 
 /// Publish one framed OWN string to TOPIC_DUMP — as compact JSON (PAYLOAD_FORMAT=
