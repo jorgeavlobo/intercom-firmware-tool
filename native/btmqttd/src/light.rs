@@ -100,6 +100,18 @@ impl State {
     /// fresh generation (returned to the caller for [`on_forward_failed`]) and its OWN deadline,
     /// so a later command's arm can't extend this expectation's window.
     fn arm_guard(&mut self, now: Instant) -> u64 {
+        // Prune expired expectations first (front-first — arm order is deadline order, same as
+        // apply_observe) so the queue is self-limiting: if the monitor stream is down while
+        // commands keep succeeding, stale entries don't accumulate until the next observe().
+        // A forward resolves within FORWARD_TIMEOUT (< ECHO_GUARD), so an in-flight command's
+        // entry is never expired here — only genuinely stale ones (lost echoes) are dropped.
+        while let Some(&(_, dl)) = self.pending.front() {
+            if now >= dl {
+                self.pending.pop_front();
+            } else {
+                break;
+            }
+        }
         let gen = self.next_gen;
         self.next_gen = self.next_gen.wrapping_add(1);
         self.pending.push_back((gen, now + ECHO_GUARD));
@@ -225,18 +237,18 @@ impl LightCtl {
             Some(false) => "off",
             None => "", // empty retained → clears any stale retained value; HA shows unknown
         };
-        // Non-blocking, retained best-effort: observe() runs on the monitor read path, so this
-        // must never block on a full request queue during a broker outage — else the reader
-        // stalls and a following light echo misses its 3 s guard (Codex). A drop while the queue
-        // is full is recovered by seed() on the next reconnect, and durable disk persistence goes
-        // through a separate, unaffected channel. See sender::publish_retained_besteffort.
-        crate::sender::publish_retained_besteffort(
+        // Non-blocking single try_publish: observe() runs on the monitor read path, so this must
+        // never block on a full request queue — else the reader stalls and a following light echo
+        // misses its 3 s guard (Codex/CodeRabbit). A drop while the queue is full is recovered off
+        // the read path by the sender loop's periodic reseed (and by seed() on the next reconnect);
+        // durable disk persistence goes through a separate, unaffected channel. See
+        // sender::try_publish_retained.
+        crate::sender::try_publish_retained(
             &self.client,
             &self.topic_light,
             QoS::AtLeastOnce,
             payload.as_bytes().to_vec(),
-        )
-        .await;
+        );
     }
 
     /// On-connect (re)publish of the retained state — a restarted broker dropped retained

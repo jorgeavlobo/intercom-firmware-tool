@@ -77,6 +77,13 @@ const CALL_STATE_POLL: Duration = Duration::from_secs(30);
 /// ticking — are drained promptly instead of waiting out the up-to-5 s query.
 const RECONNECT_DRAIN_TICK: Duration = Duration::from_millis(200);
 
+/// How often the monitor loop re-publishes the retained states (light, volume/mute, call
+/// state). This is the recovery path for a retained update dropped by a momentarily-full
+/// request queue while the broker stayed CONNECTED (no reconnect re-seeds it). Coalesced by
+/// nature — always the latest cached value — and off the per-frame path, so it never blocks
+/// the reader. Bounds such staleness to at most one interval.
+const RETAINED_RESEED_INTERVAL: Duration = Duration::from_secs(60);
+
 /// The call-state reconcile marker: `(last-known state, poll instant)`, or `None` when
 /// idle (disarmed). The inner `Option<u8>` is `Some(code)` for a known non-idle state and
 /// `None` for "unknown" — armed after a reconnect whose authoritative read failed, so the
@@ -165,7 +172,7 @@ async fn session(
     if let Some(pos) = pre.windows(own::ACK.len()).position(|w| w == own::ACK) {
         framer.push(&pre[pos + own::ACK.len()..], &mut frames);
         for frame in frames.drain(..) {
-            if let Some(code) = publish_frame(cfg, client, volume, light, &frame).await {
+            if let Some(code) = publish_frame(cfg, client, volume, light, &frame, false).await {
                 update_call_watch(&mut call_watch, code);
             }
         }
@@ -176,30 +183,20 @@ async fn session(
     // buffered frames above (or blindly assuming idle), so a call genuinely in progress
     // across a monitor reconnect is preserved.
     //
-    // Do NOT await this query in isolation: it can take up to `dimension::SESSION_TIMEOUT`
-    // (5 s) — longer than the light `ECHO_GUARD` (3 s). If a light command's echo lands on
-    // the fresh session while we sit here, blocking the monitor read would delay observe()
-    // past the guard, and apply_observe would misread our OWN echo as a physical press —
-    // committing a second flip and inverting the cache (Codex). So keep draining the
-    // monitor socket CONCURRENTLY while the query runs: every frame (light echoes included)
-    // is processed the moment it arrives, within its guard window. This also cuts general
-    // reconnect frame latency, which previously waited out the whole query.
-    //
     // read_call_state can take up to `dimension::SESSION_TIMEOUT` (5 s) — longer than the light
     // `ECHO_GUARD` (3 s). If a light command's echo lands on the fresh session while we sit here,
     // blocking the monitor read would delay observe() past the guard, and apply_observe would
     // misread our OWN echo as a physical press, inverting the cache (Codex). So while the query
-    // runs, keep draining the socket — but feed those frames to LIGHT observation ONLY. Their
-    // other effects are deliberately dropped: the dump is a lossy live stream, and any volume or
-    // call-state transition in this brief window is reconciled immediately AFTER — call state by
-    // this very query (its result below is the single authoritative writer), volume by the
-    // `resync()` spawned next. Keeping call state OUT of the drain is what makes the query
-    // authoritative without racing a concurrently-drained transition against its snapshot in
-    // EITHER direction: the query completes 500 ms after its snapshot (the session idle gap), so
-    // neither "apply unconditionally" (a newer drained ringing is clobbered — Codex) nor "suppress
-    // on any drained frame" (an older buffered idle discards the authoritative ringing — CodeRabbit)
-    // is correct while both are processed here. Only light is, and light echoes carry no such
-    // ordering ambiguity.
+    // runs, keep draining the socket and processing frames NORMALLY — light echoes, volume/mute,
+    // doorbell events and the raw dump all reach their handlers the moment they arrive — with ONE
+    // exception: call-state transitions are SUPPRESSED here (the `true` below), left solely to
+    // this query's authoritative result. The query completes 500 ms after its snapshot (the
+    // session idle gap), so mixing concurrently-drained call frames with it races in EITHER
+    // direction — "apply unconditionally" clobbers a newer drained ringing (Codex), "suppress on
+    // any drained frame" lets an older buffered idle discard the authoritative ringing (CodeRabbit).
+    // Suppressing ONLY call state keeps the query the single authoritative writer while no longer
+    // losing doorbell/dump/volume frames in the window (CodeRabbit). Light echoes carry no such
+    // ordering ambiguity, so they are observed inline here.
     let call_state = if let Some(light) = light {
         let reconcile = dimension::read_call_state(&cfg.own_host, cfg.own_port_mon);
         tokio::pin!(reconcile);
@@ -208,7 +205,7 @@ async fn session(
                 biased;
                 result = &mut reconcile => break result,
                 read = tokio::time::timeout(RECONNECT_DRAIN_TICK, sock.read(&mut buf)) => {
-                    // A completed read is observed for light now; a tick timeout re-polls.
+                    // A completed read is processed now (call state suppressed); a timeout re-polls.
                     if let Ok(read) = read {
                         let n = read?;
                         if n == 0 {
@@ -217,7 +214,7 @@ async fn session(
                         frames.clear();
                         framer.push(&buf[..n], &mut frames);
                         for frame in frames.drain(..) {
-                            light.observe(&frame).await;
+                            publish_frame(cfg, client, volume, Some(light), &frame, true).await;
                         }
                     }
                 }
@@ -226,7 +223,7 @@ async fn session(
     } else {
         // No light controller: nothing on the read path is time-sensitive, so await the query
         // inline — its original, known-correct ordering (authoritative over the buffered frames
-        // above; a later transition supersedes it in the main loop).
+        // above; later frames are processed, with call state, by the main loop).
         dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await
     };
     // Apply the authoritative reconcile. On a FAILED read (session refused / no reply) do NOT
@@ -259,6 +256,7 @@ async fn session(
         async move { volume.resync().await }
     });
 
+    let mut last_reseed = tokio::time::Instant::now();
     loop {
         // Read with a CALL_STATE_POLL cap so the loop still wakes to run the reconcile below
         // on a QUIET bus (no frames). A completed read is handled; on a timeout the `if let`
@@ -271,7 +269,7 @@ async fn session(
             frames.clear();
             framer.push(&buf[..n], &mut frames);
             for frame in frames.drain(..) {
-                if let Some(code) = publish_frame(cfg, client, volume, light, &frame).await {
+                if let Some(code) = publish_frame(cfg, client, volume, light, &frame, false).await {
                     update_call_watch(&mut call_watch, code);
                 }
             }
@@ -305,6 +303,27 @@ async fn session(
                 }
             }
         }
+
+        // Periodically re-publish the retained states (light, volume/mute, call state) so a value
+        // dropped by a full request queue while the broker stayed CONNECTED — which no reconnect
+        // re-seeds — is corrected within RETAINED_RESEED_INTERVAL instead of lingering until the
+        // topic next changes (Codex/CodeRabbit). This runs off the per-frame path and every publish
+        // is non-blocking, so it never delays a light echo. Call state is included because a dropped
+        // transition is not otherwise republished — a dropped idle disarms the poll and a dropped
+        // non-idle looks already-known — and the monitor session does not restart on a
+        // connected-only drop (Codex).
+        if last_reseed.elapsed() >= RETAINED_RESEED_INTERVAL {
+            if let Some(light) = light {
+                light.seed().await;
+            }
+            volume.reseed().await;
+            match call_watch {
+                None => publish_call_state(cfg, client, 0).await, // confirmed idle
+                Some((Some(code), _)) => publish_call_state(cfg, client, code).await,
+                Some((None, _)) => {} // unknown (failed reconnect read) — nothing authoritative
+            }
+            last_reseed = tokio::time::Instant::now();
+        }
     }
 }
 
@@ -312,13 +331,16 @@ async fn session(
 /// json, the default) or the raw frame. QoS 0, not retained, as the shell's
 /// `mqtt_pub -l` did.
 /// Returns the call-state `code` when this frame was a call-state transition (so the
-/// caller can arm/disarm the watchdog), else `None`.
+/// caller can arm/disarm the watchdog), else `None`. With `suppress_call_state` set, a
+/// call-state frame is NOT published or reported (used by the reconnect-query drain, where
+/// the authoritative query is the sole call-state writer); every other effect still runs.
 async fn publish_frame(
     cfg: &Arc<Config>,
     client: &AsyncClient,
     volume: &Arc<VolumeCtl>,
     light: Option<&Arc<LightCtl>>,
     frame: &str,
+    suppress_call_state: bool,
 ) -> Option<u8> {
     // Stair-light SWITCH state tracking: a physical panel press of the light button appears
     // on the monitor as `*8*21*<WHERE>##`. Feed EVERY frame to the controller — it matches
@@ -343,10 +365,15 @@ async fn publish_frame(
         // Entrance-panel CALL: fire a momentary "pressed" event.
         publish_doorbell(cfg, client, where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
-        // Call STATE transition (idle/ringing/in_call, or "active" fallback): update the
-        // retained sensor and report the code so the caller can (dis)arm the watchdog.
-        publish_call_state(cfg, client, code).await;
-        call_code = Some(code);
+        // Call STATE transition (idle/ringing/in_call, or "active" fallback). Normally update the
+        // retained sensor and report the code so the caller can (dis)arm the watchdog; but when
+        // `suppress_call_state` is set (the reconnect-query drain) leave call state entirely to the
+        // authoritative query, so a concurrently-drained transition can't race its snapshot
+        // (Codex/CodeRabbit). The frame is still dumped below either way.
+        if !suppress_call_state {
+            publish_call_state(cfg, client, code).await;
+            call_code = Some(code);
+        }
     }
     let payload: Vec<u8> = if cfg.payload_json {
         match own::frame_to_json(frame) {
@@ -396,51 +423,24 @@ async fn publish_doorbell(cfg: &Arc<Config>, client: &AsyncClient, where_: &str)
 async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
     let payload =
         serde_json::json!({ "state": dimension::call_state_label(code), "code": code }).to_string();
-    publish_retained_besteffort(client, &cfg.topic_call_state, QoS::AtLeastOnce, payload.into_bytes())
-        .await;
+    try_publish_retained(client, &cfg.topic_call_state, QoS::AtLeastOnce, payload.into_bytes());
 }
 
-/// Retry a retained publish rejected as FULL this often, and at most this many times. A tiny
-/// SLEEP (not a bare `yield_now`) is used because the runtime is single-threaded: only parking
-/// on a timer lets the event-loop task be polled to flush a queued request and free a channel
-/// slot. A few of these total a few ms — far under the 3 s light [`crate::light`] echo guard.
-const RETAINED_RETRY_TICK: Duration = Duration::from_millis(1);
-const RETAINED_RETRY_MAX: usize = 8;
-
-/// Best-effort publish of a RETAINED topic that must NOT block the monitor reader. `try_publish`
-/// is non-blocking, but it also fails when the bounded request channel is momentarily FULL — a
-/// burst outrunning the event loop while the broker is still CONNECTED — which would silently
-/// drop a retained update that no reconnect re-seeds, leaving HA stale (CodeRabbit). So retry the
-/// latest value a few times, sleeping briefly so the event loop can drain a slot. If it stays
-/// full — a real broker outage, where `main`'s poll loop is parked in its reconnect backoff and
-/// not draining — give up and DROP; the value is re-published on the next reconnect
-/// (`read_call_state` / `VolumeCtl::resync` / `LightCtl::seed`). Never blocks the reader for more
-/// than a few ms, so a following light echo still makes its guard.
-pub(crate) async fn publish_retained_besteffort(
-    client: &AsyncClient,
-    topic: &str,
-    qos: QoS,
-    payload: Vec<u8>,
-) {
-    for attempt in 0..RETAINED_RETRY_MAX {
-        match client.try_publish(topic, qos, true, payload.clone()) {
-            Ok(()) => return,
-            // Channel full — let the event loop drain a slot, then retry the latest value.
-            Err(rumqttc::ClientError::TryRequest(_)) => {
-                if attempt + 1 < RETAINED_RETRY_MAX {
-                    tokio::time::sleep(RETAINED_RETRY_TICK).await;
-                }
-            }
-            Err(e) => {
-                eprintln!("btmqttd: publish retained {topic} failed: {e}");
-                return;
-            }
-        }
+/// Publish a RETAINED topic on the monitor read path WITHOUT ever blocking it: a single
+/// `try_publish`. If the bounded request channel is momentarily full (a burst outran the
+/// single-threaded event loop, or the broker is down) the value is DROPPED here rather than
+/// awaited — the reader must never stall, or a following light echo could miss its 3 s guard
+/// (Codex/CodeRabbit). A dropped retained value is recovered OFF the read path: the session
+/// loop's periodic reseed re-publishes the latest light/volume/call state within
+/// [`RETAINED_RESEED_INTERVAL`], and every reconnect re-seeds them too. The lossy dump and
+/// doorbell event call `try_publish` directly.
+pub(crate) fn try_publish_retained(client: &AsyncClient, topic: &str, qos: QoS, payload: Vec<u8>) {
+    match client.try_publish(topic, qos, true, payload) {
+        Ok(()) => {}
+        // Full (or disconnected): drop; the periodic reseed / next reconnect republishes.
+        Err(rumqttc::ClientError::TryRequest(_)) => {}
+        Err(e) => eprintln!("btmqttd: publish retained {topic} failed: {e}"),
     }
-    eprintln!(
-        "btmqttd: retained {topic} dropped (request queue full); \
-         re-published on the next reconnect"
-    );
 }
 
 #[cfg(test)]

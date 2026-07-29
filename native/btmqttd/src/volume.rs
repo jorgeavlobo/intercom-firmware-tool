@@ -248,14 +248,21 @@ impl VolumeCtl {
         self.publish_retained(&self.topic_mute, payload.as_bytes().to_vec()).await;
     }
 
+    /// Re-publish the current retained volume + mute. Called by the sender loop's periodic
+    /// reseed (which recovers a retained value dropped by a momentarily-full request queue while
+    /// connected). Best-effort and non-blocking, like every retained publish here.
+    pub async fn reseed(&self) {
+        self.publish_volume().await;
+        self.publish_mute().await;
+    }
+
     async fn publish_retained(&self, topic: &str, payload: Vec<u8>) {
-        // Non-blocking, retained best-effort: observe_volume/observe_mute run on the monitor read
-        // path, so this must never block on a full request queue during a broker outage — else
-        // the reader stalls and a following light echo misses its 3 s guard (Codex). A drop while
-        // the queue is full self-heals: resync() re-reads and republishes this retained state on
-        // the next reconnect. See sender::publish_retained_besteffort.
-        crate::sender::publish_retained_besteffort(&self.client, topic, QoS::AtMostOnce, payload)
-            .await;
+        // Non-blocking single try_publish: observe_volume/observe_mute run on the monitor read
+        // path, so this must never block on a full request queue — else the reader stalls and a
+        // following light echo misses its 3 s guard (Codex/CodeRabbit). A drop while the queue is
+        // full is recovered off the read path by the sender loop's periodic reseed (and by
+        // resync() on the next reconnect). See sender::try_publish_retained.
+        crate::sender::try_publish_retained(&self.client, topic, QoS::AtMostOnce, payload);
     }
 
     /// Set the volume to `pct` (clamped 0..=100). Writes the dimension (under `cmd_lock`)
