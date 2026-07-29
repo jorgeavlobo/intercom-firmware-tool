@@ -132,6 +132,14 @@ async fn run() -> Result<(), String> {
         let initial = tokio::task::spawn_blocking(move || persist::read_light(&where_for_read))
             .await
             .unwrap_or(None);
+        // Nothing valid was restored for THIS WHERE — either no record, or one left by a
+        // DIFFERENT WHERE (a changed LIGHT_WHERE) or a corrupt one. Forget it, so a later
+        // switch BACK to an old WHERE starts unknown instead of restoring a value that went
+        // stale while that WHERE was untracked (Codex). A valid record (initial is Some) is
+        // kept — that's the normal reboot restore.
+        if initial.is_none() {
+            clear_persisted_light("no valid state for the configured WHERE").await;
+        }
         let (ctl, persist_rx) = light::LightCtl::new(&cfg, client.clone(), initial);
         let (persist_shutdown_tx, persist_shutdown_rx) = tokio::sync::oneshot::channel();
         // Pass the restored disk value as the persist task's durable BASELINE explicitly, so a
@@ -143,22 +151,8 @@ async fn run() -> Result<(), String> {
     } else {
         // Feature DISABLED: forget any persisted light-state, so that re-enabling the same
         // WHERE later starts from an UNKNOWN baseline instead of restoring a value that may
-        // have gone stale while untracked (a physical toggle we didn't see) — Codex. Retry a
-        // few times so a transient partition hiccup doesn't leave a stale record behind, and
-        // log if it ultimately fails rather than silently dropping the result (CodeRabbit).
-        let mut cleared = false;
-        for _ in 0..3 {
-            if tokio::task::spawn_blocking(persist::clear_light).await.unwrap_or(false) {
-                cleared = true;
-                break;
-            }
-        }
-        if !cleared {
-            eprintln!(
-                "btmqttd: could not clear persisted light-state while the feature is disabled; \
-                 re-enabling the same LIGHT_WHERE later may restore a stale value"
-            );
-        }
+        // have gone stale while untracked (a physical toggle we didn't see) — Codex.
+        clear_persisted_light("feature disabled").await;
         (None, None)
     };
 
@@ -675,6 +669,24 @@ async fn run() -> Result<(), String> {
     let _ = tokio::time::timeout(lock::MAX_PULSE + Duration::from_secs(1), lock_task).await;
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(())
+}
+
+/// Best-effort clear of the persisted stair-light record (bounded retries, log on ultimate
+/// failure). Used when the feature is DISABLED, and when an ENABLED build restored nothing for
+/// its configured WHERE (no record, a record left by a DIFFERENT WHERE, or a corrupt one) — so
+/// a later switch back to an old WHERE starts from an unknown baseline instead of a value that
+/// went stale while that WHERE was untracked (Codex). The disk work runs on the blocking pool;
+/// a transient failure is retried a few times, then logged rather than silently dropped.
+async fn clear_persisted_light(reason: &str) {
+    for _ in 0..3 {
+        if tokio::task::spawn_blocking(persist::clear_light).await.unwrap_or(false) {
+            return;
+        }
+    }
+    eprintln!(
+        "btmqttd: could not clear persisted light-state ({reason}); re-enabling an old \
+         LIGHT_WHERE later may restore a stale value"
+    );
 }
 
 /// On-connect step 1: SUBSCRIBE to the command topic, then clear any stray retained

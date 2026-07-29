@@ -59,6 +59,10 @@ struct State {
     on: Option<bool>,
     /// Set when WE just injected a toggle, so its monitor echo is ignored once.
     expect_echo_until: Option<Instant>,
+    /// Whether the guard ABSORBED an observed frame during the current command's window. If
+    /// the forward then FAILS, that frame wasn't our echo (our injection failed) but a real
+    /// relay toggle, and the failure path reclaims it. Reset by [`arm_guard`].
+    guard_absorbed: bool,
 }
 
 impl State {
@@ -68,15 +72,27 @@ impl State {
     }
 
     /// Arm the echo guard — called BEFORE forwarding, so the echo (which can land as soon
-    /// as the frame reaches the bus) is always covered.
+    /// as the frame reaches the bus) is always covered. Clears any prior absorb flag so the
+    /// reclaim only ever applies to a frame seen in THIS command's window.
     fn arm_guard(&mut self, now: Instant) {
         self.expect_echo_until = Some(now + ECHO_GUARD);
+        self.guard_absorbed = false;
     }
 
-    /// Disarm the guard — called when the forward FAILED, so a stale guard can't later
-    /// swallow a genuine physical press.
-    fn disarm_guard(&mut self) {
+    /// Called when the forward FAILED. Disarms the guard so it can't later swallow a genuine
+    /// physical press. If the guard ABSORBED a frame during the (now-failed) forward, that
+    /// frame was NOT our echo — our injection didn't land — but a real relay toggle (a
+    /// concurrent physical press, or our frame that reached the bus before the write error);
+    /// reclaim it by flipping the cache and returning `Some(new_state)` to publish + persist.
+    /// Otherwise nothing toggled: return `None`, leaving the cache unchanged (retryable).
+    fn on_forward_failed(&mut self) -> Option<Option<bool>> {
         self.expect_echo_until = None;
+        if std::mem::take(&mut self.guard_absorbed) {
+            self.on = self.on.map(|b| !b); // reclaim the observed toggle; unknown stays unknown
+            Some(self.on)
+        } else {
+            None
+        }
     }
 
     /// Commit OUR injected toggle after a SUCCESSFUL forward, returning the new cached
@@ -103,7 +119,11 @@ impl State {
     fn apply_observe(&mut self, now: Instant) -> Option<Option<bool>> {
         if let Some(until) = self.expect_echo_until.take() {
             if now < until {
-                return None; // our own toggle's echo — already accounted for
+                // Absorbed within the guard window. Assume it's our echo and ignore it — BUT
+                // remember we absorbed a frame, so if the forward turns out to have FAILED,
+                // on_forward_failed() can reclaim it as a real toggle.
+                self.guard_absorbed = true;
+                return None;
             }
             // else: a stale guard (echo never arrived) — fall through, this is physical.
         }
@@ -152,7 +172,7 @@ impl LightCtl {
         let where_ = cfg.light_where.clone().unwrap_or_default();
         let (persist_tx, persist_rx) = watch::channel(initial);
         let ctl = Arc::new(LightCtl {
-            st: Mutex::new(State { on: initial, expect_echo_until: None }),
+            st: Mutex::new(State { on: initial, expect_echo_until: None, guard_absorbed: false }),
             io_lock: AsyncMutex::new(()),
             persist_tx,
             press_frame: format!("*8*21*{where_}##"),
@@ -227,10 +247,19 @@ impl LightCtl {
         }
         if let Err(e) = forward_to_gateway(&self.press_frame, FORWARD_TIMEOUT).await {
             eprintln!("btmqttd: light toggle failed: {e}");
-            // Actuation FAILED: don't publish/persist a state the relay never reached, and
-            // clear the guard so it can't swallow a later genuine physical press. The command
-            // stays retryable (the cache is unchanged).
-            self.st.lock().expect("light state mutex poisoned").disarm_guard();
+            // Actuation FAILED. Disarm the guard so it can't later swallow a genuine physical
+            // press. If a frame was ABSORBED by the guard during this (failed) forward, it
+            // wasn't our echo — it was a real relay toggle — so reclaim it (flip + persist +
+            // publish). Otherwise nothing toggled: leave the cache unchanged (retryable).
+            let reclaimed = self
+                .st
+                .lock()
+                .expect("light state mutex poisoned")
+                .on_forward_failed();
+            if reclaimed.is_some() {
+                self.enqueue_persist();
+                self.publish_current().await;
+            }
             return;
         }
         // Post-forward: commit the toggle and ENQUEUE persistence with NO `.await` in between
@@ -368,7 +397,7 @@ mod tests {
     use super::*;
 
     fn state(on: Option<bool>) -> State {
-        State { on, expect_echo_until: None }
+        State { on, expect_echo_until: None, guard_absorbed: false }
     }
 
     #[test]
@@ -412,14 +441,31 @@ mod tests {
     }
 
     #[test]
-    fn failed_forward_leaves_state_and_guard_clean() {
-        // Mirrors command()'s failure path on the pure State: arm the guard, then (forward
-        // failed) disarm it WITHOUT committing — the cache is unchanged, so the command retries.
+    fn failed_forward_with_no_observation_leaves_state_and_guard_clean() {
+        // command()'s failure path when NOTHING was observed during the forward: nothing
+        // toggled, so the cache is unchanged and the command stays retryable.
         let mut st = state(Some(false));
         st.arm_guard(Instant::now());
-        st.disarm_guard();
+        assert_eq!(st.on_forward_failed(), None); // no absorbed frame → no reclaim
         assert_eq!(st.on, Some(false)); // NOT mutated to the desired state
         assert!(st.expect_echo_until.is_none()); // no stale guard to swallow a real press
+    }
+
+    #[test]
+    fn failed_forward_reclaims_an_absorbed_observation() {
+        // A monitor frame lands within the guard window (assumed to be our echo, ignored) —
+        // but the forward then FAILS, so that frame was actually a real relay toggle (a
+        // concurrent physical press, or our frame that hit the bus before the write error).
+        // on_forward_failed reclaims it: the cache flips to match the relay instead of losing
+        // the toggle and leaving HA/persist inverted.
+        let now = Instant::now();
+        let mut st = state(Some(false));
+        st.arm_guard(now);
+        assert_eq!(st.apply_observe(now + Duration::from_millis(10)), None); // absorbed
+        assert_eq!(st.on_forward_failed(), Some(Some(true))); // reclaimed → flipped
+        assert_eq!(st.on, Some(true));
+        assert!(st.expect_echo_until.is_none()); // guard cleared, nothing to double-count
+        assert!(!st.guard_absorbed);
     }
 
     #[test]
