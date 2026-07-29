@@ -150,19 +150,6 @@ async fn session(
         }
     }
 
-    // Monitor session is now LIVE. Discard any stale stair-light echo expectations FIRST —
-    // BEFORE any `.await` below (the ACK-buffered drain's `publish_frame`, `read_call_state`,
-    // the read loop), because each of those awaits lets the command worker arm a FRESH
-    // expectation on this now-live session. Clearing here (before commands can arm) parks the
-    // pre-reconnect generations in `cleared` — where an in-flight command that spanned the
-    // reconnect will find its own generation — while any command that arms AFTER this point
-    // keeps its expectation and absorbs its echo (Codex). Frames buffered with the ACK carry no
-    // command echo (no command has armed on this session yet), so clearing before the drain
-    // loses nothing; they are drained (and judged fresh) right after.
-    if let Some(light) = light {
-        light.on_monitor_reconnect().await;
-    }
-
     // Drain the ACK-buffered frames FIRST. Any bus frame that arrived in the same read(s)
     // as the ACK is framed and published here; the handshake ACK and any pre-ACK banner are
     // NOT framed (feeding all of `pre` could let stray pre-ACK bytes merge into a garbage

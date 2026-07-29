@@ -28,9 +28,14 @@
 //!
 //! Residual imperfection (inherent to a stateless toggle): on the very FIRST cold boot the
 //! cache is unknown, so the first command is optimistic; a toggle made while the daemon is
-//! DOWN is missed; and — irreducibly — if SIGTERM lands DURING the forward itself (the frame
-//! reached the bus but the `.await` hasn't returned) that single toggle can be lost.
-//! Persistence + the drained task remove the common cases; the rest is documented.
+//! DOWN is missed; if SIGTERM lands DURING the forward itself (the frame reached the bus but
+//! the `.await` hasn't returned) that single toggle can be lost; and if a command's echo is
+//! MISSED across a monitor reconnect, its expectation lingers until its [`ECHO_GUARD`] deadline
+//! (≤3 s), during which a physical press could be absorbed as that echo. These are bounded and
+//! rare; deliberately NOT special-cased at reconnect, because the tracker cannot distinguish a
+//! command whose echo was lost on the dead socket (should be forgotten) from one still
+//! in-flight whose echo arrives on the new socket (must be kept), so any reconnect-time
+//! clearing would either strand stale guards or double-count an in-flight command.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -57,11 +62,6 @@ const FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
 /// so the cache stays correct.
 const ECHO_GUARD: Duration = Duration::from_secs(3);
 
-/// Hard cap on remembered reconnect-cleared generations, so a lost-echo-then-reconnect
-/// generation whose command already finished can't accumulate unboundedly. Only in-flight
-/// commands (sequential, so ~one at a time) consult this; a small cap is ample.
-const MAX_CLEARED: usize = 64;
-
 /// The tracked light state + echo guard. Its methods are PURE (no I/O), so the tracking
 /// logic is unit-tested without a gateway or broker; [`LightCtl`] does the MQTT/forward I/O
 /// around them.
@@ -77,17 +77,12 @@ struct State {
     /// than the bus echoes them each get their own echo absorbed; a failing command reclaims
     /// ONLY its own echo, never an earlier successful command's delayed echo; and a new
     /// command's arm can't extend an older expectation's window and let a stale count swallow a
-    /// genuine later physical press (all Codex).
+    /// genuine later physical press (all Codex). An expectation whose echo never arrives (e.g.
+    /// missed across a monitor reconnect) simply EXPIRES by its own deadline, at which point the
+    /// next observed frame is judged fresh — no cross-session bookkeeping is needed.
     pending: VecDeque<(u64, Instant)>,
     /// Next generation to hand out (monotonic; wraps harmlessly — only equality is used).
     next_gen: u64,
-    /// Generations that were still PENDING (echo NOT yet consumed) when a monitor reconnect
-    /// cleared the queue. A command whose forward spanned the reconnect consults this by its own
-    /// generation: present ⇒ its echo was cleared-not-observed, so on success it re-arms (the
-    /// echo will arrive on the new session) and on failure it doesn't reclaim; absent ⇒ its echo
-    /// was already observed (or never pending), so it must NOT re-arm (that would swallow the
-    /// next physical press) and a failure DOES reclaim (Codex/CodeRabbit/Copilot).
-    cleared: VecDeque<u64>,
 }
 
 impl State {
@@ -98,8 +93,8 @@ impl State {
 
     /// Arm the echo guard — called BEFORE forwarding, so the echo (which can land as soon as
     /// the frame reaches the bus) is always covered. Queues ONE expected echo tagged with a
-    /// fresh generation (returned to the caller for [`on_forward_failed`]/[`rearm_if_cleared`])
-    /// and its OWN deadline, so a later command's arm can't extend this expectation's window.
+    /// fresh generation (returned to the caller for [`on_forward_failed`]) and its OWN deadline,
+    /// so a later command's arm can't extend this expectation's window.
     fn arm_guard(&mut self, now: Instant) -> u64 {
         let gen = self.next_gen;
         self.next_gen = self.next_gen.wrapping_add(1);
@@ -107,59 +102,19 @@ impl State {
         gen
     }
 
-    /// Called when the forward for the command tagged `gen` FAILED. Three cases:
-    /// * `gen` still PENDING → its frame never reached the bus (nothing toggled): drop the
-    ///   expectation, return `None` (retryable).
-    /// * `gen` in CLEARED (a monitor reconnect wiped it while unconsumed) → also not evidence
-    ///   of a toggle: drop it from `cleared`, return `None`.
-    /// * `gen` in NEITHER → an observed frame already consumed it (its frame reached the bus
-    ///   before the error, or a concurrent physical press), so reclaim it: flip and return
-    ///   `Some(new_state)`.
-    ///
-    /// Echoes are consumed oldest-first, so an earlier command's delayed echo consumes THAT
-    /// command's (older) generation, never this one.
+    /// Called when the forward for the command tagged `gen` FAILED. If `gen` is still PENDING,
+    /// its frame never reached the bus (nothing toggled): drop the expectation and return `None`
+    /// (retryable). If it is GONE, an observed frame already consumed it — the frame reached the
+    /// bus before the write error, or a concurrent physical press — so reclaim it: flip and
+    /// return `Some(new_state)`. Echoes are consumed oldest-first, so an earlier command's
+    /// delayed echo consumes THAT command's (older) generation, never this one.
     fn on_forward_failed(&mut self, gen: u64) -> Option<Option<bool>> {
         if let Some(pos) = self.pending.iter().position(|&(g, _)| g == gen) {
             self.pending.remove(pos);
-            return None;
-        }
-        if let Some(pos) = self.cleared.iter().position(|&g| g == gen) {
-            self.cleared.remove(pos); // cleared by a reconnect while unconsumed — not observed
-            return None;
-        }
-        self.on = self.on.map(|b| !b); // reclaim the observed toggle; unknown stays unknown
-        Some(self.on)
-    }
-
-    /// After a SUCCESSFUL forward, if a monitor reconnect cleared THIS command's still-pending
-    /// echo expectation (its `gen` is in `cleared`), the echo will arrive on the NEW session
-    /// with no slot to absorb it — re-arm a fresh expectation so it's swallowed rather than
-    /// double-counted as a physical press. Crucially this re-arms ONLY when the generation was
-    /// actually cleared while PENDING: if the echo had already been consumed before the reconnect
-    /// (gen not in `cleared`), re-arming would leave a phantom slot that swallows the next real
-    /// press (CodeRabbit). No-op when no reconnect cleared this command's slot.
-    fn rearm_if_cleared(&mut self, gen: u64, now: Instant) {
-        if let Some(pos) = self.cleared.iter().position(|&g| g == gen) {
-            self.cleared.remove(pos);
-            let g = self.next_gen;
-            self.next_gen = self.next_gen.wrapping_add(1);
-            self.pending.push_back((g, now + ECHO_GUARD));
-        }
-    }
-
-    /// A monitor reconnect: the stream was down, so any still-pending echoes may have been
-    /// missed. Move their generations from `pending` into `cleared` (rather than dropping them),
-    /// so a command whose forward SPANS the reconnect can tell its echo was cleared-not-observed
-    /// (re-arm on success / no mis-reclaim on failure) while a consumed echo — already gone from
-    /// `pending` — is NOT recorded as cleared (Codex/CodeRabbit/Copilot). The tracked on/off is
-    /// untouched. A hard cap bounds `cleared` against a lost-echo-then-reconnect generation whose
-    /// command already finished and will never consult it.
-    fn discard_pending_echoes(&mut self) {
-        for (gen, _) in self.pending.drain(..) {
-            self.cleared.push_back(gen);
-        }
-        while self.cleared.len() > MAX_CLEARED {
-            self.cleared.pop_front();
+            None
+        } else {
+            self.on = self.on.map(|b| !b); // reclaim the observed toggle; unknown stays unknown
+            Some(self.on)
         }
     }
 
@@ -243,12 +198,7 @@ impl LightCtl {
         let where_ = cfg.light_where.clone().unwrap_or_default();
         let (persist_tx, persist_rx) = watch::channel(initial);
         let ctl = Arc::new(LightCtl {
-            st: Mutex::new(State {
-                on: initial,
-                pending: VecDeque::new(),
-                next_gen: 0,
-                cleared: VecDeque::new(),
-            }),
+            st: Mutex::new(State { on: initial, pending: VecDeque::new(), next_gen: 0 }),
             io_lock: AsyncMutex::new(()),
             persist_tx,
             press_frame: format!("*8*21*{where_}##"),
@@ -285,25 +235,6 @@ impl LightCtl {
     /// clears any stale value the broker still holds — e.g. from a previous `LIGHT_WHERE`).
     pub async fn seed(&self) {
         self.publish_current().await;
-    }
-
-    /// A fresh monitor session just went live. Any of our injected toggles still awaiting their
-    /// echo may have had that echo delivered while the stream was DOWN (and thus missed), which
-    /// would leave a stale expectation that wrongly absorbs the FIRST physical press after
-    /// reconnect as if it were our echo — desyncing the tracked state. Move all outstanding
-    /// expectations to `cleared` (via [`State::discard_pending_echoes`]) so post-reconnect frames
-    /// are judged fresh, while a command whose forward SPANS the reconnect can still find its own
-    /// generation there (re-arm on success / no mis-reclaim on failure). The cached on/off is
-    /// unchanged.
-    ///
-    /// The caller MUST invoke this IMMEDIATELY after the monitor ACK, BEFORE draining the
-    /// ACK-buffered frames or any other `.await` — so it runs before the concurrent command
-    /// worker can arm a fresh expectation on this now-live session (a command arming during the
-    /// awaited drain would otherwise be wrongly cleared). Pre-reconnect echoes were lost on the
-    /// dead socket and never appear in the new session's buffered read, so clearing before the
-    /// drain doesn't discard a still-arriving legitimate echo.
-    pub async fn on_monitor_reconnect(&self) {
-        self.st.lock().expect("light state mutex poisoned").discard_pending_echoes();
     }
 
     /// Publish the CURRENT cached state (retained), SERIALIZED via `io_lock` so a physical
@@ -361,13 +292,7 @@ impl LightCtl {
         // Post-forward: commit the toggle and ENQUEUE persistence with NO `.await` in between
         // (the state mutex is sync), so even if SIGTERM fires the instant the forward returns,
         // the new state is already on the persist channel and the drained task will write it.
-        // If a monitor reconnect wiped THIS command's still-pending expectation mid-forward,
-        // re-arm one so the echo (arriving on the new session) is absorbed, not double-flipped.
-        {
-            let mut st = self.st.lock().expect("light state mutex poisoned");
-            st.commit_actuation(desired_on);
-            st.rearm_if_cleared(gen, Instant::now());
-        }
+        self.st.lock().expect("light state mutex poisoned").commit_actuation(desired_on);
         self.enqueue_persist();
         // Retained publish is best-effort and comes after (network I/O is the first yield).
         self.publish_current().await;
@@ -496,7 +421,7 @@ mod tests {
     use super::*;
 
     fn state(on: Option<bool>) -> State {
-        State { on, pending: VecDeque::new(), next_gen: 0, cleared: VecDeque::new() }
+        State { on, pending: VecDeque::new(), next_gen: 0 }
     }
 
     #[test]
@@ -600,72 +525,6 @@ mod tests {
         assert_eq!(st.apply_observe(now + Duration::from_millis(10)), None); // absorbs A's echo
         assert_eq!(st.on_forward_failed(gen_b), None); // B's own echo still queued → no flip
         assert_eq!(st.on, Some(true)); // A's commit stands; B didn't invert it
-    }
-
-    #[test]
-    fn reconnect_mid_forward_does_not_reclaim_on_failure() {
-        // A command arms, then the monitor reconnects mid-forward (moving its still-pending
-        // generation into `cleared`), then the forward FAILS. The command must NOT reclaim
-        // (flip) — its slot was cleared by the reconnect, not consumed by an echo.
-        let now = Instant::now();
-        let mut st = state(Some(false));
-        let gen = st.arm_guard(now);
-        st.discard_pending_echoes(); // monitor reconnect during the forward
-        assert_eq!(st.on_forward_failed(gen), None); // gen in `cleared` → no reclaim
-        assert_eq!(st.on, Some(false)); // unchanged
-    }
-
-    #[test]
-    fn reconnect_mid_forward_rearms_on_success() {
-        // A command arms, the monitor reconnects mid-forward (moving its unconsumed slot into
-        // `cleared`), then the forward SUCCEEDS. commit flips; rearm_if_cleared must queue a
-        // fresh expectation so the echo (arriving on the new session) is ABSORBED, not
-        // double-flipped as physical.
-        let now = Instant::now();
-        let mut st = state(Some(false));
-        let gen = st.arm_guard(now);
-        st.discard_pending_echoes(); // reconnect moved the (unconsumed) slot to `cleared`
-        st.commit_actuation(true); // → on
-        st.rearm_if_cleared(gen, now); // gen was cleared while pending → re-arm
-        assert_eq!(st.pending.len(), 1);
-        // The echo lands on the new session → absorbed (no second flip).
-        assert_eq!(st.apply_observe(now + Duration::from_millis(10)), None);
-        assert_eq!(st.on, Some(true)); // stays on — matches the single relay toggle
-    }
-
-    #[test]
-    fn consumed_echo_then_reconnect_does_not_rearm() {
-        // The case CodeRabbit flagged: a command's echo is CONSUMED before the reconnect. On
-        // reconnect its generation is NOT in `pending` (already popped), so it is NOT recorded
-        // in `cleared`; the success path must NOT re-arm — a phantom slot would swallow the next
-        // real physical press, leaving the cache one toggle behind the relay.
-        let now = Instant::now();
-        let mut st = state(Some(false));
-        let gen = st.arm_guard(now);
-        st.commit_actuation(true); // → on
-        assert_eq!(st.apply_observe(now + Duration::from_millis(10)), None); // echo consumed
-        st.discard_pending_echoes(); // reconnect: nothing was pending → `cleared` stays empty
-        st.rearm_if_cleared(gen, now); // gen not in `cleared` → NO re-arm
-        assert!(st.pending.is_empty());
-        // The next physical press flips (not swallowed by a phantom expectation).
-        assert_eq!(st.apply_observe(now + Duration::from_millis(20)), Some(Some(false)));
-        assert_eq!(st.on, Some(false));
-    }
-
-    #[test]
-    fn discard_pending_echoes_lets_the_next_press_flip() {
-        // On a monitor reconnect, an in-flight command's echo may have been missed. After
-        // discarding pending expectations, the first physical press is treated as physical
-        // (flips), not swallowed as a stale echo (Copilot).
-        let now = Instant::now();
-        let mut st = state(Some(false));
-        st.arm_guard(now); // a command whose echo will be missed across the reconnect
-        st.commit_actuation(true); // → on
-        st.discard_pending_echoes(); // monitor reconnected: forget the missed echo
-        assert!(st.pending.is_empty());
-        // A physical press now flips instead of being absorbed as our (never-arriving) echo.
-        assert_eq!(st.apply_observe(now + Duration::from_millis(10)), Some(Some(false)));
-        assert_eq!(st.on, Some(false));
     }
 
     #[test]
