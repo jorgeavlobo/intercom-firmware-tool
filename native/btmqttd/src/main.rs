@@ -129,17 +129,31 @@ async fn run() -> Result<(), String> {
         Option<(tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>)>,
     ) = if let Some(where_) = cfg.light_where.clone() {
         let where_for_read = where_.clone();
-        let initial = tokio::task::spawn_blocking(move || persist::read_light(&where_for_read))
+        let restore = tokio::task::spawn_blocking(move || persist::read_light(&where_for_read))
             .await
-            .unwrap_or(None);
-        // Nothing valid was restored for THIS WHERE — either no record, or one left by a
-        // DIFFERENT WHERE (a changed LIGHT_WHERE) or a corrupt one. Forget it, so a later
-        // switch BACK to an old WHERE starts unknown instead of restoring a value that went
-        // stale while that WHERE was untracked (Codex). A valid record (initial is Some) is
-        // kept — that's the normal reboot restore.
-        if initial.is_none() {
-            clear_persisted_light("no valid state for the configured WHERE").await;
-        }
+            // A JOIN failure (the blocking read panicked) is "couldn't read" — treat as Unreadable
+            // so we KEEP the record rather than deleting it.
+            .unwrap_or(persist::LightRestore::Unreadable);
+        let initial = match restore {
+            // Normal reboot restore: a valid on/off record for THIS WHERE.
+            persist::LightRestore::State(on) => Some(on),
+            // No usable record (absent, a DIFFERENT WHERE's, or corrupt). Forget it, so a later
+            // switch BACK to an old WHERE starts unknown instead of restoring a stale value (Codex).
+            persist::LightRestore::Absent => {
+                clear_persisted_light("no valid state for the configured WHERE").await;
+                None
+            }
+            // Present but UNREADABLE (transient I/O). Do NOT clear — a valid state may still be on
+            // disk; keep it and retry next boot. Start unknown for now rather than DELETING a
+            // possibly-good record (Codex).
+            persist::LightRestore::Unreadable => {
+                eprintln!(
+                    "btmqttd: light: persisted state unreadable (I/O error) — keeping the record, \
+                     starting from unknown"
+                );
+                None
+            }
+        };
         let (ctl, persist_rx) = light::LightCtl::new(&cfg, client.clone(), initial);
         let (persist_shutdown_tx, persist_shutdown_rx) = tokio::sync::oneshot::channel();
         // Pass the restored disk value as the persist task's durable BASELINE explicitly, so a

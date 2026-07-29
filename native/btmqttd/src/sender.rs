@@ -212,6 +212,10 @@ async fn session(
                 call_watch = Some((None, tokio::time::Instant::now()));
             }
         }
+        // Capped without a clean snapshot: arm UNKNOWN so the poll keeps reconciling.
+        Reconcile::Exhausted => {
+            call_watch = Some((None, tokio::time::Instant::now()));
+        }
     }
 
     // Monitor (re)connected: force a fresh read of volume + mute so a change made on the
@@ -284,6 +288,12 @@ async fn session(
                         // read — both must keep polling until an authoritative read succeeds.
                         call_watch = Some((known, tokio::time::Instant::now()));
                     }
+                    // Capped without a clean snapshot: arm UNKNOWN (NOT the stale pre-drain
+                    // `known`) so the poll keeps reconciling and the reseed republishes nothing
+                    // until a clean snapshot lands (Codex).
+                    Reconcile::Exhausted => {
+                        call_watch = Some((None, tokio::time::Instant::now()));
+                    }
                 }
             }
         }
@@ -321,6 +331,11 @@ enum Reconcile {
         result: std::io::Result<Option<u8>>,
         saw_transition: bool,
     },
+    /// Every attempt saw a transition, so no clean snapshot was obtained. The last drained frame
+    /// is itself ambiguous, so the caller must NOT treat it as authoritative: it arms an UNKNOWN
+    /// obligation (`Some((None, now))`) so the periodic poll keeps reconciling and the reseed
+    /// republishes nothing until a clean snapshot lands (Codex).
+    Exhausted,
     /// The monitor socket closed mid-drain — the caller should end the session.
     SocketClosed,
 }
@@ -414,20 +429,21 @@ async fn read_call_state_draining(
                 Err(e) => return Err(e),
             }
         }
-        // A query that completed with NO transition — before OR already-ready at completion — is
-        // current: apply it. Otherwise re-query.
+        // A query that saw no transition — neither before it completed nor already-ready at
+        // completion — is applied. This is BEST-EFFORT: the monitor and dim-35 use separate
+        // connections with no gateway-provided sequence marker (CodeRabbit), so a monitor frame
+        // could still become readable in the instant AFTER this check and before the caller
+        // publishes. That residual is self-healing, though: monitor frames are an ORDERED TCP
+        // stream, so a stale idle is followed by the real transition that re-arms, and a genuinely
+        // missed transition is corrected by the next periodic poll or the next reconnect reconcile.
         if !saw_transition {
             return Ok(Reconcile::Done { result, saw_transition: false });
         }
     }
-    // Transitions kept arriving through every attempt. The last drained one is itself ambiguous
-    // (it may be an older delayed frame), so do NOT treat it as authoritative — retain a reconcile
-    // OBLIGATION: a transition-free `Ok(None)` makes the caller keep `call_watch` armed / re-arm so
-    // the periodic poll keeps reconciling until a clean snapshot is obtained (Codex).
-    Ok(Reconcile::Done {
-        result: Ok(None),
-        saw_transition: false,
-    })
+    // Transitions kept arriving through every attempt: no clean snapshot. Signal Exhausted so the
+    // caller arms an UNKNOWN obligation rather than trusting the last (ambiguous) drained frame or
+    // the stale pre-drain `known` (Codex).
+    Ok(Reconcile::Exhausted)
 }
 
 /// Publish one framed OWN string to TOPIC_DUMP — as compact JSON (PAYLOAD_FORMAT=

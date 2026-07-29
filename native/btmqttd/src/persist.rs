@@ -103,11 +103,25 @@ pub fn clear() -> bool {
     clear_in(&state_dir())
 }
 
-/// Read the tracked stair-light state for the actuator at `want_where`
-/// (`Some(true)`=on / `Some(false)`=off), or `None` when unknown — no file, unparseable,
-/// or a record for a DIFFERENT WHERE (a build that changed `LIGHT_WHERE` must not inherit
-/// the previous actuator's state). Blocking; call via `spawn_blocking`.
-pub fn read_light(want_where: &str) -> Option<bool> {
+/// Outcome of restoring the persisted stair-light state for a configured WHERE.
+pub enum LightRestore {
+    /// A valid `on`/`off` record for THIS WHERE — restore it.
+    State(bool),
+    /// No usable record: no file, a record for a DIFFERENT WHERE (a build that changed
+    /// `LIGHT_WHERE`), or a corrupt/unparseable one. Safe to CLEAR so a later WHERE change
+    /// starts from a known-unknown baseline.
+    Absent,
+    /// The record could not be READ (a transient I/O error — a permission or storage blip).
+    /// Do NOT clear it: a valid state may still be on disk, so keep it and retry next boot,
+    /// rather than deleting a possibly-good record and starting from an unknown baseline (Codex).
+    Unreadable,
+}
+
+/// Read the tracked stair-light state for the actuator at `want_where`. Distinguishes a valid
+/// record ([`LightRestore::State`]) from a genuinely absent/mismatched/corrupt one
+/// ([`LightRestore::Absent`], safe to clear) and from an I/O read failure
+/// ([`LightRestore::Unreadable`], must be retained). Blocking; call via `spawn_blocking`.
+pub fn read_light(want_where: &str) -> LightRestore {
     read_light_in(&state_dir(), want_where)
 }
 
@@ -243,19 +257,29 @@ fn clear_light_in(dir: &Path) -> bool {
     remove_or_absent(&light_file_in(dir))
 }
 
-fn read_light_in(dir: &Path, want_where: &str) -> Option<bool> {
-    let text = std::fs::read_to_string(light_file_in(dir)).ok()?;
-    let line = text.lines().next()?.trim();
+fn read_light_in(dir: &Path, want_where: &str) -> LightRestore {
+    let text = match std::fs::read_to_string(light_file_in(dir)) {
+        Ok(t) => t,
+        // Genuinely absent → nothing to restore, safe to clear.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LightRestore::Absent,
+        // Present but unreadable (a transient I/O blip) → keep it, do not clear (Codex).
+        Err(_) => return LightRestore::Unreadable,
+    };
+    let Some(line) = text.lines().next().map(str::trim) else {
+        return LightRestore::Absent;
+    };
     // Record is `<where>\t<on|off>`. A record for a DIFFERENT WHERE (a build that changed
     // LIGHT_WHERE — the cfg/extra partition survives reflashes) must NOT be inherited.
-    let (where_, token) = line.split_once('\t')?;
+    let Some((where_, token)) = line.split_once('\t') else {
+        return LightRestore::Absent;
+    };
     if where_ != want_where {
-        return None;
+        return LightRestore::Absent;
     }
     match token.trim() {
-        "on" => Some(true),
-        "off" => Some(false),
-        _ => None,
+        "on" => LightRestore::State(true),
+        "off" => LightRestore::State(false),
+        _ => LightRestore::Absent, // corrupt token
     }
 }
 
@@ -393,16 +417,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("btmqttd-light-{}-{uniq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!(read_light_in(&dir, "112"), None); // no file yet
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::Absent)); // no file yet
         assert!(store_light_in(&dir, "112", Some(true)));
-        assert_eq!(read_light_in(&dir, "112"), Some(true));
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::State(true)));
         assert!(store_light_in(&dir, "112", Some(false)));
-        assert_eq!(read_light_in(&dir, "112"), Some(false));
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::State(false)));
         // A record for a DIFFERENT WHERE is NOT inherited (a changed LIGHT_WHERE).
-        assert_eq!(read_light_in(&dir, "999"), None);
-        // None clears the file → reads back as unknown.
+        assert!(matches!(read_light_in(&dir, "999"), LightRestore::Absent));
+        // None clears the file → reads back as absent.
         assert!(store_light_in(&dir, "112", None));
-        assert_eq!(read_light_in(&dir, "112"), None);
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::Absent));
         assert!(store_light_in(&dir, "112", None)); // clearing an absent file is still success
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -421,13 +445,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(store_light_in(&dir, "112", Some(true)));
-        assert_eq!(read_light_in(&dir, "112"), Some(true));
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::State(true)));
         assert!(clear_light_in(&dir)); // disabled-mode cleanup removes it
-        assert_eq!(read_light_in(&dir, "112"), None); // re-enable would start unknown
+        // re-enable would start unknown
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::Absent));
         // Already absent, but the DIRECTORY still exists → the NotFound path now fsyncs the dir
         // (confirming durability for a retry after a prior dir-sync failure) and still succeeds.
         assert!(clear_light_in(&dir));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_light_in_reports_unreadable_on_io_error() {
+        // A present-but-unreadable record must be Unreadable — NOT Absent — so main KEEPS it
+        // instead of deleting a possibly-valid record on a transient I/O blip (Codex). Simulate
+        // an I/O error that is NOT NotFound by making the record path a DIRECTORY (read_to_string
+        // then fails with EISDIR).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(4000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("btmqttd-lightio-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(light_file_in(&dir)).unwrap(); // record path is a directory
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::Unreadable));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
