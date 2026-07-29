@@ -185,26 +185,25 @@ async fn session(
     // is processed the moment it arrives, within its guard window. This also cuts general
     // reconnect frame latency, which previously waited out the whole query.
     //
-    // The query's result stays authoritative for call state over the BUFFERED frames drained
-    // above, with one exception: a LIVE call-state transition read from the socket DURING the
-    // drain is newer than this snapshot, so it must not be clobbered by it. On a FAILED read
-    // (session refused / no reply) do NOT fabricate a state — publishing idle would clobber a
-    // real ringing/in_call; keep what the frames left and, if still disarmed, arm an "unknown"
-    // marker so a later poll re-queries.
+    // The query result stays authoritative for call state: it completes at the END of this
+    // drain window, so its snapshot reflects gateway state at least as fresh as any frame
+    // processed during the drain — applying it unconditionally cannot be clobbered by a staler
+    // drained frame (the buffered-idle-then-authoritative-ringing case, Codex). A genuinely
+    // newer transition arriving AFTER the query completes is read by the main loop below and
+    // supersedes it there. On a FAILED read (session refused / no reply) do NOT fabricate a
+    // state — publishing idle would clobber a real ringing/in_call; keep what the frames left
+    // and, if still disarmed, arm an "unknown" marker so a later poll re-queries.
     let reconcile = dimension::read_call_state(&cfg.own_host, cfg.own_port_mon);
     tokio::pin!(reconcile);
-    let mut live_call_state = false;
     loop {
         tokio::select! {
             biased;
             result = &mut reconcile => {
                 match result {
-                    // Skip if a live transition already superseded this snapshot.
-                    Ok(Some(code)) if !live_call_state => {
+                    Ok(Some(code)) => {
                         publish_call_state(cfg, client, code).await;
                         update_call_watch(&mut call_watch, code);
                     }
-                    Ok(Some(_)) => {}
                     Ok(None) | Err(_) => {
                         if call_watch.is_none() {
                             call_watch = Some((None, tokio::time::Instant::now()));
@@ -227,7 +226,6 @@ async fn session(
                             publish_frame(cfg, client, volume, light, &frame).await
                         {
                             update_call_watch(&mut call_watch, code);
-                            live_call_state = true;
                         }
                     }
                 }
@@ -346,10 +344,15 @@ async fn publish_frame(
     } else {
         frame.as_bytes().to_vec()
     };
-    if let Err(e) = client
-        .publish(&cfg.topic_dump, QoS::AtMostOnce, false, payload)
-        .await
-    {
+    // NON-BLOCKING publish (try_publish, not publish().await): every publish on the monitor
+    // read path must be non-blocking, or a broker outage could stall the reader. During an
+    // outage main's poll loop stops draining the bounded (32) request channel for up to 5 s;
+    // once it fills, an awaited publish here would BLOCK — and while blocked we'd never reach a
+    // later light echo (same buffer or a later socket read), whose 3 s guard would then expire
+    // and misread our own echo as a physical press, inverting the cache (Codex). Dropping a
+    // frame when the queue is full is safe: the dump is a live QoS-0 stream, and every retained
+    // topic (call state, volume/mute, light) is re-seeded on the next reconnect.
+    if let Err(e) = client.try_publish(&cfg.topic_dump, QoS::AtMostOnce, false, payload) {
         eprintln!("btmqttd: publish bus frame failed: {e}");
     }
     call_code
@@ -364,9 +367,11 @@ async fn publish_frame(
 /// payload carries the HA `event_type` plus the entrance-panel WHERE (informational).
 async fn publish_doorbell(cfg: &Arc<Config>, client: &AsyncClient, where_: &str) {
     let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
-    if let Err(e) = client
-        .publish(&cfg.topic_doorbell, QoS::AtMostOnce, false, payload.into_bytes())
-        .await
+    // Non-blocking (see publish_frame): never stall the monitor reader on a full request queue.
+    // A doorbell press dropped during a broker outage matches this event's existing philosophy
+    // (a lost press is preferable to a double actuation) — it is not retained or replayed.
+    if let Err(e) =
+        client.try_publish(&cfg.topic_doorbell, QoS::AtMostOnce, false, payload.into_bytes())
     {
         eprintln!("btmqttd: publish doorbell event failed: {e}");
     }
@@ -379,9 +384,11 @@ async fn publish_doorbell(cfg: &Arc<Config>, client: &AsyncClient, where_: &str)
 async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
     let payload =
         serde_json::json!({ "state": dimension::call_state_label(code), "code": code }).to_string();
-    if let Err(e) = client
-        .publish(&cfg.topic_call_state, QoS::AtLeastOnce, true, payload.into_bytes())
-        .await
+    // Non-blocking (see publish_frame): never stall the monitor reader on a full request queue.
+    // This retained state is re-read authoritatively and republished on the next reconnect
+    // (read_call_state), so a drop during an outage self-heals.
+    if let Err(e) =
+        client.try_publish(&cfg.topic_call_state, QoS::AtLeastOnce, true, payload.into_bytes())
     {
         eprintln!("btmqttd: publish call state failed: {e}");
     }

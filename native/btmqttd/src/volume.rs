@@ -249,7 +249,12 @@ impl VolumeCtl {
     }
 
     async fn publish_retained(&self, topic: &str, payload: Vec<u8>) {
-        if let Err(e) = self.client.publish(topic, QoS::AtMostOnce, true, payload).await {
+        // NON-BLOCKING (try_publish): observe_volume/observe_mute run on the monitor read path,
+        // so this must never block on a full request queue during a broker outage — else the
+        // reader stalls and a following light echo misses its 3 s guard (Codex). A drop while
+        // disconnected self-heals: resync() re-reads and republishes this retained state on the
+        // next reconnect.
+        if let Err(e) = self.client.try_publish(topic, QoS::AtMostOnce, true, payload) {
             // Topic-agnostic: this publishes both the volume and the mute state, so name
             // the actual topic rather than hard-coding "volume".
             eprintln!("btmqttd: publish retained state to {topic} failed: {e}");

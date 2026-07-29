@@ -225,10 +225,13 @@ impl LightCtl {
             Some(false) => "off",
             None => "", // empty retained → clears any stale retained value; HA shows unknown
         };
-        if let Err(e) = self
-            .client
-            .publish(&self.topic_light, QoS::AtLeastOnce, true, payload)
-            .await
+        // NON-BLOCKING (try_publish): observe() runs on the monitor read path, so this must
+        // never block on a full request queue during a broker outage — else the reader stalls
+        // and a following light echo misses its 3 s guard (Codex). A drop while disconnected is
+        // harmless: seed() re-publishes this retained state on the next reconnect, and durable
+        // disk persistence goes through a separate, unaffected channel.
+        if let Err(e) =
+            self.client.try_publish(&self.topic_light, QoS::AtLeastOnce, true, payload)
         {
             eprintln!("btmqttd: publish light state failed: {e}");
         }
