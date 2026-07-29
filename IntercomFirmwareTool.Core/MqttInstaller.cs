@@ -560,11 +560,18 @@ namespace IntercomFirmwareTool.Core
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                         opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
-                                        opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicLight })
+                                        opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
+            // The light STATE topic is only PUBLISHED when the feature is enabled; a disabled
+            // build derives EffectiveTopicLight but the daemon never publishes it (and TopicRx
+            // isn't a light command topic without the switch), so it can't form a self-loop —
+            // exclude it when disabled, or a valid opt-out config whose namespace happens to
+            // derive a colliding light topic would fail validation (Codex).
+            if (opts.LightEnabled && TopicFilterMatches(rxFilter, opts.EffectiveTopicLight))
+                throw new ArgumentException(
+                    CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
         }
 
         /// <summary>

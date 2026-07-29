@@ -750,17 +750,21 @@ async fn announce(
         eprintln!("btmqttd: publish start_date failed: {e}");
     }
     ha::reconcile(&cfg, &client).await;
-    // Seed the volume slider/mute with the unit's real level via an on-demand read, so
-    // HA shows a value immediately on connect (the monitor keeps it live afterwards).
-    // Only meaningful with discovery on — otherwise no entity reads the state topics —
-    // but the retained publish is harmless either way; still, skip the extra gateway
-    // round-trip when discovery is off.
+    // Re-publish the tracked light state on every connect (a restarted broker dropped its
+    // retained topics; a changed WHERE reusing the topic left a stale value). This is
+    // INDEPENDENT of discovery — unlike the volume seed below it does NO gateway round-trip,
+    // it just re-emits the already-restored cached value, so it's cheap and keeps the retained
+    // state topic correct even with discovery off (the daemon still accepts light commands) —
+    // Codex.
+    if let Some(light) = &light {
+        light.seed().await;
+    }
+    // Seed the volume slider/mute with the unit's real level via an on-demand GATEWAY READ, so
+    // HA shows a value immediately on connect (the monitor keeps it live afterwards). Gated on
+    // discovery: without an entity reading the state topics the extra gateway round-trip is
+    // wasted (the retained publish itself would be harmless either way).
     if cfg.ha_discovery {
         volume.seed().await;
-        // Re-publish the tracked light state (a restarted broker dropped retained topics).
-        if let Some(light) = &light {
-            light.seed().await;
-        }
     }
 }
 

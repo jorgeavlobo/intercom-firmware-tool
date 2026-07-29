@@ -290,10 +290,18 @@ impl LightCtl {
     /// A fresh monitor session just went live. Any of our injected toggles still awaiting their
     /// echo may have had that echo delivered while the stream was DOWN (and thus missed), which
     /// would leave a stale expectation that wrongly absorbs the FIRST physical press after
-    /// reconnect as if it were our echo — desyncing the tracked state. Drop all outstanding
-    /// expectations so post-reconnect frames are judged fresh (Copilot). The cached on/off is
-    /// unchanged. Call AFTER draining the ACK-buffered frames, so an echo that DID arrive
-    /// buffered with the ACK is still consumed normally; only genuinely-missed ones are cleared.
+    /// reconnect as if it were our echo — desyncing the tracked state. Move all outstanding
+    /// expectations to `cleared` (via [`State::discard_pending_echoes`]) so post-reconnect frames
+    /// are judged fresh, while a command whose forward SPANS the reconnect can still find its own
+    /// generation there (re-arm on success / no mis-reclaim on failure). The cached on/off is
+    /// unchanged.
+    ///
+    /// The caller MUST invoke this IMMEDIATELY after the monitor ACK, BEFORE draining the
+    /// ACK-buffered frames or any other `.await` — so it runs before the concurrent command
+    /// worker can arm a fresh expectation on this now-live session (a command arming during the
+    /// awaited drain would otherwise be wrongly cleared). Pre-reconnect echoes were lost on the
+    /// dead socket and never appear in the new session's buffered read, so clearing before the
+    /// drain doesn't discard a still-arriving legitimate echo.
     pub async fn on_monitor_reconnect(&self) {
         self.st.lock().expect("light state mutex poisoned").discard_pending_echoes();
     }
