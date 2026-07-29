@@ -26,8 +26,8 @@
          permissive, no copyleft. Pinned to exact versions for reproducible restores, matching
          the repo convention; bump deliberately. The downloaded bytes are always re-verified
          against the registry's size + SHA-256 before use — the libraries are transport only. -->
-    <PackageReference Include="Downloader" Version="5.9.0" />
-    <PackageReference Include="Polly.Core" Version="8.6.6" />
+    <PackageReference Include="Downloader" Version="5.9.5" />
+    <PackageReference Include="Polly.Core" Version="8.7.0" />
   </ItemGroup>
 
   <ItemGroup>
