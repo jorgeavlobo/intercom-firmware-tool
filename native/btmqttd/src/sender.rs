@@ -190,6 +190,15 @@ async fn session(
         }
     }
 
+    // Monitor (re)connected: any of OUR still-pending light-toggle echoes may have had their
+    // echo delivered while the stream was DOWN (and thus missed), which would leave a stale
+    // expectation that wrongly absorbs the first physical press after reconnect. Drop them —
+    // runs AFTER the ACK-buffered drain above, so an echo that DID arrive buffered with the ACK
+    // is still consumed normally; only genuinely-missed expectations are cleared (Copilot).
+    if let Some(light) = light {
+        light.on_monitor_reconnect().await;
+    }
+
     // Monitor (re)connected: force a fresh read of volume + mute so a change made on the
     // unit WHILE the stream was down — whose one-shot broadcast (`*#8**41*<N>##` for
     // volume, `*#8**33*<0|1>##` for mute) we missed — is reconciled, instead of leaving

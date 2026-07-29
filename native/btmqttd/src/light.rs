@@ -113,6 +113,13 @@ impl State {
         }
     }
 
+    /// Drop ALL outstanding echo expectations — a fresh monitor session may have missed their
+    /// echoes while the stream was down. The tracked on/off is untouched; only the echo
+    /// bookkeeping is reset, so a post-reconnect frame is judged fresh (Copilot).
+    fn discard_pending_echoes(&mut self) {
+        self.pending.clear();
+    }
+
     /// Commit OUR injected toggle after a SUCCESSFUL forward, returning the new cached
     /// state to publish + persist. A KNOWN state FLIPS exactly once — our injection is one
     /// relay toggle — rather than being absolute-`set` to `desired_on`: an absolute set
@@ -230,6 +237,17 @@ impl LightCtl {
     /// clears any stale value the broker still holds — e.g. from a previous `LIGHT_WHERE`).
     pub async fn seed(&self) {
         self.publish_current().await;
+    }
+
+    /// A fresh monitor session just went live. Any of our injected toggles still awaiting their
+    /// echo may have had that echo delivered while the stream was DOWN (and thus missed), which
+    /// would leave a stale expectation that wrongly absorbs the FIRST physical press after
+    /// reconnect as if it were our echo — desyncing the tracked state. Drop all outstanding
+    /// expectations so post-reconnect frames are judged fresh (Copilot). The cached on/off is
+    /// unchanged. Call AFTER draining the ACK-buffered frames, so an echo that DID arrive
+    /// buffered with the ACK is still consumed normally; only genuinely-missed ones are cleared.
+    pub async fn on_monitor_reconnect(&self) {
+        self.st.lock().expect("light state mutex poisoned").discard_pending_echoes();
     }
 
     /// Publish the CURRENT cached state (retained), SERIALIZED via `io_lock` so a physical
@@ -522,6 +540,22 @@ mod tests {
         assert_eq!(st.apply_observe(now + Duration::from_millis(10)), None); // absorbs A's echo
         assert_eq!(st.on_forward_failed(gen_b), None); // B's own echo still queued → no flip
         assert_eq!(st.on, Some(true)); // A's commit stands; B didn't invert it
+    }
+
+    #[test]
+    fn discard_pending_echoes_lets_the_next_press_flip() {
+        // On a monitor reconnect, an in-flight command's echo may have been missed. After
+        // discarding pending expectations, the first physical press is treated as physical
+        // (flips), not swallowed as a stale echo (Copilot).
+        let now = Instant::now();
+        let mut st = state(Some(false));
+        st.arm_guard(now); // a command whose echo will be missed across the reconnect
+        st.commit_actuation(true); // → on
+        st.discard_pending_echoes(); // monitor reconnected: forget the missed echo
+        assert!(st.pending.is_empty());
+        // A physical press now flips instead of being absorbed as our (never-arriving) echo.
+        assert_eq!(st.apply_observe(now + Duration::from_millis(10)), Some(Some(false)));
+        assert_eq!(st.on, Some(false));
     }
 
     #[test]
