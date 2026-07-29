@@ -390,17 +390,43 @@ async fn read_call_state_draining(
                 }
             }
         };
-        // A transition-free snapshot is unambiguously current — apply it. Otherwise re-query.
+        // The biased select gives the query priority, so a monitor frame that was ALSO ready this
+        // poll is still queued (it would otherwise be read AFTER we commit the snapshot — possibly
+        // an OLDER delayed transition that then overwrites it). Drain any ready frames NOW
+        // (non-blocking) before accepting the snapshot; a transition here makes it ambiguous, so
+        // the outer loop re-queries rather than committing it (Codex/CodeRabbit).
+        loop {
+            match sock.try_read(buf) {
+                Ok(0) => return Ok(Reconcile::SocketClosed),
+                Ok(n) => {
+                    frames.clear();
+                    framer.push(&buf[..n], frames);
+                    for frame in frames.drain(..) {
+                        if let Some(code) =
+                            publish_frame(cfg, client, volume, Some(light), &frame).await
+                        {
+                            update_call_watch(call_watch, code);
+                            saw_transition = true;
+                        }
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => return Err(e),
+            }
+        }
+        // A query that completed with NO transition — before OR already-ready at completion — is
+        // current: apply it. Otherwise re-query.
         if !saw_transition {
             return Ok(Reconcile::Done { result, saw_transition: false });
         }
     }
-    // Transitions kept arriving through every attempt: the monitor is live and `call_watch` already
-    // reflects the latest drained transition, so keep it (do not overwrite with an ambiguous
-    // snapshot). `saw_transition: true` tells the caller to leave `call_watch` as the drain left it.
+    // Transitions kept arriving through every attempt. The last drained one is itself ambiguous
+    // (it may be an older delayed frame), so do NOT treat it as authoritative — retain a reconcile
+    // OBLIGATION: a transition-free `Ok(None)` makes the caller keep `call_watch` armed / re-arm so
+    // the periodic poll keeps reconciling until a clean snapshot is obtained (Codex).
     Ok(Reconcile::Done {
         result: Ok(None),
-        saw_transition: true,
+        saw_transition: false,
     })
 }
 

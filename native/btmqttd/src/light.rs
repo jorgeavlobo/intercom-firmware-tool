@@ -382,13 +382,16 @@ async fn run_persist_with<F, Fut>(
     // deliberately do NOT `borrow_and_update`: leaving any pending value unseen lets the first
     // loop iteration persist it (it differs from this disk baseline).
     let mut written = initial;
-    // Set when the latest write FAILED, so we keep retrying until it lands or a newer value
-    // supersedes it — a failed write is NEVER mistaken for durable.
-    let mut retry_pending = false;
+    // Set when the latest write did NOT confirm durability (the spawn_blocking failed, or
+    // `atomic_write_in` renamed the new file but its directory fsync failed). The on-disk value is
+    // then UNCERTAIN — it may hold an intermediate value even if the tracked state later returns to
+    // `written` — so keep rewriting the latest until a write confirms; an unconfirmed write is
+    // NEVER mistaken for durable (Codex).
+    let mut uncertain = false;
     tokio::pin!(shutdown);
     loop {
         let retry = async {
-            if retry_pending {
+            if uncertain {
                 tokio::time::sleep(RETRY).await;
             } else {
                 std::future::pending::<()>().await; // nothing to retry → this arm never fires
@@ -405,21 +408,23 @@ async fn run_persist_with<F, Fut>(
         }
         // Woken by a new value or a retry tick (shutdown / channel-close break out above).
         let v = *rx.borrow_and_update();
-        if v != written {
+        // Write when the latest differs from the last CONFIRMED value, OR the disk is uncertain: a
+        // prior failed write may have left an intermediate value on disk even when `v` now equals
+        // `written`, so `v == written` alone is not proof the disk is correct.
+        if v != written || uncertain {
             if write(v).await {
                 written = v;
-                retry_pending = false;
+                uncertain = false;
             } else {
-                retry_pending = true;
+                uncertain = true;
             }
-        } else {
-            retry_pending = false;
         }
     }
-    // Final flush: the process is exiting, so there is no future tick — persist the latest if
-    // it isn't known-durable, retrying a few times to ride out a brief outage.
+    // Final flush: the process is exiting, so there is no future tick — persist the latest if it
+    // isn't known-durable (differs from the confirmed value, or the disk is uncertain), retrying a
+    // few times to ride out a brief outage.
     let v = *rx.borrow();
-    if v != written {
+    if v != written || uncertain {
         for _ in 0..3 {
             if write(v).await {
                 break;
