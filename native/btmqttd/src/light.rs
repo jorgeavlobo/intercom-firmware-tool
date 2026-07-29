@@ -45,11 +45,16 @@ use crate::receiver::forward_to_gateway;
 /// Per-frame forward timeout for the toggle (loopback gateway; tight like the lock pulse).
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// After WE inject a toggle, the gateway may echo the same `*8*21*<w>##` back on the
-/// monitor. Ignore an observed press within this window so our own toggle isn't counted a
-/// second time. Loopback echo is near-instant; a small window is ample and can't swallow a
-/// genuine follow-up physical press (a human can't re-press within 1.5 s of an app toggle).
-const ECHO_GUARD: Duration = Duration::from_millis(1500);
+/// After WE inject a toggle, the gateway echoes the same `*8*21*<w>##` back on the monitor;
+/// ignore an observed press within this window so our own toggle isn't counted a second time.
+/// The window must OUTLAST a full command: a forward may take up to [`FORWARD_TIMEOUT`] and its
+/// echo can arrive a little later still, so a shorter window would let a successful-but-late
+/// echo be miscounted as a physical press on top of the commit (Codex). Kept well above
+/// `FORWARD_TIMEOUT`. Loopback echo is normally near-instant, so this ceiling is rarely
+/// approached; and while a window this long could absorb a concurrent PHYSICAL press as if it
+/// were our echo, the toggle COUNT still balances (our commit plus one flip per extra frame),
+/// so the cache stays correct.
+const ECHO_GUARD: Duration = Duration::from_secs(3);
 
 /// The tracked light state + echo guard. Its methods are PURE (no I/O), so the tracking
 /// logic is unit-tested without a gateway or broker; [`LightCtl`] does the MQTT/forward I/O
@@ -57,12 +62,22 @@ const ECHO_GUARD: Duration = Duration::from_millis(1500);
 struct State {
     /// Cached light state: `None` = unknown (first cold boot, no persisted value).
     on: Option<bool>,
-    /// Set when WE just injected a toggle, so its monitor echo is ignored once.
-    expect_echo_until: Option<Instant>,
-    /// Whether the guard ABSORBED an observed frame during the current command's window. If
-    /// the forward then FAILS, that frame wasn't our echo (our injection failed) but a real
-    /// relay toggle, and the failure path reclaims it. Reset by [`arm_guard`].
-    guard_absorbed: bool,
+    /// How many of OUR injected toggles are still awaiting their monitor echo. Each armed
+    /// command adds one; each frame observed within the window consumes one (absorbed as our
+    /// echo) instead of being counted as a physical press. A COUNT — not a single flag — so
+    /// several commands issued faster than the bus echoes them each get their echo absorbed,
+    /// instead of a later command's arm clobbering an earlier one's guard and the stray echo
+    /// double-flipping the cache (Codex).
+    pending_echoes: u32,
+    /// Deadline by which the outstanding echoes should have arrived. Once it passes, they are
+    /// treated as lost (the count is reset) so a genuine later physical press isn't absorbed
+    /// as one of ours. Extended on every [`arm_guard`].
+    echo_deadline: Option<Instant>,
+    /// Whether an echo was absorbed since the last [`arm_guard`]. Used ONLY by the failure
+    /// path: if the forward FAILED but a frame was absorbed in its window, that frame was a
+    /// real relay toggle (our frame reached the bus before the error, or a concurrent physical
+    /// press) to reclaim.
+    absorbed_since_arm: bool,
 }
 
 impl State {
@@ -71,26 +86,31 @@ impl State {
         self.on != Some(desired)
     }
 
-    /// Arm the echo guard — called BEFORE forwarding, so the echo (which can land as soon
-    /// as the frame reaches the bus) is always covered. Clears any prior absorb flag so the
-    /// reclaim only ever applies to a frame seen in THIS command's window.
+    /// Arm the echo guard — called BEFORE forwarding, so the echo (which can land as soon as
+    /// the frame reaches the bus) is always covered. Expects ONE more echo and (re)extends the
+    /// window; clears the absorb flag so the reclaim only applies to THIS command's window.
     fn arm_guard(&mut self, now: Instant) {
-        self.expect_echo_until = Some(now + ECHO_GUARD);
-        self.guard_absorbed = false;
+        self.pending_echoes = self.pending_echoes.saturating_add(1);
+        self.echo_deadline = Some(now + ECHO_GUARD);
+        self.absorbed_since_arm = false;
     }
 
-    /// Called when the forward FAILED. Disarms the guard so it can't later swallow a genuine
-    /// physical press. If the guard ABSORBED a frame during the (now-failed) forward, that
-    /// frame was NOT our echo — our injection didn't land — but a real relay toggle (a
-    /// concurrent physical press, or our frame that reached the bus before the write error);
-    /// reclaim it by flipping the cache and returning `Some(new_state)` to publish + persist.
-    /// Otherwise nothing toggled: return `None`, leaving the cache unchanged (retryable).
+    /// Called when the forward FAILED. If a frame was ABSORBED since we armed, it was NOT a
+    /// spurious echo — our injection didn't land — but a real relay toggle (a concurrent
+    /// physical press, or our frame that reached the bus before the write error); reclaim it by
+    /// flipping the cache and returning `Some(new_state)` to publish + persist (the echo
+    /// accounting was already decremented when it was absorbed). Otherwise nothing toggled:
+    /// undo the echo this command expected and return `None`, leaving the cache unchanged
+    /// (retryable).
     fn on_forward_failed(&mut self) -> Option<Option<bool>> {
-        self.expect_echo_until = None;
-        if std::mem::take(&mut self.guard_absorbed) {
+        if std::mem::take(&mut self.absorbed_since_arm) {
             self.on = self.on.map(|b| !b); // reclaim the observed toggle; unknown stays unknown
             Some(self.on)
         } else {
+            self.pending_echoes = self.pending_echoes.saturating_sub(1);
+            if self.pending_echoes == 0 {
+                self.echo_deadline = None;
+            }
             None
         }
     }
@@ -114,18 +134,25 @@ impl State {
     }
 
     /// Apply an observed `*8*21*<WHERE>##` press. Returns `Some(new_state)` to publish +
-    /// persist (a PHYSICAL toggle), or `None` to ignore it (our own toggle's echo, still
-    /// within the guard). `now` is checked against the guard.
+    /// persist (a PHYSICAL toggle), or `None` to ignore it (one of our own toggles' echoes,
+    /// still within the window). `now` is checked against the echo deadline.
     fn apply_observe(&mut self, now: Instant) -> Option<Option<bool>> {
-        if let Some(until) = self.expect_echo_until.take() {
-            if now < until {
-                // Absorbed within the guard window. Assume it's our echo and ignore it — BUT
-                // remember we absorbed a frame, so if the forward turns out to have FAILED,
-                // on_forward_failed() can reclaim it as a real toggle.
-                self.guard_absorbed = true;
-                return None;
+        // Expire outstanding echoes that never arrived, so a genuine later physical press isn't
+        // absorbed as one of ours.
+        if let Some(dl) = self.echo_deadline {
+            if now >= dl {
+                self.pending_echoes = 0;
+                self.echo_deadline = None;
             }
-            // else: a stale guard (echo never arrived) — fall through, this is physical.
+        }
+        if self.pending_echoes > 0 {
+            // Absorb one outstanding echo — already accounted for by its command's commit.
+            self.pending_echoes -= 1;
+            if self.pending_echoes == 0 {
+                self.echo_deadline = None;
+            }
+            self.absorbed_since_arm = true;
+            return None;
         }
         self.on = self.on.map(|b| !b); // physical toggle; unknown stays unknown
         Some(self.on)
@@ -172,7 +199,12 @@ impl LightCtl {
         let where_ = cfg.light_where.clone().unwrap_or_default();
         let (persist_tx, persist_rx) = watch::channel(initial);
         let ctl = Arc::new(LightCtl {
-            st: Mutex::new(State { on: initial, expect_echo_until: None, guard_absorbed: false }),
+            st: Mutex::new(State {
+                on: initial,
+                pending_echoes: 0,
+                echo_deadline: None,
+                absorbed_since_arm: false,
+            }),
             io_lock: AsyncMutex::new(()),
             persist_tx,
             press_frame: format!("*8*21*{where_}##"),
@@ -397,7 +429,7 @@ mod tests {
     use super::*;
 
     fn state(on: Option<bool>) -> State {
-        State { on, expect_echo_until: None, guard_absorbed: false }
+        State { on, pending_echoes: 0, echo_deadline: None, absorbed_since_arm: false }
     }
 
     #[test]
@@ -448,7 +480,8 @@ mod tests {
         st.arm_guard(Instant::now());
         assert_eq!(st.on_forward_failed(), None); // no absorbed frame → no reclaim
         assert_eq!(st.on, Some(false)); // NOT mutated to the desired state
-        assert!(st.expect_echo_until.is_none()); // no stale guard to swallow a real press
+        assert_eq!(st.pending_echoes, 0); // the expected echo was undone
+        assert!(st.echo_deadline.is_none()); // no stale window to swallow a real press
     }
 
     #[test]
@@ -464,8 +497,36 @@ mod tests {
         assert_eq!(st.apply_observe(now + Duration::from_millis(10)), None); // absorbed
         assert_eq!(st.on_forward_failed(), Some(Some(true))); // reclaimed → flipped
         assert_eq!(st.on, Some(true));
-        assert!(st.expect_echo_until.is_none()); // guard cleared, nothing to double-count
-        assert!(!st.guard_absorbed);
+        assert_eq!(st.pending_echoes, 0); // the absorbed frame already cleared the expectation
+        assert!(!st.absorbed_since_arm);
+    }
+
+    #[test]
+    fn two_outstanding_command_echoes_are_each_absorbed() {
+        // Rapid ON→OFF issued before the bus echoes the first (Codex): with a single-slot
+        // guard the second arm would clobber the first, and OFF's echo would be counted as a
+        // physical press. With the echo COUNT, both echoes are absorbed and the cache matches
+        // the relay (on then off = off).
+        let now = Instant::now();
+        let mut st = state(Some(false));
+        st.arm_guard(now); // ON
+        st.commit_actuation(true); // → on
+        st.arm_guard(now); // OFF (before ON's echo arrived)
+        st.commit_actuation(false); // → off
+        assert_eq!(st.pending_echoes, 2);
+        // Both echoes now arrive — each absorbed, neither treated as a physical press.
+        assert_eq!(st.apply_observe(now + Duration::from_millis(10)), None);
+        assert_eq!(st.apply_observe(now + Duration::from_millis(11)), None);
+        assert_eq!(st.pending_echoes, 0);
+        assert_eq!(st.on, Some(false)); // matches the relay
+    }
+
+    #[test]
+    fn echo_guard_outlasts_the_forward_timeout() {
+        // A successful-but-late echo (up to FORWARD_TIMEOUT plus latency) must still fall inside
+        // the guard window, or apply_observe would count it as a physical press on top of the
+        // commit and invert the cache (Codex).
+        assert!(ECHO_GUARD > FORWARD_TIMEOUT);
     }
 
     #[test]
