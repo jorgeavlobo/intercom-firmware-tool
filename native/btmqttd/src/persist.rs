@@ -187,32 +187,44 @@ fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
 }
 
 /// Remove `path`, treating an already-absent file as success — the shared "clear a record"
-/// path (broker IP, light state → unknown). After a real unlink, fsync the PARENT directory
-/// so the removal (a dir-entry change) is DURABLE, not just cached — otherwise a power loss
-/// could restore the "deleted" file on reboot and resurrect a stale record (CodeRabbit);
-/// symmetric with [`atomic_write_in`]'s dir fsync. A dir-sync failure is reported as a FAILED
-/// clear (`false`) so the caller retries, rather than claiming a durability it didn't get.
-/// Only a real removal error (or that dir-sync failure) is a failure; an already-absent file
-/// is success (nothing to make durable).
+/// path (broker IP, light state → unknown). Once the record is gone, fsync the PARENT
+/// directory so the removal (a dir-entry change) is DURABLE, not just cached — otherwise a
+/// power loss could restore the "deleted" file on reboot and resurrect a stale record
+/// (CodeRabbit); symmetric with [`atomic_write_in`]'s dir fsync. The fsync runs on BOTH the
+/// just-removed AND the already-absent (`NotFound`) paths: if a previous attempt unlinked the
+/// file but its dir-sync failed (returning `false`), a retry finds the file gone yet still
+/// confirms durability rather than short-circuiting as "already durable". A dir-sync failure
+/// is reported as a FAILED clear (`false`) so the caller retries; only a real removal error is
+/// otherwise a failure.
 fn remove_or_absent(path: &Path) -> bool {
     match std::fs::remove_file(path) {
-        Ok(()) => match path.parent() {
-            Some(dir) => match std::fs::File::open(dir).and_then(|d| d.sync_all()) {
-                Ok(()) => true,
-                Err(e) => {
-                    eprintln!(
-                        "btmqttd: persist: cannot sync dir {} after clearing {}: {e}",
-                        dir.display(),
-                        path.display()
-                    );
-                    false
-                }
-            },
-            None => true, // no parent to sync (shouldn't happen for our joined paths)
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // already gone
+        Ok(()) => sync_parent_dir(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => sync_parent_dir(path),
         Err(e) => {
             eprintln!("btmqttd: persist: cannot clear {}: {e}", path.display());
+            false
+        }
+    }
+}
+
+/// fsync the parent directory of `path`, so a preceding unlink is durable. Returns `true` on
+/// success; `false` on a sync/open error so the caller retries. A genuinely MISSING directory
+/// means nothing was ever persisted there, so the record is durably absent → success.
+fn sync_parent_dir(path: &Path) -> bool {
+    let Some(dir) = path.parent() else {
+        return true; // no parent to sync (shouldn't happen for our joined paths)
+    };
+    match std::fs::File::open(dir) {
+        Ok(d) => match d.sync_all() {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("btmqttd: persist: cannot sync dir {} after clearing: {e}", dir.display());
+                false
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // dir absent → nothing persisted
+        Err(e) => {
+            eprintln!("btmqttd: persist: cannot open dir {} to sync: {e}", dir.display());
             false
         }
     }
@@ -412,8 +424,24 @@ mod tests {
         assert_eq!(read_light_in(&dir, "112"), Some(true));
         assert!(clear_light_in(&dir)); // disabled-mode cleanup removes it
         assert_eq!(read_light_in(&dir, "112"), None); // re-enable would start unknown
-        assert!(clear_light_in(&dir)); // already absent → still success
+        // Already absent, but the DIRECTORY still exists → the NotFound path now fsyncs the dir
+        // (confirming durability for a retry after a prior dir-sync failure) and still succeeds.
+        assert!(clear_light_in(&dir));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_light_in_on_a_missing_dir_is_success() {
+        // Fresh device: nothing was ever persisted and the btmqttd dir doesn't exist. Clearing
+        // must be a (durably) successful no-op — NOT a false failure that main would retry and
+        // then log — because there is no directory entry to make durable.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(3000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("btmqttd-nodir-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir); // ensure it does NOT exist
+        assert!(clear_light_in(&dir));
     }
 }
