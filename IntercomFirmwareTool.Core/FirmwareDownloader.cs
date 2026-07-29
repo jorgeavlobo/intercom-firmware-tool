@@ -63,13 +63,12 @@ namespace IntercomFirmwareTool.Core
     public sealed class FirmwareDownloader
     {
         // Modest parallelism: enough to be fast without hammering the CDN. Downloader falls back to a
-        // single connection when the server doesn't support range requests.
+        // single connection when the server doesn't support range requests. Timeout/retry use the
+        // library defaults (its v5 DownloadConfiguration exposes neither as a property).
         private static DownloadConfiguration BuildConfig() => new()
         {
             ChunkCount = 4,
             ParallelDownload = true,
-            MaxTryAgainOnFailover = 5,
-            Timeout = 15_000, // ms per request
             RequestConfiguration = new RequestConfiguration
             {
                 UserAgent = "IntercomFirmwareTool",
