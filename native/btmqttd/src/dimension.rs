@@ -257,13 +257,55 @@ pub async fn read_mute(host: &str, port: u16) -> std::io::Result<Option<bool>> {
     Ok(replies.iter().find_map(|f| parse_mute_report(f)))
 }
 
+/// Like [`session`], but returns AS SOON AS a reply frame satisfies `parse` — it does not
+/// wait out the [`REPLY_IDLE`] tail after the report. For a single-report GET this makes the
+/// call return at the snapshot instant instead of ~500 ms later, which matters for the
+/// call-state reconcile: it shrinks the window in which the monitor read is blocked (so a light
+/// echo isn't buffered past its guard, Codex) and removes the gap in which a monitor transition
+/// arriving during the tail would be newer than this snapshot yet published before it (Codex).
+/// Still bounded by [`SESSION_TIMEOUT`]; returns `None` if the reply burst ends with no match.
+async fn session_first<T>(
+    host: &str,
+    port: u16,
+    frame: &str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> std::io::Result<Option<T>> {
+    let fut = async {
+        let mut sock = TcpStream::connect((host, port)).await?;
+        sock.write_all(COMMAND_REQ).await?;
+        sock.write_all(frame.as_bytes()).await?;
+        sock.flush().await?;
+
+        let mut framer = Framer::default();
+        let mut out: Vec<String> = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            match tokio::time::timeout(REPLY_IDLE, sock.read(&mut buf)).await {
+                Ok(Ok(0)) => break, // gateway closed the session
+                Ok(Ok(n)) => {
+                    framer.push(&buf[..n], &mut out);
+                    if let Some(found) = out.iter().find_map(|f| parse(f)) {
+                        return Ok(Some(found)); // report in hand — return without the idle wait
+                    }
+                }
+                Ok(Err(e)) => return Err(e),
+                Err(_) => break, // idle: reply burst is complete, no match
+            }
+        }
+        Ok(None)
+    };
+    tokio::time::timeout(SESSION_TIMEOUT, fut).await.map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "own command session timed out")
+    })?
+}
+
 /// Read the current call state via a dimension request (`*#8**35##`). Returns the
 /// reported code, or `None` if the gateway gave no valid call-state report (session
 /// refused). This is the AUTHORITATIVE source used to reconcile the retained sensor,
-/// so a missed transition frame (or a reconnect mid-call) can't leave HA stuck.
+/// so a missed transition frame (or a reconnect mid-call) can't leave HA stuck. Returns
+/// PROMPTLY on the report (see [`session_first`]) rather than waiting out the reply idle gap.
 pub async fn read_call_state(host: &str, port: u16) -> std::io::Result<Option<u8>> {
-    let replies = session(host, port, &call_state_read_request()).await?;
-    Ok(replies.iter().find_map(|f| parse_call_state(f)))
+    session_first(host, port, &call_state_read_request(), parse_call_state).await
 }
 
 /// Mute/unmute the ringtone and return the state the device ECHOES back. Mirrors

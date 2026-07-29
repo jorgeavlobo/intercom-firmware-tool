@@ -179,52 +179,17 @@ async fn session(
     }
 
     // Reconcile the retained call state AUTHORITATIVELY on every (re)connect: query the
-    // gateway (`*#8**35##`) for the REAL state rather than trusting the possibly-stale
-    // buffered frames above (or blindly assuming idle), so a call genuinely in progress
-    // across a monitor reconnect is preserved.
-    //
-    // read_call_state can take up to `dimension::SESSION_TIMEOUT` (5 s) — longer than the light
-    // `ECHO_GUARD` (3 s). If a light command's echo lands on the fresh session while we sit here,
-    // blocking the monitor read would delay observe() past the guard, and apply_observe would
-    // misread our OWN echo as a physical press, inverting the cache (Codex). So while the query
-    // runs, keep draining the socket and processing frames NORMALLY — light echoes, volume/mute,
-    // doorbell events and the raw dump all reach their handlers the moment they arrive — with ONE
-    // exception: call-state transitions are SUPPRESSED here (the `true` below), left solely to
-    // this query's authoritative result. The query completes 500 ms after its snapshot (the
-    // session idle gap), so mixing concurrently-drained call frames with it races in EITHER
-    // direction — "apply unconditionally" clobbers a newer drained ringing (Codex), "suppress on
-    // any drained frame" lets an older buffered idle discard the authoritative ringing (CodeRabbit).
-    // Suppressing ONLY call state keeps the query the single authoritative writer while no longer
-    // losing doorbell/dump/volume frames in the window (CodeRabbit). Light echoes carry no such
-    // ordering ambiguity, so they are observed inline here.
-    let call_state = if let Some(light) = light {
-        let reconcile = dimension::read_call_state(&cfg.own_host, cfg.own_port_mon);
-        tokio::pin!(reconcile);
-        loop {
-            tokio::select! {
-                biased;
-                result = &mut reconcile => break result,
-                read = tokio::time::timeout(RECONNECT_DRAIN_TICK, sock.read(&mut buf)) => {
-                    // A completed read is processed now (call state suppressed); a timeout re-polls.
-                    if let Ok(read) = read {
-                        let n = read?;
-                        if n == 0 {
-                            return Ok(()); // gateway closed the monitor session
-                        }
-                        frames.clear();
-                        framer.push(&buf[..n], &mut frames);
-                        for frame in frames.drain(..) {
-                            publish_frame(cfg, client, volume, Some(light), &frame, true).await;
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        // No light controller: nothing on the read path is time-sensitive, so await the query
-        // inline — its original, known-correct ordering (authoritative over the buffered frames
-        // above; later frames are processed, with call state, by the main loop).
-        dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await
+    // gateway (`*#8**35##`) for the REAL state rather than trusting the possibly-stale buffered
+    // frames above (or blindly assuming idle), so a call genuinely in progress across a monitor
+    // reconnect is preserved. The query drains the monitor for light meanwhile, so a light echo
+    // landing on the fresh session isn't buffered past its guard (see read_call_state_draining).
+    let call_state = match read_call_state_draining(
+        cfg, client, volume, light, &mut sock, &mut framer, &mut buf, &mut frames,
+    )
+    .await?
+    {
+        Reconcile::SocketClosed => return Ok(()),
+        Reconcile::Done(result) => result,
     };
     // Apply the authoritative reconcile. On a FAILED read (session refused / no reply) do NOT
     // fabricate a state — publishing idle would clobber a real ringing/in_call; keep what the
@@ -283,7 +248,18 @@ async fn session(
         // state and retries next interval rather than fabricating idle.
         if let Some((known, since)) = call_watch {
             if since.elapsed() >= CALL_STATE_POLL {
-                match dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await {
+                // Drain the monitor for light while this query runs (same reason as the reconnect
+                // reconcile): a slow/timed-out poll must not block the read past a light echo's
+                // 3 s guard (Codex).
+                let poll = match read_call_state_draining(
+                    cfg, client, volume, light, &mut sock, &mut framer, &mut buf, &mut frames,
+                )
+                .await?
+                {
+                    Reconcile::SocketClosed => return Ok(()),
+                    Reconcile::Done(result) => result,
+                };
+                match poll {
                     Ok(Some(code)) => {
                         // Publish only on a real change — `known` is None ("unknown", from a
                         // failed reconnect read) so the first successful poll always writes.
@@ -323,6 +299,63 @@ async fn session(
                 Some((None, _)) => {} // unknown (failed reconnect read) — nothing authoritative
             }
             last_reseed = tokio::time::Instant::now();
+        }
+    }
+}
+
+/// Outcome of a monitor-draining call-state query.
+enum Reconcile {
+    /// The query finished (its own Ok/Err) and the monitor socket stayed open.
+    Done(std::io::Result<Option<u8>>),
+    /// The monitor socket closed mid-drain — the caller should end the session.
+    SocketClosed,
+}
+
+/// Run `read_call_state` while KEEPING the monitor socket drained, so a light echo landing on
+/// the socket during a slow or timed-out query is still observed within its 3 s guard instead of
+/// being read late and misjudged as a physical press (Codex). Used by BOTH the reconnect reconcile
+/// and the periodic poll. Drained frames run the full [`publish_frame`] with call state SUPPRESSED:
+/// light echoes, volume/mute, doorbell and dump are all handled, but call state is left to this
+/// query's authoritative result. The query returns promptly at its snapshot (see
+/// [`dimension::read_call_state`]), so the drain window is short and no post-snapshot transition
+/// is lost. With no light controller nothing on the read path is time-sensitive, so the query is
+/// simply awaited.
+#[allow(clippy::too_many_arguments)]
+async fn read_call_state_draining(
+    cfg: &Arc<Config>,
+    client: &AsyncClient,
+    volume: &Arc<VolumeCtl>,
+    light: Option<&Arc<LightCtl>>,
+    sock: &mut TcpStream,
+    framer: &mut Framer,
+    buf: &mut [u8],
+    frames: &mut Vec<String>,
+) -> std::io::Result<Reconcile> {
+    let Some(light) = light else {
+        return Ok(Reconcile::Done(
+            dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await,
+        ));
+    };
+    let reconcile = dimension::read_call_state(&cfg.own_host, cfg.own_port_mon);
+    tokio::pin!(reconcile);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut reconcile => return Ok(Reconcile::Done(result)),
+            read = tokio::time::timeout(RECONNECT_DRAIN_TICK, sock.read(buf)) => {
+                // A completed read is processed now (call state suppressed); a timeout re-polls.
+                if let Ok(read) = read {
+                    let n = read?;
+                    if n == 0 {
+                        return Ok(Reconcile::SocketClosed);
+                    }
+                    frames.clear();
+                    framer.push(&buf[..n], frames);
+                    for frame in frames.drain(..) {
+                        publish_frame(cfg, client, volume, Some(light), &frame, true).await;
+                    }
+                }
+            }
         }
     }
 }
