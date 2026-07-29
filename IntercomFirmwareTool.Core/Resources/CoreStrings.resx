@@ -191,6 +191,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_InvalidTopic" xml:space="preserve">
     <value>An MQTT topic is empty or contains a line break.</value>
   </data>
+  <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
+    <value>The light address (WHERE) must contain digits only.</value>
+  </data>
   <data name="Mqtt_CredentialNewline" xml:space="preserve">
     <value>The MQTT username or password contains a line break; credentials must be a single line.</value>
   </data>

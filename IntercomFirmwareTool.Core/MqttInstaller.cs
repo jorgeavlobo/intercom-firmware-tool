@@ -171,6 +171,23 @@ namespace IntercomFirmwareTool.Core
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicCallState"/>.</summary>
         public string? TopicCallState { get; init; }
 
+        /// <summary>
+        /// Stair-light SWITCH (opt-in): the WHO=8 actuator WHERE, digits only (e.g.
+        /// <c>112</c>). Installation-specific — the same door-entry "light button" WHAT
+        /// (21/22) drives whatever WHERE the building wired. NULL/empty ⇒ the light entity
+        /// is DISABLED (no active switch): <c>LIGHT_WHERE</c> is still written (empty) and
+        /// <c>TOPIC_LIGHT</c> stays configured, and the retained <c>light.json</c> discovery
+        /// config is tombstoned so btmqttd clears any stale entity. The actuator is a
+        /// stateless toggle (firmware-confirmed), so btmqttd tracks + persists the state;
+        /// there is no readable state to poll.
+        /// </summary>
+        public string? LightWhere { get; init; }
+
+        /// <summary>Retained light-state topic (on/off) HA's light switch reads back.
+        /// NULL (default) derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicLight"/>.</summary>
+        public string? TopicLight { get; init; }
+
         /// <summary>The volume state topic actually used: the explicit
         /// <see cref="TopicVolume"/>, or one derived from the <see cref="TopicLastWill"/>
         /// namespace so multi-unit deployments auto-scope without extra UI.</summary>
@@ -181,6 +198,10 @@ namespace IntercomFirmwareTool.Core
         public string EffectiveTopicDoorbell => TopicDoorbell ?? (TopicNamespace(TopicLastWill) + "doorbell");
         /// <summary>The call-state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicCallState => TopicCallState ?? (TopicNamespace(TopicLastWill) + "call_state");
+        /// <summary>The light state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicLight => TopicLight ?? (TopicNamespace(TopicLastWill) + "light");
+        /// <summary>Whether the stair-light switch is enabled — a non-empty <see cref="LightWhere"/>.</summary>
+        public bool LightEnabled => !string.IsNullOrEmpty(LightWhere);
 
         /// <summary>The namespace prefix of <paramref name="topic"/> — everything up to
         /// and INCLUDING the last '/', or "" when the topic has no '/'. Scopes the
@@ -465,12 +486,19 @@ namespace IntercomFirmwareTool.Core
             if (opts.AllowRemoteShell && !(opts.HasAuth || opts.HasMutualTls))
                 throw new ArgumentException(CoreStrings.Get("Mqtt_RemoteShellNeedsAuth"), nameof(opts));
 
+            // Stair-light WHERE (opt-in): digits only, matching btmqttd's LIGHT_WHERE parse
+            // (a non-numeric value is ignored device-side, silently disabling the feature).
+            // Reject it here where the user sees why.
+            if (opts.LightEnabled && !opts.LightWhere!.All(char.IsAsciiDigit))
+                throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidLightWhere"), nameof(opts));
+
             // Topics must be non-empty and single-line (they are sourced into the
             // .conf and used as MQTT topic filters).
             foreach (var t in new[] { opts.TopicRx, opts.TopicDump, opts.TopicStartDate,
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
                                       opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
-                                      opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState })
+                                      opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState,
+                                      opts.EffectiveTopicLight })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
@@ -482,7 +510,8 @@ namespace IntercomFirmwareTool.Core
             foreach (var t in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                       opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
-                                      opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState })
+                                      opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState,
+                                      opts.EffectiveTopicLight })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
                 // prefix — both are subscription-only and invalid to PUBLISH to (a broker
                 // rejects the publish), so no publish topic (including the derived volume/
@@ -535,6 +564,14 @@ namespace IntercomFirmwareTool.Core
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
+            // The light STATE topic is only PUBLISHED when the feature is enabled; a disabled
+            // build derives EffectiveTopicLight but the daemon never publishes it (and TopicRx
+            // isn't a light command topic without the switch), so it can't form a self-loop —
+            // exclude it when disabled, or a valid opt-out config whose namespace happens to
+            // derive a colliding light topic would fail validation (Codex).
+            if (opts.LightEnabled && TopicFilterMatches(rxFilter, opts.EffectiveTopicLight))
+                throw new ArgumentException(
+                    CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
         }
 
         /// <summary>
@@ -832,6 +869,13 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_DOORBELL", opts.EffectiveTopicDoorbell));
             sb.Append(Conf("TOPIC_CALL_STATE", opts.EffectiveTopicCallState));
 
+            // Stair-light SWITCH (opt-in): LIGHT_WHERE is the WHO=8 actuator WHERE
+            // (installation-specific; empty ⇒ feature off, and btmqttd emits no light entity).
+            // TOPIC_LIGHT is the retained on/off state topic btmqttd tracks (the actuator has
+            // no readable state). Command reuses TOPIC_RX (a JSON action).
+            sb.Append(Conf("LIGHT_WHERE", opts.LightEnabled ? opts.LightWhere! : ""));
+            sb.Append(Conf("TOPIC_LIGHT", opts.EffectiveTopicLight));
+
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 
             // OpenWebNet gateway endpoint for the bus MONITOR session (btmqttd opens it
@@ -896,13 +940,13 @@ namespace IntercomFirmwareTool.Core
         };
 
         /// <summary>
-        /// The six volume/lock CONTROL entities' identity — (JSON filename, discovery
+        /// The seven volume/lock/light CONTROL entities' identity — (JSON filename, discovery
         /// component, object id). Used by the TOMBSTONE path in
         /// <see cref="GenerateHaDiscovery"/> (when there is no concrete command topic) to
         /// emit the exact same config topics with an empty payload, so a previous build's
         /// controls are cleared. The real-config path builds each entity inline (their
-        /// JSON bodies differ: number vs switch vs button), so this list MUST be kept in
-        /// step with those six entities' filenames/components/object ids — it is the
+        /// JSON bodies differ: number vs switch vs button, and the light is opt-in), so this
+        /// list MUST be kept in step with those entities' filenames/components/object ids — it is the
         /// single definition of WHICH config topics the controls occupy (constant across
         /// builds; they depend only on the node id, not on TopicRx).
         /// </summary>
@@ -914,6 +958,7 @@ namespace IntercomFirmwareTool.Core
             ("volume_down.json", "button", "volume_down"),
             ("main_lock.json", "button", "main_lock"),
             ("secondary_lock.json", "button", "secondary_lock"),
+            ("light.json", "switch", "light"),
         };
 
         /// <summary>
@@ -1319,6 +1364,38 @@ namespace IntercomFirmwareTool.Core
 
             AddLock("main_lock", "Main Lock", "main_lock", "mdi:lock");
             AddLock("secondary_lock", "Secondary Lock", "secondary_lock", "mdi:lock-outline");
+
+            // Stair-light SWITCH (opt-in). The actuator is a stateless TOGGLE with no readable
+            // state (firmware-confirmed), so btmqttd tracks the on/off and publishes it retained
+            // to EffectiveTopicLight; HA reads that as the switch state. The command is an
+            // ABSOLUTE on/off action on TopicRx — btmqttd toggles the actuator only when the
+            // tracked state differs, so a QoS-1 redelivery is harmless (idempotent set), unlike
+            // the non-idempotent lock pulses above. When the feature is OFF, TOMBSTONE the
+            // config (empty retained) so turning it off in a later build drops the stale entity.
+            if (opts.LightEnabled)
+                entities.Add(new HaEntity(
+                    "light.json",
+                    Topic("switch", "light"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Light",
+                        unique_id = $"{node}_light",
+                        default_entity_id = EntId("switch", "light"),
+                        command_topic = controlTopic,
+                        qos = 1,
+                        payload_on = "{\"action\":\"light\",\"value\":\"on\"}",
+                        payload_off = "{\"action\":\"light\",\"value\":\"off\"}",
+                        state_topic = opts.EffectiveTopicLight,
+                        state_on = "on",
+                        state_off = "off",
+                        icon = "mdi:lightbulb",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            else
+                entities.Add(new HaEntity("light.json", Topic("switch", "light"), ""));
 
             return entities;
         }

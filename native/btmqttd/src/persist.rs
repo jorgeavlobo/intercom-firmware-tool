@@ -50,6 +50,11 @@ const DEFAULT_STATE_DIR: &str = "/home/bticino/cfg/extra/btmqttd";
 /// The state file: one line, `<host>\t<base_ip>\t<learned_ip>`.
 const STATE_FILE: &str = "broker-ip";
 
+/// The tracked stair-light on/off, one token `on`/`off` (issue: light switch). Persisted
+/// on the same reboot-persistent partition so the switch survives a reboot with the right
+/// state instead of guessing — the actuator has no readable state to re-query.
+const LIGHT_FILE: &str = "light-state";
+
 /// The state directory, honouring `$BTMQTTD_STATE_DIR` (tests/dev) like `config.rs`
 /// honours `$BTMQTTD_CONF`.
 fn state_dir() -> PathBuf {
@@ -60,6 +65,10 @@ fn state_dir() -> PathBuf {
 
 fn state_file_in(dir: &Path) -> PathBuf {
     dir.join(STATE_FILE)
+}
+
+fn light_file_in(dir: &Path) -> PathBuf {
+    dir.join(LIGHT_FILE)
 }
 
 /// The persisted state as `(file_exists, record)`, read in one pass. `file_exists` is
@@ -94,6 +103,48 @@ pub fn clear() -> bool {
     clear_in(&state_dir())
 }
 
+/// Outcome of restoring the persisted stair-light state for a configured WHERE.
+pub enum LightRestore {
+    /// A valid `on`/`off` record for THIS WHERE — restore it.
+    State(bool),
+    /// No usable record: no file, a record for a DIFFERENT WHERE (a build that changed
+    /// `LIGHT_WHERE`), or a corrupt/unparseable one. Safe to CLEAR so a later WHERE change
+    /// starts from a known-unknown baseline.
+    Absent,
+    /// The record could not be READ (a transient I/O error — a permission or storage blip).
+    /// Do NOT clear it: a valid state may still be on disk, so keep it and retry next boot,
+    /// rather than deleting a possibly-good record and starting from an unknown baseline (Codex).
+    Unreadable,
+}
+
+/// Read the tracked stair-light state for the actuator at `want_where`. Distinguishes a valid
+/// record ([`LightRestore::State`]) from a genuinely absent/mismatched/corrupt one
+/// ([`LightRestore::Absent`], safe to clear) and from an I/O read failure
+/// ([`LightRestore::Unreadable`], must be retained). Blocking; call via `spawn_blocking`.
+pub fn read_light(want_where: &str) -> LightRestore {
+    read_light_in(&state_dir(), want_where)
+}
+
+/// Persist the tracked stair-light state, KEYED by the actuator `where_` so a later WHERE
+/// change can't restore an unrelated relay's state. `None` clears it (an unknown state,
+/// e.g. after a physical toggle from an unknown baseline). Atomic write + dir fsync like
+/// [`store`], so a reboot mid-write never sees a torn file. Returns `true` on success.
+/// Blocking; call via `spawn_blocking`.
+#[must_use]
+pub fn store_light(where_: &str, on: Option<bool>) -> bool {
+    store_light_in(&state_dir(), where_, on)
+}
+
+/// Forget any persisted stair-light record — called when the feature is DISABLED, so
+/// re-enabling the same WHERE later starts from an UNKNOWN baseline instead of restoring a
+/// value that may have gone stale (physical toggles while tracking was off) — Codex. Returns
+/// `true` when the file is gone (removed, or already absent). Blocking; call via
+/// `spawn_blocking`.
+#[must_use]
+pub fn clear_light() -> bool {
+    clear_light_in(&state_dir())
+}
+
 // ---------------------------------------------------------------------------
 // Directory-injected cores (unit-tested with a temp dir — no process-env
 // mutation, so the tests are parallel-safe). The public fns above just resolve
@@ -111,33 +162,31 @@ fn read_state_in(dir: &Path, host: &str) -> (bool, Option<(Ipv4Addr, Ipv4Addr)>)
     }
 }
 
-fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> bool {
+/// Durably write `body` to `path` via a temp file + rename + directory fsync — the shared
+/// atomicity-critical path for every persisted record (broker IP, light state). Creating
+/// `dir` first, then writing a unique temp, renaming it over `path`, and fsync'ing the
+/// DIRECTORY so the rename (the dir entry now pointing at the new inode) is durable, not
+/// just the file bytes. A dir-sync failure is reported as a FAILED write (`false`) so the
+/// caller doesn't advance its change-gate and retries later, rather than claiming a
+/// durability it didn't get (CodeRabbit). Kept in ONE place so the two records can't drift.
+fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("btmqttd: persist: cannot create {}: {e}", dir.display());
         return false;
     }
-    let path = state_file_in(dir);
     let Some(path_str) = path.to_str() else {
-        eprintln!("btmqttd: persist: state path is not valid UTF-8");
+        eprintln!("btmqttd: persist: path is not valid UTF-8");
         return false;
     };
-    let body = format_state(host, base_ip, learned_ip);
-    match crate::receiver::create_unique_temp(path_str, body.as_bytes()) {
+    match crate::receiver::create_unique_temp(path_str, body) {
         Ok(tmp) => match std::fs::rename(&tmp, path_str) {
-            Ok(()) => {
-                // fsync the directory so the rename itself (the dir entry now pointing at
-                // the new inode) is durable, not just the file bytes. Report a dir-sync
-                // failure as a FAILED store (false) so the caller doesn't advance its
-                // change-gate and retries on the next ConnAck, rather than claiming a
-                // durability it didn't get (CodeRabbit).
-                match std::fs::File::open(dir).and_then(|dirf| dirf.sync_all()) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
-                        false
-                    }
+            Ok(()) => match std::fs::File::open(dir).and_then(|dirf| dirf.sync_all()) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
+                    false
                 }
-            }
+            },
             Err(e) => {
                 let _ = std::fs::remove_file(&tmp);
                 eprintln!("btmqttd: persist: cannot write {path_str}: {e}");
@@ -151,16 +200,97 @@ fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> 
     }
 }
 
-fn clear_in(dir: &Path) -> bool {
-    let path = state_file_in(dir);
-    match std::fs::remove_file(&path) {
-        Ok(()) => true,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // already gone
+/// Remove `path`, treating an already-absent file as success — the shared "clear a record"
+/// path (broker IP, light state → unknown). Once the record is gone, fsync the PARENT
+/// directory so the removal (a dir-entry change) is DURABLE, not just cached — otherwise a
+/// power loss could restore the "deleted" file on reboot and resurrect a stale record
+/// (CodeRabbit); symmetric with [`atomic_write_in`]'s dir fsync. The fsync runs on BOTH the
+/// just-removed AND the already-absent (`NotFound`) paths: if a previous attempt unlinked the
+/// file but its dir-sync failed (returning `false`), a retry finds the file gone yet still
+/// confirms durability rather than short-circuiting as "already durable". A dir-sync failure
+/// is reported as a FAILED clear (`false`) so the caller retries; only a real removal error is
+/// otherwise a failure.
+fn remove_or_absent(path: &Path) -> bool {
+    match std::fs::remove_file(path) {
+        Ok(()) => sync_parent_dir(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => sync_parent_dir(path),
         Err(e) => {
             eprintln!("btmqttd: persist: cannot clear {}: {e}", path.display());
             false
         }
     }
+}
+
+/// fsync the parent directory of `path`, so a preceding unlink is durable. Returns `true` on
+/// success; `false` on a sync/open error so the caller retries. A genuinely MISSING directory
+/// means nothing was ever persisted there, so the record is durably absent → success.
+fn sync_parent_dir(path: &Path) -> bool {
+    let Some(dir) = path.parent() else {
+        return true; // no parent to sync (shouldn't happen for our joined paths)
+    };
+    match std::fs::File::open(dir) {
+        Ok(d) => match d.sync_all() {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("btmqttd: persist: cannot sync dir {} after clearing: {e}", dir.display());
+                false
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true, // dir absent → nothing persisted
+        Err(e) => {
+            eprintln!("btmqttd: persist: cannot open dir {} to sync: {e}", dir.display());
+            false
+        }
+    }
+}
+
+fn store_in(dir: &Path, host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> bool {
+    let body = format_state(host, base_ip, learned_ip);
+    atomic_write_in(dir, &state_file_in(dir), body.as_bytes())
+}
+
+fn clear_in(dir: &Path) -> bool {
+    remove_or_absent(&state_file_in(dir))
+}
+
+fn clear_light_in(dir: &Path) -> bool {
+    remove_or_absent(&light_file_in(dir))
+}
+
+fn read_light_in(dir: &Path, want_where: &str) -> LightRestore {
+    let text = match std::fs::read_to_string(light_file_in(dir)) {
+        Ok(t) => t,
+        // Genuinely absent → nothing to restore, safe to clear.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LightRestore::Absent,
+        // Present but unreadable (a transient I/O blip) → keep it, do not clear (Codex).
+        Err(_) => return LightRestore::Unreadable,
+    };
+    let Some(line) = text.lines().next().map(str::trim) else {
+        return LightRestore::Absent;
+    };
+    // Record is `<where>\t<on|off>`. A record for a DIFFERENT WHERE (a build that changed
+    // LIGHT_WHERE — the cfg/extra partition survives reflashes) must NOT be inherited.
+    let Some((where_, token)) = line.split_once('\t') else {
+        return LightRestore::Absent;
+    };
+    if where_ != want_where {
+        return LightRestore::Absent;
+    }
+    match token.trim() {
+        "on" => LightRestore::State(true),
+        "off" => LightRestore::State(false),
+        _ => LightRestore::Absent, // corrupt token
+    }
+}
+
+fn store_light_in(dir: &Path, where_: &str, on: Option<bool>) -> bool {
+    let path = light_file_in(dir);
+    // Unknown → remove the file (a missing file reads back as None).
+    let Some(state) = on.map(|b| if b { "on" } else { "off" }) else {
+        return remove_or_absent(&path);
+    };
+    let body = format!("{where_}\t{state}\n");
+    atomic_write_in(dir, &path, body.as_bytes())
 }
 
 // ---------------------------------------------------------------------------
@@ -277,5 +407,83 @@ mod tests {
         assert!(clear_in(&dir));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn light_state_store_read_clear_roundtrip() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(1000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-light-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::Absent)); // no file yet
+        assert!(store_light_in(&dir, "112", Some(true)));
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::State(true)));
+        assert!(store_light_in(&dir, "112", Some(false)));
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::State(false)));
+        // A record for a DIFFERENT WHERE is NOT inherited (a changed LIGHT_WHERE).
+        assert!(matches!(read_light_in(&dir, "999"), LightRestore::Absent));
+        // None clears the file → reads back as absent.
+        assert!(store_light_in(&dir, "112", None));
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::Absent));
+        assert!(store_light_in(&dir, "112", None)); // clearing an absent file is still success
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_light_in_removes_the_record_and_is_idempotent() {
+        // The disabled-mode cleanup path: an existing light-state record is removed (durably —
+        // remove_or_absent fsyncs the dir), so a later re-enable reads back unknown; clearing
+        // an already-absent record is still success.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(2000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("btmqttd-clearlight-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(store_light_in(&dir, "112", Some(true)));
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::State(true)));
+        assert!(clear_light_in(&dir)); // disabled-mode cleanup removes it
+        // re-enable would start unknown
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::Absent));
+        // Already absent, but the DIRECTORY still exists → the NotFound path now fsyncs the dir
+        // (confirming durability for a retry after a prior dir-sync failure) and still succeeds.
+        assert!(clear_light_in(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_light_in_reports_unreadable_on_io_error() {
+        // A present-but-unreadable record must be Unreadable — NOT Absent — so main KEEPS it
+        // instead of deleting a possibly-valid record on a transient I/O blip (Codex). Simulate
+        // an I/O error that is NOT NotFound by making the record path a DIRECTORY (read_to_string
+        // then fails with EISDIR).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(4000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("btmqttd-lightio-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(light_file_in(&dir)).unwrap(); // record path is a directory
+        assert!(matches!(read_light_in(&dir, "112"), LightRestore::Unreadable));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_light_in_on_a_missing_dir_is_success() {
+        // Fresh device: nothing was ever persisted and the btmqttd dir doesn't exist. Clearing
+        // must be a (durably) successful no-op — NOT a false failure that main would retry and
+        // then log — because there is no directory entry to make durable.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(3000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("btmqttd-nodir-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir); // ensure it does NOT exist
+        assert!(clear_light_in(&dir));
     }
 }

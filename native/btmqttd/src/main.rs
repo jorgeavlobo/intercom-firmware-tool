@@ -27,6 +27,7 @@ mod config;
 mod dimension;
 mod ha;
 mod keys;
+mod light;
 mod lock;
 mod mdns;
 mod own;
@@ -114,6 +115,71 @@ async fn run() -> Result<(), String> {
     // volume from the bus broadcasts). All volume STATE lives here — HA is dumb.
     let volume = volume::VolumeCtl::new(&cfg, client.clone());
 
+    // Stair-light SWITCH (opt-in; only when a WHERE is configured). The actuator has no
+    // readable state, so we track the toggle and PERSIST it across reboots — restore the
+    // last known on/off here so a reboot keeps the switch correct (issue: light). `None`
+    // (feature off) threads through as no-op everywhere.
+    // The controller does the RETAINED-MQTT + forward I/O; durable persistence runs on its
+    // OWN task (`run_persist`), fed by a watch channel. That task is DRAINED at shutdown (via
+    // the oneshot below) so a toggle actuated the instant before SIGTERM is still written —
+    // the command worker is aborted, but the persist task is signalled + awaited.
+    #[allow(clippy::type_complexity)]
+    let (light, light_persist): (
+        Option<Arc<light::LightCtl>>,
+        Option<(tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>)>,
+    ) = if let Some(where_) = cfg.light_where.clone() {
+        let where_for_read = where_.clone();
+        let restore = tokio::task::spawn_blocking(move || persist::read_light(&where_for_read))
+            .await
+            // A JOIN failure (the blocking read panicked) is "couldn't read" — treat as Unreadable
+            // so we KEEP the record rather than deleting it.
+            .unwrap_or(persist::LightRestore::Unreadable);
+        // `initial` seeds the in-memory cache; `initial_uncertain` tells the persist task whether
+        // the on-disk value is known to match `initial` (so an observed value equal to it must
+        // still be durably written to overwrite a possibly-different record we couldn't read).
+        let (initial, initial_uncertain) = match restore {
+            // Normal reboot restore: a valid on/off record for THIS WHERE — disk matches `initial`.
+            persist::LightRestore::State(on) => (Some(on), false),
+            // No usable record (absent, a DIFFERENT WHERE's, or corrupt). Forget it, so a later
+            // switch BACK to an old WHERE starts unknown instead of restoring a stale value (Codex).
+            // Disk is now confirmed absent (= None), so the baseline is certain.
+            persist::LightRestore::Absent => {
+                clear_persisted_light("no valid state for the configured WHERE").await;
+                (None, false)
+            }
+            // Present but UNREADABLE (transient I/O). Do NOT clear — a valid state may still be on
+            // disk; keep it and retry next boot. Start the cache unknown, and mark the disk baseline
+            // UNCERTAIN so the first observed value is durably written (overwriting whatever record
+            // we couldn't read) rather than skipped as already-durable (Codex).
+            persist::LightRestore::Unreadable => {
+                eprintln!(
+                    "btmqttd: light: persisted state unreadable (I/O error) — keeping the record, \
+                     starting from unknown"
+                );
+                (None, true)
+            }
+        };
+        let (ctl, persist_rx) = light::LightCtl::new(&cfg, client.clone(), initial);
+        let (persist_shutdown_tx, persist_shutdown_rx) = tokio::sync::oneshot::channel();
+        // Pass the restored disk value as the persist task's durable BASELINE explicitly, so a
+        // command/observe that bumps the channel before the task is first polled is still
+        // persisted (not mistaken for the restored value).
+        let persist_task = tokio::spawn(light::run_persist(
+            where_,
+            initial,
+            initial_uncertain,
+            persist_rx,
+            persist_shutdown_rx,
+        ));
+        (Some(ctl), Some((persist_shutdown_tx, persist_task)))
+    } else {
+        // Feature DISABLED: forget any persisted light-state, so that re-enabling the same
+        // WHERE later starts from an UNKNOWN baseline instead of restoring a value that may
+        // have gone stale while untracked (a physical toggle we didn't see) — Codex.
+        clear_persisted_light("feature disabled").await;
+        (None, None)
+    };
+
     // Locks (issue #41) run on their OWN task, fed by a small channel: the command worker
     // enqueues a press request (which actuator) and moves on (no 300 ms block), the lock
     // task serialises each press→hold→release, and shutdown DRAINS it (drops the sender +
@@ -149,9 +215,10 @@ async fn run() -> Result<(), String> {
         let client = client.clone();
         let volume = volume.clone();
         let lock_tx = lock_tx.clone();
+        let light = light.clone();
         async move {
             while let Some(payload) = cmd_rx.recv().await {
-                receiver::dispatch(&cfg, &client, &volume, &lock_tx, &payload).await;
+                receiver::dispatch(&cfg, &client, &volume, &lock_tx, light.as_ref(), &payload).await;
             }
         }
     });
@@ -161,7 +228,8 @@ async fn run() -> Result<(), String> {
     // Keep their handles so shutdown can ABORT every MQTT-producing task before it
     // publishes the final retained `offline` — otherwise a task still in flight could
     // enqueue a publish AFTER `offline` and leave stale state retained on the broker.
-    let sender_task = tokio::spawn(sender::run(cfg.clone(), client.clone(), volume.clone()));
+    let sender_task =
+        tokio::spawn(sender::run(cfg.clone(), client.clone(), volume.clone(), light.clone()));
     let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone()));
     // Birth is split across two events: SUBSCRIBE to the command topic on ConnAck,
     // then ANNOUNCE (online + start_date + HA) only after the broker confirms the
@@ -463,6 +531,7 @@ async fn run() -> Result<(), String> {
                                 client.clone(),
                                 start_iso.clone(),
                                 volume.clone(),
+                                light.clone(),
                             )));
                         }
                     }
@@ -603,6 +672,14 @@ async fn run() -> Result<(), String> {
     stop(sender_task).await;
     stop(keys_task).await;
     stop(cmd_worker).await;
+    // Drain the stair-light persist task LAST among the state producers: `command()` (on
+    // cmd_worker) and `observe()` (on sender_task) are now stopped, so no further state can be
+    // enqueued. Signal the task and await its final flush (bounded) so a toggle actuated in the
+    // last instant reaches disk instead of being lost with the aborted worker.
+    if let Some((persist_shutdown_tx, persist_task)) = light_persist {
+        let _ = persist_shutdown_tx.send(());
+        let _ = tokio::time::timeout(Duration::from_secs(2), persist_task).await;
+    }
     // Lock task: DRAIN rather than abort. Signal `stopping` FIRST so the task finishes
     // the pulse IN PROGRESS (its release is sent) but discards queued, not-yet-started
     // presses (which emitted nothing, so dropping them strands nothing). Then drop this
@@ -616,6 +693,24 @@ async fn run() -> Result<(), String> {
     let _ = tokio::time::timeout(lock::MAX_PULSE + Duration::from_secs(1), lock_task).await;
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(())
+}
+
+/// Best-effort clear of the persisted stair-light record (bounded retries, log on ultimate
+/// failure). Used when the feature is DISABLED, and when an ENABLED build restored nothing for
+/// its configured WHERE (no record, a record left by a DIFFERENT WHERE, or a corrupt one) — so
+/// a later switch back to an old WHERE starts from an unknown baseline instead of a value that
+/// went stale while that WHERE was untracked (Codex). The disk work runs on the blocking pool;
+/// a transient failure is retried a few times, then logged rather than silently dropped.
+async fn clear_persisted_light(reason: &str) {
+    for _ in 0..3 {
+        if tokio::task::spawn_blocking(persist::clear_light).await.unwrap_or(false) {
+            return;
+        }
+    }
+    eprintln!(
+        "btmqttd: could not clear persisted light-state ({reason}); re-enabling an old \
+         LIGHT_WHERE later may restore a stale value"
+    );
 }
 
 /// On-connect step 1: SUBSCRIBE to the command topic, then clear any stray retained
@@ -664,6 +759,7 @@ async fn announce(
     client: AsyncClient,
     start_iso: Arc<str>,
     volume: Arc<volume::VolumeCtl>,
+    light: Option<Arc<light::LightCtl>>,
 ) {
     if let Err(e) = client
         .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
@@ -678,11 +774,19 @@ async fn announce(
         eprintln!("btmqttd: publish start_date failed: {e}");
     }
     ha::reconcile(&cfg, &client).await;
-    // Seed the volume slider/mute with the unit's real level via an on-demand read, so
-    // HA shows a value immediately on connect (the monitor keeps it live afterwards).
-    // Only meaningful with discovery on — otherwise no entity reads the state topics —
-    // but the retained publish is harmless either way; still, skip the extra gateway
-    // round-trip when discovery is off.
+    // Re-publish the tracked light state on every connect (a restarted broker dropped its
+    // retained topics; a changed WHERE reusing the topic left a stale value). This is
+    // INDEPENDENT of discovery — unlike the volume seed below it does NO gateway round-trip,
+    // it just re-emits the already-restored cached value, so it's cheap and keeps the retained
+    // state topic correct even with discovery off (the daemon still accepts light commands) —
+    // Codex.
+    if let Some(light) = &light {
+        light.seed().await;
+    }
+    // Seed the volume slider/mute with the unit's real level via an on-demand GATEWAY READ, so
+    // HA shows a value immediately on connect (the monitor keeps it live afterwards). Gated on
+    // discovery: without an entity reading the state topics the extra gateway round-trip is
+    // wasted (the retained publish itself would be harmless either way).
     if cfg.ha_discovery {
         volume.seed().await;
     }

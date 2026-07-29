@@ -194,6 +194,9 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Mqtt_InvalidTopic" xml:space="preserve">
     <value>Un topic MQTT è vuoto o contiene un'interruzione di riga.</value>
   </data>
+  <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
+    <value>L'indirizzo della luce (WHERE) deve contenere solo cifre.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} non esiste nell'immagine; impossibile applicare la patch del bridge MQTT.</value>
   </data>

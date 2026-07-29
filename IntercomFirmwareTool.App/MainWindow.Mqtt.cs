@@ -1339,6 +1339,16 @@ namespace IntercomFirmwareTool.App
                             return L("MqttHint_HaNodeId");
             }
 
+            // Stair-light WHERE — mirror the Core validator (Mqtt_InvalidLightWhere):
+            // opt-in, so an empty field is valid (feature off), but a non-empty value
+            // must be digits only (it becomes the *8*21*<WHERE>## actuator address). Fail
+            // here rather than let Build enable and then abort with the Core popup.
+            {
+                string where = TxtMqttLightWhere.Text.Trim();
+                if (where.Length > 0 && !where.All(char.IsAsciiDigit))
+                    return L("MqttHint_LightWhere");
+            }
+
             return null;
         }
 
@@ -1432,6 +1442,12 @@ namespace IntercomFirmwareTool.App
                 // 100X/300X); the record default is a model-neutral fallback. The node id
                 // above is the machine id (auto-filled from the same model, editable).
                 HaDeviceName = _fwzMatch?.HaDeviceName ?? new MqttOptions("x").HaDeviceName,
+                // Stair-light SWITCH (opt-in): the WHO=8 actuator WHERE (digits) is
+                // installation-specific — the "light button" WHAT (21/22) is universal, but
+                // the WHERE the building wired is not, so each user enters their own (captured
+                // as `*8*21*<WHERE>##`). Empty ⇒ no light entity is emitted (feature off);
+                // Core validates it is digits-only.
+                LightWhere = NullIfEmpty(TxtMqttLightWhere.Text.Trim()),
             };
 
             // Surface the Core validator's exact (localized) message as a clean

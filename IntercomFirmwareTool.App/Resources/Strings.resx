@@ -431,6 +431,8 @@ Key: {1}</value></data>
   <data name="MqttHint_AnchorNoMac" xml:space="preserve"><value>Connected, but the broker's MAC could not be read (it may be on another subnet). Plaintext rediscovery needs a same-subnet broker; with TLS it is anchored either way.</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Device id:</value></data>
   <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identifier for the Home Assistant device and its entities. Distinct per unit gives each bridge its own HA device; for several units on one broker, also set distinct topics (else they mirror each other). ASCII letters, digits, '_' or '-' only.</value></data>
+  <data name="Field_MqttLightWhere" xml:space="preserve"><value>Light address (WHERE):</value></data>
+  <data name="Tip_MqttLightWhere" xml:space="preserve"><value>Optional. The OpenWebNet address (WHERE) of the stair-light button on YOUR installation — the digits in the *8*21*&lt;WHERE&gt;## frame the panel sends when you press the light button (capture it on the bus). Leave empty to disable the Light switch. Digits only.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receive (commands):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Bus dump:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Start date:</value></data>
@@ -444,5 +446,6 @@ Enable it only on an authenticated, trusted broker. Enable the remote command ch
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Remote command channel</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>A topic is empty, spans multiple lines, or a publish topic contains an MQTT wildcard ('+' or '#').</value></data>
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>The Home Assistant node id may contain only ASCII letters, digits, '_' or '-'.</value></data>
+  <data name="MqttHint_LightWhere" xml:space="preserve"><value>The light address (WHERE) must contain only digits, or be left blank to disable the Light switch.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>connection refused or no response.</value></data>
 </root>

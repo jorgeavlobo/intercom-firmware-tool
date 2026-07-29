@@ -48,6 +48,13 @@ pub struct Config {
     // are learned for free from the same WHO=8 monitor stream — no extra subscription.
     pub topic_doorbell: String,
     pub topic_call_state: String,
+    // Stair-light SWITCH (opt-in). `light_where` is the WHO=8 actuator WHERE (installation-
+    // specific, e.g. "112"); the feature is OFF unless it is set. The button toggles the
+    // relay (`*8*21*<where>##`) — there is NO discrete on/off and NO status query on this
+    // actuator (firmware-confirmed), so `topic_light` carries a TRACKED retained on/off.
+    // The COMMAND reuses TOPIC_RX (a small JSON action), so no extra subscription is added.
+    pub light_where: Option<String>,
+    pub topic_light: String,
     // OpenWebNet monitor endpoint (bus -> MQTT)
     pub own_host: String,
     pub own_port_mon: u16,
@@ -111,6 +118,9 @@ impl Config {
             topic_mute: get("TOPIC_MUTE", "Bticino/mute"),
             topic_doorbell: get("TOPIC_DOORBELL", "Bticino/doorbell"),
             topic_call_state: get("TOPIC_CALL_STATE", "Bticino/call_state"),
+            // Digits only — a WHERE like "112". Empty/absent ⇒ the light feature is off.
+            light_where: opt("LIGHT_WHERE").filter(|s| s.bytes().all(|b| b.is_ascii_digit())),
+            topic_light: get("TOPIC_LIGHT", "Bticino/light"),
             own_host: get("OWN_HOST", "127.0.0.1"),
             own_port_mon: opt("OWN_PORT_MON").and_then(|s| s.parse().ok()).unwrap_or(20000),
             // PAYLOAD_FORMAT defaults to json (mqtt_common.sh); anything but "raw" is json.

@@ -194,6 +194,9 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_InvalidTopic" xml:space="preserve">
     <value>Un sujet MQTT est vide ou contient un saut de ligne.</value>
   </data>
+  <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
+    <value>L'adresse de la lumière (WHERE) ne doit contenir que des chiffres.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} n'existe pas dans l'image ; impossible d'appliquer le correctif du pont MQTT.</value>
   </data>
