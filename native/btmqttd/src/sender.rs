@@ -185,50 +185,62 @@ async fn session(
     // is processed the moment it arrives, within its guard window. This also cuts general
     // reconnect frame latency, which previously waited out the whole query.
     //
-    // The query result stays authoritative for call state: it completes at the END of this
-    // drain window, so its snapshot reflects gateway state at least as fresh as any frame
-    // processed during the drain — applying it unconditionally cannot be clobbered by a staler
-    // drained frame (the buffered-idle-then-authoritative-ringing case, Codex). A genuinely
-    // newer transition arriving AFTER the query completes is read by the main loop below and
-    // supersedes it there. On a FAILED read (session refused / no reply) do NOT fabricate a
-    // state — publishing idle would clobber a real ringing/in_call; keep what the frames left
-    // and, if still disarmed, arm an "unknown" marker so a later poll re-queries.
-    let reconcile = dimension::read_call_state(&cfg.own_host, cfg.own_port_mon);
-    tokio::pin!(reconcile);
-    loop {
-        tokio::select! {
-            biased;
-            result = &mut reconcile => {
-                match result {
-                    Ok(Some(code)) => {
-                        publish_call_state(cfg, client, code).await;
-                        update_call_watch(&mut call_watch, code);
-                    }
-                    Ok(None) | Err(_) => {
-                        if call_watch.is_none() {
-                            call_watch = Some((None, tokio::time::Instant::now()));
+    // read_call_state can take up to `dimension::SESSION_TIMEOUT` (5 s) — longer than the light
+    // `ECHO_GUARD` (3 s). If a light command's echo lands on the fresh session while we sit here,
+    // blocking the monitor read would delay observe() past the guard, and apply_observe would
+    // misread our OWN echo as a physical press, inverting the cache (Codex). So while the query
+    // runs, keep draining the socket — but feed those frames to LIGHT observation ONLY. Their
+    // other effects are deliberately dropped: the dump is a lossy live stream, and any volume or
+    // call-state transition in this brief window is reconciled immediately AFTER — call state by
+    // this very query (its result below is the single authoritative writer), volume by the
+    // `resync()` spawned next. Keeping call state OUT of the drain is what makes the query
+    // authoritative without racing a concurrently-drained transition against its snapshot in
+    // EITHER direction: the query completes 500 ms after its snapshot (the session idle gap), so
+    // neither "apply unconditionally" (a newer drained ringing is clobbered — Codex) nor "suppress
+    // on any drained frame" (an older buffered idle discards the authoritative ringing — CodeRabbit)
+    // is correct while both are processed here. Only light is, and light echoes carry no such
+    // ordering ambiguity.
+    let call_state = if let Some(light) = light {
+        let reconcile = dimension::read_call_state(&cfg.own_host, cfg.own_port_mon);
+        tokio::pin!(reconcile);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut reconcile => break result,
+                read = tokio::time::timeout(RECONNECT_DRAIN_TICK, sock.read(&mut buf)) => {
+                    // A completed read is observed for light now; a tick timeout re-polls.
+                    if let Ok(read) = read {
+                        let n = read?;
+                        if n == 0 {
+                            return Ok(()); // gateway closed the monitor session
+                        }
+                        frames.clear();
+                        framer.push(&buf[..n], &mut frames);
+                        for frame in frames.drain(..) {
+                            light.observe(&frame).await;
                         }
                     }
                 }
-                break;
             }
-            read = tokio::time::timeout(RECONNECT_DRAIN_TICK, sock.read(&mut buf)) => {
-                // A completed read is drained now; a tick timeout just re-polls the select.
-                if let Ok(read) = read {
-                    let n = read?;
-                    if n == 0 {
-                        return Ok(()); // gateway closed the monitor session
-                    }
-                    frames.clear();
-                    framer.push(&buf[..n], &mut frames);
-                    for frame in frames.drain(..) {
-                        if let Some(code) =
-                            publish_frame(cfg, client, volume, light, &frame).await
-                        {
-                            update_call_watch(&mut call_watch, code);
-                        }
-                    }
-                }
+        }
+    } else {
+        // No light controller: nothing on the read path is time-sensitive, so await the query
+        // inline — its original, known-correct ordering (authoritative over the buffered frames
+        // above; a later transition supersedes it in the main loop).
+        dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await
+    };
+    // Apply the authoritative reconcile. On a FAILED read (session refused / no reply) do NOT
+    // fabricate a state — publishing idle would clobber a real ringing/in_call; keep what the
+    // buffered frames left and, if still disarmed, arm an "unknown" marker so a later poll
+    // re-queries.
+    match call_state {
+        Ok(Some(code)) => {
+            publish_call_state(cfg, client, code).await;
+            update_call_watch(&mut call_watch, code);
+        }
+        Ok(None) | Err(_) => {
+            if call_watch.is_none() {
+                call_watch = Some((None, tokio::time::Instant::now()));
             }
         }
     }
@@ -384,14 +396,51 @@ async fn publish_doorbell(cfg: &Arc<Config>, client: &AsyncClient, where_: &str)
 async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
     let payload =
         serde_json::json!({ "state": dimension::call_state_label(code), "code": code }).to_string();
-    // Non-blocking (see publish_frame): never stall the monitor reader on a full request queue.
-    // This retained state is re-read authoritatively and republished on the next reconnect
-    // (read_call_state), so a drop during an outage self-heals.
-    if let Err(e) =
-        client.try_publish(&cfg.topic_call_state, QoS::AtLeastOnce, true, payload.into_bytes())
-    {
-        eprintln!("btmqttd: publish call state failed: {e}");
+    publish_retained_besteffort(client, &cfg.topic_call_state, QoS::AtLeastOnce, payload.into_bytes())
+        .await;
+}
+
+/// Retry a retained publish rejected as FULL this often, and at most this many times. A tiny
+/// SLEEP (not a bare `yield_now`) is used because the runtime is single-threaded: only parking
+/// on a timer lets the event-loop task be polled to flush a queued request and free a channel
+/// slot. A few of these total a few ms — far under the 3 s light [`crate::light`] echo guard.
+const RETAINED_RETRY_TICK: Duration = Duration::from_millis(1);
+const RETAINED_RETRY_MAX: usize = 8;
+
+/// Best-effort publish of a RETAINED topic that must NOT block the monitor reader. `try_publish`
+/// is non-blocking, but it also fails when the bounded request channel is momentarily FULL — a
+/// burst outrunning the event loop while the broker is still CONNECTED — which would silently
+/// drop a retained update that no reconnect re-seeds, leaving HA stale (CodeRabbit). So retry the
+/// latest value a few times, sleeping briefly so the event loop can drain a slot. If it stays
+/// full — a real broker outage, where `main`'s poll loop is parked in its reconnect backoff and
+/// not draining — give up and DROP; the value is re-published on the next reconnect
+/// (`read_call_state` / `VolumeCtl::resync` / `LightCtl::seed`). Never blocks the reader for more
+/// than a few ms, so a following light echo still makes its guard.
+pub(crate) async fn publish_retained_besteffort(
+    client: &AsyncClient,
+    topic: &str,
+    qos: QoS,
+    payload: Vec<u8>,
+) {
+    for attempt in 0..RETAINED_RETRY_MAX {
+        match client.try_publish(topic, qos, true, payload.clone()) {
+            Ok(()) => return,
+            // Channel full — let the event loop drain a slot, then retry the latest value.
+            Err(rumqttc::ClientError::TryRequest(_)) => {
+                if attempt + 1 < RETAINED_RETRY_MAX {
+                    tokio::time::sleep(RETAINED_RETRY_TICK).await;
+                }
+            }
+            Err(e) => {
+                eprintln!("btmqttd: publish retained {topic} failed: {e}");
+                return;
+            }
+        }
     }
+    eprintln!(
+        "btmqttd: retained {topic} dropped (request queue full); \
+         re-published on the next reconnect"
+    );
 }
 
 #[cfg(test)]
