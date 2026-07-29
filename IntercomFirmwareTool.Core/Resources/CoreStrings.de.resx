@@ -236,4 +236,44 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
     <value>Das MQTT-Empfangs-Topic darf mit keinem Veröffentlichungs-Topic übereinstimmen; andernfalls würde die Brücke ihre eigene Ausgabe abonnieren und Bus-Frames in einer Schleife wiederholen.</value>
   </data>
+  <!-- ================= Firmware download (FD_) — issue #23 ================= -->
+  <data name="FD_NotDownloadable" xml:space="preserve">
+    <value>Diese Firmware steht nicht zum Download bereit.</value>
+  </data>
+  <data name="FD_Cached" xml:space="preserve">
+    <value>Bereits heruntergeladen und überprüft: {0}.</value>
+  </data>
+  <data name="FD_Verified" xml:space="preserve">
+    <value>Heruntergeladen und überprüft: {0} ({1:N0} Bytes).</value>
+  </data>
+  <data name="FD_Cancelled" xml:space="preserve">
+    <value>Download abgebrochen.</value>
+  </data>
+  <data name="FD_DownloadFailed" xml:space="preserve">
+    <value>Download fehlgeschlagen.</value>
+  </data>
+  <data name="FD_DownloadError" xml:space="preserve">
+    <value>Download fehlgeschlagen: {0}</value>
+  </data>
+  <data name="FD_IntegrityMismatch" xml:space="preserve">
+    <value>Die heruntergeladene Datei entspricht nicht der erwarteten {0} (Integritätsprüfung fehlgeschlagen).</value>
+  </data>
+  <data name="FD_IoError" xml:space="preserve">
+    <value>Dateifehler: {0}</value>
+  </data>
+  <data name="FD_ProbeAvailable" xml:space="preserve">
+    <value>Verfügbar.</value>
+  </data>
+  <data name="FD_ProbeUnreachable" xml:space="preserve">
+    <value>Nicht erreichbar: {0}</value>
+  </data>
+  <data name="FD_ProbeHttpStatus" xml:space="preserve">
+    <value>Der Server hat HTTP {0} zurückgegeben.</value>
+  </data>
+  <data name="FD_ProbeNotFirmware" xml:space="preserve">
+    <value>Der Server hat unerwarteten Inhalt zurückgegeben, nicht die Firmware.</value>
+  </data>
+  <data name="FD_ProbeSizeMismatch" xml:space="preserve">
+    <value>Unerwartete Größe (erwartet {0:N0}, erhalten {1:N0} Bytes).</value>
+  </data>
 </root>

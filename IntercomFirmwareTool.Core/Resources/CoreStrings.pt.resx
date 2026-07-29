@@ -236,4 +236,44 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
     <value>O tópico de receção MQTT não pode corresponder a nenhum tópico de publicação; caso contrário, a ponte subscreveria a sua própria saída e repetiria as tramas do barramento em ciclo.</value>
   </data>
+  <!-- ================= Firmware download (FD_) — issue #23 ================= -->
+  <data name="FD_NotDownloadable" xml:space="preserve">
+    <value>Este firmware não está disponível para descarga.</value>
+  </data>
+  <data name="FD_Cached" xml:space="preserve">
+    <value>Já descarregado e verificado: {0}.</value>
+  </data>
+  <data name="FD_Verified" xml:space="preserve">
+    <value>Descarregado e verificado: {0} ({1:N0} bytes).</value>
+  </data>
+  <data name="FD_Cancelled" xml:space="preserve">
+    <value>Descarga cancelada.</value>
+  </data>
+  <data name="FD_DownloadFailed" xml:space="preserve">
+    <value>A descarga falhou.</value>
+  </data>
+  <data name="FD_DownloadError" xml:space="preserve">
+    <value>A descarga falhou: {0}</value>
+  </data>
+  <data name="FD_IntegrityMismatch" xml:space="preserve">
+    <value>O ficheiro descarregado não corresponde ao {0} esperado (verificação de integridade falhou).</value>
+  </data>
+  <data name="FD_IoError" xml:space="preserve">
+    <value>Erro de ficheiro: {0}</value>
+  </data>
+  <data name="FD_ProbeAvailable" xml:space="preserve">
+    <value>Disponível.</value>
+  </data>
+  <data name="FD_ProbeUnreachable" xml:space="preserve">
+    <value>Inacessível: {0}</value>
+  </data>
+  <data name="FD_ProbeHttpStatus" xml:space="preserve">
+    <value>O servidor devolveu HTTP {0}.</value>
+  </data>
+  <data name="FD_ProbeNotFirmware" xml:space="preserve">
+    <value>O servidor devolveu conteúdo inesperado, não o firmware.</value>
+  </data>
+  <data name="FD_ProbeSizeMismatch" xml:space="preserve">
+    <value>Tamanho inesperado (esperado {0:N0}, obtido {1:N0} bytes).</value>
+  </data>
 </root>

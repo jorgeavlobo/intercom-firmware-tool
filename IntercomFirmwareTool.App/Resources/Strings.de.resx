@@ -448,4 +448,26 @@ Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. 
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>Die Home-Assistant-Knoten-ID darf nur ASCII-Buchstaben, ASCII-Ziffern, '_' oder '-' enthalten.</value></data>
   <data name="MqttHint_LightWhere" xml:space="preserve"><value>Die Lichtadresse (WHERE) darf nur Ziffern enthalten oder leer bleiben, um den Licht-Schalter zu deaktivieren.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>Verbindung abgelehnt oder keine Antwort.</value></data>
+
+  <!-- ================= Download official firmware (issue #23) ================= -->
+  <data name="Dl_Toggle" xml:space="preserve"><value>Offizielle Firmware herunterladen</value></data>
+  <data name="Dl_ToggleTip" xml:space="preserve"><value>Die Original-Firmware von BTicino herunterladen und automatisch überprüfen</value></data>
+  <data name="Dl_Title" xml:space="preserve"><value>Offizielle Firmware herunterladen</value></data>
+  <data name="Dl_Subtitle" xml:space="preserve"><value>Von BTicino bezogen und automatisch überprüft</value></data>
+  <data name="Dl_Legal" xml:space="preserve"><value>Dies ist dieselbe Original-Firmware, die Sie von BTicino / Legrand auch von Hand herunterladen können. Das Tool lädt sie nur für Sie herunter und prüft sie vor der Verwendung Byte für Byte (Größe + SHA-256) gegen das bekannte Original.</value></data>
+  <data name="Dl_Model" xml:space="preserve"><value>Modell</value></data>
+  <data name="Dl_Version" xml:space="preserve"><value>Version</value></data>
+  <data name="Dl_VersionLatest" xml:space="preserve"><value>{0}  ·  neueste</value></data>
+  <data name="Dl_SaveTo" xml:space="preserve"><value>Speichern unter</value></data>
+  <data name="Dl_SaveToTip" xml:space="preserve"><value>Ordner, in dem die heruntergeladene Firmware gespeichert wird (zum Ändern klicken)</value></data>
+  <data name="Dl_Browse" xml:space="preserve"><value>Durchsuchen…</value></data>
+  <data name="Dl_ChooseFolder" xml:space="preserve"><value>Wählen Sie, wo die Firmware gespeichert werden soll</value></data>
+  <data name="Dl_Start" xml:space="preserve"><value>Herunterladen und prüfen</value></data>
+  <data name="Dl_Downloading" xml:space="preserve"><value>Wird heruntergeladen…</value></data>
+  <data name="Dl_Cancel" xml:space="preserve"><value>Abbrechen</value></data>
+  <data name="Dl_Cancelling" xml:space="preserve"><value>Wird abgebrochen…</value></data>
+  <data name="Dl_ProgressStarting" xml:space="preserve"><value>Download von {0} wird gestartet…</value></data>
+  <data name="Dl_ProgressFmt" xml:space="preserve"><value>{0}%  ·  {1} / {2}  ·  {3}</value></data>
+  <data name="Dl_ProgressUnknown" xml:space="preserve"><value>{0}  ·  {1}</value></data>
+  <data name="Dl_UnexpectedError" xml:space="preserve"><value>Download fehlgeschlagen: {0}</value></data>
 </root>

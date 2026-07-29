@@ -89,6 +89,11 @@ namespace IntercomFirmwareTool.App
             // section is inert until the user ticks "Install MQTT bridge".
             InitMqttUi();
 
+            // Optional "download official firmware" flow (Advanced-free, #23): probe the
+            // official URLs in the background and, if any are online, reveal the download
+            // link under the firmware box. Inert until the user opens the card.
+            InitDownloadUi();
+
             // Password fields start EMPTY on purpose: the user must enter a root
             // password (or tick key-only), so a build can never ship the publicly
             // known fquinto default. The empty-password guard in Build enforces it.
@@ -326,7 +331,7 @@ namespace IntercomFirmwareTool.App
 
         private async Task ChooseFirmwareAsync()
         {
-            if (!_uiEnabled) return; // ignored while an operation is running
+            if (!_uiEnabled || _downloading) return; // ignored while an operation/download is running
             var dlg = new OpenFileDialog
             {
                 Title = L("Dlg_ChooseFirmware_Title"),
@@ -408,31 +413,44 @@ namespace IntercomFirmwareTool.App
                 return;
             }
 
-            // Accepted: record the path and enable the output row (BtnClearOutput is
-            // driven by UpdateBuildEnabled once _outputPath is set, below).
-            _fwzPath = chosen;
-            _fwzMatch = check.Match;
+            // Accepted: record the path, enable the output row, and re-suggest the
+            // output next to the new input.
+            AcceptVerifiedFirmware(chosen, check.Match!);
+
+            SetResult(() => LF("Fmt_Result_Accepted", check.Message, check.Match!.Describe()));
+            SetStatus(() => L("Status_FirmwareVerified")); // visible confirmation in the simple view
+        }
+
+        /// <summary>
+        /// Records a verified original firmware as the build input: sets the path,
+        /// auto-fills the HA node id from the model, stops the background scan, shows
+        /// the file in the box, enables the output row and re-suggests an output name
+        /// next to the input. Shared by the manual picker and the download flow (#23),
+        /// so both feed the exact same build state. The <paramref name="match"/> must
+        /// be the registry entry the file was verified against.
+        /// </summary>
+        private void AcceptVerifiedFirmware(string path, KnownFirmware match)
+        {
+            _fwzPath = path;
+            _fwzMatch = match;
             _fwzRejected = false;
             // Auto-fill the HA node id from the model (editable), so the entities appear
             // as bticino_c100x_* / bticino_c300x_* and the device is named after the model.
             // Overwriting on each selection mirrors the output-path re-suggestion below.
-            if (check.Match!.HaNodeId is string modelNode)
+            if (match.HaNodeId is string modelNode)
                 TxtMqttHaNodeId.Text = modelNode;
             StopFirmwareScan(); // a firmware is chosen — stop and release the scan
-            SetPathText(TxtFwzPath, chosen);
+            SetPathText(TxtFwzPath, path);
             LblOutput.IsEnabled = true;
             TxtOutputPath.IsEnabled = true;
             // Always re-suggest the output next to the NEW input, so switching
             // firmware can't leave the output pointing at the previous file's
             // name/location (the user can still Browse to change it).
             _outputPath = Path.Combine(
-                Path.GetDirectoryName(chosen) ?? "",
-                Path.GetFileNameWithoutExtension(chosen) + "_ssh.fwz");
+                Path.GetDirectoryName(path) ?? "",
+                Path.GetFileNameWithoutExtension(path) + "_ssh.fwz");
             SetPathText(TxtOutputPath, _outputPath);
             UpdateBuildEnabled();
-
-            SetResult(() => LF("Fmt_Result_Accepted", check.Message, check.Match!.Describe()));
-            SetStatus(() => L("Status_FirmwareVerified")); // visible confirmation in the simple view
         }
 
         /// <summary>
@@ -442,6 +460,7 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private void BtnClearFwz_Click(object sender, RoutedEventArgs e)
         {
+            if (_downloading) return; // a download is publishing into this box
             _fwzPath = null;
             _fwzMatch = null;
             _outputPath = null;
@@ -1079,6 +1098,8 @@ namespace IntercomFirmwareTool.App
             TxtResult.Text = _resultRender != null ? _resultRender() : L("Result_Default");
             // The always-visible status line re-renders too.
             RenderStatus();
+            // The download card's code-set text (pills, busy button, status line).
+            ApplyDownloadLanguage();
         }
 
         /// <summary>Sets the neutral placeholder on any path box that has no selection.</summary>

@@ -74,6 +74,107 @@
             <Setter Property="Padding" Value="6,0"/>
         </Style>
 
+        <!-- ============ Download official firmware (issue #23) ============ -->
+        <!-- Link-style disclosure that opens the download card. Sits under the
+             firmware box and is revealed only after the startup availability probe
+             finds at least one online, size-matching official file. Chevron flips
+             down (collapsed) ↔ up (expanded). -->
+        <Style TargetType="ToggleButton" x:Key="DownloadLink">
+            <Setter Property="Foreground" Value="#FF0F6CBD"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                CornerRadius="4" Padding="5,3" SnapsToDevicePixels="True">
+                            <StackPanel Orientation="Horizontal">
+                                <!-- Download glyph -->
+                                <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                           VerticalAlignment="Center" Margin="0,0,7,0"/>
+                                <TextBlock Text="{loc:Loc Dl_Toggle}" VerticalAlignment="Center"
+                                           FontWeight="SemiBold"/>
+                                <!-- ChevronDown (collapsed) / ChevronUp (expanded) -->
+                                <TextBlock x:Name="chev" Text="&#xE70D;" FontFamily="Segoe MDL2 Assets"
+                                           FontSize="10" VerticalAlignment="Center" Margin="7,1,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="chev" Property="Text" Value="&#xE70E;"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#170F6CBD"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Segmented "pill" selector (model / version). A RadioButton so a group
+             is single-select and screen-reader-correct; the bullet is replaced by a
+             rounded chip that fills accent-blue when chosen. -->
+        <Style TargetType="RadioButton" x:Key="SegmentPill">
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="MinWidth" Value="58"/>
+            <Setter Property="Padding" Value="14,0"/>
+            <Setter Property="Margin" Value="0,0,8,8"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="#FF334155"/>
+            <Setter Property="Background" Value="#FFEEF3F9"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="bd" CornerRadius="15" Background="{TemplateBinding Background}"
+                                BorderBrush="#FFDCE6F1" BorderThickness="1" SnapsToDevicePixels="True">
+                            <ContentPresenter Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FFE1EAF4"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#FF0F6CBD"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#FF0F6CBD"/>
+                                <Setter Property="Foreground" Value="White"/>
+                                <Setter Property="FontWeight" Value="SemiBold"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Slim, rounded, accent-filled progress bar for the download. -->
+        <Style TargetType="ProgressBar" x:Key="SlimBar">
+            <Setter Property="Height" Value="8"/>
+            <Setter Property="Foreground" Value="#FF0F6CBD"/>
+            <Setter Property="Background" Value="#FFE3EAF2"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ProgressBar">
+                        <Border CornerRadius="4" Background="{TemplateBinding Background}" SnapsToDevicePixels="True">
+                            <Grid ClipToBounds="True">
+                                <Border x:Name="PART_Track"/>
+                                <Border x:Name="PART_Indicator" CornerRadius="4" HorizontalAlignment="Left"
+                                        Background="{TemplateBinding Foreground}"/>
+                            </Grid>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Modern flat action buttons (Windows 11 / Fluent look): a filled accent
              PRIMARY for the main call-to-action and a subtle bordered SECONDARY for
              the rest. Flat fills (no 3-D gradient), 6px rounded corners, smooth
@@ -358,15 +459,111 @@
                 <RowDefinition Height="Auto"/>   <!-- 4: output -->
             </Grid.RowDefinitions>
 
-            <!-- Firmware .fwz -->
+            <!-- Firmware .fwz — the box, the "download official firmware" link, and
+                 the (collapsed) download card share column 1 so the card can grow the
+                 Auto row and push the fields below it down. The label and clear button
+                 pin to the TOP so they stay next to the box, not the grown cell. -->
             <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource FieldLabel}"
+                       VerticalAlignment="Top" Margin="0,4,12,0"
                        Text="{loc:Loc Field_Firmware}"/>
-            <TextBox Grid.Row="0" Grid.Column="1" x:Name="TxtFwzPath"
-                     Style="{StaticResource InputField}" IsReadOnly="True" Margin="0,0,0,6"
-                     Cursor="Hand" ToolTip="{loc:Loc Tip_Firmware}"
-                     PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown" PreviewKeyDown="TxtFwzPath_PreviewKeyDown"
-                     Foreground="Gray"/>
-            <Button Grid.Row="0" Grid.Column="2" x:Name="BtnClearFwz"
+            <StackPanel Grid.Row="0" Grid.Column="1" Margin="0,0,0,6">
+                <TextBox x:Name="TxtFwzPath"
+                         Style="{StaticResource InputField}" IsReadOnly="True"
+                         Cursor="Hand" ToolTip="{loc:Loc Tip_Firmware}"
+                         PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown" PreviewKeyDown="TxtFwzPath_PreviewKeyDown"
+                         Foreground="Gray"/>
+
+                <!-- Download official firmware (issue #23). Hidden until the startup
+                     availability probe finds at least one online, size-matching file. -->
+                <ToggleButton x:Name="TglDownload" Style="{StaticResource DownloadLink}"
+                              Visibility="Collapsed" Margin="0,6,0,0"
+                              Checked="TglDownload_Changed" Unchecked="TglDownload_Changed"
+                              AutomationProperties.Name="{loc:Loc Dl_Toggle}"
+                              ToolTip="{loc:Loc Dl_ToggleTip}"/>
+
+                <Border x:Name="DownloadCard" Visibility="Collapsed" Margin="0,8,0,4"
+                        Padding="16,14" CornerRadius="10"
+                        Background="#FFF6FAFE" BorderBrush="#FFD8E4F1" BorderThickness="1">
+                    <StackPanel>
+                        <!-- Header: accent badge + title / subtitle -->
+                        <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                            <Border Width="32" Height="32" CornerRadius="16"
+                                    Background="#FF0F6CBD" Margin="0,0,11,0">
+                                <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="15"
+                                           Foreground="White" HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="{loc:Loc Dl_Title}" FontWeight="SemiBold"
+                                           FontSize="13.5" Foreground="#FF16202B"/>
+                                <TextBlock Text="{loc:Loc Dl_Subtitle}" FontSize="11.5"
+                                           Foreground="#FF6B7C8D" Margin="0,1,0,0"/>
+                            </StackPanel>
+                        </StackPanel>
+
+                        <!-- Reassurance / legal note -->
+                        <Border Background="#FFEDF4FB" CornerRadius="6" Padding="10,8" Margin="0,0,0,14">
+                            <TextBlock Text="{loc:Loc Dl_Legal}" FontSize="11.5"
+                                       Foreground="#FF4A5B6B" TextWrapping="Wrap"/>
+                        </Border>
+
+                        <!-- Model -->
+                        <TextBlock Text="{loc:Loc Dl_Model}" FontSize="11.5" FontWeight="SemiBold"
+                                   Foreground="#FF334155" Margin="0,0,0,7"/>
+                        <WrapPanel x:Name="ModelPills"/>
+
+                        <!-- Version -->
+                        <TextBlock Text="{loc:Loc Dl_Version}" FontSize="11.5" FontWeight="SemiBold"
+                                   Foreground="#FF334155" Margin="0,6,0,7"/>
+                        <WrapPanel x:Name="VersionPills"/>
+
+                        <!-- Destination folder (click box or Browse…) -->
+                        <TextBlock Text="{loc:Loc Dl_SaveTo}" FontSize="11.5" FontWeight="SemiBold"
+                                   Foreground="#FF334155" Margin="0,6,0,7"/>
+                        <Grid Margin="0,0,0,14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="TxtDlFolder" Grid.Column="0" Style="{StaticResource InputField}"
+                                     Height="30" IsReadOnly="True" Cursor="Hand" Foreground="#FF334155"
+                                     ToolTip="{loc:Loc Dl_SaveToTip}"
+                                     PreviewMouseLeftButtonDown="DlFolder_MouseDown"/>
+                            <Button x:Name="BtnDlBrowse" Grid.Column="1" Style="{StaticResource SecondaryButton}"
+                                    Height="30" Margin="8,0,0,0" Padding="14,0"
+                                    Content="{loc:Loc Dl_Browse}" Click="BtnDlBrowse_Click"/>
+                        </Grid>
+
+                        <!-- Primary action -->
+                        <Button x:Name="BtnDlStart" Style="{StaticResource PrimaryButton}" Height="34"
+                                HorizontalAlignment="Left" MinWidth="190" IsEnabled="False"
+                                Content="{loc:Loc Dl_Start}" Click="BtnDlStart_Click"/>
+
+                        <!-- Progress (shown only while a download runs) -->
+                        <StackPanel x:Name="DlProgressPanel" Visibility="Collapsed" Margin="0,14,0,0">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <ProgressBar x:Name="DlProgress" Grid.Column="0" Style="{StaticResource SlimBar}"
+                                             VerticalAlignment="Center" Minimum="0" Maximum="100" Value="0"/>
+                                <Button x:Name="BtnDlCancel" Grid.Column="1" Style="{StaticResource SecondaryButton}"
+                                        Height="28" Margin="12,0,0,0" Padding="12,0"
+                                        Content="{loc:Loc Dl_Cancel}" Click="BtnDlCancel_Click"/>
+                            </Grid>
+                            <TextBlock x:Name="TxtDlProgress" Margin="0,6,0,0" FontSize="11.5"
+                                       Foreground="#FF64748B" AutomationProperties.LiveSetting="Polite"/>
+                        </StackPanel>
+
+                        <!-- Result (success / error / cancelled) -->
+                        <TextBlock x:Name="TxtDlStatus" Visibility="Collapsed" Margin="0,10,0,0"
+                                   FontSize="12" TextWrapping="Wrap"
+                                   AutomationProperties.LiveSetting="Polite"/>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+            <Button Grid.Row="0" Grid.Column="2" x:Name="BtnClearFwz" VerticalAlignment="Top"
                     Style="{StaticResource RowIconButton}" Content="&#xE711;" IsEnabled="False"
                     ToolTip="{loc:Loc Tip_ClearFirmware}"
                     AutomationProperties.Name="{loc:Loc Tip_ClearFirmware}"

@@ -448,4 +448,26 @@ Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de co
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>El id del nodo de Home Assistant solo puede contener letras y dígitos ASCII, '_' o '-'.</value></data>
   <data name="MqttHint_LightWhere" xml:space="preserve"><value>La dirección de la luz (WHERE) solo puede contener dígitos, o dejarse vacía para desactivar el interruptor de Luz.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>conexión rechazada o sin respuesta.</value></data>
+
+  <!-- ================= Download official firmware (issue #23) ================= -->
+  <data name="Dl_Toggle" xml:space="preserve"><value>Descargar firmware oficial</value></data>
+  <data name="Dl_ToggleTip" xml:space="preserve"><value>Descargar el firmware original de BTicino y verificarlo automáticamente</value></data>
+  <data name="Dl_Title" xml:space="preserve"><value>Descargar firmware oficial</value></data>
+  <data name="Dl_Subtitle" xml:space="preserve"><value>Obtenido de BTicino y verificado automáticamente</value></data>
+  <data name="Dl_Legal" xml:space="preserve"><value>Es el mismo firmware original que puede descargar manualmente de BTicino / Legrand. La herramienta solo lo descarga por usted y lo verifica byte a byte (tamaño + SHA-256) con el original conocido antes de usarlo.</value></data>
+  <data name="Dl_Model" xml:space="preserve"><value>Modelo</value></data>
+  <data name="Dl_Version" xml:space="preserve"><value>Versión</value></data>
+  <data name="Dl_VersionLatest" xml:space="preserve"><value>{0}  ·  más reciente</value></data>
+  <data name="Dl_SaveTo" xml:space="preserve"><value>Guardar en</value></data>
+  <data name="Dl_SaveToTip" xml:space="preserve"><value>Carpeta donde se guardará el firmware descargado (clic para cambiar)</value></data>
+  <data name="Dl_Browse" xml:space="preserve"><value>Examinar…</value></data>
+  <data name="Dl_ChooseFolder" xml:space="preserve"><value>Elija dónde guardar el firmware</value></data>
+  <data name="Dl_Start" xml:space="preserve"><value>Descargar y verificar</value></data>
+  <data name="Dl_Downloading" xml:space="preserve"><value>Descargando…</value></data>
+  <data name="Dl_Cancel" xml:space="preserve"><value>Cancelar</value></data>
+  <data name="Dl_Cancelling" xml:space="preserve"><value>Cancelando…</value></data>
+  <data name="Dl_ProgressStarting" xml:space="preserve"><value>Iniciando la descarga de {0}…</value></data>
+  <data name="Dl_ProgressFmt" xml:space="preserve"><value>{0}%  ·  {1} / {2}  ·  {3}</value></data>
+  <data name="Dl_ProgressUnknown" xml:space="preserve"><value>{0}  ·  {1}</value></data>
+  <data name="Dl_UnexpectedError" xml:space="preserve"><value>Error de descarga: {0}</value></data>
 </root>

@@ -448,4 +448,26 @@ Enable it only on an authenticated, trusted broker. Enable the remote command ch
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>The Home Assistant node id may contain only ASCII letters, digits, '_' or '-'.</value></data>
   <data name="MqttHint_LightWhere" xml:space="preserve"><value>The light address (WHERE) must contain only digits, or be left blank to disable the Light switch.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>connection refused or no response.</value></data>
+
+  <!-- ================= Download official firmware (issue #23) ================= -->
+  <data name="Dl_Toggle" xml:space="preserve"><value>Download official firmware</value></data>
+  <data name="Dl_ToggleTip" xml:space="preserve"><value>Download the original firmware from BTicino and verify it automatically</value></data>
+  <data name="Dl_Title" xml:space="preserve"><value>Download official firmware</value></data>
+  <data name="Dl_Subtitle" xml:space="preserve"><value>Fetched from BTicino and verified automatically</value></data>
+  <data name="Dl_Legal" xml:space="preserve"><value>This is the same original firmware you can download by hand from BTicino / Legrand. The tool simply fetches it for you and checks it byte-for-byte (size + SHA-256) against the known-good original before it is used.</value></data>
+  <data name="Dl_Model" xml:space="preserve"><value>Model</value></data>
+  <data name="Dl_Version" xml:space="preserve"><value>Version</value></data>
+  <data name="Dl_VersionLatest" xml:space="preserve"><value>{0}  ·  latest</value></data>
+  <data name="Dl_SaveTo" xml:space="preserve"><value>Save to</value></data>
+  <data name="Dl_SaveToTip" xml:space="preserve"><value>Folder where the downloaded firmware will be saved (click to change)</value></data>
+  <data name="Dl_Browse" xml:space="preserve"><value>Browse…</value></data>
+  <data name="Dl_ChooseFolder" xml:space="preserve"><value>Choose where to save the firmware</value></data>
+  <data name="Dl_Start" xml:space="preserve"><value>Download &amp; verify</value></data>
+  <data name="Dl_Downloading" xml:space="preserve"><value>Downloading…</value></data>
+  <data name="Dl_Cancel" xml:space="preserve"><value>Cancel</value></data>
+  <data name="Dl_Cancelling" xml:space="preserve"><value>Cancelling…</value></data>
+  <data name="Dl_ProgressStarting" xml:space="preserve"><value>Starting download of {0}…</value></data>
+  <data name="Dl_ProgressFmt" xml:space="preserve"><value>{0}%  ·  {1} / {2}  ·  {3}</value></data>
+  <data name="Dl_ProgressUnknown" xml:space="preserve"><value>{0}  ·  {1}</value></data>
+  <data name="Dl_UnexpectedError" xml:space="preserve"><value>Download failed: {0}</value></data>
 </root>

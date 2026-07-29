@@ -448,4 +448,26 @@ Ne l'activez que sur un broker authentifié et de confiance. Activer le canal de
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>L'id du nœud Home Assistant ne peut contenir que des lettres et chiffres ASCII, « _ » ou « - ».</value></data>
   <data name="MqttHint_LightWhere" xml:space="preserve"><value>L'adresse de la lumière (WHERE) ne peut contenir que des chiffres, ou être laissée vide pour désactiver l'interrupteur Lumière.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>connexion refusée ou aucune réponse.</value></data>
+
+  <!-- ================= Download official firmware (issue #23) ================= -->
+  <data name="Dl_Toggle" xml:space="preserve"><value>Télécharger le firmware officiel</value></data>
+  <data name="Dl_ToggleTip" xml:space="preserve"><value>Télécharger le firmware d'origine depuis BTicino et le vérifier automatiquement</value></data>
+  <data name="Dl_Title" xml:space="preserve"><value>Télécharger le firmware officiel</value></data>
+  <data name="Dl_Subtitle" xml:space="preserve"><value>Récupéré depuis BTicino et vérifié automatiquement</value></data>
+  <data name="Dl_Legal" xml:space="preserve"><value>Il s'agit du même firmware d'origine que vous pouvez télécharger manuellement depuis BTicino / Legrand. L'outil se contente de le récupérer pour vous et de le vérifier octet par octet (taille + SHA-256) par rapport à l'original connu avant utilisation.</value></data>
+  <data name="Dl_Model" xml:space="preserve"><value>Modèle</value></data>
+  <data name="Dl_Version" xml:space="preserve"><value>Version</value></data>
+  <data name="Dl_VersionLatest" xml:space="preserve"><value>{0}  ·  la plus récente</value></data>
+  <data name="Dl_SaveTo" xml:space="preserve"><value>Enregistrer dans</value></data>
+  <data name="Dl_SaveToTip" xml:space="preserve"><value>Dossier où le firmware téléchargé sera enregistré (cliquez pour changer)</value></data>
+  <data name="Dl_Browse" xml:space="preserve"><value>Parcourir…</value></data>
+  <data name="Dl_ChooseFolder" xml:space="preserve"><value>Choisissez où enregistrer le firmware</value></data>
+  <data name="Dl_Start" xml:space="preserve"><value>Télécharger et vérifier</value></data>
+  <data name="Dl_Downloading" xml:space="preserve"><value>Téléchargement…</value></data>
+  <data name="Dl_Cancel" xml:space="preserve"><value>Annuler</value></data>
+  <data name="Dl_Cancelling" xml:space="preserve"><value>Annulation…</value></data>
+  <data name="Dl_ProgressStarting" xml:space="preserve"><value>Démarrage du téléchargement de {0}…</value></data>
+  <data name="Dl_ProgressFmt" xml:space="preserve"><value>{0}%  ·  {1} / {2}  ·  {3}</value></data>
+  <data name="Dl_ProgressUnknown" xml:space="preserve"><value>{0}  ·  {1}</value></data>
+  <data name="Dl_UnexpectedError" xml:space="preserve"><value>Échec du téléchargement : {0}</value></data>
 </root>
