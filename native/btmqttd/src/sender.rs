@@ -150,6 +150,19 @@ async fn session(
         }
     }
 
+    // Monitor session is now LIVE. Discard any stale stair-light echo expectations FIRST —
+    // BEFORE any `.await` below (the ACK-buffered drain's `publish_frame`, `read_call_state`,
+    // the read loop), because each of those awaits lets the command worker arm a FRESH
+    // expectation on this now-live session. Clearing here (before commands can arm) parks the
+    // pre-reconnect generations in `cleared` — where an in-flight command that spanned the
+    // reconnect will find its own generation — while any command that arms AFTER this point
+    // keeps its expectation and absorbs its echo (Codex). Frames buffered with the ACK carry no
+    // command echo (no command has armed on this session yet), so clearing before the drain
+    // loses nothing; they are drained (and judged fresh) right after.
+    if let Some(light) = light {
+        light.on_monitor_reconnect().await;
+    }
+
     // Drain the ACK-buffered frames FIRST. Any bus frame that arrived in the same read(s)
     // as the ACK is framed and published here; the handshake ACK and any pre-ACK banner are
     // NOT framed (feeding all of `pre` could let stray pre-ACK bytes merge into a garbage
@@ -164,18 +177,6 @@ async fn session(
                 update_call_watch(&mut call_watch, code);
             }
         }
-    }
-
-    // Monitor (re)connected: any of OUR still-pending light-toggle echoes may have had their
-    // echo delivered while the stream was DOWN (and thus missed), which would leave a stale
-    // expectation that wrongly absorbs the first physical press after reconnect. Drop them here
-    // — AFTER draining the frames buffered with the ACK (so an echo that DID arrive buffered is
-    // consumed first), and crucially BEFORE the read_call_state()/resync awaits below: during
-    // those awaits the command worker could arm a FRESH expectation and its echo could queue on
-    // the now-live socket, and clearing after that would misclassify it as a physical press and
-    // double-flip. Clearing here discards only the stale pre-reconnect expectations (Codex).
-    if let Some(light) = light {
-        light.on_monitor_reconnect().await;
     }
 
     // Reconcile the retained call state AUTHORITATIVELY on every (re)connect: query the
