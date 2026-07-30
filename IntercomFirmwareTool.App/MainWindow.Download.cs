@@ -47,6 +47,10 @@ namespace IntercomFirmwareTool.App
         private readonly FirmwareDownloader _downloader = new();
         private CancellationTokenSource? _dlCts;
         private bool _downloading;
+        // Snapshot of the (always-editable) HA node id taken when a download starts, so
+        // completion can tell whether the user retyped it mid-transfer and, if so, keep
+        // their value instead of overwriting it with the model default.
+        private string? _dlNodeIdAtStart;
 
         // Success is green, cancelled is neutral, failure reuses the app error colour.
         private static readonly Brush DlOkBrush = MakeFrozen(Color.FromRgb(0x2E, 0x7D, 0x32));
@@ -323,6 +327,10 @@ namespace IntercomFirmwareTool.App
 
             KnownFirmware fw = _dlSelected;
             _downloading = true;
+            // The node id field stays editable during the transfer (its clear/opt-out path
+            // needs it); snapshot it so completion won't clobber an edit the user made while
+            // the download ran.
+            _dlNodeIdAtStart = TxtMqttHaNodeId.Text;
             _dlCts = new CancellationTokenSource();
             SetDownloadBusy(true);
             SetDlStatus(null);
@@ -387,7 +395,10 @@ namespace IntercomFirmwareTool.App
             if (result.Ok && result.Path is string path)
             {
                 // Feed the verified file into the build flow, exactly like a manual pick.
-                AcceptVerifiedFirmware(path, fw);
+                // If the user retyped the HA node id while the download ran, keep their
+                // value; only re-suggest the model default when they left it untouched.
+                bool nodeIdUntouched = TxtMqttHaNodeId.Text == _dlNodeIdAtStart;
+                AcceptVerifiedFirmware(path, fw, fillNodeId: nodeIdUntouched);
                 // result.Message is a factory (re-localizes on each render), so these closures
                 // re-render in the current language on a later switch, like the rest of the app.
                 SetDlStatus(() => "✓ " + result.Message, DlOkBrush);

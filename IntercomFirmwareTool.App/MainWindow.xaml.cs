@@ -431,7 +431,7 @@ namespace IntercomFirmwareTool.App
         /// so both feed the exact same build state. The <paramref name="match"/> must
         /// be the registry entry the file was verified against.
         /// </summary>
-        private void AcceptVerifiedFirmware(string path, KnownFirmware match)
+        private void AcceptVerifiedFirmware(string path, KnownFirmware match, bool fillNodeId = true)
         {
             _fwzPath = path;
             _fwzMatch = match;
@@ -439,7 +439,9 @@ namespace IntercomFirmwareTool.App
             // Auto-fill the HA node id from the model (editable), so the entities appear
             // as bticino_c100x_* / bticino_c300x_* and the device is named after the model.
             // Overwriting on each selection mirrors the output-path re-suggestion below.
-            if (match.HaNodeId is string modelNode)
+            // fillNodeId is false only when a completing download must not clobber an id the
+            // user retyped while the transfer ran (the field stays editable mid-download).
+            if (fillNodeId && match.HaNodeId is string modelNode)
                 TxtMqttHaNodeId.Text = modelNode;
             StopFirmwareScan(); // a firmware is chosen — stop and release the scan
             SetPathText(TxtFwzPath, path);
