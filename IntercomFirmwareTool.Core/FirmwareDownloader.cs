@@ -181,6 +181,8 @@ namespace IntercomFirmwareTool.Core
                             CoreStrings.Format("FD_Verified", fw.OriginalName, fw.SizeBytes));
 
                     case DownloadOutcome.Cancelled:
+                    case DownloadOutcome.IoError:
+                        // Both are final: a local filesystem error won't fix itself on retry.
                         CleanPartials(partPath);
                         return attemptResult;
 
@@ -240,7 +242,7 @@ namespace IntercomFirmwareTool.Core
                 if (ct.IsCancellationRequested || completed?.Cancelled == true)
                     return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
                 if (completed?.Error is { } err)
-                    return new(DownloadOutcome.HttpError, null, CoreStrings.Format("FD_DownloadError", SafeMsg(err)));
+                    return ClassifyTransferError(err);
                 if (!File.Exists(partPath))
                     return new(DownloadOutcome.HttpError, null, CoreStrings.Get("FD_DownloadFailed"));
             }
@@ -250,7 +252,7 @@ namespace IntercomFirmwareTool.Core
             }
             catch (Exception ex)
             {
-                return new(DownloadOutcome.HttpError, null, CoreStrings.Format("FD_DownloadError", SafeMsg(ex)));
+                return ClassifyTransferError(ex);
             }
 
             // Verify the downloaded bytes against THIS entry (size + SHA-256).
@@ -260,6 +262,14 @@ namespace IntercomFirmwareTool.Core
 
             return new(DownloadOutcome.Verified, partPath, string.Empty);
         }
+
+        // A local filesystem failure (unwritable dir, disk full, locked .part) is not a transport
+        // error and must NOT be retried — classify it as IoError so the loop stops and the user
+        // sees a file error, not a network one. Everything else is treated as a transport failure.
+        private static DownloadResult ClassifyTransferError(Exception ex) =>
+            ex is IOException or UnauthorizedAccessException
+                ? new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)))
+                : new(DownloadOutcome.HttpError, null, CoreStrings.Format("FD_DownloadError", SafeMsg(ex)));
 
         // Size fast-path then SHA-256, checked against a SPECIFIC entry (clearer than the whole-registry
         // Verify, and a match here means the file also passes that gate).

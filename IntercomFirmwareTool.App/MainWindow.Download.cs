@@ -11,6 +11,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Effects;   // DropShadowEffect on the "Latest" badge
 using IntercomFirmwareTool.Core;
+using IntercomFirmwareTool.Core.Localization;   // CoreStrings — re-localize download messages
 using Microsoft.Win32;
 
 namespace IntercomFirmwareTool.App
@@ -382,22 +383,30 @@ namespace IntercomFirmwareTool.App
             {
                 // Feed the verified file into the build flow, exactly like a manual pick.
                 AcceptVerifiedFirmware(path, fw);
-                // The Core message is already localized at download time; show it with a
-                // check. (Transient, so it doesn't need to re-localize on a later switch.)
-                string msg = result.Message;
-                SetDlStatus(() => "✓ " + msg, DlOkBrush);
-                SetResult(() => LF("Fmt_Result_Accepted", msg, fw.Describe()));
+                // Re-derive the Core message from the outcome + entry on each render (not the
+                // already-localized string), so it re-localizes on a later language switch like
+                // the rest of the app.
+                Func<string> core = result.Outcome == DownloadOutcome.Cached
+                    ? () => CoreStrings.Format("FD_Cached", fw.OriginalName)
+                    : () => CoreStrings.Format("FD_Verified", fw.OriginalName, fw.SizeBytes);
+                SetDlStatus(() => "✓ " + core(), DlOkBrush);
+                SetResult(() => LF("Fmt_Result_Accepted", core(), fw.Describe()));
                 SetStatus(() => L("Status_FirmwareVerified")); // simple-view confirmation
             }
             else if (result.Outcome == DownloadOutcome.Cancelled)
             {
-                string msg = result.Message;
-                SetDlStatus(() => msg, null);
+                SetDlStatus(() => CoreStrings.Get("FD_Cancelled"), null);
+            }
+            else if (result.Outcome == DownloadOutcome.IntegrityMismatch)
+            {
+                SetDlStatus(() => CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName), ErrorBrush);
             }
             else
             {
-                string msg = result.Message;
-                SetDlStatus(() => msg, ErrorBrush);
+                // HttpError / IoError carry an exception detail that doesn't localize anyway;
+                // show the message Core produced as-is.
+                string frozen = result.Message;
+                SetDlStatus(() => frozen, ErrorBrush);
             }
         }
 
