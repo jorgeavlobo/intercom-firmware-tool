@@ -110,6 +110,8 @@ namespace IntercomFirmwareTool.App
                 if (_shineStarted) return;
                 _shineStarted = true;
                 StartDonateShine();
+                // Arm the "new options below" scroll cue once the initial layout settles.
+                ArmScrollCue();
             };
 
             // Kick off the silent firmware scan immediately (background thread), and

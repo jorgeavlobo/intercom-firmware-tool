@@ -470,4 +470,7 @@ Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de co
   <data name="Dl_ProgressFmt" xml:space="preserve"><value>{0}%  ·  {1} / {2}  ·  {3}</value></data>
   <data name="Dl_ProgressUnknown" xml:space="preserve"><value>{0}  ·  {1}</value></data>
   <data name="Dl_UnexpectedError" xml:space="preserve"><value>Error de descarga: {0}</value></data>
+
+  <!-- ================= Scroll cue ================= -->
+  <data name="Scroll_More" xml:space="preserve"><value>Nuevas opciones abajo</value></data>
 </root>

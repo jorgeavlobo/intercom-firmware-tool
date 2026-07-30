@@ -470,4 +470,7 @@ Ne l'activez que sur un broker authentifié et de confiance. Activer le canal de
   <data name="Dl_ProgressFmt" xml:space="preserve"><value>{0}%  ·  {1} / {2}  ·  {3}</value></data>
   <data name="Dl_ProgressUnknown" xml:space="preserve"><value>{0}  ·  {1}</value></data>
   <data name="Dl_UnexpectedError" xml:space="preserve"><value>Échec du téléchargement : {0}</value></data>
+
+  <!-- ================= Scroll cue ================= -->
+  <data name="Scroll_More" xml:space="preserve"><value>Nouvelles options ci-dessous</value></data>
 </root>

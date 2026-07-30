@@ -468,6 +468,39 @@
             </Setter>
         </Style>
 
+        <!-- Floating "new options below" pill: a transient, accent, drop-shadowed
+             toast anchored at the bottom of the scroll area. It appears momentarily when
+             content grows past the fold and scrolls the user to it on click. -->
+        <Style TargetType="Button" x:Key="ScrollCueButton">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Background" Value="#FF0F6CBD"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="14,7"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="pill" CornerRadius="16" Background="{TemplateBinding Background}"
+                                Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                            <Border.Effect>
+                                <DropShadowEffect Color="#FF1B3A5B" BlurRadius="14" ShadowDepth="2"
+                                                  Opacity="0.35" Direction="270"/>
+                            </Border.Effect>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="pill" Property="Background" Value="#FF1A79C9"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="pill" Property="Background" Value="#FF0B5C9E"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Brand icons, transcoded from Assets/Icons/PayPal.svg and Revolut.svg
              into native WPF vectors (WPF can't render .svg directly; this keeps
              the app dependency-free). The .svg files remain the design source. -->
@@ -500,8 +533,10 @@
         <!-- Scrollable body: everything above the footer. The optional MQTT panel can
              make the form taller than the window, so a ScrollViewer keeps the lower
              fields reachable instead of clipped, while the footer below stays pinned. -->
-        <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto"
-                      HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0">
+        <Grid Grid.Row="0">
+        <ScrollViewer x:Name="BodyScroll" VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0"
+                      ScrollChanged="BodyScroll_ScrollChanged">
         <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>   <!-- 0: language menu + intro/safety -->
@@ -1172,6 +1207,26 @@
         </DockPanel>
         </Grid>
         </ScrollViewer>
+
+        <!-- Transient "new options below" cue, overlaid at the bottom of the scroll
+             area (hidden until content grows past the fold; see MainWindow.ScrollCue.cs).
+             RenderTransform is named so the code can slide/bounce it in. -->
+        <Button x:Name="ScrollCue" Style="{StaticResource ScrollCueButton}"
+                VerticalAlignment="Bottom" HorizontalAlignment="Center"
+                Margin="0,0,10,12" Visibility="Collapsed" Opacity="0"
+                RenderTransformOrigin="0.5,0.5" Click="ScrollCue_Click"
+                AutomationProperties.LiveSetting="Assertive">
+            <Button.RenderTransform>
+                <TranslateTransform x:Name="ScrollCueTranslate" Y="14"/>
+            </Button.RenderTransform>
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="{loc:Loc Scroll_More}" FontSize="12" FontWeight="SemiBold"
+                           VerticalAlignment="Center"/>
+                <TextBlock Text="&#xE70D;" FontFamily="Segoe MDL2 Assets" FontSize="12"
+                           VerticalAlignment="Center" Margin="9,1,0,0"/>
+            </StackPanel>
+        </Button>
+        </Grid>
 
         <!-- Pinned footer: diagnostics + support. Outside the ScrollViewer so it stays
              visible however tall the scrollable body grows. -->

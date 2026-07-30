@@ -470,4 +470,7 @@ Enable it only on an authenticated, trusted broker. Enable the remote command ch
   <data name="Dl_ProgressFmt" xml:space="preserve"><value>{0}%  ·  {1} / {2}  ·  {3}</value></data>
   <data name="Dl_ProgressUnknown" xml:space="preserve"><value>{0}  ·  {1}</value></data>
   <data name="Dl_UnexpectedError" xml:space="preserve"><value>Download failed: {0}</value></data>
+
+  <!-- ================= Scroll cue ================= -->
+  <data name="Scroll_More" xml:space="preserve"><value>New options below</value></data>
 </root>

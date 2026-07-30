@@ -470,4 +470,7 @@ Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. 
   <data name="Dl_ProgressFmt" xml:space="preserve"><value>{0}%  ·  {1} / {2}  ·  {3}</value></data>
   <data name="Dl_ProgressUnknown" xml:space="preserve"><value>{0}  ·  {1}</value></data>
   <data name="Dl_UnexpectedError" xml:space="preserve"><value>Download fehlgeschlagen: {0}</value></data>
+
+  <!-- ================= Scroll cue ================= -->
+  <data name="Scroll_More" xml:space="preserve"><value>Neue Optionen unten</value></data>
 </root>
