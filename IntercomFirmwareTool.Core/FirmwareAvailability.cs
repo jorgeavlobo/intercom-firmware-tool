@@ -17,11 +17,13 @@ namespace IntercomFirmwareTool.Core
     /// <summary>
     /// Probes the official download URLs of the <b>customizable (Door Entry)</b> registry entries so
     /// the app can offer for download <b>only</b> those whose link is currently valid and online
-    /// (issue #23). Each probe is a lightweight <c>GET</c> with <c>Range: bytes=0-0</c> (reading only
-    /// the response headers), following redirects, and — crucially — checking that the resolved full
-    /// length matches the registry's recorded <see cref="KnownFirmware.SizeBytes"/>. That confirms the
-    /// URL still serves the <i>expected</i> file (not an HTML error page, and not a different/rotated
-    /// artifact) without downloading it.
+    /// (issue #23). Each probe is a lightweight, headers-only <c>GET</c> (read the response headers,
+    /// then dispose without draining the body), following redirects, and — crucially — checking that
+    /// the reported length matches the registry's recorded <see cref="KnownFirmware.SizeBytes"/>. That
+    /// confirms the URL still serves the <i>expected</i> file (not an HTML error page, and not a
+    /// different/rotated artifact) without downloading it. A Range request is deliberately NOT used:
+    /// some official endpoints (the Liferay checkout links) reject Range even though the file
+    /// downloads fine, which would wrongly hide them.
     ///
     /// Transport resilience uses <b>Polly v8</b>'s industry-standard pipeline: retry only on transient
     /// failures (network errors, per-attempt timeouts, and HTTP 408/429/5xx), with <b>exponential
@@ -114,7 +116,14 @@ namespace IntercomFirmwareTool.Core
                 HttpResponseMessage resp = await _pipeline.ExecuteAsync(async token =>
                 {
                     using var req = new HttpRequestMessage(HttpMethod.Get, fw.DownloadUrl);
-                    req.Headers.Range = new RangeHeaderValue(0, 0); // ask for just the first byte
+                    // A plain, headers-only GET (deliberately NO Range header): some official
+                    // endpoints — notably the Liferay checkout links (bt_mxLiferayCheckout.jsp) —
+                    // reject Range requests (403/416) even though the file downloads fine, which
+                    // wrongly hid them. ResponseHeadersRead returns as soon as the headers arrive
+                    // and we dispose without draining the body, so it stays just as lightweight.
+                    // A browser-ish UA/Accept avoids servers that 403 an unidentified client.
+                    req.Headers.UserAgent.ParseAdd("IntercomFirmwareTool");
+                    req.Headers.Accept.ParseAdd("application/octet-stream, */*");
                     return await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token)
                         .ConfigureAwait(false);
                 }, ct).ConfigureAwait(false);
@@ -145,7 +154,8 @@ namespace IntercomFirmwareTool.Core
             if (mediaType is not null && mediaType.Contains("html", StringComparison.OrdinalIgnoreCase))
                 return new(fw, false, CoreStrings.Get("FD_ProbeNotFirmware"));
 
-            // Resolve the full length: Content-Range total (206) or Content-Length (200 = range ignored).
+            // Resolve the full length from Content-Length (a Content-Range total is still
+            // honored if some server sends one). Null when the server streams chunked.
             long? total = r.Content.Headers.ContentRange?.Length ?? r.Content.Headers.ContentLength;
             if (total is { } len && len != fw.SizeBytes)
                 return new(fw, false, CoreStrings.Format("FD_ProbeSizeMismatch", fw.SizeBytes, len));
