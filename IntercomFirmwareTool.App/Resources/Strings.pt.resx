@@ -33,7 +33,7 @@
 
   <!-- ================= Safety banner (kept as separate runs so the bold/underline
        emphasis and the mid-sentence hyperlink survive; keep this word order) ===== -->
-  <data name="Banner_Risk_Pre" xml:space="preserve"><value>⚠ Gravar firmware modificado pode inutilizar o dispositivo. </value></data>
+  <data name="Banner_Risk_Pre" xml:space="preserve"><value>Gravar firmware modificado pode inutilizar o dispositivo. </value></data>
   <data name="Banner_Risk_Emph" xml:space="preserve"><value>Faça-o por sua conta e risco!</value></data>
   <data name="Banner_Use_Pre" xml:space="preserve"><value> Utilize </value></data>
   <data name="Banner_Link" xml:space="preserve"><value>MyHOME Suite</value></data>
