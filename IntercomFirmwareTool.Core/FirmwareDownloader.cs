@@ -102,9 +102,10 @@ namespace IntercomFirmwareTool.Core
             string partPath = finalPath + ".part";
 
             // Cache hit: a valid copy is already here → skip the download entirely. The SHA-256
-            // hash of a ~100 MB file runs on a thread-pool thread (Task.Run), so awaiting it keeps
-            // the UI responsive instead of freezing before any progress shows. Honor a cancel
-            // pressed during (or before) that hash: never return Cached once cancelled.
+            // hash of a ~100 MB file runs on a thread-pool thread (Task.Run) so it can't freeze the
+            // UI. The hash itself isn't interruptible, but cancellation is still honored: the token
+            // stops the task from starting if already cancelled (caught below), and once it finishes
+            // we re-check the token and return Cancelled rather than Cached.
             try
             {
                 if (File.Exists(finalPath)
