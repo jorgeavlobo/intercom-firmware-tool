@@ -335,17 +335,30 @@ namespace IntercomFirmwareTool.Core
         {
             string baseName = Path.GetFileNameWithoutExtension(fw.OriginalName);
             string ext = Path.GetExtension(fw.OriginalName);
+            string? firstFree = null;   // the first free name → where we'd download
+            int gap = 0;                // consecutive empty names since the last existing file
+            const int gapLimit = 16;    // stop once the numbering clearly ran out (allow small holes)
             for (int i = 0; i < 10000; i++)
             {
                 string candidate = i == 0
                     ? Path.Combine(destDir, fw.OriginalName)
                     : Path.Combine(destDir, $"{baseName} ({i}){ext}");
-                if (!File.Exists(candidate)) return (null, candidate);       // free slot → target
-                if (MatchesEntry(candidate, fw)) return (candidate, candidate); // verified copy → reuse
-                // occupied by a DIFFERENT file → leave it untouched, try the next sibling
+                if (File.Exists(candidate))
+                {
+                    gap = 0;
+                    if (MatchesEntry(candidate, fw)) return (candidate, candidate); // a verified copy → reuse
+                    // occupied by a DIFFERENT file → leave it untouched and keep scanning, so a
+                    // verified sibling further along (e.g. a free canonical name but a matching "(1)")
+                    // is still found instead of triggering another full download.
+                }
+                else
+                {
+                    firstFree ??= candidate;
+                    if (++gap >= gapLimit) break; // enough empty tail — no more siblings to check
+                }
             }
-            // Pathological fallback (10k occupied non-matching siblings) — a guaranteed-free target.
-            return (null, Path.Combine(destDir, $"{baseName} ({Guid.NewGuid():N}){ext}"));
+            // No verified copy anywhere → download into the first free name (never overwrite a file).
+            return (null, firstFree ?? Path.Combine(destDir, $"{baseName} ({Guid.NewGuid():N}){ext}"));
         }
 
         private static void TryDelete(string path)

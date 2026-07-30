@@ -302,14 +302,19 @@ namespace IntercomFirmwareTool.App
         // _uiEnabled is false while a build/verify/self-test runs, so a download can't be
         // started concurrently with (and publish a firmware into) an in-flight build.
         private void UpdateDlStartEnabled() =>
-            BtnDlStart.IsEnabled = _uiEnabled && !_downloading && _dlSelected != null
-                                   && !string.IsNullOrWhiteSpace(_dlFolder);
+            // Blocked while a build/verify runs (_uiEnabled), while a download is in flight, or while
+            // an MQTT connection test / MAC capture is running — the two must not overlap.
+            BtnDlStart.IsEnabled = _uiEnabled && !_downloading && !_mqttTesting && !_mqttCapturing
+                                   && _dlSelected != null && !string.IsNullOrWhiteSpace(_dlFolder);
 
         // ---- Download --------------------------------------------------------
 
         private async void BtnDlStart_Click(object sender, RoutedEventArgs e)
         {
-            if (_downloading || _dlSelected is null) return;
+            // Don't start a download over another operation: a build/verify (_uiEnabled) or an MQTT
+            // connection test / MAC capture in flight. The Start button gate mirrors this.
+            if (_downloading || !_uiEnabled || _mqttTesting || _mqttCapturing || _dlSelected is null)
+                return;
             if (string.IsNullOrWhiteSpace(_dlFolder) || !Directory.Exists(_dlFolder))
             {
                 ChooseDownloadFolder();
@@ -416,6 +421,14 @@ namespace IntercomFirmwareTool.App
             BtnVerify.IsEnabled = !busy;
             BtnSelfTest.IsEnabled = !busy;
             BtnGenKey.IsEnabled = !busy;
+            // Also the MQTT connection test: a download's completion changes the HA node id, which
+            // would silently invalidate an in-flight test.
+            BtnMqttTest.IsEnabled = !busy;
+            // And the output row: completion overwrites _outputPath with the auto-suggested path,
+            // so don't let the user edit/clear it mid-download.
+            TxtOutputPath.IsEnabled = !busy && _fwzPath != null;
+            LblOutput.IsEnabled = !busy && _fwzPath != null;
+            BtnClearOutput.IsEnabled = !busy && _fwzPath != null && _outputPath != null;
             if (busy)
             {
                 BtnDlStart.Tag = "busy";      // keep it full-colour while disabled

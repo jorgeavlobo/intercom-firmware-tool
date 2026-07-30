@@ -627,7 +627,7 @@ namespace IntercomFirmwareTool.App
             BtnClearMqttCa.IsEnabled = _uiEnabled && _mqttCaPath != null;
             BtnClearMqttCert.IsEnabled = _uiEnabled && _mqttCertPath != null;
             BtnClearMqttKey.IsEnabled = _uiEnabled && _mqttKeyPath != null;
-            BtnMqttTest.IsEnabled = _uiEnabled && !_mqttTesting && !_mqttCapturing;
+            BtnMqttTest.IsEnabled = _uiEnabled && !_downloading && !_mqttTesting && !_mqttCapturing;
 
             UpdateMqttHostIpVisibility();
             UpdateRemoteShellEnabled();
@@ -666,6 +666,7 @@ namespace IntercomFirmwareTool.App
 
         private async void BtnMqttTest_Click(object sender, RoutedEventArgs e)
         {
+            if (_downloading) return; // don't run a broker test concurrently with a firmware download
             await RunMqttConnectionTestAsync();
         }
 

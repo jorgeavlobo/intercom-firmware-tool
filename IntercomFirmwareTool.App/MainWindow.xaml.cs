@@ -1344,9 +1344,11 @@ namespace IntercomFirmwareTool.App
 
             // Each clear/erase button is only useful when its field holds something to
             // clear — disable it while the path is empty (and while an op is running).
-            BtnClearFwz.IsEnabled = _uiEnabled && _fwzPath != null;
+            // A running download publishes into the firmware + output fields on completion, so its
+            // clear buttons are locked for the duration (mirrors the field locks in SetDownloadBusy).
+            BtnClearFwz.IsEnabled = _uiEnabled && !_downloading && _fwzPath != null;
             BtnClearKey.IsEnabled = _uiEnabled && _keyPath != null;
-            BtnClearOutput.IsEnabled = _uiEnabled && _outputPath != null;
+            BtnClearOutput.IsEnabled = _uiEnabled && !_downloading && _outputPath != null;
 
             var missing = new List<string>();
             if (needFirmware) missing.Add(L("Miss_Firmware"));
