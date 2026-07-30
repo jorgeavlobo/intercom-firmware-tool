@@ -84,6 +84,14 @@ namespace IntercomFirmwareTool.Core
                             ?? (ra?.Date is { } date ? date - DateTimeOffset.UtcNow : null);
                         return ValueTask.FromResult(delay is { } d && d > TimeSpan.Zero ? d : (TimeSpan?)null);
                     },
+                    // Polly v8 does not dispose a handled result, so dispose the response that
+                    // triggered this retry — otherwise a retried 5xx/429 leaks its socket/handler
+                    // until finalization. The final (returned) response is disposed by the caller.
+                    OnRetry = static args =>
+                    {
+                        args.Outcome.Result?.Dispose();
+                        return default;
+                    },
                 })
                 .AddTimeout(TimeSpan.FromSeconds(10))
                 .Build();

@@ -102,11 +102,23 @@ namespace IntercomFirmwareTool.Core
             string partPath = finalPath + ".part";
 
             // Cache hit: a valid copy is already here → skip the download entirely. The SHA-256
-            // hash of a ~100 MB file runs off the UI thread (this executes before the first await,
-            // i.e. on the caller's thread), so it can't freeze the UI before progress shows.
-            if (File.Exists(finalPath)
-                && await Task.Run(() => MatchesEntry(finalPath, fw), ct).ConfigureAwait(false))
-                return new(DownloadOutcome.Cached, finalPath, CoreStrings.Format("FD_Cached", fw.OriginalName));
+            // hash of a ~100 MB file runs on a thread-pool thread (Task.Run), so awaiting it keeps
+            // the UI responsive instead of freezing before any progress shows. Honor a cancel
+            // pressed during (or before) that hash: never return Cached once cancelled.
+            try
+            {
+                if (File.Exists(finalPath)
+                    && await Task.Run(() => MatchesEntry(finalPath, fw), ct).ConfigureAwait(false))
+                {
+                    if (ct.IsCancellationRequested)
+                        return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+                    return new(DownloadOutcome.Cached, finalPath, CoreStrings.Format("FD_Cached", fw.OriginalName));
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+            }
 
             try
             {
@@ -144,6 +156,13 @@ namespace IntercomFirmwareTool.Core
                 switch (attemptResult.Outcome)
                 {
                     case DownloadOutcome.Verified:
+                        // Honor a cancel pressed during the (thread-pool) verify hash: don't
+                        // publish a file the user just cancelled.
+                        if (ct.IsCancellationRequested)
+                        {
+                            CleanPartials(partPath);
+                            return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+                        }
                         // The bytes are present in partPath and already verified; publish it.
                         // Move with overwrite=true is a single operation, so it can't leave the
                         // destination missing (a delete-then-move could, if the move failed) —

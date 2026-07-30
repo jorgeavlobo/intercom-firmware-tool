@@ -411,6 +411,12 @@ namespace IntercomFirmwareTool.App
             foreach (var r in VersionPillButtons()) r.IsEnabled = !busy;
             BtnDlBrowse.IsEnabled = !busy;
             BtnDlCancel.IsEnabled = busy;
+            // Lock the other operation launchers while a download runs (a build already blocks
+            // the download; this is the mirror). They share the Result/status surface, and a
+            // download's completion mutates the selected firmware — so they must not overlap.
+            BtnVerify.IsEnabled = !busy;
+            BtnSelfTest.IsEnabled = !busy;
+            BtnGenKey.IsEnabled = !busy;
             if (busy)
             {
                 BtnDlStart.Tag = "busy";      // keep it full-colour while disabled
