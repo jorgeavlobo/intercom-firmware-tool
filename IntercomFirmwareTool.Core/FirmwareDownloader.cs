@@ -62,13 +62,18 @@ namespace IntercomFirmwareTool.Core
     /// </summary>
     public sealed class FirmwareDownloader
     {
-        // Modest parallelism: enough to be fast without hammering the CDN. Downloader falls back to a
-        // single connection when the server doesn't support range requests. Timeout/retry use the
-        // library defaults (its v5 DownloadConfiguration exposes neither as a property).
+        // A SINGLE, sequential connection (no parallel range chunks). Multipart hammered the
+        // official endpoints with concurrent range requests; the Liferay checkout links in
+        // particular then intermittently returned a small error page for some chunks, so the
+        // assembled file was short/corrupt and failed verification — which looked like a
+        // download that "almost immediately" mismatched. One plain connection is reliable
+        // everywhere (the file is re-verified regardless). Timeout/retry use the library
+        // defaults (its v5 DownloadConfiguration exposes neither as a property); our own
+        // retry loop in DownloadAsync covers transient failures.
         private static DownloadConfiguration BuildConfig() => new()
         {
-            ChunkCount = 4,
-            ParallelDownload = true,
+            ChunkCount = 1,
+            ParallelDownload = false,
             RequestConfiguration = new RequestConfiguration
             {
                 UserAgent = "IntercomFirmwareTool",
@@ -103,13 +108,88 @@ namespace IntercomFirmwareTool.Core
             try
             {
                 Directory.CreateDirectory(destDir);
-                TryDelete(partPath); // clear any leftover partial from a previous aborted run
             }
             catch (Exception ex)
             {
                 return new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)));
             }
 
+            // A few official endpoints (the Liferay checkout links) intermittently serve an
+            // error page instead of the file, so a single try can fail verification even though
+            // the URL is fine. Re-try a few times — each from a FRESH .part (never a Range
+            // resume, which those endpoints reject) — so the user doesn't have to click Download
+            // repeatedly. A cancel or a local IO error is final; only transport/integrity
+            // failures are retried.
+            const int maxAttempts = 4;
+            DownloadResult lastFailure =
+                new(DownloadOutcome.HttpError, null, CoreStrings.Get("FD_DownloadFailed"));
+
+            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    TryDelete(partPath);
+                    return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+                }
+
+                TryDelete(partPath); // always start clean: a fresh, whole-file GET (no resume)
+                DownloadResult attemptResult = await TransferOnceAsync(fw, partPath, progress, ct)
+                    .ConfigureAwait(false);
+
+                switch (attemptResult.Outcome)
+                {
+                    case DownloadOutcome.Verified:
+                        // The bytes are present in partPath and already verified; publish atomically.
+                        try
+                        {
+                            if (File.Exists(finalPath)) File.Delete(finalPath);
+                            File.Move(partPath, finalPath);
+                        }
+                        catch (Exception ex)
+                        {
+                            TryDelete(partPath);
+                            return new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)));
+                        }
+                        return new(DownloadOutcome.Verified, finalPath,
+                            CoreStrings.Format("FD_Verified", fw.OriginalName, fw.SizeBytes));
+
+                    case DownloadOutcome.Cancelled:
+                        TryDelete(partPath);
+                        return attemptResult;
+
+                    default: // HttpError or IntegrityMismatch → remember and retry
+                        lastFailure = attemptResult;
+                        TryDelete(partPath);
+                        if (attempt < maxAttempts)
+                        {
+                            try
+                            {
+                                await Task.Delay(TimeSpan.FromMilliseconds(600 * attempt), ct)
+                                    .ConfigureAwait(false);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+                            }
+                        }
+                        break;
+                }
+            }
+
+            return lastFailure;
+        }
+
+        /// <summary>
+        /// One download attempt into <paramref name="partPath"/>. Returns <see cref="DownloadOutcome.Verified"/>
+        /// (bytes written and checked against <paramref name="fw"/>), <see cref="DownloadOutcome.Cancelled"/>,
+        /// <see cref="DownloadOutcome.HttpError"/> (transport / no file), or <see cref="DownloadOutcome.IntegrityMismatch"/>.
+        /// The caller decides whether to publish, retry, or give up. On the Verified result the message is
+        /// unused (the caller builds the final one), so it is left empty.
+        /// </summary>
+        private static async Task<DownloadResult> TransferOnceAsync(
+            KnownFirmware fw, string partPath,
+            IProgress<DownloadProgress>? progress, CancellationToken ct)
+        {
             AsyncCompletedEventArgs? completed = null;
             try
             {
@@ -130,53 +210,27 @@ namespace IntercomFirmwareTool.Core
                 }
 
                 if (ct.IsCancellationRequested || completed?.Cancelled == true)
-                {
-                    TryDelete(partPath);
                     return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
-                }
                 if (completed?.Error is { } err)
-                {
-                    TryDelete(partPath);
                     return new(DownloadOutcome.HttpError, null, CoreStrings.Format("FD_DownloadError", SafeMsg(err)));
-                }
                 if (!File.Exists(partPath))
-                {
                     return new(DownloadOutcome.HttpError, null, CoreStrings.Get("FD_DownloadFailed"));
-                }
             }
             catch (OperationCanceledException)
             {
-                TryDelete(partPath);
                 return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
             }
             catch (Exception ex)
             {
-                TryDelete(partPath);
                 return new(DownloadOutcome.HttpError, null, CoreStrings.Format("FD_DownloadError", SafeMsg(ex)));
             }
 
             // Verify the downloaded bytes against THIS entry (size + SHA-256).
             if (!MatchesEntry(partPath, fw))
-            {
-                TryDelete(partPath);
                 return new(DownloadOutcome.IntegrityMismatch, null,
                     CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName));
-            }
 
-            // Atomic publish: move the verified .part into place.
-            try
-            {
-                if (File.Exists(finalPath)) File.Delete(finalPath);
-                File.Move(partPath, finalPath);
-            }
-            catch (Exception ex)
-            {
-                TryDelete(partPath);
-                return new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)));
-            }
-
-            return new(DownloadOutcome.Verified, finalPath,
-                CoreStrings.Format("FD_Verified", fw.OriginalName, fw.SizeBytes));
+            return new(DownloadOutcome.Verified, partPath, string.Empty);
         }
 
         // Size fast-path then SHA-256, checked against a SPECIFIC entry (clearer than the whole-registry
