@@ -255,10 +255,19 @@ namespace IntercomFirmwareTool.Core
                 return ClassifyTransferError(ex);
             }
 
-            // Verify the downloaded bytes against THIS entry (size + SHA-256).
-            if (!MatchesEntry(partPath, fw))
-                return new(DownloadOutcome.IntegrityMismatch, null,
-                    CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName));
+            // Verify the downloaded bytes against THIS entry (size + SHA-256). Distinguish a
+            // genuine content mismatch from an IO error reading the .part (locked / ACL / disk):
+            // the latter is a final IoError, not something a re-download would fix.
+            try
+            {
+                if (!MatchesEntryStrict(partPath, fw))
+                    return new(DownloadOutcome.IntegrityMismatch, null,
+                        CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName));
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)));
+            }
 
             return new(DownloadOutcome.Verified, partPath, string.Empty);
         }
@@ -271,22 +280,26 @@ namespace IntercomFirmwareTool.Core
                 ? new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)))
                 : new(DownloadOutcome.HttpError, null, CoreStrings.Format("FD_DownloadError", SafeMsg(ex)));
 
-        // Size fast-path then SHA-256, checked against a SPECIFIC entry (clearer than the whole-registry
-        // Verify, and a match here means the file also passes that gate).
+        // Size fast-path then SHA-256, checked against a SPECIFIC entry (clearer than the
+        // whole-registry Verify, and a match here means the file also passes that gate). Throws on
+        // an IO error reading the file — the caller decides whether that means "not a match" or a
+        // hard IoError.
+        private static bool MatchesEntryStrict(string path, KnownFirmware fw)
+        {
+            if (new FileInfo(path).Length != fw.SizeBytes) return false;
+            using var sha = SHA256.Create();
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            string hex = Convert.ToHexString(sha.ComputeHash(fs)); // uppercase hex
+            return string.Equals(hex, fw.Sha256, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // Swallowing variant: any failure — including an unreadable file — is just "no match".
+        // Used for the cache-hit check, where an unreadable existing file simply means
+        // "no valid cache, download it".
         private static bool MatchesEntry(string path, KnownFirmware fw)
         {
-            try
-            {
-                if (new FileInfo(path).Length != fw.SizeBytes) return false;
-                using var sha = SHA256.Create();
-                using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-                string hex = Convert.ToHexString(sha.ComputeHash(fs)); // uppercase hex
-                return string.Equals(hex, fw.Sha256, StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
+            try { return MatchesEntryStrict(path, fw); }
+            catch { return false; }
         }
 
         private static void TryDelete(string path)
