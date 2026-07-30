@@ -644,10 +644,11 @@
                                    Foreground="#FF334155" Margin="0,0,0,7"/>
                         <WrapPanel x:Name="ModelPills"/>
 
-                        <!-- Version -->
+                        <!-- Version — the extra top margin is headroom for the "Latest" badge,
+                             which overhangs the newest pill's top-right corner. -->
                         <TextBlock Text="{loc:Loc Dl_Version}" FontSize="11.5" FontWeight="SemiBold"
                                    Foreground="#FF334155" Margin="0,6,0,7"/>
-                        <WrapPanel x:Name="VersionPills"/>
+                        <WrapPanel x:Name="VersionPills" Margin="0,6,0,0"/>
 
                         <!-- Destination folder (click box or Browse…) -->
                         <TextBlock Text="{loc:Loc Dl_SaveTo}" FontSize="11.5" FontWeight="SemiBold"

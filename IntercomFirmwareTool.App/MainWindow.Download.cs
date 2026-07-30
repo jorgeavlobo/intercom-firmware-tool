@@ -9,6 +9,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Effects;   // DropShadowEffect on the "Latest" badge
 using IntercomFirmwareTool.Core;
 using Microsoft.Win32;
 
@@ -171,48 +172,65 @@ namespace IntercomFirmwareTool.App
                 {
                     Style = (Style)FindResource("SegmentPill"),
                     GroupName = "dlVersion",
-                    // The newest gets a "Latest" badge chip; the rest are the plain version.
-                    Content = isNewest ? BuildLatestContent(fw.Version) : fw.Version,
+                    Content = fw.Version,
                     Tag = fw,
                 };
                 pill.Checked += VersionPill_Checked;
-                VersionPills.Children.Add(pill);
+
+                if (isNewest)
+                {
+                    // Overlay a "Latest" badge on the pill's TOP-RIGHT corner, half outside the
+                    // button (a notification-badge look): the pill sits in a Grid and the badge is
+                    // a sibling pinned top-right with a negative margin, drawn on top. The newest
+                    // is always the last (rightmost) pill, so the overhang falls into free space.
+                    var host = new Grid { Margin = new Thickness(0, 0, 8, 8) };
+                    pill.Margin = new Thickness(0); // the host carries the inter-pill spacing
+                    host.Children.Add(pill);
+                    Border badge = BuildLatestBadge();
+                    Panel.SetZIndex(badge, 1);
+                    host.Children.Add(badge);
+                    VersionPills.Children.Add(host);
+                }
+                else
+                {
+                    VersionPills.Children.Add(pill);
+                }
+
                 if (ReferenceEquals(fw, target))
                     pill.IsChecked = true; // fires VersionPill_Checked → SelectVersion(target)
             }
         }
 
-        // Emerald "Latest" badge — self-contained (its own fill + white text), so it stays
-        // legible on both the light pill and the accent-blue selected pill.
+        // Emerald "Latest" badge — self-contained (its own fill + white text + white ring + soft
+        // shadow) so it reads as a floating chip on the pill's corner, over either the light pill
+        // or the accent-blue selected pill.
         private static readonly Brush LatestBadgeBrush = MakeFrozen(Color.FromRgb(0x10, 0xB9, 0x81));
 
-        /// <summary>Pill content for the newest version: the number plus a rounded "Latest" badge.</summary>
-        private UIElement BuildLatestContent(string version)
+        /// <summary>A rounded "Latest" chip pinned to a pill's top-right corner, half outside it.</summary>
+        private Border BuildLatestBadge() => new()
         {
-            var row = new StackPanel { Orientation = Orientation.Horizontal };
-            row.Children.Add(new TextBlock
+            Background = LatestBadgeBrush,
+            CornerRadius = new CornerRadius(8),
+            BorderBrush = Brushes.White,
+            BorderThickness = new Thickness(1.5),
+            Padding = new Thickness(7, 1, 7, 2),
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, -9, -7, 0), // lift up + right, so it half-overhangs the corner
+            IsHitTestVisible = false,             // click-through: never steal a click from the pill
+            Effect = new DropShadowEffect
             {
-                Text = version,
-                VerticalAlignment = VerticalAlignment.Center,
-            });
-            row.Children.Add(new Border
+                Color = Colors.Black, BlurRadius = 4, ShadowDepth = 1, Opacity = 0.25, Direction = 270,
+            },
+            Child = new TextBlock
             {
-                Background = LatestBadgeBrush,
-                CornerRadius = new CornerRadius(7),
-                Padding = new Thickness(7, 1, 7, 2),
-                Margin = new Thickness(8, 0, 0, 0),
+                Text = L("Dl_Latest"),
+                Foreground = Brushes.White,
+                FontSize = 9,
+                FontWeight = FontWeights.Bold,
                 VerticalAlignment = VerticalAlignment.Center,
-                Child = new TextBlock
-                {
-                    Text = L("Dl_Latest"),
-                    Foreground = Brushes.White,
-                    FontSize = 9,
-                    FontWeight = FontWeights.Bold,
-                    VerticalAlignment = VerticalAlignment.Center,
-                },
-            });
-            return row;
-        }
+            },
+        };
 
         private void VersionPill_Checked(object sender, RoutedEventArgs e)
         {
