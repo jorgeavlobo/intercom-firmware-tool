@@ -457,7 +457,7 @@ Enable it only on an authenticated, trusted broker. Enable the remote command ch
   <data name="Dl_Legal" xml:space="preserve"><value>This is the same original firmware you can download by hand from BTicino / Legrand. The tool simply fetches it for you and checks it byte-for-byte (size + SHA-256) against the known-good original before it is used.</value></data>
   <data name="Dl_Model" xml:space="preserve"><value>Model</value></data>
   <data name="Dl_Version" xml:space="preserve"><value>Version</value></data>
-  <data name="Dl_VersionLatest" xml:space="preserve"><value>{0}  ·  latest</value></data>
+  <data name="Dl_Latest" xml:space="preserve"><value>Latest</value></data>
   <data name="Dl_SaveTo" xml:space="preserve"><value>Save to</value></data>
   <data name="Dl_SaveToTip" xml:space="preserve"><value>Folder where the downloaded firmware will be saved (click to change)</value></data>
   <data name="Dl_Browse" xml:space="preserve"><value>Browse…</value></data>

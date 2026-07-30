@@ -457,7 +457,7 @@ Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. 
   <data name="Dl_Legal" xml:space="preserve"><value>Dies ist dieselbe Original-Firmware, die Sie von BTicino / Legrand auch von Hand herunterladen können. Das Tool lädt sie nur für Sie herunter und prüft sie vor der Verwendung Byte für Byte (Größe + SHA-256) gegen das bekannte Original.</value></data>
   <data name="Dl_Model" xml:space="preserve"><value>Modell</value></data>
   <data name="Dl_Version" xml:space="preserve"><value>Version</value></data>
-  <data name="Dl_VersionLatest" xml:space="preserve"><value>{0}  ·  neueste</value></data>
+  <data name="Dl_Latest" xml:space="preserve"><value>Neueste</value></data>
   <data name="Dl_SaveTo" xml:space="preserve"><value>Speichern unter</value></data>
   <data name="Dl_SaveToTip" xml:space="preserve"><value>Ordner, in dem die heruntergeladene Firmware gespeichert wird (zum Ändern klicken)</value></data>
   <data name="Dl_Browse" xml:space="preserve"><value>Durchsuchen…</value></data>

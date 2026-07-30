@@ -457,7 +457,7 @@ Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comando
   <data name="Dl_Legal" xml:space="preserve"><value>Este é o mesmo firmware original que pode descarregar manualmente da BTicino / Legrand. A ferramenta apenas o obtém por si e verifica-o byte a byte (tamanho + SHA-256) em relação ao original conhecido antes de ser utilizado.</value></data>
   <data name="Dl_Model" xml:space="preserve"><value>Modelo</value></data>
   <data name="Dl_Version" xml:space="preserve"><value>Versão</value></data>
-  <data name="Dl_VersionLatest" xml:space="preserve"><value>{0}  ·  mais recente</value></data>
+  <data name="Dl_Latest" xml:space="preserve"><value>Mais recente</value></data>
   <data name="Dl_SaveTo" xml:space="preserve"><value>Guardar em</value></data>
   <data name="Dl_SaveToTip" xml:space="preserve"><value>Pasta onde o firmware descarregado será guardado (clique para alterar)</value></data>
   <data name="Dl_Browse" xml:space="preserve"><value>Procurar…</value></data>

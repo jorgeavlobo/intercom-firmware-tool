@@ -149,26 +149,30 @@ namespace IntercomFirmwareTool.App
             VersionPills.Children.Clear();
             var versions = _availableFw
                 .Where(f => f.Line == line)
-                .OrderByDescending(f => ParseVersion(f.Version))
+                // Ascending: oldest on the left → newest on the right, so the row reads as a
+                // natural version timeline and the newest (the default) sits at the end.
+                .OrderBy(f => ParseVersion(f.Version))
                 .ToList();
             if (versions.Count == 0) { _dlSelected = null; UpdateDlStartEnabled(); return; }
 
-            // Keep the current pick if it belongs to this line; otherwise default to
-            // the newest version.
+            KnownFirmware newestFw = versions[^1]; // last = newest
+
+            // Keep the current pick if it belongs to this line; otherwise default to the newest.
             KnownFirmware target =
                 (_dlSelected != null && _dlSelected.Line == line
                     && versions.Any(v => v.Version == _dlSelected.Version))
                     ? versions.First(v => v.Version == _dlSelected.Version)
-                    : versions[0];
+                    : newestFw;
 
             foreach (var fw in versions)
             {
-                bool newest = ReferenceEquals(fw, versions[0]);
+                bool isNewest = ReferenceEquals(fw, newestFw);
                 var pill = new RadioButton
                 {
                     Style = (Style)FindResource("SegmentPill"),
                     GroupName = "dlVersion",
-                    Content = newest ? LF("Dl_VersionLatest", fw.Version) : fw.Version,
+                    // The newest gets a "Latest" badge chip; the rest are the plain version.
+                    Content = isNewest ? BuildLatestContent(fw.Version) : fw.Version,
                     Tag = fw,
                 };
                 pill.Checked += VersionPill_Checked;
@@ -176,6 +180,38 @@ namespace IntercomFirmwareTool.App
                 if (ReferenceEquals(fw, target))
                     pill.IsChecked = true; // fires VersionPill_Checked → SelectVersion(target)
             }
+        }
+
+        // Emerald "Latest" badge — self-contained (its own fill + white text), so it stays
+        // legible on both the light pill and the accent-blue selected pill.
+        private static readonly Brush LatestBadgeBrush = MakeFrozen(Color.FromRgb(0x10, 0xB9, 0x81));
+
+        /// <summary>Pill content for the newest version: the number plus a rounded "Latest" badge.</summary>
+        private UIElement BuildLatestContent(string version)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal };
+            row.Children.Add(new TextBlock
+            {
+                Text = version,
+                VerticalAlignment = VerticalAlignment.Center,
+            });
+            row.Children.Add(new Border
+            {
+                Background = LatestBadgeBrush,
+                CornerRadius = new CornerRadius(7),
+                Padding = new Thickness(7, 1, 7, 2),
+                Margin = new Thickness(8, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = new TextBlock
+                {
+                    Text = L("Dl_Latest"),
+                    Foreground = Brushes.White,
+                    FontSize = 9,
+                    FontWeight = FontWeights.Bold,
+                    VerticalAlignment = VerticalAlignment.Center,
+                },
+            });
+            return row;
         }
 
         private void VersionPill_Checked(object sender, RoutedEventArgs e)

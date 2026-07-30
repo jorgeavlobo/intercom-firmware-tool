@@ -457,7 +457,7 @@ Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de co
   <data name="Dl_Legal" xml:space="preserve"><value>Es el mismo firmware original que puede descargar manualmente de BTicino / Legrand. La herramienta solo lo descarga por usted y lo verifica byte a byte (tamaño + SHA-256) con el original conocido antes de usarlo.</value></data>
   <data name="Dl_Model" xml:space="preserve"><value>Modelo</value></data>
   <data name="Dl_Version" xml:space="preserve"><value>Versión</value></data>
-  <data name="Dl_VersionLatest" xml:space="preserve"><value>{0}  ·  más reciente</value></data>
+  <data name="Dl_Latest" xml:space="preserve"><value>Más reciente</value></data>
   <data name="Dl_SaveTo" xml:space="preserve"><value>Guardar en</value></data>
   <data name="Dl_SaveToTip" xml:space="preserve"><value>Carpeta donde se guardará el firmware descargado (clic para cambiar)</value></data>
   <data name="Dl_Browse" xml:space="preserve"><value>Examinar…</value></data>
