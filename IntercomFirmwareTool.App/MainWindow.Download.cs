@@ -378,8 +378,11 @@ namespace IntercomFirmwareTool.App
         {
             if (p.Fraction is double f)
             {
-                DlProgress.Value = Math.Clamp(f * 100.0, 0, 100);
-                int pct = (int)Math.Round(f * 100.0);
+                double clamped = Math.Clamp(f * 100.0, 0, 100);
+                DlProgress.Value = clamped;
+                // Clamp the shown percent too: with TotalBytes pinned to the registry size, a server
+                // that returns more bytes than expected could otherwise print "101%".
+                int pct = (int)Math.Round(clamped);
                 TxtDlProgress.Text = LF("Dl_ProgressFmt", pct,
                     HumanBytes(p.BytesReceived), HumanBytes(p.TotalBytes), HumanRate(p.BytesPerSecond));
             }

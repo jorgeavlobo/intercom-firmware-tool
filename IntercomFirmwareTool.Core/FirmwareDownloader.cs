@@ -119,7 +119,10 @@ namespace IntercomFirmwareTool.Core
             // OR a "<name> (n)" sibling — as a cache hit (so repeated downloads don't pile up
             // duplicate copies), otherwise take the first FREE name as the target (never overwriting
             // an unrelated file that holds the name). The SHA-256 hashing runs off the UI thread so
-            // it can't freeze the UI; a cancel pressed during it (caught below) or after it is honored.
+            // it can't freeze the UI. The hash itself doesn't observe the token (it's a sub-second
+            // pass over a ~100-300 MB file), but a cancel pressed during the scan is honored the
+            // instant it returns: the cache-hit branch re-checks the token below, and the free-target
+            // path falls into the retry loop, which re-checks it at the top before any transfer.
             string finalPath;
             try
             {
