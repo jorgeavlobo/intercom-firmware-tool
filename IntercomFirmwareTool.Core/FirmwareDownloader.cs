@@ -99,7 +99,6 @@ namespace IntercomFirmwareTool.Core
                 return new(DownloadOutcome.NotDownloadable, null, CoreStrings.Get("FD_NotDownloadable"));
 
             string finalPath = Path.Combine(destDir, fw.OriginalName);
-            string partPath = finalPath + ".part";
 
             // Cache hit: a valid copy is already here → skip the download entirely. The SHA-256
             // hash of a ~100 MB file runs on a thread-pool thread (Task.Run) so it can't freeze the
@@ -129,6 +128,14 @@ namespace IntercomFirmwareTool.Core
             {
                 return new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)));
             }
+
+            // At this point the canonical name is either free or holds a DIFFERENT file (a valid copy
+            // would have been the cache hit above). Never destroy that other file — a user might have
+            // saved something else under this name — so publish under a unique sibling name instead
+            // ("<name> (1).fwz"), the way a browser would.
+            if (File.Exists(finalPath))
+                finalPath = UniquePath(finalPath);
+            string partPath = finalPath + ".part";
 
             // Re-try a few times — each from a FRESH .part (never a Range resume, which some
             // endpoints reject) — so the user doesn't have to click Download repeatedly. The FIRST
@@ -165,12 +172,12 @@ namespace IntercomFirmwareTool.Core
                             return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
                         }
                         // The bytes are present in partPath and already verified; publish it.
-                        // Move with overwrite=true is a single operation, so it can't leave the
-                        // destination missing (a delete-then-move could, if the move failed) —
-                        // a previously verified cached copy is only ever replaced, never lost.
+                        // finalPath was chosen to be free (cache hit returned earlier; a taken name
+                        // was made unique above), so a plain Move — which refuses to overwrite —
+                        // both keeps the publish atomic and guarantees no existing file is clobbered.
                         try
                         {
-                            File.Move(partPath, finalPath, overwrite: true);
+                            File.Move(partPath, finalPath);
                         }
                         catch (Exception ex)
                         {
@@ -300,6 +307,22 @@ namespace IntercomFirmwareTool.Core
         {
             try { return MatchesEntryStrict(path, fw); }
             catch { return false; }
+        }
+
+        // A sibling name that doesn't exist yet ("<name> (1).fwz", "<name> (2).fwz", …), so a
+        // download never overwrites an unrelated file that happens to share the canonical name.
+        private static string UniquePath(string path)
+        {
+            string dir = Path.GetDirectoryName(path) ?? "";
+            string name = Path.GetFileNameWithoutExtension(path);
+            string ext = Path.GetExtension(path);
+            for (int i = 1; i < 10000; i++)
+            {
+                string candidate = Path.Combine(dir, $"{name} ({i}){ext}");
+                if (!File.Exists(candidate)) return candidate;
+            }
+            // Pathological fallback (10k collisions) — a guaranteed-unique name.
+            return Path.Combine(dir, $"{name} ({Guid.NewGuid():N}){ext}");
         }
 
         private static void TryDelete(string path)
