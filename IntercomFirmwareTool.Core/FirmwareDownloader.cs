@@ -62,18 +62,17 @@ namespace IntercomFirmwareTool.Core
     /// </summary>
     public sealed class FirmwareDownloader
     {
-        // A SINGLE, sequential connection (no parallel range chunks). Multipart hammered the
-        // official endpoints with concurrent range requests; the Liferay checkout links in
-        // particular then intermittently returned a small error page for some chunks, so the
-        // assembled file was short/corrupt and failed verification — which looked like a
-        // download that "almost immediately" mismatched. One plain connection is reliable
-        // everywhere (the file is re-verified regardless). Timeout/retry use the library
-        // defaults (its v5 DownloadConfiguration exposes neither as a property); our own
-        // retry loop in DownloadAsync covers transient failures.
-        private static DownloadConfiguration BuildConfig() => new()
+        // Transfer config. <paramref name="parallel"/> true = fast multipart (4 parallel range
+        // chunks); false = a single, sequential connection. We START parallel and only fall back
+        // to single if an attempt fails (see DownloadAsync), so links that support multipart keep
+        // it, while endpoints that choke on concurrent range requests — the Liferay checkout links
+        // intermittently serve an error page for some chunks, corrupting the assembly — are
+        // downloaded reliably on a single connection. Timeout/retry use the library defaults (its
+        // v5 DownloadConfiguration exposes neither as a property); our retry loop covers the rest.
+        private static DownloadConfiguration BuildConfig(bool parallel) => new()
         {
-            ChunkCount = 1,
-            ParallelDownload = false,
+            ChunkCount = parallel ? 4 : 1,
+            ParallelDownload = parallel,
             RequestConfiguration = new RequestConfiguration
             {
                 UserAgent = "IntercomFirmwareTool",
@@ -114,12 +113,11 @@ namespace IntercomFirmwareTool.Core
                 return new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)));
             }
 
-            // A few official endpoints (the Liferay checkout links) intermittently serve an
-            // error page instead of the file, so a single try can fail verification even though
-            // the URL is fine. Re-try a few times — each from a FRESH .part (never a Range
-            // resume, which those endpoints reject) — so the user doesn't have to click Download
-            // repeatedly. A cancel or a local IO error is final; only transport/integrity
-            // failures are retried.
+            // Re-try a few times — each from a FRESH .part (never a Range resume, which some
+            // endpoints reject) — so the user doesn't have to click Download repeatedly. The FIRST
+            // attempt uses fast multipart; if it fails, the rest fall back to a single sequential
+            // connection, which the fussy endpoints (the Liferay checkout links) serve reliably.
+            // A cancel or a local IO error is final; only transport/integrity failures are retried.
             const int maxAttempts = 4;
             DownloadResult lastFailure =
                 new(DownloadOutcome.HttpError, null, CoreStrings.Get("FD_DownloadFailed"));
@@ -133,7 +131,10 @@ namespace IntercomFirmwareTool.Core
                 }
 
                 TryDelete(partPath); // always start clean: a fresh, whole-file GET (no resume)
-                DownloadResult attemptResult = await TransferOnceAsync(fw, partPath, progress, ct)
+                // Multipart on the first try (keep it for links that support it); single
+                // connection on the fallback tries.
+                bool parallel = attempt == 1;
+                DownloadResult attemptResult = await TransferOnceAsync(fw, partPath, parallel, progress, ct)
                     .ConfigureAwait(false);
 
                 switch (attemptResult.Outcome)
@@ -185,15 +186,16 @@ namespace IntercomFirmwareTool.Core
         /// <see cref="DownloadOutcome.HttpError"/> (transport / no file), or <see cref="DownloadOutcome.IntegrityMismatch"/>.
         /// The caller decides whether to publish, retry, or give up. On the Verified result the message is
         /// unused (the caller builds the final one), so it is left empty.
+        /// <paramref name="parallel"/> picks fast multipart vs a single sequential connection.
         /// </summary>
         private static async Task<DownloadResult> TransferOnceAsync(
-            KnownFirmware fw, string partPath,
+            KnownFirmware fw, string partPath, bool parallel,
             IProgress<DownloadProgress>? progress, CancellationToken ct)
         {
             AsyncCompletedEventArgs? completed = null;
             try
             {
-                using var service = new DownloadService(BuildConfig());
+                using var service = new DownloadService(BuildConfig(parallel));
                 if (progress is not null)
                 {
                     service.DownloadProgressChanged += (_, e) =>
