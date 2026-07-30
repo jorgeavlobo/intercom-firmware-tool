@@ -18,12 +18,14 @@ namespace IntercomFirmwareTool.Core
     /// Probes the official download URLs of the <b>customizable (Door Entry)</b> registry entries so
     /// the app can offer for download <b>only</b> those whose link is currently valid and online
     /// (issue #23). Each probe is a lightweight, headers-only <c>GET</c> (read the response headers,
-    /// then dispose without draining the body), following redirects, and — crucially — checking that
-    /// the reported length matches the registry's recorded <see cref="KnownFirmware.SizeBytes"/>. That
-    /// confirms the URL still serves the <i>expected</i> file (not an HTML error page, and not a
-    /// different/rotated artifact) without downloading it. A Range request is deliberately NOT used:
-    /// some official endpoints (the Liferay checkout links) reject Range even though the file
-    /// downloads fine, which would wrongly hide them.
+    /// then dispose without draining the body), following redirects, and — when the server reports a
+    /// length — <b>rejecting</b> any that does not match the registry's recorded
+    /// <see cref="KnownFirmware.SizeBytes"/>. That catches an HTML error page or a different/rotated
+    /// artifact without downloading it. A reachable endpoint that reports <i>no</i> length is still
+    /// offered (it can't be size-checked here), because the download re-verifies size + SHA-256 before
+    /// the file is ever used — the probe is only an availability hint, not the integrity gate. A Range
+    /// request is deliberately NOT used: some official endpoints (the Liferay checkout links) reject
+    /// Range even though the file downloads fine, which would wrongly hide them.
     ///
     /// Transport resilience uses <b>Polly v8</b>'s industry-standard pipeline: retry only on transient
     /// failures (network errors, per-attempt timeouts, and HTTP 408/429/5xx), with <b>exponential

@@ -22,7 +22,8 @@ namespace IntercomFirmwareTool.App
     /// "Download official firmware" link under the firmware box <b>only</b> for the
     /// entries that are currently online and serve the expected file. Opening the link
     /// shows a card to pick the model + version and a destination folder, then downloads
-    /// (fast, resumable, multipart) and <b>verifies the bytes</b> (size + SHA-256)
+    /// (fast multipart, single-connection fallback; each run starts fresh — no resume) and
+    /// <b>verifies the bytes</b> (size + SHA-256)
     /// against the chosen entry before feeding the result into the normal build flow —
     /// exactly as if the user had picked the file by hand. The download is <b>not</b> a
     /// substitute for that integrity gate: the same file is re-verified downstream.
@@ -94,7 +95,12 @@ namespace IntercomFirmwareTool.App
         private void OnAvailabilityReady(IReadOnlyList<FirmwareAvailability> results)
         {
             _availableFw.Clear();
-            _availableFw.AddRange(results.Where(r => r.Available).Select(r => r.Firmware));
+            // Only customizable (Door Entry) entries may be offered — the checker already probes
+            // only those, but assert it here too so the download path can't drift from the manual
+            // picker's IsCustomizable gate.
+            _availableFw.AddRange(results
+                .Where(r => r.Available && r.Firmware.IsCustomizable)
+                .Select(r => r.Firmware));
             if (_availableFw.Count == 0) return; // nothing online — keep manual-only
 
             // Default to the line of the newest online firmware (a sensible pick).
@@ -269,6 +275,14 @@ namespace IntercomFirmwareTool.App
             ChooseDownloadFolder();
         }
 
+        // Keyboard parity with the other click-to-browse boxes: Enter/Space opens the picker.
+        private void DlFolder_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (!IsActivationKey(e)) return;
+            e.Handled = true;
+            ChooseDownloadFolder();
+        }
+
         private void BtnDlBrowse_Click(object sender, RoutedEventArgs e) => ChooseDownloadFolder();
 
         private void ChooseDownloadFolder()
@@ -285,8 +299,10 @@ namespace IntercomFirmwareTool.App
             UpdateDlStartEnabled();
         }
 
+        // _uiEnabled is false while a build/verify/self-test runs, so a download can't be
+        // started concurrently with (and publish a firmware into) an in-flight build.
         private void UpdateDlStartEnabled() =>
-            BtnDlStart.IsEnabled = !_downloading && _dlSelected != null
+            BtnDlStart.IsEnabled = _uiEnabled && !_downloading && _dlSelected != null
                                    && !string.IsNullOrWhiteSpace(_dlFolder);
 
         // ---- Download --------------------------------------------------------
@@ -392,7 +408,7 @@ namespace IntercomFirmwareTool.App
         private void SetDownloadBusy(bool busy)
         {
             foreach (var r in ModelPills.Children.OfType<RadioButton>()) r.IsEnabled = !busy;
-            foreach (var r in VersionPills.Children.OfType<RadioButton>()) r.IsEnabled = !busy;
+            foreach (var r in VersionPillButtons()) r.IsEnabled = !busy;
             BtnDlBrowse.IsEnabled = !busy;
             BtnDlCancel.IsEnabled = busy;
             if (busy)
@@ -406,6 +422,22 @@ namespace IntercomFirmwareTool.App
                 BtnDlStart.Tag = null;
                 BtnDlStart.Content = L("Dl_Start");
                 UpdateDlStartEnabled();
+            }
+            // A running download blocks Build (and vice-versa) — refresh the Build gate.
+            UpdateBuildEnabled();
+        }
+
+        // Every version pill's RadioButton, unwrapping the newest one (which sits in a Grid
+        // host so its "Latest" badge can overhang) — a plain OfType over direct children
+        // would miss it, leaving it clickable mid-download.
+        private IEnumerable<RadioButton> VersionPillButtons()
+        {
+            foreach (var child in VersionPills.Children)
+            {
+                if (child is RadioButton rb) yield return rb;
+                else if (child is Grid g)
+                    foreach (var gc in g.Children)
+                        if (gc is RadioButton grb) yield return grb;
             }
         }
 
@@ -436,6 +468,9 @@ namespace IntercomFirmwareTool.App
         private void ApplyDownloadLanguage()
         {
             if (_availableFw.Count > 0) BuildModelPills(); // re-selects _dlModelLine/_dlSelected
+            // Freshly rebuilt pills default to enabled, so re-apply the busy lock if a download
+            // is running (the language menu stays usable mid-download).
+            if (_downloading) SetDownloadBusy(true);
             BtnDlStart.Content = _downloading ? L("Dl_Downloading") : L("Dl_Start");
             RenderDlStatus();
         }

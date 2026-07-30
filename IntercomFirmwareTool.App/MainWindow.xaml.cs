@@ -941,7 +941,7 @@ namespace IntercomFirmwareTool.App
             // _uiEnabled is false while a build/verify/self-test is running, so the
             // Build button (and the hint below, via UpdateRequiredCues) stay disabled
             // and off the "✓ Ready to build." message for the duration of the op.
-            BtnBuild.IsEnabled = _uiEnabled
+            BtnBuild.IsEnabled = _uiEnabled && !_downloading
                 && _fwzPath != null && _outputPath != null && HaveCredential()
                 && MqttOkToBuild();
             UpdateRequiredCues();
@@ -2023,6 +2023,9 @@ namespace IntercomFirmwareTool.App
             // (UpdateBuildEnabled gates Build on _uiEnabled; the hint blanks while busy).
             _uiEnabled = enabled;
             UpdateBuildEnabled();
+            // The download card's Start button is gated on _uiEnabled too, so refresh it:
+            // a running build/verify must disable it (no concurrent operation).
+            UpdateDlStartEnabled();
         }
 
         // Whether the UI is currently interactive (false during a build/verify op).

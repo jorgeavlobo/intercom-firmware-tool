@@ -9,7 +9,8 @@ When the app starts it quietly probes the official download links for the
 supported Door Entry models and shows a **Download official firmware** panel
 listing only the files that are currently online and the right size. Pick a
 model and version, choose a destination folder, and the tool downloads the file
-(fast, resumable, multipart) and then **verifies it byte-for-byte** — size plus
+(fast, multipart where the server supports it) and then **verifies it
+byte-for-byte** — size plus
 SHA-256 — against the known-good original before it is ever used. A file that
 fails verification is discarded.
 

@@ -101,8 +101,11 @@ namespace IntercomFirmwareTool.Core
             string finalPath = Path.Combine(destDir, fw.OriginalName);
             string partPath = finalPath + ".part";
 
-            // Cache hit: a valid copy is already here → skip the download entirely.
-            if (File.Exists(finalPath) && MatchesEntry(finalPath, fw))
+            // Cache hit: a valid copy is already here → skip the download entirely. The SHA-256
+            // hash of a ~100 MB file runs off the UI thread (this executes before the first await,
+            // i.e. on the caller's thread), so it can't freeze the UI before progress shows.
+            if (File.Exists(finalPath)
+                && await Task.Run(() => MatchesEntry(finalPath, fw), ct).ConfigureAwait(false))
                 return new(DownloadOutcome.Cached, finalPath, CoreStrings.Format("FD_Cached", fw.OriginalName));
 
             try
@@ -141,11 +144,13 @@ namespace IntercomFirmwareTool.Core
                 switch (attemptResult.Outcome)
                 {
                     case DownloadOutcome.Verified:
-                        // The bytes are present in partPath and already verified; publish atomically.
+                        // The bytes are present in partPath and already verified; publish it.
+                        // Move with overwrite=true is a single operation, so it can't leave the
+                        // destination missing (a delete-then-move could, if the move failed) —
+                        // a previously verified cached copy is only ever replaced, never lost.
                         try
                         {
-                            if (File.Exists(finalPath)) File.Delete(finalPath);
-                            File.Move(partPath, finalPath);
+                            File.Move(partPath, finalPath, overwrite: true);
                         }
                         catch (Exception ex)
                         {
