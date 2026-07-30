@@ -106,28 +106,6 @@ namespace IntercomFirmwareTool.Core
             if (!fw.IsCustomizable || string.IsNullOrWhiteSpace(fw.DownloadUrl))
                 return new(DownloadOutcome.NotDownloadable, null, () => CoreStrings.Get("FD_NotDownloadable"));
 
-            string finalPath = Path.Combine(destDir, fw.OriginalName);
-
-            // Cache hit: a valid copy is already here → skip the download entirely. The SHA-256
-            // hash of a ~100 MB file runs on a thread-pool thread (Task.Run) so it can't freeze the
-            // UI. The hash itself isn't interruptible, but cancellation is still honored: the token
-            // stops the task from starting if already cancelled (caught below), and once it finishes
-            // we re-check the token and return Cancelled rather than Cached.
-            try
-            {
-                if (File.Exists(finalPath)
-                    && await Task.Run(() => MatchesEntry(finalPath, fw), ct).ConfigureAwait(false))
-                {
-                    if (ct.IsCancellationRequested)
-                        return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
-                    return new(DownloadOutcome.Cached, finalPath, () => CoreStrings.Format("FD_Cached", fw.OriginalName));
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
-            }
-
             try
             {
                 Directory.CreateDirectory(destDir);
@@ -137,13 +115,33 @@ namespace IntercomFirmwareTool.Core
                 return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
             }
 
-            // At this point the canonical name is either free or holds a DIFFERENT file (a valid copy
-            // would have been the cache hit above). Never destroy that other file — a user might have
-            // saved something else under this name — so publish under a unique sibling name instead
-            // ("<name> (1).fwz"), the way a browser would.
-            if (File.Exists(finalPath))
-                finalPath = UniquePath(finalPath);
-            string partPath = finalPath + ".part";
+            // Scan the folder for THIS firmware: reuse an already-verified copy — the canonical name
+            // OR a "<name> (n)" sibling — as a cache hit (so repeated downloads don't pile up
+            // duplicate copies), otherwise take the first FREE name as the target (never overwriting
+            // an unrelated file that holds the name). The SHA-256 hashing runs off the UI thread so
+            // it can't freeze the UI; a cancel pressed during it (caught below) or after it is honored.
+            string finalPath;
+            try
+            {
+                var scan = await Task.Run(() => ScanDestination(destDir, fw), ct).ConfigureAwait(false);
+                if (scan.CachedPath is string hit)
+                {
+                    if (ct.IsCancellationRequested)
+                        return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
+                    return new(DownloadOutcome.Cached, hit,
+                        () => CoreStrings.Format("FD_Cached", Path.GetFileName(hit)));
+                }
+                finalPath = scan.FreeTarget;
+            }
+            catch (OperationCanceledException)
+            {
+                return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
+            }
+
+            // Download into a temp file this operation exclusively OWNS (a GUID name), so the
+            // per-attempt cleanup never deletes an unrelated ".part"/".part.download" that a browser
+            // or another process may have left in the folder.
+            string partPath = Path.Combine(destDir, $".ift-{Guid.NewGuid():N}.part");
 
             // Re-try a few times — each from a FRESH .part (never a Range resume, which some
             // endpoints reject) — so the user doesn't have to click Download repeatedly. The FIRST
@@ -193,7 +191,7 @@ namespace IntercomFirmwareTool.Core
                             return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
                         }
                         return new(DownloadOutcome.Verified, finalPath,
-                            () => CoreStrings.Format("FD_Verified", fw.OriginalName, fw.SizeBytes));
+                            () => CoreStrings.Format("FD_Verified", Path.GetFileName(finalPath), fw.SizeBytes));
 
                     case DownloadOutcome.Cancelled:
                     case DownloadOutcome.IoError:
@@ -326,20 +324,28 @@ namespace IntercomFirmwareTool.Core
             catch { return false; }
         }
 
-        // A sibling name that doesn't exist yet ("<name> (1).fwz", "<name> (2).fwz", …), so a
-        // download never overwrites an unrelated file that happens to share the canonical name.
-        private static string UniquePath(string path)
+        // Walk the canonical name then "<name> (1).fwz", "<name> (2).fwz", … and decide where THIS
+        // firmware goes:
+        //   • the first existing candidate that VERIFIES as this entry → a cache hit (reuse it, no
+        //     re-download), so clicking Download repeatedly never piles up duplicate copies;
+        //   • the first name that does NOT exist → the free target to download into (so an unrelated
+        //     file holding one of these names is never overwritten).
+        // Hashing happens here (call it off the UI thread).
+        private static (string? CachedPath, string FreeTarget) ScanDestination(string destDir, KnownFirmware fw)
         {
-            string dir = Path.GetDirectoryName(path) ?? "";
-            string name = Path.GetFileNameWithoutExtension(path);
-            string ext = Path.GetExtension(path);
-            for (int i = 1; i < 10000; i++)
+            string baseName = Path.GetFileNameWithoutExtension(fw.OriginalName);
+            string ext = Path.GetExtension(fw.OriginalName);
+            for (int i = 0; i < 10000; i++)
             {
-                string candidate = Path.Combine(dir, $"{name} ({i}){ext}");
-                if (!File.Exists(candidate)) return candidate;
+                string candidate = i == 0
+                    ? Path.Combine(destDir, fw.OriginalName)
+                    : Path.Combine(destDir, $"{baseName} ({i}){ext}");
+                if (!File.Exists(candidate)) return (null, candidate);       // free slot → target
+                if (MatchesEntry(candidate, fw)) return (candidate, candidate); // verified copy → reuse
+                // occupied by a DIFFERENT file → leave it untouched, try the next sibling
             }
-            // Pathological fallback (10k collisions) — a guaranteed-unique name.
-            return Path.Combine(dir, $"{name} ({Guid.NewGuid():N}){ext}");
+            // Pathological fallback (10k occupied non-matching siblings) — a guaranteed-free target.
+            return (null, Path.Combine(destDir, $"{baseName} ({Guid.NewGuid():N}){ext}"));
         }
 
         private static void TryDelete(string path)
