@@ -471,29 +471,33 @@
         <!-- Floating "new options below" pill: a transient, accent, drop-shadowed
              toast anchored at the bottom of the scroll area. It appears momentarily when
              content grows past the fold and scrolls the user to it on click. -->
+        <!-- Deliberately a DARK slate surface (not accent blue): a floating toast must
+             stand apart from the blue action buttons it may overlap and read as elevated
+             above the form. White label + a light-blue chevron for a subtle brand pop. -->
         <Style TargetType="Button" x:Key="ScrollCueButton">
             <Setter Property="Foreground" Value="White"/>
-            <Setter Property="Background" Value="#FF0F6CBD"/>
+            <Setter Property="Background" Value="#FF1E293B"/>
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="Padding" Value="14,7"/>
+            <Setter Property="Padding" Value="15,7"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border x:Name="pill" CornerRadius="16" Background="{TemplateBinding Background}"
+                                BorderBrush="#22FFFFFF" BorderThickness="1"
                                 Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
                             <Border.Effect>
-                                <DropShadowEffect Color="#FF1B3A5B" BlurRadius="14" ShadowDepth="2"
-                                                  Opacity="0.35" Direction="270"/>
+                                <DropShadowEffect Color="#FF0A1220" BlurRadius="16" ShadowDepth="3"
+                                                  Opacity="0.42" Direction="270"/>
                             </Border.Effect>
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="pill" Property="Background" Value="#FF1A79C9"/>
+                                <Setter TargetName="pill" Property="Background" Value="#FF334155"/>
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="pill" Property="Background" Value="#FF0B5C9E"/>
+                                <Setter TargetName="pill" Property="Background" Value="#FF0F172A"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -1223,7 +1227,7 @@
                 <TextBlock Text="{loc:Loc Scroll_More}" FontSize="12" FontWeight="SemiBold"
                            VerticalAlignment="Center"/>
                 <TextBlock Text="&#xE70D;" FontFamily="Segoe MDL2 Assets" FontSize="12"
-                           VerticalAlignment="Center" Margin="9,1,0,0"/>
+                           Foreground="#FF6BB6F0" VerticalAlignment="Center" Margin="9,1,0,0"/>
             </StackPanel>
         </Button>
         </Grid>
