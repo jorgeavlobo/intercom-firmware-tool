@@ -67,11 +67,92 @@
             <Setter Property="Margin" Value="6,0,0,6"/>
             <Setter Property="HorizontalAlignment" Value="Left"/>
         </Style>
-        <!-- Uniform data-entry field: same height everywhere. -->
+        <!-- Uniform data-entry field: same height everywhere, now with a soft rounded
+             border, a hover cue and an accent focus ring — the single field style shared
+             by the whole form (and the download card), so restyling it here lifts every
+             input at once and keeps them coherent. Scrollbar visibility is template-bound
+             so a multi-line consumer (the Result console) can still show them. -->
         <Style TargetType="TextBox" x:Key="InputField">
             <Setter Property="Height" Value="28"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="Padding" Value="6,0"/>
+            <Setter Property="Padding" Value="8,0"/>
+            <Setter Property="Foreground" Value="#FF1F2933"/>
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="BorderBrush" Value="#FFCBD5E1"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TextBox">
+                        <Border x:Name="border" CornerRadius="6"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                SnapsToDevicePixels="True">
+                            <ScrollViewer x:Name="PART_ContentHost" Focusable="False"
+                                          Margin="{TemplateBinding Padding}"
+                                          HorizontalScrollBarVisibility="{TemplateBinding HorizontalScrollBarVisibility}"
+                                          VerticalScrollBarVisibility="{TemplateBinding VerticalScrollBarVisibility}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="BorderBrush" Value="#FF9FB3C8"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                                <Setter TargetName="border" Property="BorderBrush" Value="#FF0F6CBD"/>
+                                <Setter TargetName="border" Property="BorderThickness" Value="1.6"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="border" Property="Background" Value="#FFF3F5F7"/>
+                                <Setter TargetName="border" Property="BorderBrush" Value="#FFE2E8F0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Modern check: a rounded box that fills accent-blue with a crisp tick when
+             checked. Implicit (no key) so EVERY checkbox in the app adopts it and matches
+             the download section — no per-control wiring. -->
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="#FF1F2933"/>
+            <Setter Property="FontSize" Value="12.5"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" Background="Transparent">
+                            <Border x:Name="box" Width="18" Height="18" CornerRadius="5"
+                                    Background="White" BorderBrush="#FFB6C2D2" BorderThickness="1.5"
+                                    VerticalAlignment="Center" SnapsToDevicePixels="True">
+                                <Path x:Name="check" Stretch="Uniform" Width="10" Height="10"
+                                      Data="M 0,5 L 4,9 L 11,1" Stroke="White" StrokeThickness="2"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      Visibility="Collapsed"/>
+                            </Border>
+                            <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"
+                                              RecognizesAccessKey="True"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="box" Property="Background" Value="#FF0F6CBD"/>
+                                <Setter TargetName="box" Property="BorderBrush" Value="#FF0F6CBD"/>
+                                <Setter TargetName="check" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="box" Property="BorderBrush" Value="#FF0F6CBD"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.5"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
 
         <!-- ============ Download official firmware (issue #23) ============ -->
@@ -438,14 +519,26 @@
                   AutomationProperties.Name="{loc:Loc Lang_MenuTooltip}">
                 <MenuItem x:Name="LangMenuRoot"/>
             </Menu>
-            <Border Background="#FFF7F2E8" BorderBrush="#FFE0C98A"
-                    BorderThickness="1" CornerRadius="4" Padding="10" Margin="0,0,0,12">
-                <TextBlock TextWrapping="Wrap" Foreground="#FF7A5B00"><Run Text="{loc:Loc Banner_Risk_Pre}"/><Run Text="{loc:Loc Banner_Risk_Emph}" FontWeight="Bold" TextDecorations="Underline"/><Run Text="{loc:Loc Banner_Use_Pre}"/><Hyperlink NavigateUri="https://assets.legrand.com/pim/AUTRE/MyHOME_Suite_030538.exe" RequestNavigate="Hyperlink_RequestNavigate"><Run Text="{loc:Loc Banner_Link}"/></Hyperlink><Run Text="{loc:Loc Banner_Use_Post}"/></TextBlock>
+            <Border Background="#FFFFF8EC" BorderBrush="#FFF0DBA8"
+                    BorderThickness="1" CornerRadius="8" Padding="13,11" Margin="0,0,0,14">
+                <DockPanel LastChildFill="True">
+                    <!-- Warning glyph in a soft amber badge -->
+                    <Border DockPanel.Dock="Left" Width="26" Height="26" CornerRadius="13"
+                            Background="#FFFBEAC2" VerticalAlignment="Top" Margin="0,0,11,0">
+                        <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                   Foreground="#FFB8860B" HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+                    </Border>
+                    <TextBlock TextWrapping="Wrap" VerticalAlignment="Center" Foreground="#FF7A5B00"><Run Text="{loc:Loc Banner_Risk_Pre}"/><Run Text="{loc:Loc Banner_Risk_Emph}" FontWeight="Bold" TextDecorations="Underline"/><Run Text="{loc:Loc Banner_Use_Pre}"/><Hyperlink NavigateUri="https://assets.legrand.com/pim/AUTRE/MyHOME_Suite_030538.exe" RequestNavigate="Hyperlink_RequestNavigate"><Run Text="{loc:Loc Banner_Link}"/></Hyperlink><Run Text="{loc:Loc Banner_Use_Post}"/></TextBlock>
+                </DockPanel>
             </Border>
         </StackPanel>
 
-        <!-- Row 1: the input form -->
-        <Grid Grid.Row="1" Margin="0,0,0,10">
+        <!-- Row 1: the input form, grouped in a soft card so the primary flow reads as
+             one designed surface, coherent with the download card. -->
+        <Border Grid.Row="1" Margin="0,0,0,12" Padding="16,14" CornerRadius="10"
+                Background="#FFFCFDFE" BorderBrush="#FFE7EDF3" BorderThickness="1">
+        <Grid>
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
@@ -655,6 +748,7 @@
                     AutomationProperties.Name="{loc:Loc Tip_ClearOutput}"
                     Click="BtnClearOutput_Click"/>
         </Grid>
+        </Border>
 
         <!-- Row 2: the primary action (centered), then an always-visible one-line
              status area for short simple-view messages (firmware verifying, password
@@ -989,7 +1083,7 @@
                     <StackPanel Orientation="Horizontal" Margin="22,4,0,0">
                         <TextBlock x:Name="LblMqttHaNodeId" Text="{loc:Loc Field_MqttHaNodeId}"
                                    VerticalAlignment="Center" Margin="0,0,6,0"/>
-                        <TextBox x:Name="TxtMqttHaNodeId" Width="200"
+                        <TextBox x:Name="TxtMqttHaNodeId" Width="200" Style="{StaticResource InputField}"
                                  AutomationProperties.LabeledBy="{Binding ElementName=LblMqttHaNodeId}"
                                  ToolTip="{loc:Loc Tip_MqttHaNodeId}"
                                  TextChanged="MqttField_TextChanged"/>
@@ -1002,7 +1096,7 @@
                     <StackPanel Orientation="Horizontal" Margin="22,4,0,0">
                         <TextBlock x:Name="LblMqttLightWhere" Text="{loc:Loc Field_MqttLightWhere}"
                                    VerticalAlignment="Center" Margin="0,0,6,0"/>
-                        <TextBox x:Name="TxtMqttLightWhere" Width="200"
+                        <TextBox x:Name="TxtMqttLightWhere" Width="200" Style="{StaticResource InputField}"
                                  AutomationProperties.LabeledBy="{Binding ElementName=LblMqttLightWhere}"
                                  ToolTip="{loc:Loc Tip_MqttLightWhere}"
                                  TextChanged="MqttField_TextChanged"/>
@@ -1062,13 +1156,19 @@
             <TextBlock DockPanel.Dock="Top" Text="{loc:Loc Lbl_Result}" Margin="0,0,0,4" FontWeight="SemiBold"/>
             <!-- Bounded height with its own scrollbar: inside the page ScrollViewer a
                  star-fill box can't work (the viewer offers infinite height), so a long
-                 build log scrolls within this box while the page scrolls around it. -->
-            <TextBox x:Name="TxtResult" MaxHeight="320"
-                     IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
-                     VerticalScrollBarVisibility="Auto"
-                     HorizontalScrollBarVisibility="Auto"
-                     FontFamily="Consolas" FontSize="12"
-                     Text="{loc:Loc Result_Default}"/>
+                 build log scrolls within this box while the page scrolls around it. The
+                 rounded border lives on the wrapper so the console matches the form
+                 fields (the TextBox itself is borderless). -->
+            <Border CornerRadius="6" Background="#FFFBFCFD" BorderBrush="#FFDDE4EC"
+                    BorderThickness="1" Padding="2">
+                <TextBox x:Name="TxtResult" MaxHeight="320"
+                         IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap"
+                         BorderThickness="0" Background="Transparent"
+                         VerticalScrollBarVisibility="Auto"
+                         HorizontalScrollBarVisibility="Auto"
+                         FontFamily="Consolas" FontSize="12"
+                         Text="{loc:Loc Result_Default}"/>
+            </Border>
         </DockPanel>
         </Grid>
         </ScrollViewer>
