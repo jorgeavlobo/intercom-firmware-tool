@@ -210,17 +210,22 @@ namespace IntercomFirmwareTool.App
         private Border BuildLatestBadge() => new()
         {
             Background = LatestBadgeBrush,
-            CornerRadius = new CornerRadius(8),
-            BorderBrush = Brushes.White,
-            BorderThickness = new Thickness(1.5),
+            CornerRadius = new CornerRadius(9),
             Padding = new Thickness(7, 1, 7, 2),
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Top,
             Margin = new Thickness(0, -9, -7, 0), // lift up + right, so it half-overhangs the corner
             IsHitTestVisible = false,             // click-through: never steal a click from the pill
+            // Elevation, not an outline: a soft, diffuse shadow tinted with the badge's own colour
+            // and offset downward, so the chip reads as floating above the pill (a green "lift"
+            // glow — the premium colored-shadow look) rather than a flat sticker with a border.
             Effect = new DropShadowEffect
             {
-                Color = Colors.Black, BlurRadius = 4, ShadowDepth = 1, Opacity = 0.25, Direction = 270,
+                Color = Color.FromRgb(0x05, 0x5F, 0x43), // deep emerald
+                BlurRadius = 13,
+                ShadowDepth = 2.5,
+                Opacity = 0.6,
+                Direction = 270, // straight down
             },
             Child = new TextBlock
             {
