@@ -52,8 +52,9 @@ namespace IntercomFirmwareTool.Core
     /// Fetches an official firmware from its registry <see cref="KnownFirmware.DownloadUrl"/> and
     /// guarantees the result is a byte-for-byte known-good original before it can be used (issue #23).
     ///
-    /// Uses the <b>Downloader</b> library for a fast, resumable, multipart transfer, but the integrity
-    /// gate is always <b>ours</b>: the downloaded bytes are verified against the <i>specific</i> entry's
+    /// Uses the <b>Downloader</b> library for a fast multipart transfer (with a single-connection
+    /// fallback; each run starts fresh — no resume), but the integrity gate is always <b>ours</b>:
+    /// the downloaded bytes are verified against the <i>specific</i> entry's
     /// <see cref="KnownFirmware.SizeBytes"/> + <see cref="KnownFirmware.Sha256"/> (a clearer error than the
     /// whole-registry <see cref="FirmwareRegistry.Verify"/>), and a file that passes therefore also
     /// satisfies that gate downstream. The write is <b>atomic</b> — download to <c>&lt;name&gt;.part</c>,
@@ -126,11 +127,11 @@ namespace IntercomFirmwareTool.Core
             {
                 if (ct.IsCancellationRequested)
                 {
-                    TryDelete(partPath);
+                    CleanPartials(partPath);
                     return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
                 }
 
-                TryDelete(partPath); // always start clean: a fresh, whole-file GET (no resume)
+                CleanPartials(partPath); // always start clean: a fresh, whole-file GET (no resume)
                 // Multipart on the first try (keep it for links that support it); single
                 // connection on the fallback tries.
                 bool parallel = attempt == 1;
@@ -148,19 +149,19 @@ namespace IntercomFirmwareTool.Core
                         }
                         catch (Exception ex)
                         {
-                            TryDelete(partPath);
+                            CleanPartials(partPath);
                             return new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)));
                         }
                         return new(DownloadOutcome.Verified, finalPath,
                             CoreStrings.Format("FD_Verified", fw.OriginalName, fw.SizeBytes));
 
                     case DownloadOutcome.Cancelled:
-                        TryDelete(partPath);
+                        CleanPartials(partPath);
                         return attemptResult;
 
                     default: // HttpError or IntegrityMismatch → remember and retry
                         lastFailure = attemptResult;
-                        TryDelete(partPath);
+                        CleanPartials(partPath);
                         if (attempt < maxAttempts)
                         {
                             try
@@ -257,6 +258,16 @@ namespace IntercomFirmwareTool.Core
         {
             try { if (File.Exists(path)) File.Delete(path); }
             catch { /* best-effort cleanup */ }
+        }
+
+        // Remove the partial and the Downloader library's working temp. The library streams into
+        // "&lt;partPath&gt;.download" and renames it to partPath only on success, so a cancel or a
+        // failure leaves that ".download" sidecar behind — delete both, so nothing lingers and a
+        // later Download always starts clean (no resume).
+        private static void CleanPartials(string partPath)
+        {
+            TryDelete(partPath);
+            TryDelete(partPath + ".download");
         }
 
         private static string SafeMsg(Exception ex) =>
