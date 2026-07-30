@@ -125,15 +125,23 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="CheckBox">
                         <StackPanel Orientation="Horizontal" Background="Transparent">
-                            <Border x:Name="box" Width="18" Height="18" CornerRadius="5"
-                                    Background="White" BorderBrush="#FFB6C2D2" BorderThickness="1.5"
-                                    VerticalAlignment="Center" SnapsToDevicePixels="True">
-                                <Path x:Name="check" Stretch="Uniform" Width="10" Height="10"
-                                      Data="M 0,5 L 4,9 L 11,1" Stroke="White" StrokeThickness="2"
-                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                                      Visibility="Collapsed"/>
+                            <!-- Transparent focus ring around the box: shown on keyboard focus so
+                                 Tab users can see which checkbox Space will toggle, in both the
+                                 checked and unchecked states (a plain border on the box wouldn't
+                                 contrast against the accent-filled checked state). -->
+                            <Border x:Name="focusRing" CornerRadius="7" BorderThickness="2"
+                                    BorderBrush="Transparent" VerticalAlignment="Center"
+                                    SnapsToDevicePixels="True">
+                                <Border x:Name="box" Width="18" Height="18" CornerRadius="5" Margin="1"
+                                        Background="White" BorderBrush="#FFB6C2D2" BorderThickness="1.5"
+                                        SnapsToDevicePixels="True">
+                                    <Path x:Name="check" Stretch="Uniform" Width="10" Height="10"
+                                          Data="M 0,5 L 4,9 L 11,1" Stroke="White" StrokeThickness="2"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                          Visibility="Collapsed"/>
+                                </Border>
                             </Border>
-                            <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"
+                            <ContentPresenter Margin="7,0,0,0" VerticalAlignment="Center"
                                               RecognizesAccessKey="True"/>
                         </StackPanel>
                         <ControlTemplate.Triggers>
@@ -144,6 +152,9 @@
                             </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="box" Property="BorderBrush" Value="#FF0F6CBD"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="focusRing" Property="BorderBrush" Value="#FF0F6CBD"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.5"/>

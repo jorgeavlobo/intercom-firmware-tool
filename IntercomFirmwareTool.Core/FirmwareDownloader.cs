@@ -267,8 +267,11 @@ namespace IntercomFirmwareTool.Core
                 if (!File.Exists(partPath))
                     return new(DownloadOutcome.HttpError, null, () => CoreStrings.Get("FD_DownloadFailed"));
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
+                // Only a cancel the CALLER requested is a real cancellation; a transport-thrown
+                // OperationCanceledException (e.g. an HTTP timeout while ct is still active) is a
+                // transport failure that should be retried, so let it fall through below.
                 return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
             }
             catch (Exception ex)
