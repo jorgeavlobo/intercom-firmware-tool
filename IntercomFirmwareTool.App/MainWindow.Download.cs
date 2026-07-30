@@ -11,7 +11,6 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Effects;   // DropShadowEffect on the "Latest" badge
 using IntercomFirmwareTool.Core;
-using IntercomFirmwareTool.Core.Localization;   // CoreStrings — re-localize download messages
 using Microsoft.Win32;
 
 namespace IntercomFirmwareTool.App
@@ -338,8 +337,9 @@ namespace IntercomFirmwareTool.App
             {
                 // DownloadAsync is written not to throw for expected failures, but never
                 // let anything escape this async void handler.
+                string em = SafeMessage(ex);
                 result = new DownloadResult(DownloadOutcome.HttpError, null,
-                    LF("Dl_UnexpectedError", SafeMessage(ex)));
+                    () => LF("Dl_UnexpectedError", em));
             }
             finally
             {
@@ -383,30 +383,19 @@ namespace IntercomFirmwareTool.App
             {
                 // Feed the verified file into the build flow, exactly like a manual pick.
                 AcceptVerifiedFirmware(path, fw);
-                // Re-derive the Core message from the outcome + entry on each render (not the
-                // already-localized string), so it re-localizes on a later language switch like
-                // the rest of the app.
-                Func<string> core = result.Outcome == DownloadOutcome.Cached
-                    ? () => CoreStrings.Format("FD_Cached", fw.OriginalName)
-                    : () => CoreStrings.Format("FD_Verified", fw.OriginalName, fw.SizeBytes);
-                SetDlStatus(() => "✓ " + core(), DlOkBrush);
-                SetResult(() => LF("Fmt_Result_Accepted", core(), fw.Describe()));
+                // result.Message is a factory (re-localizes on each render), so these closures
+                // re-render in the current language on a later switch, like the rest of the app.
+                SetDlStatus(() => "✓ " + result.Message, DlOkBrush);
+                SetResult(() => LF("Fmt_Result_Accepted", result.Message, fw.Describe()));
                 SetStatus(() => L("Status_FirmwareVerified")); // simple-view confirmation
             }
             else if (result.Outcome == DownloadOutcome.Cancelled)
             {
-                SetDlStatus(() => CoreStrings.Get("FD_Cancelled"), null);
-            }
-            else if (result.Outcome == DownloadOutcome.IntegrityMismatch)
-            {
-                SetDlStatus(() => CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName), ErrorBrush);
+                SetDlStatus(() => result.Message, null);
             }
             else
             {
-                // HttpError / IoError carry an exception detail that doesn't localize anyway;
-                // show the message Core produced as-is.
-                string frozen = result.Message;
-                SetDlStatus(() => frozen, ErrorBrush);
+                SetDlStatus(() => result.Message, ErrorBrush);
             }
         }
 

@@ -36,13 +36,21 @@ namespace IntercomFirmwareTool.Core
         public DownloadOutcome Outcome { get; }
         /// <summary>The verified firmware file on <see cref="DownloadOutcome.Verified"/>/<see cref="DownloadOutcome.Cached"/>; else null.</summary>
         public string? Path { get; }
-        public string Message { get; }
+        private readonly Func<string> _message;
 
-        public DownloadResult(DownloadOutcome outcome, string? path, string message)
+        /// <summary>
+        /// The localized outcome message, regenerated in the current UI culture on each access
+        /// (like <see cref="FirmwareCheckResult"/>) — so a language switch after a download
+        /// re-localizes it. Any non-localizable detail (an exception's text) is captured once by
+        /// the factory; the surrounding localized prefix still re-resolves.
+        /// </summary>
+        public string Message => _message();
+
+        public DownloadResult(DownloadOutcome outcome, string? path, Func<string> message)
         {
             Outcome = outcome;
             Path = path;
-            Message = message;
+            _message = message;
         }
 
         public bool Ok => Outcome is DownloadOutcome.Verified or DownloadOutcome.Cached;
@@ -96,7 +104,7 @@ namespace IntercomFirmwareTool.Core
 
             // Fail-closed: only a customizable Door Entry entry with a URL may be fetched.
             if (!fw.IsCustomizable || string.IsNullOrWhiteSpace(fw.DownloadUrl))
-                return new(DownloadOutcome.NotDownloadable, null, CoreStrings.Get("FD_NotDownloadable"));
+                return new(DownloadOutcome.NotDownloadable, null, () => CoreStrings.Get("FD_NotDownloadable"));
 
             string finalPath = Path.Combine(destDir, fw.OriginalName);
 
@@ -111,13 +119,13 @@ namespace IntercomFirmwareTool.Core
                     && await Task.Run(() => MatchesEntry(finalPath, fw), ct).ConfigureAwait(false))
                 {
                     if (ct.IsCancellationRequested)
-                        return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
-                    return new(DownloadOutcome.Cached, finalPath, CoreStrings.Format("FD_Cached", fw.OriginalName));
+                        return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
+                    return new(DownloadOutcome.Cached, finalPath, () => CoreStrings.Format("FD_Cached", fw.OriginalName));
                 }
             }
             catch (OperationCanceledException)
             {
-                return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+                return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
             }
 
             try
@@ -126,7 +134,7 @@ namespace IntercomFirmwareTool.Core
             }
             catch (Exception ex)
             {
-                return new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)));
+                return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
             }
 
             // At this point the canonical name is either free or holds a DIFFERENT file (a valid copy
@@ -144,14 +152,14 @@ namespace IntercomFirmwareTool.Core
             // A cancel or a local IO error is final; only transport/integrity failures are retried.
             const int maxAttempts = 4;
             DownloadResult lastFailure =
-                new(DownloadOutcome.HttpError, null, CoreStrings.Get("FD_DownloadFailed"));
+                new(DownloadOutcome.HttpError, null, () => CoreStrings.Get("FD_DownloadFailed"));
 
             for (int attempt = 1; attempt <= maxAttempts; attempt++)
             {
                 if (ct.IsCancellationRequested)
                 {
                     CleanPartials(partPath);
-                    return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+                    return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
                 }
 
                 CleanPartials(partPath); // always start clean: a fresh, whole-file GET (no resume)
@@ -169,7 +177,7 @@ namespace IntercomFirmwareTool.Core
                         if (ct.IsCancellationRequested)
                         {
                             CleanPartials(partPath);
-                            return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+                            return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
                         }
                         // The bytes are present in partPath and already verified; publish it.
                         // finalPath was chosen to be free (cache hit returned earlier; a taken name
@@ -182,10 +190,10 @@ namespace IntercomFirmwareTool.Core
                         catch (Exception ex)
                         {
                             CleanPartials(partPath);
-                            return new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)));
+                            return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
                         }
                         return new(DownloadOutcome.Verified, finalPath,
-                            CoreStrings.Format("FD_Verified", fw.OriginalName, fw.SizeBytes));
+                            () => CoreStrings.Format("FD_Verified", fw.OriginalName, fw.SizeBytes));
 
                     case DownloadOutcome.Cancelled:
                     case DownloadOutcome.IoError:
@@ -205,7 +213,7 @@ namespace IntercomFirmwareTool.Core
                             }
                             catch (OperationCanceledException)
                             {
-                                return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+                                return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
                             }
                         }
                         break;
@@ -247,15 +255,15 @@ namespace IntercomFirmwareTool.Core
                 }
 
                 if (ct.IsCancellationRequested || completed?.Cancelled == true)
-                    return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+                    return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
                 if (completed?.Error is { } err)
                     return ClassifyTransferError(err);
                 if (!File.Exists(partPath))
-                    return new(DownloadOutcome.HttpError, null, CoreStrings.Get("FD_DownloadFailed"));
+                    return new(DownloadOutcome.HttpError, null, () => CoreStrings.Get("FD_DownloadFailed"));
             }
             catch (OperationCanceledException)
             {
-                return new(DownloadOutcome.Cancelled, null, CoreStrings.Get("FD_Cancelled"));
+                return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
             }
             catch (Exception ex)
             {
@@ -269,14 +277,14 @@ namespace IntercomFirmwareTool.Core
             {
                 if (!MatchesEntryStrict(partPath, fw))
                     return new(DownloadOutcome.IntegrityMismatch, null,
-                        CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName));
+                        () => CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                return new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)));
+                return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
             }
 
-            return new(DownloadOutcome.Verified, partPath, string.Empty);
+            return new(DownloadOutcome.Verified, partPath, () => string.Empty);
         }
 
         // A local filesystem failure (unwritable dir, disk full, locked .part) is not a transport
@@ -284,8 +292,8 @@ namespace IntercomFirmwareTool.Core
         // sees a file error, not a network one. Everything else is treated as a transport failure.
         private static DownloadResult ClassifyTransferError(Exception ex) =>
             ex is IOException or UnauthorizedAccessException
-                ? new(DownloadOutcome.IoError, null, CoreStrings.Format("FD_IoError", SafeMsg(ex)))
-                : new(DownloadOutcome.HttpError, null, CoreStrings.Format("FD_DownloadError", SafeMsg(ex)));
+                ? new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)))
+                : new(DownloadOutcome.HttpError, null, () => CoreStrings.Format("FD_DownloadError", SafeMsg(ex)));
 
         // Size fast-path then SHA-256, checked against a SPECIFIC entry (clearer than the
         // whole-registry Verify, and a match here means the file also passes that gate). Throws on
