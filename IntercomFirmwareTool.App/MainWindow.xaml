@@ -534,10 +534,22 @@
                                     Content="{loc:Loc Dl_Browse}" Click="BtnDlBrowse_Click"/>
                         </Grid>
 
-                        <!-- Primary action -->
-                        <Button x:Name="BtnDlStart" Style="{StaticResource PrimaryButton}" Height="34"
-                                HorizontalAlignment="Left" MinWidth="190" IsEnabled="False"
-                                Content="{loc:Loc Dl_Start}" Click="BtnDlStart_Click"/>
+                        <!-- Primary action + the result (success / error / cancelled)
+                             shown INLINE to the right of the button — a cache hit has no
+                             progress bar, so the message reads best right beside it. -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="BtnDlStart" Grid.Column="0" Style="{StaticResource PrimaryButton}"
+                                    Height="34" HorizontalAlignment="Left" MinWidth="190" IsEnabled="False"
+                                    Content="{loc:Loc Dl_Start}" Click="BtnDlStart_Click"/>
+                            <TextBlock x:Name="TxtDlStatus" Grid.Column="1" Visibility="Collapsed"
+                                       VerticalAlignment="Center" Margin="14,0,0,0"
+                                       FontSize="12" TextWrapping="Wrap"
+                                       AutomationProperties.LiveSetting="Polite"/>
+                        </Grid>
 
                         <!-- Progress (shown only while a download runs) -->
                         <StackPanel x:Name="DlProgressPanel" Visibility="Collapsed" Margin="0,14,0,0">
@@ -555,11 +567,6 @@
                             <TextBlock x:Name="TxtDlProgress" Margin="0,6,0,0" FontSize="11.5"
                                        Foreground="#FF64748B" AutomationProperties.LiveSetting="Polite"/>
                         </StackPanel>
-
-                        <!-- Result (success / error / cancelled) -->
-                        <TextBlock x:Name="TxtDlStatus" Visibility="Collapsed" Margin="0,10,0,0"
-                                   FontSize="12" TextWrapping="Wrap"
-                                   AutomationProperties.LiveSetting="Polite"/>
                     </StackPanel>
                 </Border>
             </StackPanel>
