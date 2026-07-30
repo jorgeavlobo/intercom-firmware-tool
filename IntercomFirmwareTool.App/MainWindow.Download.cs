@@ -409,6 +409,7 @@ namespace IntercomFirmwareTool.App
         {
             foreach (var r in ModelPills.Children.OfType<RadioButton>()) r.IsEnabled = !busy;
             foreach (var r in VersionPillButtons()) r.IsEnabled = !busy;
+            TxtDlFolder.IsEnabled = !busy; // click-to-browse box: dead while a download runs
             BtnDlBrowse.IsEnabled = !busy;
             BtnDlCancel.IsEnabled = busy;
             // Lock the other operation launchers while a download runs (a build already blocks
