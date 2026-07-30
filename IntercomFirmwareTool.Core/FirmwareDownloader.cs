@@ -243,7 +243,13 @@ namespace IntercomFirmwareTool.Core
                 {
                     service.DownloadProgressChanged += (_, e) =>
                         progress.Report(new DownloadProgress(
-                            e.ReceivedBytesSize, e.TotalBytesToReceive, e.BytesPerSecondSpeed));
+                            e.ReceivedBytesSize,
+                            // Some endpoints (the Liferay checkout links) don't send a Content-Length,
+                            // so the library reports total 0 and the bar can't fill. We already KNOW the
+                            // exact size from the registry — fall back to it so the percentage shows.
+                            // Safe: the bytes are verified against this same size on completion.
+                            e.TotalBytesToReceive > 0 ? e.TotalBytesToReceive : fw.SizeBytes,
+                            e.BytesPerSecondSpeed));
                 }
                 service.DownloadFileCompleted += (_, e) => completed = e;
 
