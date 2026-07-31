@@ -325,7 +325,11 @@ namespace IntercomFirmwareTool.Core
             // the latter is a final IoError, not something a re-download would fix.
             try
             {
-                var v = await VerifyEntryAsync(partPath, fw, ct).ConfigureAwait(false);
+                // Cancellable outer wait (like the destination scan): VerifyEntryAsync opens the file
+                // with synchronous FileInfo.Length / FileStream calls before its first cancellable
+                // ReadAsync, so on a stalled network destination a Cancel could otherwise hang here.
+                var v = await Task.Run(() => VerifyEntryAsync(partPath, fw, ct), ct)
+                    .WaitAsync(ct).ConfigureAwait(false);
                 if (v.Outcome == VerifyOutcome.SizeMismatch)
                 {
                     long actual = v.ActualSize; // capture for the re-localizing message factory
@@ -507,7 +511,8 @@ namespace IntercomFirmwareTool.Core
         private static async Task<DownloadResult> PublishVerifiedAsync(
             string partPath, string finalPath, string destDir, KnownFirmware fw, CancellationToken ct)
         {
-            for (int attempt = 0; attempt < 3; attempt++)
+            const int maxAttempts = 4;
+            for (int attempt = 0; attempt < maxAttempts; attempt++)
             {
                 try
                 {
@@ -515,7 +520,11 @@ namespace IntercomFirmwareTool.Core
                     return new(DownloadOutcome.Verified, finalPath,
                         () => CoreStrings.Format("FD_Verified", Path.GetFileName(finalPath), fw.SizeBytes));
                 }
-                catch (IOException) when (File.Exists(finalPath) || Directory.Exists(finalPath))
+                // Rescan only while attempts remain, so the target the LAST rescan picks is always
+                // tried by the next iteration (never assigned then dropped). A collision on the final
+                // attempt falls through to the generic catch below as an IoError.
+                catch (IOException) when (attempt < maxAttempts - 1
+                                          && (File.Exists(finalPath) || Directory.Exists(finalPath)))
                 {
                     // The name was taken between the scan and now. Re-scan: a verified match is a
                     // cache hit (someone published the identical file); else take a fresh free target
