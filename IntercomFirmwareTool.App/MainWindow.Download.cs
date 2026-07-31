@@ -40,6 +40,11 @@ namespace IntercomFirmwareTool.App
 
         // Current selection in the card.
         private string? _dlModelLine;      // selected product line (model pill)
+        // True only while BuildModelPills rebuilds the pills for a language switch. The rebuild
+        // re-checks the remembered model/version, firing the same Checked handlers a real click
+        // would — this flag lets SelectVersion tell the two apart, so a language switch keeps the
+        // last download's inline status while an actual selection change clears it.
+        private bool _dlRebuilding;
         private KnownFirmware? _dlSelected; // selected version (feeds the download)
         private string _dlFolder = "";      // destination folder
 
@@ -130,27 +135,35 @@ namespace IntercomFirmwareTool.App
 
         private void BuildModelPills()
         {
-            ModelPills.Children.Clear();
-            // Distinct preserves registry order (100X before 300X).
-            var lines = _availableFw.Select(f => f.Line).Distinct().ToList();
-            RadioButton? target = null;
-            foreach (var line in lines)
+            // A rebuild re-checks the remembered pills, which fires the selection handlers exactly
+            // as a user click would; flag it so SelectVersion preserves (not clears) the last
+            // download's inline status across a language switch.
+            _dlRebuilding = true;
+            try
             {
-                var pill = new RadioButton
+                ModelPills.Children.Clear();
+                // Distinct preserves registry order (100X before 300X).
+                var lines = _availableFw.Select(f => f.Line).Distinct().ToList();
+                RadioButton? target = null;
+                foreach (var line in lines)
                 {
-                    Style = (Style)FindResource("SegmentPill"),
-                    GroupName = "dlModel",
-                    Content = line,
-                    Tag = line,
-                };
-                pill.Checked += ModelPill_Checked;
-                ModelPills.Children.Add(pill);
-                if (line == _dlModelLine) target = pill;
+                    var pill = new RadioButton
+                    {
+                        Style = (Style)FindResource("SegmentPill"),
+                        GroupName = "dlModel",
+                        Content = line,
+                        Tag = line,
+                    };
+                    pill.Checked += ModelPill_Checked;
+                    ModelPills.Children.Add(pill);
+                    if (line == _dlModelLine) target = pill;
+                }
+                target ??= ModelPills.Children.OfType<RadioButton>().FirstOrDefault();
+                // Setting IsChecked here (after the handler is wired + the pill is in the
+                // tree) fires ModelPill_Checked → SelectModel → BuildVersionPills.
+                if (target != null) target.IsChecked = true;
             }
-            target ??= ModelPills.Children.OfType<RadioButton>().FirstOrDefault();
-            // Setting IsChecked here (after the handler is wired + the pill is in the
-            // tree) fires ModelPill_Checked → SelectModel → BuildVersionPills.
-            if (target != null) target.IsChecked = true;
+            finally { _dlRebuilding = false; }
         }
 
         private void ModelPill_Checked(object sender, RoutedEventArgs e)
@@ -266,6 +279,10 @@ namespace IntercomFirmwareTool.App
         private void SelectVersion(KnownFirmware fw)
         {
             _dlSelected = fw;
+            // A genuine selection change makes the previous download's inline status (e.g. the
+            // generic "Download failed"/"cancelled") describe a firmware no longer selected — clear
+            // it. A language-only pill rebuild re-selects the same entry, so keep the status there.
+            if (!_dlRebuilding) SetDlStatus(null);
             UpdateDlStartEnabled();
         }
 
