@@ -587,23 +587,26 @@ namespace IntercomFirmwareTool.App
 
         // ---- Byte / rate formatting ------------------------------------------
 
+        // Binary units (1024-based), labelled with the correct IEC names (MiB/GiB/KiB) so the
+        // divisor and the unit agree — "MB/GB" would imply SI 1000-based and misread against
+        // browser/OS sizes.
         private static string HumanBytes(long bytes)
         {
             if (bytes < 0) bytes = 0;
-            double mb = bytes / (1024.0 * 1024.0);
-            return mb >= 1024.0
-                ? string.Format(CultureInfo.CurrentCulture, "{0:N1} GB", mb / 1024.0)
-                : string.Format(CultureInfo.CurrentCulture, "{0:N1} MB", mb);
+            double mib = bytes / (1024.0 * 1024.0);
+            return mib >= 1024.0
+                ? string.Format(CultureInfo.CurrentCulture, "{0:N1} GiB", mib / 1024.0)
+                : string.Format(CultureInfo.CurrentCulture, "{0:N1} MiB", mib);
         }
 
         private static string HumanRate(double bytesPerSecond)
         {
             if (bytesPerSecond < 0) bytesPerSecond = 0;
-            double mbps = bytesPerSecond / (1024.0 * 1024.0);
-            if (mbps >= 1.0)
-                return string.Format(CultureInfo.CurrentCulture, "{0:N1} MB/s", mbps);
-            double kbps = bytesPerSecond / 1024.0;
-            return string.Format(CultureInfo.CurrentCulture, "{0:N0} KB/s", kbps);
+            double mibps = bytesPerSecond / (1024.0 * 1024.0);
+            if (mibps >= 1.0)
+                return string.Format(CultureInfo.CurrentCulture, "{0:N1} MiB/s", mibps);
+            double kibps = bytesPerSecond / 1024.0;
+            return string.Format(CultureInfo.CurrentCulture, "{0:N0} KiB/s", kibps);
         }
     }
 }
