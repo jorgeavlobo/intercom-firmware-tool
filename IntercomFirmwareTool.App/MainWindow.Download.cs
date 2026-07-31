@@ -371,7 +371,8 @@ namespace IntercomFirmwareTool.App
             SetDownloadBusy(true);
             SetDlStatus(null);
             DlProgress.Value = 0;
-            SetDlProgress(() => LF("Dl_ProgressStarting", fw.OriginalName));
+            _dlLastAnnouncedPct = 0;
+            SetDlProgress(() => LF("Dl_ProgressStarting", fw.OriginalName), announce: true);
             DlProgressPanel.Visibility = Visibility.Visible;
 
             // Progress<T> captures this UI SynchronizationContext, so the report
@@ -406,7 +407,7 @@ namespace IntercomFirmwareTool.App
         {
             if (!_downloading) return;
             BtnDlCancel.IsEnabled = false;
-            SetDlProgress(() => L("Dl_Cancelling"));
+            SetDlProgress(() => L("Dl_Cancelling"), announce: true);
             try { _dlCts?.Cancel(); } catch { /* best-effort */ }
         }
 
@@ -423,11 +424,15 @@ namespace IntercomFirmwareTool.App
                 // Clamp the shown percent too: with TotalBytes pinned to the registry size, a server
                 // that returns more bytes than expected could otherwise print "101%".
                 int pct = (int)Math.Round(clamped);
+                // Announce only when a 10% milestone is crossed, so a screen reader hears steady
+                // progress without being flooded on every callback.
+                bool milestone = pct / 10 != _dlLastAnnouncedPct / 10;
+                _dlLastAnnouncedPct = pct;
                 // Capture the values so the render closure re-localizes on a later language switch.
                 long recv = p.BytesReceived, total = p.TotalBytes;
                 double rate = p.BytesPerSecond;
                 SetDlProgress(() => LF("Dl_ProgressFmt", pct,
-                    HumanBytes(recv), HumanBytes(total), HumanRate(rate)));
+                    HumanBytes(recv), HumanBytes(total), HumanRate(rate)), announce: milestone);
             }
             else
             {
@@ -552,11 +557,16 @@ namespace IntercomFirmwareTool.App
         // switch mid-transfer re-localizes it — even a "Starting download…" that's stalled waiting
         // for the first bytes and so isn't being refreshed by progress callbacks.
         private Func<string>? _dlProgressRender;
+        private int _dlLastAnnouncedPct;  // last 10%-milestone announced to a screen reader
 
-        private void SetDlProgress(Func<string> render)
+        // A WPF live region does NOT announce a bare Text change — the helper must raise
+        // LiveRegionChanged. Announce the discrete states (Starting…/Cancelling…) always, but only
+        // 10%-milestone percentage updates, so a screen reader isn't spammed on every callback.
+        private void SetDlProgress(Func<string> render, bool announce = false)
         {
             _dlProgressRender = render;
             TxtDlProgress.Text = render();
+            if (announce) AnnounceLiveRegion(TxtDlProgress);
         }
 
         /// <summary>Re-applies the card's code-set text after a runtime language switch:

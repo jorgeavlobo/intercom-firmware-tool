@@ -125,6 +125,11 @@ namespace IntercomFirmwareTool.App
 
         private void HideScrollCue()
         {
+            // Cancel a still-queued programmatic-reveal evaluation: once the cue is dismissed (a user
+            // scroll, the auto-hide timer, or a click), that Background callback must not fire and
+            // re-show the cue behind the user's back.
+            _cueRevealOp?.Abort();
+            _cueRevealOp = null;
             _scrollCueTimer?.Stop();
             if (!_cueShown) return;
             _cueShown = false;
