@@ -75,8 +75,11 @@ namespace IntercomFirmwareTool.App
         /// <summary>Cancels the probe / any in-flight download and releases the checker.</summary>
         private void StopDownload()
         {
+            // Cancel but deliberately DON'T dispose _dlProbeCts: the background probe may still be
+            // using its token in HttpClient/Polly, and disposing a CTS whose token is being registered
+            // on can throw ObjectDisposedException on the in-flight operation. It uses no timer/
+            // WaitHandle, so leaving it undisposed for the window's lifetime frees nothing meaningful.
             try { _dlProbeCts.Cancel(); } catch { /* nothing registered can throw */ }
-            try { _dlProbeCts.Dispose(); } catch { /* best-effort: only runs on window close */ }
             try { _dlCts?.Cancel(); } catch { /* best-effort */ }
             try { _availChecker?.Dispose(); } catch { /* best-effort */ }
             _availChecker = null; // idempotent: a second Stop won't re-dispose a released checker
