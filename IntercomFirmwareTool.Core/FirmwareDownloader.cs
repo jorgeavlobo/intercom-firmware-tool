@@ -544,7 +544,7 @@ namespace IntercomFirmwareTool.Core
                 }
             }
             // Kept colliding across re-scans (pathological) → give up rather than loop forever.
-            return new(DownloadOutcome.IoError, null, () => CoreStrings.Get("FD_DownloadFailed"));
+            return new(DownloadOutcome.IoError, null, () => CoreStrings.Get("FD_PublishFailed"));
         }
 
         // A local filesystem failure (unwritable dir, disk full, locked .part) is not a transport

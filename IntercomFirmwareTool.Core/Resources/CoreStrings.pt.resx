@@ -267,6 +267,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="FD_IoError" xml:space="preserve">
     <value>Erro de ficheiro: {0}</value>
   </data>
+  <data name="FD_PublishFailed" xml:space="preserve">
+    <value>Não foi possível guardar o ficheiro descarregado na pasta de destino.</value>
+  </data>
   <data name="FD_ProbeAvailable" xml:space="preserve">
     <value>Disponível.</value>
   </data>

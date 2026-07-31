@@ -267,6 +267,9 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="FD_IoError" xml:space="preserve">
     <value>Dateifehler: {0}</value>
   </data>
+  <data name="FD_PublishFailed" xml:space="preserve">
+    <value>Die heruntergeladene Datei konnte nicht im Zielordner gespeichert werden.</value>
+  </data>
   <data name="FD_ProbeAvailable" xml:space="preserve">
     <value>Verfügbar.</value>
   </data>

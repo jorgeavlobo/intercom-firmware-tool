@@ -267,6 +267,9 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="FD_IoError" xml:space="preserve">
     <value>Error de archivo: {0}</value>
   </data>
+  <data name="FD_PublishFailed" xml:space="preserve">
+    <value>No se pudo guardar el archivo descargado en la carpeta de destino.</value>
+  </data>
   <data name="FD_ProbeAvailable" xml:space="preserve">
     <value>Disponible.</value>
   </data>

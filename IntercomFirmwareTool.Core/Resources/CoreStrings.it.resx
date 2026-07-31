@@ -267,6 +267,9 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="FD_IoError" xml:space="preserve">
     <value>Errore di file: {0}</value>
   </data>
+  <data name="FD_PublishFailed" xml:space="preserve">
+    <value>Impossibile salvare il file scaricato nella cartella di destinazione.</value>
+  </data>
   <data name="FD_ProbeAvailable" xml:space="preserve">
     <value>Disponibile.</value>
   </data>

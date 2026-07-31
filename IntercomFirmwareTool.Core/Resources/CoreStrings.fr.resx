@@ -267,6 +267,9 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="FD_IoError" xml:space="preserve">
     <value>Erreur de fichier : {0}</value>
   </data>
+  <data name="FD_PublishFailed" xml:space="preserve">
+    <value>Impossible d'enregistrer le fichier téléchargé dans le dossier de destination.</value>
+  </data>
   <data name="FD_ProbeAvailable" xml:space="preserve">
     <value>Disponible.</value>
   </data>
