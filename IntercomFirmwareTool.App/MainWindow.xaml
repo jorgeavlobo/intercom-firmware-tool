@@ -181,7 +181,8 @@
                 <Setter.Value>
                     <ControlTemplate TargetType="ToggleButton">
                         <Border x:Name="bd" Background="{TemplateBinding Background}"
-                                CornerRadius="4" Padding="5,3" SnapsToDevicePixels="True">
+                                CornerRadius="4" Padding="5,3" SnapsToDevicePixels="True"
+                                BorderThickness="1" BorderBrush="Transparent">
                             <StackPanel Orientation="Horizontal">
                                 <!-- Download glyph -->
                                 <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="13"
@@ -199,6 +200,12 @@
                             </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="bd" Property="Background" Value="#170F6CBD"/>
+                            </Trigger>
+                            <!-- Keyboard-focus cue: a visible accent outline (the transparent
+                                 1px border is always present, so showing it never shifts layout). -->
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#170F6CBD"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#FF0F6CBD"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -222,11 +229,20 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="RadioButton">
-                        <Border x:Name="bd" CornerRadius="15" Background="{TemplateBinding Background}"
-                                BorderBrush="#FFDCE6F1" BorderThickness="1" SnapsToDevicePixels="True">
-                            <ContentPresenter Margin="{TemplateBinding Padding}"
-                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        </Border>
+                        <Grid>
+                            <Border x:Name="bd" CornerRadius="15" Background="{TemplateBinding Background}"
+                                    BorderBrush="#FFDCE6F1" BorderThickness="1" SnapsToDevicePixels="True">
+                                <ContentPresenter Margin="{TemplateBinding Padding}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <!-- Keyboard-focus halo: a high-contrast ring drawn just OUTSIDE the pill
+                                 so it reads on both the light (unchecked) and blue (checked) states,
+                                 telling keyboard users which group the arrow keys will move. Overlay
+                                 (not a border on bd) so showing it never shifts the pill's layout. -->
+                            <Border x:Name="focus" CornerRadius="17" BorderBrush="#FF00335A"
+                                    BorderThickness="2" Margin="-3" SnapsToDevicePixels="True"
+                                    IsHitTestVisible="False" Visibility="Collapsed"/>
+                        </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="bd" Property="Background" Value="#FFE1EAF4"/>
@@ -236,6 +252,9 @@
                                 <Setter TargetName="bd" Property="BorderBrush" Value="#FF0F6CBD"/>
                                 <Setter Property="Foreground" Value="White"/>
                                 <Setter Property="FontWeight" Value="SemiBold"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="focus" Property="Visibility" Value="Visible"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.5"/>

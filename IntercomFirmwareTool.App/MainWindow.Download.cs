@@ -73,6 +73,7 @@ namespace IntercomFirmwareTool.App
             try { _dlProbeCts.Cancel(); } catch { /* nothing registered can throw */ }
             try { _dlCts?.Cancel(); } catch { /* best-effort */ }
             try { _availChecker?.Dispose(); } catch { /* best-effort */ }
+            _availChecker = null; // idempotent: a second Stop won't re-dispose a released checker
         }
 
         /// <summary>Probe the official URLs off the UI thread; on completion, marshal
@@ -80,8 +81,8 @@ namespace IntercomFirmwareTool.App
         /// hidden and manual file-picking as the only path.</summary>
         private void StartAvailabilityProbe()
         {
-            _availChecker = new FirmwareAvailabilityChecker();
-            var checker = _availChecker;
+            var checker = new FirmwareAvailabilityChecker();
+            _availChecker = checker; // non-null local: the closure captures it without a null-check
             var token = _dlProbeCts.Token;
             _ = Task.Run(async () =>
             {
