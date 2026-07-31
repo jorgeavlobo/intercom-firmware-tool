@@ -472,6 +472,10 @@ namespace IntercomFirmwareTool.App
             BtnVerify.IsEnabled = !busy;
             BtnSelfTest.IsEnabled = !busy;
             BtnGenKey.IsEnabled = !busy;
+            // The firmware picker box, too: ChooseFirmwareAsync no-ops while _downloading, so leaving
+            // it enabled/focusable would just swallow clicks; lock it like the other browse fields.
+            // (A download and a build are mutually exclusive, so !busy is the right restore state.)
+            TxtFwzPath.IsEnabled = !busy;
             // Also the MQTT connection test: a download's completion changes the HA node id, which
             // would silently invalidate an in-flight test.
             BtnMqttTest.IsEnabled = !busy;

@@ -101,6 +101,12 @@ namespace IntercomFirmwareTool.Core
         private static readonly HttpClient _http =
             new(new HttpClientHandler { AllowAutoRedirect = true }) { Timeout = Timeout.InfiniteTimeSpan };
 
+        // Inactivity timeout for the owned fallback stream: since _http has no wall-clock timeout (we
+        // bound with the token), a server that accepts the request then stalls — no header or body
+        // bytes — would otherwise hang until the user cancels. If nothing arrives for this long, abort
+        // the attempt as a RETRYABLE transport failure so the retry loop moves on.
+        private static readonly TimeSpan InactivityTimeout = TimeSpan.FromSeconds(30);
+
         /// <summary>
         /// Download <paramref name="fw"/> into <paramref name="destDir"/> (as its original name),
         /// reporting <paramref name="progress"/> and honoring <paramref name="ct"/>. Verifies the
@@ -363,13 +369,19 @@ namespace IntercomFirmwareTool.Core
             KnownFirmware fw, string partPath,
             IProgress<DownloadProgress>? progress, CancellationToken ct)
         {
+            // tk = the user token PLUS an inactivity deadline (re-armed on every network wait via
+            // CancelAfter). It bounds the header wait and each body read; the file ops keep the plain
+            // user token (ct), so a slow disk isn't mistaken for a network stall.
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            CancellationToken tk = timeoutCts.Token;
             try
             {
                 using var req = new HttpRequestMessage(HttpMethod.Get, fw.DownloadUrl!);
                 req.Headers.UserAgent.ParseAdd("IntercomFirmwareTool");
                 req.Headers.Accept.ParseAdd("application/octet-stream, */*");
+                timeoutCts.CancelAfter(InactivityTimeout); // arm for the header wait
                 using var resp = await _http
-                    .SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+                    .SendAsync(req, HttpCompletionOption.ResponseHeadersRead, tk).ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode)
                     return new(DownloadOutcome.HttpError, null,
                         () => CoreStrings.Format("FD_ProbeHttpStatus", (int)resp.StatusCode));
@@ -378,7 +390,7 @@ namespace IntercomFirmwareTool.Core
                 // For the % bar: prefer a sane Content-Length, else the known registry size.
                 long barTotal = resp.Content.Headers.ContentLength is long cl && cl > 0 ? cl : expected;
 
-                using var body = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                using var body = await resp.Content.ReadAsStreamAsync(tk).ConfigureAwait(false);
 
                 // Creating/writing/flushing the destination is a LOCAL op — wrap those so their
                 // failures classify as a final IoError, distinct from a transport IOException on the
@@ -400,9 +412,12 @@ namespace IntercomFirmwareTool.Core
                     byte[] buffer = new byte[1 << 20]; // 1 MiB
                     long received = 0;
                     long startTs = Stopwatch.GetTimestamp();
-                    int read;
-                    while ((read = await body.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+                    while (true)
                     {
+                        timeoutCts.CancelAfter(InactivityTimeout); // reset the inactivity clock each read
+                        int read = await body.ReadAsync(buffer.AsMemory(0, buffer.Length), tk).ConfigureAwait(false);
+                        if (read <= 0) break;
+
                         // HARD write-boundary cap: if this chunk would push the file past the known
                         // size, stop before writing it — the .part can never exceed `expected` on disk.
                         if (expected > 0 && received + read > expected)
@@ -423,6 +438,7 @@ namespace IntercomFirmwareTool.Core
                         double secs = (Stopwatch.GetTimestamp() - startTs) / (double)Stopwatch.Frequency;
                         progress?.Report(new DownloadProgress(received, barTotal, secs > 0 ? received / secs : 0));
                     }
+                    timeoutCts.CancelAfter(Timeout.InfiniteTimeSpan); // stop the clock; the rest is local work
 
                     try
                     {
@@ -450,6 +466,12 @@ namespace IntercomFirmwareTool.Core
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
+            }
+            catch (OperationCanceledException)
+            {
+                // Not the user's cancel (ct isn't set) → the inactivity deadline fired: the server
+                // stalled. A retryable transport failure, so the loop moves to the next attempt.
+                return new(DownloadOutcome.HttpError, null, () => CoreStrings.Get("FD_DownloadFailed"));
             }
             catch (LocalIoException lex)
             {
@@ -551,7 +573,12 @@ namespace IntercomFirmwareTool.Core
             // ACL denial): continuing with a PARTIAL set could miss a cached copy or pick a name
             // that's actually taken — wasting a full transfer before File.Move fails. Let it
             // propagate so DownloadAsync reports it as an IoError instead of scanning blind.
-            var existing = new HashSet<int>();
+            // Keep the ACTUAL enumerated path with each parsed index — don't reconstruct a candidate
+            // name from baseName/ext later. The reconstructed form can differ from what's on disk
+            // (a zero-padded "(01)" the regex normalizes to 1, or a differently-cased canonical name
+            // on a case-sensitive filesystem), which would hash a non-existent path and MISS a valid
+            // 100-300 MB cache copy.
+            var candidates = new List<(int Index, string Path)>();
             var rx = new Regex(
                 "^" + Regex.Escape(baseName) + @" \((\d+)\)" + Regex.Escape(ext) + "$",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
@@ -562,28 +589,26 @@ namespace IntercomFirmwareTool.Core
                 ct.ThrowIfCancellationRequested();
                 string name = Path.GetFileName(path);
                 if (string.Equals(name, fw.OriginalName, StringComparison.OrdinalIgnoreCase))
-                    existing.Add(0);
+                    candidates.Add((0, path));
                 else if (rx.Match(name) is { Success: true } m
                          && int.TryParse(m.Groups[1].Value, out int n) && n > 0)
-                    existing.Add(n);
+                    candidates.Add((n, path));
             }
 
-            // Reuse a verified copy if one exists — check in ascending index order so the reused
-            // file is the most canonical available.
-            foreach (int i in existing.OrderBy(static x => x))
+            // Reuse a verified copy if one exists — verify the REAL enumerated path, in ascending
+            // index order so the reused file is the most canonical available.
+            foreach (var (_, path) in candidates.OrderBy(static c => c.Index))
             {
                 ct.ThrowIfCancellationRequested(); // stop between candidates so Cancel is responsive
-                string candidate = i == 0
-                    ? Path.Combine(destDir, fw.OriginalName)
-                    : Path.Combine(destDir, $"{baseName} ({i}){ext}");
-                if (await MatchesEntryAsync(candidate, fw, ct).ConfigureAwait(false))
-                    return (candidate, candidate);
+                if (await MatchesEntryAsync(path, fw, ct).ConfigureAwait(false))
+                    return (path, path);
             }
 
-            // No verified copy anywhere → download into the first free name (smallest unused index),
+            // No verified copy anywhere → download into the first free NAME (smallest unused index),
             // never overwriting an existing (unrelated) file.
+            var occupied = new HashSet<int>(candidates.Select(static c => c.Index));
             int free = 0;
-            while (existing.Contains(free)) free++;
+            while (occupied.Contains(free)) free++;
             string target = free == 0
                 ? Path.Combine(destDir, fw.OriginalName)
                 : Path.Combine(destDir, $"{baseName} ({free}){ext}");
