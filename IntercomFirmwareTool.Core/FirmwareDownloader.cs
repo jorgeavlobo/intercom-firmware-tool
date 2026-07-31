@@ -121,14 +121,14 @@ namespace IntercomFirmwareTool.Core
             // duplicate copies), otherwise take the first FREE name as the target (never overwriting
             // an unrelated file that holds the name). The SHA-256 hashing runs off the UI thread so
             // it can't freeze the UI, and it observes the token — the scan checks between candidates
-            // and hashes each file in cancellable chunks — so a Cancel pressed while a slow/networked
-            // destination with many same-size candidates is being hashed stops promptly instead of
-            // sitting at "Cancelling…" through gigabytes. A cancel surfaces as OperationCanceledException,
-            // caught below.
+            // and reads each file with cancellable async I/O — so a Cancel pressed while a slow or
+            // stalled/networked destination with many same-size candidates is being hashed stops
+            // promptly instead of sitting at "Cancelling…". A cancel surfaces as
+            // OperationCanceledException, caught below.
             string finalPath;
             try
             {
-                var scan = await Task.Run(() => ScanDestination(destDir, fw, ct), ct).ConfigureAwait(false);
+                var scan = await Task.Run(() => ScanDestinationAsync(destDir, fw, ct), ct).ConfigureAwait(false);
                 if (scan.CachedPath is string hit)
                 {
                     if (ct.IsCancellationRequested)
@@ -305,7 +305,7 @@ namespace IntercomFirmwareTool.Core
             // the latter is a final IoError, not something a re-download would fix.
             try
             {
-                var v = VerifyEntry(partPath, fw, ct);
+                var v = await VerifyEntryAsync(partPath, fw, ct).ConfigureAwait(false);
                 if (v.Outcome == VerifyOutcome.SizeMismatch)
                 {
                     long actual = v.ActualSize; // capture for the re-localizing message factory
@@ -353,24 +353,22 @@ namespace IntercomFirmwareTool.Core
         // ACTUAL size and (when it got as far as hashing) the actual hash, so the caller can build a
         // diagnosable message — a size mismatch usually means a truncated download or an HTML error
         // page, a hash mismatch means same-size but different content. Throws on an IO error reading
-        // the file (the caller decides what that means) and on cancellation (the hash reads in
-        // cancellable chunks).
-        private static (VerifyOutcome Outcome, long ActualSize, string? ActualHash) VerifyEntry(
+        // the file (the caller decides what that means) and on cancellation.
+        private static async Task<(VerifyOutcome Outcome, long ActualSize, string? ActualHash)> VerifyEntryAsync(
             string path, KnownFirmware fw, CancellationToken ct)
         {
             long actualSize = new FileInfo(path).Length;
             if (actualSize != fw.SizeBytes) return (VerifyOutcome.SizeMismatch, actualSize, null);
             using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            // Hash in chunks and check the token each chunk, so a Cancel interrupts a large (or
-            // slow/networked) file mid-read instead of blocking until the whole pass completes.
+            // Open async + sequential so ReadAsync observes the token: a Cancel interrupts a read
+            // that's blocked on a stalled/slow network share, instead of leaving the UI at
+            // "Cancelling…" until the filesystem operation times out.
+            using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                bufferSize: 1 << 20, options: FileOptions.Asynchronous | FileOptions.SequentialScan);
             byte[] buffer = new byte[1 << 20]; // 1 MiB
             int read;
-            while ((read = fs.Read(buffer, 0, buffer.Length)) > 0)
-            {
-                ct.ThrowIfCancellationRequested();
+            while ((read = await fs.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
                 sha.AppendData(buffer, 0, read);
-            }
             string hex = Convert.ToHexString(sha.GetHashAndReset()); // uppercase hex
             return string.Equals(hex, fw.Sha256, StringComparison.OrdinalIgnoreCase)
                 ? (VerifyOutcome.Match, actualSize, hex)
@@ -380,9 +378,9 @@ namespace IntercomFirmwareTool.Core
         // Bool wrapper for the cache-hit scan: any mismatch — or an unreadable file — is just "no
         // match" (download it). A cancel, however, must NOT be read as "no match" (that would keep
         // scanning) — let it propagate so the scan stops.
-        private static bool MatchesEntry(string path, KnownFirmware fw, CancellationToken ct)
+        private static async Task<bool> MatchesEntryAsync(string path, KnownFirmware fw, CancellationToken ct)
         {
-            try { return VerifyEntry(path, fw, ct).Outcome == VerifyOutcome.Match; }
+            try { return (await VerifyEntryAsync(path, fw, ct).ConfigureAwait(false)).Outcome == VerifyOutcome.Match; }
             catch (OperationCanceledException) { throw; }
             catch { return false; }
         }
@@ -401,7 +399,7 @@ namespace IntercomFirmwareTool.Core
         // pattern, so every numbered copy is considered no matter how large the gaps in the
         // numbering are (a lone "(16)" left after "(0)"–"(15)" were deleted is still reused).
         // Hashing happens here (call it off the UI thread).
-        private static (string? CachedPath, string FreeTarget) ScanDestination(
+        private static async Task<(string? CachedPath, string FreeTarget)> ScanDestinationAsync(
             string destDir, KnownFirmware fw, CancellationToken ct)
         {
             string baseName = Path.GetFileNameWithoutExtension(fw.OriginalName);
@@ -411,7 +409,7 @@ namespace IntercomFirmwareTool.Core
             // Enumerate file-system ENTRIES, not just files: a *directory* named like a candidate
             // (e.g. a "C100X_010508.fwz" folder) also occupies that name — File.Move onto it would
             // fail, and only after a full 100-300 MB transfer — so it must be skipped as a target
-            // too. Such an entry never becomes a cache hit: MatchesEntry can't hash a directory.
+            // too. Such an entry never becomes a cache hit: MatchesEntryAsync can't hash a directory.
             var existing = new HashSet<int>();
             try
             {
@@ -438,7 +436,8 @@ namespace IntercomFirmwareTool.Core
                 string candidate = i == 0
                     ? Path.Combine(destDir, fw.OriginalName)
                     : Path.Combine(destDir, $"{baseName} ({i}){ext}");
-                if (MatchesEntry(candidate, fw, ct)) return (candidate, candidate);
+                if (await MatchesEntryAsync(candidate, fw, ct).ConfigureAwait(false))
+                    return (candidate, candidate);
             }
 
             // No verified copy anywhere → download into the first free name (smallest unused index),
