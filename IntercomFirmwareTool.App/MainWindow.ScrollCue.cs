@@ -34,7 +34,10 @@ namespace IntercomFirmwareTool.App
             var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(700) };
             t.Tick += (_, _) => { t.Stop(); _cueArmed = true; };
             t.Start();
-            Closed += (_, _) => { _scrollCueTimer?.Stop(); _scrollAnim?.Stop(); };
+            // Stop t on close too: if the window closes before its first tick, a pending tick would
+            // otherwise fire on the dispatcher after Closed, briefly rooting the window and flipping
+            // _cueArmed post-close.
+            Closed += (_, _) => { t.Stop(); _scrollCueTimer?.Stop(); _scrollAnim?.Stop(); };
         }
 
         private void BodyScroll_ScrollChanged(object sender, ScrollChangedEventArgs e)

@@ -76,6 +76,7 @@ namespace IntercomFirmwareTool.App
         private void StopDownload()
         {
             try { _dlProbeCts.Cancel(); } catch { /* nothing registered can throw */ }
+            try { _dlProbeCts.Dispose(); } catch { /* best-effort: only runs on window close */ }
             try { _dlCts?.Cancel(); } catch { /* best-effort */ }
             try { _availChecker?.Dispose(); } catch { /* best-effort */ }
             _availChecker = null; // idempotent: a second Stop won't re-dispose a released checker
