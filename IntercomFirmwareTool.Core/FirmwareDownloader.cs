@@ -1,4 +1,6 @@
 using System.ComponentModel; // AsyncCompletedEventArgs
+using System.Diagnostics;    // Stopwatch (transfer-rate for the owned single-stream fallback)
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
 using Downloader;
@@ -61,8 +63,10 @@ namespace IntercomFirmwareTool.Core
     /// Fetches an official firmware from its registry <see cref="KnownFirmware.DownloadUrl"/> and
     /// guarantees the result is a byte-for-byte known-good original before it can be used (issue #23).
     ///
-    /// Uses the <b>Downloader</b> library for a fast multipart transfer (with a single-connection
-    /// fallback; each run starts fresh — no resume), but the integrity gate is always <b>ours</b>:
+    /// Uses the <b>Downloader</b> library for a fast multipart transfer on the first attempt, then
+    /// falls back to our <b>own single-connection stream</b> that enforces the known size at the
+    /// write boundary (a hard cap — see <see cref="TransferSingleCappedAsync"/>); each run starts
+    /// fresh — no resume. The integrity gate is always <b>ours</b>:
     /// the downloaded bytes are verified against the <i>specific</i> entry's
     /// <see cref="KnownFirmware.SizeBytes"/> + <see cref="KnownFirmware.Sha256"/> (a clearer error than the
     /// whole-registry <see cref="FirmwareRegistry.Verify"/>), and a file that passes therefore also
@@ -72,17 +76,17 @@ namespace IntercomFirmwareTool.Core
     /// </summary>
     public sealed class FirmwareDownloader
     {
-        // Transfer config. <paramref name="parallel"/> true = fast multipart (4 parallel range
-        // chunks); false = a single, sequential connection. We START parallel and only fall back
-        // to single if an attempt fails (see DownloadAsync), so links that support multipart keep
-        // it, while endpoints that choke on concurrent range requests — the Liferay checkout links
-        // intermittently serve an error page for some chunks, corrupting the assembly — are
-        // downloaded reliably on a single connection. Timeout/retry use the library defaults (its
-        // v5 DownloadConfiguration exposes neither as a property); our retry loop covers the rest.
-        private static DownloadConfiguration BuildConfig(bool parallel) => new()
+        // Fast multipart config for the FIRST attempt (4 parallel range chunks). Endpoints that
+        // support ranges send a Content-Length, so the library requests exact byte ranges and can't
+        // overrun; the fallback attempts use our own single-connection stream instead (see
+        // TransferSingleCappedAsync), which both serves the range-hostile Liferay checkout links
+        // reliably AND enforces the size cap at the write boundary. Timeout/retry use the library
+        // defaults (its v5 DownloadConfiguration exposes neither as a property); our retry loop
+        // covers the rest.
+        private static DownloadConfiguration BuildConfig() => new()
         {
-            ChunkCount = parallel ? 4 : 1,
-            ParallelDownload = parallel,
+            ChunkCount = 4,
+            ParallelDownload = true,
             RequestConfiguration = new RequestConfiguration
             {
                 UserAgent = "IntercomFirmwareTool",
@@ -90,6 +94,12 @@ namespace IntercomFirmwareTool.Core
                 KeepAlive = true,
             },
         };
+
+        // Shared client for the owned single-connection fallback stream. Static (process-lifetime,
+        // never disposed) is the recommended HttpClient pattern; we bound each transfer with the
+        // CancellationToken rather than a wall-clock timeout.
+        private static readonly HttpClient _http =
+            new(new HttpClientHandler { AllowAutoRedirect = true }) { Timeout = Timeout.InfiniteTimeSpan };
 
         /// <summary>
         /// Download <paramref name="fw"/> into <paramref name="destDir"/> (as its original name),
@@ -153,8 +163,9 @@ namespace IntercomFirmwareTool.Core
             // Range resume some endpoints reject) — so the user doesn't have to click Download
             // repeatedly. A per-attempt path means a cleanup that fails (AV/lock) can never leave the
             // NEXT attempt starting from a dirty file, and the finally removes every temp we created.
-            // The FIRST attempt uses fast multipart; the rest fall back to a single sequential
-            // connection, which the fussy endpoints (the Liferay checkout links) serve reliably.
+            // The FIRST attempt uses fast multipart (the library); the rest fall back to our own
+            // single-connection capped stream, which the fussy endpoints (the Liferay checkout links)
+            // serve reliably and which can't overrun the disk.
             // A cancel or a local IO error is final; only transport/integrity failures are retried.
             const int maxAttempts = 4;
             DownloadResult lastFailure =
@@ -169,11 +180,13 @@ namespace IntercomFirmwareTool.Core
 
                     string partPath = Path.Combine(destDir, $".ift-{Guid.NewGuid():N}.part");
                     usedParts.Add(partPath);
-                    // Multipart on the first try (keep it for links that support it); single
-                    // connection on the fallback tries.
-                    bool parallel = attempt == 1;
-                    DownloadResult attemptResult = await TransferOnceAsync(fw, partPath, parallel, progress, ct)
-                        .ConfigureAwait(false);
+                    // First attempt: fast multipart via the library (range-supporting CDNs, which
+                    // send a Content-Length so it can't overrun). Fallback attempts: our OWN
+                    // single-connection stream with a hard write-boundary size cap, which both serves
+                    // the range-hostile Liferay links reliably and can't be made to overrun the disk.
+                    DownloadResult attemptResult = attempt == 1
+                        ? await TransferOnceAsync(fw, partPath, progress, ct).ConfigureAwait(false)
+                        : await TransferSingleCappedAsync(fw, partPath, progress, ct).ConfigureAwait(false);
 
                     switch (attemptResult.Outcome)
                     {
@@ -232,30 +245,29 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// One download attempt into <paramref name="partPath"/>. Returns <see cref="DownloadOutcome.Verified"/>
-        /// (bytes written and checked against <paramref name="fw"/>), <see cref="DownloadOutcome.Cancelled"/>,
+        /// The fast <b>multipart</b> attempt via the Downloader library, into <paramref name="partPath"/>.
+        /// Returns <see cref="DownloadOutcome.Verified"/> (bytes written and checked against
+        /// <paramref name="fw"/>), <see cref="DownloadOutcome.Cancelled"/>,
         /// <see cref="DownloadOutcome.HttpError"/> (transport / no file), or <see cref="DownloadOutcome.IntegrityMismatch"/>.
         /// The caller decides whether to publish, retry, or give up. On the Verified result the message is
-        /// unused (the caller builds the final one), so it is left empty.
-        /// <paramref name="parallel"/> picks fast multipart vs a single sequential connection.
+        /// unused (the caller builds the final one), so it is left empty. The single-connection fallback is
+        /// <see cref="TransferSingleCappedAsync"/>.
         /// </summary>
         private static async Task<DownloadResult> TransferOnceAsync(
-            KnownFirmware fw, string partPath, bool parallel,
+            KnownFirmware fw, string partPath,
             IProgress<DownloadProgress>? progress, CancellationToken ct)
         {
             AsyncCompletedEventArgs? completed = null;
             bool oversize = false;
             try
             {
-                using var service = new DownloadService(BuildConfig(parallel));
+                using var service = new DownloadService(BuildConfig());
                 service.DownloadProgressChanged += (_, e) =>
                 {
-                    // Hard cap at the known registry size: an endpoint may omit or lie about
-                    // Content-Length (the availability probe permits a missing length), so don't
-                    // write until the server decides to stop — a misconfigured or compromised
-                    // endpoint could otherwise stream arbitrarily many bytes and fill the disk
-                    // before the post-transfer size check ever runs. Abort the instant we exceed
-                    // the exact expected size; a correct file never crosses it.
+                    // Backstop size guard for the multipart path: a range-supporting endpoint sends a
+                    // Content-Length so the library requests exact bytes and shouldn't overrun, but if
+                    // one lies, abort the instant we exceed the exact expected size rather than write
+                    // on. (The strict, write-boundary cap lives in the single-stream fallback.)
                     if (!oversize && fw.SizeBytes > 0 && e.ReceivedBytesSize > fw.SizeBytes)
                     {
                         oversize = true;
@@ -336,6 +348,83 @@ namespace IntercomFirmwareTool.Core
             }
 
             return new(DownloadOutcome.Verified, partPath, () => string.Empty);
+        }
+
+        /// <summary>
+        /// The single-connection fallback: a plain sequential GET (no Range — the Liferay checkout
+        /// links reject it) that WE stream ourselves, so the known registry size is enforced at the
+        /// <b>write boundary</b> — the industry-standard hard cap for an untrusted download: the
+        /// moment more than <see cref="KnownFirmware.SizeBytes"/> bytes arrive we stop, so the file on
+        /// disk can never exceed it (no reliance on an async cancel racing the writer). The SHA-256 is
+        /// computed inline as we write, so there is no second pass over the file. Same result contract
+        /// as <see cref="TransferOnceAsync"/>.
+        /// </summary>
+        private static async Task<DownloadResult> TransferSingleCappedAsync(
+            KnownFirmware fw, string partPath,
+            IProgress<DownloadProgress>? progress, CancellationToken ct)
+        {
+            try
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, fw.DownloadUrl!);
+                req.Headers.UserAgent.ParseAdd("IntercomFirmwareTool");
+                req.Headers.Accept.ParseAdd("application/octet-stream, */*");
+                using var resp = await _http
+                    .SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+                if (!resp.IsSuccessStatusCode)
+                    return new(DownloadOutcome.HttpError, null,
+                        () => CoreStrings.Format("FD_ProbeHttpStatus", (int)resp.StatusCode));
+
+                long expected = fw.SizeBytes;
+                // For the % bar: prefer a sane Content-Length, else the known registry size.
+                long barTotal = resp.Content.Headers.ContentLength is long cl && cl > 0 ? cl : expected;
+
+                using var body = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                using var file = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None,
+                    bufferSize: 1 << 20, options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+                using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+                byte[] buffer = new byte[1 << 20]; // 1 MiB
+                long received = 0;
+                long startTs = Stopwatch.GetTimestamp();
+                int read;
+                while ((read = await body.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+                {
+                    // HARD write-boundary cap: if this chunk would push the file past the known size,
+                    // stop before writing it — the .part can never exceed `expected` bytes on disk.
+                    if (expected > 0 && received + read > expected)
+                        return new(DownloadOutcome.IntegrityMismatch, null,
+                            () => CoreStrings.Format("FD_IntegrityOversize", fw.OriginalName, expected));
+
+                    await file.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                    sha.AppendData(buffer, 0, read);
+                    received += read;
+
+                    double secs = (Stopwatch.GetTimestamp() - startTs) / (double)Stopwatch.Frequency;
+                    progress?.Report(new DownloadProgress(received, barTotal, secs > 0 ? received / secs : 0));
+                }
+                await file.FlushAsync(ct).ConfigureAwait(false);
+
+                // Verify inline (no re-read): a short read means a truncated transfer; then the hash.
+                if (received != expected)
+                    return new(DownloadOutcome.IntegrityMismatch, null,
+                        () => CoreStrings.Format("FD_IntegritySize", fw.OriginalName, received, expected));
+                string hex = Convert.ToHexString(sha.GetHashAndReset()); // uppercase hex
+                if (!string.Equals(hex, fw.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    string got = ShortHash(hex), want = ShortHash(fw.Sha256);
+                    return new(DownloadOutcome.IntegrityMismatch, null,
+                        () => CoreStrings.Format("FD_IntegrityHash", fw.OriginalName, got, want));
+                }
+                return new(DownloadOutcome.Verified, partPath, () => string.Empty);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
+            }
+            catch (Exception ex)
+            {
+                return ClassifyTransferError(ex);
+            }
         }
 
         // A local filesystem failure (unwritable dir, disk full, locked .part) is not a transport
