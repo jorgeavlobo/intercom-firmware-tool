@@ -130,6 +130,9 @@ namespace IntercomFirmwareTool.App
 
             BuildModelPills();
             TglDownload.Visibility = Visibility.Visible;
+            // A fast probe can reveal this entry point within the cue's arming delay; announce it so
+            // the reveal isn't silently swallowed and the download section goes unnoticed below the fold.
+            NotifyContentRevealed();
         }
 
         // ---- Model / version pills -------------------------------------------

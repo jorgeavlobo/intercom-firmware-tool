@@ -40,6 +40,21 @@ namespace IntercomFirmwareTool.App
             Closed += (_, _) => { t.Stop(); _scrollCueTimer?.Stop(); _scrollAnim?.Stop(); };
         }
 
+        /// <summary>Announce a PROGRAMMATIC reveal (e.g. the availability probe showing the download
+        /// section) that may land during the cue's arming delay — which the delay would otherwise
+        /// swallow, leaving the new entry point unnoticed. Arm the cue and, once the layout reflects
+        /// the new content, show it if anything now sits below the fold. Free of the initial-layout
+        /// false positive: such reveals are async and land after that first pass has settled.</summary>
+        private void NotifyContentRevealed()
+        {
+            _cueArmed = true;
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+            {
+                double below = BodyScroll.ExtentHeight - (BodyScroll.VerticalOffset + BodyScroll.ViewportHeight);
+                if (below > 4) ShowScrollCue();
+            }));
+        }
+
         private void BodyScroll_ScrollChanged(object sender, ScrollChangedEventArgs e)
         {
             if (!_cueArmed) return;

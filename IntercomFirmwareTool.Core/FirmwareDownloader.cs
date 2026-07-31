@@ -523,7 +523,11 @@ namespace IntercomFirmwareTool.Core
                     // inside this catch would otherwise escape past the sibling catches below.
                     try
                     {
-                        var scan = await ScanDestinationAsync(destDir, fw, ct).ConfigureAwait(false);
+                        // Same cancellable outer wait as the initial scan: a synchronous filesystem
+                        // call inside the rescan can stall on a dead share, and the direct await
+                        // couldn't be released by Cancel otherwise.
+                        var scan = await Task.Run(() => ScanDestinationAsync(destDir, fw, ct), ct)
+                            .WaitAsync(ct).ConfigureAwait(false);
                         if (scan.CachedPath is string hit)
                             return new(DownloadOutcome.Cached, hit,
                                 () => CoreStrings.Format("FD_Cached", Path.GetFileName(hit)));
