@@ -120,14 +120,15 @@ namespace IntercomFirmwareTool.Core
             // OR a "<name> (n)" sibling — as a cache hit (so repeated downloads don't pile up
             // duplicate copies), otherwise take the first FREE name as the target (never overwriting
             // an unrelated file that holds the name). The SHA-256 hashing runs off the UI thread so
-            // it can't freeze the UI. The hash itself doesn't observe the token (it's a sub-second
-            // pass over a ~100-300 MB file), but a cancel pressed during the scan is honored the
-            // instant it returns: the cache-hit branch re-checks the token below, and the free-target
-            // path falls into the retry loop, which re-checks it at the top before any transfer.
+            // it can't freeze the UI, and it observes the token — the scan checks between candidates
+            // and hashes each file in cancellable chunks — so a Cancel pressed while a slow/networked
+            // destination with many same-size candidates is being hashed stops promptly instead of
+            // sitting at "Cancelling…" through gigabytes. A cancel surfaces as OperationCanceledException,
+            // caught below.
             string finalPath;
             try
             {
-                var scan = await Task.Run(() => ScanDestination(destDir, fw), ct).ConfigureAwait(false);
+                var scan = await Task.Run(() => ScanDestination(destDir, fw, ct), ct).ConfigureAwait(false);
                 if (scan.CachedPath is string hit)
                 {
                     if (ct.IsCancellationRequested)
@@ -286,9 +287,15 @@ namespace IntercomFirmwareTool.Core
             // the latter is a final IoError, not something a re-download would fix.
             try
             {
-                if (!MatchesEntryStrict(partPath, fw))
+                if (!MatchesEntryStrict(partPath, fw, ct))
                     return new(DownloadOutcome.IntegrityMismatch, null,
                         () => CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName));
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Cancelled mid-verify (the hash reads in cancellable chunks) — report it as such,
+                // not as an integrity/IO failure.
+                return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -310,21 +317,32 @@ namespace IntercomFirmwareTool.Core
         // whole-registry Verify, and a match here means the file also passes that gate). Throws on
         // an IO error reading the file — the caller decides whether that means "not a match" or a
         // hard IoError.
-        private static bool MatchesEntryStrict(string path, KnownFirmware fw)
+        private static bool MatchesEntryStrict(string path, KnownFirmware fw, CancellationToken ct)
         {
             if (new FileInfo(path).Length != fw.SizeBytes) return false;
-            using var sha = SHA256.Create();
+            using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            string hex = Convert.ToHexString(sha.ComputeHash(fs)); // uppercase hex
+            // Hash in chunks and check the token each chunk, so a Cancel interrupts a large (or
+            // slow/networked) file mid-read instead of blocking until the whole pass completes.
+            byte[] buffer = new byte[1 << 20]; // 1 MiB
+            int read;
+            while ((read = fs.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                ct.ThrowIfCancellationRequested();
+                sha.AppendData(buffer, 0, read);
+            }
+            string hex = Convert.ToHexString(sha.GetHashAndReset()); // uppercase hex
             return string.Equals(hex, fw.Sha256, StringComparison.OrdinalIgnoreCase);
         }
 
         // Swallowing variant: any failure — including an unreadable file — is just "no match".
         // Used for the cache-hit check, where an unreadable existing file simply means
-        // "no valid cache, download it".
-        private static bool MatchesEntry(string path, KnownFirmware fw)
+        // "no valid cache, download it". A cancel, however, must NOT be read as "no match" (that
+        // would keep scanning) — let it propagate so the scan stops.
+        private static bool MatchesEntry(string path, KnownFirmware fw, CancellationToken ct)
         {
-            try { return MatchesEntryStrict(path, fw); }
+            try { return MatchesEntryStrict(path, fw, ct); }
+            catch (OperationCanceledException) { throw; }
             catch { return false; }
         }
 
@@ -338,7 +356,8 @@ namespace IntercomFirmwareTool.Core
         // pattern, so every numbered copy is considered no matter how large the gaps in the
         // numbering are (a lone "(16)" left after "(0)"–"(15)" were deleted is still reused).
         // Hashing happens here (call it off the UI thread).
-        private static (string? CachedPath, string FreeTarget) ScanDestination(string destDir, KnownFirmware fw)
+        private static (string? CachedPath, string FreeTarget) ScanDestination(
+            string destDir, KnownFirmware fw, CancellationToken ct)
         {
             string baseName = Path.GetFileNameWithoutExtension(fw.OriginalName);
             string ext = Path.GetExtension(fw.OriginalName);
@@ -370,10 +389,11 @@ namespace IntercomFirmwareTool.Core
             // file is the most canonical available.
             foreach (int i in existing.OrderBy(static x => x))
             {
+                ct.ThrowIfCancellationRequested(); // stop between candidates so Cancel is responsive
                 string candidate = i == 0
                     ? Path.Combine(destDir, fw.OriginalName)
                     : Path.Combine(destDir, $"{baseName} ({i}){ext}");
-                if (MatchesEntry(candidate, fw)) return (candidate, candidate);
+                if (MatchesEntry(candidate, fw, ct)) return (candidate, candidate);
             }
 
             // No verified copy anywhere → download into the first free name (smallest unused index),
