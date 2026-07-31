@@ -61,6 +61,14 @@ namespace IntercomFirmwareTool.Core
             _pipeline = BuildPipeline();
         }
 
+        // Upper bound on any server-supplied Retry-After we'll actually wait. This is a
+        // best-effort STARTUP probe and ProbeAsync awaits every entry before exposing ANY
+        // result, so a single endpoint answering 429/503 with a long Retry-After (minutes,
+        // hours, or a far-future Date) must not hold the whole download list hostage. A few
+        // seconds is polite enough yet keeps startup snappy; the overall wait stays bounded
+        // (MaxRetryAttempts x this, plus the per-attempt timeouts).
+        private static readonly TimeSpan MaxRetryDelay = TimeSpan.FromSeconds(5);
+
         private static ResiliencePipeline<HttpResponseMessage> BuildPipeline() =>
             new ResiliencePipelineBuilder<HttpResponseMessage>()
                 // Retry (outer) wraps the per-attempt timeout (inner), so each attempt is time-bounded
@@ -82,7 +90,12 @@ namespace IntercomFirmwareTool.Core
                         RetryConditionHeaderValue? ra = args.Outcome.Result?.Headers.RetryAfter;
                         TimeSpan? delay = ra?.Delta
                             ?? (ra?.Date is { } date ? date - DateTimeOffset.UtcNow : null);
-                        return ValueTask.FromResult(delay is { } d && d > TimeSpan.Zero ? d : (TimeSpan?)null);
+                        // Cap the honored delay (see MaxRetryDelay) so one throttled endpoint can't
+                        // keep every successful probe hidden for minutes/hours.
+                        TimeSpan? capped = delay is { } d && d > TimeSpan.Zero
+                            ? (d < MaxRetryDelay ? d : MaxRetryDelay)
+                            : null;
+                        return ValueTask.FromResult(capped);
                     },
                     // Polly v8 does not dispose a handled result, so dispose the response that
                     // triggered this retry — otherwise a retried 5xx/429 leaks its socket/handler
