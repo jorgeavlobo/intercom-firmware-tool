@@ -379,53 +379,96 @@ namespace IntercomFirmwareTool.Core
                 long barTotal = resp.Content.Headers.ContentLength is long cl && cl > 0 ? cl : expected;
 
                 using var body = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-                using var file = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None,
-                    bufferSize: 1 << 20, options: FileOptions.Asynchronous | FileOptions.SequentialScan);
-                using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
 
-                byte[] buffer = new byte[1 << 20]; // 1 MiB
-                long received = 0;
-                long startTs = Stopwatch.GetTimestamp();
-                int read;
-                while ((read = await body.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+                // Creating/writing/flushing the destination is a LOCAL op — wrap those so their
+                // failures classify as a final IoError, distinct from a transport IOException on the
+                // network body read below (which the retry loop can and should re-attempt).
+                FileStream file;
+                try
                 {
-                    // HARD write-boundary cap: if this chunk would push the file past the known size,
-                    // stop before writing it — the .part can never exceed `expected` bytes on disk.
-                    if (expected > 0 && received + read > expected)
+                    file = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None,
+                        bufferSize: 1 << 20, options: FileOptions.Asynchronous | FileOptions.SequentialScan);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    throw new LocalIoException(ex);
+                }
+
+                using (file)
+                using (var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256))
+                {
+                    byte[] buffer = new byte[1 << 20]; // 1 MiB
+                    long received = 0;
+                    long startTs = Stopwatch.GetTimestamp();
+                    int read;
+                    while ((read = await body.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+                    {
+                        // HARD write-boundary cap: if this chunk would push the file past the known
+                        // size, stop before writing it — the .part can never exceed `expected` on disk.
+                        if (expected > 0 && received + read > expected)
+                            return new(DownloadOutcome.IntegrityMismatch, null,
+                                () => CoreStrings.Format("FD_IntegrityOversize", fw.OriginalName, expected));
+
+                        try
+                        {
+                            await file.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                        {
+                            throw new LocalIoException(ex);
+                        }
+                        sha.AppendData(buffer, 0, read);
+                        received += read;
+
+                        double secs = (Stopwatch.GetTimestamp() - startTs) / (double)Stopwatch.Frequency;
+                        progress?.Report(new DownloadProgress(received, barTotal, secs > 0 ? received / secs : 0));
+                    }
+
+                    try
+                    {
+                        await file.FlushAsync(ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        throw new LocalIoException(ex);
+                    }
+
+                    // Verify inline (no re-read): a short read means a truncated transfer; then the hash.
+                    if (received != expected)
                         return new(DownloadOutcome.IntegrityMismatch, null,
-                            () => CoreStrings.Format("FD_IntegrityOversize", fw.OriginalName, expected));
-
-                    await file.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
-                    sha.AppendData(buffer, 0, read);
-                    received += read;
-
-                    double secs = (Stopwatch.GetTimestamp() - startTs) / (double)Stopwatch.Frequency;
-                    progress?.Report(new DownloadProgress(received, barTotal, secs > 0 ? received / secs : 0));
+                            () => CoreStrings.Format("FD_IntegritySize", fw.OriginalName, received, expected));
+                    string hex = Convert.ToHexString(sha.GetHashAndReset()); // uppercase hex
+                    if (!string.Equals(hex, fw.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        string got = ShortHash(hex), want = ShortHash(fw.Sha256);
+                        return new(DownloadOutcome.IntegrityMismatch, null,
+                            () => CoreStrings.Format("FD_IntegrityHash", fw.OriginalName, got, want));
+                    }
+                    return new(DownloadOutcome.Verified, partPath, () => string.Empty);
                 }
-                await file.FlushAsync(ct).ConfigureAwait(false);
-
-                // Verify inline (no re-read): a short read means a truncated transfer; then the hash.
-                if (received != expected)
-                    return new(DownloadOutcome.IntegrityMismatch, null,
-                        () => CoreStrings.Format("FD_IntegritySize", fw.OriginalName, received, expected));
-                string hex = Convert.ToHexString(sha.GetHashAndReset()); // uppercase hex
-                if (!string.Equals(hex, fw.Sha256, StringComparison.OrdinalIgnoreCase))
-                {
-                    string got = ShortHash(hex), want = ShortHash(fw.Sha256);
-                    return new(DownloadOutcome.IntegrityMismatch, null,
-                        () => CoreStrings.Format("FD_IntegrityHash", fw.OriginalName, got, want));
-                }
-                return new(DownloadOutcome.Verified, partPath, () => string.Empty);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
             }
+            catch (LocalIoException lex)
+            {
+                // A local file failure (disk full, ACL, lock) — final; a re-download won't fix it.
+                return new(DownloadOutcome.IoError, null,
+                    () => CoreStrings.Format("FD_IoError", SafeMsg(lex.InnerException ?? lex)));
+            }
             catch (Exception ex)
             {
-                return ClassifyTransferError(ex);
+                // Everything else — including a network IOException/HttpIOException on the body read
+                // (reset/truncated) — is a TRANSPORT failure the retry loop can re-attempt.
+                return new(DownloadOutcome.HttpError, null,
+                    () => CoreStrings.Format("FD_DownloadError", SafeMsg(ex)));
             }
         }
+
+        // Marks a LOCAL file-operation failure inside TransferSingleCappedAsync, so the handler can
+        // classify it as a final IoError — distinct from a transport IOException on the body read.
+        private sealed class LocalIoException(Exception inner) : Exception(inner.Message, inner);
 
         // A local filesystem failure (unwritable dir, disk full, locked .part) is not a transport
         // error and must NOT be retried — classify it as IoError so the loop stops and the user
@@ -514,6 +557,9 @@ namespace IntercomFirmwareTool.Core
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
             foreach (string path in Directory.EnumerateFileSystemEntries(destDir))
             {
+                // Check between entries so a Cancel is responsive even on a large or slow network
+                // folder (the enumeration is lazy; Task.Run's token can't stop it once started).
+                ct.ThrowIfCancellationRequested();
                 string name = Path.GetFileName(path);
                 if (string.Equals(name, fw.OriginalName, StringComparison.OrdinalIgnoreCase))
                     existing.Add(0);

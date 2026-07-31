@@ -362,7 +362,7 @@ namespace IntercomFirmwareTool.App
             SetDownloadBusy(true);
             SetDlStatus(null);
             DlProgress.Value = 0;
-            TxtDlProgress.Text = LF("Dl_ProgressStarting", fw.OriginalName);
+            SetDlProgress(() => LF("Dl_ProgressStarting", fw.OriginalName));
             DlProgressPanel.Visibility = Visibility.Visible;
 
             // Progress<T> captures this UI SynchronizationContext, so the report
@@ -397,7 +397,7 @@ namespace IntercomFirmwareTool.App
         {
             if (!_downloading) return;
             BtnDlCancel.IsEnabled = false;
-            TxtDlProgress.Text = L("Dl_Cancelling");
+            SetDlProgress(() => L("Dl_Cancelling"));
             try { _dlCts?.Cancel(); } catch { /* best-effort */ }
         }
 
@@ -410,13 +410,17 @@ namespace IntercomFirmwareTool.App
                 // Clamp the shown percent too: with TotalBytes pinned to the registry size, a server
                 // that returns more bytes than expected could otherwise print "101%".
                 int pct = (int)Math.Round(clamped);
-                TxtDlProgress.Text = LF("Dl_ProgressFmt", pct,
-                    HumanBytes(p.BytesReceived), HumanBytes(p.TotalBytes), HumanRate(p.BytesPerSecond));
+                // Capture the values so the render closure re-localizes on a later language switch.
+                long recv = p.BytesReceived, total = p.TotalBytes;
+                double rate = p.BytesPerSecond;
+                SetDlProgress(() => LF("Dl_ProgressFmt", pct,
+                    HumanBytes(recv), HumanBytes(total), HumanRate(rate)));
             }
             else
             {
-                TxtDlProgress.Text = LF("Dl_ProgressUnknown",
-                    HumanBytes(p.BytesReceived), HumanRate(p.BytesPerSecond));
+                long recv = p.BytesReceived;
+                double rate = p.BytesPerSecond;
+                SetDlProgress(() => LF("Dl_ProgressUnknown", HumanBytes(recv), HumanRate(rate)));
             }
         }
 
@@ -527,6 +531,17 @@ namespace IntercomFirmwareTool.App
             if (!string.IsNullOrEmpty(msg)) AnnounceLiveRegion(TxtDlStatus);
         }
 
+        // The in-progress line (TxtDlProgress) is likewise held as a render closure, so a language
+        // switch mid-transfer re-localizes it — even a "Starting download…" that's stalled waiting
+        // for the first bytes and so isn't being refreshed by progress callbacks.
+        private Func<string>? _dlProgressRender;
+
+        private void SetDlProgress(Func<string> render)
+        {
+            _dlProgressRender = render;
+            TxtDlProgress.Text = render();
+        }
+
         /// <summary>Re-applies the card's code-set text after a runtime language switch:
         /// rebuild the pills (the "latest" tag localizes), the Start/Downloading label,
         /// and the status line.</summary>
@@ -538,6 +553,9 @@ namespace IntercomFirmwareTool.App
             if (_downloading) SetDownloadBusy(true);
             BtnDlStart.Content = _downloading ? L("Dl_Downloading") : L("Dl_Start");
             RenderDlStatus();
+            // Re-localize the in-progress line too (e.g. a stalled "Starting download…"): the
+            // progress callbacks may not fire while waiting for the first bytes.
+            if (_downloading && _dlProgressRender != null) TxtDlProgress.Text = _dlProgressRender();
         }
 
         // ---- Byte / rate formatting ------------------------------------------
