@@ -239,21 +239,32 @@ namespace IntercomFirmwareTool.Core
             IProgress<DownloadProgress>? progress, CancellationToken ct)
         {
             AsyncCompletedEventArgs? completed = null;
+            bool oversize = false;
             try
             {
                 using var service = new DownloadService(BuildConfig(parallel));
-                if (progress is not null)
+                service.DownloadProgressChanged += (_, e) =>
                 {
-                    service.DownloadProgressChanged += (_, e) =>
-                        progress.Report(new DownloadProgress(
-                            e.ReceivedBytesSize,
-                            // Some endpoints (the Liferay checkout links) don't send a Content-Length,
-                            // so the library reports total 0 and the bar can't fill. We already KNOW the
-                            // exact size from the registry — fall back to it so the percentage shows.
-                            // Safe: the bytes are verified against this same size on completion.
-                            e.TotalBytesToReceive > 0 ? e.TotalBytesToReceive : fw.SizeBytes,
-                            e.BytesPerSecondSpeed));
-                }
+                    // Hard cap at the known registry size: an endpoint may omit or lie about
+                    // Content-Length (the availability probe permits a missing length), so don't
+                    // write until the server decides to stop — a misconfigured or compromised
+                    // endpoint could otherwise stream arbitrarily many bytes and fill the disk
+                    // before the post-transfer size check ever runs. Abort the instant we exceed
+                    // the exact expected size; a correct file never crosses it.
+                    if (!oversize && fw.SizeBytes > 0 && e.ReceivedBytesSize > fw.SizeBytes)
+                    {
+                        oversize = true;
+                        service.CancelAsync();
+                    }
+                    // Some endpoints (the Liferay checkout links) don't send a Content-Length,
+                    // so the library reports total 0 and the bar can't fill. We already KNOW the
+                    // exact size from the registry — fall back to it so the percentage shows.
+                    // Safe: the bytes are verified against this same size on completion.
+                    progress?.Report(new DownloadProgress(
+                        e.ReceivedBytesSize,
+                        e.TotalBytesToReceive > 0 ? e.TotalBytesToReceive : fw.SizeBytes,
+                        e.BytesPerSecondSpeed));
+                };
                 service.DownloadFileCompleted += (_, e) => completed = e;
 
                 // Bridge cancellation to the service (its DownloadFileTaskAsync overloads vary by version;
@@ -263,6 +274,12 @@ namespace IntercomFirmwareTool.Core
                     await service.DownloadFileTaskAsync(fw.DownloadUrl!, partPath).ConfigureAwait(false);
                 }
 
+                // An oversize abort is NOT a user cancel (which is final): the endpoint overran the
+                // known size, so treat it as an integrity failure the retry loop can re-attempt.
+                // Check it before the cancel branch, since aborting sets completed.Cancelled too.
+                if (oversize)
+                    return new(DownloadOutcome.IntegrityMismatch, null,
+                        () => CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName));
                 if (ct.IsCancellationRequested || completed?.Cancelled == true)
                     return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
                 if (completed?.Error is { } err)
