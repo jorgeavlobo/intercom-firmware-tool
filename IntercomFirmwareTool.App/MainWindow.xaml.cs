@@ -1361,10 +1361,12 @@ namespace IntercomFirmwareTool.App
             if (needMqttHost) missing.Add(L("Miss_Mqtt"));
 
             string previousHint = TxtBuildHint.Text;
-            if (!_uiEnabled)
+            if (!_uiEnabled || _downloading)
             {
-                // An operation is running. The Build button itself shows the progress
-                // ("⏳ Building…"), so keep the hint blank — no duplicated info.
+                // An operation is running (build/verify → _uiEnabled false) or a download is in
+                // flight (_downloading). Build is disabled either way, so keep the hint blank rather
+                // than claim "Ready to build": the Build button shows a build's own progress
+                // ("⏳ Building…"), and a download has its own progress bar in the card.
                 TxtBuildHint.Text = "";
             }
             else if (confirmMismatch)

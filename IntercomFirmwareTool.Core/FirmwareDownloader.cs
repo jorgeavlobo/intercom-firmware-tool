@@ -142,88 +142,93 @@ namespace IntercomFirmwareTool.Core
             {
                 return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
             }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // The destination folder couldn't be fully enumerated (a network share went away, an
+                // ACL denial). Don't proceed on a partial view of what's there — report a file error.
+                return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
+            }
 
-            // Download into a temp file this operation exclusively OWNS (a GUID name), so the
-            // per-attempt cleanup never deletes an unrelated ".part"/".part.download" that a browser
-            // or another process may have left in the folder.
-            string partPath = Path.Combine(destDir, $".ift-{Guid.NewGuid():N}.part");
-
-            // Re-try a few times — each from a FRESH .part (never a Range resume, which some
-            // endpoints reject) — so the user doesn't have to click Download repeatedly. The FIRST
-            // attempt uses fast multipart; if it fails, the rest fall back to a single sequential
+            // Re-try a few times — each from a FRESH, exclusively-OWNED .part (a GUID name, never a
+            // Range resume some endpoints reject) — so the user doesn't have to click Download
+            // repeatedly. A per-attempt path means a cleanup that fails (AV/lock) can never leave the
+            // NEXT attempt starting from a dirty file, and the finally removes every temp we created.
+            // The FIRST attempt uses fast multipart; the rest fall back to a single sequential
             // connection, which the fussy endpoints (the Liferay checkout links) serve reliably.
             // A cancel or a local IO error is final; only transport/integrity failures are retried.
             const int maxAttempts = 4;
             DownloadResult lastFailure =
                 new(DownloadOutcome.HttpError, null, () => CoreStrings.Get("FD_DownloadFailed"));
-
-            for (int attempt = 1; attempt <= maxAttempts; attempt++)
+            var usedParts = new List<string>();
+            try
             {
-                if (ct.IsCancellationRequested)
+                for (int attempt = 1; attempt <= maxAttempts; attempt++)
                 {
-                    CleanPartials(partPath);
-                    return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
-                }
+                    if (ct.IsCancellationRequested)
+                        return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
 
-                CleanPartials(partPath); // always start clean: a fresh, whole-file GET (no resume)
-                // Multipart on the first try (keep it for links that support it); single
-                // connection on the fallback tries.
-                bool parallel = attempt == 1;
-                DownloadResult attemptResult = await TransferOnceAsync(fw, partPath, parallel, progress, ct)
-                    .ConfigureAwait(false);
+                    string partPath = Path.Combine(destDir, $".ift-{Guid.NewGuid():N}.part");
+                    usedParts.Add(partPath);
+                    // Multipart on the first try (keep it for links that support it); single
+                    // connection on the fallback tries.
+                    bool parallel = attempt == 1;
+                    DownloadResult attemptResult = await TransferOnceAsync(fw, partPath, parallel, progress, ct)
+                        .ConfigureAwait(false);
 
-                switch (attemptResult.Outcome)
-                {
-                    case DownloadOutcome.Verified:
-                        // Honor a cancel pressed during the (thread-pool) verify hash: don't
-                        // publish a file the user just cancelled.
-                        if (ct.IsCancellationRequested)
-                        {
-                            CleanPartials(partPath);
-                            return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
-                        }
-                        // The bytes are present in partPath and already verified; publish it.
-                        // finalPath was chosen to be free (cache hit returned earlier; a taken name
-                        // was made unique above), so a plain Move — which refuses to overwrite —
-                        // both keeps the publish atomic and guarantees no existing file is clobbered.
-                        try
-                        {
-                            File.Move(partPath, finalPath);
-                        }
-                        catch (Exception ex)
-                        {
-                            CleanPartials(partPath);
-                            return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
-                        }
-                        return new(DownloadOutcome.Verified, finalPath,
-                            () => CoreStrings.Format("FD_Verified", Path.GetFileName(finalPath), fw.SizeBytes));
-
-                    case DownloadOutcome.Cancelled:
-                    case DownloadOutcome.IoError:
-                        // Both are final: a local filesystem error won't fix itself on retry.
-                        CleanPartials(partPath);
-                        return attemptResult;
-
-                    default: // HttpError or IntegrityMismatch → remember and retry
-                        lastFailure = attemptResult;
-                        CleanPartials(partPath);
-                        if (attempt < maxAttempts)
-                        {
+                    switch (attemptResult.Outcome)
+                    {
+                        case DownloadOutcome.Verified:
+                            // Honor a cancel pressed during the (thread-pool) verify hash: don't
+                            // publish a file the user just cancelled.
+                            if (ct.IsCancellationRequested)
+                                return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
+                            // The bytes are present in partPath and already verified; publish it.
+                            // finalPath was chosen to be free, so a plain Move — which refuses to
+                            // overwrite — keeps the publish atomic and clobbers no existing file.
                             try
                             {
-                                await Task.Delay(TimeSpan.FromMilliseconds(600 * attempt), ct)
-                                    .ConfigureAwait(false);
+                                File.Move(partPath, finalPath);
                             }
-                            catch (OperationCanceledException)
+                            catch (Exception ex)
                             {
-                                return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
+                                return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
                             }
-                        }
-                        break;
-                }
-            }
+                            return new(DownloadOutcome.Verified, finalPath,
+                                () => CoreStrings.Format("FD_Verified", Path.GetFileName(finalPath), fw.SizeBytes));
 
-            return lastFailure;
+                        case DownloadOutcome.Cancelled:
+                        case DownloadOutcome.IoError:
+                            // Both are final: a local filesystem error won't fix itself on retry.
+                            return attemptResult;
+
+                        default: // HttpError or IntegrityMismatch → remember and retry
+                            lastFailure = attemptResult;
+                            CleanPartials(partPath); // free this attempt's temp now (finally is a backstop)
+                            if (attempt < maxAttempts)
+                            {
+                                try
+                                {
+                                    await Task.Delay(TimeSpan.FromMilliseconds(600 * attempt), ct)
+                                        .ConfigureAwait(false);
+                                }
+                                catch (OperationCanceledException)
+                                {
+                                    return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
+                                }
+                            }
+                            break;
+                    }
+                }
+
+                return lastFailure;
+            }
+            finally
+            {
+                // Best-effort backstop: remove every temp this operation created, so no orphaned
+                // .ift-*.part / .part.download is left behind on any exit path. The Verified one was
+                // renamed to finalPath by File.Move, so cleaning its old name is a harmless no-op.
+                foreach (string p in usedParts) CleanPartials(p);
+            }
         }
 
         /// <summary>
@@ -410,23 +415,23 @@ namespace IntercomFirmwareTool.Core
             // (e.g. a "C100X_010508.fwz" folder) also occupies that name — File.Move onto it would
             // fail, and only after a full 100-300 MB transfer — so it must be skipped as a target
             // too. Such an entry never becomes a cache hit: MatchesEntryAsync can't hash a directory.
+            // Enumerate the folder ONCE. Don't swallow a failure here (a network share going away, an
+            // ACL denial): continuing with a PARTIAL set could miss a cached copy or pick a name
+            // that's actually taken — wasting a full transfer before File.Move fails. Let it
+            // propagate so DownloadAsync reports it as an IoError instead of scanning blind.
             var existing = new HashSet<int>();
-            try
+            var rx = new Regex(
+                "^" + Regex.Escape(baseName) + @" \((\d+)\)" + Regex.Escape(ext) + "$",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            foreach (string path in Directory.EnumerateFileSystemEntries(destDir))
             {
-                var rx = new Regex(
-                    "^" + Regex.Escape(baseName) + @" \((\d+)\)" + Regex.Escape(ext) + "$",
-                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-                foreach (string path in Directory.EnumerateFileSystemEntries(destDir))
-                {
-                    string name = Path.GetFileName(path);
-                    if (string.Equals(name, fw.OriginalName, StringComparison.OrdinalIgnoreCase))
-                        existing.Add(0);
-                    else if (rx.Match(name) is { Success: true } m
-                             && int.TryParse(m.Groups[1].Value, out int n) && n > 0)
-                        existing.Add(n);
-                }
+                string name = Path.GetFileName(path);
+                if (string.Equals(name, fw.OriginalName, StringComparison.OrdinalIgnoreCase))
+                    existing.Add(0);
+                else if (rx.Match(name) is { Success: true } m
+                         && int.TryParse(m.Groups[1].Value, out int n) && n > 0)
+                    existing.Add(n);
             }
-            catch { /* unreadable folder → treat as empty; fall through to the canonical name */ }
 
             // Reuse a verified copy if one exists — check in ascending index order so the reused
             // file is the most canonical available.
