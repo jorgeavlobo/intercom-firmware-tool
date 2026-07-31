@@ -383,8 +383,11 @@ namespace IntercomFirmwareTool.Core
                 using var resp = await _http
                     .SendAsync(req, HttpCompletionOption.ResponseHeadersRead, tk).ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode)
+                    // Read as a DOWNLOAD failure (not a probe result): wrap the HTTP-status detail in
+                    // the download-error prefix so the message is consistent with the other outcomes.
                     return new(DownloadOutcome.HttpError, null,
-                        () => CoreStrings.Format("FD_ProbeHttpStatus", (int)resp.StatusCode));
+                        () => CoreStrings.Format("FD_DownloadError",
+                            CoreStrings.Format("FD_ProbeHttpStatus", (int)resp.StatusCode)));
 
                 long expected = fw.SizeBytes;
                 // For the % bar: prefer a sane Content-Length, else the known registry size.
