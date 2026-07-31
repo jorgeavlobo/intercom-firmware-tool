@@ -93,6 +93,15 @@ namespace IntercomFirmwareTool.App
                     await Dispatcher.InvokeAsync(() => OnAvailabilityReady(results));
                 }
                 catch { /* unreachable network / cancelled — leave the link hidden */ }
+                finally
+                {
+                    // One-shot probe: release the HttpClient/handlers the instant it finishes rather
+                    // than holding them for the whole app lifetime. StopDownload's later dispose then
+                    // no-ops (it's idempotent and null-guarded); nulling the field keeps that safe
+                    // even under the race with a shutdown Stop.
+                    checker.Dispose();
+                    _availChecker = null;
+                }
             });
         }
 

@@ -268,8 +268,9 @@ namespace IntercomFirmwareTool.Core
                 service.DownloadFileCompleted += (_, e) => completed = e;
 
                 // Bridge cancellation to the service (its DownloadFileTaskAsync overloads vary by version;
-                // registering CancelAsync is the portable way).
-                using (ct.Register(() => service.CancelAsync()))
+                // registering CancelAsync is the portable way). The callback must be fail-safe — a throw
+                // here (e.g. a dispose/race in the library) would propagate out of cancellation.
+                using (ct.Register(() => { try { service.CancelAsync(); } catch { /* best-effort cancel */ } }))
                 {
                     await service.DownloadFileTaskAsync(fw.DownloadUrl!, partPath).ConfigureAwait(false);
                 }
