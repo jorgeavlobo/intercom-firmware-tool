@@ -280,7 +280,7 @@ namespace IntercomFirmwareTool.Core
                 // Check it before the cancel branch, since aborting sets completed.Cancelled too.
                 if (oversize)
                     return new(DownloadOutcome.IntegrityMismatch, null,
-                        () => CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName));
+                        () => CoreStrings.Format("FD_IntegrityOversize", fw.OriginalName, fw.SizeBytes));
                 if (ct.IsCancellationRequested || completed?.Cancelled == true)
                     return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
                 if (completed?.Error is { } err)
@@ -305,9 +305,19 @@ namespace IntercomFirmwareTool.Core
             // the latter is a final IoError, not something a re-download would fix.
             try
             {
-                if (!MatchesEntryStrict(partPath, fw, ct))
+                var v = VerifyEntry(partPath, fw, ct);
+                if (v.Outcome == VerifyOutcome.SizeMismatch)
+                {
+                    long actual = v.ActualSize; // capture for the re-localizing message factory
                     return new(DownloadOutcome.IntegrityMismatch, null,
-                        () => CoreStrings.Format("FD_IntegrityMismatch", fw.OriginalName));
+                        () => CoreStrings.Format("FD_IntegritySize", fw.OriginalName, actual, fw.SizeBytes));
+                }
+                if (v.Outcome == VerifyOutcome.HashMismatch)
+                {
+                    string got = ShortHash(v.ActualHash), want = ShortHash(fw.Sha256);
+                    return new(DownloadOutcome.IntegrityMismatch, null,
+                        () => CoreStrings.Format("FD_IntegrityHash", fw.OriginalName, got, want));
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -335,9 +345,21 @@ namespace IntercomFirmwareTool.Core
         // whole-registry Verify, and a match here means the file also passes that gate). Throws on
         // an IO error reading the file — the caller decides whether that means "not a match" or a
         // hard IoError.
-        private static bool MatchesEntryStrict(string path, KnownFirmware fw, CancellationToken ct)
+        // Which check a file failed against an entry, so callers can report WHY (size vs content)
+        // instead of one generic message.
+        private enum VerifyOutcome { Match, SizeMismatch, HashMismatch }
+
+        // Size fast-path then SHA-256, against a SPECIFIC entry. Returns which check failed plus the
+        // ACTUAL size and (when it got as far as hashing) the actual hash, so the caller can build a
+        // diagnosable message — a size mismatch usually means a truncated download or an HTML error
+        // page, a hash mismatch means same-size but different content. Throws on an IO error reading
+        // the file (the caller decides what that means) and on cancellation (the hash reads in
+        // cancellable chunks).
+        private static (VerifyOutcome Outcome, long ActualSize, string? ActualHash) VerifyEntry(
+            string path, KnownFirmware fw, CancellationToken ct)
         {
-            if (new FileInfo(path).Length != fw.SizeBytes) return false;
+            long actualSize = new FileInfo(path).Length;
+            if (actualSize != fw.SizeBytes) return (VerifyOutcome.SizeMismatch, actualSize, null);
             using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             // Hash in chunks and check the token each chunk, so a Cancel interrupts a large (or
@@ -350,19 +372,24 @@ namespace IntercomFirmwareTool.Core
                 sha.AppendData(buffer, 0, read);
             }
             string hex = Convert.ToHexString(sha.GetHashAndReset()); // uppercase hex
-            return string.Equals(hex, fw.Sha256, StringComparison.OrdinalIgnoreCase);
+            return string.Equals(hex, fw.Sha256, StringComparison.OrdinalIgnoreCase)
+                ? (VerifyOutcome.Match, actualSize, hex)
+                : (VerifyOutcome.HashMismatch, actualSize, hex);
         }
 
-        // Swallowing variant: any failure — including an unreadable file — is just "no match".
-        // Used for the cache-hit check, where an unreadable existing file simply means
-        // "no valid cache, download it". A cancel, however, must NOT be read as "no match" (that
-        // would keep scanning) — let it propagate so the scan stops.
+        // Bool wrapper for the cache-hit scan: any mismatch — or an unreadable file — is just "no
+        // match" (download it). A cancel, however, must NOT be read as "no match" (that would keep
+        // scanning) — let it propagate so the scan stops.
         private static bool MatchesEntry(string path, KnownFirmware fw, CancellationToken ct)
         {
-            try { return MatchesEntryStrict(path, fw, ct); }
+            try { return VerifyEntry(path, fw, ct).Outcome == VerifyOutcome.Match; }
             catch (OperationCanceledException) { throw; }
             catch { return false; }
         }
+
+        // First 12 hex chars of a SHA-256, for a compact, human-diffable message (never the full 64).
+        private static string ShortHash(string? hash) =>
+            string.IsNullOrEmpty(hash) ? "?" : (hash.Length <= 12 ? hash : hash[..12]);
 
         // Consider the canonical name and every "<name> (n).fwz" sibling, and decide where THIS
         // firmware goes:

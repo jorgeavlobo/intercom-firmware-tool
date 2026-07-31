@@ -255,8 +255,14 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="FD_DownloadError" xml:space="preserve">
     <value>Download fehlgeschlagen: {0}</value>
   </data>
-  <data name="FD_IntegrityMismatch" xml:space="preserve">
-    <value>Die heruntergeladene Datei entspricht nicht der erwarteten {0} (Integritätsprüfung fehlgeschlagen).</value>
+  <data name="FD_IntegritySize" xml:space="preserve">
+    <value>Die heruntergeladene Datei {0} hat {1:N0} Bytes, erwartet wurden jedoch {2:N0} (Integritätsprüfung fehlgeschlagen).</value>
+  </data>
+  <data name="FD_IntegrityHash" xml:space="preserve">
+    <value>Die heruntergeladene Datei {0} entspricht nicht dem erwarteten Inhalt (SHA-256 {1}…, erwartet {2}…).</value>
+  </data>
+  <data name="FD_IntegrityOversize" xml:space="preserve">
+    <value>Der Download von {0} hat die erwarteten {1:N0} Bytes überschritten und wurde gestoppt.</value>
   </data>
   <data name="FD_IoError" xml:space="preserve">
     <value>Dateifehler: {0}</value>

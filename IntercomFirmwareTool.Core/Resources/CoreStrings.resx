@@ -256,8 +256,14 @@ The verified build was kept here — move/rename it manually:
   <data name="FD_DownloadError" xml:space="preserve">
     <value>Download failed: {0}</value>
   </data>
-  <data name="FD_IntegrityMismatch" xml:space="preserve">
-    <value>The downloaded file does not match the expected {0} (integrity check failed).</value>
+  <data name="FD_IntegritySize" xml:space="preserve">
+    <value>The downloaded {0} is {1:N0} bytes, but {2:N0} were expected (integrity check failed).</value>
+  </data>
+  <data name="FD_IntegrityHash" xml:space="preserve">
+    <value>The downloaded {0} does not match the expected content (SHA-256 {1}…, expected {2}…).</value>
+  </data>
+  <data name="FD_IntegrityOversize" xml:space="preserve">
+    <value>The download of {0} exceeded the expected {1:N0} bytes and was stopped.</value>
   </data>
   <data name="FD_IoError" xml:space="preserve">
     <value>File error: {0}</value>

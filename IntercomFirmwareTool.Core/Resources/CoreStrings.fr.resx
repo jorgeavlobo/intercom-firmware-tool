@@ -255,8 +255,14 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="FD_DownloadError" xml:space="preserve">
     <value>Échec du téléchargement : {0}</value>
   </data>
-  <data name="FD_IntegrityMismatch" xml:space="preserve">
-    <value>Le fichier téléchargé ne correspond pas au {0} attendu (échec du contrôle d'intégrité).</value>
+  <data name="FD_IntegritySize" xml:space="preserve">
+    <value>Le fichier {0} téléchargé fait {1:N0} octets, mais {2:N0} étaient attendus (échec du contrôle d'intégrité).</value>
+  </data>
+  <data name="FD_IntegrityHash" xml:space="preserve">
+    <value>Le fichier {0} téléchargé ne correspond pas au contenu attendu (SHA-256 {1}…, attendu {2}…).</value>
+  </data>
+  <data name="FD_IntegrityOversize" xml:space="preserve">
+    <value>Le téléchargement de {0} a dépassé les {1:N0} octets attendus et a été arrêté.</value>
   </data>
   <data name="FD_IoError" xml:space="preserve">
     <value>Erreur de fichier : {0}</value>

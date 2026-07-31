@@ -255,8 +255,14 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="FD_DownloadError" xml:space="preserve">
     <value>La descarga falló: {0}</value>
   </data>
-  <data name="FD_IntegrityMismatch" xml:space="preserve">
-    <value>El archivo descargado no coincide con el {0} esperado (la verificación de integridad falló).</value>
+  <data name="FD_IntegritySize" xml:space="preserve">
+    <value>El archivo {0} descargado tiene {1:N0} bytes, pero se esperaban {2:N0} (la verificación de integridad falló).</value>
+  </data>
+  <data name="FD_IntegrityHash" xml:space="preserve">
+    <value>El archivo {0} descargado no coincide con el contenido esperado (SHA-256 {1}…, esperado {2}…).</value>
+  </data>
+  <data name="FD_IntegrityOversize" xml:space="preserve">
+    <value>La descarga de {0} superó los {1:N0} bytes esperados y se detuvo.</value>
   </data>
   <data name="FD_IoError" xml:space="preserve">
     <value>Error de archivo: {0}</value>

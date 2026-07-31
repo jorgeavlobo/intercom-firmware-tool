@@ -255,8 +255,14 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="FD_DownloadError" xml:space="preserve">
     <value>A descarga falhou: {0}</value>
   </data>
-  <data name="FD_IntegrityMismatch" xml:space="preserve">
-    <value>O ficheiro descarregado não corresponde ao {0} esperado (verificação de integridade falhou).</value>
+  <data name="FD_IntegritySize" xml:space="preserve">
+    <value>O {0} descarregado tem {1:N0} bytes, mas eram esperados {2:N0} (verificação de integridade falhou).</value>
+  </data>
+  <data name="FD_IntegrityHash" xml:space="preserve">
+    <value>O {0} descarregado não corresponde ao conteúdo esperado (SHA-256 {1}…, esperado {2}…).</value>
+  </data>
+  <data name="FD_IntegrityOversize" xml:space="preserve">
+    <value>A transferência de {0} excedeu os {1:N0} bytes esperados e foi interrompida.</value>
   </data>
   <data name="FD_IoError" xml:space="preserve">
     <value>Erro de ficheiro: {0}</value>
