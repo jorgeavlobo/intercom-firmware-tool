@@ -16,16 +16,20 @@ namespace IntercomFirmwareTool.App
     /// seconds, on any user scroll, or once everything fits. Clicking it smooth-scrolls
     /// down to the new content.
     ///
-    /// One <see cref="ScrollViewer.ScrollChanged"/> handler covers every reveal — it keys
-    /// off the extent growing (<see cref="ScrollChangedEventArgs.ExtentHeightChange"/>),
-    /// so no per-control wiring is needed.
+    /// The <see cref="ScrollViewer.ScrollChanged"/> handler covers <b>layout-driven</b> reveals —
+    /// it keys off the extent growing (<see cref="ScrollChangedEventArgs.ExtentHeightChange"/>), so no
+    /// per-control wiring is needed. A <b>programmatic</b> reveal that can land during the cue's
+    /// arming delay (the availability probe showing the download section) instead calls
+    /// <see cref="NotifyContentRevealed"/>.
     /// </summary>
     public partial class MainWindow
     {
         private bool _cueArmed;   // ignore the initial layout burst until the window settles
         private bool _cueShown;   // the pill is currently visible (animating in / shown)
+        private bool _closed;     // window closed — pending dispatcher callbacks must no-op
         private DispatcherTimer? _scrollCueTimer; // auto-hide countdown
         private DispatcherTimer? _scrollAnim;     // smooth-scroll stepper
+        private DispatcherOperation? _cueRevealOp; // queued programmatic-reveal evaluation
 
         /// <summary>Arm the cue shortly after load, so the first layout pass (which fills
         /// the extent) doesn't fire it — only genuine post-load reveals do.</summary>
@@ -36,8 +40,16 @@ namespace IntercomFirmwareTool.App
             t.Start();
             // Stop t on close too: if the window closes before its first tick, a pending tick would
             // otherwise fire on the dispatcher after Closed, briefly rooting the window and flipping
-            // _cueArmed post-close.
-            Closed += (_, _) => { t.Stop(); _scrollCueTimer?.Stop(); _scrollAnim?.Stop(); };
+            // _cueArmed post-close. Also abort any queued reveal evaluation — the dispatcher stays
+            // alive after Closed, so it could otherwise run ShowScrollCue()/create a timer post-close.
+            Closed += (_, _) =>
+            {
+                _closed = true;
+                _cueRevealOp?.Abort();
+                t.Stop();
+                _scrollCueTimer?.Stop();
+                _scrollAnim?.Stop();
+            };
         }
 
         /// <summary>Announce a PROGRAMMATIC reveal (e.g. the availability probe showing the download
@@ -48,8 +60,9 @@ namespace IntercomFirmwareTool.App
         private void NotifyContentRevealed()
         {
             _cueArmed = true;
-            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+            _cueRevealOp = Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
             {
+                if (_closed) return; // window gone — don't show a cue / create a timer post-close
                 double below = BodyScroll.ExtentHeight - (BodyScroll.VerticalOffset + BodyScroll.ViewportHeight);
                 if (below > 4) ShowScrollCue();
             }));

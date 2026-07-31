@@ -304,7 +304,7 @@ namespace IntercomFirmwareTool.Core
                 if (ct.IsCancellationRequested || completed?.Cancelled == true)
                     return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
                 if (completed?.Error is { } err)
-                    return ClassifyTransferError(err);
+                    return ClassifyMultipartError(err);
                 if (!File.Exists(partPath))
                     return new(DownloadOutcome.HttpError, null, () => CoreStrings.Get("FD_DownloadFailed"));
             }
@@ -317,7 +317,7 @@ namespace IntercomFirmwareTool.Core
             }
             catch (Exception ex)
             {
-                return ClassifyTransferError(ex);
+                return ClassifyMultipartError(ex);
             }
 
             // Verify the downloaded bytes against THIS entry (size + SHA-256). Distinguish a
@@ -551,13 +551,14 @@ namespace IntercomFirmwareTool.Core
             return new(DownloadOutcome.IoError, null, () => CoreStrings.Get("FD_PublishFailed"));
         }
 
-        // A local filesystem failure (unwritable dir, disk full, locked .part) is not a transport
-        // error and must NOT be retried — classify it as IoError so the loop stops and the user
-        // sees a file error, not a network one. Everything else is treated as a transport failure.
-        private static DownloadResult ClassifyTransferError(Exception ex) =>
-            ex is IOException or UnauthorizedAccessException
-                ? new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)))
-                : new(DownloadOutcome.HttpError, null, () => CoreStrings.Format("FD_DownloadError", SafeMsg(ex)));
+        // Classify a failure from the MULTIPART library attempt. The library owns the file writes, so
+        // an IOException here is ambiguous — a network reset/truncation OR a local disk error — and we
+        // can't tell them apart at this level. Treat every failure as a RETRYABLE transport error so a
+        // network blip still reaches the remaining attempts and the single-connection fallback; a
+        // genuine local error (disk full, ACL) resurfaces there, accurately classified as IoError by
+        // TransferSingleCappedAsync (which flags its own file ops), and the loop then stops.
+        private static DownloadResult ClassifyMultipartError(Exception ex) =>
+            new(DownloadOutcome.HttpError, null, () => CoreStrings.Format("FD_DownloadError", SafeMsg(ex)));
 
         // Size fast-path then SHA-256, checked against a SPECIFIC entry (clearer than the
         // whole-registry Verify, and a match here means the file also passes that gate). Throws on
