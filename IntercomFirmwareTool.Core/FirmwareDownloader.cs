@@ -343,14 +343,18 @@ namespace IntercomFirmwareTool.Core
             string baseName = Path.GetFileNameWithoutExtension(fw.OriginalName);
             string ext = Path.GetExtension(fw.OriginalName);
 
-            // Which candidate indices actually exist on disk (0 = the canonical name; n = "(n)").
+            // Which candidate indices are already taken on disk (0 = the canonical name; n = "(n)").
+            // Enumerate file-system ENTRIES, not just files: a *directory* named like a candidate
+            // (e.g. a "C100X_010508.fwz" folder) also occupies that name — File.Move onto it would
+            // fail, and only after a full 100-300 MB transfer — so it must be skipped as a target
+            // too. Such an entry never becomes a cache hit: MatchesEntry can't hash a directory.
             var existing = new HashSet<int>();
             try
             {
                 var rx = new Regex(
                     "^" + Regex.Escape(baseName) + @" \((\d+)\)" + Regex.Escape(ext) + "$",
                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-                foreach (string path in Directory.EnumerateFiles(destDir))
+                foreach (string path in Directory.EnumerateFileSystemEntries(destDir))
                 {
                     string name = Path.GetFileName(path);
                     if (string.Equals(name, fw.OriginalName, StringComparison.OrdinalIgnoreCase))
