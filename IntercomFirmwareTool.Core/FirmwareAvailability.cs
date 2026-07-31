@@ -134,11 +134,15 @@ namespace IntercomFirmwareTool.Core
 
         private async Task<FirmwareAvailability> ProbeOneAsync(KnownFirmware fw, CancellationToken ct)
         {
+            // ProbeAsync only ever queues entries with a non-empty DownloadUrl; capture it as a
+            // non-null local so the contract is explicit at the single use site (and nullability
+            // is satisfied without warnings).
+            string url = fw.DownloadUrl!;
             try
             {
                 HttpResponseMessage resp = await _pipeline.ExecuteAsync(async token =>
                 {
-                    using var req = new HttpRequestMessage(HttpMethod.Get, fw.DownloadUrl);
+                    using var req = new HttpRequestMessage(HttpMethod.Get, url);
                     // A plain, headers-only GET (deliberately NO Range header): some official
                     // endpoints — notably the Liferay checkout links (bt_mxLiferayCheckout.jsp) —
                     // reject Range requests (403/416) even though the file downloads fine, which
