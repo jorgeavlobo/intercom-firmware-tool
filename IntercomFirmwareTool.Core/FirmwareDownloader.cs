@@ -1,5 +1,6 @@
 using System.ComponentModel; // AsyncCompletedEventArgs
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 using Downloader;
 using IntercomFirmwareTool.Core.Localization;
 
@@ -327,41 +328,58 @@ namespace IntercomFirmwareTool.Core
             catch { return false; }
         }
 
-        // Walk the canonical name then "<name> (1).fwz", "<name> (2).fwz", … and decide where THIS
+        // Consider the canonical name and every "<name> (n).fwz" sibling, and decide where THIS
         // firmware goes:
-        //   • the first existing candidate that VERIFIES as this entry → a cache hit (reuse it, no
+        //   • an existing candidate that VERIFIES as this entry → a cache hit (reuse it, no
         //     re-download), so clicking Download repeatedly never piles up duplicate copies;
-        //   • the first name that does NOT exist → the free target to download into (so an unrelated
-        //     file holding one of these names is never overwritten).
+        //   • otherwise the first name that does NOT exist → the free target to download into (so an
+        //     unrelated file holding one of these names is never overwritten).
+        // The existing siblings are found by enumerating the folder ONCE and matching the exact
+        // pattern, so every numbered copy is considered no matter how large the gaps in the
+        // numbering are (a lone "(16)" left after "(0)"–"(15)" were deleted is still reused).
         // Hashing happens here (call it off the UI thread).
         private static (string? CachedPath, string FreeTarget) ScanDestination(string destDir, KnownFirmware fw)
         {
             string baseName = Path.GetFileNameWithoutExtension(fw.OriginalName);
             string ext = Path.GetExtension(fw.OriginalName);
-            string? firstFree = null;   // the first free name → where we'd download
-            int gap = 0;                // consecutive empty names since the last existing file
-            const int gapLimit = 16;    // stop once the numbering clearly ran out (allow small holes)
-            for (int i = 0; i < 10000; i++)
+
+            // Which candidate indices actually exist on disk (0 = the canonical name; n = "(n)").
+            var existing = new HashSet<int>();
+            try
+            {
+                var rx = new Regex(
+                    "^" + Regex.Escape(baseName) + @" \((\d+)\)" + Regex.Escape(ext) + "$",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+                foreach (string path in Directory.EnumerateFiles(destDir))
+                {
+                    string name = Path.GetFileName(path);
+                    if (string.Equals(name, fw.OriginalName, StringComparison.OrdinalIgnoreCase))
+                        existing.Add(0);
+                    else if (rx.Match(name) is { Success: true } m
+                             && int.TryParse(m.Groups[1].Value, out int n) && n > 0)
+                        existing.Add(n);
+                }
+            }
+            catch { /* unreadable folder → treat as empty; fall through to the canonical name */ }
+
+            // Reuse a verified copy if one exists — check in ascending index order so the reused
+            // file is the most canonical available.
+            foreach (int i in existing.OrderBy(static x => x))
             {
                 string candidate = i == 0
                     ? Path.Combine(destDir, fw.OriginalName)
                     : Path.Combine(destDir, $"{baseName} ({i}){ext}");
-                if (File.Exists(candidate))
-                {
-                    gap = 0;
-                    if (MatchesEntry(candidate, fw)) return (candidate, candidate); // a verified copy → reuse
-                    // occupied by a DIFFERENT file → leave it untouched and keep scanning, so a
-                    // verified sibling further along (e.g. a free canonical name but a matching "(1)")
-                    // is still found instead of triggering another full download.
-                }
-                else
-                {
-                    firstFree ??= candidate;
-                    if (++gap >= gapLimit) break; // enough empty tail — no more siblings to check
-                }
+                if (MatchesEntry(candidate, fw)) return (candidate, candidate);
             }
-            // No verified copy anywhere → download into the first free name (never overwrite a file).
-            return (null, firstFree ?? Path.Combine(destDir, $"{baseName} ({Guid.NewGuid():N}){ext}"));
+
+            // No verified copy anywhere → download into the first free name (smallest unused index),
+            // never overwriting an existing (unrelated) file.
+            int free = 0;
+            while (existing.Contains(free)) free++;
+            string target = free == 0
+                ? Path.Combine(destDir, fw.OriginalName)
+                : Path.Combine(destDir, $"{baseName} ({free}){ext}");
+            return (null, target);
         }
 
         private static void TryDelete(string path)
