@@ -201,19 +201,10 @@ namespace IntercomFirmwareTool.Core
                             // publish a file the user just cancelled.
                             if (ct.IsCancellationRequested)
                                 return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
-                            // The bytes are present in partPath and already verified; publish it.
-                            // finalPath was chosen to be free, so a plain Move — which refuses to
-                            // overwrite — keeps the publish atomic and clobbers no existing file.
-                            try
-                            {
-                                File.Move(partPath, finalPath);
-                            }
-                            catch (Exception ex)
-                            {
-                                return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
-                            }
-                            return new(DownloadOutcome.Verified, finalPath,
-                                () => CoreStrings.Format("FD_Verified", Path.GetFileName(finalPath), fw.SizeBytes));
+                            // The bytes are present in partPath and already verified; publish them
+                            // (handling a concurrent process that grabbed the target name first).
+                            return await PublishVerifiedAsync(partPath, finalPath, destDir, fw, ct)
+                                .ConfigureAwait(false);
 
                         case DownloadOutcome.Cancelled:
                         case DownloadOutcome.IoError:
@@ -417,8 +408,12 @@ namespace IntercomFirmwareTool.Core
                     long startTs = Stopwatch.GetTimestamp();
                     while (true)
                     {
-                        timeoutCts.CancelAfter(InactivityTimeout); // reset the inactivity clock each read
+                        timeoutCts.CancelAfter(InactivityTimeout); // arm only for the network read
                         int read = await body.ReadAsync(buffer.AsMemory(0, buffer.Length), tk).ConfigureAwait(false);
+                        // Disarm the instant the read returns, so the LOCAL write/hash below aren't
+                        // under the network clock — a slow disk taking >InactivityTimeout on a 1 MiB
+                        // write must not cancel tk and get mis-reported as a network stall.
+                        timeoutCts.CancelAfter(Timeout.InfiniteTimeSpan);
                         if (read <= 0) break;
 
                         // HARD write-boundary cap: if this chunk would push the file past the known
@@ -441,7 +436,6 @@ namespace IntercomFirmwareTool.Core
                         double secs = (Stopwatch.GetTimestamp() - startTs) / (double)Stopwatch.Frequency;
                         progress?.Report(new DownloadProgress(received, barTotal, secs > 0 ? received / secs : 0));
                     }
-                    timeoutCts.CancelAfter(Timeout.InfiniteTimeSpan); // stop the clock; the rest is local work
 
                     try
                     {
@@ -494,6 +488,42 @@ namespace IntercomFirmwareTool.Core
         // Marks a LOCAL file-operation failure inside TransferSingleCappedAsync, so the handler can
         // classify it as a final IoError — distinct from a transport IOException on the body read.
         private sealed class LocalIoException(Exception inner) : Exception(inner.Message, inner);
+
+        // Publish the verified .part into finalPath. Normally a plain Move (finalPath was chosen free
+        // and Move refuses to overwrite, so nothing is clobbered). If ANOTHER process grabbed the
+        // name first — a concurrent download of the same firmware into the same folder — re-scan and
+        // either accept their identical, verified copy as a cache hit, or move into a fresh free name
+        // instead of throwing away our fully-verified transfer as an IoError.
+        private static async Task<DownloadResult> PublishVerifiedAsync(
+            string partPath, string finalPath, string destDir, KnownFirmware fw, CancellationToken ct)
+        {
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    File.Move(partPath, finalPath); // refuses to overwrite → atomic publish
+                    return new(DownloadOutcome.Verified, finalPath,
+                        () => CoreStrings.Format("FD_Verified", Path.GetFileName(finalPath), fw.SizeBytes));
+                }
+                catch (IOException) when (File.Exists(finalPath) || Directory.Exists(finalPath))
+                {
+                    // The name was taken between the scan and now. Re-scan: a verified match is a
+                    // cache hit (someone published the identical file); else take a fresh free target
+                    // and try the move again.
+                    var scan = await ScanDestinationAsync(destDir, fw, ct).ConfigureAwait(false);
+                    if (scan.CachedPath is string hit)
+                        return new(DownloadOutcome.Cached, hit,
+                            () => CoreStrings.Format("FD_Cached", Path.GetFileName(hit)));
+                    finalPath = scan.FreeTarget;
+                }
+                catch (Exception ex)
+                {
+                    return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
+                }
+            }
+            // Kept colliding across re-scans (pathological) → give up rather than loop forever.
+            return new(DownloadOutcome.IoError, null, () => CoreStrings.Get("FD_DownloadFailed"));
+        }
 
         // A local filesystem failure (unwritable dir, disk full, locked .part) is not a transport
         // error and must NOT be retried — classify it as IoError so the loop stops and the user

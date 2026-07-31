@@ -325,8 +325,13 @@ namespace IntercomFirmwareTool.App
                 InitialDirectory = Directory.Exists(_dlFolder) ? _dlFolder : FirmwareDefaultDir(),
             };
             if (dlg.ShowDialog(this) != true) return;
+            bool changed = !string.Equals(_dlFolder, dlg.FolderName, StringComparison.Ordinal);
             _dlFolder = dlg.FolderName;
             TxtDlFolder.Text = _dlFolder;
+            // A different destination has never been scanned/downloaded to, so a prior verified/
+            // cached/failed result (scoped to the old folder) no longer applies — clear it, mirroring
+            // the selection-change clear in SelectVersion.
+            if (changed) SetDlStatus(null);
             UpdateDlStartEnabled();
         }
 
@@ -403,6 +408,10 @@ namespace IntercomFirmwareTool.App
 
         private void OnDownloadProgress(DownloadProgress p)
         {
+            // Once Cancel is pressed, BtnDlCancel_Click shows "Cancelling…"; CancelAsync is async, so
+            // queued Progress<T> callbacks can still arrive. Drop them, so they don't overwrite the
+            // "Cancelling…" acknowledgement and make the button look like it did nothing.
+            if (_dlCts?.IsCancellationRequested == true) return;
             if (p.Fraction is double f)
             {
                 double clamped = Math.Clamp(f * 100.0, 0, 100);

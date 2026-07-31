@@ -951,6 +951,11 @@ namespace IntercomFirmwareTool.App
             // a key is selected (both can change here); the advanced tools are toggled
             // separately by TglAdvanced_Changed.
             UpdateAdvancedVisibility();
+            // The Download button shares the same interlocks (a build, an MQTT test, or a MAC
+            // capture all block it). This runs at every build-gate refresh — including the MQTT
+            // test/capture transitions, which call UpdateBuildEnabled — so the Download button's
+            // visible enablement tracks _mqttTesting/_mqttCapturing, not just its own click guard.
+            UpdateDlStartEnabled();
         }
 
         /// <summary>
