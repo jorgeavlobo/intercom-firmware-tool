@@ -425,6 +425,12 @@ namespace IntercomFirmwareTool.App
         /// the Start button keeps its accent fill via the Tag="busy" style trick.</summary>
         private void SetDownloadBusy(bool busy)
         {
+            // Lock the disclosure OPEN while a download runs: the card can only be open now
+            // (Start lives inside it), and collapsing it would hide the sole progress bar AND
+            // the Cancel button while the transfer continued and every other op stays locked —
+            // the operation would look like it vanished, with no way to cancel. Disabling the
+            // toggle pins it in its current (open) state.
+            TglDownload.IsEnabled = !busy;
             foreach (var r in ModelPills.Children.OfType<RadioButton>()) r.IsEnabled = !busy;
             foreach (var r in VersionPillButtons()) r.IsEnabled = !busy;
             TxtDlFolder.IsEnabled = !busy; // click-to-browse box: dead while a download runs
