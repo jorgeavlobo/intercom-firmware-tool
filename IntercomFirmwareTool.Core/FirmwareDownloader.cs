@@ -144,7 +144,13 @@ namespace IntercomFirmwareTool.Core
             string finalPath;
             try
             {
-                var scan = await Task.Run(() => ScanDestinationAsync(destDir, fw, ct), ct).ConfigureAwait(false);
+                // WaitAsync(ct) makes the OUTER wait cancellable too: a synchronous filesystem call
+                // inside the scan (enumeration MoveNext, FileInfo.Length) can stall on a dead network
+                // share where the scan's own inner token checks can't run and Task.Run's token can't
+                // stop a delegate already started — so without this, Cancel would hang the UI. The
+                // orphaned background scan finishes when the share recovers; its result is dropped.
+                var scan = await Task.Run(() => ScanDestinationAsync(destDir, fw, ct), ct)
+                    .WaitAsync(ct).ConfigureAwait(false);
                 if (scan.CachedPath is string hit)
                 {
                     if (ct.IsCancellationRequested)
@@ -373,6 +379,10 @@ namespace IntercomFirmwareTool.Core
                 timeoutCts.CancelAfter(InactivityTimeout); // arm for the header wait
                 using var resp = await _http
                     .SendAsync(req, HttpCompletionOption.ResponseHeadersRead, tk).ConfigureAwait(false);
+                // Headers have arrived — disarm before the LOCAL work below (get the body stream,
+                // open the temp file). A slow disk opening the FileStream must not trip the network
+                // clock and cancel tk before the first body read; the loop re-arms per read.
+                timeoutCts.CancelAfter(Timeout.InfiniteTimeSpan);
                 if (!resp.IsSuccessStatusCode)
                     // Read as a DOWNLOAD failure (not a probe result): wrap the HTTP-status detail in
                     // the download-error prefix so the message is consistent with the other outcomes.
@@ -509,12 +519,24 @@ namespace IntercomFirmwareTool.Core
                 {
                     // The name was taken between the scan and now. Re-scan: a verified match is a
                     // cache hit (someone published the identical file); else take a fresh free target
-                    // and try the move again.
-                    var scan = await ScanDestinationAsync(destDir, fw, ct).ConfigureAwait(false);
-                    if (scan.CachedPath is string hit)
-                        return new(DownloadOutcome.Cached, hit,
-                            () => CoreStrings.Format("FD_Cached", Path.GetFileName(hit)));
-                    finalPath = scan.FreeTarget;
+                    // and try the move again. Classify a rescan failure here — an exception thrown
+                    // inside this catch would otherwise escape past the sibling catches below.
+                    try
+                    {
+                        var scan = await ScanDestinationAsync(destDir, fw, ct).ConfigureAwait(false);
+                        if (scan.CachedPath is string hit)
+                            return new(DownloadOutcome.Cached, hit,
+                                () => CoreStrings.Format("FD_Cached", Path.GetFileName(hit)));
+                        finalPath = scan.FreeTarget;
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        return new(DownloadOutcome.Cancelled, null, () => CoreStrings.Get("FD_Cancelled"));
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        return new(DownloadOutcome.IoError, null, () => CoreStrings.Format("FD_IoError", SafeMsg(ex)));
+                    }
                 }
                 catch (Exception ex)
                 {
