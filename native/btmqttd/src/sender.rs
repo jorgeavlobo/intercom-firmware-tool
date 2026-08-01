@@ -212,14 +212,16 @@ async fn session(
         Reconcile::SocketClosed => return Ok(()),
         Reconcile::Done { saw_transition: true, .. } => {}
         Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
-            // Floor-filter the authoritative snapshot too: if the ACK-buffered frames already
-            // classified an in-progress FLOOR call, a mid-ring dim-35 snapshot must not leak
-            // "ringing" onto the entrance-panel sensor (Copilot). A fresh Idle classifier never
-            // suppresses, so a genuine in-progress ENTRANCE call is still reconciled here.
-            let suppressed = lock_classifier(&classifier).snapshot_suppressed(code);
-            if !suppressed {
-                publish_call_state(cfg, client, code).await;
-                update_call_watch(&mut call_watch, code);
+            // Reconcile the authoritative snapshot against the live classification: a known FLOOR
+            // call (or a still-Pending, unresolved leading ring, e.g. from the ACK-buffered frames)
+            // suppresses a ringing snapshot so it can't reach the entrance-panel sensor; an idle
+            // snapshot also resets the classifier. A fresh Idle classifier at reconnect publishes,
+            // so a genuine in-progress ENTRANCE call is still reconciled (Codex/Copilot). Bind the
+            // action first so the (non-Send) guard is dropped before the await.
+            let action = lock_classifier(&classifier).reconcile_snapshot(code);
+            if let dimension::CallStateAction::Publish(c) = action {
+                publish_call_state(cfg, client, c).await;
+                update_call_watch(&mut call_watch, c);
             }
         }
         Reconcile::Done { result: Ok(None) | Err(_), saw_transition: false } => {
@@ -290,25 +292,28 @@ async fn session(
                     // (in order, newer than this snapshot) — leave it.
                     Reconcile::Done { saw_transition: true, .. } => {}
                     Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
-                        // Floor-filter here too. call_watch is NOT armed only by entrance calls: a
-                        // failed reconnect read / exhausted reconcile arms it as UNKNOWN
-                        // (`Some((None, …))`), so a floor call starting before the retry sets the
-                        // classifier to Floor while this poll is live — and would otherwise publish
-                        // the floor call's ringing snapshot to the entrance-panel sensor (Codex).
-                        let suppressed = lock_classifier(&classifier).snapshot_suppressed(code);
-                        if suppressed {
-                            // Floor call in progress: publish nothing. Preserve the obligation
-                            // (`known` unchanged) but reset the timer so we re-check after the
-                            // interval instead of hot-looping; it converges once the floor call ends
-                            // (classifier → Idle) and the next poll publishes the true idle state.
-                            call_watch = Some((known, tokio::time::Instant::now()));
-                        } else {
-                            // Publish only on a real change — `known` is None ("unknown", from a
-                            // failed reconnect read) so the first successful poll always writes.
-                            if known != Some(code) {
-                                publish_call_state(cfg, client, code).await;
+                        // Reconcile against the live classification here too. call_watch is NOT armed
+                        // only by entrance calls: a failed reconnect read / exhausted reconcile arms
+                        // it as UNKNOWN (`Some((None, …))`), so a floor call starting before the retry
+                        // sets the classifier to Floor (or leaves it Pending) while this poll is live —
+                        // which would otherwise publish the floor ringing snapshot here (Codex).
+                        let action = lock_classifier(&classifier).reconcile_snapshot(code);
+                        match action {
+                            dimension::CallStateAction::Publish(c) => {
+                                // Publish only on a real change — `known` is None ("unknown", from a
+                                // failed reconnect read) so the first successful poll always writes.
+                                if known != Some(c) {
+                                    publish_call_state(cfg, client, c).await;
+                                }
+                                update_call_watch(&mut call_watch, c);
                             }
-                            update_call_watch(&mut call_watch, code);
+                            dimension::CallStateAction::Suppress => {
+                                // Floor/pending in progress: publish nothing. Preserve the obligation
+                                // (`known` unchanged) but reset the timer so we re-check after the
+                                // interval instead of hot-looping; it converges once the call resolves
+                                // and the next poll publishes the true state.
+                                call_watch = Some((known, tokio::time::Instant::now()));
+                            }
                         }
                     }
                     Reconcile::Done { result: Ok(None) | Err(_), saw_transition: false } => {
@@ -356,14 +361,15 @@ async fn session(
                 // A live transition during the drain already published + updated the watch.
                 Reconcile::Done { saw_transition: true, .. } => {}
                 Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
-                    // Floor-filter the periodic authoritative snapshot: a reseed landing during a
-                    // FLOOR call would otherwise publish that call's dim-35 "ringing" to the
-                    // entrance-panel sensor — the one path that can leak, since a floor call never
-                    // arms call_watch (Copilot). Non-floor states (incl. Idle) publish normally.
-                    let suppressed = lock_classifier(&classifier).snapshot_suppressed(code);
-                    if !suppressed {
-                        publish_call_state(cfg, client, code).await;
-                        update_call_watch(&mut call_watch, code);
+                    // Reconcile the periodic authoritative snapshot: a reseed landing during a FLOOR
+                    // call (or a still-Pending ring) suppresses its dim-35 "ringing" so it can't reach
+                    // the entrance-panel sensor; an idle snapshot also resets the classifier, repairing
+                    // a missed terminal frame so a later floor call's ring isn't mis-published as
+                    // entrance (Codex/Copilot). Bind first to drop the guard before the await.
+                    let action = lock_classifier(&classifier).reconcile_snapshot(code);
+                    if let dimension::CallStateAction::Publish(c) = action {
+                        publish_call_state(cfg, client, c).await;
+                        update_call_watch(&mut call_watch, c);
                     }
                 }
                 Reconcile::Done { result: Ok(None) | Err(_), saw_transition: false } => {

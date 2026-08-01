@@ -305,20 +305,34 @@ impl CallClassifier {
         }
     }
 
-    /// Whether an AUTHORITATIVE dim-35 snapshot for `code` — read directly from the gateway,
-    /// OUT-OF-BAND from the live frame stream (the reconnect/poll/reseed reconcile) — must be
-    /// SUPPRESSED given the current classification. A floor call in progress drives dim-35 to a
-    /// ringing code just like an entrance call, so a snapshot landing mid-floor-ring would leak
-    /// "ringing" onto the entrance-panel sensor; suppress it (Copilot). Only a NON-idle code
-    /// during a KNOWN floor call is suppressed — a `0` snapshot is idle and always publishes, and
-    /// every non-floor state publishes the true state (crucially, a fresh `Idle` classifier at
-    /// reconnect never suppresses, so a genuine in-progress entrance call is still reconciled).
+    /// Reconcile an AUTHORITATIVE dim-35 snapshot `code` — read directly from the gateway,
+    /// OUT-OF-BAND from the live frame stream (the reconnect/poll/reseed reconcile) — against the
+    /// current classification, returning whether it may reach the entrance-panel sensor.
     ///
-    /// NON-mutating BY DESIGN: a snapshot is a full-truth read, not a live transition, so it must
-    /// not drive the `Pending`-holding state machine (feeding it into [`Self::on_call_state`]
-    /// would, e.g., turn a real entrance snapshot into a spuriously-held `Pending`).
-    pub fn snapshot_suppressed(&self, code: u8) -> bool {
-        matches!(self.state, CallKind::Floor) && code != 0
+    /// - An idle (`0`) snapshot is authoritative gateway truth that no call is active, so it
+    ///   RESETS the classifier to `Idle` and publishes. This repairs a MISSED live terminal `0`:
+    ///   without the reset the classifier would linger in `Entrance`, and the next floor call's
+    ///   leading ring would be published as an entrance ring instead of held (Codex).
+    /// - A non-idle snapshot is SUPPRESSED while the classification is `Floor` (a known floor call
+    ///   — its ringing must never surface here) OR still `Pending` (the leading ring is held,
+    ///   classification unresolved — publishing the out-of-band ringing could pre-empt a floor
+    ///   signature still in flight and leak; the live stream will resolve and publish it) (Codex).
+    /// - Otherwise (`Entrance`, or a fresh `Idle` at reconnect) it PUBLISHES: a call in progress
+    ///   that predates this session is assumed entrance — a floor call is momentary and long over
+    ///   by the time an out-of-band query runs.
+    ///
+    /// Only `0` mutates; a non-idle snapshot leaves the live state machine untouched (it is a
+    /// full-truth read, not a live transition — feeding it into [`Self::on_call_state`] would, e.g.,
+    /// turn a real entrance snapshot into a spuriously-held `Pending`).
+    pub fn reconcile_snapshot(&mut self, code: u8) -> CallStateAction {
+        if code == 0 {
+            self.state = CallKind::Idle;
+            return CallStateAction::Publish(0);
+        }
+        match self.state {
+            CallKind::Floor | CallKind::Pending(_) => CallStateAction::Suppress,
+            CallKind::Idle | CallKind::Entrance => CallStateAction::Publish(code),
+        }
     }
 }
 
@@ -622,23 +636,43 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_is_suppressed_only_during_a_known_floor_call() {
-        // A fresh classifier (reconnect) NEVER suppresses an authoritative snapshot — a genuine
+    fn reconcile_snapshot_publishes_for_a_fresh_or_entrance_classifier() {
+        // A fresh classifier (reconnect) PUBLISHES an authoritative snapshot — a genuine
         // in-progress entrance call must still be reconciled after a monitor reconnect.
         let mut c = CallClassifier::new();
-        assert!(!c.snapshot_suppressed(2));
-        assert!(!c.snapshot_suppressed(0));
+        assert_eq!(c.reconcile_snapshot(2), CallStateAction::Publish(2));
+        assert_eq!(c.reconcile_snapshot(0), CallStateAction::Publish(0));
+        // A classified entrance call publishes snapshots too.
+        c.saw_entrance_panel_call();
+        assert_eq!(c.reconcile_snapshot(6), CallStateAction::Publish(6));
+    }
+
+    #[test]
+    fn reconcile_snapshot_suppresses_during_floor_and_pending() {
         // A classified floor call suppresses a ringing snapshot (the reseed-during-floor leak)...
+        let mut c = CallClassifier::new();
         c.saw_floor_call();
-        assert!(c.snapshot_suppressed(1));
-        assert!(c.snapshot_suppressed(2));
-        // ...but never an idle snapshot (0 is genuinely idle → publish it).
-        assert!(!c.snapshot_suppressed(0));
-        // snapshot_suppressed does NOT mutate: the classifier is still Floor afterwards.
-        assert!(c.snapshot_suppressed(2));
-        // An entrance classification publishes snapshots normally.
-        assert_eq!(c.saw_entrance_panel_call(), None);
-        assert!(!c.snapshot_suppressed(2));
+        assert_eq!(c.reconcile_snapshot(1), CallStateAction::Suppress);
+        assert_eq!(c.reconcile_snapshot(2), CallStateAction::Suppress);
+        // A still-Pending (held leading ring, not yet classified) also suppresses — publishing the
+        // out-of-band ringing could pre-empt a floor signature still in flight and leak.
+        let mut p = CallClassifier::new();
+        assert_eq!(p.on_call_state(1), CallStateAction::Suppress); // Pending(1)
+        assert_eq!(p.reconcile_snapshot(2), CallStateAction::Suppress);
+    }
+
+    #[test]
+    fn reconcile_snapshot_idle_resets_the_classifier() {
+        // The missed-terminal-frame repair: a stuck Entrance classifier is reset to Idle by an
+        // authoritative idle snapshot, so the NEXT floor call's leading ring is HELD (not published
+        // as a false entrance ring).
+        let mut c = CallClassifier::new();
+        c.saw_entrance_panel_call(); // state = Entrance (its terminal 0 was missed)
+        assert_eq!(c.reconcile_snapshot(0), CallStateAction::Publish(0)); // discovers idle + resets
+        // Proof of reset: a subsequent leading ring is now HELD (Pending), not published.
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress);
+        c.saw_floor_call();
+        assert_eq!(c.on_call_state(2), CallStateAction::Suppress);
     }
 
     #[test]
