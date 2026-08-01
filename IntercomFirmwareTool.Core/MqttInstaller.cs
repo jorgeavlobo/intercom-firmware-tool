@@ -162,10 +162,15 @@ namespace IntercomFirmwareTool.Core
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicMute"/>.</summary>
         public string? TopicMute { get; init; }
 
-        /// <summary>Momentary doorbell-event topic HA's event entity reads.
-        /// NULL (default) derives from the <see cref="TopicLastWill"/> namespace — see
-        /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicDoorbell"/>.</summary>
-        public string? TopicDoorbell { get; init; }
+        /// <summary>Momentary entrance-panel-call event topic HA's event entity reads (the
+        /// outdoor door station ring). NULL (default) derives from the <see cref="TopicLastWill"/>
+        /// namespace — see <see cref="TopicVolume"/> and <see cref="EffectiveTopicEntrancePanelCall"/>.</summary>
+        public string? TopicEntrancePanelCall { get; init; }
+        /// <summary>Momentary floor-call event topic HA's event entity reads (the dumb push-button
+        /// at the apartment's own front door — independent from the entrance panel). NULL (default)
+        /// derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicFloorCall"/>.</summary>
+        public string? TopicFloorCall { get; init; }
         /// <summary>Retained call-state topic HA's sensor reads. NULL (default)
         /// derives from the <see cref="TopicLastWill"/> namespace — see
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicCallState"/>.</summary>
@@ -194,8 +199,10 @@ namespace IntercomFirmwareTool.Core
         public string EffectiveTopicVolume => TopicVolume ?? (TopicNamespace(TopicLastWill) + "volume");
         /// <summary>The mute state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicMute => TopicMute ?? (TopicNamespace(TopicLastWill) + "mute");
-        /// <summary>The doorbell-event topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
-        public string EffectiveTopicDoorbell => TopicDoorbell ?? (TopicNamespace(TopicLastWill) + "doorbell");
+        /// <summary>The entrance-panel-call event topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicEntrancePanelCall => TopicEntrancePanelCall ?? (TopicNamespace(TopicLastWill) + "entrance_panel_call");
+        /// <summary>The floor-call event topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicFloorCall => TopicFloorCall ?? (TopicNamespace(TopicLastWill) + "floor_call");
         /// <summary>The call-state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicCallState => TopicCallState ?? (TopicNamespace(TopicLastWill) + "call_state");
         /// <summary>The light state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
@@ -497,7 +504,7 @@ namespace IntercomFirmwareTool.Core
             foreach (var t in new[] { opts.TopicRx, opts.TopicDump, opts.TopicStartDate,
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
                                       opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
-                                      opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState,
+                                      opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
                                       opts.EffectiveTopicLight })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
@@ -510,7 +517,7 @@ namespace IntercomFirmwareTool.Core
             foreach (var t in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                       opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
-                                      opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState,
+                                      opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
                                       opts.EffectiveTopicLight })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
                 // prefix — both are subscription-only and invalid to PUBLISH to (a broker
@@ -560,7 +567,7 @@ namespace IntercomFirmwareTool.Core
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                         opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
-                                        opts.EffectiveTopicDoorbell, opts.EffectiveTopicCallState })
+                                        opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
@@ -864,9 +871,11 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_VOLUME", opts.EffectiveTopicVolume));
             sb.Append(Conf("TOPIC_MUTE", opts.EffectiveTopicMute));
 
-            // Door-entry events: the momentary doorbell event and the retained
-            // call-state sensor btmqttd publishes from the WHO=8 monitor stream.
-            sb.Append(Conf("TOPIC_DOORBELL", opts.EffectiveTopicDoorbell));
+            // Door-entry events: two INDEPENDENT momentary events — the entrance-panel call
+            // (outdoor door station) and the floor call (the apartment's own front-door button) —
+            // plus the retained call-state sensor btmqttd publishes from the WHO=8 monitor stream.
+            sb.Append(Conf("TOPIC_ENTRANCE_PANEL_CALL", opts.EffectiveTopicEntrancePanelCall));
+            sb.Append(Conf("TOPIC_FLOOR_CALL", opts.EffectiveTopicFloorCall));
             sb.Append(Conf("TOPIC_CALL_STATE", opts.EffectiveTopicCallState));
 
             // Stair-light SWITCH (opt-in): LIGHT_WHERE is the WHO=8 actuator WHERE
@@ -1139,23 +1148,47 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
-            // Doorbell: a momentary EVENT fired when the entrance-panel call is
+            // Entrance-panel call: a momentary EVENT fired when the OUTDOOR door-station call is
             // seen on the bus (WHO=8 `*8*1#1#4#21*<WHERE>##`). `event_types` lists "pressed";
             // btmqttd publishes {"event_type":"pressed","where":…} NON-retained, so it fires
             // once per ring and never re-fires on an HA reconnect. HA reads `event_type` from
             // the JSON and exposes the extra `where` key as an attribute.
             entities.Add(new HaEntity(
-                "doorbell.json",
-                Topic("event", "doorbell"),
+                "entrance_panel_call.json",
+                Topic("event", "entrance_panel_call"),
                 JsonSerializer.Serialize(new
                 {
-                    name = "Doorbell",
-                    unique_id = $"{node}_doorbell",
-                    default_entity_id = EntId("event", "doorbell"),
-                    state_topic = opts.EffectiveTopicDoorbell,
+                    name = "Entrance Panel Call",
+                    unique_id = $"{node}_entrance_panel_call",
+                    default_entity_id = EntId("event", "entrance_panel_call"),
+                    state_topic = opts.EffectiveTopicEntrancePanelCall,
                     event_types = new[] { "pressed" },
                     device_class = "doorbell",
                     icon = "mdi:bell-ring",
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Floor call: a momentary EVENT fired when the dumb push-button at the apartment's
+            // OWN front door is pressed (WHO=8 `*8*1#13#2*<WHERE>##`). Wholly INDEPENDENT from the
+            // entrance-panel call above — a separate entity so automations never conflate the two.
+            // Same delivery model: {"event_type":"pressed","where":…} NON-retained, fires once per
+            // ring. btmqttd also SUPPRESSES the concurrent dim-35 ringing so a floor call never
+            // surfaces on the entrance-panel call-state sensor.
+            entities.Add(new HaEntity(
+                "floor_call.json",
+                Topic("event", "floor_call"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Floor Call",
+                    unique_id = $"{node}_floor_call",
+                    default_entity_id = EntId("event", "floor_call"),
+                    state_topic = opts.EffectiveTopicFloorCall,
+                    event_types = new[] { "pressed" },
+                    device_class = "doorbell",
+                    icon = "mdi:doorbell",
                     availability_topic = opts.TopicLastWill,
                     payload_available = "online",
                     payload_not_available = "offline",

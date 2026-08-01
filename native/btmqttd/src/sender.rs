@@ -125,6 +125,13 @@ async fn session(
     let mut buf = [0u8; 4096];
     let mut frames: Vec<String> = Vec::new();
 
+    // Classifies each call as an entrance-panel call or a floor call so the two stay completely
+    // independent. It holds the leading `*#8**35*1` ring (which arrives BEFORE the classifying
+    // WHO=8 frame) until resolved, then either flushes it (entrance) or suppresses it (floor).
+    // Per-session state: a fresh (re)connect starts Idle, so an authoritative dim-35 snapshot read
+    // below reconciles the true state without the classifier suppressing an in-progress call.
+    let classifier = std::sync::Mutex::new(dimension::CallClassifier::new());
+
     // Require the monitor ACK ("*#*1##") before streaming. The gateway may accept the
     // TCP connection but REFUSE the monitor session with a NACK ("*#*0##") — e.g. a
     // monitor slot is already in use — or just go idle. Without this check we'd sit on
@@ -179,7 +186,7 @@ async fn session(
     if let Some(pos) = pre.windows(own::ACK.len()).position(|w| w == own::ACK) {
         framer.push(&pre[pos + own::ACK.len()..], &mut frames);
         for frame in frames.drain(..) {
-            if let Some(code) = publish_frame(cfg, client, volume, light, &frame).await {
+            if let Some(code) = publish_frame(cfg, client, volume, light, &classifier, &frame).await {
                 update_call_watch(&mut call_watch, code);
             }
         }
@@ -197,7 +204,8 @@ async fn session(
     // clobber a real ringing/in_call; keep what the frames left and, if still disarmed, arm an
     // "unknown" marker so a later poll re-queries.
     match read_call_state_draining(
-        cfg, client, volume, light, &mut sock, &mut framer, &mut buf, &mut frames, &mut call_watch,
+        cfg, client, volume, light, &classifier, &mut sock, &mut framer, &mut buf, &mut frames,
+        &mut call_watch,
     )
     .await?
     {
@@ -245,7 +253,9 @@ async fn session(
             frames.clear();
             framer.push(&buf[..n], &mut frames);
             for frame in frames.drain(..) {
-                if let Some(code) = publish_frame(cfg, client, volume, light, &frame).await {
+                if let Some(code) =
+                    publish_frame(cfg, client, volume, light, &classifier, &frame).await
+                {
                     update_call_watch(&mut call_watch, code);
                 }
             }
@@ -263,8 +273,8 @@ async fn session(
                 // reconcile): a slow/timed-out poll must not block the read past a light echo's
                 // 3 s guard (Codex).
                 match read_call_state_draining(
-                    cfg, client, volume, light, &mut sock, &mut framer, &mut buf, &mut frames,
-                    &mut call_watch,
+                    cfg, client, volume, light, &classifier, &mut sock, &mut framer, &mut buf,
+                    &mut frames, &mut call_watch,
                 )
                 .await?
                 {
@@ -316,8 +326,8 @@ async fn session(
             // a stale idle frame disarmed the poll, this unconditional re-query re-checks dim-35
             // within one interval and re-arms/corrects, so the call-state sensor can't remain stuck.
             match read_call_state_draining(
-                cfg, client, volume, light, &mut sock, &mut framer, &mut buf, &mut frames,
-                &mut call_watch,
+                cfg, client, volume, light, &classifier, &mut sock, &mut framer, &mut buf,
+                &mut frames, &mut call_watch,
             )
             .await?
             {
@@ -369,7 +379,7 @@ enum Reconcile {
 /// the socket during a slow or timed-out query is still observed within its 3 s guard instead of
 /// being read late and misjudged as a physical press (Codex). Used by BOTH the reconnect reconcile
 /// and the periodic poll. Drained frames run the full [`publish_frame`] — light echoes, volume/mute,
-/// doorbell, dump AND call-state are all handled the moment they arrive. A call-state transition
+/// entrance-panel/floor call events, dump AND call-state are all handled the moment they arrive. A call-state transition
 /// seen here is a LIVE event from the monitor connection, at least as recent as the dim-35 snapshot
 /// (which travels over a SEPARATE connection); it is published, updates `call_watch`, and sets
 /// `saw_transition` so the caller leaves it in place rather than clobbering it with the snapshot
@@ -381,6 +391,7 @@ async fn read_call_state_draining(
     client: &AsyncClient,
     volume: &Arc<VolumeCtl>,
     light: Option<&Arc<LightCtl>>,
+    classifier: &std::sync::Mutex<dimension::CallClassifier>,
     sock: &mut TcpStream,
     framer: &mut Framer,
     buf: &mut [u8],
@@ -420,7 +431,8 @@ async fn read_call_state_draining(
                             // A live call-state transition is applied IN ORDER (published + watch
                             // updated); it marks this snapshot ambiguous, so we re-query below.
                             if let Some(code) =
-                                publish_frame(cfg, client, volume, Some(light), &frame).await
+                                publish_frame(cfg, client, volume, Some(light), classifier, &frame)
+                                    .await
                             {
                                 update_call_watch(call_watch, code);
                                 saw_transition = true;
@@ -443,7 +455,7 @@ async fn read_call_state_draining(
                     framer.push(&buf[..n], frames);
                     for frame in frames.drain(..) {
                         if let Some(code) =
-                            publish_frame(cfg, client, volume, Some(light), &frame).await
+                            publish_frame(cfg, client, volume, Some(light), classifier, &frame).await
                         {
                             update_call_watch(call_watch, code);
                             saw_transition = true;
@@ -481,6 +493,7 @@ async fn publish_frame(
     client: &AsyncClient,
     volume: &Arc<VolumeCtl>,
     light: Option<&Arc<LightCtl>>,
+    classifier: &std::sync::Mutex<dimension::CallClassifier>,
     frame: &str,
 ) -> Option<u8> {
     // Stair-light SWITCH state tracking: a physical panel press of the light button appears
@@ -502,14 +515,39 @@ async fn publish_frame(
         volume.observe_volume(pct).await;
     } else if let Some(muted) = dimension::parse_mute_report(frame) {
         volume.observe_mute(muted).await;
-    } else if let Some(where_) = dimension::parse_doorbell(frame) {
-        // Entrance-panel CALL: fire a momentary "pressed" event.
-        publish_doorbell(cfg, client, where_).await;
+    } else if let Some(where_) = dimension::parse_entrance_panel_call(frame) {
+        // Entrance-panel CALL (outdoor door station): fire a momentary "pressed" event AND
+        // classify this call as an entrance-panel call. The `*#8**35*1` ringing frame arrives
+        // BEFORE this classifying frame, so the classifier held it as Pending (Suppressed);
+        // flush that held ring now that we know it's a real entrance call (arming the watchdog).
+        let held = classifier.lock().unwrap().saw_entrance_panel_call();
+        if let Some(code) = held {
+            publish_call_state(cfg, client, code).await;
+            call_code = Some(code);
+        }
+        publish_entrance_panel_call(cfg, client, where_).await;
+    } else if let Some(where_) = dimension::parse_floor_call(frame) {
+        // Floor CALL (dumb push-button at the apartment's own front door): a COMPLETELY
+        // independent event from the entrance panel. Fire its own momentary event and arm the
+        // classifier so the concurrent dim-35 ringing (which the gateway also raises for a floor
+        // call) is SUPPRESSED — a floor call must never surface on the entrance-panel call_state.
+        classifier.lock().unwrap().saw_floor_call();
+        publish_floor_call(cfg, client, where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
-        // Call STATE transition (idle/ringing/in_call, or "active" fallback): update the
-        // retained sensor and report the code so the caller can (dis)arm the watchdog.
-        publish_call_state(cfg, client, code).await;
-        call_code = Some(code);
+        // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the
+        // classifier: an entrance-panel call publishes it (updating the retained sensor and reporting
+        // the code so the caller can (dis)arm the watchdog); a floor call's ringing is suppressed; an
+        // as-yet-unclassified leading ring is HELD until the classifying WHO=8 frame resolves it.
+        // Resolve the action and DROP the (non-Send) guard before any `.await` — never hold a
+        // std::sync::MutexGuard across an await point.
+        let action = classifier.lock().unwrap().on_call_state(code);
+        match action {
+            dimension::CallStateAction::Publish(c) => {
+                publish_call_state(cfg, client, c).await;
+                call_code = Some(c);
+            }
+            dimension::CallStateAction::Suppress => {}
+        }
     }
     let payload: Vec<u8> = if cfg.payload_json {
         match own::frame_to_json(frame) {
@@ -533,22 +571,42 @@ async fn publish_frame(
     call_code
 }
 
-/// Publish a momentary doorbell "pressed" event to TOPIC_DOORBELL. NOT retained: an
-/// event fires once, and a retained event would spuriously re-fire on every HA
-/// reconnect. QoS 0 (like the non-idempotent lock/step actions): a doorbell press is
-/// NON-idempotent, and QoS 1 may legitimately REDELIVER a publish (DUP on a lost PUBACK),
-/// which would fire the HA event — and any doorbell automation — twice for one ring. A
-/// press lost during a brief broker reconnect is preferable to a double actuation. The
-/// payload carries the HA `event_type` plus the entrance-panel WHERE (informational).
-async fn publish_doorbell(cfg: &Arc<Config>, client: &AsyncClient, where_: &str) {
+/// Publish a momentary entrance-panel "pressed" event to TOPIC_ENTRANCE_PANEL_CALL. NOT
+/// retained: an event fires once, and a retained event would spuriously re-fire on every HA
+/// reconnect. QoS 0 (like the non-idempotent lock/step actions): a ring is NON-idempotent,
+/// and QoS 1 may legitimately REDELIVER a publish (DUP on a lost PUBACK), which would fire the
+/// HA event — and any automation — twice for one ring. A press lost during a brief broker
+/// reconnect is preferable to a double actuation. The payload carries the HA `event_type` plus
+/// the entrance-panel WHERE (informational).
+async fn publish_entrance_panel_call(cfg: &Arc<Config>, client: &AsyncClient, where_: &str) {
     let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
     // Non-blocking (see publish_frame): never stall the monitor reader on a full request queue.
-    // A doorbell press dropped during a broker outage matches this event's existing philosophy
-    // (a lost press is preferable to a double actuation) — it is not retained or replayed.
-    if let Err(e) =
-        client.try_publish(&cfg.topic_doorbell, QoS::AtMostOnce, false, payload.into_bytes())
-    {
-        eprintln!("btmqttd: publish doorbell event failed: {e}");
+    // A press dropped during a broker outage matches this event's existing philosophy (a lost
+    // press is preferable to a double actuation) — it is not retained or replayed.
+    if let Err(e) = client.try_publish(
+        &cfg.topic_entrance_panel_call,
+        QoS::AtMostOnce,
+        false,
+        payload.into_bytes(),
+    ) {
+        eprintln!("btmqttd: publish entrance-panel call event failed: {e}");
+    }
+}
+
+/// Publish a momentary floor-call "pressed" event to TOPIC_FLOOR_CALL. This is the dumb
+/// push-button wired to the apartment's own front door — a wholly independent ring from the
+/// entrance panel, on its own HA `event` entity. Same delivery semantics as the entrance-panel
+/// event (NOT retained, QoS 0, non-blocking) and for the same reasons: a ring is momentary and
+/// non-idempotent, so a redelivered or replayed publish would double-fire the automation.
+async fn publish_floor_call(cfg: &Arc<Config>, client: &AsyncClient, where_: &str) {
+    let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
+    if let Err(e) = client.try_publish(
+        &cfg.topic_floor_call,
+        QoS::AtMostOnce,
+        false,
+        payload.into_bytes(),
+    ) {
+        eprintln!("btmqttd: publish floor call event failed: {e}");
     }
 }
 
@@ -569,7 +627,7 @@ async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
 /// (Codex/CodeRabbit). A dropped retained value is recovered OFF the read path: the session
 /// loop's periodic reseed re-publishes the latest light/volume/call state within
 /// [`RETAINED_RESEED_INTERVAL`], and every reconnect re-seeds them too. The lossy dump and
-/// doorbell event call `try_publish` directly.
+/// the momentary call events (entrance-panel/floor) call `try_publish` directly.
 pub(crate) fn try_publish_retained(client: &AsyncClient, topic: &str, qos: QoS, payload: Vec<u8>) {
     match client.try_publish(topic, qos, true, payload) {
         Ok(()) => {}

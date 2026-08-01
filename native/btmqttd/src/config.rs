@@ -43,10 +43,13 @@ pub struct Config {
     // extra subscription is needed — only these two state topics are new.
     pub topic_volume: String,
     pub topic_mute: String,
-    // Door-entry events: the entrance-panel CALL ("doorbell") is published
-    // as a momentary event (NOT retained), and the call STATE as a retained sensor. Both
-    // are learned for free from the same WHO=8 monitor stream — no extra subscription.
-    pub topic_doorbell: String,
+    // Door-entry events: the ENTRANCE-PANEL CALL (outdoor door station) and the FLOOR CALL
+    // (local front-door button on the unit's floor-call terminals) are each published as a
+    // momentary event (NOT retained); the call STATE (entrance-panel only) as a retained
+    // sensor. All are learned for free from the same WHO=8 monitor stream — no extra
+    // subscription. The two calls have disjoint WHO=8 signatures and never cross-fire.
+    pub topic_entrance_panel_call: String,
+    pub topic_floor_call: String,
     pub topic_call_state: String,
     // Stair-light SWITCH (opt-in). `light_where` is the WHO=8 actuator WHERE (installation-
     // specific, e.g. "112"); the feature is OFF unless it is set. The button toggles the
@@ -116,7 +119,8 @@ impl Config {
             topic_file_content: get("TOPIC_FILE_CONTENT", "Bticino/file_content_topic"),
             topic_volume: get("TOPIC_VOLUME", "Bticino/volume"),
             topic_mute: get("TOPIC_MUTE", "Bticino/mute"),
-            topic_doorbell: get("TOPIC_DOORBELL", "Bticino/doorbell"),
+            topic_entrance_panel_call: get("TOPIC_ENTRANCE_PANEL_CALL", "Bticino/entrance_panel_call"),
+            topic_floor_call: get("TOPIC_FLOOR_CALL", "Bticino/floor_call"),
             topic_call_state: get("TOPIC_CALL_STATE", "Bticino/call_state"),
             // Digits only — a WHERE like "112". Empty/absent ⇒ the light feature is off.
             light_where: opt("LIGHT_WHERE").filter(|s| s.bytes().all(|b| b.is_ascii_digit())),
@@ -335,7 +339,8 @@ EMPTY=
         assert_eq!(c.own_port_mon, 20000);
         assert_eq!(c.topic_volume, "Bticino/volume");
         assert_eq!(c.topic_mute, "Bticino/mute");
-        assert_eq!(c.topic_doorbell, "Bticino/doorbell");
+        assert_eq!(c.topic_entrance_panel_call, "Bticino/entrance_panel_call");
+        assert_eq!(c.topic_floor_call, "Bticino/floor_call");
         assert_eq!(c.topic_call_state, "Bticino/call_state");
     }
 

@@ -125,12 +125,20 @@ pub fn parse_mute_report(frame: &str) -> Option<bool> {
     }
 }
 
-/// WHO=8 entrance-panel CALL ("doorbell") command: `*8*1#1#4#21*<WHERE>##` (RE —
-/// captured on a live Classe 100X, matching fquinto's Classe 300X
-/// `*8*1#1#4#21*16##`). The WHAT (`1#1#4#21`) is the stable doorbell signature; the
-/// WHERE (the entrance-panel address, e.g. `112`/`16`) varies per install, so it is
-/// NOT matched — it is returned for information.
-const DOORBELL_WHAT: &str = "1#1#4#21";
+/// WHO=8 ENTRANCE-PANEL CALL command: `*8*1#1#4#21*<WHERE>##` (RE — captured on a live
+/// Classe 100X, matching fquinto's Classe 300X `*8*1#1#4#21*16##`). The WHAT
+/// (`1#1#4#21`) is the stable entrance-panel-call signature; the WHERE (the entrance-panel
+/// address, e.g. `112`/`16`) varies per install, so it is NOT matched — it is returned for
+/// information. This is the outdoor door-station ("betoneira") call.
+const ENTRANCE_PANEL_CALL_WHAT: &str = "1#1#4#21";
+
+/// WHO=8 FLOOR-CALL command: `*8*1#13#2*<WHERE>##` (RE — captured live on a Classe unit
+/// with a dumb push-button wired to the unit's floor-call terminals; the ring-start frame
+/// was `*8*1#13#2*10##` byte-for-byte on 3/3 presses, and the entrance-panel call NEVER
+/// emits this WHAT). The WHAT (`1#13#2`) is the stable floor-call signature — BTicino's
+/// "chiamata al piano", the local front-door bell, distinct from the entrance panel. The
+/// WHERE (`10` observed) is returned for information, not matched.
+const FLOOR_CALL_WHAT: &str = "1#13#2";
 
 /// WHO=8 dimension carrying the CALL STATE, broadcast as a call progresses:
 /// `*#8**35*<N>*0*0##`. Confirmed against live captures of both an ANSWERED and an
@@ -140,20 +148,32 @@ const DOORBELL_WHAT: &str = "1#1#4#21";
 /// travels as an attribute for finer granularity (door-entry RE).
 const CALL_STATE_DIM: &str = "35";
 
-/// Match the entrance-panel call ("doorbell") `*8*1#1#4#21*<WHERE>##` and return the
-/// WHERE (the panel address). Returns `None` for any other frame — a different WHO=8
-/// WHAT (`*8*9#1#4*20##`), a dimension report (`*#8**…`), a command, etc.
-pub fn parse_doorbell(frame: &str) -> Option<&str> {
+/// Match a WHO=8 CALL command `*8*<WHAT>*<WHERE>##` for the EXACT `what`, returning the
+/// WHERE. The WHAT must be followed immediately by the `*` before WHERE (so a longer WHAT
+/// with `what` as a prefix can't match), and WHERE must be a single non-empty field —
+/// rejecting the empty (`…*##`) and extended (`…*112*X##`) forms so neither fires a
+/// spurious event. Returns `None` for a dimension report (`*#8**…`), a different WHAT
+/// (e.g. the `9#…` ring-STOP), or any other frame.
+fn parse_who8_call<'a>(frame: &'a str, what: &str) -> Option<&'a str> {
     let body = frame.strip_prefix("*8*")?.strip_suffix("##")?;
-    // `*8*<WHAT>*<WHERE>##`: require the exact doorbell WHAT, then the '*' before WHERE.
-    let where_ = body.strip_prefix(DOORBELL_WHAT)?.strip_prefix('*')?;
-    // WHERE must be a single non-empty field: reject `*8*1#1#4#21*##` (empty) and an
-    // extended frame `*8*1#1#4#21*112*X##` (extra '*'-separated fields) so neither fires
-    // a spurious doorbell event.
+    let where_ = body.strip_prefix(what)?.strip_prefix('*')?;
     if where_.is_empty() || where_.contains('*') {
         return None;
     }
     Some(where_)
+}
+
+/// Match the ENTRANCE-PANEL call `*8*1#1#4#21*<WHERE>##` (the outdoor door station) and
+/// return the WHERE (the panel address). `None` for any other frame.
+pub fn parse_entrance_panel_call(frame: &str) -> Option<&str> {
+    parse_who8_call(frame, ENTRANCE_PANEL_CALL_WHAT)
+}
+
+/// Match the FLOOR call `*8*1#13#2*<WHERE>##` (the local front-door button on the unit's
+/// floor-call terminals) and return the WHERE. Disjoint from the entrance-panel WHAT, so
+/// the two never cross-fire. `None` for any other frame.
+pub fn parse_floor_call(frame: &str) -> Option<&str> {
+    parse_who8_call(frame, FLOOR_CALL_WHAT)
 }
 
 /// Parse a WHO=8 call-state report `*#8**35*<N>*0*0##` into `N`. Returns `None` for any
@@ -186,6 +206,103 @@ pub fn call_state_label(code: u8) -> &'static str {
         1 | 2 | 4 => "ringing",
         6 => "in_call",
         _ => "active",
+    }
+}
+
+/// What the caller should do with a dim-35 call-state code, per [`CallClassifier`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CallStateAction {
+    /// Publish this code to the (entrance-panel) call-state sensor.
+    Publish(u8),
+    /// Swallow it — it belongs to a FLOOR call (or a not-yet-classified ring being held),
+    /// which must never surface on the entrance-panel call-state sensor.
+    Suppress,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum CallKind {
+    /// No call in progress.
+    #[default]
+    Idle,
+    /// A ring started (`code` 1/2) but the source is not yet known — the classifying WHO=8
+    /// frame (`*8*1#1#4#21*…` entrance vs `*8*1#13#2*…` floor) always arrives ONE frame
+    /// later, so the first ringing code is HELD until then. `code` is the held ring code.
+    Pending(u8),
+    /// Classified as an entrance-panel call → publish call-state normally.
+    Entrance,
+    /// Classified as a floor call → suppress call-state until the ring ends.
+    Floor,
+}
+
+/// Routes the SHARED dim-35 call-state stream to the entrance-panel sensor ONLY.
+///
+/// Both an entrance-panel call and a floor call drive dim-35 (`1→2→…→0`), and in BOTH the
+/// first `*#8**35*1*…` (ringing) arrives BEFORE the classifying WHO=8 frame. To keep the
+/// floor call entirely off the entrance-panel `call_state` sensor without leaking that
+/// leading "ringing", the first ring code is HELD (`Pending`) until the classifier is seen:
+/// an entrance signature flushes the held code and publishes normally; a floor signature
+/// discards it and suppresses the rest. Frame-driven, no timers. One instance per monitor
+/// session (reset to `Idle` on reconnect).
+#[derive(Default)]
+pub struct CallClassifier {
+    state: CallKind,
+}
+
+impl CallClassifier {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The entrance-panel signature (`*8*1#1#4#21*…`) was seen. Classify as entrance and, if
+    /// a ring code was being held, return it so the caller can now publish it.
+    pub fn saw_entrance_panel_call(&mut self) -> Option<u8> {
+        let held = match self.state {
+            CallKind::Pending(code) => Some(code),
+            _ => None,
+        };
+        self.state = CallKind::Entrance;
+        held
+    }
+
+    /// The floor-call signature (`*8*1#13#2*…`) was seen. Classify as floor; any held ring
+    /// code is DISCARDED (never published), so the entrance-panel sensor stays idle.
+    pub fn saw_floor_call(&mut self) {
+        self.state = CallKind::Floor;
+    }
+
+    /// A dim-35 call-state `code` arrived. Decide whether it reaches the entrance-panel
+    /// sensor. `0` (idle/ended) always publishes and resets. `1`/`2` from idle are HELD
+    /// (pending classification); a second unclassified ring, or a `4`/`6` (which only an
+    /// entrance call reaches), defaults to entrance rather than risk hiding a real call.
+    pub fn on_call_state(&mut self, code: u8) -> CallStateAction {
+        match code {
+            0 => {
+                self.state = CallKind::Idle;
+                CallStateAction::Publish(0)
+            }
+            1 | 2 => match self.state {
+                CallKind::Idle => {
+                    self.state = CallKind::Pending(code);
+                    CallStateAction::Suppress
+                }
+                // A second ring with no classifier yet: prefer showing a real call over
+                // hiding one — treat as entrance and publish.
+                CallKind::Pending(_) => {
+                    self.state = CallKind::Entrance;
+                    CallStateAction::Publish(code)
+                }
+                CallKind::Entrance => CallStateAction::Publish(code),
+                CallKind::Floor => CallStateAction::Suppress,
+            },
+            // 4/6 (answered/in-call phases) are only ever reached by an entrance-panel call.
+            _ => match self.state {
+                CallKind::Floor => CallStateAction::Suppress, // defensive; floor never emits these
+                _ => {
+                    self.state = CallKind::Entrance;
+                    CallStateAction::Publish(code)
+                }
+            },
+        }
     }
 }
 
@@ -402,28 +519,90 @@ mod tests {
     }
 
     #[test]
-    fn parses_doorbell_call_and_returns_where() {
+    fn parses_entrance_panel_call_and_returns_where() {
         // Captured on a live Classe 100X; WHERE varies per install.
-        assert_eq!(parse_doorbell("*8*1#1#4#21*112##"), Some("112"));
+        assert_eq!(parse_entrance_panel_call("*8*1#1#4#21*112##"), Some("112"));
         // fquinto's Classe 300X used the SAME WHAT, a different WHERE.
-        assert_eq!(parse_doorbell("*8*1#1#4#21*16##"), Some("16"));
+        assert_eq!(parse_entrance_panel_call("*8*1#1#4#21*16##"), Some("16"));
     }
 
     #[test]
-    fn rejects_non_doorbell_frames() {
-        // Other WHO=8 commands seen in the same capture must NOT trigger the doorbell.
-        assert_eq!(parse_doorbell("*8*9#1#4*20##"), None);
-        assert_eq!(parse_doorbell("*8*3#1#4*420##"), None);
-        assert_eq!(parse_doorbell("*8*19*20##"), None);
+    fn rejects_non_entrance_panel_call_frames() {
+        // Other WHO=8 commands seen in the same capture must NOT trigger the entrance call.
+        assert_eq!(parse_entrance_panel_call("*8*9#1#4*20##"), None);
+        assert_eq!(parse_entrance_panel_call("*8*3#1#4*420##"), None);
+        assert_eq!(parse_entrance_panel_call("*8*19*20##"), None);
         // A near-miss WHAT must not match (prefix guard).
-        assert_eq!(parse_doorbell("*8*1#1#4#210*112##"), None);
+        assert_eq!(parse_entrance_panel_call("*8*1#1#4#210*112##"), None);
         // An empty WHERE or an extended frame with extra '*' fields must not match.
-        assert_eq!(parse_doorbell("*8*1#1#4#21*##"), None);
-        assert_eq!(parse_doorbell("*8*1#1#4#21*112*X##"), None);
-        // Dimension reports and other WHOs are not doorbell commands.
-        assert_eq!(parse_doorbell("*#8**35*1*0*0##"), None);
-        assert_eq!(parse_doorbell("*7*55*##"), None);
-        assert_eq!(parse_doorbell("garbage"), None);
+        assert_eq!(parse_entrance_panel_call("*8*1#1#4#21*##"), None);
+        assert_eq!(parse_entrance_panel_call("*8*1#1#4#21*112*X##"), None);
+        // Dimension reports and other WHOs are not entrance-call commands.
+        assert_eq!(parse_entrance_panel_call("*#8**35*1*0*0##"), None);
+        assert_eq!(parse_entrance_panel_call("*7*55*##"), None);
+        assert_eq!(parse_entrance_panel_call("garbage"), None);
+        // The FLOOR-call WHAT must NOT be read as an entrance-panel call.
+        assert_eq!(parse_entrance_panel_call("*8*1#13#2*10##"), None);
+    }
+
+    #[test]
+    fn parses_floor_call_and_returns_where() {
+        // Captured live: byte-for-byte on 3/3 presses of the floor-call button.
+        assert_eq!(parse_floor_call("*8*1#13#2*10##"), Some("10"));
+        // WHERE is informational, not matched — a different WHERE still parses.
+        assert_eq!(parse_floor_call("*8*1#13#2*42##"), Some("42"));
+    }
+
+    #[test]
+    fn rejects_non_floor_call_frames() {
+        // The floor-call ring-STOP (`9#13#2`) is not the ring-START.
+        assert_eq!(parse_floor_call("*8*9#13#2*410##"), None);
+        // The ENTRANCE-panel WHAT must NOT be read as a floor call (the two are disjoint).
+        assert_eq!(parse_floor_call("*8*1#1#4#21*112##"), None);
+        // Near-miss WHAT (prefix guard), empty/extended WHERE.
+        assert_eq!(parse_floor_call("*8*1#13#20*10##"), None);
+        assert_eq!(parse_floor_call("*8*1#13#2*##"), None);
+        assert_eq!(parse_floor_call("*8*1#13#2*10*X##"), None);
+        // Dimension reports and other WHOs.
+        assert_eq!(parse_floor_call("*#8**35*1*0*0##"), None);
+        assert_eq!(parse_floor_call("*7*58#14#0#0#1*##"), None);
+        assert_eq!(parse_floor_call("garbage"), None);
+    }
+
+    #[test]
+    fn classifier_suppresses_a_floor_call_entirely() {
+        // The captured floor-call sequence: the leading ring (1) arrives BEFORE the
+        // classifier, so it is HELD; the floor signature then discards it; 2 and (final) 0
+        // never surface a "ringing" — only the terminating idle publishes.
+        let mut c = CallClassifier::new();
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // held (pending)
+        c.saw_floor_call(); // classified floor -> held ring discarded
+        assert_eq!(c.on_call_state(2), CallStateAction::Suppress);
+        assert_eq!(c.on_call_state(0), CallStateAction::Publish(0)); // idle (harmless, already idle)
+    }
+
+    #[test]
+    fn classifier_preserves_the_entrance_panel_call() {
+        // The captured entrance sequence: the held leading ring (1) is FLUSHED when the
+        // entrance signature arrives, then 2 -> 4 -> 0 publish normally.
+        let mut c = CallClassifier::new();
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // held (pending)
+        assert_eq!(c.saw_entrance_panel_call(), Some(1)); // flush the held ring
+        assert_eq!(c.on_call_state(2), CallStateAction::Publish(2));
+        assert_eq!(c.on_call_state(4), CallStateAction::Publish(4));
+        assert_eq!(c.on_call_state(6), CallStateAction::Publish(6));
+        assert_eq!(c.on_call_state(0), CallStateAction::Publish(0));
+    }
+
+    #[test]
+    fn classifier_defaults_to_entrance_when_the_classifier_is_missing() {
+        // Defensive: a second ring with no classifier seen must NOT hide a real call.
+        let mut c = CallClassifier::new();
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // held
+        assert_eq!(c.on_call_state(2), CallStateAction::Publish(2)); // promote to entrance
+        // A 4/6 straight from idle (no preceding ring) also publishes.
+        let mut c2 = CallClassifier::new();
+        assert_eq!(c2.on_call_state(4), CallStateAction::Publish(4));
     }
 
     #[test]
@@ -441,8 +620,9 @@ mod tests {
         // Other WHO=8 dimensions (volume 41 / mute 33) are not the call-state dimension.
         assert_eq!(parse_call_state("*#8**41*50##"), None);
         assert_eq!(parse_call_state("*#8**33*1##"), None);
-        // The doorbell command is not a dimension report.
+        // The entrance-panel / floor call commands are not dimension reports.
         assert_eq!(parse_call_state("*8*1#1#4#21*112##"), None);
+        assert_eq!(parse_call_state("*8*1#13#2*10##"), None);
         assert_eq!(parse_call_state("garbage"), None);
         // And the volume/mute parsers reject the call-state dimension.
         assert_eq!(parse_volume_report("*#8**35*1*0*0##"), None);
