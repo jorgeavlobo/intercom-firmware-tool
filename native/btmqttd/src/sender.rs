@@ -137,6 +137,12 @@ async fn session(
     let mut buf = [0u8; 4096];
     let mut frames: Vec<String> = Vec::new();
 
+    // Drop any TRANSIENT (Pending) classifier state carried from a previous session: its resolving
+    // signature can't be replayed across the reconnect, so a stale hold would wrongly promote the
+    // call's next ring to Entrance. Resolved Floor/Entrance states are kept (see run()). No-op on
+    // the first connect. (Sync call — the guard is released before the awaits below.)
+    lock_classifier(classifier).on_reconnect();
+
     // Require the monitor ACK ("*#*1##") before streaming. The gateway may accept the
     // TCP connection but REFUSE the monitor session with a NACK ("*#*0##") — e.g. a
     // monitor slot is already in use — or just go idle. Without this check we'd sit on

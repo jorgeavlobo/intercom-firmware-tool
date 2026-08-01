@@ -270,6 +270,19 @@ impl CallClassifier {
         self.state = CallKind::Floor;
     }
 
+    /// Called at the start of each monitor session. The classifier PERSISTS across reconnects so a
+    /// resolved `Floor`/`Entrance` call in progress keeps its classification — but a `Pending` hold
+    /// is TRANSIENT: it waits for the classifying signature that arrives in the very next frame, and
+    /// that signature is never replayed if it fell in the disconnect gap. A `Pending` that survived
+    /// a reconnect is therefore stale — its resolver is gone — and the call's next ring would wrongly
+    /// promote to Entrance (a false entrance ring). Reset it to Idle so the next live frame re-holds
+    /// cleanly; leave resolved states untouched (Codex). No-op on the first connect (starts Idle).
+    pub fn on_reconnect(&mut self) {
+        if matches!(self.state, CallKind::Pending(_)) {
+            self.state = CallKind::Idle;
+        }
+    }
+
     /// A dim-35 call-state `code` arrived. Decide whether it reaches the entrance-panel
     /// sensor. `0` (idle/ended) always publishes and resets. A leading ring-start `1` is HELD
     /// (pending classification) — including from a stale `Entrance` (a previous call's terminal
@@ -721,6 +734,30 @@ mod tests {
         assert_eq!(g.on_call_state(4), CallStateAction::Publish(4));
         assert_eq!(g.on_call_state(6), CallStateAction::Publish(6));
         assert_eq!(g.on_call_state(0), CallStateAction::Publish(0));
+    }
+
+    #[test]
+    fn on_reconnect_drops_a_stale_pending_but_keeps_resolved_states() {
+        // A Pending hold carried across a reconnect is stale (its classifying signature was lost in
+        // the gap): reset to Idle so the next ring re-holds, rather than promoting a floor call's
+        // next ring to a false entrance ring.
+        let mut c = CallClassifier::new();
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // Pending(1)
+        c.on_reconnect(); // signature lost across the reconnect → drop the hold
+        // A following floor `2` is now HELD (Idle→Pending), not promoted to Entrance/published.
+        assert_eq!(c.on_call_state(2), CallStateAction::Suppress);
+        c.saw_floor_call();
+        assert_eq!(c.on_call_state(0), CallStateAction::Publish(0));
+        // Resolved states survive a reconnect untouched: a Floor call still suppresses.
+        let mut f = CallClassifier::new();
+        f.saw_floor_call();
+        f.on_reconnect();
+        assert_eq!(f.on_call_state(2), CallStateAction::Suppress);
+        // ...and an Entrance call still publishes.
+        let mut e = CallClassifier::new();
+        e.saw_entrance_panel_call();
+        e.on_reconnect();
+        assert_eq!(e.on_call_state(2), CallStateAction::Publish(2));
     }
 
     #[test]
