@@ -212,8 +212,15 @@ async fn session(
         Reconcile::SocketClosed => return Ok(()),
         Reconcile::Done { saw_transition: true, .. } => {}
         Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
-            publish_call_state(cfg, client, code).await;
-            update_call_watch(&mut call_watch, code);
+            // Floor-filter the authoritative snapshot too: if the ACK-buffered frames already
+            // classified an in-progress FLOOR call, a mid-ring dim-35 snapshot must not leak
+            // "ringing" onto the entrance-panel sensor (Copilot). A fresh Idle classifier never
+            // suppresses, so a genuine in-progress ENTRANCE call is still reconciled here.
+            let suppressed = lock_classifier(&classifier).snapshot_suppressed(code);
+            if !suppressed {
+                publish_call_state(cfg, client, code).await;
+                update_call_watch(&mut call_watch, code);
+            }
         }
         Reconcile::Done { result: Ok(None) | Err(_), saw_transition: false } => {
             if call_watch.is_none() {
@@ -283,8 +290,11 @@ async fn session(
                     // (in order, newer than this snapshot) — leave it.
                     Reconcile::Done { saw_transition: true, .. } => {}
                     Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
-                        // Publish only on a real change — `known` is None ("unknown", from a
-                        // failed reconnect read) so the first successful poll always writes.
+                        // No floor-filter needed here (unlike the reconnect/reseed snapshots): this
+                        // poll only runs while call_watch is armed, and a floor call never arms it
+                        // (its ringing is suppressed → no call_code), so the classifier is never
+                        // Floor on this path. Publish only on a real change — `known` is None
+                        // ("unknown", from a failed reconnect read) so the first successful poll writes.
                         if known != Some(code) {
                             publish_call_state(cfg, client, code).await;
                         }
@@ -335,12 +345,21 @@ async fn session(
                 // A live transition during the drain already published + updated the watch.
                 Reconcile::Done { saw_transition: true, .. } => {}
                 Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
-                    publish_call_state(cfg, client, code).await;
-                    update_call_watch(&mut call_watch, code);
+                    // Floor-filter the periodic authoritative snapshot: a reseed landing during a
+                    // FLOOR call would otherwise publish that call's dim-35 "ringing" to the
+                    // entrance-panel sensor — the one path that can leak, since a floor call never
+                    // arms call_watch (Copilot). Non-floor states (incl. Idle) publish normally.
+                    let suppressed = lock_classifier(&classifier).snapshot_suppressed(code);
+                    if !suppressed {
+                        publish_call_state(cfg, client, code).await;
+                        update_call_watch(&mut call_watch, code);
+                    }
                 }
                 Reconcile::Done { result: Ok(None) | Err(_), saw_transition: false } => {
                     // Query failed — best-effort republish the last cached value (the original
-                    // reseed behavior), so a dropped retained update is still recovered.
+                    // reseed behavior), so a dropped retained update is still recovered. During a
+                    // floor call call_watch is disarmed (None) → this republishes idle(0), which is
+                    // exactly right: the entrance-panel sensor stays idle through a floor call.
                     match call_watch {
                         None => publish_call_state(cfg, client, 0).await, // confirmed idle
                         Some((Some(code), _)) => publish_call_state(cfg, client, code).await,
@@ -488,6 +507,18 @@ async fn read_call_state_draining(
 /// `mqtt_pub -l` did.
 /// Returns the call-state `code` when this frame was a call-state transition (so the
 /// caller can arm/disarm the watchdog), else `None`.
+/// Lock the call classifier, RECOVERING the guard if the mutex was poisoned instead of
+/// panicking the daemon (Copilot). The guarded operations are panic-free atomic state
+/// transitions over a `CallKind` enum, so a poisoned lock can only mean an unrelated panic
+/// elsewhere unwound past a still-held guard while the state stayed a valid variant — there is
+/// no torn state to fear, so recovering keeps call classification (and the whole monitor) alive
+/// rather than bringing it down for good. Never hold the returned guard across an `.await`.
+fn lock_classifier(
+    classifier: &std::sync::Mutex<dimension::CallClassifier>,
+) -> std::sync::MutexGuard<'_, dimension::CallClassifier> {
+    classifier.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 async fn publish_frame(
     cfg: &Arc<Config>,
     client: &AsyncClient,
@@ -520,7 +551,7 @@ async fn publish_frame(
         // classify this call as an entrance-panel call. The `*#8**35*1` ringing frame arrives
         // BEFORE this classifying frame, so the classifier held it as Pending (Suppressed);
         // flush that held ring now that we know it's a real entrance call (arming the watchdog).
-        let held = classifier.lock().unwrap().saw_entrance_panel_call();
+        let held = lock_classifier(classifier).saw_entrance_panel_call();
         if let Some(code) = held {
             publish_call_state(cfg, client, code).await;
             call_code = Some(code);
@@ -531,7 +562,7 @@ async fn publish_frame(
         // independent event from the entrance panel. Fire its own momentary event and arm the
         // classifier so the concurrent dim-35 ringing (which the gateway also raises for a floor
         // call) is SUPPRESSED — a floor call must never surface on the entrance-panel call_state.
-        classifier.lock().unwrap().saw_floor_call();
+        lock_classifier(classifier).saw_floor_call();
         publish_floor_call(cfg, client, where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
         // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the
@@ -540,7 +571,7 @@ async fn publish_frame(
         // as-yet-unclassified leading ring is HELD until the classifying WHO=8 frame resolves it.
         // Resolve the action and DROP the (non-Send) guard before any `.await` — never hold a
         // std::sync::MutexGuard across an await point.
-        let action = classifier.lock().unwrap().on_call_state(code);
+        let action = lock_classifier(classifier).on_call_state(code);
         match action {
             dimension::CallStateAction::Publish(c) => {
                 publish_call_state(cfg, client, c).await;

@@ -304,6 +304,22 @@ impl CallClassifier {
             },
         }
     }
+
+    /// Whether an AUTHORITATIVE dim-35 snapshot for `code` — read directly from the gateway,
+    /// OUT-OF-BAND from the live frame stream (the reconnect/poll/reseed reconcile) — must be
+    /// SUPPRESSED given the current classification. A floor call in progress drives dim-35 to a
+    /// ringing code just like an entrance call, so a snapshot landing mid-floor-ring would leak
+    /// "ringing" onto the entrance-panel sensor; suppress it (Copilot). Only a NON-idle code
+    /// during a KNOWN floor call is suppressed — a `0` snapshot is idle and always publishes, and
+    /// every non-floor state publishes the true state (crucially, a fresh `Idle` classifier at
+    /// reconnect never suppresses, so a genuine in-progress entrance call is still reconciled).
+    ///
+    /// NON-mutating BY DESIGN: a snapshot is a full-truth read, not a live transition, so it must
+    /// not drive the `Pending`-holding state machine (feeding it into [`Self::on_call_state`]
+    /// would, e.g., turn a real entrance snapshot into a spuriously-held `Pending`).
+    pub fn snapshot_suppressed(&self, code: u8) -> bool {
+        matches!(self.state, CallKind::Floor) && code != 0
+    }
 }
 
 /// Run ONE command-session operation: connect to `host:port`, open the command
@@ -603,6 +619,26 @@ mod tests {
         // A 4/6 straight from idle (no preceding ring) also publishes.
         let mut c2 = CallClassifier::new();
         assert_eq!(c2.on_call_state(4), CallStateAction::Publish(4));
+    }
+
+    #[test]
+    fn snapshot_is_suppressed_only_during_a_known_floor_call() {
+        // A fresh classifier (reconnect) NEVER suppresses an authoritative snapshot — a genuine
+        // in-progress entrance call must still be reconciled after a monitor reconnect.
+        let mut c = CallClassifier::new();
+        assert!(!c.snapshot_suppressed(2));
+        assert!(!c.snapshot_suppressed(0));
+        // A classified floor call suppresses a ringing snapshot (the reseed-during-floor leak)...
+        c.saw_floor_call();
+        assert!(c.snapshot_suppressed(1));
+        assert!(c.snapshot_suppressed(2));
+        // ...but never an idle snapshot (0 is genuinely idle → publish it).
+        assert!(!c.snapshot_suppressed(0));
+        // snapshot_suppressed does NOT mutate: the classifier is still Floor afterwards.
+        assert!(c.snapshot_suppressed(2));
+        // An entrance classification publishes snapshots normally.
+        assert_eq!(c.saw_entrance_panel_call(), None);
+        assert!(!c.snapshot_suppressed(2));
     }
 
     #[test]
