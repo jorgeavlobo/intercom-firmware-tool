@@ -231,7 +231,7 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
     <value>Un topic MQTT di pubblicazione (tutti tranne il topic di ricezione) non può contenere i wildcard '+' o '#', né iniziare con '$share/' (prefisso solo per le sottoscrizioni).</value>
   </data>
   <data name="Mqtt_PublishTopicsMustDiffer" xml:space="preserve">
-    <value>Ogni topic MQTT di pubblicazione deve essere distinto, altrimenti due entità di Home Assistant consumerebbero i dati l'una dell'altra, oppure lo stato ritenuto / la disponibilità verrebbero corrotti.</value>
+    <value>Ogni topic MQTT di pubblicazione deve essere distinto, altrimenti due entità di Home Assistant consumerebbero i dati l'una dell'altra, oppure lo stato conservato / la disponibilità verrebbero corrotti.</value>
   </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>Il topic di ricezione MQTT non è un filtro di sottoscrizione valido: '+' deve occupare un intero livello e '#' deve essere l'ultimo livello intero.</value>
