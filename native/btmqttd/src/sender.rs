@@ -37,10 +37,17 @@ pub async fn run(
     volume: Arc<VolumeCtl>,
     light: Option<Arc<LightCtl>>,
 ) {
+    // Classifies each call as entrance-panel vs floor and keeps the two independent. Lives
+    // ACROSS monitor sessions (not recreated per connect), so a call in progress over a monitor
+    // reconnect keeps its classification: a floor call whose terminal dim-35 `0` has not yet
+    // arrived stays `Floor`, so the fresh session's authoritative dim-35 read is suppressed
+    // instead of leaking the floor ring onto the entrance-panel sensor. An authoritative idle
+    // read still resets it to Idle (via `reconcile_snapshot`), so no stale state persists (Codex).
+    let classifier = std::sync::Mutex::new(dimension::CallClassifier::new());
     let mut backoff = 0u64;
     loop {
         let start = tokio::time::Instant::now();
-        if let Err(e) = session(&cfg, &client, &volume, light.as_ref()).await {
+        if let Err(e) = session(&cfg, &client, &volume, light.as_ref(), &classifier).await {
             eprintln!(
                 "btmqttd: monitor {}:{} unavailable: {e}",
                 cfg.own_host, cfg.own_port_mon
@@ -116,6 +123,11 @@ async fn session(
     client: &AsyncClient,
     volume: &Arc<VolumeCtl>,
     light: Option<&Arc<LightCtl>>,
+    // Owned by run() and shared across sessions, so a call in progress over a monitor reconnect
+    // keeps its entrance/floor classification (see run()). It holds the leading `*#8**35*1` ring
+    // (which arrives BEFORE the classifying WHO=8 frame) until resolved, then either flushes it
+    // (entrance) or suppresses it (floor).
+    classifier: &std::sync::Mutex<dimension::CallClassifier>,
 ) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
@@ -124,13 +136,6 @@ async fn session(
     let mut framer = Framer::default();
     let mut buf = [0u8; 4096];
     let mut frames: Vec<String> = Vec::new();
-
-    // Classifies each call as an entrance-panel call or a floor call so the two stay completely
-    // independent. It holds the leading `*#8**35*1` ring (which arrives BEFORE the classifying
-    // WHO=8 frame) until resolved, then either flushes it (entrance) or suppresses it (floor).
-    // Per-session state: a fresh (re)connect starts Idle, so an authoritative dim-35 snapshot read
-    // below reconciles the true state without the classifier suppressing an in-progress call.
-    let classifier = std::sync::Mutex::new(dimension::CallClassifier::new());
 
     // Require the monitor ACK ("*#*1##") before streaming. The gateway may accept the
     // TCP connection but REFUSE the monitor session with a NACK ("*#*0##") — e.g. a
@@ -186,7 +191,7 @@ async fn session(
     if let Some(pos) = pre.windows(own::ACK.len()).position(|w| w == own::ACK) {
         framer.push(&pre[pos + own::ACK.len()..], &mut frames);
         for frame in frames.drain(..) {
-            if let Some(code) = publish_frame(cfg, client, volume, light, &classifier, &frame).await {
+            if let Some(code) = publish_frame(cfg, client, volume, light, classifier, &frame).await {
                 update_call_watch(&mut call_watch, code);
             }
         }
@@ -204,7 +209,7 @@ async fn session(
     // clobber a real ringing/in_call; keep what the frames left and, if still disarmed, arm an
     // "unknown" marker so a later poll re-queries.
     match read_call_state_draining(
-        cfg, client, volume, light, &classifier, &mut sock, &mut framer, &mut buf, &mut frames,
+        cfg, client, volume, light, classifier, &mut sock, &mut framer, &mut buf, &mut frames,
         &mut call_watch,
     )
     .await?
@@ -212,13 +217,14 @@ async fn session(
         Reconcile::SocketClosed => return Ok(()),
         Reconcile::Done { saw_transition: true, .. } => {}
         Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
-            // Reconcile the authoritative snapshot against the live classification: a known FLOOR
-            // call (or a still-Pending, unresolved leading ring, e.g. from the ACK-buffered frames)
-            // suppresses a ringing snapshot so it can't reach the entrance-panel sensor; an idle
-            // snapshot also resets the classifier. A fresh Idle classifier at reconnect publishes,
-            // so a genuine in-progress ENTRANCE call is still reconciled (Codex/Copilot). Bind the
-            // action first so the (non-Send) guard is dropped before the await.
-            let action = lock_classifier(&classifier).reconcile_snapshot(code);
+            // Reconcile the authoritative snapshot against the live classification, which PERSISTS
+            // across reconnects (see run()): a known FLOOR call — including one carried over a
+            // monitor reconnect — (or a still-Pending, unresolved leading ring) suppresses a ringing
+            // snapshot so it can't reach the entrance-panel sensor; an idle snapshot resets the
+            // classifier. A classifier that is Idle/Entrance here publishes, so a genuine in-progress
+            // ENTRANCE call (or one whose type was never seen) is still reconciled (Codex/Copilot).
+            // Bind the action first so the (non-Send) guard is dropped before the await.
+            let action = lock_classifier(classifier).reconcile_snapshot(code);
             if let dimension::CallStateAction::Publish(c) = action {
                 publish_call_state(cfg, client, c).await;
                 update_call_watch(&mut call_watch, c);
@@ -263,7 +269,7 @@ async fn session(
             framer.push(&buf[..n], &mut frames);
             for frame in frames.drain(..) {
                 if let Some(code) =
-                    publish_frame(cfg, client, volume, light, &classifier, &frame).await
+                    publish_frame(cfg, client, volume, light, classifier, &frame).await
                 {
                     update_call_watch(&mut call_watch, code);
                 }
@@ -282,7 +288,7 @@ async fn session(
                 // reconcile): a slow/timed-out poll must not block the read past a light echo's
                 // 3 s guard (Codex).
                 match read_call_state_draining(
-                    cfg, client, volume, light, &classifier, &mut sock, &mut framer, &mut buf,
+                    cfg, client, volume, light, classifier, &mut sock, &mut framer, &mut buf,
                     &mut frames, &mut call_watch,
                 )
                 .await?
@@ -297,7 +303,7 @@ async fn session(
                         // it as UNKNOWN (`Some((None, …))`), so a floor call starting before the retry
                         // sets the classifier to Floor (or leaves it Pending) while this poll is live —
                         // which would otherwise publish the floor ringing snapshot here (Codex).
-                        let action = lock_classifier(&classifier).reconcile_snapshot(code);
+                        let action = lock_classifier(classifier).reconcile_snapshot(code);
                         match action {
                             dimension::CallStateAction::Publish(c) => {
                                 // Publish only on a real change — `known` is None ("unknown", from a
@@ -352,7 +358,7 @@ async fn session(
             // a stale idle frame disarmed the poll, this unconditional re-query re-checks dim-35
             // within one interval and re-arms/corrects, so the call-state sensor can't remain stuck.
             match read_call_state_draining(
-                cfg, client, volume, light, &classifier, &mut sock, &mut framer, &mut buf,
+                cfg, client, volume, light, classifier, &mut sock, &mut framer, &mut buf,
                 &mut frames, &mut call_watch,
             )
             .await?
@@ -366,7 +372,7 @@ async fn session(
                     // the entrance-panel sensor; an idle snapshot also resets the classifier, repairing
                     // a missed terminal frame so a later floor call's ring isn't mis-published as
                     // entrance (Codex/Copilot). Bind first to drop the guard before the await.
-                    let action = lock_classifier(&classifier).reconcile_snapshot(code);
+                    let action = lock_classifier(classifier).reconcile_snapshot(code);
                     if let dimension::CallStateAction::Publish(c) = action {
                         publish_call_state(cfg, client, c).await;
                         update_call_watch(&mut call_watch, c);
