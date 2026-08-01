@@ -191,7 +191,9 @@ async fn session(
     if let Some(pos) = pre.windows(own::ACK.len()).position(|w| w == own::ACK) {
         framer.push(&pre[pos + own::ACK.len()..], &mut frames);
         for frame in frames.drain(..) {
-            if let Some(code) = publish_frame(cfg, client, volume, light, classifier, &frame).await {
+            if let FrameOutcome::CallStatePublished(code) =
+                publish_frame(cfg, client, volume, light, classifier, &frame).await
+            {
                 update_call_watch(&mut call_watch, code);
             }
         }
@@ -268,7 +270,7 @@ async fn session(
             frames.clear();
             framer.push(&buf[..n], &mut frames);
             for frame in frames.drain(..) {
-                if let Some(code) =
+                if let FrameOutcome::CallStatePublished(code) =
                     publish_frame(cfg, client, volume, light, classifier, &frame).await
                 {
                     update_call_watch(&mut call_watch, code);
@@ -466,14 +468,17 @@ async fn read_call_state_draining(
                         frames.clear();
                         framer.push(&buf[..n], frames);
                         for frame in frames.drain(..) {
-                            // A live call-state transition is applied IN ORDER (published + watch
-                            // updated); it marks this snapshot ambiguous, so we re-query below.
-                            if let Some(code) =
-                                publish_frame(cfg, client, volume, light, classifier, &frame)
-                                    .await
+                            // A live call-state frame (published OR suppressed) or a classifying
+                            // signature marks this snapshot ambiguous → re-query below; only a
+                            // PUBLISHED code updates the watch, applied IN ORDER (Codex).
+                            match publish_frame(cfg, client, volume, light, classifier, &frame).await
                             {
-                                update_call_watch(call_watch, code);
-                                saw_transition = true;
+                                FrameOutcome::CallStatePublished(code) => {
+                                    update_call_watch(call_watch, code);
+                                    saw_transition = true;
+                                }
+                                FrameOutcome::ClassifierChanged => saw_transition = true,
+                                FrameOutcome::Other => {}
                             }
                         }
                     }
@@ -492,11 +497,13 @@ async fn read_call_state_draining(
                     frames.clear();
                     framer.push(&buf[..n], frames);
                     for frame in frames.drain(..) {
-                        if let Some(code) =
-                            publish_frame(cfg, client, volume, light, classifier, &frame).await
-                        {
-                            update_call_watch(call_watch, code);
-                            saw_transition = true;
+                        match publish_frame(cfg, client, volume, light, classifier, &frame).await {
+                            FrameOutcome::CallStatePublished(code) => {
+                                update_call_watch(call_watch, code);
+                                saw_transition = true;
+                            }
+                            FrameOutcome::ClassifierChanged => saw_transition = true,
+                            FrameOutcome::Other => {}
                         }
                     }
                 }
@@ -521,11 +528,22 @@ async fn read_call_state_draining(
     Ok(Reconcile::Exhausted)
 }
 
-/// Publish one framed OWN string to TOPIC_DUMP — as compact JSON (PAYLOAD_FORMAT=
-/// json, the default) or the raw frame. QoS 0, not retained, as the shell's
-/// `mqtt_pub -l` did.
-/// Returns the call-state `code` when this frame was a call-state transition (so the
-/// caller can arm/disarm the watchdog), else `None`.
+/// What a monitor frame turned out to be, as far as call-state watching and reconciliation care.
+/// The distinction between "published" and merely "changed the classifier" matters for the drain
+/// in [`read_call_state_draining`]: ANY frame that touched the classifier makes a concurrent dim-35
+/// snapshot AMBIGUOUS (it may have arrived after the snapshot and changed state the snapshot can't
+/// see), so the query must re-run — but only a PUBLISHED call-state code may (dis)arm the entrance
+/// watch (Codex).
+enum FrameOutcome {
+    /// A call-state transition that reached the sensor; `u8` is the code — (dis)arm the watch.
+    CallStatePublished(u8),
+    /// The frame changed the classifier but published no call-state code — a floor/entrance
+    /// signature, or a suppressed/held dim-35 ring. Marks a snapshot ambiguous; does NOT arm the watch.
+    ClassifierChanged,
+    /// Any other frame (light echo, volume/mute, dump-only) — irrelevant to call-state reconcile.
+    Other,
+}
+
 /// Lock the call classifier, RECOVERING the guard if the mutex was poisoned instead of
 /// panicking the daemon (Copilot). The guarded operations are panic-free atomic state
 /// transitions over a `CallKind` enum, so a poisoned lock can only mean an unrelated panic
@@ -538,6 +556,10 @@ fn lock_classifier(
     classifier.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Publish one framed OWN string to TOPIC_DUMP — as compact JSON (PAYLOAD_FORMAT=json, the default)
+/// or the raw frame. QoS 0, not retained, as the shell's `mqtt_pub -l` did. Also feeds the frame to
+/// the light/volume controllers and the call classifier. Returns a [`FrameOutcome`] describing what
+/// the frame was for call-state purposes (see its doc).
 async fn publish_frame(
     cfg: &Arc<Config>,
     client: &AsyncClient,
@@ -545,7 +567,7 @@ async fn publish_frame(
     light: Option<&Arc<LightCtl>>,
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
     frame: &str,
-) -> Option<u8> {
+) -> FrameOutcome {
     // Stair-light SWITCH state tracking: a physical panel press of the light button appears
     // on the monitor as `*8*21*<WHERE>##`. Feed EVERY frame to the controller — it matches
     // its own WHERE and flips the tracked state (ignoring our own toggle's echo). Cheap: a
@@ -560,7 +582,7 @@ async fn publish_frame(
     // so this is the single source of truth for `current`/`muted`. Parse BEFORE the format
     // branch so it works in raw mode too; a frame is at most one of the two, and any other
     // frame parses to None and is ignored.
-    let mut call_code = None;
+    let mut outcome = FrameOutcome::Other;
     if let Some(pct) = dimension::parse_volume_report(frame) {
         volume.observe_volume(pct).await;
     } else if let Some(muted) = dimension::parse_mute_report(frame) {
@@ -573,7 +595,10 @@ async fn publish_frame(
         let held = lock_classifier(classifier).saw_entrance_panel_call();
         if let Some(code) = held {
             publish_call_state(cfg, client, code).await;
-            call_code = Some(code);
+            outcome = FrameOutcome::CallStatePublished(code);
+        } else {
+            // No held ring, but we still (re)classified to Entrance → snapshot ambiguous.
+            outcome = FrameOutcome::ClassifierChanged;
         }
         publish_entrance_panel_call(cfg, client, where_).await;
     } else if let Some(where_) = dimension::parse_floor_call(frame) {
@@ -582,27 +607,30 @@ async fn publish_frame(
         // classifier so the concurrent dim-35 ringing (which the gateway also raises for a floor
         // call) is SUPPRESSED — a floor call must never surface on the entrance-panel call_state.
         lock_classifier(classifier).saw_floor_call();
+        outcome = FrameOutcome::ClassifierChanged; // reclassified to Floor → snapshot ambiguous
         publish_floor_call(cfg, client, where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
         // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the
         // classifier: an entrance-panel call publishes it (updating the retained sensor and reporting
         // the code so the caller can (dis)arm the watchdog); a floor call's ringing is suppressed; an
         // as-yet-unclassified leading ring is HELD until the classifying WHO=8 frame resolves it.
-        // Resolve the action and DROP the (non-Send) guard before any `.await` — never hold a
-        // std::sync::MutexGuard across an await point.
+        // EITHER way it is a live call-state frame, so a concurrent reconcile snapshot is ambiguous —
+        // a Suppress still reports ClassifierChanged so the query re-runs and does not commit a stale
+        // snapshot that would clobber the held/floor state (Codex). Resolve the action and DROP the
+        // (non-Send) guard before any `.await` — never hold a std::sync::MutexGuard across an await.
         let action = lock_classifier(classifier).on_call_state(code);
-        match action {
+        outcome = match action {
             dimension::CallStateAction::Publish(c) => {
                 publish_call_state(cfg, client, c).await;
-                call_code = Some(c);
+                FrameOutcome::CallStatePublished(c)
             }
-            dimension::CallStateAction::Suppress => {}
-        }
+            dimension::CallStateAction::Suppress => FrameOutcome::ClassifierChanged,
+        };
     }
     let payload: Vec<u8> = if cfg.payload_json {
         match own::frame_to_json(frame) {
             Some(v) => v.to_string().into_bytes(),
-            None => return call_code, // ACK/NACK dropped (never a call-state frame)
+            None => return outcome, // ACK/NACK dropped (never a call-state frame → Other)
         }
     } else {
         frame.as_bytes().to_vec()
@@ -618,7 +646,7 @@ async fn publish_frame(
     if let Err(e) = client.try_publish(&cfg.topic_dump, QoS::AtMostOnce, false, payload) {
         eprintln!("btmqttd: publish bus frame failed: {e}");
     }
-    call_code
+    outcome
 }
 
 /// Publish a momentary entrance-panel "pressed" event to TOPIC_ENTRANCE_PANEL_CALL. NOT
