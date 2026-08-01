@@ -293,17 +293,22 @@ impl CallClassifier {
                     self.state = CallKind::Entrance;
                     CallStateAction::Publish(code)
                 }
-                // A fresh ring-START (`1`) from Entrance begins a NEW call of unknown type — the
-                // previous entrance call's terminal `0` was missed, leaving us stale. RE-HOLD it as
-                // Pending so a following floor call's leading ring is never emitted as an entrance
-                // ring before its signature arrives (Codex). Safe for a genuine repeated `1` in an
-                // ongoing entrance call too: the retained sensor keeps its last value during the
-                // one-frame hold and the next frame (`2`/`4`/`6`) republishes — no idle flicker.
-                CallKind::Entrance if code == 1 => {
+                // A fresh ring-START (`1`) from a stale TERMINAL state (Entrance OR Floor — the
+                // previous call's terminal `0` was missed, leaving us wedged) begins a NEW call of
+                // unknown type. RE-HOLD it as Pending so the following signature classifies it
+                // (entrance flushes it via `saw_entrance_panel_call`, floor discards it), instead of
+                // publishing a floor ring as entrance (from Entrance) or silently dropping an
+                // entrance ring (from Floor) (Codex). Safe for a genuine repeated `1` mid-call: the
+                // retained sensor keeps its last value during the one-frame hold and the next frame
+                // republishes — no idle flicker. (A leading ring is always `1`; a floor call's own
+                // sequence is `1 → 2 → 0`, so `Floor + 1` only ever means a new call, never a
+                // continuation.)
+                CallKind::Entrance | CallKind::Floor if code == 1 => {
                     self.state = CallKind::Pending(1);
                     CallStateAction::Suppress
                 }
-                // A `2` from Entrance is a mid-call progression of the SAME entrance call → publish.
+                // A `2` from Entrance is a mid-call progression of the SAME entrance call → publish;
+                // a `2` from Floor is a floor-call continuation → stays suppressed.
                 CallKind::Entrance => CallStateAction::Publish(code),
                 CallKind::Floor => CallStateAction::Suppress,
             },
@@ -690,6 +695,24 @@ mod tests {
         let mut e = CallClassifier::new();
         e.saw_entrance_panel_call();
         assert_eq!(e.on_call_state(2), CallStateAction::Publish(2));
+    }
+
+    #[test]
+    fn an_entrance_call_after_a_missed_floor_terminal_frame_is_reclassified() {
+        // Mirror of the stuck-Entrance case: a floor call's terminal `0` is missed, so the
+        // classifier lingers in Floor. An entrance call then starts before the reseed reconciles.
+        // Its leading ring-start `1` must be RE-HELD (not silently dropped) so the entrance
+        // signature can flush it — otherwise the entrance ring would never surface.
+        let mut c = CallClassifier::new();
+        c.saw_floor_call(); // classified floor; its terminal 0 is then missed
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // NEW leading ring re-held
+        assert_eq!(c.saw_entrance_panel_call(), Some(1)); // flushed as a real entrance ring
+        assert_eq!(c.on_call_state(2), CallStateAction::Publish(2));
+        assert_eq!(c.on_call_state(0), CallStateAction::Publish(0));
+        // A floor continuation `2` from stale Floor still stays suppressed (not a new call).
+        let mut f = CallClassifier::new();
+        f.saw_floor_call();
+        assert_eq!(f.on_call_state(2), CallStateAction::Suppress);
     }
 
     #[test]
