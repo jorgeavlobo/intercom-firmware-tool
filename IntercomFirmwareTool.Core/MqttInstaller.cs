@@ -362,7 +362,19 @@ namespace IntercomFirmwareTool.Core
                 var manifest = new StringBuilder();
                 foreach (var e in GenerateHaDiscovery(opts))
                 {
-                    WriteConfigFile(fs, HaDir + "/" + e.FileName, e.Json, 644);
+                    // Wrap the ext4 write so a SharpExt4 failure names the offending entity — its
+                    // native exceptions (e.g. IndexOutOfRangeException from ExtFileStream) carry no
+                    // path, which otherwise makes a bad entity impossible to identify from the trace.
+                    try
+                    {
+                        WriteConfigFile(fs, HaDir + "/" + e.FileName, e.Json, 644);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidOperationException(
+                            $"Failed writing HA discovery config '{e.FileName}' (payload {e.Json.Length} bytes): {ex.Message}",
+                            ex);
+                    }
                     manifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
                 }
                 WriteConfigFile(fs, HaDir + "/manifest", manifest.ToString(), 644);
@@ -1664,13 +1676,21 @@ namespace IntercomFirmwareTool.Core
         {
             byte[] bytes = Encoding.UTF8.GetBytes(text);
             using var f = fs.OpenFile(path, FileMode.Create, FileAccess.Write);
-            f.Write(bytes, 0, bytes.Length);
+            // A ZERO-length write throws IndexOutOfRangeException inside SharpExt4's
+            // ExtFileStream.Write (empty-buffer edge). FileMode.Create has already created/
+            // truncated the file to 0 bytes, so writing nothing leaves the correct empty file.
+            // Tombstone discovery entities carry an empty payload, so this path is real.
+            if (bytes.Length > 0)
+                f.Write(bytes, 0, bytes.Length);
         }
 
         private static void WriteBytesFile(ExtFileSystem fs, string path, byte[] bytes)
         {
             using var f = fs.OpenFile(path, FileMode.Create, FileAccess.Write);
-            f.Write(bytes, 0, bytes.Length);
+            // See WriteTextFile: a zero-length Write throws in SharpExt4; FileMode.Create already
+            // leaves a correct 0-byte file, so skip the empty write.
+            if (bytes.Length > 0)
+                f.Write(bytes, 0, bytes.Length);
         }
 
         private static void EnsureDir(ExtFileSystem fs, string path)
