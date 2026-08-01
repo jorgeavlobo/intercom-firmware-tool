@@ -290,15 +290,26 @@ async fn session(
                     // (in order, newer than this snapshot) — leave it.
                     Reconcile::Done { saw_transition: true, .. } => {}
                     Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
-                        // No floor-filter needed here (unlike the reconnect/reseed snapshots): this
-                        // poll only runs while call_watch is armed, and a floor call never arms it
-                        // (its ringing is suppressed → no call_code), so the classifier is never
-                        // Floor on this path. Publish only on a real change — `known` is None
-                        // ("unknown", from a failed reconnect read) so the first successful poll writes.
-                        if known != Some(code) {
-                            publish_call_state(cfg, client, code).await;
+                        // Floor-filter here too. call_watch is NOT armed only by entrance calls: a
+                        // failed reconnect read / exhausted reconcile arms it as UNKNOWN
+                        // (`Some((None, …))`), so a floor call starting before the retry sets the
+                        // classifier to Floor while this poll is live — and would otherwise publish
+                        // the floor call's ringing snapshot to the entrance-panel sensor (Codex).
+                        let suppressed = lock_classifier(&classifier).snapshot_suppressed(code);
+                        if suppressed {
+                            // Floor call in progress: publish nothing. Preserve the obligation
+                            // (`known` unchanged) but reset the timer so we re-check after the
+                            // interval instead of hot-looping; it converges once the floor call ends
+                            // (classifier → Idle) and the next poll publishes the true idle state.
+                            call_watch = Some((known, tokio::time::Instant::now()));
+                        } else {
+                            // Publish only on a real change — `known` is None ("unknown", from a
+                            // failed reconnect read) so the first successful poll always writes.
+                            if known != Some(code) {
+                                publish_call_state(cfg, client, code).await;
+                            }
+                            update_call_watch(&mut call_watch, code);
                         }
-                        update_call_watch(&mut call_watch, code);
                     }
                     Reconcile::Done { result: Ok(None) | Err(_), saw_transition: false } => {
                         // Retry after the interval, preserving `known` either way. The two
@@ -402,8 +413,10 @@ enum Reconcile {
 /// seen here is a LIVE event from the monitor connection, at least as recent as the dim-35 snapshot
 /// (which travels over a SEPARATE connection); it is published, updates `call_watch`, and sets
 /// `saw_transition` so the caller leaves it in place rather than clobbering it with the snapshot
-/// (Codex/CodeRabbit). With no light controller nothing on the read path is time-sensitive, so the
-/// query is simply awaited.
+/// (Codex/CodeRabbit). The socket is drained even with NO light controller: call classification is
+/// now time-sensitive on its own (a floor signature must reach the classifier BEFORE the snapshot
+/// is accepted, or a floor ring leaks to the entrance-panel sensor), independent of the light echo
+/// guard (Codex).
 #[allow(clippy::too_many_arguments)]
 async fn read_call_state_draining(
     cfg: &Arc<Config>,
@@ -417,12 +430,6 @@ async fn read_call_state_draining(
     frames: &mut Vec<String>,
     call_watch: &mut CallWatch,
 ) -> std::io::Result<Reconcile> {
-    let Some(light) = light else {
-        return Ok(Reconcile::Done {
-            result: dimension::read_call_state(&cfg.own_host, cfg.own_port_mon).await,
-            saw_transition: false,
-        });
-    };
     // Cross-connection ordering can't be inferred from local receipt time — a monitor frame drained
     // during the query may PREDATE or POSTDATE the dim-35 snapshot. So whenever a live call-state
     // transition IS drained (published + applied in order below), the snapshot is ambiguous:
@@ -450,7 +457,7 @@ async fn read_call_state_draining(
                             // A live call-state transition is applied IN ORDER (published + watch
                             // updated); it marks this snapshot ambiguous, so we re-query below.
                             if let Some(code) =
-                                publish_frame(cfg, client, volume, Some(light), classifier, &frame)
+                                publish_frame(cfg, client, volume, light, classifier, &frame)
                                     .await
                             {
                                 update_call_watch(call_watch, code);
@@ -474,7 +481,7 @@ async fn read_call_state_draining(
                     framer.push(&buf[..n], frames);
                     for frame in frames.drain(..) {
                         if let Some(code) =
-                            publish_frame(cfg, client, volume, Some(light), classifier, &frame).await
+                            publish_frame(cfg, client, volume, light, classifier, &frame).await
                         {
                             update_call_watch(call_watch, code);
                             saw_transition = true;

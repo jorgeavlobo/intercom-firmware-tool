@@ -1148,6 +1148,17 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
+            // Legacy migration (one release, #69 → Entrance Panel Call): the "Doorbell" event
+            // (object id `doorbell`) that shipped in #40 was renamed to entrance_panel_call.
+            // ha::reconcile only touches config topics present in the NEW manifest, so a prior
+            // install's retained `event/<node>/doorbell/config` would linger as an orphan
+            // "Doorbell" entity. Tombstone it: same config topic, EMPTY retained payload = cleared.
+            // Emitted UNCONDITIONALLY (like the gate tombstone above) so it runs on a normal
+            // install too; on a fresh install the topic holds nothing, so it is a harmless no-op.
+            // SAFE — stays within THIS bridge's OWN node/object. Remove a release after the rename
+            // has propagated.
+            entities.Add(new HaEntity("doorbell.json", Topic("event", "doorbell"), ""));
+
             // Entrance-panel call: a momentary EVENT fired when the OUTDOOR door-station call is
             // seen on the bus (WHO=8 `*8*1#1#4#21*<WHERE>##`). `event_types` lists "pressed";
             // btmqttd publishes {"event_type":"pressed","where":…} NON-retained, so it fires
