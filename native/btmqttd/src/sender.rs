@@ -375,7 +375,7 @@ async fn session(
                 Reconcile::Done { result: Ok(None) | Err(_), saw_transition: false } => {
                     // Query failed — best-effort republish the last cached value (the original
                     // reseed behavior), so a dropped retained update is still recovered. During a
-                    // floor call call_watch is disarmed (None) → this republishes idle(0), which is
+                    // floor call, call_watch is disarmed (None) → this republishes idle(0), which is
                     // exactly right: the entrance-panel sensor stays idle through a floor call.
                     match call_watch {
                         None => publish_call_state(cfg, client, 0).await, // confirmed idle

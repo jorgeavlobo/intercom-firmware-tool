@@ -372,7 +372,7 @@ namespace IntercomFirmwareTool.Core
                     catch (Exception ex)
                     {
                         throw new InvalidOperationException(
-                            $"Failed writing HA discovery config '{e.FileName}' (payload {e.Json.Length} bytes): {ex.Message}",
+                            $"Failed writing HA discovery config '{e.FileName}' (payload {Encoding.UTF8.GetByteCount(e.Json)} bytes): {ex.Message}",
                             ex);
                     }
                     manifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
@@ -538,6 +538,21 @@ namespace IntercomFirmwareTool.Core
                 if (t.IndexOfAny(new[] { '+', '#' }) >= 0
                     || t.StartsWith("$share/", StringComparison.Ordinal))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
+
+            // The two momentary call EVENTS and the retained call-STATE sensor must use DISTINCT
+            // topics: they drive three separate HA entities off the same WHO=8 stream, and the whole
+            // point of this feature is that an entrance-panel call and a floor call stay independent.
+            // Defaults are always distinct (namespace-scoped), so this only rejects a caller that
+            // explicitly overrode two of them to the SAME topic — which would silently conflate the
+            // events or cross-wire the state sensor.
+            var callTopics = new[]
+            {
+                opts.EffectiveTopicEntrancePanelCall,
+                opts.EffectiveTopicFloorCall,
+                opts.EffectiveTopicCallState,
+            };
+            if (callTopics.Distinct(StringComparer.Ordinal).Count() != callTopics.Length)
+                throw new ArgumentException(CoreStrings.Get("Mqtt_CallTopicsMustDiffer"), nameof(opts));
 
             // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by
             // the broker against the UNDERLYING <filter> that btmqttd

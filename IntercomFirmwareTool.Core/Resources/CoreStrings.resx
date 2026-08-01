@@ -200,6 +200,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
     <value>An MQTT publish topic (every topic except the receive topic) must not contain the wildcards '+' or '#', nor begin with '$share/' (a subscription-only prefix).</value>
   </data>
+  <data name="Mqtt_CallTopicsMustDiffer" xml:space="preserve">
+    <value>The entrance-panel call, floor call, and call-state topics must all be different — otherwise their Home Assistant entities would receive each other's events.</value>
+  </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>The MQTT receive topic is not a valid subscription filter: '+' must occupy a whole level and '#' must be the final whole level.</value>
   </data>

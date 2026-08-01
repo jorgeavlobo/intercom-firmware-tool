@@ -230,6 +230,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
     <value>Um tópico MQTT de publicação (todos exceto o tópico de receção) não pode conter os wildcards '+' ou '#', nem começar por '$share/' (um prefixo só para subscrições).</value>
   </data>
+  <data name="Mqtt_CallTopicsMustDiffer" xml:space="preserve">
+    <value>Os tópicos da chamada da botoneira, da chamada de piso e do estado da chamada têm de ser todos diferentes — caso contrário, as respetivas entidades do Home Assistant receberiam os eventos umas das outras.</value>
+  </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>O tópico de receção MQTT não é um filtro de subscrição válido: '+' tem de ocupar um nível inteiro e '#' tem de ser o último nível inteiro.</value>
   </data>
