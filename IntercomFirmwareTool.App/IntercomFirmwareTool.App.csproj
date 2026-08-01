@@ -31,7 +31,7 @@
          mirroring the device's mosquitto client. Pinned to an exact patch version for reproducible
          restores, matching the repo's convention (e.g. SharpZipLib); bump
          deliberately when needed. -->
-    <PackageReference Include="MQTTnet" Version="5.0.1.1416" />
+    <PackageReference Include="MQTTnet" Version="5.2.0.1603" />
   </ItemGroup>
 
 </Project>

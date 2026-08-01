@@ -236,4 +236,53 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_RxMatchesPublishTopic" xml:space="preserve">
     <value>El tema de recepción MQTT no debe coincidir con ningún tema de publicación; de lo contrario, el puente se suscribiría a su propia salida y repetiría las tramas del bus en bucle.</value>
   </data>
+  <!-- ================= Firmware download (FD_) — issue #23 ================= -->
+  <data name="FD_NotDownloadable" xml:space="preserve">
+    <value>Este firmware no está disponible para descarga.</value>
+  </data>
+  <data name="FD_Cached" xml:space="preserve">
+    <value>Ya descargado y verificado: {0}.</value>
+  </data>
+  <data name="FD_Verified" xml:space="preserve">
+    <value>Descargado y verificado: {0} ({1:N0} bytes).</value>
+  </data>
+  <data name="FD_Cancelled" xml:space="preserve">
+    <value>Descarga cancelada.</value>
+  </data>
+  <data name="FD_DownloadFailed" xml:space="preserve">
+    <value>La descarga falló.</value>
+  </data>
+  <data name="FD_DownloadError" xml:space="preserve">
+    <value>La descarga falló: {0}</value>
+  </data>
+  <data name="FD_IntegritySize" xml:space="preserve">
+    <value>El archivo {0} descargado tiene {1:N0} bytes, pero se esperaban {2:N0} (la verificación de integridad falló).</value>
+  </data>
+  <data name="FD_IntegrityHash" xml:space="preserve">
+    <value>El archivo {0} descargado no coincide con el contenido esperado (SHA-256 {1}…, esperado {2}…).</value>
+  </data>
+  <data name="FD_IntegrityOversize" xml:space="preserve">
+    <value>La descarga de {0} superó los {1:N0} bytes esperados y se detuvo.</value>
+  </data>
+  <data name="FD_IoError" xml:space="preserve">
+    <value>Error de archivo: {0}</value>
+  </data>
+  <data name="FD_PublishFailed" xml:space="preserve">
+    <value>No se pudo guardar el archivo descargado en la carpeta de destino.</value>
+  </data>
+  <data name="FD_ProbeAvailable" xml:space="preserve">
+    <value>Disponible.</value>
+  </data>
+  <data name="FD_ProbeUnreachable" xml:space="preserve">
+    <value>Inaccesible: {0}</value>
+  </data>
+  <data name="FD_ProbeHttpStatus" xml:space="preserve">
+    <value>El servidor devolvió HTTP {0}.</value>
+  </data>
+  <data name="FD_ProbeNotFirmware" xml:space="preserve">
+    <value>El servidor devolvió contenido inesperado, no el firmware.</value>
+  </data>
+  <data name="FD_ProbeSizeMismatch" xml:space="preserve">
+    <value>Tamaño inesperado (se esperaba {0:N0}, se obtuvo {1:N0} bytes).</value>
+  </data>
 </root>

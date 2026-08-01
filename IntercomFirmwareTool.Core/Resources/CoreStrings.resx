@@ -236,4 +236,54 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_FileTooLarge" xml:space="preserve">
     <value>{0} is {1} bytes, larger than the {2}-byte limit for an editable init script; refusing to read it.</value>
   </data>
+
+  <!-- ================= Firmware download (FD_) — issue #23 ================= -->
+  <data name="FD_NotDownloadable" xml:space="preserve">
+    <value>This firmware is not available for download.</value>
+  </data>
+  <data name="FD_Cached" xml:space="preserve">
+    <value>Already downloaded and verified: {0}.</value>
+  </data>
+  <data name="FD_Verified" xml:space="preserve">
+    <value>Downloaded and verified: {0} ({1:N0} bytes).</value>
+  </data>
+  <data name="FD_Cancelled" xml:space="preserve">
+    <value>Download cancelled.</value>
+  </data>
+  <data name="FD_DownloadFailed" xml:space="preserve">
+    <value>Download failed.</value>
+  </data>
+  <data name="FD_DownloadError" xml:space="preserve">
+    <value>Download failed: {0}</value>
+  </data>
+  <data name="FD_IntegritySize" xml:space="preserve">
+    <value>The downloaded {0} is {1:N0} bytes, but {2:N0} were expected (integrity check failed).</value>
+  </data>
+  <data name="FD_IntegrityHash" xml:space="preserve">
+    <value>The downloaded {0} does not match the expected content (SHA-256 {1}…, expected {2}…).</value>
+  </data>
+  <data name="FD_IntegrityOversize" xml:space="preserve">
+    <value>The download of {0} exceeded the expected {1:N0} bytes and was stopped.</value>
+  </data>
+  <data name="FD_IoError" xml:space="preserve">
+    <value>File error: {0}</value>
+  </data>
+  <data name="FD_PublishFailed" xml:space="preserve">
+    <value>Could not save the downloaded file to the destination folder.</value>
+  </data>
+  <data name="FD_ProbeAvailable" xml:space="preserve">
+    <value>Available.</value>
+  </data>
+  <data name="FD_ProbeUnreachable" xml:space="preserve">
+    <value>Unreachable: {0}</value>
+  </data>
+  <data name="FD_ProbeHttpStatus" xml:space="preserve">
+    <value>Server returned HTTP {0}.</value>
+  </data>
+  <data name="FD_ProbeNotFirmware" xml:space="preserve">
+    <value>The server returned unexpected content, not the firmware.</value>
+  </data>
+  <data name="FD_ProbeSizeMismatch" xml:space="preserve">
+    <value>Unexpected size (expected {0:N0}, got {1:N0} bytes).</value>
+  </data>
 </root>

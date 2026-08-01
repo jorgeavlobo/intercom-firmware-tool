@@ -33,7 +33,7 @@
 
   <!-- ================= Safety banner (kept as separate runs so the bold/underline
        emphasis and the mid-sentence hyperlink survive; keep this word order) ===== -->
-  <data name="Banner_Risk_Pre" xml:space="preserve"><value>⚠ Gravar firmware modificado pode inutilizar o dispositivo. </value></data>
+  <data name="Banner_Risk_Pre" xml:space="preserve"><value>Gravar firmware modificado pode inutilizar o dispositivo. </value></data>
   <data name="Banner_Risk_Emph" xml:space="preserve"><value>Faça-o por sua conta e risco!</value></data>
   <data name="Banner_Use_Pre" xml:space="preserve"><value> Utilize </value></data>
   <data name="Banner_Link" xml:space="preserve"><value>MyHOME Suite</value></data>
@@ -448,4 +448,29 @@ Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comando
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>O id do nó Home Assistant só pode conter letras e dígitos ASCII, '_' ou '-'.</value></data>
   <data name="MqttHint_LightWhere" xml:space="preserve"><value>O endereço da luz (WHERE) só pode conter dígitos, ou ficar vazio para desativar o interruptor de Luz.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>ligação recusada ou sem resposta.</value></data>
+
+  <!-- ================= Download official firmware (issue #23) ================= -->
+  <data name="Dl_Toggle" xml:space="preserve"><value>Descarregar firmware oficial</value></data>
+  <data name="Dl_ToggleTip" xml:space="preserve"><value>Descarregar o firmware original da BTicino e verificá-lo automaticamente</value></data>
+  <data name="Dl_Title" xml:space="preserve"><value>Descarregar firmware oficial</value></data>
+  <data name="Dl_Subtitle" xml:space="preserve"><value>Obtido da BTicino e verificado automaticamente</value></data>
+  <data name="Dl_Legal" xml:space="preserve"><value>Este é o mesmo firmware original que pode descarregar manualmente da BTicino / Legrand. A ferramenta apenas o obtém por si e verifica-o byte a byte (tamanho + SHA-256) em relação ao original conhecido antes de ser utilizado.</value></data>
+  <data name="Dl_Model" xml:space="preserve"><value>Modelo</value></data>
+  <data name="Dl_Version" xml:space="preserve"><value>Versão</value></data>
+  <data name="Dl_Latest" xml:space="preserve"><value>Mais recente</value></data>
+  <data name="Dl_SaveTo" xml:space="preserve"><value>Guardar em</value></data>
+  <data name="Dl_SaveToTip" xml:space="preserve"><value>Pasta onde o firmware descarregado será guardado (clique para alterar)</value></data>
+  <data name="Dl_Browse" xml:space="preserve"><value>Procurar…</value></data>
+  <data name="Dl_ChooseFolder" xml:space="preserve"><value>Escolha onde guardar o firmware</value></data>
+  <data name="Dl_Start" xml:space="preserve"><value>Descarregar e verificar</value></data>
+  <data name="Dl_Downloading" xml:space="preserve"><value>A descarregar…</value></data>
+  <data name="Dl_Cancel" xml:space="preserve"><value>Cancelar</value></data>
+  <data name="Dl_Cancelling" xml:space="preserve"><value>A cancelar…</value></data>
+  <data name="Dl_ProgressStarting" xml:space="preserve"><value>A iniciar a descarga de {0}…</value></data>
+  <data name="Dl_ProgressFmt" xml:space="preserve"><value>{0}%  ·  {1} / {2}  ·  {3}</value></data>
+  <data name="Dl_ProgressUnknown" xml:space="preserve"><value>{0}  ·  {1}</value></data>
+  <data name="Dl_UnexpectedError" xml:space="preserve"><value>Falha na descarga: {0}</value></data>
+
+  <!-- ================= Scroll cue ================= -->
+  <data name="Scroll_More" xml:space="preserve"><value>Novas opções abaixo</value></data>
 </root>
