@@ -241,8 +241,10 @@ enum CallKind {
 /// floor call entirely off the entrance-panel `call_state` sensor without leaking that
 /// leading "ringing", the first ring code is HELD (`Pending`) until the classifier is seen:
 /// an entrance signature flushes the held code and publishes normally; a floor signature
-/// discards it and suppresses the rest. Frame-driven, no timers. One instance per monitor
-/// session (reset to `Idle` on reconnect).
+/// discards it and suppresses the rest. Frame-driven, no timers. ONE instance PERSISTS across
+/// monitor reconnects (owned by `run()`), so a resolved `Floor`/`Entrance` call in progress keeps
+/// its classification over a reconnect; only the transient `Pending` hold is dropped on reconnect
+/// (its classifying signature can't be replayed) — see [`Self::on_reconnect`].
 #[derive(Default)]
 pub struct CallClassifier {
     state: CallKind,
@@ -341,29 +343,38 @@ impl CallClassifier {
     /// OUT-OF-BAND from the live frame stream (the reconnect/poll/reseed reconcile) — against the
     /// current classification, returning whether it may reach the entrance-panel sensor.
     ///
-    /// - An idle (`0`) snapshot is authoritative gateway truth that no call is active, so it
-    ///   RESETS the classifier to `Idle` and publishes. This repairs a MISSED live terminal `0`:
-    ///   without the reset the classifier would linger in `Entrance`, and the next floor call's
-    ///   leading ring would be published as an entrance ring instead of held (Codex).
-    /// - A non-idle snapshot is SUPPRESSED while the classification is `Floor` (a known floor call
-    ///   — its ringing must never surface here) OR still `Pending` (the leading ring is held,
-    ///   classification unresolved — publishing the out-of-band ringing could pre-empt a floor
-    ///   signature still in flight and leak; the live stream will resolve and publish it) (Codex).
-    /// - Otherwise (`Entrance`, or a fresh `Idle` at reconnect) it PUBLISHES: a call in progress
-    ///   that predates this session is assumed entrance — a floor call is momentary and long over
-    ///   by the time an out-of-band query runs.
+    /// - `0` (idle) is gateway truth that no call is active: RESET to `Idle` and publish. Repairs a
+    ///   missed live terminal `0` (otherwise the classifier would linger and mis-handle the next call).
+    /// - `4`/`6` (answered/in-call) are entrance-ONLY phases — a floor call never emits them — so an
+    ///   out-of-band read of one is DEFINITIVE entrance evidence: (re)classify to `Entrance` and
+    ///   publish, from ANY state. This is exactly the case the poll/reconnect reconcile exists to
+    ///   repair — a real entrance call whose live frames were missed, even from a stale `Floor`
+    ///   (Codex/Copilot).
+    /// - `1`/`2` (ringing) are AMBIGUOUS — floor and entrance share them, and out-of-band there is no
+    ///   signature to disambiguate. Publish ONLY when the call is already KNOWN to be entrance
+    ///   (`Entrance`); from every other state (`Floor`, `Pending`, or a fresh `Idle` at reconnect)
+    ///   SUPPRESS, so a floor call's ringing can never leak onto the entrance-panel sensor — the
+    ///   feature's hard rule (Codex). Cost: a genuine entrance call merely RINGING across a reconnect
+    ///   is not shown until it is answered (`4`/`6`), a live signature arrives, or it goes idle — an
+    ///   acceptable trade for never leaking a floor call.
     ///
-    /// Only `0` mutates; a non-idle snapshot leaves the live state machine untouched (it is a
-    /// full-truth read, not a live transition — feeding it into [`Self::on_call_state`] would, e.g.,
-    /// turn a real entrance snapshot into a spuriously-held `Pending`).
+    /// `0` and `4`/`6` mutate the classification; a `1`/`2` snapshot does not (it is an out-of-band
+    /// read, not a live transition — feeding it into [`Self::on_call_state`] would spuriously hold it
+    /// as `Pending`).
     pub fn reconcile_snapshot(&mut self, code: u8) -> CallStateAction {
-        if code == 0 {
-            self.state = CallKind::Idle;
-            return CallStateAction::Publish(0);
-        }
-        match self.state {
-            CallKind::Floor | CallKind::Pending(_) => CallStateAction::Suppress,
-            CallKind::Idle | CallKind::Entrance => CallStateAction::Publish(code),
+        match code {
+            0 => {
+                self.state = CallKind::Idle;
+                CallStateAction::Publish(0)
+            }
+            c if c != 1 && c != 2 => {
+                self.state = CallKind::Entrance;
+                CallStateAction::Publish(c)
+            }
+            _ => match self.state {
+                CallKind::Entrance => CallStateAction::Publish(code),
+                _ => CallStateAction::Suppress,
+            },
         }
     }
 }
@@ -668,15 +679,20 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_snapshot_publishes_for_a_fresh_or_entrance_classifier() {
-        // A fresh classifier (reconnect) PUBLISHES an authoritative snapshot — a genuine
-        // in-progress entrance call must still be reconciled after a monitor reconnect.
+    fn reconcile_snapshot_ambiguous_ring_only_publishes_from_entrance() {
+        // A fresh classifier (reconnect) SUPPRESSES an ambiguous ringing snapshot (1/2) — it could be
+        // a floor call, and a floor call must never leak onto the entrance sensor...
         let mut c = CallClassifier::new();
-        assert_eq!(c.reconcile_snapshot(2), CallStateAction::Publish(2));
-        assert_eq!(c.reconcile_snapshot(0), CallStateAction::Publish(0));
-        // A classified entrance call publishes snapshots too.
-        c.saw_entrance_panel_call();
+        assert_eq!(c.reconcile_snapshot(1), CallStateAction::Suppress);
+        assert_eq!(c.reconcile_snapshot(2), CallStateAction::Suppress);
+        // ...but an entrance-ONLY phase (4/6) is definitive → publish + reclassify from fresh Idle...
         assert_eq!(c.reconcile_snapshot(6), CallStateAction::Publish(6));
+        // ...and an idle snapshot always publishes (and resets).
+        assert_eq!(c.reconcile_snapshot(0), CallStateAction::Publish(0));
+        // A KNOWN entrance call publishes even an ambiguous ring snapshot.
+        let mut e = CallClassifier::new();
+        e.saw_entrance_panel_call();
+        assert_eq!(e.reconcile_snapshot(2), CallStateAction::Publish(2));
     }
 
     #[test]
