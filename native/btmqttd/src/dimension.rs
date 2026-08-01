@@ -312,14 +312,15 @@ impl CallClassifier {
                 CallKind::Entrance => CallStateAction::Publish(code),
                 CallKind::Floor => CallStateAction::Suppress,
             },
-            // 4/6 (answered/in-call phases) are only ever reached by an entrance-panel call.
-            _ => match self.state {
-                CallKind::Floor => CallStateAction::Suppress, // defensive; floor never emits these
-                _ => {
-                    self.state = CallKind::Entrance;
-                    CallStateAction::Publish(code)
-                }
-            },
+            // 4/6 (answered/in-call phases) are reached ONLY by an entrance-panel call — a floor
+            // call's sequence is `1 → 2 → 0`. So any such code is DEFINITIVE evidence of an entrance
+            // call: (re)classify to Entrance and publish, even from a stale `Floor` left by a floor
+            // call whose terminal `0` was missed across a monitor reconnect. Suppressing here would
+            // hide a real entrance call until its terminal idle (Codex).
+            _ => {
+                self.state = CallKind::Entrance;
+                CallStateAction::Publish(code)
+            }
         }
     }
 
@@ -713,6 +714,13 @@ mod tests {
         let mut f = CallClassifier::new();
         f.saw_floor_call();
         assert_eq!(f.on_call_state(2), CallStateAction::Suppress);
+        // But an entrance-ONLY phase (4/6) from a stale Floor is definitive evidence of an entrance
+        // call (a floor call never emits these) → publish and reclassify, don't suppress.
+        let mut g = CallClassifier::new();
+        g.saw_floor_call();
+        assert_eq!(g.on_call_state(4), CallStateAction::Publish(4));
+        assert_eq!(g.on_call_state(6), CallStateAction::Publish(6));
+        assert_eq!(g.on_call_state(0), CallStateAction::Publish(0));
     }
 
     #[test]
