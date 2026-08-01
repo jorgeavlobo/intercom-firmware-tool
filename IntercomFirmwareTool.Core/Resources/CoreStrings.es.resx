@@ -230,8 +230,8 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
     <value>Un tema MQTT de publicación (todos excepto el tema de recepción) no puede contener los comodines '+' o '#', ni empezar por '$share/' (un prefijo solo para suscripciones).</value>
   </data>
-  <data name="Mqtt_CallTopicsMustDiffer" xml:space="preserve">
-    <value>Los temas de la llamada de la placa de calle, la llamada de piso y el estado de la llamada deben ser todos diferentes; de lo contrario, sus entidades de Home Assistant recibirían los eventos de las demás.</value>
+  <data name="Mqtt_PublishTopicsMustDiffer" xml:space="preserve">
+    <value>Cada tema MQTT de publicación debe ser distinto; de lo contrario, dos entidades de Home Assistant consumirían los datos de la otra, o se corromperían el estado retenido / la disponibilidad.</value>
   </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>El tema de recepción MQTT no es un filtro de suscripción válido: '+' debe ocupar un nivel completo y '#' debe ser el último nivel completo.</value>

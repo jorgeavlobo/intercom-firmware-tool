@@ -539,20 +539,26 @@ namespace IntercomFirmwareTool.Core
                     || t.StartsWith("$share/", StringComparison.Ordinal))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicWildcard"), nameof(opts));
 
-            // The two momentary call EVENTS and the retained call-STATE sensor must use DISTINCT
-            // topics: they drive three separate HA entities off the same WHO=8 stream, and the whole
-            // point of this feature is that an entrance-panel call and a floor call stay independent.
-            // Defaults are always distinct (namespace-scoped), so this only rejects a caller that
-            // explicitly overrode two of them to the SAME topic — which would silently conflate the
-            // events or cross-wire the state sensor.
-            var callTopics = new[]
+            // No two PUBLISH topics may be equal. Each carries a DISTINCT data stream, so a
+            // collision would make two Home Assistant entities consume each other's (incompatible)
+            // payloads — e.g. the floor-call event and the volume state on one topic — or corrupt
+            // the retained state / last-will availability. In particular the two momentary call
+            // events and the retained call-state sensor must stay independent (the whole point of
+            // this feature). Defaults are namespace-scoped and always distinct, so this only rejects
+            // a caller that explicitly overrode topics to collide. The light STATE topic is included
+            // ONLY when the feature is enabled — it is otherwise derived but never published.
+            // TopicRx is excluded: it is the sole SUBSCRIBE filter, and its self-loop overlap with
+            // the publish topics is checked separately below.
+            var publishTopics = new List<string>
             {
-                opts.EffectiveTopicEntrancePanelCall,
-                opts.EffectiveTopicFloorCall,
-                opts.EffectiveTopicCallState,
+                opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill, opts.TopicKey,
+                opts.TopicCmdResult, opts.TopicFileContent, opts.EffectiveTopicVolume,
+                opts.EffectiveTopicMute, opts.EffectiveTopicEntrancePanelCall,
+                opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
             };
-            if (callTopics.Distinct(StringComparer.Ordinal).Count() != callTopics.Length)
-                throw new ArgumentException(CoreStrings.Get("Mqtt_CallTopicsMustDiffer"), nameof(opts));
+            if (opts.LightEnabled) publishTopics.Add(opts.EffectiveTopicLight);
+            if (publishTopics.Distinct(StringComparer.Ordinal).Count() != publishTopics.Count)
+                throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
 
             // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by
             // the broker against the UNDERLYING <filter> that btmqttd

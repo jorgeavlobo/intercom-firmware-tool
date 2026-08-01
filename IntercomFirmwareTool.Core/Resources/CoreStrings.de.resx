@@ -230,8 +230,8 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
     <value>Ein MQTT-Veröffentlichungs-Topic (alle außer dem Empfangs-Topic) darf die Platzhalter „+“ oder „#“ nicht enthalten und nicht mit „$share/“ beginnen (ein Präfix nur für Abonnements).</value>
   </data>
-  <data name="Mqtt_CallTopicsMustDiffer" xml:space="preserve">
-    <value>Die Topics für Türstationsruf, Etagenruf und Anrufstatus müssen alle unterschiedlich sein, sonst würden ihre Home-Assistant-Entitäten die Ereignisse der jeweils anderen empfangen.</value>
+  <data name="Mqtt_PublishTopicsMustDiffer" xml:space="preserve">
+    <value>Jedes MQTT-Veröffentlichungs-Topic muss eindeutig sein, sonst würden zwei Home-Assistant-Entitäten die Daten der jeweils anderen verarbeiten oder der beibehaltene Status / die Verfügbarkeit würde beschädigt.</value>
   </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>Das MQTT-Empfangs-Topic ist kein gültiger Abonnementfilter: '+' muss eine ganze Ebene belegen und '#' muss die letzte ganze Ebene sein.</value>
