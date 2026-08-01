@@ -37,12 +37,12 @@ pub async fn run(
     volume: Arc<VolumeCtl>,
     light: Option<Arc<LightCtl>>,
 ) {
-    // Classifies each call as entrance-panel vs floor and keeps the two independent. Lives
-    // ACROSS monitor sessions (not recreated per connect), so a call in progress over a monitor
-    // reconnect keeps its classification: a floor call whose terminal dim-35 `0` has not yet
-    // arrived stays `Floor`, so the fresh session's authoritative dim-35 read is suppressed
-    // instead of leaking the floor ring onto the entrance-panel sensor. An authoritative idle
-    // read still resets it to Idle (via `reconcile_snapshot`), so no stale state persists (Codex).
+    // Classifies each call as entrance-panel vs floor and keeps the two independent. Owned here so
+    // its lifetime spans reconnects, but RESET to Idle at the start of each session (see
+    // `on_reconnect` below): a monitor outage can end one call and start another in the gap, so no
+    // classification survives it — the authoritative reconcile suppresses ambiguous rings and the
+    // post-reconnect live frames reclassify, which is what keeps a floor call off the entrance
+    // sensor across reconnects (Codex).
     let classifier = std::sync::Mutex::new(dimension::CallClassifier::new());
     let mut backoff = 0u64;
     loop {
@@ -137,10 +137,12 @@ async fn session(
     let mut buf = [0u8; 4096];
     let mut frames: Vec<String> = Vec::new();
 
-    // Drop any TRANSIENT (Pending) classifier state carried from a previous session: its resolving
-    // signature can't be replayed across the reconnect, so a stale hold would wrongly promote the
-    // call's next ring to Entrance. Resolved Floor/Entrance states are kept (see run()). No-op on
-    // the first connect. (Sync call — the guard is released before the awaits below.)
+    // Reset the classifier for this session: a monitor outage loses every frame in the gap, so any
+    // classification carried from the previous session is untrustworthy (the call may have ended and
+    // another begun). Resetting to Idle makes the authoritative reconcile suppress ambiguous rings
+    // and the post-reconnect live frames reclassify — no stale Floor/Entrance/Pending can leak a
+    // call onto the wrong sensor. No-op on the first connect. (Sync call — guard released before the
+    // awaits below.)
     lock_classifier(classifier).on_reconnect();
 
     // Require the monitor ACK ("*#*1##") before streaming. The gateway may accept the

@@ -241,10 +241,12 @@ enum CallKind {
 /// floor call entirely off the entrance-panel `call_state` sensor without leaking that
 /// leading "ringing", the first ring code is HELD (`Pending`) until the classifier is seen:
 /// an entrance signature flushes the held code and publishes normally; a floor signature
-/// discards it and suppresses the rest. Frame-driven, no timers. ONE instance PERSISTS across
-/// monitor reconnects (owned by `run()`), so a resolved `Floor`/`Entrance` call in progress keeps
-/// its classification over a reconnect; only the transient `Pending` hold is dropped on reconnect
-/// (its classifying signature can't be replayed) — see [`Self::on_reconnect`].
+/// discards it and suppresses the rest. Frame-driven, no timers. The instance is owned by `run()`
+/// but RESET to `Idle` at the start of each monitor session ([`Self::on_reconnect`]): a monitor
+/// outage can end one call and begin another in the gap, so no classification is trustworthy across
+/// it — the authoritative reconcile (see [`Self::reconcile_snapshot`]) and post-reconnect live
+/// frames re-establish state from scratch, which is what keeps a floor call off this sensor even
+/// across reconnects.
 #[derive(Default)]
 pub struct CallClassifier {
     state: CallKind,
@@ -272,17 +274,17 @@ impl CallClassifier {
         self.state = CallKind::Floor;
     }
 
-    /// Called at the start of each monitor session. The classifier PERSISTS across reconnects so a
-    /// resolved `Floor`/`Entrance` call in progress keeps its classification — but a `Pending` hold
-    /// is TRANSIENT: it waits for the classifying signature that arrives in the very next frame, and
-    /// that signature is never replayed if it fell in the disconnect gap. A `Pending` that survived
-    /// a reconnect is therefore stale — its resolver is gone — and the call's next ring would wrongly
-    /// promote to Entrance (a false entrance ring). Reset it to Idle so the next live frame re-holds
-    /// cleanly; leave resolved states untouched (Codex). No-op on the first connect (starts Idle).
+    /// Called at the start of each monitor session. A monitor outage loses EVERY frame in the gap,
+    /// so a call in progress before it may have ENDED and a DIFFERENT one begun. No classification
+    /// carried across the reconnect can therefore be trusted for the current dim-35 reading — a
+    /// stale `Floor`, `Entrance`, OR `Pending` would mis-handle a new call and could publish a floor
+    /// call's ring onto the entrance-panel sensor. Reset to `Idle`: the authoritative reconcile then
+    /// suppresses ambiguous rings (`1`/`2`) and publishes only definitive entrance-only phases
+    /// (`4`/`6`), while live frames after the reconnect reclassify from scratch (Codex). Cost: an
+    /// entrance call merely RINGING across a reconnect is not shown until it is answered (`4`/`6`),
+    /// a live signature arrives, or it goes idle — the accepted price of never leaking a floor call.
     pub fn on_reconnect(&mut self) {
-        if matches!(self.state, CallKind::Pending(_)) {
-            self.state = CallKind::Idle;
-        }
+        self.state = CallKind::Idle;
     }
 
     /// A dim-35 call-state `code` arrived. Decide whether it reaches the entrance-panel
@@ -753,27 +755,28 @@ mod tests {
     }
 
     #[test]
-    fn on_reconnect_drops_a_stale_pending_but_keeps_resolved_states() {
-        // A Pending hold carried across a reconnect is stale (its classifying signature was lost in
-        // the gap): reset to Idle so the next ring re-holds, rather than promoting a floor call's
-        // next ring to a false entrance ring.
-        let mut c = CallClassifier::new();
-        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // Pending(1)
-        c.on_reconnect(); // signature lost across the reconnect → drop the hold
-        // A following floor `2` is now HELD (Idle→Pending), not promoted to Entrance/published.
-        assert_eq!(c.on_call_state(2), CallStateAction::Suppress);
-        c.saw_floor_call();
-        assert_eq!(c.on_call_state(0), CallStateAction::Publish(0));
-        // Resolved states survive a reconnect untouched: a Floor call still suppresses.
-        let mut f = CallClassifier::new();
-        f.saw_floor_call();
-        f.on_reconnect();
-        assert_eq!(f.on_call_state(2), CallStateAction::Suppress);
-        // ...and an Entrance call still publishes.
-        let mut e = CallClassifier::new();
-        e.saw_entrance_panel_call();
-        e.on_reconnect();
-        assert_eq!(e.on_call_state(2), CallStateAction::Publish(2));
+    fn on_reconnect_resets_every_classification_to_idle() {
+        // A monitor outage can end one call and start another in the gap, so NO carried-over state
+        // is trustworthy — reset all of Pending/Floor/Entrance to Idle. After the reset, an ambiguous
+        // ring snapshot is suppressed (proving no stale Entrance can leak a new floor call's ring),
+        // and a new leading ring is held afresh.
+        for setup in [0u8, 1, 4] {
+            let mut c = CallClassifier::new();
+            match setup {
+                1 => {
+                    c.on_call_state(1); // Pending
+                }
+                4 => {
+                    c.on_call_state(4); // Entrance
+                }
+                _ => c.saw_floor_call(), // Floor
+            }
+            c.on_reconnect();
+            // Reset to Idle → an ambiguous authoritative ring is suppressed (no leak from stale state)...
+            assert_eq!(c.reconcile_snapshot(2), CallStateAction::Suppress);
+            // ...and a fresh leading ring is HELD (Idle → Pending), not published.
+            assert_eq!(c.on_call_state(1), CallStateAction::Suppress);
+        }
     }
 
     #[test]
