@@ -271,9 +271,11 @@ impl CallClassifier {
     }
 
     /// A dim-35 call-state `code` arrived. Decide whether it reaches the entrance-panel
-    /// sensor. `0` (idle/ended) always publishes and resets. `1`/`2` from idle are HELD
-    /// (pending classification); a second unclassified ring, or a `4`/`6` (which only an
-    /// entrance call reaches), defaults to entrance rather than risk hiding a real call.
+    /// sensor. `0` (idle/ended) always publishes and resets. A leading ring-start `1` is HELD
+    /// (pending classification) — including from a stale `Entrance` (a previous call's terminal
+    /// `0` was missed), so the NEXT call's leading ring can't be mis-published before its
+    /// signature resolves it. A second unclassified ring, or a `4`/`6` (which only an entrance
+    /// call reaches), defaults to entrance rather than risk hiding a real call.
     pub fn on_call_state(&mut self, code: u8) -> CallStateAction {
         match code {
             0 => {
@@ -291,6 +293,17 @@ impl CallClassifier {
                     self.state = CallKind::Entrance;
                     CallStateAction::Publish(code)
                 }
+                // A fresh ring-START (`1`) from Entrance begins a NEW call of unknown type — the
+                // previous entrance call's terminal `0` was missed, leaving us stale. RE-HOLD it as
+                // Pending so a following floor call's leading ring is never emitted as an entrance
+                // ring before its signature arrives (Codex). Safe for a genuine repeated `1` in an
+                // ongoing entrance call too: the retained sensor keeps its last value during the
+                // one-frame hold and the next frame (`2`/`4`/`6`) republishes — no idle flicker.
+                CallKind::Entrance if code == 1 => {
+                    self.state = CallKind::Pending(1);
+                    CallStateAction::Suppress
+                }
+                // A `2` from Entrance is a mid-call progression of the SAME entrance call → publish.
                 CallKind::Entrance => CallStateAction::Publish(code),
                 CallKind::Floor => CallStateAction::Suppress,
             },
@@ -659,6 +672,24 @@ mod tests {
         let mut p = CallClassifier::new();
         assert_eq!(p.on_call_state(1), CallStateAction::Suppress); // Pending(1)
         assert_eq!(p.reconcile_snapshot(2), CallStateAction::Suppress);
+    }
+
+    #[test]
+    fn a_floor_call_after_a_missed_terminal_frame_is_still_held() {
+        // Stuck-Entrance repair on the LIVE path: an entrance call's terminal `0` is missed, so the
+        // classifier lingers in Entrance. A floor call then starts BEFORE the authoritative poll
+        // reconciles. Its leading ring-start `1` must be HELD (not published as an entrance ring),
+        // then the floor signature discards it — the floor call never surfaces on the sensor.
+        let mut c = CallClassifier::new();
+        c.saw_entrance_panel_call(); // classified entrance; its terminal 0 is then missed
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // NEW leading ring re-held
+        c.saw_floor_call();
+        assert_eq!(c.on_call_state(2), CallStateAction::Suppress);
+        assert_eq!(c.on_call_state(0), CallStateAction::Publish(0));
+        // Contrast: a `2` from Entrance is a same-call continuation and still publishes.
+        let mut e = CallClassifier::new();
+        e.saw_entrance_panel_call();
+        assert_eq!(e.on_call_state(2), CallStateAction::Publish(2));
     }
 
     #[test]
