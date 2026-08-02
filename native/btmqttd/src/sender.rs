@@ -5,6 +5,7 @@
 //! Native replacement for StartMqttSend's socket back-end (nc + awk framer). The
 //! tcpdump/filter.py fallback is retired — this connects directly and retries.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +37,10 @@ pub async fn run(
     client: AsyncClient,
     volume: Arc<VolumeCtl>,
     light: Option<Arc<LightCtl>>,
+    // Set true on ConnAck / false on connection drop by main's event loop. Momentary call events
+    // are DROPPED (not enqueued) while this is false, so a press during a broker outage isn't
+    // queued by rumqttc and flushed late as a stale ring (issue #71). Only reads it; never writes.
+    broker_online: Arc<AtomicBool>,
 ) {
     // Classifies each call as entrance-panel vs floor and keeps the two independent. Owned here so
     // its lifetime spans reconnects, but RESET to Idle at the start of each session (see
@@ -47,7 +52,7 @@ pub async fn run(
     let mut backoff = 0u64;
     loop {
         let start = tokio::time::Instant::now();
-        if let Err(e) = session(&cfg, &client, &volume, light.as_ref(), &classifier).await {
+        if let Err(e) = session(&cfg, &client, &volume, light.as_ref(), &classifier, &broker_online).await {
             eprintln!(
                 "btmqttd: monitor {}:{} unavailable: {e}",
                 cfg.own_host, cfg.own_port_mon
@@ -129,6 +134,9 @@ async fn session(
     // BEFORE the classifying WHO=8 frame) until resolved, then either flushes it (entrance) or
     // suppresses it (floor).
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
+    // Broker connectivity, so momentary call events can be dropped rather than enqueued while the
+    // broker is down (issue #71). Read-only here; owned/updated by main's event loop.
+    broker_online: &AtomicBool,
 ) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
@@ -201,7 +209,7 @@ async fn session(
         framer.push(&pre[pos + own::ACK.len()..], &mut frames);
         for frame in frames.drain(..) {
             if let FrameOutcome::CallStatePublished(code) =
-                publish_frame(cfg, client, volume, light, classifier, &frame).await
+                publish_frame(cfg, client, volume, light, classifier, broker_online, &frame).await
             {
                 update_call_watch(&mut call_watch, code);
             }
@@ -220,7 +228,7 @@ async fn session(
     // clobber a real ringing/in_call; keep what the frames left and, if still disarmed, arm an
     // "unknown" marker so a later poll re-queries.
     match read_call_state_draining(
-        cfg, client, volume, light, classifier, &mut sock, &mut framer, &mut buf, &mut frames,
+        cfg, client, volume, light, classifier, broker_online, &mut sock, &mut framer, &mut buf, &mut frames,
         &mut call_watch,
     )
     .await?
@@ -281,7 +289,7 @@ async fn session(
             framer.push(&buf[..n], &mut frames);
             for frame in frames.drain(..) {
                 if let FrameOutcome::CallStatePublished(code) =
-                    publish_frame(cfg, client, volume, light, classifier, &frame).await
+                    publish_frame(cfg, client, volume, light, classifier, broker_online, &frame).await
                 {
                     update_call_watch(&mut call_watch, code);
                 }
@@ -300,7 +308,7 @@ async fn session(
                 // reconcile): a slow/timed-out poll must not block the read past a light echo's
                 // 3 s guard (Codex).
                 match read_call_state_draining(
-                    cfg, client, volume, light, classifier, &mut sock, &mut framer, &mut buf,
+                    cfg, client, volume, light, classifier, broker_online, &mut sock, &mut framer, &mut buf,
                     &mut frames, &mut call_watch,
                 )
                 .await?
@@ -365,7 +373,7 @@ async fn session(
             // a stale idle frame disarmed the poll, this unconditional re-query re-checks dim-35
             // within one interval and re-arms/corrects, so the call-state sensor can't remain stuck.
             match read_call_state_draining(
-                cfg, client, volume, light, classifier, &mut sock, &mut framer, &mut buf,
+                cfg, client, volume, light, classifier, broker_online, &mut sock, &mut framer, &mut buf,
                 &mut frames, &mut call_watch,
             )
             .await?
@@ -443,6 +451,7 @@ async fn read_call_state_draining(
     volume: &Arc<VolumeCtl>,
     light: Option<&Arc<LightCtl>>,
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
+    broker_online: &AtomicBool,
     sock: &mut TcpStream,
     framer: &mut Framer,
     buf: &mut [u8],
@@ -476,7 +485,7 @@ async fn read_call_state_draining(
                             // A live call-state frame (published OR suppressed) or a classifying
                             // signature marks this snapshot ambiguous → re-query below; only a
                             // PUBLISHED code updates the watch, applied IN ORDER (Codex).
-                            match publish_frame(cfg, client, volume, light, classifier, &frame).await
+                            match publish_frame(cfg, client, volume, light, classifier, broker_online, &frame).await
                             {
                                 FrameOutcome::CallStatePublished(code) => {
                                     update_call_watch(call_watch, code);
@@ -502,7 +511,7 @@ async fn read_call_state_draining(
                     frames.clear();
                     framer.push(&buf[..n], frames);
                     for frame in frames.drain(..) {
-                        match publish_frame(cfg, client, volume, light, classifier, &frame).await {
+                        match publish_frame(cfg, client, volume, light, classifier, broker_online, &frame).await {
                             FrameOutcome::CallStatePublished(code) => {
                                 update_call_watch(call_watch, code);
                                 saw_transition = true;
@@ -571,6 +580,7 @@ async fn publish_frame(
     volume: &Arc<VolumeCtl>,
     light: Option<&Arc<LightCtl>>,
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
+    broker_online: &AtomicBool,
     frame: &str,
 ) -> FrameOutcome {
     // Stair-light SWITCH state tracking: a physical panel press of the light button appears
@@ -605,7 +615,7 @@ async fn publish_frame(
             // No held ring, but we still (re)classified to Entrance → snapshot ambiguous.
             outcome = FrameOutcome::ClassifierChanged;
         }
-        publish_call_event(client, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
+        publish_call_event(client, broker_online, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
     } else if let Some(where_) = dimension::parse_floor_call(frame) {
         // Floor CALL (dumb push-button at the apartment's own front door): a COMPLETELY
         // independent event from the entrance panel. Fire its own momentary event and arm the
@@ -619,7 +629,7 @@ async fn publish_frame(
         // entrance sensor exclusively entrance-driven is the strongest form of "never mix the two".
         lock_classifier(classifier).saw_floor_call();
         outcome = FrameOutcome::ClassifierChanged; // reclassified to Floor → snapshot ambiguous
-        publish_call_event(client, &cfg.topic_floor_call, "floor", where_).await;
+        publish_call_event(client, broker_online, &cfg.topic_floor_call, "floor", where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
         // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the
         // classifier: an entrance-panel call publishes it (updating the retained sensor and reporting
@@ -665,6 +675,13 @@ async fn publish_frame(
 /// separate HA `event` entities but share identical delivery semantics — one helper keeps the
 /// payload shape, QoS, retain flag and non-blocking behaviour defined in exactly one place.
 ///
+/// DROPPED while the broker is offline (issue #71): rumqttc queues a `try_publish` made during an
+/// outage and FLUSHES it on reconnect, so a press that happened minutes ago would fire a
+/// time-sensitive automation (unlock/notify) after nobody is at the door. A momentary event has no
+/// meaning once stale, so we skip it entirely when `broker_online` is false rather than enqueue it.
+/// (The retained call-state sensor is the opposite — it SHOULD re-flush on reconnect — so this gate
+/// is only for the momentary events.)
+///
 /// NOT retained: an event fires once, and a retained event would spuriously re-fire on every HA
 /// reconnect. QoS 0 (like the non-idempotent lock/step actions): a ring is NON-idempotent, and
 /// QoS 1 may legitimately REDELIVER a publish (DUP on a lost PUBACK), which would fire the HA
@@ -672,11 +689,29 @@ async fn publish_frame(
 /// stall the monitor reader on a full request queue; a press lost during a brief broker outage
 /// is preferable to a double actuation, and it is not retained or replayed. The payload carries
 /// the HA `event_type` plus the WHERE (informational).
-async fn publish_call_event(client: &AsyncClient, topic: &str, kind: &str, where_: &str) {
+async fn publish_call_event(
+    client: &AsyncClient,
+    broker_online: &AtomicBool,
+    topic: &str,
+    kind: &str,
+    where_: &str,
+) {
+    if !momentary_deliverable(broker_online) {
+        eprintln!("btmqttd: dropped {kind} call event (broker offline; not queued for late replay)");
+        return;
+    }
     let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
     if let Err(e) = client.try_publish(topic, QoS::AtMostOnce, false, payload.into_bytes()) {
         eprintln!("btmqttd: publish {kind} call event failed: {e}");
     }
+}
+
+/// Whether a momentary (non-retained, non-replayed) event may be published right now: only while
+/// the broker is currently connected. If offline it is DROPPED, not enqueued, because rumqttc would
+/// otherwise flush the queued publish late on reconnect and fire a time-sensitive automation after
+/// the fact — a lost press is preferable to a delayed false one (issue #71).
+fn momentary_deliverable(broker_online: &AtomicBool) -> bool {
+    broker_online.load(Ordering::Relaxed)
 }
 
 /// Publish the call STATE to TOPIC_CALL_STATE, RETAINED so HA shows the current state
@@ -722,5 +757,17 @@ mod tests {
         // ...and idle (0) disarms it (so the loop stops polling once the call ends).
         update_call_watch(&mut watch, 0);
         assert!(watch.is_none());
+    }
+
+    #[test]
+    fn momentary_events_only_deliver_while_the_broker_is_connected() {
+        // A momentary call event is DROPPED while the broker is offline (issue #71) — never queued
+        // for a late replay that would fire an automation after the fact — and delivered once online.
+        let online = AtomicBool::new(false);
+        assert!(!momentary_deliverable(&online)); // offline -> drop
+        online.store(true, Ordering::Relaxed);
+        assert!(momentary_deliverable(&online)); // connected -> deliver
+        online.store(false, Ordering::Relaxed);
+        assert!(!momentary_deliverable(&online)); // dropped again after a disconnect
     }
 }

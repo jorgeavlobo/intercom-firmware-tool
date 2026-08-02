@@ -228,8 +228,17 @@ async fn run() -> Result<(), String> {
     // Keep their handles so shutdown can ABORT every MQTT-producing task before it
     // publishes the final retained `offline` — otherwise a task still in flight could
     // enqueue a publish AFTER `offline` and leave stale state retained on the broker.
-    let sender_task =
-        tokio::spawn(sender::run(cfg.clone(), client.clone(), volume.clone(), light.clone()));
+    // Broker connectivity, driven by THIS event loop (true on ConnAck, false on drop below) and
+    // read by the sender: a momentary call event pressed while the broker is down is DROPPED rather
+    // than enqueued, so rumqttc can't flush it late on reconnect and fire a stale automation (#71).
+    let broker_online = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sender_task = tokio::spawn(sender::run(
+        cfg.clone(),
+        client.clone(),
+        volume.clone(),
+        light.clone(),
+        broker_online.clone(),
+    ));
     let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone()));
     // Birth is split across two events: SUBSCRIBE to the command topic on ConnAck,
     // then ANNOUNCE (online + start_date + HA) only after the broker confirms the
@@ -408,6 +417,8 @@ async fn run() -> Result<(), String> {
             ev = eventloop.poll() => {
                 match ev {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
+                        // Broker is up: momentary call events may publish again (issue #71).
+                        broker_online.store(true, std::sync::atomic::Ordering::Relaxed);
                         // Connected: clear the rediscovery failure streak and forget
                         // proposed addresses, so a later outage starts fresh and a broker
                         // that returns to a former address can be found again.
@@ -568,6 +579,9 @@ async fn run() -> Result<(), String> {
                     }
                     Ok(_) => {}
                     Err(e) => {
+                        // Broker is down: momentary call events are now DROPPED (not queued for a
+                        // late flush) until the next ConnAck re-sets this (issue #71).
+                        broker_online.store(false, std::sync::atomic::Ordering::Relaxed);
                         // Connection dropped/unreachable. ABORT the in-flight birth tasks
                         // NOW — not at the next ConnAck. Otherwise a subscribe/announce
                         // task still running through the outage could enqueue a stale
