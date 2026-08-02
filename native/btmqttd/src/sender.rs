@@ -5,6 +5,8 @@
 //! Native replacement for StartMqttSend's socket back-end (nc + awk framer). The
 //! tcpdump/filter.py fallback is retired — this connects directly and retries.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +38,12 @@ pub async fn run(
     client: AsyncClient,
     volume: Arc<VolumeCtl>,
     light: Option<Arc<LightCtl>>,
+    // Set true on ConnAck / false on connection drop by main's event loop. Momentary call events
+    // are DROPPED (not enqueued) while this is false, so a press during a broker outage isn't
+    // queued by rumqttc and flushed late as a stale ring (issue #71). This gate covers the window
+    // AFTER a drop is detected; presses queued in the detection window BEFORE that are purged from
+    // rumqttc's `pending` by main's disconnect handler. Only reads it; never writes.
+    broker_online: Arc<AtomicBool>,
 ) {
     // Classifies each call as entrance-panel vs floor and keeps the two independent. Owned here so
     // its lifetime spans reconnects, but RESET to Idle at the start of each session (see
@@ -44,10 +52,14 @@ pub async fn run(
     // (clearing any stale retained value) and the post-reconnect live frames reclassify, which is
     // what keeps a floor call off the entrance sensor across reconnects (Codex).
     let classifier = std::sync::Mutex::new(dimension::CallClassifier::new());
+    // Coalesces a burst of repeated momentary rings into one event (issue #71). Owned here so it
+    // spans reconnects; its entries simply age out (a reconnect is far longer than MOMENTARY_DEBOUNCE),
+    // so no explicit reset is needed. Threaded through session alongside the classifier.
+    let debounce = std::sync::Mutex::new(MomentaryDebounce::default());
     let mut backoff = 0u64;
     loop {
         let start = tokio::time::Instant::now();
-        if let Err(e) = session(&cfg, &client, &volume, light.as_ref(), &classifier).await {
+        if let Err(e) = session(&cfg, &client, &volume, light.as_ref(), &classifier, &debounce, &broker_online).await {
             eprintln!(
                 "btmqttd: monitor {}:{} unavailable: {e}",
                 cfg.own_host, cfg.own_port_mon
@@ -98,6 +110,14 @@ const RETAINED_RESEED_INTERVAL: Duration = Duration::from_secs(60);
 /// burst can't loop forever — at the cap the drained transitions have kept the state current.
 const MAX_RECONCILE_REQUERIES: usize = 5;
 
+/// Coalescing window for a BURST of momentary rings on the SAME call topic (issue #71). An OWN
+/// gateway can repeat a call signature several times for ONE physical press, and the non-blocking
+/// publish path would otherwise fire a separate HA `pressed` — and any unlock/notify automation —
+/// per repeat. Within this window of the last PUBLISHED event on a topic, further rings are
+/// coalesced into it. Kept short so two genuinely distinct presses spaced beyond it still produce
+/// distinct events; the entrance-panel and floor topics debounce INDEPENDENTLY (never mixed).
+const MOMENTARY_DEBOUNCE: Duration = Duration::from_secs(2);
+
 /// The call-state reconcile marker: `(last-known state, poll instant)`, or `None` when
 /// idle (disarmed). The inner `Option<u8>` is `Some(code)` for a known non-idle state and
 /// `None` for "unknown" — armed after a reconnect whose authoritative read failed, so the
@@ -129,6 +149,12 @@ async fn session(
     // BEFORE the classifying WHO=8 frame) until resolved, then either flushes it (entrance) or
     // suppresses it (floor).
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
+    // Coalesces a burst of repeated momentary rings into one event (issue #71); threaded alongside
+    // the classifier through every publish_frame path. Owned by run(), shared across sessions.
+    debounce: &std::sync::Mutex<MomentaryDebounce>,
+    // Broker connectivity, so momentary call events can be dropped rather than enqueued while the
+    // broker is down (issue #71). Read-only here; owned/updated by main's event loop.
+    broker_online: &AtomicBool,
 ) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
@@ -201,7 +227,7 @@ async fn session(
         framer.push(&pre[pos + own::ACK.len()..], &mut frames);
         for frame in frames.drain(..) {
             if let FrameOutcome::CallStatePublished(code) =
-                publish_frame(cfg, client, volume, light, classifier, &frame).await
+                publish_frame(cfg, client, volume, light, classifier, debounce, broker_online, &frame).await
             {
                 update_call_watch(&mut call_watch, code);
             }
@@ -220,7 +246,7 @@ async fn session(
     // clobber a real ringing/in_call; keep what the frames left and, if still disarmed, arm an
     // "unknown" marker so a later poll re-queries.
     match read_call_state_draining(
-        cfg, client, volume, light, classifier, &mut sock, &mut framer, &mut buf, &mut frames,
+        cfg, client, volume, light, classifier, debounce, broker_online, &mut sock, &mut framer, &mut buf, &mut frames,
         &mut call_watch,
     )
     .await?
@@ -281,7 +307,7 @@ async fn session(
             framer.push(&buf[..n], &mut frames);
             for frame in frames.drain(..) {
                 if let FrameOutcome::CallStatePublished(code) =
-                    publish_frame(cfg, client, volume, light, classifier, &frame).await
+                    publish_frame(cfg, client, volume, light, classifier, debounce, broker_online, &frame).await
                 {
                     update_call_watch(&mut call_watch, code);
                 }
@@ -300,7 +326,7 @@ async fn session(
                 // reconcile): a slow/timed-out poll must not block the read past a light echo's
                 // 3 s guard (Codex).
                 match read_call_state_draining(
-                    cfg, client, volume, light, classifier, &mut sock, &mut framer, &mut buf,
+                    cfg, client, volume, light, classifier, debounce, broker_online, &mut sock, &mut framer, &mut buf,
                     &mut frames, &mut call_watch,
                 )
                 .await?
@@ -365,7 +391,7 @@ async fn session(
             // a stale idle frame disarmed the poll, this unconditional re-query re-checks dim-35
             // within one interval and re-arms/corrects, so the call-state sensor can't remain stuck.
             match read_call_state_draining(
-                cfg, client, volume, light, classifier, &mut sock, &mut framer, &mut buf,
+                cfg, client, volume, light, classifier, debounce, broker_online, &mut sock, &mut framer, &mut buf,
                 &mut frames, &mut call_watch,
             )
             .await?
@@ -443,6 +469,8 @@ async fn read_call_state_draining(
     volume: &Arc<VolumeCtl>,
     light: Option<&Arc<LightCtl>>,
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
+    debounce: &std::sync::Mutex<MomentaryDebounce>,
+    broker_online: &AtomicBool,
     sock: &mut TcpStream,
     framer: &mut Framer,
     buf: &mut [u8],
@@ -476,7 +504,7 @@ async fn read_call_state_draining(
                             // A live call-state frame (published OR suppressed) or a classifying
                             // signature marks this snapshot ambiguous → re-query below; only a
                             // PUBLISHED code updates the watch, applied IN ORDER (Codex).
-                            match publish_frame(cfg, client, volume, light, classifier, &frame).await
+                            match publish_frame(cfg, client, volume, light, classifier, debounce, broker_online, &frame).await
                             {
                                 FrameOutcome::CallStatePublished(code) => {
                                     update_call_watch(call_watch, code);
@@ -502,7 +530,7 @@ async fn read_call_state_draining(
                     frames.clear();
                     framer.push(&buf[..n], frames);
                     for frame in frames.drain(..) {
-                        match publish_frame(cfg, client, volume, light, classifier, &frame).await {
+                        match publish_frame(cfg, client, volume, light, classifier, debounce, broker_online, &frame).await {
                             FrameOutcome::CallStatePublished(code) => {
                                 update_call_watch(call_watch, code);
                                 saw_transition = true;
@@ -565,12 +593,15 @@ fn lock_classifier(
 /// or the raw frame. QoS 0, not retained, as the shell's `mqtt_pub -l` did. Also feeds the frame to
 /// the light/volume controllers and the call classifier. Returns a [`FrameOutcome`] describing what
 /// the frame was for call-state purposes (see its doc).
+#[allow(clippy::too_many_arguments)]
 async fn publish_frame(
     cfg: &Arc<Config>,
     client: &AsyncClient,
     volume: &Arc<VolumeCtl>,
     light: Option<&Arc<LightCtl>>,
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
+    debounce: &std::sync::Mutex<MomentaryDebounce>,
+    broker_online: &AtomicBool,
     frame: &str,
 ) -> FrameOutcome {
     // Stair-light SWITCH state tracking: a physical panel press of the light button appears
@@ -605,7 +636,7 @@ async fn publish_frame(
             // No held ring, but we still (re)classified to Entrance → snapshot ambiguous.
             outcome = FrameOutcome::ClassifierChanged;
         }
-        publish_call_event(client, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
+        publish_call_event(client, debounce, broker_online, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
     } else if let Some(where_) = dimension::parse_floor_call(frame) {
         // Floor CALL (dumb push-button at the apartment's own front door): a COMPLETELY
         // independent event from the entrance panel. Fire its own momentary event and arm the
@@ -619,7 +650,7 @@ async fn publish_frame(
         // entrance sensor exclusively entrance-driven is the strongest form of "never mix the two".
         lock_classifier(classifier).saw_floor_call();
         outcome = FrameOutcome::ClassifierChanged; // reclassified to Floor → snapshot ambiguous
-        publish_call_event(client, &cfg.topic_floor_call, "floor", where_).await;
+        publish_call_event(client, debounce, broker_online, &cfg.topic_floor_call, "floor", where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
         // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the
         // classifier: an entrance-panel call publishes it (updating the retained sensor and reporting
@@ -665,18 +696,126 @@ async fn publish_frame(
 /// separate HA `event` entities but share identical delivery semantics — one helper keeps the
 /// payload shape, QoS, retain flag and non-blocking behaviour defined in exactly one place.
 ///
+/// DROPPED while the broker is offline (issue #71): rumqttc queues a `try_publish` made during an
+/// outage and FLUSHES it on reconnect, so a press that happened minutes ago would fire a
+/// time-sensitive automation (unlock/notify) after nobody is at the door. A momentary event has no
+/// meaning once stale, so we skip it entirely when `broker_online` is false rather than enqueue it.
+/// (The retained call-state sensor is the opposite — it SHOULD re-flush on reconnect — so this gate
+/// is only for the momentary events.)
+///
+/// COALESCED across a burst (issue #71): an OWN gateway can repeat a call signature several times
+/// for ONE physical press, and this non-blocking path would otherwise fire a separate HA `pressed`
+/// — and any unlock/notify automation — per repeat. `debounce` suppresses a repeat on the same
+/// topic within [`MOMENTARY_DEBOUNCE`] of the last PUBLISHED event, so a burst collapses to one.
+/// The offline drop is checked FIRST, so an event skipped while offline never arms the debounce —
+/// the next online ring is the first delivered event and publishes normally.
+///
 /// NOT retained: an event fires once, and a retained event would spuriously re-fire on every HA
 /// reconnect. QoS 0 (like the non-idempotent lock/step actions): a ring is NON-idempotent, and
 /// QoS 1 may legitimately REDELIVER a publish (DUP on a lost PUBACK), which would fire the HA
 /// event — and any automation — twice for one ring. Non-blocking (see publish_frame): never
 /// stall the monitor reader on a full request queue; a press lost during a brief broker outage
 /// is preferable to a double actuation, and it is not retained or replayed. The payload carries
-/// the HA `event_type` plus the WHERE (informational).
-async fn publish_call_event(client: &AsyncClient, topic: &str, kind: &str, where_: &str) {
-    let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
-    if let Err(e) = client.try_publish(topic, QoS::AtMostOnce, false, payload.into_bytes()) {
-        eprintln!("btmqttd: publish {kind} call event failed: {e}");
+/// the HA `event_type`, the WHERE (informational), and a `ts` stamp (see [`momentary_payload`]).
+async fn publish_call_event(
+    client: &AsyncClient,
+    debounce: &std::sync::Mutex<MomentaryDebounce>,
+    broker_online: &AtomicBool,
+    topic: &str,
+    kind: &str,
+    where_: &str,
+) {
+    if !momentary_deliverable(broker_online) {
+        eprintln!(
+            "btmqttd: dropped {kind} call event @ WHERE={where_} on {topic} \
+             (broker offline; not queued for late replay)"
+        );
+        return;
     }
+    // Coalesce a burst of repeats into one event. First a READ-ONLY check: is this a repeat within
+    // the window of the last PUBLISHED event? (Guard scope minimal; there is no await here anyway.)
+    let now = std::time::Instant::now();
+    let coalesce = {
+        let d = debounce.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        d.within_window(topic, now)
+    };
+    if coalesce {
+        eprintln!(
+            "btmqttd: coalesced {kind} call event @ WHERE={where_} on {topic} \
+             (burst within {MOMENTARY_DEBOUNCE:?} of the last)"
+        );
+        return;
+    }
+    let payload = momentary_payload(where_);
+    match client.try_publish(topic, QoS::AtMostOnce, false, payload.into_bytes()) {
+        // Arm the debounce window ONLY on a delivered event (CodeRabbit): if the request channel is
+        // full, try_publish fails and NOTHING was published, so we must NOT record — otherwise the
+        // window would suppress a later retry and silently lose a physical press. The window starts
+        // from the PUBLISHED event, exactly as documented.
+        Ok(()) => debounce
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(topic, now),
+        Err(e) => eprintln!("btmqttd: publish {kind} call event failed: {e}"),
+    }
+}
+
+/// Per-topic debounce that coalesces a BURST of repeated momentary rings into a single event
+/// (issue #71). Remembers when each topic last PUBLISHED a `pressed`; entrance-panel and floor are
+/// keyed separately so one never debounces the other (they are wholly independent — "never mix the
+/// two"). Uses a monotonic [`std::time::Instant`] (no wall-clock, no tokio-runtime dependency).
+#[derive(Default)]
+struct MomentaryDebounce {
+    last_emit: HashMap<String, std::time::Instant>,
+}
+
+impl MomentaryDebounce {
+    /// READ-ONLY: is a momentary event on `topic` at `now` within the coalescing window of the last
+    /// PUBLISHED event — i.e. a burst repeat to SUPPRESS? Split from [`record`](Self::record) so the
+    /// window is armed only after a publish actually succeeds (a press dropped by a full request
+    /// channel must not suppress a later retry).
+    fn within_window(&self, topic: &str, now: std::time::Instant) -> bool {
+        matches!(
+            self.last_emit.get(topic),
+            Some(&last) if now.saturating_duration_since(last) < MOMENTARY_DEBOUNCE
+        )
+    }
+
+    /// Record that `topic` PUBLISHED an event at `now`, arming its coalescing window. Call ONLY
+    /// after `try_publish` returns `Ok(())`. A suppressed repeat does NOT call this, so the window
+    /// runs from the published event: a burst yields at most one event per window, and a sustained
+    /// ring re-emits once each window elapses.
+    fn record(&mut self, topic: &str, now: std::time::Instant) {
+        self.last_emit.insert(topic.to_string(), now);
+    }
+}
+
+/// Build the momentary "pressed" event payload: the HA `event_type`, the WHERE (informational),
+/// and `ts` — a UTC ISO-8601 stamp (same format as the bus-frame `ts`, see [`own::utc_now_iso`]).
+///
+/// The `ts` is the END-TO-END freshness guard, the transport-independent complement to the
+/// producer-side drop/purge (issue #71). The drop (offline gate) and purge (disconnect handler)
+/// stop a stale event at the source, but they lean on rumqttc internals; `ts` lets the CONSUMER
+/// enforce its own TTL regardless — an HA automation gated on `-1 <= now - ts < N s` (bounded both
+/// sides, -1 s tolerating whole-second `ts` + tiny clock skew; future-dated events can't read fresh)
+/// ignores any late "pressed", so a time-sensitive automation never fires after the fact even if a stale
+/// event slipped past every transport layer. A momentary event has no meaning once stale, and
+/// freshness is only truly knowable where the meaning lives (the consumer).
+fn momentary_payload(where_: &str) -> String {
+    serde_json::json!({
+        "event_type": "pressed",
+        "where": where_,
+        "ts": own::utc_now_iso(),
+    })
+    .to_string()
+}
+
+/// Whether a momentary (non-retained, non-replayed) event may be published right now: only while
+/// the broker is currently connected. If offline it is DROPPED, not enqueued, because rumqttc would
+/// otherwise flush the queued publish late on reconnect and fire a time-sensitive automation after
+/// the fact — a lost press is preferable to a delayed false one (issue #71).
+fn momentary_deliverable(broker_online: &AtomicBool) -> bool {
+    broker_online.load(Ordering::Relaxed)
 }
 
 /// Publish the call STATE to TOPIC_CALL_STATE, RETAINED so HA shows the current state
@@ -722,5 +861,81 @@ mod tests {
         // ...and idle (0) disarms it (so the loop stops polling once the call ends).
         update_call_watch(&mut watch, 0);
         assert!(watch.is_none());
+    }
+
+    #[test]
+    fn momentary_events_only_deliver_while_the_broker_is_connected() {
+        // A momentary call event is DROPPED while the broker is offline (issue #71) — never queued
+        // for a late replay that would fire an automation after the fact — and delivered once online.
+        let online = AtomicBool::new(false);
+        assert!(!momentary_deliverable(&online)); // offline -> drop
+        online.store(true, Ordering::Relaxed);
+        assert!(momentary_deliverable(&online)); // connected -> deliver
+        online.store(false, Ordering::Relaxed);
+        assert!(!momentary_deliverable(&online)); // dropped again after a disconnect
+    }
+
+    #[test]
+    fn debounce_coalesces_a_burst_but_keeps_distinct_presses() {
+        // A burst of repeats for ONE press (an OWN gateway re-emitting the signature) collapses to a
+        // single event; a genuinely distinct press beyond the window publishes again (issue #71).
+        let mut d = MomentaryDebounce::default();
+        let base = std::time::Instant::now();
+        let topic = "Bticino/entrance_panel_call";
+
+        assert!(!d.within_window(topic, base)); // first ring → publish...
+        d.record(topic, base); // ...and arm the window on the delivered event
+        assert!(d.within_window(topic, base + Duration::from_millis(200))); // repeat → coalesced
+        assert!(d.within_window(topic, base + Duration::from_millis(1_999))); // still within 2 s → coalesced
+        // Window runs from the PUBLISHED event (not extended by suppressed repeats), so once it
+        // elapses the next ring publishes again.
+        assert!(!d.within_window(topic, base + Duration::from_millis(2_001))); // distinct press → publish
+        d.record(topic, base + Duration::from_millis(2_001));
+        assert!(d.within_window(topic, base + Duration::from_millis(2_500))); // its own repeat → coalesced
+    }
+
+    #[test]
+    fn debounce_tracks_entrance_and_floor_independently() {
+        // The two momentary topics must never debounce each other — a floor ring must publish even
+        // if an entrance ring fired in the same instant (they are wholly independent events).
+        let mut d = MomentaryDebounce::default();
+        let base = std::time::Instant::now();
+        d.record("Bticino/entrance_panel_call", base);
+        // Floor has no recorded event → NOT within window (it publishes), despite the entrance emit.
+        assert!(!d.within_window("Bticino/floor_call", base));
+        d.record("Bticino/floor_call", base);
+        // Each still coalesces its own repeats.
+        assert!(d.within_window("Bticino/entrance_panel_call", base + Duration::from_millis(100)));
+        assert!(d.within_window("Bticino/floor_call", base + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn debounce_window_arms_only_on_a_recorded_publish() {
+        // A press dropped by a full request channel does NOT record, so the window never arms and a
+        // later retry is still admitted — the window starts from a DELIVERED event (CodeRabbit).
+        let mut d = MomentaryDebounce::default();
+        let base = std::time::Instant::now();
+        let topic = "Bticino/floor_call";
+
+        // within_window says publish (false); simulate try_publish FAILING → no record() call.
+        assert!(!d.within_window(topic, base));
+        // A repeat 200 ms later must STILL be admitted — nothing was ever published/recorded.
+        assert!(!d.within_window(topic, base + Duration::from_millis(200)));
+        // Now a successful publish records it; only then do subsequent repeats coalesce.
+        d.record(topic, base + Duration::from_millis(200));
+        assert!(d.within_window(topic, base + Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn momentary_payload_carries_event_type_where_and_a_utc_ts() {
+        // The published "pressed" payload must carry the HA `event_type`, the WHERE, and a `ts`
+        // so a consumer can enforce its own freshness TTL (issue #71, end-to-end guard). Parse it
+        // back rather than string-match, so the assertion survives key reordering.
+        let v: serde_json::Value =
+            serde_json::from_str(&momentary_payload("1#1#4#21")).unwrap();
+        assert_eq!(v["event_type"], "pressed");
+        assert_eq!(v["where"], "1#1#4#21");
+        // ts is a UTC ISO-8601 stamp (Z suffix), matching the bus-frame `ts` format.
+        assert!(v["ts"].as_str().unwrap().ends_with('Z'));
     }
 }
