@@ -616,19 +616,14 @@ async fn publish_frame(
         // independent event from the entrance panel. Fire its own momentary event and arm the
         // classifier so the concurrent dim-35 ringing (which the gateway also raises for a floor
         // call) is SUPPRESSED — a floor call must never surface on the entrance-panel call_state.
-        // saw_floor_call also returns Publish(0) when it must CLEAR a stale non-idle retained value:
-        // if a prior entrance call's terminal 0 was missed, the sensor still reads ringing/in_call,
-        // and classifying this floor call would otherwise leave that leak visible for the whole call
-        // (the live-path twin of reconcile_snapshot's stale clear). Resolve + drop the guard first.
-        let action = lock_classifier(classifier).saw_floor_call();
-        outcome = match action {
-            dimension::CallStateAction::Publish(c) => {
-                publish_call_state(cfg, client, c).await;
-                FrameOutcome::CallStatePublished(c)
-            }
-            // reclassified to Floor with nothing stale to clear → snapshot still ambiguous
-            dimension::CallStateAction::Suppress => FrameOutcome::ClassifierChanged,
-        };
+        // DELIBERATELY a no-op on the call_state topic: a floor event NEVER writes to the
+        // entrance-panel sensor, not even idle. Clearing here would clobber a genuinely-active
+        // concurrent entrance call. A stale entrance ring left by a MISSED terminal `0` is not our
+        // job to clear on this path — it self-heals at the floor call's own terminal `0` (code 0
+        // resets from any state) and is authoritatively reconciled by the ≤60 s reseed. Keeping the
+        // entrance sensor exclusively entrance-driven is the strongest form of "never mix the two".
+        lock_classifier(classifier).saw_floor_call();
+        outcome = FrameOutcome::ClassifierChanged; // reclassified to Floor → snapshot ambiguous
         publish_floor_call(cfg, client, where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
         // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the

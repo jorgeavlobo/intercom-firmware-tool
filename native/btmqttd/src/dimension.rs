@@ -268,23 +268,10 @@ impl CallClassifier {
         held
     }
 
-    /// The floor-call signature (`*8*1#13#2*…`) was seen. Classify as floor; any held ring code is
-    /// DISCARDED (never published). Returns the action for the entrance-panel sensor: `Publish(0)` to
-    /// CLEAR any stale non-idle retained value, so a floor call can never leave the sensor showing a
-    /// ring. That stale value arises when a previous entrance call's terminal `0` was missed (the
-    /// classifier lingered in `Entrance`, or re-held the new leading ring as `Pending`, while the
-    /// retained sensor still reads `ringing`/`in_call`) — this is the LIVE-path twin of the stale
-    /// clear [`Self::reconcile_snapshot`] performs after a reconnect. Idempotent when the sensor is
-    /// already idle. Returns `Suppress` only when already `Floor` (mid floor-call: nothing new to
-    /// clear, and we avoid a redundant idle republish) (Codex).
-    pub fn saw_floor_call(&mut self) -> CallStateAction {
-        let already_floor = matches!(self.state, CallKind::Floor);
+    /// The floor-call signature (`*8*1#13#2*…`) was seen. Classify as floor; any held ring
+    /// code is DISCARDED (never published), so the entrance-panel sensor stays idle.
+    pub fn saw_floor_call(&mut self) {
         self.state = CallKind::Floor;
-        if already_floor {
-            CallStateAction::Suppress
-        } else {
-            CallStateAction::Publish(0)
-        }
     }
 
     /// Called at the start of each monitor session. A monitor outage loses EVERY frame in the gap,
@@ -756,30 +743,13 @@ mod tests {
         let mut c = CallClassifier::new();
         c.saw_entrance_panel_call(); // classified entrance; its terminal 0 is then missed
         assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // NEW leading ring re-held
-        // The floor signature also CLEARS the stale retained ring (the entrance call's ringing whose
-        // terminal 0 was missed) by publishing idle — the floor call never leaves it visible.
-        assert_eq!(c.saw_floor_call(), CallStateAction::Publish(0));
+        c.saw_floor_call();
         assert_eq!(c.on_call_state(2), CallStateAction::Suppress);
         assert_eq!(c.on_call_state(0), CallStateAction::Publish(0));
         // Contrast: a `2` from Entrance is a same-call continuation and still publishes.
         let mut e = CallClassifier::new();
         e.saw_entrance_panel_call();
         assert_eq!(e.on_call_state(2), CallStateAction::Publish(2));
-    }
-
-    #[test]
-    fn saw_floor_call_clears_stale_entrance_state_but_not_mid_floor() {
-        // A floor signature must leave the entrance-panel sensor idle. From a stale Entrance (its
-        // terminal 0 missed, sensor still shows a ring) it publishes idle to CLEAR the leak...
-        let mut c = CallClassifier::new();
-        c.saw_entrance_panel_call(); // Entrance, retained sensor non-idle
-        assert_eq!(c.saw_floor_call(), CallStateAction::Publish(0));
-        // ...from a fresh Idle it also publishes idle (harmless no-op; the sensor is already idle)...
-        let mut i = CallClassifier::new();
-        assert_eq!(i.saw_floor_call(), CallStateAction::Publish(0));
-        // ...but a second signature mid floor-call (already Floor) suppresses — nothing new to clear,
-        // and no redundant idle republish.
-        assert_eq!(i.saw_floor_call(), CallStateAction::Suppress);
     }
 
     #[test]
@@ -829,9 +799,7 @@ mod tests {
                 4 => {
                     c.on_call_state(4); // Entrance
                 }
-                _ => {
-                    c.saw_floor_call(); // Floor
-                }
+                _ => c.saw_floor_call(), // Floor
             }
             c.on_reconnect();
             // Reset to Idle → an ambiguous authoritative ring publishes IDLE (no leak from stale state,
