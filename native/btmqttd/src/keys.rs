@@ -160,7 +160,19 @@ mod tests {
         assert_eq!(v["key"], "KEY_1");
         assert_eq!(v["code"], 2);
         assert_eq!(v["value"], "pressed");
-        // ts is a UTC ISO-8601 stamp (Z suffix), matching the bus-frame / call-event `ts` format.
-        assert!(v["ts"].as_str().unwrap().ends_with('Z'));
+        // Validate the COMPLETE UTC ISO-8601 shape `YYYY-MM-DDTHH:MM:SSZ`, not just a trailing Z
+        // (which would accept "invalidZ") — this test guards the HA freshness contract (CodeRabbit).
+        let ts = v["ts"].as_str().unwrap();
+        assert_eq!(ts.len(), 20, "ts must be YYYY-MM-DDTHH:MM:SSZ, got {ts:?}");
+        for (i, b) in ts.bytes().enumerate() {
+            let ok = match i {
+                4 | 7 => b == b'-',
+                10 => b == b'T',
+                13 | 16 => b == b':',
+                19 => b == b'Z',
+                _ => b.is_ascii_digit(),
+            };
+            assert!(ok, "ts malformed at index {i}: {ts:?}");
+        }
     }
 }
