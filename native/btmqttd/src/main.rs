@@ -828,13 +828,23 @@ fn is_concrete_topic(topic: &str) -> bool {
 
 /// True if `req` is a momentary call-event publish (entrance-panel or floor). These are the ONLY
 /// requests purged from the event loop's `pending` queue on a disconnect (issue #71): a queued
-/// press must never be flushed late on reconnect. Matched by destination topic so nothing else —
-/// retained state, the dump stream, or protocol packets — is ever discarded.
+/// press must never be flushed late on reconnect. Nothing else — retained state, the dump stream,
+/// or protocol packets — is ever discarded.
+///
+/// Matched by destination topic AND publish shape: the momentary events are always QoS 0,
+/// non-retained (see `publish_call_event`), whereas the call-state sensor is QoS 1, retained. The
+/// C# installer forbids the three topics from aliasing (`Mqtt_PublishTopicsMustDiffer`), but the
+/// daemon must not depend on that — if a hand-edited `.conf` pointed `TOPIC_CALL_STATE` at an event
+/// topic, a topic-only predicate would purge the retained state publish too. Requiring
+/// `AtMostOnce && !retain` makes this incapable of ever dropping a retained publish, and never
+/// loses a real momentary event (they are always exactly QoS 0 / non-retained) — CodeRabbit.
 fn is_momentary_call_publish(req: &Request, cfg: &Config) -> bool {
     matches!(
         req,
         Request::Publish(p)
-            if p.topic == cfg.topic_entrance_panel_call || p.topic == cfg.topic_floor_call
+            if p.qos == QoS::AtMostOnce
+                && !p.retain
+                && (p.topic == cfg.topic_entrance_panel_call || p.topic == cfg.topic_floor_call)
     )
 }
 
@@ -897,6 +907,7 @@ mod tests {
         let cfg = Config::from_map(HashMap::new()); // default topics
         let pub_to = |t: &str| Request::Publish(Publish::new(t, QoS::AtMostOnce, "x"));
 
+        // The momentary events, exactly as publish_call_event emits them: QoS 0, non-retained.
         assert!(is_momentary_call_publish(&pub_to(&cfg.topic_entrance_panel_call), &cfg));
         assert!(is_momentary_call_publish(&pub_to(&cfg.topic_floor_call), &cfg));
         // Retained call-state sensor and other topics are KEPT (must survive to re-flush).
@@ -904,5 +915,24 @@ mod tests {
         assert!(!is_momentary_call_publish(&pub_to("Bticino/dump"), &cfg));
         // Non-publish protocol packets are never momentary events.
         assert!(!is_momentary_call_publish(&Request::PingReq(rumqttc::PingReq), &cfg));
+    }
+
+    #[test]
+    fn purge_predicate_keeps_retained_and_qos1_publishes_even_on_an_event_topic() {
+        // Shape guard (CodeRabbit): the predicate also requires QoS 0 + non-retained, so even if a
+        // hand-edited .conf ALIASED the call-state topic onto an event topic, the retained QoS 1
+        // state publish is never purged. Build the publishes ON an event topic and vary the shape.
+        let cfg = Config::from_map(HashMap::new());
+        let mut retained = Publish::new(&cfg.topic_entrance_panel_call, QoS::AtMostOnce, "x");
+        retained.retain = true;
+        // Retained (as the call-state publish is) → KEPT, despite the event topic.
+        assert!(!is_momentary_call_publish(&Request::Publish(retained), &cfg));
+        // QoS 1 (as the call-state publish is) → KEPT, despite the event topic.
+        let qos1 = Publish::new(&cfg.topic_floor_call, QoS::AtLeastOnce, "x");
+        assert!(!is_momentary_call_publish(&Request::Publish(qos1), &cfg));
+        // A retained QoS 1 publish (the exact call-state shape) aliased onto an event topic → KEPT.
+        let mut state_shape = Publish::new(&cfg.topic_entrance_panel_call, QoS::AtLeastOnce, "x");
+        state_shape.retain = true;
+        assert!(!is_momentary_call_publish(&Request::Publish(state_shape), &cfg));
     }
 }
