@@ -1203,7 +1203,11 @@ namespace IntercomFirmwareTool.Core
             // but the `ts` (UTC ISO-8601) is the END-TO-END backstop: gate any time-sensitive
             // automation on it so a stale event that somehow arrived late is ignored, e.g.
             //   trigger: { platform: mqtt, topic: <entrance_panel_call topic> }
-            //   condition: "{{ now().timestamp() - as_timestamp(trigger.payload_json.ts) < 5 }}"
+            //   condition: "{{ 0 <= now().timestamp() - as_timestamp(trigger.payload_json.ts) < 5 }}"
+            // Bound the age on BOTH sides: a one-sided `age < 5` treats a FUTURE-dated payload as
+            // fresh (negative age), so an event delayed while the intercom clock ran ahead of HA
+            // (e.g. a bad RTC restore before NTP sync) would slip through for the whole offset. The
+            // `0 <=` lower bound rejects that; it assumes the two clocks are roughly in sync (NTP).
             // Freshness is only truly knowable at the consumer, so enforce the TTL there.
             entities.Add(new HaEntity(
                 "entrance_panel_call.json",
