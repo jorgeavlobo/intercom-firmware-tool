@@ -123,10 +123,11 @@ async fn session(
     client: &AsyncClient,
     volume: &Arc<VolumeCtl>,
     light: Option<&Arc<LightCtl>>,
-    // Owned by run() and shared across sessions, so a call in progress over a monitor reconnect
-    // keeps its entrance/floor classification (see run()). It holds the leading `*#8**35*1` ring
-    // (which arrives BEFORE the classifying WHO=8 frame) until resolved, then either flushes it
-    // (entrance) or suppresses it (floor).
+    // Owned by run() and shared across sessions, but RESET to Idle at the start of each session (see
+    // `on_reconnect` below): a monitor outage loses every frame in the gap, so no classification
+    // survives a reconnect. Within a session it holds the leading `*#8**35*1` ring (which arrives
+    // BEFORE the classifying WHO=8 frame) until resolved, then either flushes it (entrance) or
+    // suppresses it (floor).
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
 ) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
@@ -139,10 +140,10 @@ async fn session(
 
     // Reset the classifier for this session: a monitor outage loses every frame in the gap, so any
     // classification carried from the previous session is untrustworthy (the call may have ended and
-    // another begun). Resetting to Idle makes the authoritative reconcile suppress ambiguous rings
-    // and the post-reconnect live frames reclassify — no stale Floor/Entrance/Pending can leak a
-    // call onto the wrong sensor. No-op on the first connect. (Sync call — guard released before the
-    // awaits below.)
+    // another begun). Resetting to Idle makes the authoritative reconcile publish idle for ambiguous
+    // rings (clearing any stale retained value) and the post-reconnect live frames reclassify — no
+    // stale Floor/Entrance/Pending can leak a call onto the wrong sensor. No-op on the first connect.
+    // (Sync call — guard released before the awaits below.)
     lock_classifier(classifier).on_reconnect();
 
     // Require the monitor ACK ("*#*1##") before streaming. The gateway may accept the
