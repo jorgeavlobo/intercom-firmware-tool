@@ -717,9 +717,9 @@ async fn publish_call_event(
 /// The `ts` is the END-TO-END freshness guard, the transport-independent complement to the
 /// producer-side drop/purge (issue #71). The drop (offline gate) and purge (disconnect handler)
 /// stop a stale event at the source, but they lean on rumqttc internals; `ts` lets the CONSUMER
-/// enforce its own TTL regardless — an HA automation gated on `0 <= now - ts < N s` (bounded on
-/// BOTH sides, so a future-dated `ts` from a clock skew can't read as fresh) ignores any "pressed"
-/// that arrived late, so a time-sensitive automation never fires after the fact even if a stale
+/// enforce its own TTL regardless — an HA automation gated on `-1 <= now - ts < N s` (bounded both
+/// sides, -1 s tolerating whole-second `ts` + tiny clock skew; future-dated events can't read fresh)
+/// ignores any late "pressed", so a time-sensitive automation never fires after the fact even if a stale
 /// event slipped past every transport layer. A momentary event has no meaning once stale, and
 /// freshness is only truly knowable where the meaning lives (the consumer).
 fn momentary_payload(where_: &str) -> String {
