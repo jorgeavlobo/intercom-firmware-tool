@@ -697,7 +697,10 @@ async fn publish_call_event(
     where_: &str,
 ) {
     if !momentary_deliverable(broker_online) {
-        eprintln!("btmqttd: dropped {kind} call event (broker offline; not queued for late replay)");
+        eprintln!(
+            "btmqttd: dropped {kind} call event @ WHERE={where_} on {topic} \
+             (broker offline; not queued for late replay)"
+        );
         return;
     }
     let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
