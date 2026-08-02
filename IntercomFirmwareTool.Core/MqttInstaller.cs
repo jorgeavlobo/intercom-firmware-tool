@@ -1194,9 +1194,17 @@ namespace IntercomFirmwareTool.Core
 
             // Entrance-panel call: a momentary EVENT fired when the OUTDOOR door-station call is
             // seen on the bus (WHO=8 `*8*1#1#4#21*<WHERE>##`). `event_types` lists "pressed";
-            // btmqttd publishes {"event_type":"pressed","where":…} NON-retained, so it fires
+            // btmqttd publishes {"event_type":"pressed","where":…,"ts":…} NON-retained, so it fires
             // once per ring and never re-fires on an HA reconnect. HA reads `event_type` from
-            // the JSON and exposes the extra `where` key as an attribute.
+            // the JSON and exposes the extra `where` and `ts` keys as attributes.
+            //
+            // FRESHNESS (issue #71): a momentary "pressed" is only meaningful NOW. btmqttd already
+            // drops it at the source while the broker is offline (never queued for a late replay),
+            // but the `ts` (UTC ISO-8601) is the END-TO-END backstop: gate any time-sensitive
+            // automation on it so a stale event that somehow arrived late is ignored, e.g.
+            //   trigger: { platform: mqtt, topic: <entrance_panel_call topic> }
+            //   condition: "{{ now().timestamp() - as_timestamp(trigger.payload_json.ts) < 5 }}"
+            // Freshness is only truly knowable at the consumer, so enforce the TTL there.
             entities.Add(new HaEntity(
                 "entrance_panel_call.json",
                 Topic("event", "entrance_panel_call"),
@@ -1218,9 +1226,11 @@ namespace IntercomFirmwareTool.Core
             // Floor call: a momentary EVENT fired when the dumb push-button at the apartment's
             // OWN front door is pressed (WHO=8 `*8*1#13#2*<WHERE>##`). Wholly INDEPENDENT from the
             // entrance-panel call above — a separate entity so automations never conflate the two.
-            // Same delivery model: {"event_type":"pressed","where":…} NON-retained, fires once per
-            // ring. btmqttd also SUPPRESSES the concurrent dim-35 ringing so a floor call never
-            // surfaces on the entrance-panel call-state sensor.
+            // Same delivery model: {"event_type":"pressed","where":…,"ts":…} NON-retained, fires
+            // once per ring, and carries the same `ts` freshness stamp (gate time-sensitive
+            // automations on it — see the entrance-panel entity above). btmqttd also SUPPRESSES the
+            // concurrent dim-35 ringing so a floor call never surfaces on the entrance-panel
+            // call-state sensor.
             entities.Add(new HaEntity(
                 "floor_call.json",
                 Topic("event", "floor_call"),

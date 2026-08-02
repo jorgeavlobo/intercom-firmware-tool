@@ -690,7 +690,7 @@ async fn publish_frame(
 /// event — and any automation — twice for one ring. Non-blocking (see publish_frame): never
 /// stall the monitor reader on a full request queue; a press lost during a brief broker outage
 /// is preferable to a double actuation, and it is not retained or replayed. The payload carries
-/// the HA `event_type` plus the WHERE (informational).
+/// the HA `event_type`, the WHERE (informational), and a `ts` stamp (see [`momentary_payload`]).
 async fn publish_call_event(
     client: &AsyncClient,
     broker_online: &AtomicBool,
@@ -705,10 +705,29 @@ async fn publish_call_event(
         );
         return;
     }
-    let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
+    let payload = momentary_payload(where_);
     if let Err(e) = client.try_publish(topic, QoS::AtMostOnce, false, payload.into_bytes()) {
         eprintln!("btmqttd: publish {kind} call event failed: {e}");
     }
+}
+
+/// Build the momentary "pressed" event payload: the HA `event_type`, the WHERE (informational),
+/// and `ts` — a UTC ISO-8601 stamp (same format as the bus-frame `ts`, see [`own::utc_now_iso`]).
+///
+/// The `ts` is the END-TO-END freshness guard, the transport-independent complement to the
+/// producer-side drop/purge (issue #71). The drop (offline gate) and purge (disconnect handler)
+/// stop a stale event at the source, but they lean on rumqttc internals; `ts` lets the CONSUMER
+/// enforce its own TTL regardless — an HA automation gated on `now - ts < N s` ignores any
+/// "pressed" that somehow arrived late, so a time-sensitive automation never fires after the fact
+/// even if a stale event slipped past every transport layer. A momentary event has no meaning once
+/// stale, and freshness is only truly knowable where the meaning lives (the consumer).
+fn momentary_payload(where_: &str) -> String {
+    serde_json::json!({
+        "event_type": "pressed",
+        "where": where_,
+        "ts": own::utc_now_iso(),
+    })
+    .to_string()
 }
 
 /// Whether a momentary (non-retained, non-replayed) event may be published right now: only while
@@ -774,5 +793,18 @@ mod tests {
         assert!(momentary_deliverable(&online)); // connected -> deliver
         online.store(false, Ordering::Relaxed);
         assert!(!momentary_deliverable(&online)); // dropped again after a disconnect
+    }
+
+    #[test]
+    fn momentary_payload_carries_event_type_where_and_a_utc_ts() {
+        // The published "pressed" payload must carry the HA `event_type`, the WHERE, and a `ts`
+        // so a consumer can enforce its own freshness TTL (issue #71, end-to-end guard). Parse it
+        // back rather than string-match, so the assertion survives key reordering.
+        let v: serde_json::Value =
+            serde_json::from_str(&momentary_payload("1#1#4#21")).unwrap();
+        assert_eq!(v["event_type"], "pressed");
+        assert_eq!(v["where"], "1#1#4#21");
+        // ts is a UTC ISO-8601 stamp (Z suffix), matching the bus-frame `ts` format.
+        assert!(v["ts"].as_str().unwrap().ends_with('Z'));
     }
 }
