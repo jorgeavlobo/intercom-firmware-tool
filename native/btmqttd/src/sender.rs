@@ -732,14 +732,14 @@ async fn publish_call_event(
         );
         return;
     }
-    // Coalesce a burst of repeats into one event. Decide + drop the (non-Send) guard before the
-    // publish; there is no await here (try_publish is synchronous), but this keeps the guard scope
-    // minimal and mirrors the classifier's lock discipline.
-    let admitted = {
-        let mut d = debounce.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        d.admit(topic, std::time::Instant::now())
+    // Coalesce a burst of repeats into one event. First a READ-ONLY check: is this a repeat within
+    // the window of the last PUBLISHED event? (Guard scope minimal; there is no await here anyway.)
+    let now = std::time::Instant::now();
+    let coalesce = {
+        let d = debounce.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        d.within_window(topic, now)
     };
-    if !admitted {
+    if coalesce {
         eprintln!(
             "btmqttd: coalesced {kind} call event @ WHERE={where_} on {topic} \
              (burst within {MOMENTARY_DEBOUNCE:?} of the last)"
@@ -747,8 +747,16 @@ async fn publish_call_event(
         return;
     }
     let payload = momentary_payload(where_);
-    if let Err(e) = client.try_publish(topic, QoS::AtMostOnce, false, payload.into_bytes()) {
-        eprintln!("btmqttd: publish {kind} call event failed: {e}");
+    match client.try_publish(topic, QoS::AtMostOnce, false, payload.into_bytes()) {
+        // Arm the debounce window ONLY on a delivered event (CodeRabbit): if the request channel is
+        // full, try_publish fails and NOTHING was published, so we must NOT record — otherwise the
+        // window would suppress a later retry and silently lose a physical press. The window starts
+        // from the PUBLISHED event, exactly as documented.
+        Ok(()) => debounce
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record(topic, now),
+        Err(e) => eprintln!("btmqttd: publish {kind} call event failed: {e}"),
     }
 }
 
@@ -762,19 +770,23 @@ struct MomentaryDebounce {
 }
 
 impl MomentaryDebounce {
-    /// Decide whether a momentary event on `topic` at `now` should be PUBLISHED. Returns true to
-    /// publish (recording `now` as the topic's last emit); false to COALESCE it into the recent
-    /// event. A suppressed repeat does NOT extend the window — it runs from the PUBLISHED event, so
-    /// a burst yields at most one event per window and can never suppress indefinitely (a sustained
-    /// ring re-emits once each window elapses).
-    fn admit(&mut self, topic: &str, now: std::time::Instant) -> bool {
-        if let Some(&last) = self.last_emit.get(topic) {
-            if now.saturating_duration_since(last) < MOMENTARY_DEBOUNCE {
-                return false;
-            }
-        }
+    /// READ-ONLY: is a momentary event on `topic` at `now` within the coalescing window of the last
+    /// PUBLISHED event — i.e. a burst repeat to SUPPRESS? Split from [`record`](Self::record) so the
+    /// window is armed only after a publish actually succeeds (a press dropped by a full request
+    /// channel must not suppress a later retry).
+    fn within_window(&self, topic: &str, now: std::time::Instant) -> bool {
+        matches!(
+            self.last_emit.get(topic),
+            Some(&last) if now.saturating_duration_since(last) < MOMENTARY_DEBOUNCE
+        )
+    }
+
+    /// Record that `topic` PUBLISHED an event at `now`, arming its coalescing window. Call ONLY
+    /// after `try_publish` returns `Ok(())`. A suppressed repeat does NOT call this, so the window
+    /// runs from the published event: a burst yields at most one event per window, and a sustained
+    /// ring re-emits once each window elapses.
+    fn record(&mut self, topic: &str, now: std::time::Instant) {
         self.last_emit.insert(topic.to_string(), now);
-        true
     }
 }
 
@@ -871,13 +883,15 @@ mod tests {
         let base = std::time::Instant::now();
         let topic = "Bticino/entrance_panel_call";
 
-        assert!(d.admit(topic, base)); // first ring → publish
-        assert!(!d.admit(topic, base + Duration::from_millis(200))); // repeat → coalesced
-        assert!(!d.admit(topic, base + Duration::from_millis(1_999))); // still within 2 s → coalesced
+        assert!(!d.within_window(topic, base)); // first ring → publish...
+        d.record(topic, base); // ...and arm the window on the delivered event
+        assert!(d.within_window(topic, base + Duration::from_millis(200))); // repeat → coalesced
+        assert!(d.within_window(topic, base + Duration::from_millis(1_999))); // still within 2 s → coalesced
         // Window runs from the PUBLISHED event (not extended by suppressed repeats), so once it
         // elapses the next ring publishes again.
-        assert!(d.admit(topic, base + Duration::from_millis(2_001))); // distinct press → publish
-        assert!(!d.admit(topic, base + Duration::from_millis(2_500))); // its own repeat → coalesced
+        assert!(!d.within_window(topic, base + Duration::from_millis(2_001))); // distinct press → publish
+        d.record(topic, base + Duration::from_millis(2_001));
+        assert!(d.within_window(topic, base + Duration::from_millis(2_500))); // its own repeat → coalesced
     }
 
     #[test]
@@ -886,11 +900,30 @@ mod tests {
         // if an entrance ring fired in the same instant (they are wholly independent events).
         let mut d = MomentaryDebounce::default();
         let base = std::time::Instant::now();
-        assert!(d.admit("Bticino/entrance_panel_call", base));
-        assert!(d.admit("Bticino/floor_call", base)); // different topic → NOT coalesced
+        d.record("Bticino/entrance_panel_call", base);
+        // Floor has no recorded event → NOT within window (it publishes), despite the entrance emit.
+        assert!(!d.within_window("Bticino/floor_call", base));
+        d.record("Bticino/floor_call", base);
         // Each still coalesces its own repeats.
-        assert!(!d.admit("Bticino/entrance_panel_call", base + Duration::from_millis(100)));
-        assert!(!d.admit("Bticino/floor_call", base + Duration::from_millis(100)));
+        assert!(d.within_window("Bticino/entrance_panel_call", base + Duration::from_millis(100)));
+        assert!(d.within_window("Bticino/floor_call", base + Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn debounce_window_arms_only_on_a_recorded_publish() {
+        // A press dropped by a full request channel does NOT record, so the window never arms and a
+        // later retry is still admitted — the window starts from a DELIVERED event (CodeRabbit).
+        let mut d = MomentaryDebounce::default();
+        let base = std::time::Instant::now();
+        let topic = "Bticino/floor_call";
+
+        // within_window says publish (false); simulate try_publish FAILING → no record() call.
+        assert!(!d.within_window(topic, base));
+        // A repeat 200 ms later must STILL be admitted — nothing was ever published/recorded.
+        assert!(!d.within_window(topic, base + Duration::from_millis(200)));
+        // Now a successful publish records it; only then do subsequent repeats coalesce.
+        d.record(topic, base + Duration::from_millis(200));
+        assert!(d.within_window(topic, base + Duration::from_millis(300)));
     }
 
     #[test]
