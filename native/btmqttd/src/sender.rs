@@ -315,23 +315,18 @@ async fn session(
                         // it as UNKNOWN (`Some((None, …))`), so a floor call starting before the retry
                         // sets the classifier to Floor (or leaves it Pending) while this poll is live —
                         // which would otherwise publish the floor ringing snapshot here (Codex).
+                        // reconcile_snapshot always returns Publish (idle for an ambiguous snapshot,
+                        // to CLEAR any stale retained value — it never Suppresses, unlike the live
+                        // on_call_state path), so a single Publish arm covers it (as at the reconnect
+                        // and reseed sites). Bind + drop the guard before the await.
                         let action = lock_classifier(classifier).reconcile_snapshot(code);
-                        match action {
-                            dimension::CallStateAction::Publish(c) => {
-                                // Publish only on a real change — `known` is None ("unknown", from a
-                                // failed reconnect read) so the first successful poll always writes.
-                                if known != Some(c) {
-                                    publish_call_state(cfg, client, c).await;
-                                }
-                                update_call_watch(&mut call_watch, c);
+                        if let dimension::CallStateAction::Publish(c) = action {
+                            // Publish only on a real change — `known` is None ("unknown", from a
+                            // failed reconnect read) so the first successful poll always writes.
+                            if known != Some(c) {
+                                publish_call_state(cfg, client, c).await;
                             }
-                            dimension::CallStateAction::Suppress => {
-                                // Floor/pending in progress: publish nothing. Preserve the obligation
-                                // (`known` unchanged) but reset the timer so we re-check after the
-                                // interval instead of hot-looping; it converges once the call resolves
-                                // and the next poll publishes the true state.
-                                call_watch = Some((known, tokio::time::Instant::now()));
-                            }
+                            update_call_watch(&mut call_watch, c);
                         }
                     }
                     Reconcile::Done { result: Ok(None) | Err(_), saw_transition: false } => {
