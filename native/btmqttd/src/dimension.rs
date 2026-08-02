@@ -364,16 +364,20 @@ impl CallClassifier {
     ///   repair — a real entrance call whose live frames were missed, even from a stale `Floor`
     ///   (Codex/Copilot).
     /// - `1`/`2` (ringing) are AMBIGUOUS — floor and entrance share them, and out-of-band there is no
-    ///   signature to disambiguate. Publish ONLY when the call is already KNOWN to be entrance
-    ///   (`Entrance`); from every other state (`Floor`, `Pending`, or a fresh `Idle` at reconnect)
-    ///   SUPPRESS, so a floor call's ringing can never leak onto the entrance-panel sensor — the
-    ///   feature's hard rule (Codex). Cost: a genuine entrance call merely RINGING across a reconnect
-    ///   is not shown until it is answered (`4`/`6`), a live signature arrives, or it goes idle — an
-    ///   acceptable trade for never leaking a floor call.
+    ///   signature to disambiguate. Publish the ring ONLY when the call is already KNOWN to be
+    ///   entrance (`Entrance`). From every other state (`Floor`, `Pending`, or a fresh `Idle` at
+    ///   reconnect) we cannot confirm an entrance call, so publish IDLE — actively clearing any stale
+    ///   non-idle retained value (e.g. a prior entrance call's "ringing" whose terminal `0` was
+    ///   missed across the outage), so the entrance-panel sensor reads idle during a floor call. Both
+    ///   uphold the hard rule that a floor call never surfaces here — suppressing instead would leave
+    ///   the stale value visible for the whole floor call (Codex). Cost: a genuine entrance call
+    ///   merely RINGING across a reconnect reads idle until it is answered (`4`/`6`), a live signature
+    ///   arrives, or it truly goes idle — an acceptable trade for never surfacing a floor call.
     ///
     /// `0` and `4`/`6` mutate the classification; a `1`/`2` snapshot does not (it is an out-of-band
     /// read, not a live transition — feeding it into [`Self::on_call_state`] would spuriously hold it
-    /// as `Pending`).
+    /// as `Pending`). The idle it publishes is a SENSOR value, not a reclassification: a floor call
+    /// stays `Floor` and keeps suppressing its live frames.
     pub fn reconcile_snapshot(&mut self, code: u8) -> CallStateAction {
         match code {
             0 => {
@@ -384,12 +388,12 @@ impl CallClassifier {
                 self.state = CallKind::Entrance;
                 CallStateAction::Publish(code)
             }
-            // 1/2 (ambiguous ring) AND any unrecognised code (`3`/`5`/`7`): publish only from a KNOWN
-            // Entrance; from every other state suppress — an out-of-band unknown code is not evidence
-            // enough to override Floor or to assume entrance from a fresh Idle (CodeRabbit).
+            // 1/2 (ambiguous ring) AND any unrecognised code (`3`/`5`/`7`): show the ring only from a
+            // KNOWN Entrance; otherwise publish IDLE to clear any stale non-idle value — never assume
+            // entrance, and never leave a floor call showing a prior "ringing" (Codex/CodeRabbit).
             _ => match self.state {
                 CallKind::Entrance => CallStateAction::Publish(code),
-                _ => CallStateAction::Suppress,
+                _ => CallStateAction::Publish(0),
             },
         }
     }
@@ -695,34 +699,38 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_snapshot_ambiguous_ring_only_publishes_from_entrance() {
-        // A fresh classifier (reconnect) SUPPRESSES an ambiguous ringing snapshot (1/2) — it could be
-        // a floor call, and a floor call must never leak onto the entrance sensor...
+    fn reconcile_snapshot_ambiguous_ring_publishes_idle_unless_entrance() {
+        // A fresh classifier (reconnect) treats an ambiguous ringing snapshot (1/2) as NOT-entrance:
+        // it could be a floor call, and a floor call must never leak onto the entrance sensor. But we
+        // must also not leave a stale retained "ringing" showing — so publish IDLE (clears any stale
+        // value) rather than suppressing (which would keep the stale value visible)...
         let mut c = CallClassifier::new();
-        assert_eq!(c.reconcile_snapshot(1), CallStateAction::Suppress);
-        assert_eq!(c.reconcile_snapshot(2), CallStateAction::Suppress);
+        assert_eq!(c.reconcile_snapshot(1), CallStateAction::Publish(0));
+        assert_eq!(c.reconcile_snapshot(2), CallStateAction::Publish(0));
         // ...but an entrance-ONLY phase (4/6) is definitive → publish + reclassify from fresh Idle...
         assert_eq!(c.reconcile_snapshot(6), CallStateAction::Publish(6));
         // ...and an idle snapshot always publishes (and resets).
         assert_eq!(c.reconcile_snapshot(0), CallStateAction::Publish(0));
-        // A KNOWN entrance call publishes even an ambiguous ring snapshot.
+        // A KNOWN entrance call publishes the actual ambiguous ring snapshot.
         let mut e = CallClassifier::new();
         e.saw_entrance_panel_call();
         assert_eq!(e.reconcile_snapshot(2), CallStateAction::Publish(2));
     }
 
     #[test]
-    fn reconcile_snapshot_suppresses_during_floor_and_pending() {
-        // A classified floor call suppresses a ringing snapshot (the reseed-during-floor leak)...
+    fn reconcile_snapshot_publishes_idle_during_floor_and_pending() {
+        // A classified floor call must never surface as ringing, and a stale retained "ringing" must
+        // be cleared — so an out-of-band ringing snapshot publishes IDLE (not the ring, not a no-op)
+        // and leaves the Floor classification intact...
         let mut c = CallClassifier::new();
         c.saw_floor_call();
-        assert_eq!(c.reconcile_snapshot(1), CallStateAction::Suppress);
-        assert_eq!(c.reconcile_snapshot(2), CallStateAction::Suppress);
-        // A still-Pending (held leading ring, not yet classified) also suppresses — publishing the
-        // out-of-band ringing could pre-empt a floor signature still in flight and leak.
+        assert_eq!(c.reconcile_snapshot(1), CallStateAction::Publish(0));
+        assert_eq!(c.reconcile_snapshot(2), CallStateAction::Publish(0));
+        // A still-Pending (held leading ring, not yet classified) also publishes IDLE — surfacing the
+        // out-of-band ringing could pre-empt a floor signature still in flight, so we clear instead.
         let mut p = CallClassifier::new();
         assert_eq!(p.on_call_state(1), CallStateAction::Suppress); // Pending(1)
-        assert_eq!(p.reconcile_snapshot(2), CallStateAction::Suppress);
+        assert_eq!(p.reconcile_snapshot(2), CallStateAction::Publish(0));
     }
 
     #[test]
@@ -767,19 +775,20 @@ mod tests {
         assert_eq!(g.on_call_state(6), CallStateAction::Publish(6));
         assert_eq!(g.on_call_state(0), CallStateAction::Publish(0));
         // An UNRECOGNISED code (never observed) is NOT definitive entrance evidence, so it must not
-        // reclassify a known floor call — stays suppressed on both the live and snapshot paths.
+        // reclassify a known floor call: the LIVE path suppresses (no stale value to clear), while the
+        // authoritative SNAPSHOT publishes IDLE (clears any stale "ringing") — neither surfaces floor.
         let mut u = CallClassifier::new();
         u.saw_floor_call();
         assert_eq!(u.on_call_state(5), CallStateAction::Suppress);
-        assert_eq!(u.reconcile_snapshot(5), CallStateAction::Suppress);
+        assert_eq!(u.reconcile_snapshot(5), CallStateAction::Publish(0));
     }
 
     #[test]
     fn on_reconnect_resets_every_classification_to_idle() {
         // A monitor outage can end one call and start another in the gap, so NO carried-over state
         // is trustworthy — reset all of Pending/Floor/Entrance to Idle. After the reset, an ambiguous
-        // ring snapshot is suppressed (proving no stale Entrance can leak a new floor call's ring),
-        // and a new leading ring is held afresh.
+        // ring snapshot publishes IDLE (proving no stale Entrance can leak a new floor call's ring,
+        // and clearing any stale retained "ringing"), and a new leading ring is held afresh.
         for setup in [0u8, 1, 4] {
             let mut c = CallClassifier::new();
             match setup {
@@ -792,8 +801,9 @@ mod tests {
                 _ => c.saw_floor_call(), // Floor
             }
             c.on_reconnect();
-            // Reset to Idle → an ambiguous authoritative ring is suppressed (no leak from stale state)...
-            assert_eq!(c.reconcile_snapshot(2), CallStateAction::Suppress);
+            // Reset to Idle → an ambiguous authoritative ring publishes IDLE (no leak from stale state,
+            // and any stale retained "ringing" is cleared)...
+            assert_eq!(c.reconcile_snapshot(2), CallStateAction::Publish(0));
             // ...and a fresh leading ring is HELD (Idle → Pending), not published.
             assert_eq!(c.on_call_state(1), CallStateAction::Suppress);
         }
