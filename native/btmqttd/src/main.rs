@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rumqttc::{
-    AsyncClient, Event, EventLoop, Incoming, LastWill, MqttOptions, Outgoing, QoS,
+    AsyncClient, Event, EventLoop, Incoming, LastWill, MqttOptions, Outgoing, QoS, Request,
     SubscribeReasonCode, TlsConfiguration, Transport,
 };
 use tokio::signal::unix::{signal, SignalKind};
@@ -582,6 +582,21 @@ async fn run() -> Result<(), String> {
                         // Broker is down: momentary call events are now DROPPED (not queued for a
                         // late flush) until the next ConnAck re-sets this (issue #71).
                         broker_online.store(false, std::sync::atomic::Ordering::Relaxed);
+                        // ...and PURGE any momentary call events rumqttc already buffered for replay.
+                        // poll() ran clean() on this error, moving the requests channel + unacked
+                        // state into `pending` BEFORE returning Err; on the single-threaded runtime
+                        // no task interleaves between that and here (no `.await` above), so every
+                        // press queued during the disconnect-DETECTION window (up to ~keepalive, 60s)
+                        // is in `pending` now. Drop them so none is flushed late on reconnect and
+                        // fires a time-sensitive automation. Together with the gate above this makes
+                        // the drop airtight: the gate stops events once the drop is DETECTED, this
+                        // purge discards those queued before detection. (QoS-0 copies caught
+                        // mid-flush are dropped by rumqttc itself — never tracked in `outgoing_pub`,
+                        // and its write buffer is cleared on reconnect.) Retained state and the dump
+                        // stream are KEPT: re-seeded on reconnect / a live QoS-0 stream.
+                        eventloop
+                            .pending
+                            .retain(|req| !is_momentary_call_publish(req, &cfg));
                         // Connection dropped/unreachable. ABORT the in-flight birth tasks
                         // NOW — not at the next ConnAck. Otherwise a subscribe/announce
                         // task still running through the outage could enqueue a stale
@@ -811,6 +826,18 @@ fn is_concrete_topic(topic: &str) -> bool {
     !topic.contains('+') && !topic.contains('#') && !topic.starts_with("$share/")
 }
 
+/// True if `req` is a momentary call-event publish (entrance-panel or floor). These are the ONLY
+/// requests purged from the event loop's `pending` queue on a disconnect (issue #71): a queued
+/// press must never be flushed late on reconnect. Matched by destination topic so nothing else —
+/// retained state, the dump stream, or protocol packets — is ever discarded.
+fn is_momentary_call_publish(req: &Request, cfg: &Config) -> bool {
+    matches!(
+        req,
+        Request::Publish(p)
+            if p.topic == cfg.topic_entrance_panel_call || p.topic == cfg.topic_floor_call
+    )
+}
+
 /// Clean shutdown: publish an explicit retained `offline` (the will only fires on an
 /// UNCLEAN drop) and disconnect, then keep DRIVING the event loop until the
 /// disconnect actually flushes — `publish`/`disconnect` only QUEUE requests, so
@@ -855,4 +882,27 @@ fn build_tls(cfg: &Config) -> Result<TlsConfiguration, String> {
         None => None,
     };
     Ok(TlsConfiguration::Simple { ca, alpn: None, client_auth })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rumqttc::{Publish, QoS};
+    use std::collections::HashMap;
+
+    #[test]
+    fn purge_predicate_matches_only_momentary_call_publishes() {
+        // The disconnect purge (#71) must drop ONLY momentary call events, never retained state,
+        // the dump stream, or protocol packets — so a genuine sensor/state republish still flushes.
+        let cfg = Config::from_map(HashMap::new()); // default topics
+        let pub_to = |t: &str| Request::Publish(Publish::new(t, QoS::AtMostOnce, "x"));
+
+        assert!(is_momentary_call_publish(&pub_to(&cfg.topic_entrance_panel_call), &cfg));
+        assert!(is_momentary_call_publish(&pub_to(&cfg.topic_floor_call), &cfg));
+        // Retained call-state sensor and other topics are KEPT (must survive to re-flush).
+        assert!(!is_momentary_call_publish(&pub_to(&cfg.topic_call_state), &cfg));
+        assert!(!is_momentary_call_publish(&pub_to("Bticino/dump"), &cfg));
+        // Non-publish protocol packets are never momentary events.
+        assert!(!is_momentary_call_publish(&Request::PingReq(rumqttc::PingReq), &cfg));
+    }
 }

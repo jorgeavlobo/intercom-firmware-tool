@@ -39,7 +39,9 @@ pub async fn run(
     light: Option<Arc<LightCtl>>,
     // Set true on ConnAck / false on connection drop by main's event loop. Momentary call events
     // are DROPPED (not enqueued) while this is false, so a press during a broker outage isn't
-    // queued by rumqttc and flushed late as a stale ring (issue #71). Only reads it; never writes.
+    // queued by rumqttc and flushed late as a stale ring (issue #71). This gate covers the window
+    // AFTER a drop is detected; presses queued in the detection window BEFORE that are purged from
+    // rumqttc's `pending` by main's disconnect handler. Only reads it; never writes.
     broker_online: Arc<AtomicBool>,
 ) {
     // Classifies each call as entrance-panel vs floor and keeps the two independent. Owned here so
