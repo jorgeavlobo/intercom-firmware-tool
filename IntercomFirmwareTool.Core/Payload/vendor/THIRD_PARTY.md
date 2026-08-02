@@ -41,6 +41,7 @@ license texts and per-crate copyright notices travel with the binary in
 | ABI | armv7 (`Tag_CPU_arch: v7`), **hard-float** (`Tag_FP_arch: VFPv3-D16`, `Tag_ABI_VFP_args: VFP registers`; ELF flags `0x5000400`) |
 | Build ID | none (stripped; `rust-lld` emits no GNU build-id note) |
 | Target triple | `armv7-unknown-linux-musleabihf` (armv7 hardfloat), **static musl** — no dependency on the device glibc 2.27 |
+| Build toolchain | `rustc 1.94.1` + `arm-linux-gnueabihf-gcc` (for `ring`'s C/asm); `cargo build --release` per `BUILD.md` |
 | Upstream version | `btmqttd` 0.1.0 (this repo, `native/btmqttd/`) |
 | Statically bundles | ~65 Rust crates (MIT / Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0 — all permissive) + musl libc (MIT) |
 | License | permissive only — see SPDX below |
