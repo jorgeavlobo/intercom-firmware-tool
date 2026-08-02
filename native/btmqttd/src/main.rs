@@ -905,7 +905,7 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn purge_predicate_matches_only_momentary_call_publishes() {
+    fn purge_predicate_matches_only_momentary_publishes() {
         // The disconnect purge (#71) must drop ONLY momentary call events, never retained state,
         // the dump stream, or protocol packets — so a genuine sensor/state republish still flushes.
         let cfg = Config::from_map(HashMap::new()); // default topics
