@@ -605,7 +605,7 @@ async fn publish_frame(
             // No held ring, but we still (re)classified to Entrance → snapshot ambiguous.
             outcome = FrameOutcome::ClassifierChanged;
         }
-        publish_entrance_panel_call(cfg, client, where_).await;
+        publish_call_event(client, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
     } else if let Some(where_) = dimension::parse_floor_call(frame) {
         // Floor CALL (dumb push-button at the apartment's own front door): a COMPLETELY
         // independent event from the entrance panel. Fire its own momentary event and arm the
@@ -619,7 +619,7 @@ async fn publish_frame(
         // entrance sensor exclusively entrance-driven is the strongest form of "never mix the two".
         lock_classifier(classifier).saw_floor_call();
         outcome = FrameOutcome::ClassifierChanged; // reclassified to Floor → snapshot ambiguous
-        publish_floor_call(cfg, client, where_).await;
+        publish_call_event(client, &cfg.topic_floor_call, "floor", where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
         // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the
         // classifier: an entrance-panel call publishes it (updating the retained sensor and reporting
@@ -660,42 +660,22 @@ async fn publish_frame(
     outcome
 }
 
-/// Publish a momentary entrance-panel "pressed" event to TOPIC_ENTRANCE_PANEL_CALL. NOT
-/// retained: an event fires once, and a retained event would spuriously re-fire on every HA
-/// reconnect. QoS 0 (like the non-idempotent lock/step actions): a ring is NON-idempotent,
-/// and QoS 1 may legitimately REDELIVER a publish (DUP on a lost PUBACK), which would fire the
-/// HA event — and any automation — twice for one ring. A press lost during a brief broker
-/// reconnect is preferable to a double actuation. The payload carries the HA `event_type` plus
-/// the entrance-panel WHERE (informational).
-async fn publish_entrance_panel_call(cfg: &Arc<Config>, client: &AsyncClient, where_: &str) {
+/// Publish a momentary "pressed" call event (`kind` names it in the error log) to `topic`. Used
+/// for BOTH the entrance-panel call and the floor call, which are wholly independent rings on
+/// separate HA `event` entities but share identical delivery semantics — one helper keeps the
+/// payload shape, QoS, retain flag and non-blocking behaviour defined in exactly one place.
+///
+/// NOT retained: an event fires once, and a retained event would spuriously re-fire on every HA
+/// reconnect. QoS 0 (like the non-idempotent lock/step actions): a ring is NON-idempotent, and
+/// QoS 1 may legitimately REDELIVER a publish (DUP on a lost PUBACK), which would fire the HA
+/// event — and any automation — twice for one ring. Non-blocking (see publish_frame): never
+/// stall the monitor reader on a full request queue; a press lost during a brief broker outage
+/// is preferable to a double actuation, and it is not retained or replayed. The payload carries
+/// the HA `event_type` plus the WHERE (informational).
+async fn publish_call_event(client: &AsyncClient, topic: &str, kind: &str, where_: &str) {
     let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
-    // Non-blocking (see publish_frame): never stall the monitor reader on a full request queue.
-    // A press dropped during a broker outage matches this event's existing philosophy (a lost
-    // press is preferable to a double actuation) — it is not retained or replayed.
-    if let Err(e) = client.try_publish(
-        &cfg.topic_entrance_panel_call,
-        QoS::AtMostOnce,
-        false,
-        payload.into_bytes(),
-    ) {
-        eprintln!("btmqttd: publish entrance-panel call event failed: {e}");
-    }
-}
-
-/// Publish a momentary floor-call "pressed" event to TOPIC_FLOOR_CALL. This is the dumb
-/// push-button wired to the apartment's own front door — a wholly independent ring from the
-/// entrance panel, on its own HA `event` entity. Same delivery semantics as the entrance-panel
-/// event (NOT retained, QoS 0, non-blocking) and for the same reasons: a ring is momentary and
-/// non-idempotent, so a redelivered or replayed publish would double-fire the automation.
-async fn publish_floor_call(cfg: &Arc<Config>, client: &AsyncClient, where_: &str) {
-    let payload = serde_json::json!({ "event_type": "pressed", "where": where_ }).to_string();
-    if let Err(e) = client.try_publish(
-        &cfg.topic_floor_call,
-        QoS::AtMostOnce,
-        false,
-        payload.into_bytes(),
-    ) {
-        eprintln!("btmqttd: publish floor call event failed: {e}");
+    if let Err(e) = client.try_publish(topic, QoS::AtMostOnce, false, payload.into_bytes()) {
+        eprintln!("btmqttd: publish {kind} call event failed: {e}");
     }
 }
 
