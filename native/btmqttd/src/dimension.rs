@@ -125,12 +125,20 @@ pub fn parse_mute_report(frame: &str) -> Option<bool> {
     }
 }
 
-/// WHO=8 entrance-panel CALL ("doorbell") command: `*8*1#1#4#21*<WHERE>##` (RE —
-/// captured on a live Classe 100X, matching fquinto's Classe 300X
-/// `*8*1#1#4#21*16##`). The WHAT (`1#1#4#21`) is the stable doorbell signature; the
-/// WHERE (the entrance-panel address, e.g. `112`/`16`) varies per install, so it is
-/// NOT matched — it is returned for information.
-const DOORBELL_WHAT: &str = "1#1#4#21";
+/// WHO=8 ENTRANCE-PANEL CALL command: `*8*1#1#4#21*<WHERE>##` (RE — captured on a live
+/// Classe 100X, matching fquinto's Classe 300X `*8*1#1#4#21*16##`). The WHAT
+/// (`1#1#4#21`) is the stable entrance-panel-call signature; the WHERE (the entrance-panel
+/// address, e.g. `112`/`16`) varies per install, so it is NOT matched — it is returned for
+/// information. This is the outdoor door-station ("betoneira") call.
+const ENTRANCE_PANEL_CALL_WHAT: &str = "1#1#4#21";
+
+/// WHO=8 FLOOR-CALL command: `*8*1#13#2*<WHERE>##` (RE — captured live on a Classe unit
+/// with a dumb push-button wired to the unit's floor-call terminals; the ring-start frame
+/// was `*8*1#13#2*10##` byte-for-byte on 3/3 presses, and the entrance-panel call NEVER
+/// emits this WHAT). The WHAT (`1#13#2`) is the stable floor-call signature — BTicino's
+/// "chiamata al piano", the local front-door bell, distinct from the entrance panel. The
+/// WHERE (`10` observed) is returned for information, not matched.
+const FLOOR_CALL_WHAT: &str = "1#13#2";
 
 /// WHO=8 dimension carrying the CALL STATE, broadcast as a call progresses:
 /// `*#8**35*<N>*0*0##`. Confirmed against live captures of both an ANSWERED and an
@@ -140,20 +148,32 @@ const DOORBELL_WHAT: &str = "1#1#4#21";
 /// travels as an attribute for finer granularity (door-entry RE).
 const CALL_STATE_DIM: &str = "35";
 
-/// Match the entrance-panel call ("doorbell") `*8*1#1#4#21*<WHERE>##` and return the
-/// WHERE (the panel address). Returns `None` for any other frame — a different WHO=8
-/// WHAT (`*8*9#1#4*20##`), a dimension report (`*#8**…`), a command, etc.
-pub fn parse_doorbell(frame: &str) -> Option<&str> {
+/// Match a WHO=8 CALL command `*8*<WHAT>*<WHERE>##` for the EXACT `what`, returning the
+/// WHERE. The WHAT must be followed immediately by the `*` before WHERE (so a longer WHAT
+/// with `what` as a prefix can't match), and WHERE must be a single non-empty field —
+/// rejecting the empty (`…*##`) and extended (`…*112*X##`) forms so neither fires a
+/// spurious event. Returns `None` for a dimension report (`*#8**…`), a different WHAT
+/// (e.g. the `9#…` ring-STOP), or any other frame.
+fn parse_who8_call<'a>(frame: &'a str, what: &str) -> Option<&'a str> {
     let body = frame.strip_prefix("*8*")?.strip_suffix("##")?;
-    // `*8*<WHAT>*<WHERE>##`: require the exact doorbell WHAT, then the '*' before WHERE.
-    let where_ = body.strip_prefix(DOORBELL_WHAT)?.strip_prefix('*')?;
-    // WHERE must be a single non-empty field: reject `*8*1#1#4#21*##` (empty) and an
-    // extended frame `*8*1#1#4#21*112*X##` (extra '*'-separated fields) so neither fires
-    // a spurious doorbell event.
+    let where_ = body.strip_prefix(what)?.strip_prefix('*')?;
     if where_.is_empty() || where_.contains('*') {
         return None;
     }
     Some(where_)
+}
+
+/// Match the ENTRANCE-PANEL call `*8*1#1#4#21*<WHERE>##` (the outdoor door station) and
+/// return the WHERE (the panel address). `None` for any other frame.
+pub fn parse_entrance_panel_call(frame: &str) -> Option<&str> {
+    parse_who8_call(frame, ENTRANCE_PANEL_CALL_WHAT)
+}
+
+/// Match the FLOOR call `*8*1#13#2*<WHERE>##` (the local front-door button on the unit's
+/// floor-call terminals) and return the WHERE. Disjoint from the entrance-panel WHAT, so
+/// the two never cross-fire. `None` for any other frame.
+pub fn parse_floor_call(frame: &str) -> Option<&str> {
+    parse_who8_call(frame, FLOOR_CALL_WHAT)
 }
 
 /// Parse a WHO=8 call-state report `*#8**35*<N>*0*0##` into `N`. Returns `None` for any
@@ -186,6 +206,197 @@ pub fn call_state_label(code: u8) -> &'static str {
         1 | 2 | 4 => "ringing",
         6 => "in_call",
         _ => "active",
+    }
+}
+
+/// What the caller should do with a dim-35 call-state code, per [`CallClassifier`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CallStateAction {
+    /// Publish this code to the (entrance-panel) call-state sensor.
+    Publish(u8),
+    /// Swallow it — it belongs to a FLOOR call (or a not-yet-classified ring being held),
+    /// which must never surface on the entrance-panel call-state sensor.
+    Suppress,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum CallKind {
+    /// No call in progress.
+    #[default]
+    Idle,
+    /// A ring started (`code` 1/2) but the source is not yet known — the classifying WHO=8
+    /// frame (`*8*1#1#4#21*…` entrance vs `*8*1#13#2*…` floor) always arrives ONE frame
+    /// later, so the first ringing code is HELD until then. `code` is the held ring code.
+    Pending(u8),
+    /// Classified as an entrance-panel call → publish call-state normally.
+    Entrance,
+    /// Classified as a floor call → suppress call-state until the ring ends.
+    Floor,
+}
+
+/// Routes the SHARED dim-35 call-state stream to the entrance-panel sensor ONLY.
+///
+/// Both an entrance-panel call and a floor call drive dim-35 (`1→2→…→0`), and in BOTH the
+/// first `*#8**35*1*…` (ringing) arrives BEFORE the classifying WHO=8 frame. To keep the
+/// floor call entirely off the entrance-panel `call_state` sensor without leaking that
+/// leading "ringing", the first ring code is HELD (`Pending`) until the classifier is seen:
+/// an entrance signature flushes the held code and publishes normally; a floor signature
+/// discards it and suppresses the rest. Frame-driven, no timers. The instance is owned by `run()`
+/// but RESET to `Idle` at the start of each monitor session ([`Self::on_reconnect`]): a monitor
+/// outage can end one call and begin another in the gap, so no classification is trustworthy across
+/// it — the authoritative reconcile (see [`Self::reconcile_snapshot`]) and post-reconnect live
+/// frames re-establish state from scratch, which is what keeps a floor call off this sensor even
+/// across reconnects.
+#[derive(Default)]
+pub struct CallClassifier {
+    state: CallKind,
+}
+
+impl CallClassifier {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The entrance-panel signature (`*8*1#1#4#21*…`) was seen. Classify as entrance and, if
+    /// a ring code was being held, return it so the caller can now publish it.
+    pub fn saw_entrance_panel_call(&mut self) -> Option<u8> {
+        let held = match self.state {
+            CallKind::Pending(code) => Some(code),
+            _ => None,
+        };
+        self.state = CallKind::Entrance;
+        held
+    }
+
+    /// The floor-call signature (`*8*1#13#2*…`) was seen. Classify as floor; any held ring
+    /// code is DISCARDED (never published), so the entrance-panel sensor stays idle.
+    pub fn saw_floor_call(&mut self) {
+        self.state = CallKind::Floor;
+    }
+
+    /// Called at the start of each monitor session. A monitor outage loses EVERY frame in the gap,
+    /// so a call in progress before it may have ENDED and a DIFFERENT one begun. No classification
+    /// carried across the reconnect can therefore be trusted for the current dim-35 reading — a
+    /// stale `Floor`, `Entrance`, OR `Pending` would mis-handle a new call and could publish a floor
+    /// call's ring onto the entrance-panel sensor. Reset to `Idle`: the authoritative reconcile then
+    /// publishes IDLE for ambiguous rings (`1`/`2`) — clearing any stale retained value without ever
+    /// asserting entrance — and publishes only definitive entrance-only phases (`4`/`6`), while live
+    /// frames after the reconnect reclassify from scratch (Codex). Cost: an entrance call merely
+    /// RINGING across a reconnect reads idle until it is answered (`4`/`6`), a live signature arrives,
+    /// or it truly goes idle — the accepted price of never leaking a floor call.
+    pub fn on_reconnect(&mut self) {
+        self.state = CallKind::Idle;
+    }
+
+    /// A dim-35 call-state `code` arrived. Decide whether it reaches the entrance-panel
+    /// sensor. `0` (idle/ended) always publishes and resets. A leading ring-start `1` is HELD
+    /// (pending classification) — including from a stale `Entrance` (a previous call's terminal
+    /// `0` was missed), so the NEXT call's leading ring can't be mis-published before its
+    /// signature resolves it. A second unclassified ring, or a `4`/`6` (which only an entrance
+    /// call reaches), defaults to entrance rather than risk hiding a real call.
+    pub fn on_call_state(&mut self, code: u8) -> CallStateAction {
+        match code {
+            0 => {
+                self.state = CallKind::Idle;
+                CallStateAction::Publish(0)
+            }
+            1 | 2 => match self.state {
+                CallKind::Idle => {
+                    self.state = CallKind::Pending(code);
+                    CallStateAction::Suppress
+                }
+                // A second ring with no classifier yet: prefer showing a real call over
+                // hiding one — treat as entrance and publish.
+                CallKind::Pending(_) => {
+                    self.state = CallKind::Entrance;
+                    CallStateAction::Publish(code)
+                }
+                // A fresh ring-START (`1`) from a stale TERMINAL state (Entrance OR Floor — the
+                // previous call's terminal `0` was missed, leaving us wedged) begins a NEW call of
+                // unknown type. RE-HOLD it as Pending so the following signature classifies it
+                // (entrance flushes it via `saw_entrance_panel_call`, floor discards it), instead of
+                // publishing a floor ring as entrance (from Entrance) or silently dropping an
+                // entrance ring (from Floor) (Codex). Safe for a genuine repeated `1` mid-call: the
+                // retained sensor keeps its last value during the one-frame hold and the next frame
+                // republishes — no idle flicker. (A leading ring is always `1`; a floor call's own
+                // sequence is `1 → 2 → 0`, so `Floor + 1` only ever means a new call, never a
+                // continuation.)
+                CallKind::Entrance | CallKind::Floor if code == 1 => {
+                    self.state = CallKind::Pending(1);
+                    CallStateAction::Suppress
+                }
+                // A `2` from Entrance is a mid-call progression of the SAME entrance call → publish;
+                // a `2` from Floor is a floor-call continuation → stays suppressed.
+                CallKind::Entrance => CallStateAction::Publish(code),
+                CallKind::Floor => CallStateAction::Suppress,
+            },
+            // 4/6 (answered/in-call phases) are reached ONLY by an entrance-panel call — a floor
+            // call's sequence is `1 → 2 → 0`. So either is DEFINITIVE evidence of an entrance call:
+            // (re)classify to Entrance and publish, even from a stale `Floor` left by a floor call
+            // whose terminal `0` was missed across a monitor reconnect. Suppressing here would hide a
+            // real entrance call until its terminal idle (Codex).
+            4 | 6 => {
+                self.state = CallKind::Entrance;
+                CallStateAction::Publish(code)
+            }
+            // Any OTHER code (`3`/`5`/`7` — never observed for door entry, mapped to the "active"
+            // label). An unrecognised code is NOT definitive evidence of an entrance call, so it must
+            // not reclassify a KNOWN floor call — honour "a floor call never reaches this sensor".
+            // From any other state, fall back to showing it as an entrance call (CodeRabbit).
+            _ => match self.state {
+                CallKind::Floor => CallStateAction::Suppress,
+                _ => {
+                    self.state = CallKind::Entrance;
+                    CallStateAction::Publish(code)
+                }
+            },
+        }
+    }
+
+    /// Reconcile an AUTHORITATIVE dim-35 snapshot `code` — read directly from the gateway,
+    /// OUT-OF-BAND from the live frame stream (the reconnect/poll/reseed reconcile) — against the
+    /// current classification, returning whether it may reach the entrance-panel sensor.
+    ///
+    /// - `0` (idle) is gateway truth that no call is active: RESET to `Idle` and publish. Repairs a
+    ///   missed live terminal `0` (otherwise the classifier would linger and mis-handle the next call).
+    /// - `4`/`6` (answered/in-call) are entrance-ONLY phases — a floor call never emits them — so an
+    ///   out-of-band read of one is DEFINITIVE entrance evidence: (re)classify to `Entrance` and
+    ///   publish, from ANY state. This is exactly the case the poll/reconnect reconcile exists to
+    ///   repair — a real entrance call whose live frames were missed, even from a stale `Floor`
+    ///   (Codex/Copilot).
+    /// - `1`/`2` (ringing) are AMBIGUOUS — floor and entrance share them, and out-of-band there is no
+    ///   signature to disambiguate. Publish the ring ONLY when the call is already KNOWN to be
+    ///   entrance (`Entrance`). From every other state (`Floor`, `Pending`, or a fresh `Idle` at
+    ///   reconnect) we cannot confirm an entrance call, so publish IDLE — actively clearing any stale
+    ///   non-idle retained value (e.g. a prior entrance call's "ringing" whose terminal `0` was
+    ///   missed across the outage), so the entrance-panel sensor reads idle during a floor call. Both
+    ///   uphold the hard rule that a floor call never surfaces here — suppressing instead would leave
+    ///   the stale value visible for the whole floor call (Codex). Cost: a genuine entrance call
+    ///   merely RINGING across a reconnect reads idle until it is answered (`4`/`6`), a live signature
+    ///   arrives, or it truly goes idle — an acceptable trade for never surfacing a floor call.
+    ///
+    /// `0` and `4`/`6` mutate the classification; a `1`/`2` snapshot does not (it is an out-of-band
+    /// read, not a live transition — feeding it into [`Self::on_call_state`] would spuriously hold it
+    /// as `Pending`). The idle it publishes is a SENSOR value, not a reclassification: a floor call
+    /// stays `Floor` and keeps suppressing its live frames.
+    pub fn reconcile_snapshot(&mut self, code: u8) -> CallStateAction {
+        match code {
+            0 => {
+                self.state = CallKind::Idle;
+                CallStateAction::Publish(0)
+            }
+            4 | 6 => {
+                self.state = CallKind::Entrance;
+                CallStateAction::Publish(code)
+            }
+            // 1/2 (ambiguous ring) AND any unrecognised code (`3`/`5`/`7`): show the ring only from a
+            // KNOWN Entrance; otherwise publish IDLE to clear any stale non-idle value — never assume
+            // entrance, and never leave a floor call showing a prior "ringing" (Codex/CodeRabbit).
+            _ => match self.state {
+                CallKind::Entrance => CallStateAction::Publish(code),
+                _ => CallStateAction::Publish(0),
+            },
+        }
     }
 }
 
@@ -402,28 +613,215 @@ mod tests {
     }
 
     #[test]
-    fn parses_doorbell_call_and_returns_where() {
+    fn parses_entrance_panel_call_and_returns_where() {
         // Captured on a live Classe 100X; WHERE varies per install.
-        assert_eq!(parse_doorbell("*8*1#1#4#21*112##"), Some("112"));
+        assert_eq!(parse_entrance_panel_call("*8*1#1#4#21*112##"), Some("112"));
         // fquinto's Classe 300X used the SAME WHAT, a different WHERE.
-        assert_eq!(parse_doorbell("*8*1#1#4#21*16##"), Some("16"));
+        assert_eq!(parse_entrance_panel_call("*8*1#1#4#21*16##"), Some("16"));
     }
 
     #[test]
-    fn rejects_non_doorbell_frames() {
-        // Other WHO=8 commands seen in the same capture must NOT trigger the doorbell.
-        assert_eq!(parse_doorbell("*8*9#1#4*20##"), None);
-        assert_eq!(parse_doorbell("*8*3#1#4*420##"), None);
-        assert_eq!(parse_doorbell("*8*19*20##"), None);
+    fn rejects_non_entrance_panel_call_frames() {
+        // Other WHO=8 commands seen in the same capture must NOT trigger the entrance call.
+        assert_eq!(parse_entrance_panel_call("*8*9#1#4*20##"), None);
+        assert_eq!(parse_entrance_panel_call("*8*3#1#4*420##"), None);
+        assert_eq!(parse_entrance_panel_call("*8*19*20##"), None);
         // A near-miss WHAT must not match (prefix guard).
-        assert_eq!(parse_doorbell("*8*1#1#4#210*112##"), None);
+        assert_eq!(parse_entrance_panel_call("*8*1#1#4#210*112##"), None);
         // An empty WHERE or an extended frame with extra '*' fields must not match.
-        assert_eq!(parse_doorbell("*8*1#1#4#21*##"), None);
-        assert_eq!(parse_doorbell("*8*1#1#4#21*112*X##"), None);
-        // Dimension reports and other WHOs are not doorbell commands.
-        assert_eq!(parse_doorbell("*#8**35*1*0*0##"), None);
-        assert_eq!(parse_doorbell("*7*55*##"), None);
-        assert_eq!(parse_doorbell("garbage"), None);
+        assert_eq!(parse_entrance_panel_call("*8*1#1#4#21*##"), None);
+        assert_eq!(parse_entrance_panel_call("*8*1#1#4#21*112*X##"), None);
+        // Dimension reports and other WHOs are not entrance-call commands.
+        assert_eq!(parse_entrance_panel_call("*#8**35*1*0*0##"), None);
+        assert_eq!(parse_entrance_panel_call("*7*55*##"), None);
+        assert_eq!(parse_entrance_panel_call("garbage"), None);
+        // The FLOOR-call WHAT must NOT be read as an entrance-panel call.
+        assert_eq!(parse_entrance_panel_call("*8*1#13#2*10##"), None);
+    }
+
+    #[test]
+    fn parses_floor_call_and_returns_where() {
+        // Captured live: byte-for-byte on 3/3 presses of the floor-call button.
+        assert_eq!(parse_floor_call("*8*1#13#2*10##"), Some("10"));
+        // WHERE is informational, not matched — a different WHERE still parses.
+        assert_eq!(parse_floor_call("*8*1#13#2*42##"), Some("42"));
+    }
+
+    #[test]
+    fn rejects_non_floor_call_frames() {
+        // The floor-call ring-STOP (`9#13#2`) is not the ring-START.
+        assert_eq!(parse_floor_call("*8*9#13#2*410##"), None);
+        // The ENTRANCE-panel WHAT must NOT be read as a floor call (the two are disjoint).
+        assert_eq!(parse_floor_call("*8*1#1#4#21*112##"), None);
+        // Near-miss WHAT (prefix guard), empty/extended WHERE.
+        assert_eq!(parse_floor_call("*8*1#13#20*10##"), None);
+        assert_eq!(parse_floor_call("*8*1#13#2*##"), None);
+        assert_eq!(parse_floor_call("*8*1#13#2*10*X##"), None);
+        // Dimension reports and other WHOs.
+        assert_eq!(parse_floor_call("*#8**35*1*0*0##"), None);
+        assert_eq!(parse_floor_call("*7*58#14#0#0#1*##"), None);
+        assert_eq!(parse_floor_call("garbage"), None);
+    }
+
+    #[test]
+    fn classifier_suppresses_a_floor_call_entirely() {
+        // The captured floor-call sequence: the leading ring (1) arrives BEFORE the
+        // classifier, so it is HELD; the floor signature then discards it; 2 and (final) 0
+        // never surface a "ringing" — only the terminating idle publishes.
+        let mut c = CallClassifier::new();
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // held (pending)
+        c.saw_floor_call(); // classified floor -> held ring discarded
+        assert_eq!(c.on_call_state(2), CallStateAction::Suppress);
+        assert_eq!(c.on_call_state(0), CallStateAction::Publish(0)); // idle (harmless, already idle)
+    }
+
+    #[test]
+    fn classifier_preserves_the_entrance_panel_call() {
+        // The captured entrance sequence: the held leading ring (1) is FLUSHED when the
+        // entrance signature arrives, then 2 -> 4 -> 0 publish normally.
+        let mut c = CallClassifier::new();
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // held (pending)
+        assert_eq!(c.saw_entrance_panel_call(), Some(1)); // flush the held ring
+        assert_eq!(c.on_call_state(2), CallStateAction::Publish(2));
+        assert_eq!(c.on_call_state(4), CallStateAction::Publish(4));
+        assert_eq!(c.on_call_state(6), CallStateAction::Publish(6));
+        assert_eq!(c.on_call_state(0), CallStateAction::Publish(0));
+    }
+
+    #[test]
+    fn classifier_defaults_to_entrance_when_the_classifier_is_missing() {
+        // Defensive: a second ring with no classifier seen must NOT hide a real call.
+        let mut c = CallClassifier::new();
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // held
+        assert_eq!(c.on_call_state(2), CallStateAction::Publish(2)); // promote to entrance
+        // A 4/6 straight from idle (no preceding ring) also publishes.
+        let mut c2 = CallClassifier::new();
+        assert_eq!(c2.on_call_state(4), CallStateAction::Publish(4));
+    }
+
+    #[test]
+    fn reconcile_snapshot_ambiguous_ring_publishes_idle_unless_entrance() {
+        // A fresh classifier (reconnect) treats an ambiguous ringing snapshot (1/2) as NOT-entrance:
+        // it could be a floor call, and a floor call must never leak onto the entrance sensor. But we
+        // must also not leave a stale retained "ringing" showing — so publish IDLE (clears any stale
+        // value) rather than suppressing (which would keep the stale value visible)...
+        let mut c = CallClassifier::new();
+        assert_eq!(c.reconcile_snapshot(1), CallStateAction::Publish(0));
+        assert_eq!(c.reconcile_snapshot(2), CallStateAction::Publish(0));
+        // ...but an entrance-ONLY phase (4/6) is definitive → publish + reclassify from fresh Idle...
+        assert_eq!(c.reconcile_snapshot(6), CallStateAction::Publish(6));
+        // ...and an idle snapshot always publishes (and resets).
+        assert_eq!(c.reconcile_snapshot(0), CallStateAction::Publish(0));
+        // A KNOWN entrance call publishes the actual ambiguous ring snapshot.
+        let mut e = CallClassifier::new();
+        e.saw_entrance_panel_call();
+        assert_eq!(e.reconcile_snapshot(2), CallStateAction::Publish(2));
+    }
+
+    #[test]
+    fn reconcile_snapshot_publishes_idle_during_floor_and_pending() {
+        // A classified floor call must never surface as ringing, and a stale retained "ringing" must
+        // be cleared — so an out-of-band ringing snapshot publishes IDLE (not the ring, not a no-op)
+        // and leaves the Floor classification intact...
+        let mut c = CallClassifier::new();
+        c.saw_floor_call();
+        assert_eq!(c.reconcile_snapshot(1), CallStateAction::Publish(0));
+        assert_eq!(c.reconcile_snapshot(2), CallStateAction::Publish(0));
+        // A still-Pending (held leading ring, not yet classified) also publishes IDLE — surfacing the
+        // out-of-band ringing could pre-empt a floor signature still in flight, so we clear instead.
+        let mut p = CallClassifier::new();
+        assert_eq!(p.on_call_state(1), CallStateAction::Suppress); // Pending(1)
+        assert_eq!(p.reconcile_snapshot(2), CallStateAction::Publish(0));
+    }
+
+    #[test]
+    fn a_floor_call_after_a_missed_terminal_frame_is_still_held() {
+        // Stuck-Entrance repair on the LIVE path: an entrance call's terminal `0` is missed, so the
+        // classifier lingers in Entrance. A floor call then starts BEFORE the authoritative poll
+        // reconciles. Its leading ring-start `1` must be HELD (not published as an entrance ring),
+        // then the floor signature discards it — the floor call never surfaces on the sensor.
+        let mut c = CallClassifier::new();
+        c.saw_entrance_panel_call(); // classified entrance; its terminal 0 is then missed
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // NEW leading ring re-held
+        c.saw_floor_call();
+        assert_eq!(c.on_call_state(2), CallStateAction::Suppress);
+        assert_eq!(c.on_call_state(0), CallStateAction::Publish(0));
+        // Contrast: a `2` from Entrance is a same-call continuation and still publishes.
+        let mut e = CallClassifier::new();
+        e.saw_entrance_panel_call();
+        assert_eq!(e.on_call_state(2), CallStateAction::Publish(2));
+    }
+
+    #[test]
+    fn an_entrance_call_after_a_missed_floor_terminal_frame_is_reclassified() {
+        // Mirror of the stuck-Entrance case: a floor call's terminal `0` is missed, so the
+        // classifier lingers in Floor. An entrance call then starts before the reseed reconciles.
+        // Its leading ring-start `1` must be RE-HELD (not silently dropped) so the entrance
+        // signature can flush it — otherwise the entrance ring would never surface.
+        let mut c = CallClassifier::new();
+        c.saw_floor_call(); // classified floor; its terminal 0 is then missed
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress); // NEW leading ring re-held
+        assert_eq!(c.saw_entrance_panel_call(), Some(1)); // flushed as a real entrance ring
+        assert_eq!(c.on_call_state(2), CallStateAction::Publish(2));
+        assert_eq!(c.on_call_state(0), CallStateAction::Publish(0));
+        // A floor continuation `2` from stale Floor still stays suppressed (not a new call).
+        let mut f = CallClassifier::new();
+        f.saw_floor_call();
+        assert_eq!(f.on_call_state(2), CallStateAction::Suppress);
+        // But an entrance-ONLY phase (4/6) from a stale Floor is definitive evidence of an entrance
+        // call (a floor call never emits these) → publish and reclassify, don't suppress.
+        let mut g = CallClassifier::new();
+        g.saw_floor_call();
+        assert_eq!(g.on_call_state(4), CallStateAction::Publish(4));
+        assert_eq!(g.on_call_state(6), CallStateAction::Publish(6));
+        assert_eq!(g.on_call_state(0), CallStateAction::Publish(0));
+        // An UNRECOGNISED code (never observed) is NOT definitive entrance evidence, so it must not
+        // reclassify a known floor call: the LIVE path suppresses (no stale value to clear), while the
+        // authoritative SNAPSHOT publishes IDLE (clears any stale "ringing") — neither surfaces floor.
+        let mut u = CallClassifier::new();
+        u.saw_floor_call();
+        assert_eq!(u.on_call_state(5), CallStateAction::Suppress);
+        assert_eq!(u.reconcile_snapshot(5), CallStateAction::Publish(0));
+    }
+
+    #[test]
+    fn on_reconnect_resets_every_classification_to_idle() {
+        // A monitor outage can end one call and start another in the gap, so NO carried-over state
+        // is trustworthy — reset all of Pending/Floor/Entrance to Idle. After the reset, an ambiguous
+        // ring snapshot publishes IDLE (proving no stale Entrance can leak a new floor call's ring,
+        // and clearing any stale retained "ringing"), and a new leading ring is held afresh.
+        for setup in [0u8, 1, 4] {
+            let mut c = CallClassifier::new();
+            match setup {
+                1 => {
+                    c.on_call_state(1); // Pending
+                }
+                4 => {
+                    c.on_call_state(4); // Entrance
+                }
+                _ => c.saw_floor_call(), // Floor
+            }
+            c.on_reconnect();
+            // Reset to Idle → an ambiguous authoritative ring publishes IDLE (no leak from stale state,
+            // and any stale retained "ringing" is cleared)...
+            assert_eq!(c.reconcile_snapshot(2), CallStateAction::Publish(0));
+            // ...and a fresh leading ring is HELD (Idle → Pending), not published.
+            assert_eq!(c.on_call_state(1), CallStateAction::Suppress);
+        }
+    }
+
+    #[test]
+    fn reconcile_snapshot_idle_resets_the_classifier() {
+        // The missed-terminal-frame repair: a stuck Entrance classifier is reset to Idle by an
+        // authoritative idle snapshot, so the NEXT floor call's leading ring is HELD (not published
+        // as a false entrance ring).
+        let mut c = CallClassifier::new();
+        c.saw_entrance_panel_call(); // state = Entrance (its terminal 0 was missed)
+        assert_eq!(c.reconcile_snapshot(0), CallStateAction::Publish(0)); // discovers idle + resets
+        // Proof of reset: a subsequent leading ring is now HELD (Pending), not published.
+        assert_eq!(c.on_call_state(1), CallStateAction::Suppress);
+        c.saw_floor_call();
+        assert_eq!(c.on_call_state(2), CallStateAction::Suppress);
     }
 
     #[test]
@@ -441,8 +839,9 @@ mod tests {
         // Other WHO=8 dimensions (volume 41 / mute 33) are not the call-state dimension.
         assert_eq!(parse_call_state("*#8**41*50##"), None);
         assert_eq!(parse_call_state("*#8**33*1##"), None);
-        // The doorbell command is not a dimension report.
+        // The entrance-panel / floor call commands are not dimension reports.
         assert_eq!(parse_call_state("*8*1#1#4#21*112##"), None);
+        assert_eq!(parse_call_state("*8*1#13#2*10##"), None);
         assert_eq!(parse_call_state("garbage"), None);
         // And the volume/mute parsers reject the call-state dimension.
         assert_eq!(parse_volume_report("*#8**35*1*0*0##"), None);

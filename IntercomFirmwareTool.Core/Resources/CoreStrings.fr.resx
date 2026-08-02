@@ -230,6 +230,9 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_PublishTopicWildcard" xml:space="preserve">
     <value>Un sujet MQTT de publication (tous sauf le sujet de réception) ne peut pas contenir les jokers « + » ou « # », ni commencer par « $share/ » (un préfixe réservé aux abonnements).</value>
   </data>
+  <data name="Mqtt_PublishTopicsMustDiffer" xml:space="preserve">
+    <value>Chaque sujet MQTT de publication doit être distinct, sinon deux entités Home Assistant consommeraient les données l'une de l'autre, ou l'état retenu / la disponibilité seraient corrompus.</value>
+  </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>Le sujet de réception MQTT n'est pas un filtre d'abonnement valide : « + » doit occuper un niveau entier et « # » doit être le dernier niveau entier.</value>
   </data>

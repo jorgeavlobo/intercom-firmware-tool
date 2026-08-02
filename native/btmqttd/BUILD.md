@@ -40,7 +40,10 @@ sudo apt-get install -y gcc-arm-linux-gnueabihf
 ## Build
 
 The reproducible flags (linker, self-contained musl, static CRT) live in
-[`.cargo/config.toml`](.cargo/config.toml).
+[`.cargo/config.toml`](.cargo/config.toml). The currently committed binary was
+built with **`rustc 1.94.1`** (recorded in `THIRD_PARTY.md` alongside the
+SHA-256); the exact crate versions are pinned in
+[`Cargo.lock`](Cargo.lock).
 
 ```sh
 export CC_armv7_unknown_linux_musleabihf=arm-linux-gnueabihf-gcc
