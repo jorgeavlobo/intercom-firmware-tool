@@ -330,14 +330,25 @@ impl CallClassifier {
                 CallKind::Floor => CallStateAction::Suppress,
             },
             // 4/6 (answered/in-call phases) are reached ONLY by an entrance-panel call — a floor
-            // call's sequence is `1 → 2 → 0`. So any such code is DEFINITIVE evidence of an entrance
-            // call: (re)classify to Entrance and publish, even from a stale `Floor` left by a floor
-            // call whose terminal `0` was missed across a monitor reconnect. Suppressing here would
-            // hide a real entrance call until its terminal idle (Codex).
-            _ => {
+            // call's sequence is `1 → 2 → 0`. So either is DEFINITIVE evidence of an entrance call:
+            // (re)classify to Entrance and publish, even from a stale `Floor` left by a floor call
+            // whose terminal `0` was missed across a monitor reconnect. Suppressing here would hide a
+            // real entrance call until its terminal idle (Codex).
+            4 | 6 => {
                 self.state = CallKind::Entrance;
                 CallStateAction::Publish(code)
             }
+            // Any OTHER code (`3`/`5`/`7` — never observed for door entry, mapped to the "active"
+            // label). An unrecognised code is NOT definitive evidence of an entrance call, so it must
+            // not reclassify a KNOWN floor call — honour "a floor call never reaches this sensor".
+            // From any other state, fall back to showing it as an entrance call (CodeRabbit).
+            _ => match self.state {
+                CallKind::Floor => CallStateAction::Suppress,
+                _ => {
+                    self.state = CallKind::Entrance;
+                    CallStateAction::Publish(code)
+                }
+            },
         }
     }
 
@@ -369,10 +380,13 @@ impl CallClassifier {
                 self.state = CallKind::Idle;
                 CallStateAction::Publish(0)
             }
-            c if c != 1 && c != 2 => {
+            4 | 6 => {
                 self.state = CallKind::Entrance;
-                CallStateAction::Publish(c)
+                CallStateAction::Publish(code)
             }
+            // 1/2 (ambiguous ring) AND any unrecognised code (`3`/`5`/`7`): publish only from a KNOWN
+            // Entrance; from every other state suppress — an out-of-band unknown code is not evidence
+            // enough to override Floor or to assume entrance from a fresh Idle (CodeRabbit).
             _ => match self.state {
                 CallKind::Entrance => CallStateAction::Publish(code),
                 _ => CallStateAction::Suppress,
@@ -752,6 +766,12 @@ mod tests {
         assert_eq!(g.on_call_state(4), CallStateAction::Publish(4));
         assert_eq!(g.on_call_state(6), CallStateAction::Publish(6));
         assert_eq!(g.on_call_state(0), CallStateAction::Publish(0));
+        // An UNRECOGNISED code (never observed) is NOT definitive entrance evidence, so it must not
+        // reclassify a known floor call — stays suppressed on both the live and snapshot paths.
+        let mut u = CallClassifier::new();
+        u.saw_floor_call();
+        assert_eq!(u.on_call_state(5), CallStateAction::Suppress);
+        assert_eq!(u.reconcile_snapshot(5), CallStateAction::Suppress);
     }
 
     #[test]
