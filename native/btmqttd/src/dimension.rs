@@ -279,10 +279,11 @@ impl CallClassifier {
     /// carried across the reconnect can therefore be trusted for the current dim-35 reading — a
     /// stale `Floor`, `Entrance`, OR `Pending` would mis-handle a new call and could publish a floor
     /// call's ring onto the entrance-panel sensor. Reset to `Idle`: the authoritative reconcile then
-    /// suppresses ambiguous rings (`1`/`2`) and publishes only definitive entrance-only phases
-    /// (`4`/`6`), while live frames after the reconnect reclassify from scratch (Codex). Cost: an
-    /// entrance call merely RINGING across a reconnect is not shown until it is answered (`4`/`6`),
-    /// a live signature arrives, or it goes idle — the accepted price of never leaking a floor call.
+    /// publishes IDLE for ambiguous rings (`1`/`2`) — clearing any stale retained value without ever
+    /// asserting entrance — and publishes only definitive entrance-only phases (`4`/`6`), while live
+    /// frames after the reconnect reclassify from scratch (Codex). Cost: an entrance call merely
+    /// RINGING across a reconnect reads idle until it is answered (`4`/`6`), a live signature arrives,
+    /// or it truly goes idle — the accepted price of never leaking a floor call.
     pub fn on_reconnect(&mut self) {
         self.state = CallKind::Idle;
     }

@@ -40,9 +40,9 @@ pub async fn run(
     // Classifies each call as entrance-panel vs floor and keeps the two independent. Owned here so
     // its lifetime spans reconnects, but RESET to Idle at the start of each session (see
     // `on_reconnect` below): a monitor outage can end one call and start another in the gap, so no
-    // classification survives it — the authoritative reconcile suppresses ambiguous rings and the
-    // post-reconnect live frames reclassify, which is what keeps a floor call off the entrance
-    // sensor across reconnects (Codex).
+    // classification survives it — the authoritative reconcile publishes idle for ambiguous rings
+    // (clearing any stale retained value) and the post-reconnect live frames reclassify, which is
+    // what keeps a floor call off the entrance sensor across reconnects (Codex).
     let classifier = std::sync::Mutex::new(dimension::CallClassifier::new());
     let mut backoff = 0u64;
     loop {
@@ -227,12 +227,13 @@ async fn session(
         Reconcile::SocketClosed => return Ok(()),
         Reconcile::Done { saw_transition: true, .. } => {}
         Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
-            // Reconcile the authoritative snapshot against the live classification, which PERSISTS
-            // across reconnects (see run()): a known FLOOR call — including one carried over a
-            // monitor reconnect — (or a still-Pending, unresolved leading ring) suppresses a ringing
-            // snapshot so it can't reach the entrance-panel sensor; an idle snapshot resets the
-            // classifier. A classifier that is Idle/Entrance here publishes, so a genuine in-progress
-            // ENTRANCE call (or one whose type was never seen) is still reconciled (Codex/Copilot).
+            // Reconcile the authoritative snapshot against the live classification. The classifier is
+            // RESET to Idle at the start of each session (see run()/on_reconnect), so no call type
+            // survives a reconnect: a known FLOOR call (or a still-Pending, unresolved leading ring)
+            // publishes IDLE for a ringing snapshot — clearing any stale retained value while never
+            // surfacing the ring on the entrance-panel sensor; an idle snapshot resets the classifier.
+            // A KNOWN Entrance publishes the ring, and a definitive entrance-only phase (4/6) publishes
+            // and reclassifies, so a genuine in-progress ENTRANCE call is still reconciled (Codex).
             // Bind the action first so the (non-Send) guard is dropped before the await.
             let action = lock_classifier(classifier).reconcile_snapshot(code);
             if let dimension::CallStateAction::Publish(c) = action {
