@@ -1,0 +1,149 @@
+name: release
+
+# Build + publish a downloadable Windows x64 release (issue #79). Tag-driven: pushing a
+# vX.Y.Z tag (or a manual dispatch with a version) builds the self-contained WPF app and
+# creates a DRAFT GitHub Release with a single-file .exe + a self-contained .zip, each with
+# a .sha256, plus a SLSA build-provenance attestation. A human reviews the draft and clicks
+# Publish. The .exe is UNSIGNED for now (see #84); integrity comes from the checksums + the
+# attestation until code signing lands.
+#
+# Context values (inputs, ref, sha) are passed to run: steps via env: — never interpolated
+# directly into a script — to avoid template injection (actionlint/zizmor).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 1.2.0 (a vX.Y.Z tag is created when the draft is published)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One release per ref; do NOT cancel an in-progress publish.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write # create the (draft) Release + upload assets
+      id-token: write # OIDC for the SLSA attestation
+      attestations: write # write the provenance attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gh authenticates via GH_TOKEN below (not git config), so no persisted creds.
+          persist-credentials: false
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Determine version + tag
+        id: ver
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            v="$INPUT_VERSION"
+          else
+            v="$REF_NAME"
+          fi
+          v="${v#v}"   # strip a leading 'v'
+          if ! printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)*$'; then
+            echo "::error::invalid version '$v' (expected SemVer X.Y.Z)"; exit 1
+          fi
+          {
+            echo "version=$v"
+            echo "tag=v$v"
+            echo "base=IntercomFirmwareTool-v$v-win-x64"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing v$v"
+
+      - name: Publish single-file .exe (self-contained, ReadyToRun)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          dotnet publish IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:PublishReadyToRun=true `
+            -p:Version=$env:VERSION `
+            -o out/exe
+
+      - name: Publish self-contained folder (for the .zip)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          dotnet publish IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=false `
+            -p:PublishReadyToRun=true `
+            -p:Version=$env:VERSION `
+            -o out/folder
+
+      - name: Package assets + checksums
+        shell: pwsh
+        env:
+          BASE: ${{ steps.ver.outputs.base }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = $env:BASE
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $exe = Get-ChildItem out/exe -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw 'no .exe produced by the single-file publish' }
+          Copy-Item $exe.FullName (Join-Path dist "$base.exe")
+          Compress-Archive -Path out/folder/* -DestinationPath (Join-Path dist "$base.zip") -Force
+          # SHA-256 sidecar for each primary asset (lowercase hex, two spaces, filename).
+          Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -FilePath "$($_.FullName).sha256" -Encoding ascii -NoNewline
+          }
+          Get-ChildItem dist -File | ForEach-Object { Write-Host $_.Name }
+
+      - name: Attest build provenance (SLSA) for the release assets
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*.zip
+
+      - name: Create / refresh the DRAFT release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # the two primary assets + their .sha256 sidecars.
+          files=(dist/*.exe dist/*.zip dist/*.exe.sha256 dist/*.zip.sha256)
+          target=()
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # On dispatch the tag doesn't exist yet; anchor it to this commit. (A draft
+            # release does not actually create the git tag until it is published.)
+            target=(--target "$COMMIT_SHA")
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — replacing assets."
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" --draft --generate-notes --title "$TAG" "${target[@]}" "${files[@]}"
+          fi
+          echo "Draft release $TAG is ready — review it in the Releases tab and click Publish."
