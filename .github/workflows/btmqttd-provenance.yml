@@ -1,0 +1,69 @@
+name: btmqttd binary provenance
+
+# Rebuild the shipped ARM binary from source on any PR that touches the daemon (or
+# its committed binary / metadata) and fail if the freshly built SHA-256 + size do
+# not match the committed binary, PayloadBinaries.cs, and THIRD_PARTY.md. This is the
+# automated guard against source<->binary drift for the binary-in-repo (issue #72):
+# a source change that lands without a matching rebuild — or a stale/mismatched
+# binary — is caught in review instead of shipping unverified.
+
+on:
+  pull_request:
+    paths:
+      - 'native/btmqttd/**'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd'
+      - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
+      - '.github/workflows/btmqttd-provenance.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provenance:
+    # Pin the runner image: ring's C/asm is compiled by the distro ARM cross-gcc, so
+    # the reproducible SHA is tied to this image's gcc (Ubuntu 24.04 -> gcc 13.x, the
+    # same lineage the committed binary was built with). See BUILD.md.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM cross C compiler (for ring's C/asm)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf
+          arm-linux-gnueabihf-gcc --version | head -1
+
+      - name: Install the pinned Rust toolchain (rust-toolchain.toml)
+        working-directory: native/btmqttd
+        run: |
+          rustup show
+          rustup target add armv7-unknown-linux-musleabihf
+          rustup component add clippy
+          rustc --version && cargo --version
+
+      - name: cargo test (host)
+        working-directory: native/btmqttd
+        run: cargo test --locked
+
+      - name: cargo clippy
+        working-directory: native/btmqttd
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Reproducible release cross-build
+        working-directory: native/btmqttd
+        env:
+          CC_armv7_unknown_linux_musleabihf: arm-linux-gnueabihf-gcc
+          AR_armv7_unknown_linux_musleabihf: arm-linux-gnueabihf-ar
+        run: |
+          # Scrub the runner's CARGO_HOME + workspace prefixes so the binary is
+          # host-independent and its SHA-256 matches the locally built one (BUILD.md).
+          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="-Clinker-flavor=ld.lld -Clink-self-contained=yes -Ctarget-feature=+crt-static --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$(pwd)=/build"
+          cargo build --release --locked --target armv7-unknown-linux-musleabihf
+          file target/armv7-unknown-linux-musleabihf/release/btmqttd
+
+      - name: Verify binary provenance (SHA-256 + size vs source + metadata)
+        run: |
+          native/btmqttd/ci/verify-provenance.sh \
+            native/btmqttd/target/armv7-unknown-linux-musleabihf/release/btmqttd

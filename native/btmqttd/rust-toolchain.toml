@@ -1,0 +1,9 @@
+# Pin the exact toolchain that builds the shipped ARM binary, so a local build and
+# the CI provenance check (.github/workflows/btmqttd-provenance.yml) agree on the
+# compiler — the recorded SHA-256 in PayloadBinaries.cs / THIRD_PARTY.md is only
+# reproducible against this rustc (issue #72). rustup auto-installs this on `cargo`.
+[toolchain]
+channel = "1.94.1"
+components = ["clippy", "rustfmt"]
+targets = ["armv7-unknown-linux-musleabihf"]
+profile = "minimal"

@@ -35,8 +35,8 @@ license texts and per-crate copyright notices travel with the binary in
 | Field | `btmqttd` |
 |---|---|
 | File | `armhf/btmqttd` |
-| Size | 1,384,080 bytes |
-| SHA-256 | `4ff22d35fc324c00dce1e106e4886340912b6fad9f1208f176238ffe7ed092be` |
+| Size | 1,383,056 bytes |
+| SHA-256 | `e324315b153e16627af9da4af9c620c99e39928f4b2ba1fef22502a4eba96db4` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7 (`Tag_CPU_arch: v7`), **hard-float** (`Tag_FP_arch: VFPv3-D16`, `Tag_ABI_VFP_args: VFP registers`; ELF flags `0x5000400`) |
 | Build ID | none (stripped; `rust-lld` emits no GNU build-id note) |
@@ -84,9 +84,22 @@ Rust's self-contained `rust-lld` + bundled musl link our pure-Rust code, and
 `ring`'s small C/asm is compiled with an `arm-linux-gnueabihf` cross-gcc (only to
 object code; the final static link and the runtime libc are musl). The exact
 dependency versions are pinned in
-[`native/btmqttd/Cargo.lock`](../../../native/btmqttd/Cargo.lock). A recipient
-can rebuild the binary from that source + lockfile; the recorded SHA-256 is the
-integrity reference, and `PayloadBinaries` re-verifies it before every install.
+[`native/btmqttd/Cargo.lock`](../../../native/btmqttd/Cargo.lock) and the
+compiler in [`native/btmqttd/rust-toolchain.toml`](../../../native/btmqttd/rust-toolchain.toml)
+(`rustc 1.94.1`). A recipient can rebuild the binary from that source + lockfile;
+the recorded SHA-256 is the integrity reference, and `PayloadBinaries` re-verifies
+it before every install.
+
+The build is **reproducible**: `BUILD.md`'s recipe passes `--remap-path-prefix`
+to scrub the builder's `CARGO_HOME` and workspace prefixes (otherwise the
+`#[track_caller]` panic locations embed absolute host paths that differ between a
+local build and CI), so the same source + lockfile + pinned toolchain yields the
+same SHA-256 on any host. The GitHub Actions workflow
+[`btmqttd-provenance.yml`](../../../.github/workflows/btmqttd-provenance.yml)
+rebuilds on every PR touching the daemon and fails if the freshly built SHA-256 /
+size does not match this table, `PayloadBinaries`, and the committed binary —
+catching source↔binary drift (issue #72). `trim-paths` would be the cleaner scrub
+but is not stabilised in the pinned Cargo, so the explicit remap is used.
 
 **Scope.** The binary is embedded **unconditionally** in
 `IntercomFirmwareTool.Core` (a compiled-in resource), so any distribution of that
