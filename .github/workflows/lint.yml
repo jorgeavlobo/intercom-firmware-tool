@@ -1,8 +1,9 @@
 name: lint
 
 # Static checks for the shell scripts shipped into the firmware image (the device
-# service launcher + watchdog, POSIX sh) and the CI helper (bash). Runs on Linux
-# (free runner). Cheap and broad, so it runs on every PR to be a required check.
+# service launcher + watchdog, POSIX sh) and the CI helper (bash), plus a lint of the
+# GitHub Actions workflows themselves. Runs on Linux (free runner). Cheap and broad, so
+# it runs on every PR to be a required check.
 
 on:
   push:
@@ -24,37 +25,40 @@ jobs:
     # job below does NOT cover). Pinned actionlint image for reproducibility.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: actionlint
         run: |
-          docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:1.7.7 -color
+          docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:1.7.12 -color
 
   shell:
     runs-on: ubuntu-24.04
-    env:
-      # POSIX sh scripts installed onto the device (#!/bin/sh) + the bash CI helper.
-      SH_SCRIPTS: >-
-        IntercomFirmwareTool.Core/Payload/mqtt/bt_service_watchdog
-        IntercomFirmwareTool.Core/Payload/mqtt/btmqttd
-      BASH_SCRIPTS: >-
-        native/btmqttd/ci/verify-provenance.sh
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Syntax check (sh -n / bash -n)
         run: |
           set -euo pipefail
-          for f in $SH_SCRIPTS; do echo "sh -n $f"; sh -n "$f"; done
-          for f in $BASH_SCRIPTS; do echo "bash -n $f"; bash -n "$f"; done
+          # POSIX sh scripts installed onto the device (#!/bin/sh):
+          for f in \
+            IntercomFirmwareTool.Core/Payload/mqtt/bt_service_watchdog \
+            IntercomFirmwareTool.Core/Payload/mqtt/btmqttd; do
+            echo "sh -n $f"; sh -n "$f"
+          done
+          # bash CI helper:
+          echo "bash -n native/btmqttd/ci/verify-provenance.sh"
+          bash -n native/btmqttd/ci/verify-provenance.sh
 
       - name: ShellCheck
         run: |
           set -euo pipefail
-          # shellcheck is preinstalled on the ubuntu runner image. It reads each file's
+          # ShellCheck is preinstalled on the ubuntu runner image; it reads each file's
           # shebang to pick the sh/bash dialect automatically.
           shellcheck --version
-          shellcheck $SH_SCRIPTS $BASH_SCRIPTS
+          shellcheck \
+            IntercomFirmwareTool.Core/Payload/mqtt/bt_service_watchdog \
+            IntercomFirmwareTool.Core/Payload/mqtt/btmqttd \
+            native/btmqttd/ci/verify-provenance.sh

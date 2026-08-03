@@ -17,7 +17,7 @@ on:
   # the heavy job (ARM cross-build): it only runs when the daemon, its committed binary,
   # or its metadata actually change.
   pull_request:
-    paths: &btmqttd_paths
+    paths:
       - 'native/btmqttd/**'
       - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd'
       - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
@@ -25,7 +25,12 @@ on:
       - '.github/workflows/btmqttd-provenance.yml'
   push:
     branches: [master]
-    paths: *btmqttd_paths
+    paths:
+      - 'native/btmqttd/**'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd'
+      - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
+      - '.github/workflows/btmqttd-provenance.yml'
   workflow_dispatch:
 
 permissions:
@@ -43,7 +48,7 @@ jobs:
     # on this runner image's rolling package set. See BUILD.md.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # This job only reads the repo (no push), so don't persist the token in
           # .git/config — avoids credential leakage via the checkout (zizmor artipacked).
@@ -125,7 +130,10 @@ jobs:
         run: |
           # Scrub the runner's CARGO_HOME + workspace prefixes so the binary is
           # host-independent and its SHA-256 matches the locally built one (BUILD.md).
-          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="-Clinker-flavor=ld.lld -Clink-self-contained=yes -Ctarget-feature=+crt-static --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$(pwd)=/build"
+          # Assign build_dir separately from the export so pwd's exit status isn't
+          # masked by export (shellcheck SC2155, via actionlint).
+          build_dir="$(pwd)"
+          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="-Clinker-flavor=ld.lld -Clink-self-contained=yes -Ctarget-feature=+crt-static --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=${build_dir}=/build"
           cargo build --release --locked --target armv7-unknown-linux-musleabihf
           file target/armv7-unknown-linux-musleabihf/release/btmqttd
 
