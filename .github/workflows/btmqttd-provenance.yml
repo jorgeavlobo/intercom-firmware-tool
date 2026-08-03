@@ -1,11 +1,14 @@
 name: btmqttd binary provenance
 
-# Rebuild the shipped ARM binary from source on any PR that touches the daemon (or
-# its committed binary / metadata) and fail if the freshly built SHA-256 + size do
-# not match the committed binary, PayloadBinaries.cs, and THIRD_PARTY.md. This is the
-# automated guard against source<->binary drift for the binary-in-repo (issue #72):
-# a source change that lands without a matching rebuild — or a stale/mismatched
-# binary — is caught in review instead of shipping unverified.
+# On any PR that touches the daemon (or its committed binary / metadata), guard the
+# binary-in-repo against drift (issue #72) in two tiers:
+#   - FATAL: the committed binary's SHA-256 + size must match PayloadBinaries.cs and
+#     THIRD_PARTY.md (deterministic — catches a binary or metadata updated without the
+#     other).
+#   - ADVISORY: rebuild from source and compare; a mismatch is a warning, not a
+#     failure, because the ring C/asm cross-gcc is not yet pinned (a distro gcc bump
+#     changes the object code and thus the SHA). Flips to fatal once the build is
+#     hermetic — tracked in #76.
 
 on:
   pull_request:
