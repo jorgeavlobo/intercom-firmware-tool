@@ -4,8 +4,12 @@
 # free of known RustSec advisories.
 
 [advisories]
-# RustSec advisory DB. Every advisory (vulnerability / unsound / unmaintained) is an
-# error by default.
+# RustSec advisory DB. Under cargo-deny's v2 advisories schema (the default in the pinned
+# action's cargo-deny 0.20.2) there are no per-class severity knobs: every class —
+# vulnerability, unsound AND unmaintained — is deny-by-default, and acceptance is only via
+# the `ignore` list below. (Confirmed in CI: the *unmaintained* rustls-pemfile advisory
+# RUSTSEC-2025-0134 failed the job until it was added to `ignore` — i.e. unmaintained is an
+# error here, unlike cargo-deny's old v1 schema where it defaulted to a warning.)
 yanked = "deny"
 # Documented, tracked exceptions (VEX-style). Every entry below is in the TLS stack that
 # rumqttc 0.24 pulls transitively, and there is NO fix reachable today: the latest rumqttc
