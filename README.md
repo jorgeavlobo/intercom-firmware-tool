@@ -16,7 +16,7 @@ Get-FileHash .\IntercomFirmwareTool-vX.Y.Z-win-x64.exe -Algorithm SHA256
 
 Each release also carries a **SLSA build-provenance attestation** — confirm it was built by this repository's CI:
 
-```
+```bash
 gh attestation verify IntercomFirmwareTool-vX.Y.Z-win-x64.exe --repo jorgeavlobo/intercom-firmware-tool
 ```
 

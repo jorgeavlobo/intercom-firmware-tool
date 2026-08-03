@@ -25,9 +25,11 @@ permissions:
 
 concurrency:
   # One release per version; do NOT cancel an in-progress publish. On a dispatch run
-  # github.ref is the default branch, which would serialize unrelated manual releases —
-  # so key by the requested version (the tag name on a tag push) instead (Copilot).
-  group: release-${{ inputs.version || github.ref_name }}
+  # github.ref is the default branch, which would serialize unrelated manual releases — so
+  # key by the version instead. Prefix the manual input with 'v' (it is entered without one,
+  # e.g. 1.2.0) so a dispatch and a tag push for the same version share one group
+  # (Copilot/CodeRabbit).
+  group: release-${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
