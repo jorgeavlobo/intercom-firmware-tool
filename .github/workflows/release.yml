@@ -9,8 +9,12 @@ name: release
 #
 # The vX.Y.Z git tag is anchored to the built commit at BUILD time (the tag-push event
 # already carries it; a manual dispatch creates it before the draft), never deferred to
-# publish — so the artifact, its attestation, and the tag can never describe different
-# commits. A repo tag-protection ruleset on 'v*' keeps the tag from being moved afterwards.
+# publish. The atomic create-ref stops a CONFLICTING tag, but immutability — the tag not
+# being force-MOVED between anchoring and publish — depends on a repo tag-protection ruleset
+# on 'refs/tags/v*' that restricts UPDATES and DELETIONS (creation stays allowed so this
+# workflow can anchor the tag; no bypass actor that could move release tags). That ruleset
+# is a REQUIRED prerequisite; only with it active can the artifact, its attestation, and the
+# tag never describe different commits. See the README "Cutting a release" note.
 #
 # Context values (inputs, ref, sha) are passed to run: steps via env: — never interpolated
 # directly into a script — to avoid template injection (actionlint/zizmor).
@@ -190,9 +194,10 @@ jobs:
           # release would bind to it while the assets/attestation describe $COMMIT_SHA (Codex,
           # CodeRabbit). So on dispatch we ANCHOR the tag now: create refs/tags/$TAG at
           # $COMMIT_SHA via a create-ref, which is atomic and FAILS (422) if the ref already
-          # exists — closing the window and doubling as the refuse-on-exists guard. From here
-          # the tag is immutable for the later publish. (A repo tag-protection ruleset on 'v*'
-          # is the companion control that stops the tag being force-MOVED afterwards; see #79.)
+          # exists — closing the creation window and doubling as the refuse-on-exists guard.
+          # Keeping the anchored tag from being force-MOVED before publish needs the REQUIRED
+          # 'refs/tags/v*' tag-protection ruleset (restrict updates + deletions); the create-ref
+          # alone only prevents a conflicting creation (Codex/CodeRabbit; see the README note).
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
                  -f ref="refs/tags/${TAG}" -f sha="$COMMIT_SHA" >/dev/null 2>&1; then
@@ -202,14 +207,26 @@ jobs:
           fi
 
           # The tag now exists on both paths (pushed, or just created above), so the release
-          # binds to it — no --target needed, and the published commit cannot differ from the
-          # attested one. If the create fails on a dispatch run, roll back the tag we just made
-          # so a re-run starts clean instead of tripping the guard above.
+          # binds to it — no --target needed, so the published commit cannot differ from the
+          # attested one. `gh release create` uploads assets in SEPARATE API calls, so a nonzero
+          # exit can mean the draft record was created but an asset upload failed — i.e. the draft
+          # EXISTS. On a dispatch failure, delete that draft FIRST (never leave a publishable,
+          # partially-populated draft behind), then best-effort remove the anchor tag. Order
+          # matters: a lingering draft plus a deleted/re-createable tag would let the tag be
+          # recreated at another commit and the draft published against it — the exact mismatch
+          # this anchoring prevents (Codex).
+          #
+          # The tag delete is best-effort (|| true): once the REQUIRED 'v*' ruleset restricts
+          # deletions the workflow token cannot delete the tag, so it no-ops and the (correct,
+          # $COMMIT_SHA) tag is left to remove out-of-band or reuse. We do NOT grant the workflow
+          # a ruleset bypass to force the delete — a bypass that can delete/move release tags
+          # would reopen the very window this anchoring closes (CodeRabbit).
           if ! gh release create "$TAG" --draft --generate-notes --title "$TAG" "${pre[@]}" "${files[@]}"; then
             if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              gh release delete "$TAG" --yes >/dev/null 2>&1 || true
               gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
             fi
-            echo "::error::failed to create the draft release for ${TAG}."
+            echo "::error::failed to create the draft release for ${TAG} (any partial draft was removed; a tag may remain anchored — delete it out-of-band or bump the version before re-running)."
             exit 1
           fi
           echo "Draft release $TAG created (tag ${TAG} anchored at ${COMMIT_SHA}) — review it in the Releases tab and click Publish."
