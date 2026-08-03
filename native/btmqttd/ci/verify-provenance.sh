@@ -41,11 +41,13 @@ size() { stat -c%s "$1"; }
 vend_sha="$(sha "$VENDORED")"; vend_size="$(size "$VENDORED")"
 
 # PayloadBinaries.cs — `Length: 1_383_056,`  /  `Sha256Hex: "e324...",`
-cs_size="$(grep -oP 'Length:\s*\K[0-9_]+' "$CS" | head -1 | tr -d '_')"
-cs_sha="$(grep -oP 'Sha256Hex:\s*"\K[0-9a-fA-F]+' "$CS" | head -1)"
+# grep -m1 (first match) rather than `| head -1`: takes the first record without a
+# pipeline that could SIGPIPE-fail grep under `set -o pipefail` if a second row appears.
+cs_size="$(grep -m1 -oP 'Length:\s*\K[0-9_]+' "$CS" | tr -d '_')"
+cs_sha="$(grep -m1 -oP 'Sha256Hex:\s*"\K[0-9a-fA-F]+' "$CS")"
 # THIRD_PARTY.md — `| Size | 1,383,056 bytes |`  /  `| SHA-256 | ` + backtick-wrapped hex
-md_size="$(grep -oP '\|\s*Size\s*\|\s*\K[0-9,]+' "$MD" | head -1 | tr -d ',')"
-md_sha="$(grep -oP '\|\s*SHA-256\s*\|\s*`\K[0-9a-fA-F]+' "$MD" | head -1)"
+md_size="$(grep -m1 -oP '\|\s*Size\s*\|\s*\K[0-9,]+' "$MD" | tr -d ',')"
+md_sha="$(grep -m1 -oP '\|\s*SHA-256\s*\|\s*`\K[0-9a-fA-F]+' "$MD")"
 
 printf 'committed bin  : size=%s sha=%s\n' "$vend_size" "$vend_sha"
 printf 'PayloadBinaries: size=%s sha=%s\n' "$cs_size" "$cs_sha"
