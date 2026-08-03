@@ -145,3 +145,32 @@ jobs:
           # snapshot above); a mismatch means the vendored binary is out of sync (#76).
           native/btmqttd/ci/verify-provenance.sh --rebuilt \
             native/btmqttd/target/armv7-unknown-linux-musleabihf/release/btmqttd
+
+      - name: qemu-arm smoke test (the shipped binary executes, not just links)
+        run: |
+          # Prove the vendored ARM binary actually RUNS under emulation — it links, loads,
+          # starts the tokio runtime, parses a config and reaches its error path — rather
+          # than merely cross-compiling (BUILD.md's on-device/qemu smoke check). A
+          # present-but-empty config makes btmqttd emit the specific "MQTT_HOST is not set"
+          # error and exit 1; asserting that EXACT message + exit code is the liveness
+          # signal (a generic non-zero exit could just be qemu failing to execute it).
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+          bin="IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd"
+          file "$bin"
+          conf="$(mktemp)"
+          printf '# smoke test: no MQTT_HOST set\n' > "$conf"
+          set +e
+          out="$(BTMQTTD_CONF="$conf" qemu-arm-static "$bin" 2>&1)"
+          code=$?
+          set -e
+          printf 'exit=%s\n--- output ---\n%s\n--------------\n' "$code" "$out"
+          if ! printf '%s' "$out" | grep -q 'MQTT_HOST is not set'; then
+            echo "::error::btmqttd did not emit the expected startup error under qemu-arm — it did not run correctly"
+            exit 1
+          fi
+          if [ "$code" -ne 1 ]; then
+            echo "::error::expected exit code 1 from btmqttd, got ${code}"
+            exit 1
+          fi
+          echo "smoke OK: btmqttd executes under qemu-arm and rejects an empty config as expected"

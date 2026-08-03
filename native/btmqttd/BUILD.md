@@ -35,7 +35,10 @@ sudo apt-get install -y gcc-arm-linux-gnueabihf
 > glibc cross-gcc above only *compiles* ring's C to object code; the final static
 > link (and the runtime libc) is **musl** via `rust-lld` — ring uses only
 > ABI-stable libc functions, and the static link resolves every symbol against musl.
-> Confirm on-device (or under qemu-arm) as part of the smoke test.
+> This is confirmed automatically: the provenance workflow runs the vendored binary
+> under `qemu-arm-static` (a present-but-empty config makes it emit "MQTT_HOST is not
+> set" and exit 1), proving it executes on the armv7 target — not just links. Confirm
+> on real hardware before a release.
 
 ## Build
 
