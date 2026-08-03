@@ -29,7 +29,7 @@ concurrency:
   # key by the version instead. Prefix the manual input with 'v' (it is entered without one,
   # e.g. 1.2.0) so a dispatch and a tag push for the same version share one group
   # (Copilot/CodeRabbit).
-  group: release-${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+  group: release-${{ inputs.version && (startsWith(inputs.version, 'v') && inputs.version || format('v{0}', inputs.version)) || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -155,17 +155,15 @@ jobs:
             # release does not actually create the git tag until it is published.)
             target=(--target "$COMMIT_SHA")
           fi
+          # Refuse if ANY release for this tag already exists (draft or published) rather
+          # than clobbering it. gh release upload --clobber deletes-then-uploads each asset
+          # non-atomically and can't enforce draft state, so a re-run could race a manual
+          # publish, briefly drop assets, or attach a different commit's build to an existing
+          # release. Deleting the stale draft (or bumping the version) is an explicit,
+          # auditable action; overwriting in place is not (Codex/CodeRabbit).
           if gh release view "$TAG" >/dev/null 2>&1; then
-            # Only refresh a DRAFT; never overwrite the assets of an already-published
-            # release (a re-run must not tamper with a public release) (Copilot).
-            is_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
-            if [ "$is_draft" != "true" ]; then
-              echo "::error::release $TAG already exists and is PUBLISHED — refusing to overwrite its assets. Bump the version."
-              exit 1
-            fi
-            echo "Draft $TAG already exists — replacing its assets."
-            gh release upload "$TAG" "${files[@]}" --clobber
-          else
-            gh release create "$TAG" --draft --generate-notes --title "$TAG" "${target[@]}" "${files[@]}"
+            echo "::error::a release for $TAG already exists — delete that (draft) release or bump the version, then re-run. Not overwriting it."
+            exit 1
           fi
-          echo "Draft release $TAG is ready — review it in the Releases tab and click Publish."
+          gh release create "$TAG" --draft --generate-notes --title "$TAG" "${target[@]}" "${files[@]}"
+          echo "Draft release $TAG created — review it in the Releases tab and click Publish."
