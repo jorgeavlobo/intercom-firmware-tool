@@ -3,12 +3,9 @@ name: security
 # Supply-chain / vulnerability scans on GitHub's free runners (issue #14):
 #   - dotnet-vulnerable: known-vulnerable NuGet packages (direct + transitive).
 #   - cargo-deny:        RustSec advisories + a permissive-only license policy for btmqttd.
+#   - dependency-review: block a PR that ADDS a vulnerable/copyleft dependency (requires the
+#                        repo's Dependency Graph feature, which is enabled).
 # Same trigger model as the other workflows: PR (the gate) + push:master (health) + manual.
-#
-# A `dependency-review` job (block a PR that ADDS a vulnerable/copyleft dependency) is a
-# natural third scan, but actions/dependency-review-action requires the repo's Dependency
-# Graph feature to be enabled (Settings -> Advanced Security -> Dependency graph); it errors
-# "not supported on this repository" until then. Add it once that setting is on.
 
 on:
   push:
@@ -84,3 +81,23 @@ jobs:
           manifest-path: native/btmqttd/Cargo.toml
           # Runs advisories + licenses + bans + sources against native/btmqttd/deny.toml.
           command: check
+
+  dependency-review:
+    # PR-only: block a pull request that INTRODUCES a dependency (NuGet or Cargo) with a
+    # known vulnerability or a non-permissive license. Complements cargo-deny (full existing
+    # tree) by guarding the incremental change via GitHub's dependency graph.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+          # Permissive-only ALLOW-list (SPDX ids), mirroring the cargo-deny policy. An
+          # allow-list blocks any non-permissive license — including copyleft we didn't
+          # enumerate (EPL, CDDL, GPL/LGPL/MPL/AGPL) — which a deny-list would miss
+          # (Codex/Copilot). Covers the licenses our current NuGet + Cargo deps use.
+          allow-licenses: MIT, Apache-2.0, ISC, BSD-2-Clause, BSD-3-Clause, Unicode-3.0, Unlicense, 0BSD, Zlib, BSL-1.0
