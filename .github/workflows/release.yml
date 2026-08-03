@@ -65,10 +65,12 @@ jobs:
             v="$REF_NAME"
           fi
           v="${v#v}"   # strip a leading 'v'
-          # Strict SemVer 2.0.0: core with no leading zeros, plus an OPTIONAL single
-          # prerelease and single build-metadata section. This value becomes both the git
-          # tag/release name and the MSBuild Version, so reject anything malformed (Copilot).
-          if ! printf '%s' "$v" | grep -qE '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+          # Strict SemVer 2.0.0 (this value becomes the git tag AND the MSBuild Version):
+          # core with no leading zeros; an optional dot-separated prerelease where NUMERIC
+          # identifiers may not have leading zeros (alphanumerics may); optional build
+          # metadata (Copilot/CodeRabbit).
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if ! printf '%s' "$v" | grep -qE "$semver"; then
             echo "::error::invalid version '$v' (expected SemVer 2.0.0, e.g. 1.2.3 or 1.2.3-rc.1)"; exit 1
           fi
           {
