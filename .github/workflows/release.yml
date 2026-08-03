@@ -73,12 +73,19 @@ jobs:
           if ! printf '%s' "$v" | grep -qE "$semver"; then
             echo "::error::invalid version '$v' (expected SemVer 2.0.0, e.g. 1.2.3 or 1.2.3-rc.1)"; exit 1
           fi
+          # A SemVer prerelease (e.g. 1.2.3-rc.1) → mark the GitHub Release as a prerelease so
+          # it isn't presented as the Latest/production release. The prerelease is the part
+          # after the first '-' but BEFORE any '+' build metadata, so strip build metadata
+          # first (a '-' inside '+build' does not make it a prerelease) (Codex).
+          core_and_pre="${v%%+*}"
+          if [ "$core_and_pre" != "${core_and_pre#*-}" ]; then prerelease=true; else prerelease=false; fi
           {
             echo "version=$v"
             echo "tag=v$v"
             echo "base=IntercomFirmwareTool-v$v-win-x64"
+            echo "prerelease=$prerelease"
           } >> "$GITHUB_OUTPUT"
-          echo "Releasing v$v"
+          echo "Releasing v$v (prerelease=$prerelease)"
 
       # SharpExt4.dll is a mixed-mode C++/CLI assembly (it imports Ijwhost.dll) that can't be
       # loaded from the in-memory single-file bundle, and the app checks for SharpExt4 /
@@ -145,6 +152,7 @@ jobs:
           TAG: ${{ steps.ver.outputs.tag }}
           EVENT_NAME: ${{ github.event_name }}
           COMMIT_SHA: ${{ github.sha }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
         run: |
           set -euo pipefail
           # the two primary assets + their .sha256 sidecars.
@@ -154,6 +162,12 @@ jobs:
             # On dispatch the tag doesn't exist yet; anchor it to this commit. (A draft
             # release does not actually create the git tag until it is published.)
             target=(--target "$COMMIT_SHA")
+          fi
+          # A SemVer prerelease (1.2.3-rc.1) is marked as a GitHub prerelease so it is not
+          # surfaced as Latest/production (Codex).
+          pre=()
+          if [ "$PRERELEASE" = "true" ]; then
+            pre=(--prerelease)
           fi
           # Refuse if ANY release for this tag already exists (draft or published) rather
           # than clobbering it. gh release upload --clobber deletes-then-uploads each asset
@@ -165,5 +179,5 @@ jobs:
             echo "::error::a release for $TAG already exists — delete that (draft) release or bump the version, then re-run. Not overwriting it."
             exit 1
           fi
-          gh release create "$TAG" --draft --generate-notes --title "$TAG" "${target[@]}" "${files[@]}"
+          gh release create "$TAG" --draft --generate-notes --title "$TAG" "${target[@]}" "${pre[@]}" "${files[@]}"
           echo "Draft release $TAG created — review it in the Releases tab and click Publish."
