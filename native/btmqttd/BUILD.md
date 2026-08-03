@@ -36,9 +36,9 @@ sudo apt-get install -y gcc-arm-linux-gnueabihf
 > link (and the runtime libc) is **musl** via `rust-lld` — ring uses only
 > ABI-stable libc functions, and the static link resolves every symbol against musl.
 > This is confirmed automatically: the provenance workflow runs the vendored binary
-> under `qemu-arm-static` (a present-but-empty config makes it emit "MQTT_HOST is not
-> set" and exit 1), proving it executes on the armv7 target — not just links. Confirm
-> on real hardware before a release.
+> under `qemu-arm-static` (a present-but-empty config makes it print exactly
+> `btmqttd: MQTT_HOST is not set in the config` and exit 1), proving it executes on the
+> armv7 target — not just links. Confirm on real hardware before a release.
 
 ## Build
 

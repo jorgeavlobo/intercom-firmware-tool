@@ -151,9 +151,11 @@ jobs:
           # Prove the vendored ARM binary actually RUNS under emulation — it links, loads,
           # starts the tokio runtime, parses a config and reaches its error path — rather
           # than merely cross-compiling (BUILD.md's on-device/qemu smoke check). A
-          # present-but-empty config makes btmqttd emit the specific "MQTT_HOST is not set"
-          # error and exit 1; asserting that EXACT message + exit code is the liveness
-          # signal (a generic non-zero exit could just be qemu failing to execute it).
+          # present-but-empty config makes btmqttd emit exactly this line and exit 1;
+          # asserting the FULL line (fixed-string, not a loose substring) + exit code is
+          # the liveness signal — a generic non-zero exit could just be qemu failing to
+          # execute it, and a substring could match an unrelated error mentioning the token.
+          expected='btmqttd: MQTT_HOST is not set in the config'
           sudo apt-get update
           sudo apt-get install -y qemu-user-static
           bin="IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd"
@@ -165,8 +167,8 @@ jobs:
           code=$?
           set -e
           printf 'exit=%s\n--- output ---\n%s\n--------------\n' "$code" "$out"
-          if ! printf '%s' "$out" | grep -q 'MQTT_HOST is not set'; then
-            echo "::error::btmqttd did not emit the expected startup error under qemu-arm — it did not run correctly"
+          if ! printf '%s' "$out" | grep -qF "$expected"; then
+            echo "::error::btmqttd did not emit the expected line ('${expected}') under qemu-arm — it did not run correctly"
             exit 1
           fi
           if [ "$code" -ne 1 ]; then
