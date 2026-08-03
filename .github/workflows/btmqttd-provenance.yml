@@ -40,7 +40,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-arm-linux-gnueabihf
-          arm-linux-gnueabihf-gcc --version | head -1
+          # Print the compiler version WITHOUT a pipeline: the runner's default shell is
+          # `bash -eo pipefail`, under which `gcc --version | head -1` could fail the step
+          # if gcc got SIGPIPE when head closes the pipe early (Copilot). Capture once and
+          # print just the first line via parameter expansion.
+          gcc_version="$(arm-linux-gnueabihf-gcc --version)"
+          printf '%s\n' "${gcc_version%%$'\n'*}"
 
       - name: Install the pinned Rust toolchain (rust-toolchain.toml)
         run: |
