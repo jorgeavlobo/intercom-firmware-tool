@@ -57,7 +57,10 @@ jobs:
             Write-Error "dotnet list package failed (exit $code) — vulnerability data may be incomplete."
             exit 1
           }
-          $json = $out | ConvertFrom-Json
+          # `$out` is a string[] (one element per line) from the native command; join it
+          # into a single string before parsing so multi-line/pretty-printed JSON is handled
+          # independently of PowerShell version (Copilot).
+          $json = $out | Out-String | ConvertFrom-Json
           # Collect audit/restore problems from EVERY level dotnet list can report them —
           # root, per-project, and per-framework — flattening explicitly (AddRange of each
           # flat array) so nothing is missed and we avoid arrays-of-arrays (Copilot). Any
