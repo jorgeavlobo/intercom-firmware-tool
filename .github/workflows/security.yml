@@ -96,8 +96,11 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: low
-          # Permissive-only ALLOW-list (SPDX ids), mirroring the cargo-deny policy. An
-          # allow-list blocks any non-permissive license — including copyleft we didn't
-          # enumerate (EPL, CDDL, GPL/LGPL/MPL/AGPL) — which a deny-list would miss
-          # (Codex/Copilot). Covers the licenses our current NuGet + Cargo deps use.
+          # Permissive-only ALLOW-list (SPDX ids). This is a permissive *superset* of the
+          # cargo-deny license allow-list (native/btmqttd/deny.toml) — broadened with common
+          # permissive licenses (BSD-2-Clause, Unlicense, 0BSD, Zlib, BSL-1.0) because
+          # dependency-review spans BOTH the NuGet and Cargo graphs, not just btmqttd. Same
+          # intent (permissive-only): the allow-list blocks any non-permissive license,
+          # including copyleft we didn't enumerate (EPL, CDDL, GPL/LGPL/MPL/AGPL) — which a
+          # deny-list would miss (Codex/Copilot).
           allow-licenses: MIT, Apache-2.0, ISC, BSD-2-Clause, BSD-3-Clause, Unicode-3.0, Unlicense, 0BSD, Zlib, BSL-1.0
