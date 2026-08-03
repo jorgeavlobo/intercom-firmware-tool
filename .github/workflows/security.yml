@@ -58,9 +58,20 @@ jobs:
             exit 1
           }
           $json = $out | ConvertFrom-Json
-          $problems = @($json.problems) + @($json.projects.problems) | Where-Object { $_ }
+          # Collect audit/restore problems from EVERY level dotnet list can report them —
+          # root, per-project, and per-framework — flattening explicitly (AddRange of each
+          # flat array) so nothing is missed and we avoid arrays-of-arrays (Copilot). Any
+          # problem => vulnerability data may be incomplete => fail closed.
+          $problems = [System.Collections.Generic.List[object]]::new()
+          if ($json.problems) { $problems.AddRange(@($json.problems)) }
+          foreach ($project in @($json.projects)) {
+            if ($project.problems) { $problems.AddRange(@($project.problems)) }
+            foreach ($fw in @($project.frameworks)) {
+              if ($fw.problems) { $problems.AddRange(@($fw.problems)) }
+            }
+          }
           if ($problems.Count -gt 0) {
-            $problems | ForEach-Object { Write-Host "AUDIT PROBLEM: [$($_.level)] $($_.text)" }
+            foreach ($p in $problems) { Write-Host "AUDIT PROBLEM: [$($p.level)] $($p.text)" }
             Write-Error "NuGet audit reported problems (incomplete vulnerability data) — failing closed."
             exit 1
           }
