@@ -45,7 +45,7 @@ jobs:
       - name: Install the pinned Rust toolchain (rust-toolchain.toml)
         run: |
           # Read the channel pinned by rust-toolchain.toml and install it explicitly BY NAME,
-          # with its declared target + clippy component. Installing by name (not a bare
+          # with its declared target + components. Installing by name (not a bare
           # `rustup toolchain install`, which is ambiguous, nor relying on the runner's
           # default or on auto-install) makes the toolchain deterministic (Copilot). The
           # cargo steps below run in native/btmqttd and select this channel via the
@@ -58,10 +58,12 @@ jobs:
           echo "pinned channel: $channel"
           # Install both components rust-toolchain.toml declares (clippy + rustfmt) so
           # the CI toolchain matches the repo's pinned toolchain exactly and nothing is
-          # implicitly downloaded on first use in the directory (Copilot).
+          # implicitly downloaded on first use in the directory (Copilot). `--component`
+          # takes a COMMA-separated list; a space-separated `--component clippy rustfmt`
+          # would parse `rustfmt` as a toolchain name (not a component) and rustup errors out.
           rustup toolchain install "$channel" --profile minimal \
             --target armv7-unknown-linux-musleabihf \
-            --component clippy rustfmt
+            --component clippy,rustfmt
           rustup run "$channel" rustc --version
 
       - name: cargo test (host)
