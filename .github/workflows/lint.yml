@@ -44,14 +44,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Syntax check (sh -n / bash -n)
+      - name: Syntax check (dash -n / bash -n)
         run: |
           set -euo pipefail
-          # POSIX sh scripts installed onto the device (#!/bin/sh):
+          # Device scripts are #!/bin/sh — validate POSIX syntax with dash *explicitly*
+          # (issue #14), so the dialect is stable regardless of what /bin/sh resolves to
+          # on the runner. dash ships with ubuntu-24.04 (it is /bin/sh there).
           for f in \
             IntercomFirmwareTool.Core/Payload/mqtt/bt_service_watchdog \
             IntercomFirmwareTool.Core/Payload/mqtt/btmqttd; do
-            echo "sh -n $f"; sh -n "$f"
+            echo "dash -n $f"; dash -n "$f"
           done
           # bash CI helper:
           echo "bash -n native/btmqttd/ci/verify-provenance.sh"
