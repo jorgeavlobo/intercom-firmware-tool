@@ -28,6 +28,10 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          # This job only reads the repo (no push), so don't persist the token in
+          # .git/config — avoids credential leakage via the checkout (zizmor artipacked).
+          persist-credentials: false
 
       - name: Install ARM cross C compiler (for ring's C/asm)
         run: |
@@ -69,7 +73,10 @@ jobs:
           cargo build --release --locked --target armv7-unknown-linux-musleabihf
           file target/armv7-unknown-linux-musleabihf/release/btmqttd
 
-      - name: Verify binary provenance (SHA-256 + size vs source + metadata)
+      - name: Verify binary provenance (metadata FATAL; reproduction advisory, #76)
         run: |
-          native/btmqttd/ci/verify-provenance.sh \
+          # Fatal: committed binary == PayloadBinaries == THIRD_PARTY (deterministic).
+          # Advisory: rebuilt binary == committed binary (the ring cross-gcc is not yet
+          # pinned, so a gcc change can alter the SHA — enforced once hermetic, #76).
+          native/btmqttd/ci/verify-provenance.sh --rebuilt \
             native/btmqttd/target/armv7-unknown-linux-musleabihf/release/btmqttd

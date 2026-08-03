@@ -90,15 +90,20 @@ compiler in [`native/btmqttd/rust-toolchain.toml`](../../../native/btmqttd/rust-
 the recorded SHA-256 is the integrity reference, and `PayloadBinaries` re-verifies
 it before every install.
 
-The build is **reproducible**: `BUILD.md`'s recipe passes `--remap-path-prefix`
-to scrub the builder's `CARGO_HOME` and workspace prefixes (otherwise the
-`#[track_caller]` panic locations embed absolute host paths that differ between a
-local build and CI), so the same source + lockfile + pinned toolchain yields the
-same SHA-256 on any host. The GitHub Actions workflow
+The build is **reproducible within a pinned environment**: `BUILD.md`'s recipe
+passes `--remap-path-prefix` to scrub the builder's `CARGO_HOME` and workspace
+prefixes (otherwise the `#[track_caller]` panic locations embed absolute host paths
+that differ between a local build and CI), so the same source + lockfile + pinned
+`rustc` **and the same `ring` C/asm cross-gcc** yield the same SHA-256. The Rust
+side is pinned by `Cargo.lock` + `rust-toolchain.toml`; the cross-gcc is **not**
+fully pinned yet (the CI runner installs the distro `gcc-arm-linux-gnueabihf`, a
+mutable input), so a gcc change can alter `ring`'s object code and thus the SHA —
+true bit-for-bit reproducibility across hosts requires a digest-pinned build
+container (tracked in issue #76). The GitHub Actions workflow
 [`btmqttd-provenance.yml`](../../../.github/workflows/btmqttd-provenance.yml)
-rebuilds on every PR touching the daemon and fails if the freshly built SHA-256 /
-size does not match this table, `PayloadBinaries`, and the committed binary —
-catching source↔binary drift (issue #72). `trim-paths` would be the cleaner scrub
+rebuilds on every PR touching the daemon: the metadata-consistency check (committed
+binary ↔ this table ↔ `PayloadBinaries`) is enforced, and the source↔binary
+reproduction is reported (issue #72). `trim-paths` would be the cleaner path scrub
 but is not stabilised in the pinned Cargo, so the explicit remap is used.
 
 **Scope.** The binary is embedded **unconditionally** in

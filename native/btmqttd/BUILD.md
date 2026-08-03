@@ -84,19 +84,27 @@ Then update the embedded copy and its provenance:
 1. Copy the binary to `IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd`.
 2. Update the `Length` + `Sha256Hex` in `PayloadBinaries` (`MqttInstaller`).
 3. Update the `btmqttd` entry in `Payload/vendor/THIRD_PARTY.md`.
-4. From the **repo root**, confirm the four records agree:
+4. From the **repo root**, confirm the records agree (and, with `--rebuilt`, that the
+   fresh build reproduces the committed binary):
 
    ```sh
-   native/btmqttd/ci/verify-provenance.sh \
+   native/btmqttd/ci/verify-provenance.sh --rebuilt \
      native/btmqttd/target/armv7-unknown-linux-musleabihf/release/btmqttd
    ```
 
-This same check runs in CI on every PR that touches the daemon
-([`.github/workflows/btmqttd-provenance.yml`](../../.github/workflows/btmqttd-provenance.yml)):
-it rebuilds from source with the reproducible recipe and fails if the freshly built
-SHA-256 / size do not match the committed binary, `PayloadBinaries`, and
-`THIRD_PARTY.md` — so a source change without a matching rebuild (or vice-versa) is
-caught in review (issue #72).
+This runs in CI on every PR that touches the daemon
+([`.github/workflows/btmqttd-provenance.yml`](../../.github/workflows/btmqttd-provenance.yml)),
+in two tiers:
+
+- **Metadata consistency — enforced (fatal).** The committed binary's SHA-256 + size
+  must equal `PayloadBinaries` and `THIRD_PARTY.md`. Deterministic; catches a binary or
+  metadata updated without the other.
+- **Source→binary reproduction — advisory.** CI rebuilds and compares to the committed
+  binary, but a mismatch is reported (not failed), because the `ring` cross-gcc is not
+  yet pinned (a distro gcc update can change the object code and the SHA). Making this
+  fatal needs a hermetic, digest-pinned build environment — tracked in **#76**. Until
+  then, a source change without a matching rebuild is surfaced as a CI warning; keep the
+  vendored binary in sync per the steps above.
 
 ## Host checks (fast iteration)
 
