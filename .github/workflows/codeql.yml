@@ -1,0 +1,43 @@
+name: codeql
+
+# CodeQL static analysis (SAST) for the C# code (App + Core). Free for public repos;
+# results land in the repo's Security -> Code scanning tab. Uses the buildless C#
+# analyzer (build-mode: none): no Windows/WPF build needed — which also sidesteps Core's
+# mixed-mode native SharpExt4 reference — so this runs cheaply on Linux. Runs on PRs (the
+# gate), pushes to master, a weekly schedule (catches newly-published query updates on
+# unchanged code), and on demand.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: '23 4 * * 1' # Mondays 04:23 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze (csharp)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write # upload SARIF results to the code-scanning API
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5
+        with:
+          languages: csharp
+          build-mode: none
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@e60ea984bd3baa95954f2856bcf24f9eaba46637 # v3.37.5
+        with:
+          category: "/language:csharp"
