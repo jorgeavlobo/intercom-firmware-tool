@@ -38,9 +38,15 @@ jobs:
       - name: Install the pinned Rust toolchain (rust-toolchain.toml)
         working-directory: native/btmqttd
         run: |
+          # rust-toolchain.toml pins the channel here; `rustup show` materialises it
+          # (installing the target + clippy component it lists). Then re-add the
+          # target/component to the ACTIVE (pinned) toolchain EXPLICITLY, so they can
+          # never land on the runner's stray default toolchain (Copilot). Idempotent.
           rustup show
-          rustup target add armv7-unknown-linux-musleabihf
-          rustup component add clippy
+          toolchain="$(rustup show active-toolchain | cut -d' ' -f1)"
+          echo "active toolchain: $toolchain"
+          rustup target add --toolchain "$toolchain" armv7-unknown-linux-musleabihf
+          rustup component add --toolchain "$toolchain" clippy
           rustc --version && cargo --version
 
       - name: cargo test (host)
