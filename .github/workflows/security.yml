@@ -1,0 +1,137 @@
+name: security
+
+# Supply-chain / vulnerability scans on GitHub's free runners (issue #14):
+#   - dotnet-vulnerable: known-vulnerable NuGet packages (direct + transitive).
+#   - cargo-deny:        RustSec advisories + a permissive-only license policy for btmqttd.
+#   - dependency-review: block a PR that ADDS a vulnerable/copyleft dependency (requires the
+#                        repo's Dependency Graph feature, which is enabled).
+# Same trigger model as the other workflows: PR (the gate) + push:master (health) + manual.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dotnet-vulnerable:
+    # Flag known-vulnerable NuGet packages against the GitHub Advisory DB. Windows so the
+    # net10.0-windows App restores exactly like the build gate (Core pulls in the native
+    # SharpExt4 reference).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore IntercomFirmwareTool.slnx
+
+      - name: Audit NuGet packages (fail on any vulnerability)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Machine-readable output (--format json) rather than grepping a human-readable
+          # English string: robust against wording/localization changes and shell-independent
+          # (Copilot).
+          $out = dotnet list IntercomFirmwareTool.slnx package --vulnerable --include-transitive --format json
+          $code = $LASTEXITCODE
+          Write-Host $out
+          # Fail CLOSED on incomplete data: `dotnet list` can emit valid JSON and exit 0
+          # while recording an unreachable audit source as a `problems` entry — which would
+          # otherwise let a vulnerable package pass unseen (CodeRabbit). Treat a non-zero
+          # exit, or any reported problem, as a failure.
+          if ($code -ne 0) {
+            Write-Error "dotnet list package failed (exit $code) — vulnerability data may be incomplete."
+            exit 1
+          }
+          # `$out` is a string[] (one element per line) from the native command; join it
+          # into a single string before parsing so multi-line/pretty-printed JSON is handled
+          # independently of PowerShell version (Copilot).
+          $json = $out | Out-String | ConvertFrom-Json
+          # Collect audit/restore problems from EVERY level dotnet list can report them —
+          # root, per-project, and per-framework — flattening explicitly (AddRange of each
+          # flat array) so nothing is missed and we avoid arrays-of-arrays (Copilot). Any
+          # problem => vulnerability data may be incomplete => fail closed.
+          $problems = [System.Collections.Generic.List[object]]::new()
+          if ($json.problems) { $problems.AddRange(@($json.problems)) }
+          foreach ($project in @($json.projects)) {
+            if ($project.problems) { $problems.AddRange(@($project.problems)) }
+            foreach ($fw in @($project.frameworks)) {
+              if ($fw.problems) { $problems.AddRange(@($fw.problems)) }
+            }
+          }
+          if ($problems.Count -gt 0) {
+            foreach ($p in $problems) { Write-Host "AUDIT PROBLEM: [$($p.level)] $($p.text)" }
+            Write-Error "NuGet audit reported problems (incomplete vulnerability data) — failing closed."
+            exit 1
+          }
+          # Fail when any top-level or transitive package has a non-empty `vulnerabilities`.
+          $found = $false
+          foreach ($project in $json.projects) {
+            foreach ($fw in @($project.frameworks)) {
+              foreach ($pkg in (@($fw.topLevelPackages) + @($fw.transitivePackages))) {
+                if ($pkg -and $pkg.vulnerabilities -and @($pkg.vulnerabilities).Count -gt 0) {
+                  $found = $true
+                  foreach ($v in @($pkg.vulnerabilities)) {
+                    Write-Host "VULNERABLE: $($pkg.id) $($pkg.resolvedVersion) [$($v.severity)] $($v.advisoryurl)"
+                  }
+                }
+              }
+            }
+          }
+          if ($found) {
+            Write-Error "Vulnerable NuGet packages found (see the list above)."
+            exit 1
+          }
+          Write-Host "OK: no vulnerable NuGet packages, no audit problems."
+
+  cargo-deny:
+    # RustSec advisories + license policy (permissive-only, no copyleft) for btmqttd,
+    # per native/btmqttd/deny.toml. Enforces the THIRD_PARTY.md guarantee.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          manifest-path: native/btmqttd/Cargo.toml
+          # Runs advisories + licenses + bans + sources against native/btmqttd/deny.toml.
+          command: check
+
+  dependency-review:
+    # PR-only: block a pull request that INTRODUCES a dependency (NuGet or Cargo) with a
+    # known vulnerability or a non-permissive license. Complements cargo-deny (full existing
+    # tree) by guarding the incremental change via GitHub's dependency graph.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+          # Permissive-only ALLOW-list (SPDX ids). This is a permissive *superset* of the
+          # cargo-deny license allow-list (native/btmqttd/deny.toml) — broadened with common
+          # permissive licenses (BSD-2-Clause, Unlicense, 0BSD, Zlib, BSL-1.0) because
+          # dependency-review spans BOTH the NuGet and Cargo graphs, not just btmqttd. Same
+          # intent (permissive-only): the allow-list blocks any non-permissive license,
+          # including copyleft we didn't enumerate (EPL, CDDL, GPL/LGPL/MPL/AGPL) — which a
+          # deny-list would miss (Codex/Copilot).
+          allow-licenses: MIT, Apache-2.0, ISC, BSD-2-Clause, BSD-3-Clause, Unicode-3.0, Unlicense, 0BSD, Zlib, BSL-1.0
