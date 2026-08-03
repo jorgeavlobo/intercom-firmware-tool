@@ -1,0 +1,45 @@
+name: build
+
+# Compile gate for the .NET solution. The app (IntercomFirmwareTool.App) targets
+# net10.0-windows (WPF) and the core (IntercomFirmwareTool.Core) references the
+# mixed-mode C++/CLI, native-x64 SharpExt4.dll — so the whole thing is Windows/x64
+# only and cannot be built on Linux. This job builds it on a Windows runner (free for
+# public repos), giving the App code a real compile check on every push/PR. The App
+# has a ProjectReference to Core, so building the App builds the whole solution.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Compile-only job (no push): don't persist the token in .git/config
+          # (zizmor artipacked).
+          persist-credentials: false
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: .NET info
+        run: dotnet --info
+
+      - name: Restore
+        run: dotnet restore IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj
+
+      - name: Build (Release)
+        # Building the App transitively builds Core. PlatformTarget=x64 is set in the
+        # csprojs (required by the native SharpExt4/Ijwhost dependency), so no explicit
+        # platform flag is needed here. Warnings-as-errors is intentionally NOT set yet;
+        # this gate first establishes that the solution compiles at all.
+        run: dotnet build IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj -c Release --no-restore
