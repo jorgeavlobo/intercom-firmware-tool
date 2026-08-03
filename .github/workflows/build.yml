@@ -16,6 +16,12 @@ on:
 permissions:
   contents: read
 
+# Cancel an in-progress run when the same ref (PR branch) is pushed again — faster
+# feedback, no wasted runner minutes on superseded commits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
@@ -35,11 +41,11 @@ jobs:
         run: dotnet --info
 
       - name: Restore
-        run: dotnet restore IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj
+        run: dotnet restore IntercomFirmwareTool.slnx
 
       - name: Build (Release)
-        # Building the App transitively builds Core. PlatformTarget=x64 is set in the
-        # csprojs (required by the native SharpExt4/Ijwhost dependency), so no explicit
-        # platform flag is needed here. Warnings-as-errors is intentionally NOT set yet;
-        # this gate first establishes that the solution compiles at all.
-        run: dotnet build IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj -c Release --no-restore
+        # Build the whole solution (Core + App). PlatformTarget=x64 is set in the csprojs
+        # (required by the native SharpExt4/Ijwhost dependency), so no explicit platform
+        # flag is needed here. Warnings-as-errors is intentionally NOT set yet; this gate
+        # first establishes that the solution compiles at all.
+        run: dotnet build IntercomFirmwareTool.slnx -c Release --no-restore

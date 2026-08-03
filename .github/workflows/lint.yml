@@ -1,0 +1,47 @@
+name: lint
+
+# Static checks for the shell scripts shipped into the firmware image (the device
+# service launcher + watchdog, POSIX sh) and the CI helper (bash). Runs on Linux
+# (free runner). Cheap and broad, so it runs on every PR to be a required check.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shell:
+    runs-on: ubuntu-24.04
+    env:
+      # POSIX sh scripts installed onto the device (#!/bin/sh) + the bash CI helper.
+      SH_SCRIPTS: >-
+        IntercomFirmwareTool.Core/Payload/mqtt/bt_service_watchdog
+        IntercomFirmwareTool.Core/Payload/mqtt/btmqttd
+      BASH_SCRIPTS: >-
+        native/btmqttd/ci/verify-provenance.sh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Syntax check (sh -n / bash -n)
+        run: |
+          set -euo pipefail
+          for f in $SH_SCRIPTS; do echo "sh -n $f"; sh -n "$f"; done
+          for f in $BASH_SCRIPTS; do echo "bash -n $f"; bash -n "$f"; done
+
+      - name: ShellCheck
+        run: |
+          set -euo pipefail
+          # shellcheck is preinstalled on the ubuntu runner image. It reads each file's
+          # shebang to pick the sh/bash dialect automatically.
+          shellcheck --version
+          shellcheck $SH_SCRIPTS $BASH_SCRIPTS

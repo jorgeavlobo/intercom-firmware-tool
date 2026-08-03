@@ -13,17 +13,27 @@ name: btmqttd binary provenance
 #     binary is out of sync with native/btmqttd/ source.
 
 on:
+  # PR gate (every update) + post-merge health on master. Path-filtered because this is
+  # the heavy job (ARM cross-build): it only runs when the daemon, its committed binary,
+  # or its metadata actually change.
   pull_request:
-    paths:
+    paths: &btmqttd_paths
       - 'native/btmqttd/**'
       - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd'
       - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
       - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
       - '.github/workflows/btmqttd-provenance.yml'
+  push:
+    branches: [master]
+    paths: *btmqttd_paths
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   provenance:
