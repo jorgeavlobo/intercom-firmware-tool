@@ -43,20 +43,18 @@ jobs:
           arm-linux-gnueabihf-gcc --version | head -1
 
       - name: Install the pinned Rust toolchain (rust-toolchain.toml)
-        working-directory: native/btmqttd
         run: |
-          # Explicitly install the toolchain pinned by rust-toolchain.toml — its channel
-          # plus the declared target + clippy component — so the job never depends on the
-          # runner's preinstalled toolchain, nor on whether `rustup show` auto-installs a
-          # directory-override toolchain (that varies by rustup version) (Copilot).
-          rustup toolchain install
-          # Belt-and-suspenders: ensure the target + clippy are on the ACTIVE (pinned)
-          # toolchain, so they can never land on the runner's stray default. Idempotent.
-          toolchain="$(rustup show active-toolchain | cut -d' ' -f1)"
-          echo "active toolchain: $toolchain"
-          rustup target add --toolchain "$toolchain" armv7-unknown-linux-musleabihf
-          rustup component add --toolchain "$toolchain" clippy
-          rustc --version && cargo --version
+          # Read the channel pinned by rust-toolchain.toml and install it explicitly BY NAME,
+          # with its declared target + clippy component. Installing by name (not a bare
+          # `rustup toolchain install`, which is ambiguous, nor relying on the runner's
+          # default or on auto-install) makes the toolchain deterministic (Copilot). The
+          # cargo steps below run in native/btmqttd and select this channel via the
+          # rust-toolchain.toml directory override.
+          channel="$(grep -oP '^\s*channel\s*=\s*"\K[^"]+' native/btmqttd/rust-toolchain.toml)"
+          echo "pinned channel: $channel"
+          rustup toolchain install "$channel" --profile minimal \
+            --target armv7-unknown-linux-musleabihf --component clippy
+          rustup run "$channel" rustc --version
 
       - name: cargo test (host)
         working-directory: native/btmqttd
