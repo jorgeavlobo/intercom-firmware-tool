@@ -29,8 +29,13 @@ jobs:
         with:
           persist-credentials: false
       - name: actionlint
+        # Pinned by image DIGEST (immutable — a retag can't change what CI runs),
+        # consistent with the SHA-pinned actions above. Dependabot does not track Docker
+        # images used inside run: steps, so bump this by hand: resolve the new digest with
+        # `docker buildx imagetools inspect rhysd/actionlint:<tag>` and update both below.
         run: |
-          docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:1.7.12 -color
+          docker run --rm -v "$PWD:/repo" --workdir /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color # 1.7.12
 
   shell:
     runs-on: ubuntu-24.04
