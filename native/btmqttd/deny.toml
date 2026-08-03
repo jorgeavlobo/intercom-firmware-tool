@@ -1,0 +1,39 @@
+# cargo-deny policy for btmqttd (issue #14), enforced in CI by .github/workflows/security.yml.
+# Makes the shipped binary's supply-chain guarantees a GATE, not just documentation
+# (THIRD_PARTY.md): the dependency tree must stay permissive-licensed (no copyleft) and
+# free of known RustSec advisories.
+
+[advisories]
+version = 2
+# RustSec advisory DB. Under schema v2 every advisory (vulnerability / unsound /
+# unmaintained) is an error by default; add specific IDs to `ignore` — with a written
+# justification — only if we ever consciously accept one.
+yanked = "deny"
+ignore = []
+
+[licenses]
+version = 2
+# Permissive-only allow-list, matching the licenses actually present in the dependency
+# graph today (all of MIT / Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0; the couple of
+# `... OR MIT` / `... OR Apache-2.0` crates resolve here too). Anything outside this set —
+# notably any copyleft (GPL / LGPL / MPL / AGPL) — fails the check. This is the automated
+# enforcement of the "no copyleft" claim in THIRD_PARTY.md.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "ISC",
+  "BSD-3-Clause",
+  "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Non-fatal hygiene signals (surfaced, not enforced).
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# Crates must come from crates.io (or the workspace); an unknown registry or a git
+# dependency fails — no unvetted sources sneak into the shipped binary.
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,84 @@
+name: security
+
+# Supply-chain / vulnerability scans on GitHub's free runners (issue #14):
+#   - dotnet-vulnerable: known-vulnerable NuGet packages (direct + transitive).
+#   - cargo-deny:        RustSec advisories + a permissive-only license policy for btmqttd.
+#   - dependency-review: block a PR that ADDS a vulnerable or copyleft dependency.
+# Same trigger model as the other workflows: PR (the gate) + push:master (health) + manual.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dotnet-vulnerable:
+    # Flag known-vulnerable NuGet packages against the GitHub Advisory DB. Windows so the
+    # net10.0-windows App restores exactly like the build gate (Core pulls in the native
+    # SharpExt4 reference).
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore IntercomFirmwareTool.slnx
+
+      - name: Audit NuGet packages (fail on any vulnerability)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `dotnet list package --vulnerable` prints "has the following vulnerable
+          # packages" ONLY when vulnerabilities exist; otherwise it says there are none.
+          out="$(dotnet list IntercomFirmwareTool.slnx package --vulnerable --include-transitive)"
+          echo "$out"
+          if grep -qi 'has the following vulnerable packages' <<<"$out"; then
+            echo "::error::Vulnerable NuGet packages found (see the list above)."
+            exit 1
+          fi
+          echo "OK: no vulnerable NuGet packages."
+
+  cargo-deny:
+    # RustSec advisories + license policy (permissive-only, no copyleft) for btmqttd,
+    # per native/btmqttd/deny.toml. Enforces the THIRD_PARTY.md guarantee.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
+        with:
+          manifest-path: native/btmqttd/Cargo.toml
+          # Runs advisories + licenses + bans + sources against native/btmqttd/deny.toml.
+          command: check
+
+  dependency-review:
+    # PR-only: block a pull request that INTRODUCES a dependency (NuGet or Cargo) with a
+    # known vulnerability or a copyleft license. Complements cargo-deny (full existing
+    # tree) by guarding the incremental change via GitHub's dependency graph.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+          deny-licenses: GPL-2.0, GPL-3.0, LGPL-2.0, LGPL-2.1, LGPL-3.0, AGPL-1.0, AGPL-3.0, MPL-2.0
