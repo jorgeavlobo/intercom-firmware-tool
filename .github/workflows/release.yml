@@ -159,8 +159,19 @@ jobs:
           files=(dist/*.exe dist/*.zip dist/*.exe.sha256 dist/*.zip.sha256)
           target=()
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            # On dispatch the tag doesn't exist yet; anchor it to this commit. (A draft
-            # release does not actually create the git tag until it is published.)
+            # A manual dispatch builds this run's commit and expects the tag to be created
+            # (from --target) when the draft is published. But `gh release create --target`
+            # only creates a NEW tag; if the tag ALREADY exists (e.g. a prior tag-push run
+            # created the tag but died before the release), it is ignored and the release
+            # attaches to that tag's EXISTING commit — so the attested binaries (built here)
+            # would disagree with the release's source tag. Refuse: release the tag by
+            # pushing it, or delete the stale tag, then re-run (Codex).
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::error::tag ${TAG} already exists — a manual release would attach to that tag's existing commit, not this run's build. Push the tag to release it (tag-triggered run), or delete the stale tag, then re-run."
+              exit 1
+            fi
+            # On dispatch the tag doesn't exist yet; anchor its eventual creation to this
+            # commit. (A draft release does not actually create the git tag until published.)
             target=(--target "$COMMIT_SHA")
           fi
           # A SemVer prerelease (1.2.3-rc.1) is marked as a GitHub prerelease so it is not
