@@ -229,8 +229,9 @@ async fn run() -> Result<(), String> {
     // publishes the final retained `offline` — otherwise a task still in flight could
     // enqueue a publish AFTER `offline` and leave stale state retained on the broker.
     // Broker connectivity, driven by THIS event loop (true on ConnAck, false on drop below) and
-    // read by the sender: a momentary call event pressed while the broker is down is DROPPED rather
-    // than enqueued, so rumqttc can't flush it late on reconnect and fire a stale automation (#71).
+    // read by the sender AND the keypad task: a momentary event (door call or keypress) fired while
+    // the broker is down is DROPPED rather than enqueued, so rumqttc can't flush it late on reconnect
+    // and fire a stale automation (#71).
     let broker_online = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sender_task = tokio::spawn(sender::run(
         cfg.clone(),
@@ -239,7 +240,7 @@ async fn run() -> Result<(), String> {
         light.clone(),
         broker_online.clone(),
     ));
-    let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone()));
+    let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone(), broker_online.clone()));
     // Birth is split across two events: SUBSCRIBE to the command topic on ConnAck,
     // then ANNOUNCE (online + start_date + HA) only after the broker confirms the
     // subscription (SubAck success). announce_task is the one that publishes
@@ -417,7 +418,7 @@ async fn run() -> Result<(), String> {
             ev = eventloop.poll() => {
                 match ev {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
-                        // Broker is up: momentary call events may publish again (issue #71).
+                        // Broker is up: momentary events (door call / keypress) may publish again (#71).
                         broker_online.store(true, std::sync::atomic::Ordering::Relaxed);
                         // Connected: clear the rediscovery failure streak and forget
                         // proposed addresses, so a later outage starts fresh and a broker
@@ -579,10 +580,10 @@ async fn run() -> Result<(), String> {
                     }
                     Ok(_) => {}
                     Err(e) => {
-                        // Broker is down: momentary call events are now DROPPED (not queued for a
-                        // late flush) until the next ConnAck re-sets this (issue #71).
+                        // Broker is down: momentary events (door call / keypress) are now DROPPED (not
+                        // queued for a late flush) until the next ConnAck re-sets this (issue #71).
                         broker_online.store(false, std::sync::atomic::Ordering::Relaxed);
-                        // ...and PURGE any momentary call events rumqttc already buffered for replay.
+                        // ...and PURGE any momentary events rumqttc already buffered for replay.
                         // poll() ran clean() on this error, moving the requests channel + unacked
                         // state into `pending` BEFORE returning Err; on the single-threaded runtime
                         // no task interleaves between that and here (no `.await` above), so every
@@ -596,7 +597,7 @@ async fn run() -> Result<(), String> {
                         // stream are KEPT: re-seeded on reconnect / a live QoS-0 stream.
                         eventloop
                             .pending
-                            .retain(|req| !is_momentary_call_publish(req, &cfg));
+                            .retain(|req| !is_momentary_publish(req, &cfg));
                         // Connection dropped/unreachable. ABORT the in-flight birth tasks
                         // NOW — not at the next ConnAck. Otherwise a subscribe/announce
                         // task still running through the outage could enqueue a stale
@@ -826,25 +827,28 @@ fn is_concrete_topic(topic: &str) -> bool {
     !topic.contains('+') && !topic.contains('#') && !topic.starts_with("$share/")
 }
 
-/// True if `req` is a momentary call-event publish (entrance-panel or floor). These are the ONLY
-/// requests purged from the event loop's `pending` queue on a disconnect (issue #71): a queued
-/// press must never be flushed late on reconnect. Nothing else — retained state, the dump stream,
-/// or protocol packets — is ever discarded.
+/// True if `req` is a momentary-event publish that must NOT survive a disconnect: the entrance-panel
+/// or floor call events, or a keypad key event. These are the ONLY requests purged from the event
+/// loop's `pending` queue on a disconnect (issue #71): a queued momentary event must never be flushed
+/// late on reconnect. Nothing else — retained state, the dump stream, or protocol packets — is ever
+/// discarded.
 ///
 /// Matched by destination topic AND publish shape: the momentary events are always QoS 0,
-/// non-retained (see `publish_call_event`), whereas the call-state sensor is QoS 1, retained. The
-/// C# installer forbids the three topics from aliasing (`Mqtt_PublishTopicsMustDiffer`), but the
-/// daemon must not depend on that — if a hand-edited `.conf` pointed `TOPIC_CALL_STATE` at an event
-/// topic, a topic-only predicate would purge the retained state publish too. Requiring
-/// `AtMostOnce && !retain` makes this incapable of ever dropping a retained publish, and never
-/// loses a real momentary event (they are always exactly QoS 0 / non-retained) — CodeRabbit.
-fn is_momentary_call_publish(req: &Request, cfg: &Config) -> bool {
+/// non-retained (see `publish_call_event` and `keys::session`), whereas the call-state sensor is
+/// QoS 1, retained. The C# installer forbids the topics from aliasing (`Mqtt_PublishTopicsMustDiffer`),
+/// but the daemon must not depend on that — if a hand-edited `.conf` pointed `TOPIC_CALL_STATE` at a
+/// momentary topic, a topic-only predicate would purge the retained state publish too. Requiring
+/// `AtMostOnce && !retain` makes this incapable of ever dropping a retained publish, and never loses
+/// a real momentary event (they are always exactly QoS 0 / non-retained) — CodeRabbit.
+fn is_momentary_publish(req: &Request, cfg: &Config) -> bool {
     matches!(
         req,
         Request::Publish(p)
             if p.qos == QoS::AtMostOnce
                 && !p.retain
-                && (p.topic == cfg.topic_entrance_panel_call || p.topic == cfg.topic_floor_call)
+                && (p.topic == cfg.topic_entrance_panel_call
+                    || p.topic == cfg.topic_floor_call
+                    || p.topic == cfg.topic_key)
     )
 }
 
@@ -901,20 +905,23 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn purge_predicate_matches_only_momentary_call_publishes() {
-        // The disconnect purge (#71) must drop ONLY momentary call events, never retained state,
-        // the dump stream, or protocol packets — so a genuine sensor/state republish still flushes.
+    fn purge_predicate_matches_only_momentary_publishes() {
+        // The disconnect purge (#71) must drop ONLY momentary events (door call / keypad), never
+        // retained state, the dump stream, or protocol packets — so a genuine sensor/state
+        // republish still flushes.
         let cfg = Config::from_map(HashMap::new()); // default topics
         let pub_to = |t: &str| Request::Publish(Publish::new(t, QoS::AtMostOnce, "x"));
 
-        // The momentary events, exactly as publish_call_event emits them: QoS 0, non-retained.
-        assert!(is_momentary_call_publish(&pub_to(&cfg.topic_entrance_panel_call), &cfg));
-        assert!(is_momentary_call_publish(&pub_to(&cfg.topic_floor_call), &cfg));
+        // The momentary events, exactly as publish_call_event / keys::session emit them: QoS 0,
+        // non-retained — the door calls AND the keypad key events (issue #71 + keypad follow-up).
+        assert!(is_momentary_publish(&pub_to(&cfg.topic_entrance_panel_call), &cfg));
+        assert!(is_momentary_publish(&pub_to(&cfg.topic_floor_call), &cfg));
+        assert!(is_momentary_publish(&pub_to(&cfg.topic_key), &cfg));
         // Retained call-state sensor and other topics are KEPT (must survive to re-flush).
-        assert!(!is_momentary_call_publish(&pub_to(&cfg.topic_call_state), &cfg));
-        assert!(!is_momentary_call_publish(&pub_to("Bticino/dump"), &cfg));
+        assert!(!is_momentary_publish(&pub_to(&cfg.topic_call_state), &cfg));
+        assert!(!is_momentary_publish(&pub_to("Bticino/dump"), &cfg));
         // Non-publish protocol packets are never momentary events.
-        assert!(!is_momentary_call_publish(&Request::PingReq(rumqttc::PingReq), &cfg));
+        assert!(!is_momentary_publish(&Request::PingReq(rumqttc::PingReq), &cfg));
     }
 
     #[test]
@@ -926,13 +933,13 @@ mod tests {
         let mut retained = Publish::new(&cfg.topic_entrance_panel_call, QoS::AtMostOnce, "x");
         retained.retain = true;
         // Retained (as the call-state publish is) → KEPT, despite the event topic.
-        assert!(!is_momentary_call_publish(&Request::Publish(retained), &cfg));
+        assert!(!is_momentary_publish(&Request::Publish(retained), &cfg));
         // QoS 1 (as the call-state publish is) → KEPT, despite the event topic.
         let qos1 = Publish::new(&cfg.topic_floor_call, QoS::AtLeastOnce, "x");
-        assert!(!is_momentary_call_publish(&Request::Publish(qos1), &cfg));
+        assert!(!is_momentary_publish(&Request::Publish(qos1), &cfg));
         // A retained QoS 1 publish (the exact call-state shape) aliased onto an event topic → KEPT.
         let mut state_shape = Publish::new(&cfg.topic_entrance_panel_call, QoS::AtLeastOnce, "x");
         state_shape.retain = true;
-        assert!(!is_momentary_call_publish(&Request::Publish(state_shape), &cfg));
+        assert!(!is_momentary_publish(&Request::Publish(state_shape), &cfg));
     }
 }

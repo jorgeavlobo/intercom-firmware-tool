@@ -1162,7 +1162,17 @@ namespace IntercomFirmwareTool.Core
                 }, HaJson);
             entities.Add(new HaEntity("bus.json", Topic("sensor", "bus"), busConfigJson));
 
-            // Last key press: state = key name, code/value exposed as attributes.
+            // Last key press: state = key name, code/value/ts exposed as attributes. btmqttd publishes
+            // {"key":…,"code":…,"value":"pressed|released","ts":…} NON-retained, QoS 0.
+            //
+            // FRESHNESS (issue #71): a keypress is momentary — only meaningful NOW — so btmqttd DROPS
+            // it while the broker is offline (never queued for a late replay that would fire a stale
+            // automation), and stamps each event with a UTC ISO-8601 `ts`. Gate any time-sensitive
+            // key automation (a door code, a "press N to…" shortcut) on that stamp, e.g.
+            //   trigger: { platform: mqtt, topic: <key topic> }
+            //   condition: "{{ -1 <= now().timestamp() - as_timestamp(trigger.payload_json.ts) < 5 }}"
+            // (bounded both sides — see the call-event entities above — assumes NTP-synced clocks).
+            // Unlike the call events there is NO burst-coalescing: each keypress is a distinct input.
             entities.Add(new HaEntity(
                 "key.json",
                 Topic("sensor", "key"),
