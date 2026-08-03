@@ -4,9 +4,8 @@
 # free of known RustSec advisories.
 
 [advisories]
-version = 2
-# RustSec advisory DB. Under schema v2 every advisory (vulnerability / unsound /
-# unmaintained) is an error by default.
+# RustSec advisory DB. Every advisory (vulnerability / unsound / unmaintained) is an
+# error by default.
 yanked = "deny"
 # Documented, tracked exceptions (VEX-style). Every entry below is in the TLS stack that
 # rumqttc 0.24 pulls transitively, and there is NO fix reachable today: the latest rumqttc
@@ -21,11 +20,10 @@ ignore = [
   { id = "RUSTSEC-2026-0098", reason = "rustls-webpki URI name-constraint accepted; reachable only after signature verification and requires cert misissuance; btmqttd validates only its own broker. No fix reachable. Tracked in #81." },
   { id = "RUSTSEC-2026-0099", reason = "rustls-webpki wildcard name-constraint; same class as 0098 (post-verify, misissuance-gated). No fix reachable. Tracked in #81." },
   { id = "RUSTSEC-2026-0104", reason = "rustls-webpki panic parsing CRLs; btmqttd does not use CRLs, so unreachable. No fix reachable. Tracked in #81." },
-  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained (not a vulnerability); no safe upgrade; pulled transitively by rumqttc. Tracked in #81." },
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained (not a vulnerability): no patched release exists; RustSec recommends migrating to rustls-pki-types::pem::PemObject, but the crate is pulled transitively by rumqttc, so that awaits the rumqttc/rustls bump. Tracked in #81." },
 ]
 
 [licenses]
-version = 2
 # Permissive-only allow-list, matching the licenses actually present in the dependency
 # graph today (all of MIT / Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0; the couple of
 # `... OR MIT` / `... OR Apache-2.0` crates resolve here too). Anything outside this set —

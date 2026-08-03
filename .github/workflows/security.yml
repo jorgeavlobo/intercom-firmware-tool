@@ -45,9 +45,26 @@ jobs:
           $ErrorActionPreference = 'Stop'
           # Machine-readable output (--format json) rather than grepping a human-readable
           # English string: robust against wording/localization changes and shell-independent
-          # (Copilot). Fail when any top-level or transitive package has a non-empty
-          # `vulnerabilities` array.
-          $json = dotnet list IntercomFirmwareTool.slnx package --vulnerable --include-transitive --format json | ConvertFrom-Json
+          # (Copilot).
+          $out = dotnet list IntercomFirmwareTool.slnx package --vulnerable --include-transitive --format json
+          $code = $LASTEXITCODE
+          Write-Host $out
+          # Fail CLOSED on incomplete data: `dotnet list` can emit valid JSON and exit 0
+          # while recording an unreachable audit source as a `problems` entry — which would
+          # otherwise let a vulnerable package pass unseen (CodeRabbit). Treat a non-zero
+          # exit, or any reported problem, as a failure.
+          if ($code -ne 0) {
+            Write-Error "dotnet list package failed (exit $code) — vulnerability data may be incomplete."
+            exit 1
+          }
+          $json = $out | ConvertFrom-Json
+          $problems = @($json.problems) + @($json.projects.problems) | Where-Object { $_ }
+          if ($problems.Count -gt 0) {
+            $problems | ForEach-Object { Write-Host "AUDIT PROBLEM: [$($_.level)] $($_.text)" }
+            Write-Error "NuGet audit reported problems (incomplete vulnerability data) — failing closed."
+            exit 1
+          }
+          # Fail when any top-level or transitive package has a non-empty `vulnerabilities`.
           $found = $false
           foreach ($project in $json.projects) {
             foreach ($fw in @($project.frameworks)) {
@@ -65,7 +82,7 @@ jobs:
             Write-Error "Vulnerable NuGet packages found (see the list above)."
             exit 1
           }
-          Write-Host "OK: no vulnerable NuGet packages."
+          Write-Host "OK: no vulnerable NuGet packages, no audit problems."
 
   cargo-deny:
     # RustSec advisories + license policy (permissive-only, no copyleft) for btmqttd,
@@ -76,7 +93,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: EmbarkStudios/cargo-deny-action@c3bbe7e4e3f7baeee1a3dd9aec0a3b2aded580fb # v2.1.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           manifest-path: native/btmqttd/Cargo.toml
           # Runs advisories + licenses + bans + sources against native/btmqttd/deny.toml.
