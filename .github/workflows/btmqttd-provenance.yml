@@ -45,11 +45,13 @@ jobs:
       - name: Install the pinned Rust toolchain (rust-toolchain.toml)
         working-directory: native/btmqttd
         run: |
-          # rust-toolchain.toml pins the channel here; `rustup show` materialises it
-          # (installing the target + clippy component it lists). Then re-add the
-          # target/component to the ACTIVE (pinned) toolchain EXPLICITLY, so they can
-          # never land on the runner's stray default toolchain (Copilot). Idempotent.
-          rustup show
+          # Explicitly install the toolchain pinned by rust-toolchain.toml — its channel
+          # plus the declared target + clippy component — so the job never depends on the
+          # runner's preinstalled toolchain, nor on whether `rustup show` auto-installs a
+          # directory-override toolchain (that varies by rustup version) (Copilot).
+          rustup toolchain install
+          # Belt-and-suspenders: ensure the target + clippy are on the ACTIVE (pinned)
+          # toolchain, so they can never land on the runner's stray default. Idempotent.
           toolchain="$(rustup show active-toolchain | cut -d' ' -f1)"
           echo "active toolchain: $toolchain"
           rustup target add --toolchain "$toolchain" armv7-unknown-linux-musleabihf
