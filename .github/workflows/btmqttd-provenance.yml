@@ -56,8 +56,12 @@ jobs:
             exit 1
           fi
           echo "pinned channel: $channel"
+          # Install both components rust-toolchain.toml declares (clippy + rustfmt) so
+          # the CI toolchain matches the repo's pinned toolchain exactly and nothing is
+          # implicitly downloaded on first use in the directory (Copilot).
           rustup toolchain install "$channel" --profile minimal \
-            --target armv7-unknown-linux-musleabihf --component clippy
+            --target armv7-unknown-linux-musleabihf \
+            --component clippy rustfmt
           rustup run "$channel" rustc --version
 
       - name: cargo test (host)
