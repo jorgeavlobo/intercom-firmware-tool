@@ -157,7 +157,12 @@ jobs:
           # execute it, and a mere substring could match a longer/unrelated diagnostic
           # that happens to contain the token (Codex).
           expected='btmqttd: MQTT_HOST is not set in the config'
-          sudo apt-get update
+          # The cross-gcc step above replaced apt's sources with a frozen Ubuntu snapshot
+          # whose Release files predate "now", so this update must ALSO skip apt's
+          # Valid-Until freshness check (same flag as that step) — otherwise it can error on
+          # an expired Release before qemu installs (Copilot). qemu-user-static is in the
+          # snapshot's universe component.
+          sudo apt-get -o Acquire::Check-Valid-Until=false update
           sudo apt-get install -y qemu-user-static
           bin="IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd"
           file "$bin"
