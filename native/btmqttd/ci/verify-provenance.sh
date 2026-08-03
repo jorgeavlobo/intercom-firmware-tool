@@ -19,14 +19,15 @@ set -euo pipefail
 
 usage() { echo "usage: verify-provenance.sh [--rebuilt <binary>]" >&2; exit 2; }
 
-# Accept exactly nothing, or exactly `--rebuilt <binary>`. Validating the total
-# argument count (not just $1) rejects a bare `--rebuilt` with no path, an unknown
-# first flag, and any trailing/extra arguments — all of which would otherwise be
-# silently ignored.
+# Accept exactly nothing, or exactly `--rebuilt <binary>` with a non-empty path.
+# Validating the total argument count (not just $1) rejects a bare `--rebuilt` with no
+# path, an unknown first flag, and any trailing/extra arguments; requiring a non-empty
+# $2 also rejects `--rebuilt ""` (e.g. an unset `$BIN` passed as "$BIN"), which would
+# otherwise be accepted and then silently skip the reproduction check via `[ -n "$REBUILT" ]`.
 REBUILT=""
 case "$#" in
   0) ;;
-  2) [ "$1" = "--rebuilt" ] || usage
+  2) { [ "$1" = "--rebuilt" ] && [ -n "$2" ]; } || usage
      REBUILT="$2" ;;
   *) usage ;;
 esac
