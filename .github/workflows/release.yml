@@ -24,8 +24,10 @@ permissions:
   contents: read
 
 concurrency:
-  # One release per ref; do NOT cancel an in-progress publish.
-  group: release-${{ github.ref }}
+  # One release per version; do NOT cancel an in-progress publish. On a dispatch run
+  # github.ref is the default branch, which would serialize unrelated manual releases —
+  # so key by the requested version (the tag name on a tag push) instead (Copilot).
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -61,8 +63,11 @@ jobs:
             v="$REF_NAME"
           fi
           v="${v#v}"   # strip a leading 'v'
-          if ! printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z.-]+)*$'; then
-            echo "::error::invalid version '$v' (expected SemVer X.Y.Z)"; exit 1
+          # Strict SemVer 2.0.0: core with no leading zeros, plus an OPTIONAL single
+          # prerelease and single build-metadata section. This value becomes both the git
+          # tag/release name and the MSBuild Version, so reject anything malformed (Copilot).
+          if ! printf '%s' "$v" | grep -qE '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'; then
+            echo "::error::invalid version '$v' (expected SemVer 2.0.0, e.g. 1.2.3 or 1.2.3-rc.1)"; exit 1
           fi
           {
             echo "version=$v"
@@ -141,7 +146,14 @@ jobs:
             target=(--target "$COMMIT_SHA")
           fi
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists — replacing assets."
+            # Only refresh a DRAFT; never overwrite the assets of an already-published
+            # release (a re-run must not tamper with a public release) (Copilot).
+            is_draft="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
+            if [ "$is_draft" != "true" ]; then
+              echo "::error::release $TAG already exists and is PUBLISHED — refusing to overwrite its assets. Bump the version."
+              exit 1
+            fi
+            echo "Draft $TAG already exists — replacing its assets."
             gh release upload "$TAG" "${files[@]}" --clobber
           else
             gh release create "$TAG" --draft --generate-notes --title "$TAG" "${target[@]}" "${files[@]}"
