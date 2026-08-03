@@ -80,6 +80,12 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Releasing v$v"
 
+      # SharpExt4.dll is a mixed-mode C++/CLI assembly (it imports Ijwhost.dll) that can't be
+      # loaded from the in-memory single-file bundle, and the app checks for SharpExt4 /
+      # DiskPartitionInfo / Ijwhost.dll next to AppContext.BaseDirectory at startup
+      # (MainWindow.xaml.cs). So extract ALL bundled content (not just native libraries) on
+      # first run — BaseDirectory then resolves to that run directory, where the three DLLs
+      # land, satisfying both the runtime loader and the startup check (Codex).
       - name: Publish single-file .exe (self-contained, ReadyToRun)
         shell: pwsh
         env:
@@ -88,7 +94,7 @@ jobs:
           dotnet publish IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=true `
-            -p:IncludeNativeLibrariesForSelfExtract=true `
+            -p:IncludeAllContentForSelfExtract=true `
             -p:EnableCompressionInSingleFile=true `
             -p:PublishReadyToRun=true `
             -p:Version=$env:VERSION `
