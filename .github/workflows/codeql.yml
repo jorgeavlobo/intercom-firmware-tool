@@ -15,6 +15,11 @@ on:
     - cron: '23 4 * * 1' # Mondays 04:23 UTC
   workflow_dispatch:
 
+# Least-privilege default for the whole workflow; the analyze job below widens its own
+# scope to security-events: write for the SARIF upload.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
