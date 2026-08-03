@@ -39,19 +39,36 @@ sudo apt-get install -y gcc-arm-linux-gnueabihf
 
 ## Build
 
-The reproducible flags (linker, self-contained musl, static CRT) live in
-[`.cargo/config.toml`](.cargo/config.toml). The currently committed binary was
-built with **`rustc 1.94.1`** (recorded in `THIRD_PARTY.md` alongside the
-SHA-256); the exact crate versions are pinned in
-[`Cargo.lock`](Cargo.lock).
+The link flags (rust-lld, self-contained musl, static CRT) live in
+[`.cargo/config.toml`](.cargo/config.toml); the compiler is pinned to
+**`rustc 1.94.1`** by [`rust-toolchain.toml`](rust-toolchain.toml) (rustup installs
+it automatically) and the crate versions by [`Cargo.lock`](Cargo.lock).
+
+Build with the **reproducible** recipe below. It adds `--remap-path-prefix` to
+scrub the builder's `CARGO_HOME` and workspace prefixes from the binary, so its
+SHA-256 is host-independent. (A plain `cargo build` links the same static binary
+but embeds your local absolute paths in the `#[track_caller]` panic locations,
+producing a different SHA-256 that CI will not reproduce.)
 
 ```sh
 export CC_armv7_unknown_linux_musleabihf=arm-linux-gnueabihf-gcc
 export AR_armv7_unknown_linux_musleabihf=arm-linux-gnueabihf-ar
-cargo build --release --target armv7-unknown-linux-musleabihf
+# Host-independent paths: map CARGO_HOME -> /cargo and this dir -> /build.
+export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS="\
+-Clinker-flavor=ld.lld -Clink-self-contained=yes -Ctarget-feature=+crt-static \
+--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo \
+--remap-path-prefix=$(pwd)=/build"
+cargo build --release --locked --target armv7-unknown-linux-musleabihf
 ```
 
 Output: `target/armv7-unknown-linux-musleabihf/release/btmqttd`.
+
+> `CARGO_TARGET_*_RUSTFLAGS` **replaces** (does not merge with) the `rustflags` in
+> `.cargo/config.toml`, so the link flags are repeated in the recipe. `trim-paths`
+> would be the cleaner path scrub but is not stabilised in the pinned Cargo (1.94.1),
+> so the explicit remap is used. Reproducibility also depends on the `ring` C/asm
+> cross-gcc: build on Ubuntu 24.04 (`gcc-arm-linux-gnueabihf` 13.x), which the CI
+> runner (`ubuntu-24.04`) matches.
 
 ## Verify
 
@@ -67,6 +84,27 @@ Then update the embedded copy and its provenance:
 1. Copy the binary to `IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd`.
 2. Update the `Length` + `Sha256Hex` in `PayloadBinaries` (`MqttInstaller`).
 3. Update the `btmqttd` entry in `Payload/vendor/THIRD_PARTY.md`.
+4. From the **repo root**, confirm the records agree (and, with `--rebuilt`, that the
+   fresh build reproduces the committed binary):
+
+   ```sh
+   native/btmqttd/ci/verify-provenance.sh --rebuilt \
+     native/btmqttd/target/armv7-unknown-linux-musleabihf/release/btmqttd
+   ```
+
+This runs in CI on every PR that touches the daemon
+([`.github/workflows/btmqttd-provenance.yml`](../../.github/workflows/btmqttd-provenance.yml)),
+in two tiers:
+
+- **Metadata consistency — enforced (fatal).** The committed binary's SHA-256 + size
+  must equal `PayloadBinaries` and `THIRD_PARTY.md`. Deterministic; catches a binary or
+  metadata updated without the other.
+- **Source→binary reproduction — advisory.** CI rebuilds and compares to the committed
+  binary, but a mismatch is reported (not failed), because the `ring` cross-gcc is not
+  yet pinned (a distro gcc update can change the object code and the SHA). Making this
+  fatal needs a hermetic, digest-pinned build environment — tracked in **#76**. Until
+  then, a source change without a matching rebuild is surfaced as a CI warning; keep the
+  vendored binary in sync per the steps above.
 
 ## Host checks (fast iteration)
 
