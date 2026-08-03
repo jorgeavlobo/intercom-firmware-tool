@@ -2,7 +2,7 @@
 # Verify btmqttd ARM binary provenance (issue #72).
 #
 #   verify-provenance.sh                     # metadata consistency only (FATAL)
-#   verify-provenance.sh --rebuilt <binary>  # + source->binary reproduction (ADVISORY)
+#   verify-provenance.sh --rebuilt <binary>  # + source->binary reproduction (FATAL)
 #
 # Run from the repository root.
 #
@@ -10,11 +10,11 @@
 # must equal the values recorded in PayloadBinaries.cs and THIRD_PARTY.md. Deterministic,
 # needs no build — catches the common "binary or metadata updated without the other".
 #
-# Source->binary reproduction (with --rebuilt, ADVISORY): the freshly cross-compiled
-# binary SHOULD equal the committed one. A mismatch is reported as a warning, NOT a
-# failure, because the ring C/asm cross-gcc is not yet pinned (a distro gcc update can
-# change the object code and thus the SHA). Enforcing this fatally requires a hermetic,
-# digest-pinned build environment — tracked in issue #76.
+# Source->binary reproduction (with --rebuilt, FATAL): the freshly cross-compiled binary
+# must equal the committed one, byte-for-byte. This is enforceable because every build
+# input is pinned — rustc (rust-toolchain.toml), crates (Cargo.lock) and ring's C/asm
+# armhf cross-gcc (an immutable Ubuntu archive snapshot, see the workflow). A mismatch
+# therefore means the vendored binary is out of sync with native/btmqttd/ source (#76).
 set -euo pipefail
 
 usage() { echo "usage: verify-provenance.sh [--rebuilt <binary>]" >&2; exit 2; }
@@ -37,7 +37,6 @@ CS="IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs"
 MD="IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md"
 
 fail() { echo "::error::btmqttd provenance: $*" >&2; exit 1; }
-warn() { echo "::warning::btmqttd provenance: $*" >&2; }
 
 for f in "$VENDORED" "$CS" "$MD"; do
   [ -f "$f" ] || fail "missing file: $f"
@@ -87,7 +86,7 @@ printf 'THIRD_PARTY.md : size=%s sha=%s\n' "$md_size" "$md_sha"
 [ "$vend_sha"  = "$md_sha"  ] || fail "committed SHA $vend_sha != THIRD_PARTY SHA-256 $md_sha"
 echo "OK: committed binary matches PayloadBinaries + THIRD_PARTY ($vend_sha)."
 
-# --- Source -> binary reproduction (ADVISORY until the build is hermetic, #76) ---
+# --- Source -> binary reproduction (FATAL: every build input is pinned, #76) ---
 if [ -n "$REBUILT" ]; then
   [ -f "$REBUILT" ] || fail "rebuilt binary not found: $REBUILT"
   r_sha="$(sha "$REBUILT")"; r_size="$(size "$REBUILT")"
@@ -95,9 +94,10 @@ if [ -n "$REBUILT" ]; then
   if [ "$r_sha" = "$vend_sha" ] && [ "$r_size" = "$vend_size" ]; then
     echo "OK: rebuilt binary reproduces the committed binary bit-for-bit."
   else
-    warn "rebuilt binary ($r_sha) does NOT match the committed binary ($vend_sha). \
-Expected when the ring cross-gcc differs from the build host's (the environment is not \
-yet hermetic, #76). If native/btmqttd source changed, rebuild + re-sync the vendored \
-binary per BUILD.md. Advisory — not failing the job."
+    fail "rebuilt binary ($r_sha, $r_size B) does NOT reproduce the committed binary \
+($vend_sha, $vend_size B). Every build input is pinned (rustc via rust-toolchain.toml, \
+crates via Cargo.lock, ring's cross-gcc via the Ubuntu archive snapshot in the workflow), \
+so a mismatch means the vendored binary is out of sync with native/btmqttd/ source. \
+Rebuild with the reproducible recipe and re-sync the vendored binary + metadata per BUILD.md."
   fi
 fi

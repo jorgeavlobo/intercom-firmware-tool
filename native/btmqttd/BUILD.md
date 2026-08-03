@@ -67,8 +67,13 @@ Output: `target/armv7-unknown-linux-musleabihf/release/btmqttd`.
 > `.cargo/config.toml`, so the link flags are repeated in the recipe. `trim-paths`
 > would be the cleaner path scrub but is not stabilised in the pinned Cargo (1.94.1),
 > so the explicit remap is used. Reproducibility also depends on the `ring` C/asm
-> cross-gcc: build on Ubuntu 24.04 (`gcc-arm-linux-gnueabihf` 13.x), which the CI
-> runner (`ubuntu-24.04`) matches.
+> cross-gcc: the committed binary was built with `arm-linux-gnueabihf-gcc`
+> **13.3.0-6ubuntu2~24.04.1** (Ubuntu 24.04, `gcc-13`). CI pins that exact toolchain
+> from an **immutable Ubuntu archive snapshot** — the package
+> `gcc-13-arm-linux-gnueabihf=13.3.0-6ubuntu2~24.04.1cross1` (with its `cpp-13` and
+> `binutils-arm-linux-gnueabihf=2.42-4ubuntu2.10` peers) from `snapshot.ubuntu.com`
+> (see the workflow) — so the SHA is reproducible over time; locally, an Ubuntu 24.04
+> host with the same `gcc-13` cross toolchain reproduces it.
 
 ## Verify
 
@@ -99,12 +104,13 @@ in two tiers:
 - **Metadata consistency — enforced (fatal).** The committed binary's SHA-256 + size
   must equal `PayloadBinaries` and `THIRD_PARTY.md`. Deterministic; catches a binary or
   metadata updated without the other.
-- **Source→binary reproduction — advisory.** CI rebuilds and compares to the committed
-  binary, but a mismatch is reported (not failed), because the `ring` cross-gcc is not
-  yet pinned (a distro gcc update can change the object code and the SHA). Making this
-  fatal needs a hermetic, digest-pinned build environment — tracked in **#76**. Until
-  then, a source change without a matching rebuild is surfaced as a CI warning; keep the
-  vendored binary in sync per the steps above.
+- **Source→binary reproduction — enforced (fatal).** CI rebuilds from source and requires
+  a byte-for-byte match with the committed binary. This is enforceable because every build
+  input is pinned: `rustc` (`rust-toolchain.toml`), crates (`Cargo.lock`), and the `ring`
+  C/asm cross-gcc — CI installs it from an **immutable Ubuntu archive snapshot**
+  (`snapshot.ubuntu.com`, exact version `13.3.0-6ubuntu2~24.04.1cross1`), so a distro gcc
+  bump can no longer change the object code. A mismatch means the vendored binary is out
+  of sync with the source: rebuild and re-sync per the steps above. (Resolves **#76**.)
 
 ## Host checks (fast iteration)
 

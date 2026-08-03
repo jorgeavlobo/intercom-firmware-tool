@@ -1,14 +1,16 @@
 name: btmqttd binary provenance
 
 # On any PR that touches the daemon (or its committed binary / metadata), guard the
-# binary-in-repo against drift (issue #72) in two tiers:
-#   - FATAL: the committed binary's SHA-256 + size must match PayloadBinaries.cs and
+# binary-in-repo against drift (issue #72) in two tiers, both FATAL:
+#   - metadata: the committed binary's SHA-256 + size must match PayloadBinaries.cs and
 #     THIRD_PARTY.md (deterministic — catches a binary or metadata updated without the
 #     other).
-#   - ADVISORY: rebuild from source and compare; a mismatch is a warning, not a
-#     failure, because the ring C/asm cross-gcc is not yet pinned (a distro gcc bump
-#     changes the object code and thus the SHA). Flips to fatal once the build is
-#     hermetic — tracked in #76.
+#   - reproduction: rebuild from source and require a byte-for-byte match with the
+#     committed binary. This is enforceable because every build input is pinned — rustc
+#     via rust-toolchain.toml, crates via Cargo.lock, and the one C input (ring's armhf
+#     cross-gcc) via an immutable Ubuntu archive snapshot (issue #76). A distro gcc bump
+#     can no longer silently change the object code, so a mismatch means the vendored
+#     binary is out of sync with native/btmqttd/ source.
 
 on:
   pull_request:
@@ -25,9 +27,10 @@ permissions:
 
 jobs:
   provenance:
-    # Pin the runner image: ring's C/asm is compiled by the distro ARM cross-gcc, so
-    # the reproducible SHA is tied to this image's gcc (Ubuntu 24.04 -> gcc 13.x, the
-    # same lineage the committed binary was built with). See BUILD.md.
+    # ubuntu-24.04 so the snapshot-pinned "noble" cross-gcc installs cleanly (matching apt
+    # generation / keyring). The cross-gcc *version* is pinned to an immutable Ubuntu
+    # archive snapshot in the install step below, so the reproducible SHA no longer depends
+    # on this runner image's rolling package set. See BUILD.md.
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -36,14 +39,39 @@ jobs:
           # .git/config — avoids credential leakage via the checkout (zizmor artipacked).
           persist-credentials: false
 
-      - name: Install ARM cross C compiler (for ring's C/asm)
+      - name: Install the pinned ARM cross C compiler (Ubuntu archive snapshot)
+        env:
+          # Immutable Ubuntu archive snapshot that pins ring's C/asm cross-gcc (issue #76).
+          # This snapshot serves the exact toolchain the committed binary was built with:
+          # gcc-13-arm-linux-gnueabihf 13.3.0-6ubuntu2~24.04.1cross1 (noble-updates).
+          UBUNTU_SNAPSHOT: "20260601T000000Z"
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf
-          # Print the compiler version WITHOUT a pipeline: the runner's default shell is
-          # `bash -eo pipefail`, under which `gcc --version | head -1` could fail the step
-          # if gcc got SIGPIPE when head closes the pipe early (Copilot). Capture once and
-          # print just the first line via parameter expansion.
+          set -euo pipefail
+          # Use ONLY the frozen snapshot as apt's source, so the cross toolchain and its
+          # entire dependency closure resolve against an immutable index — the produced
+          # object code, and therefore the binary SHA-256, is reproducible across hosts and
+          # over time. Remove the runner's rolling/third-party sources for this job (the
+          # runner is ephemeral and we only need the cross gcc). echo-per-line (no leading
+          # whitespace) so the deb822 field lines are valid.
+          sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
+          {
+            echo "Types: deb"
+            echo "URIs: https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}/"
+            echo "Suites: noble noble-updates noble-security noble-backports"
+            echo "Components: main restricted universe multiverse"
+            echo "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg"
+          } | sudo tee /etc/apt/sources.list.d/ubuntu.sources >/dev/null
+          # Snapshot Release files predate "now", so skip apt's Valid-Until freshness check.
+          sudo apt-get -o Acquire::Check-Valid-Until=false update
+          # Pin the toolchain to exact versions (--allow-downgrades in case the runner image
+          # preinstalls a newer one). The transitive deps resolve from the same frozen
+          # snapshot, so the whole closure is deterministic.
+          sudo apt-get install -y --allow-downgrades \
+            gcc-arm-linux-gnueabihf=4:13.2.0-7ubuntu1 \
+            gcc-13-arm-linux-gnueabihf=13.3.0-6ubuntu2~24.04.1cross1 \
+            cpp-13-arm-linux-gnueabihf=13.3.0-6ubuntu2~24.04.1cross1 \
+            binutils-arm-linux-gnueabihf=2.42-4ubuntu2.10
+          # Print the compiler version WITHOUT a pipeline (avoid SIGPIPE under pipefail).
           gcc_version="$(arm-linux-gnueabihf-gcc --version)"
           printf '%s\n' "${gcc_version%%$'\n'*}"
 
@@ -91,10 +119,11 @@ jobs:
           cargo build --release --locked --target armv7-unknown-linux-musleabihf
           file target/armv7-unknown-linux-musleabihf/release/btmqttd
 
-      - name: Verify binary provenance (metadata FATAL; reproduction advisory, #76)
+      - name: Verify binary provenance (metadata + reproduction, both FATAL)
         run: |
           # Fatal: committed binary == PayloadBinaries == THIRD_PARTY (deterministic).
-          # Advisory: rebuilt binary == committed binary (the ring cross-gcc is not yet
-          # pinned, so a gcc change can alter the SHA — enforced once hermetic, #76).
+          # Fatal: rebuilt binary == committed binary — enforceable now that every build
+          # input is pinned (rustc, Cargo.lock, and ring's cross-gcc via the Ubuntu
+          # snapshot above); a mismatch means the vendored binary is out of sync (#76).
           native/btmqttd/ci/verify-provenance.sh --rebuilt \
             native/btmqttd/target/armv7-unknown-linux-musleabihf/release/btmqttd
