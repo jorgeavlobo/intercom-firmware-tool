@@ -15,6 +15,12 @@
 # input is pinned — rustc (rust-toolchain.toml), crates (Cargo.lock) and ring's C/asm
 # armhf cross-gcc (an immutable Ubuntu archive snapshot, see the workflow). A mismatch
 # therefore means the vendored binary is out of sync with native/btmqttd/ source (#76).
+
+# The single-quoted grep -P / awk patterns below contain literal backticks and `\K`,
+# `\s` etc. BY DESIGN — they are regexes matched against the files, not shell code, and
+# must NOT be expanded. Silence SC2016 ("expressions don't expand in single quotes")
+# file-wide; it is a false positive for every pattern here.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 usage() { echo "usage: verify-provenance.sh [--rebuilt <binary>]" >&2; exit 2; }

@@ -1,0 +1,71 @@
+name: lint
+
+# Static checks for the shell scripts shipped into the firmware image (the device
+# service launcher + watchdog, POSIX sh) and the CI helper (bash), plus a lint of the
+# GitHub Actions workflows themselves. Runs on Linux (free runner). Cheap and broad, so
+# it runs on every PR to be a required check.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    # Lint the GitHub Actions workflows themselves (runner labels, ${{ }} expressions,
+    # and — via its bundled ShellCheck — the inline `run:` shell steps that the shell
+    # job below does NOT cover). Pinned actionlint image for reproducibility.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: actionlint
+        # Pinned by image DIGEST (immutable — a retag can't change what CI runs),
+        # consistent with the SHA-pinned actions above. Dependabot does not track Docker
+        # images used inside run: steps, so bump this by hand: resolve the new digest with
+        # `docker buildx imagetools inspect rhysd/actionlint:<tag>` and update both below.
+        run: |
+          docker run --rm -v "$PWD:/repo" --workdir /repo \
+            rhysd/actionlint@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667 -color # 1.7.12
+
+  shell:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Syntax check (dash -n / bash -n)
+        run: |
+          set -euo pipefail
+          # Device scripts are #!/bin/sh — validate POSIX syntax with dash *explicitly*
+          # (issue #14), so the dialect is stable regardless of what /bin/sh resolves to
+          # on the runner. dash ships with ubuntu-24.04 (it is /bin/sh there).
+          for f in \
+            IntercomFirmwareTool.Core/Payload/mqtt/bt_service_watchdog \
+            IntercomFirmwareTool.Core/Payload/mqtt/btmqttd; do
+            echo "dash -n $f"; dash -n "$f"
+          done
+          # bash CI helper:
+          echo "bash -n native/btmqttd/ci/verify-provenance.sh"
+          bash -n native/btmqttd/ci/verify-provenance.sh
+
+      - name: ShellCheck
+        run: |
+          set -euo pipefail
+          # ShellCheck is preinstalled on the ubuntu runner image; it reads each file's
+          # shebang to pick the sh/bash dialect automatically.
+          shellcheck --version
+          shellcheck \
+            IntercomFirmwareTool.Core/Payload/mqtt/bt_service_watchdog \
+            IntercomFirmwareTool.Core/Payload/mqtt/btmqttd \
+            native/btmqttd/ci/verify-provenance.sh
