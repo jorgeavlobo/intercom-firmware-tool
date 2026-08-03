@@ -154,7 +154,7 @@ jobs:
             dist/*.exe
             dist/*.zip
 
-      - name: Create / refresh the DRAFT release
+      - name: Create the DRAFT release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
