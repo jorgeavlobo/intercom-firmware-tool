@@ -18,6 +18,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  actionlint:
+    # Lint the GitHub Actions workflows themselves (runner labels, ${{ }} expressions,
+    # and — via its bundled ShellCheck — the inline `run:` shell steps that the shell
+    # job below does NOT cover). Pinned actionlint image for reproducibility.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:1.7.7 -color
+
   shell:
     runs-on: ubuntu-24.04
     env:
@@ -28,7 +41,7 @@ jobs:
       BASH_SCRIPTS: >-
         native/btmqttd/ci/verify-provenance.sh
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
