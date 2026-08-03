@@ -69,9 +69,11 @@ Output: `target/armv7-unknown-linux-musleabihf/release/btmqttd`.
 > so the explicit remap is used. Reproducibility also depends on the `ring` C/asm
 > cross-gcc: the committed binary was built with `arm-linux-gnueabihf-gcc`
 > **13.3.0-6ubuntu2~24.04.1** (Ubuntu 24.04, `gcc-13`). CI pins that exact toolchain
-> from an **immutable Ubuntu archive snapshot** (see the workflow), so the SHA is
-> reproducible over time; locally, an Ubuntu 24.04 host with the same `gcc-13` cross
-> toolchain reproduces it.
+> from an **immutable Ubuntu archive snapshot** — the package
+> `gcc-13-arm-linux-gnueabihf=13.3.0-6ubuntu2~24.04.1cross1` (with its `cpp-13` and
+> `binutils-arm-linux-gnueabihf=2.42-4ubuntu2.10` peers) from `snapshot.ubuntu.com`
+> (see the workflow) — so the SHA is reproducible over time; locally, an Ubuntu 24.04
+> host with the same `gcc-13` cross toolchain reproduces it.
 
 ## Verify
 

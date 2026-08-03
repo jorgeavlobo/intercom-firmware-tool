@@ -103,9 +103,9 @@ no longer change `ring`'s object code or the SHA. The GitHub Actions workflow
 [`btmqttd-provenance.yml`](../../../.github/workflows/btmqttd-provenance.yml)
 rebuilds on every PR touching the daemon and enforces **both** checks fatally: the
 metadata-consistency check (committed binary ↔ this table ↔ `PayloadBinaries`) and
-the source↔binary reproduction (rebuilt binary ↔ committed binary), issue #72 /
-#76. `trim-paths` would be the cleaner path scrub but is not stabilised in the pinned
-Cargo, so the explicit remap is used.
+the source↔binary reproduction (rebuilt binary ↔ committed binary) — see issues #72
+and #76. `trim-paths` would be the cleaner path scrub but is not stabilised in the
+pinned Cargo, so the explicit remap is used.
 
 **Scope.** The binary is embedded **unconditionally** in
 `IntercomFirmwareTool.Core` (a compiled-in resource), so any distribution of that
