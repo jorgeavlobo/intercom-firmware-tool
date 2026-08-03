@@ -54,22 +54,27 @@ vend_sha="$(sha "$VENDORED")"; vend_size="$(size "$VENDORED")"
 # from the first match anywhere in the file. grep -m1 (first match) rather than `| head -1`
 # avoids a pipeline that could SIGPIPE-fail grep under pipefail. Each extraction has an
 # explicit `|| fail` so a missing record or a changed format produces an actionable error,
-# not a bare non-zero exit.
+# not a bare non-zero exit. The SHA patterns require exactly 64 hex digits immediately
+# followed by the closing delimiter (`"` / backtick): an unanchored `[0-9a-fA-F]+` would
+# silently take the valid hex PREFIX of a suffixed digest (e.g. a stray trailing space in
+# the recorded value), passing this check while `PayloadBinaries.Read` later compares the
+# full suffixed string byte-for-byte and rejects the binary at load. Anchoring makes this
+# gate reject the malformed record here instead.
 #
 # PayloadBinaries.cs — the `Btmqttd = new( ... );` block:  `Length: 1_383_056,`  /
 # `Sha256Hex: "e324...",`
 cs_block="$(awk '/Btmqttd = new\(/{f=1} f{print} f && /\);/{exit}' "$CS")"
 cs_size="$(printf '%s\n' "$cs_block" | grep -m1 -oP 'Length:\s*\K[0-9_]+' | tr -d '_')" \
   || fail "could not extract 'Length' from the btmqttd record in $CS (format changed?)"
-cs_sha="$(printf '%s\n' "$cs_block" | grep -m1 -oP 'Sha256Hex:\s*"\K[0-9a-fA-F]+')" \
-  || fail "could not extract 'Sha256Hex' from the btmqttd record in $CS (format changed?)"
+cs_sha="$(printf '%s\n' "$cs_block" | grep -m1 -oP 'Sha256Hex:\s*"\K[0-9a-fA-F]{64}(?=")')" \
+  || fail "could not extract a 64-hex 'Sha256Hex' from the btmqttd record in $CS (format changed?)"
 # THIRD_PARTY.md — the provenance table headed `| Field | \`btmqttd\` |`, read to the
 # blank line that ends it:  `| Size | 1,383,056 bytes |`  /  `| SHA-256 | ` + backtick hex
 md_block="$(awk '/^\|[[:space:]]*Field[[:space:]]*\|[[:space:]]*`btmqttd`/{f=1} f{if($0 ~ /^[[:space:]]*$/) exit; print}' "$MD")"
 md_size="$(printf '%s\n' "$md_block" | grep -m1 -oP '\|\s*Size\s*\|\s*\K[0-9,]+' | tr -d ',')" \
   || fail "could not extract 'Size' from the btmqttd record in $MD (format changed?)"
-md_sha="$(printf '%s\n' "$md_block" | grep -m1 -oP '\|\s*SHA-256\s*\|\s*`\K[0-9a-fA-F]+')" \
-  || fail "could not extract 'SHA-256' from the btmqttd record in $MD (format changed?)"
+md_sha="$(printf '%s\n' "$md_block" | grep -m1 -oP '\|\s*SHA-256\s*\|\s*`\K[0-9a-fA-F]{64}(?=`)')" \
+  || fail "could not extract a 64-hex 'SHA-256' from the btmqttd record in $MD (format changed?)"
 
 printf 'committed bin  : size=%s sha=%s\n' "$vend_size" "$vend_sha"
 printf 'PayloadBinaries: size=%s sha=%s\n' "$cs_size" "$cs_sha"
