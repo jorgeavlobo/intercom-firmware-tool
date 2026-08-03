@@ -7,6 +7,11 @@ name: release
 # Publish. The .exe is UNSIGNED for now (see #84); integrity comes from the checksums + the
 # attestation until code signing lands.
 #
+# The vX.Y.Z git tag is anchored to the built commit at BUILD time (the tag-push event
+# already carries it; a manual dispatch creates it before the draft), never deferred to
+# publish — so the artifact, its attestation, and the tag can never describe different
+# commits. A repo tag-protection ruleset on 'v*' keeps the tag from being moved afterwards.
+#
 # Context values (inputs, ref, sha) are passed to run: steps via env: — never interpolated
 # directly into a script — to avoid template injection (actionlint/zizmor).
 
@@ -16,7 +21,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release, e.g. 1.2.0 (a vX.Y.Z tag is created when the draft is published)'
+        description: 'Version to release, e.g. 1.2.0 (a vX.Y.Z tag is created at this commit before the draft)'
         required: true
         type: string
 
@@ -157,23 +162,6 @@ jobs:
           set -euo pipefail
           # the two primary assets + their .sha256 sidecars.
           files=(dist/*.exe dist/*.zip dist/*.exe.sha256 dist/*.zip.sha256)
-          target=()
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            # A manual dispatch builds this run's commit and expects the tag to be created
-            # (from --target) when the draft is published. But `gh release create --target`
-            # only creates a NEW tag; if the tag ALREADY exists (e.g. a prior tag-push run
-            # created the tag but died before the release), it is ignored and the release
-            # attaches to that tag's EXISTING commit — so the attested binaries (built here)
-            # would disagree with the release's source tag. Refuse: release the tag by
-            # pushing it, or delete the stale tag, then re-run (Codex).
-            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-              echo "::error::tag ${TAG} already exists — a manual release would attach to that tag's existing commit, not this run's build. Push the tag to release it (tag-triggered run), or delete the stale tag, then re-run."
-              exit 1
-            fi
-            # On dispatch the tag doesn't exist yet; anchor its eventual creation to this
-            # commit. (A draft release does not actually create the git tag until published.)
-            target=(--target "$COMMIT_SHA")
-          fi
           # A SemVer prerelease (1.2.3-rc.1) is marked as a GitHub prerelease so it is not
           # surfaced as Latest/production (Codex).
           pre=()
@@ -190,21 +178,38 @@ jobs:
             echo "::error::a release for $TAG already exists — delete that (draft) release or bump the version, then re-run. Not overwriting it."
             exit 1
           fi
-          gh release create "$TAG" --draft --generate-notes --title "$TAG" "${target[@]}" "${pre[@]}" "${files[@]}"
-          # Close the residual TOCTOU window: between the tag-existence check above and this
-          # create, another actor could push $TAG. `gh release create` then silently binds the
-          # draft to that tag's commit and ignores --target, so the draft's assets — attested
-          # for $COMMIT_SHA — would misrepresent their source. On the dispatch path re-resolve
-          # the tag; if it now exists and points at a different commit than this build, delete
-          # the mismatched draft (leaving the concurrently-pushed tag untouched) and fail. An
-          # annotated tag's ref sha is the tag object (not the commit), so it compares unequal
-          # and we fail closed — the safe direction (CodeRabbit).
+
+          # Provenance invariant: the artifact, its SLSA attestation, and the git tag the
+          # release is published under must all describe THIS build's commit — and that binding
+          # must be immutable from build time, not deferred to a later human "Publish" click.
+          #
+          # A tag-PUSH run already satisfies this: the tag is fixed at $COMMIT_SHA before the
+          # build, so nothing can rebind it. A workflow_dispatch run does NOT get a tag from the
+          # event, and letting the draft create the tag on publish leaves the whole review
+          # window open — someone could push $TAG at a different commit and the published
+          # release would bind to it while the assets/attestation describe $COMMIT_SHA (Codex,
+          # CodeRabbit). So on dispatch we ANCHOR the tag now: create refs/tags/$TAG at
+          # $COMMIT_SHA via a create-ref, which is atomic and FAILS (422) if the ref already
+          # exists — closing the window and doubling as the refuse-on-exists guard. From here
+          # the tag is immutable for the later publish. (A repo tag-protection ruleset on 'v*'
+          # is the companion control that stops the tag being force-MOVED afterwards; see #79.)
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha' 2>/dev/null || true)"
-            if [ -n "$tag_sha" ] && [ "$tag_sha" != "$COMMIT_SHA" ]; then
-              gh release delete "$TAG" --yes || true
-              echo "::error::tag ${TAG} was pushed concurrently during this run (points at ${tag_sha}, not this build ${COMMIT_SHA}) — deleted the mismatched draft. Use the tag-triggered flow, or delete the stale tag, then re-run."
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+                 -f ref="refs/tags/${TAG}" -f sha="$COMMIT_SHA" >/dev/null 2>&1; then
+              echo "::error::could not create tag ${TAG} at ${COMMIT_SHA} (it likely already exists) — delete the stale tag or bump the version, then re-run."
               exit 1
             fi
           fi
-          echo "Draft release $TAG created — review it in the Releases tab and click Publish."
+
+          # The tag now exists on both paths (pushed, or just created above), so the release
+          # binds to it — no --target needed, and the published commit cannot differ from the
+          # attested one. If the create fails on a dispatch run, roll back the tag we just made
+          # so a re-run starts clean instead of tripping the guard above.
+          if ! gh release create "$TAG" --draft --generate-notes --title "$TAG" "${pre[@]}" "${files[@]}"; then
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
+            fi
+            echo "::error::failed to create the draft release for ${TAG}."
+            exit 1
+          fi
+          echo "Draft release $TAG created (tag ${TAG} anchored at ${COMMIT_SHA}) — review it in the Releases tab and click Publish."

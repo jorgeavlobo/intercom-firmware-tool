@@ -22,7 +22,7 @@ gh attestation verify IntercomFirmwareTool-vX.Y.Z-win-x64.exe --repo jorgeavlobo
 
 > **Note:** the `.exe` is not yet code-signed, so Windows SmartScreen may show *"Windows protected your PC"* on first run — click **More info → Run anyway**. Verify the checksum/attestation above first. (Code signing is tracked in issue #84.)
 
-**Cutting a release** (maintainer): push a `vX.Y.Z` tag, or run the **release** workflow from the Actions tab with a version. Either produces a **draft** Release with the assets attached — review it, then click **Publish**.
+**Cutting a release** (maintainer): push a `vX.Y.Z` tag, or run the **release** workflow from the Actions tab with a version. Either produces a **draft** Release with the assets attached — review it, then click **Publish**. The `vX.Y.Z` tag is anchored to the built commit at build time (the manual dispatch creates it before the draft), so the artifact, its attestation, and the tag can never describe different commits; if you discard a dispatch draft instead of publishing, delete the matching tag too. A repo **tag-protection ruleset** on `v*` (so release tags can't be moved or deleted outside this process) is the recommended companion control.
 
 ## Download official firmware (optional)
 
