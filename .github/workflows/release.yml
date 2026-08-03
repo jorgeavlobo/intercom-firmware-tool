@@ -191,4 +191,20 @@ jobs:
             exit 1
           fi
           gh release create "$TAG" --draft --generate-notes --title "$TAG" "${target[@]}" "${pre[@]}" "${files[@]}"
+          # Close the residual TOCTOU window: between the tag-existence check above and this
+          # create, another actor could push $TAG. `gh release create` then silently binds the
+          # draft to that tag's commit and ignores --target, so the draft's assets — attested
+          # for $COMMIT_SHA — would misrepresent their source. On the dispatch path re-resolve
+          # the tag; if it now exists and points at a different commit than this build, delete
+          # the mismatched draft (leaving the concurrently-pushed tag untouched) and fail. An
+          # annotated tag's ref sha is the tag object (not the commit), so it compares unequal
+          # and we fail closed — the safe direction (CodeRabbit).
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object.sha' 2>/dev/null || true)"
+            if [ -n "$tag_sha" ] && [ "$tag_sha" != "$COMMIT_SHA" ]; then
+              gh release delete "$TAG" --yes || true
+              echo "::error::tag ${TAG} was pushed concurrently during this run (points at ${tag_sha}, not this build ${COMMIT_SHA}) — deleted the mismatched draft. Use the tag-triggered flow, or delete the stale tag, then re-run."
+              exit 1
+            fi
+          fi
           echo "Draft release $TAG created — review it in the Releases tab and click Publish."
