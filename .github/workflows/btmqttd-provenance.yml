@@ -56,7 +56,7 @@ jobs:
           sudo rm -f /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources
           {
             echo "Types: deb"
-            echo "URIs: https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}"
+            echo "URIs: https://snapshot.ubuntu.com/ubuntu/${UBUNTU_SNAPSHOT}/"
             echo "Suites: noble noble-updates noble-security noble-backports"
             echo "Components: main restricted universe multiverse"
             echo "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg"
