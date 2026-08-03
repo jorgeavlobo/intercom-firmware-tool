@@ -50,7 +50,11 @@ jobs:
           # default or on auto-install) makes the toolchain deterministic (Copilot). The
           # cargo steps below run in native/btmqttd and select this channel via the
           # rust-toolchain.toml directory override.
-          channel="$(grep -oP '^\s*channel\s*=\s*"\K[^"]+' native/btmqttd/rust-toolchain.toml)"
+          channel="$(grep -oP '^\s*channel\s*=\s*"\K[^"]+' native/btmqttd/rust-toolchain.toml || true)"
+          if [ -z "$channel" ]; then
+            echo "::error::could not read [toolchain] channel from native/btmqttd/rust-toolchain.toml" >&2
+            exit 1
+          fi
           echo "pinned channel: $channel"
           rustup toolchain install "$channel" --profile minimal \
             --target armv7-unknown-linux-musleabihf --component clippy

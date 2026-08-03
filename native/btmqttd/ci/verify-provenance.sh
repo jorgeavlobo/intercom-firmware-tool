@@ -40,14 +40,21 @@ size() { stat -c%s "$1"; }
 
 vend_sha="$(sha "$VENDORED")"; vend_size="$(size "$VENDORED")"
 
+# Extract the recorded size/SHA. grep -m1 (first match) rather than `| head -1`: takes
+# the first record without a pipeline that could SIGPIPE-fail grep under pipefail. There
+# is exactly one btmqttd record in each file today (one ArmBinary; one provenance table),
+# so the first match IS it. Each extraction has an explicit `|| fail` so a format change
+# that stops the pattern matching produces an actionable error, not a bare non-zero exit.
 # PayloadBinaries.cs — `Length: 1_383_056,`  /  `Sha256Hex: "e324...",`
-# grep -m1 (first match) rather than `| head -1`: takes the first record without a
-# pipeline that could SIGPIPE-fail grep under `set -o pipefail` if a second row appears.
-cs_size="$(grep -m1 -oP 'Length:\s*\K[0-9_]+' "$CS" | tr -d '_')"
-cs_sha="$(grep -m1 -oP 'Sha256Hex:\s*"\K[0-9a-fA-F]+' "$CS")"
+cs_size="$(grep -m1 -oP 'Length:\s*\K[0-9_]+' "$CS" | tr -d '_')" \
+  || fail "could not extract 'Length' from $CS (format changed?)"
+cs_sha="$(grep -m1 -oP 'Sha256Hex:\s*"\K[0-9a-fA-F]+' "$CS")" \
+  || fail "could not extract 'Sha256Hex' from $CS (format changed?)"
 # THIRD_PARTY.md — `| Size | 1,383,056 bytes |`  /  `| SHA-256 | ` + backtick-wrapped hex
-md_size="$(grep -m1 -oP '\|\s*Size\s*\|\s*\K[0-9,]+' "$MD" | tr -d ',')"
-md_sha="$(grep -m1 -oP '\|\s*SHA-256\s*\|\s*`\K[0-9a-fA-F]+' "$MD")"
+md_size="$(grep -m1 -oP '\|\s*Size\s*\|\s*\K[0-9,]+' "$MD" | tr -d ',')" \
+  || fail "could not extract 'Size' from $MD (format changed?)"
+md_sha="$(grep -m1 -oP '\|\s*SHA-256\s*\|\s*`\K[0-9a-fA-F]+' "$MD")" \
+  || fail "could not extract 'SHA-256' from $MD (format changed?)"
 
 printf 'committed bin  : size=%s sha=%s\n' "$vend_size" "$vend_sha"
 printf 'PayloadBinaries: size=%s sha=%s\n' "$cs_size" "$cs_sha"
