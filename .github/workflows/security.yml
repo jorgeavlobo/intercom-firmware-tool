@@ -39,18 +39,32 @@ jobs:
         run: dotnet restore IntercomFirmwareTool.slnx
 
       - name: Audit NuGet packages (fail on any vulnerability)
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          # `dotnet list package --vulnerable` prints "has the following vulnerable
-          # packages" ONLY when vulnerabilities exist; otherwise it says there are none.
-          out="$(dotnet list IntercomFirmwareTool.slnx package --vulnerable --include-transitive)"
-          echo "$out"
-          if grep -qi 'has the following vulnerable packages' <<<"$out"; then
-            echo "::error::Vulnerable NuGet packages found (see the list above)."
+          $ErrorActionPreference = 'Stop'
+          # Machine-readable output (--format json) rather than grepping a human-readable
+          # English string: robust against wording/localization changes and shell-independent
+          # (Copilot). Fail when any top-level or transitive package has a non-empty
+          # `vulnerabilities` array.
+          $json = dotnet list IntercomFirmwareTool.slnx package --vulnerable --include-transitive --format json | ConvertFrom-Json
+          $found = $false
+          foreach ($project in $json.projects) {
+            foreach ($fw in @($project.frameworks)) {
+              foreach ($pkg in (@($fw.topLevelPackages) + @($fw.transitivePackages))) {
+                if ($pkg -and $pkg.vulnerabilities -and @($pkg.vulnerabilities).Count -gt 0) {
+                  $found = $true
+                  foreach ($v in @($pkg.vulnerabilities)) {
+                    Write-Host "VULNERABLE: $($pkg.id) $($pkg.resolvedVersion) [$($v.severity)] $($v.advisoryurl)"
+                  }
+                }
+              }
+            }
+          }
+          if ($found) {
+            Write-Error "Vulnerable NuGet packages found (see the list above)."
             exit 1
-          fi
-          echo "OK: no vulnerable NuGet packages."
+          }
+          Write-Host "OK: no vulnerable NuGet packages."
 
   cargo-deny:
     # RustSec advisories + license policy (permissive-only, no copyleft) for btmqttd,
@@ -81,4 +95,8 @@ jobs:
       - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: low
-          deny-licenses: GPL-2.0, GPL-3.0, LGPL-2.0, LGPL-2.1, LGPL-3.0, AGPL-1.0, AGPL-3.0, MPL-2.0
+          # Permissive-only ALLOW-list (SPDX ids), mirroring the cargo-deny policy. An
+          # allow-list blocks any non-permissive license — including copyleft we didn't
+          # enumerate (EPL, CDDL, GPL/LGPL/MPL/AGPL) — which a deny-list would miss
+          # (Codex/Copilot). Covers the licenses our current NuGet + Cargo deps use.
+          allow-licenses: MIT, Apache-2.0, ISC, BSD-2-Clause, BSD-3-Clause, Unicode-3.0, Unlicense, 0BSD, Zlib, BSL-1.0
