@@ -17,11 +17,18 @@
 # digest-pinned build environment — tracked in issue #76.
 set -euo pipefail
 
+usage() { echo "usage: verify-provenance.sh [--rebuilt <binary>]" >&2; exit 2; }
+
+# Accept exactly nothing, or exactly `--rebuilt <binary>`. Validating the total
+# argument count (not just $1) rejects a bare `--rebuilt` with no path, an unknown
+# first flag, and any trailing/extra arguments — all of which would otherwise be
+# silently ignored.
 REBUILT=""
-case "${1:-}" in
-  --rebuilt) REBUILT="${2:?usage: verify-provenance.sh --rebuilt <binary>}" ;;
-  "")        ;;
-  *)         echo "usage: verify-provenance.sh [--rebuilt <binary>]" >&2; exit 2 ;;
+case "$#" in
+  0) ;;
+  2) [ "$1" = "--rebuilt" ] || usage
+     REBUILT="$2" ;;
+  *) usage ;;
 esac
 
 VENDORED="IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd"
@@ -40,21 +47,28 @@ size() { stat -c%s "$1"; }
 
 vend_sha="$(sha "$VENDORED")"; vend_size="$(size "$VENDORED")"
 
-# Extract the recorded size/SHA. grep -m1 (first match) rather than `| head -1`: takes
-# the first record without a pipeline that could SIGPIPE-fail grep under pipefail. There
-# is exactly one btmqttd record in each file today (one ArmBinary; one provenance table),
-# so the first match IS it. Each extraction has an explicit `|| fail` so a format change
-# that stops the pattern matching produces an actionable error, not a bare non-zero exit.
-# PayloadBinaries.cs — `Length: 1_383_056,`  /  `Sha256Hex: "e324...",`
-cs_size="$(grep -m1 -oP 'Length:\s*\K[0-9_]+' "$CS" | tr -d '_')" \
-  || fail "could not extract 'Length' from $CS (format changed?)"
-cs_sha="$(grep -m1 -oP 'Sha256Hex:\s*"\K[0-9a-fA-F]+' "$CS")" \
-  || fail "could not extract 'Sha256Hex' from $CS (format changed?)"
-# THIRD_PARTY.md — `| Size | 1,383,056 bytes |`  /  `| SHA-256 | ` + backtick-wrapped hex
-md_size="$(grep -m1 -oP '\|\s*Size\s*\|\s*\K[0-9,]+' "$MD" | tr -d ',')" \
-  || fail "could not extract 'Size' from $MD (format changed?)"
-md_sha="$(grep -m1 -oP '\|\s*SHA-256\s*\|\s*`\K[0-9a-fA-F]+' "$MD")" \
-  || fail "could not extract 'SHA-256' from $MD (format changed?)"
+# Extract the recorded size/SHA. First isolate the btmqttd record in each file with
+# awk, THEN grep within that block — so a second record added *before* btmqttd (a future
+# ArmBinary, or another provenance table) can't shadow the value grep would otherwise take
+# from the first match anywhere in the file. grep -m1 (first match) rather than `| head -1`
+# avoids a pipeline that could SIGPIPE-fail grep under pipefail. Each extraction has an
+# explicit `|| fail` so a missing record or a changed format produces an actionable error,
+# not a bare non-zero exit.
+#
+# PayloadBinaries.cs — the `Btmqttd = new( ... );` block:  `Length: 1_383_056,`  /
+# `Sha256Hex: "e324...",`
+cs_block="$(awk '/Btmqttd = new\(/{f=1} f{print} f && /\);/{exit}' "$CS")"
+cs_size="$(printf '%s\n' "$cs_block" | grep -m1 -oP 'Length:\s*\K[0-9_]+' | tr -d '_')" \
+  || fail "could not extract 'Length' from the btmqttd record in $CS (format changed?)"
+cs_sha="$(printf '%s\n' "$cs_block" | grep -m1 -oP 'Sha256Hex:\s*"\K[0-9a-fA-F]+')" \
+  || fail "could not extract 'Sha256Hex' from the btmqttd record in $CS (format changed?)"
+# THIRD_PARTY.md — the provenance table headed `| Field | \`btmqttd\` |`, read to the
+# blank line that ends it:  `| Size | 1,383,056 bytes |`  /  `| SHA-256 | ` + backtick hex
+md_block="$(awk '/^\|[[:space:]]*Field[[:space:]]*\|[[:space:]]*`btmqttd`/{f=1} f{if($0 ~ /^[[:space:]]*$/) exit; print}' "$MD")"
+md_size="$(printf '%s\n' "$md_block" | grep -m1 -oP '\|\s*Size\s*\|\s*\K[0-9,]+' | tr -d ',')" \
+  || fail "could not extract 'Size' from the btmqttd record in $MD (format changed?)"
+md_sha="$(printf '%s\n' "$md_block" | grep -m1 -oP '\|\s*SHA-256\s*\|\s*`\K[0-9a-fA-F]+')" \
+  || fail "could not extract 'SHA-256' from the btmqttd record in $MD (format changed?)"
 
 printf 'committed bin  : size=%s sha=%s\n' "$vend_size" "$vend_sha"
 printf 'PayloadBinaries: size=%s sha=%s\n' "$cs_size" "$cs_sha"
