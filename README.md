@@ -4,7 +4,7 @@
 
 Windows x64 builds are published on the [Releases page](../../releases). Each release `vX.Y.Z` includes:
 
-- **`IntercomFirmwareTool-vX.Y.Z-win-x64.exe`** — self-contained single-file executable; runs on a clean Windows x64 machine with **no .NET installed**.
+- **`IntercomFirmwareTool-vX.Y.Z-win-x64.exe`** — self-contained single-file executable; runs on a clean Windows x64 machine with **no .NET installed** (the required Visual C++ runtime that the disk-image library depends on is bundled app-local, so no VC++ Redistributable is needed either).
 - **`IntercomFirmwareTool-vX.Y.Z-win-x64.zip`** — the same self-contained build as a folder, if you prefer an archive (or if antivirus flags the single-file's first-run temp-extraction).
 - **`*.sha256`** — SHA-256 checksums for each asset.
 

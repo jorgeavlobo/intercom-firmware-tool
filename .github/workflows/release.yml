@@ -115,6 +115,35 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Releasing v$v (prerelease=$prerelease)"
 
+      - name: Bundle the Visual C++ runtime app-local (SharpExt4 needs VCRUNTIME140.dll)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # SharpExt4.dll (mixed-mode C++/CLI) imports VCRUNTIME140.dll, which a clean Windows
+          # install does NOT have (it ships with the VC++ Redistributable) and which dotnet
+          # self-contained publish does NOT supply. Drop the Microsoft-redistributable copy into
+          # lib\SharpExt4\ so the csproj ships it app-local — beside SharpExt4 in the .zip and
+          # bundled into the single-file for first-run extraction — making the "runs on a clean
+          # machine" promise true (Codex).
+          #
+          # Prefer the official VC++ redistributable copy from the VS install; fall back to the
+          # system copy (the same signed DLL). Redistributing VCRUNTIME140 app-local is a
+          # supported Microsoft scenario.
+          $src = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT\vcruntime140.dll' -ErrorAction SilentlyContinue |
+                 Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $src) { $src = Join-Path $env:SystemRoot 'System32\vcruntime140.dll' }
+          if (-not (Test-Path $src)) { throw "VCRUNTIME140.dll not found on the runner" }
+          # Only bundle a genuine, valid Microsoft-signed runtime.
+          $sig = Get-AuthenticodeSignature $src
+          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Microsoft') {
+            throw "VCRUNTIME140.dll at $src is not validly Microsoft-signed (status=$($sig.Status))"
+          }
+          $dest = 'IntercomFirmwareTool.Core/lib/SharpExt4/vcruntime140.dll'
+          Copy-Item $src $dest -Force
+          $ver = (Get-Item $dest).VersionInfo.FileVersion
+          $sha = (Get-FileHash $dest -Algorithm SHA256).Hash.ToLower()
+          Write-Host "Bundled VCRUNTIME140.dll from $src (version $ver, sha256 $sha)"
+
       # SharpExt4.dll is a mixed-mode C++/CLI assembly (it imports Ijwhost.dll) that can't be
       # loaded from the in-memory single-file bundle, and the app checks for SharpExt4 /
       # DiskPartitionInfo / Ijwhost.dll next to AppContext.BaseDirectory at startup
