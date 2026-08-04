@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The repo's first unit-test project (issue #85). Targets the same net10.0 as Core and
+       references it so the pure update-check decision logic (SemanticVersion / UpdateManifest /
+       UpdateChecker) is covered without any network or UI. x64 matches Core/App (the native
+       SharpExt4 dependency Core carries is never touched by these tests). -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x64</PlatformTarget>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <!-- Exact-pinned for reproducible restores, matching the repo convention. If the net10.0 test
+       host fails to restore/run in CI, bump these to their net10-compatible releases and re-pin. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\IntercomFirmwareTool.Core\IntercomFirmwareTool.Core.csproj" />
+  </ItemGroup>
+
+</Project>

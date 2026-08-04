@@ -69,6 +69,9 @@ namespace IntercomFirmwareTool.App
             BuildLanguageMenu();
             RefreshPlaceholders();
             ShowStartupDiagnostics();
+            // Read the running version + sync the settings-menu opt-out (issue #85). The actual
+            // network check is kicked off from Loaded, after the window is shown.
+            InitUpdateUi();
 
             // The key is chosen explicitly (Choose existing… / Generate new…), so
             // nothing is pre-selected — this avoids silently picking the wrong key.
@@ -112,6 +115,9 @@ namespace IntercomFirmwareTool.App
                 StartDonateShine();
                 // Arm the "new options below" scroll cue once the initial layout settles.
                 ArmScrollCue();
+                // Best-effort startup update check (issue #85): async, time-boxed, fail-open —
+                // never blocks startup or the UI.
+                StartUpdateCheck();
             };
 
             // Kick off the silent firmware scan immediately (background thread), and
@@ -1109,6 +1115,8 @@ namespace IntercomFirmwareTool.App
             RenderStatus();
             // The download card's code-set text (pills, busy button, status line).
             ApplyDownloadLanguage();
+            // Re-render the update banners' imperatively-set text (issue #85).
+            ApplyUpdateLanguage();
         }
 
         /// <summary>Sets the neutral placeholder on any path box that has no selection.</summary>
@@ -1990,6 +1998,11 @@ namespace IntercomFirmwareTool.App
         /// <summary>Enables/disables the action buttons and credential inputs during an operation.</summary>
         private void SetButtonsEnabled(bool enabled)
         {
+            // An unsafe-version hard-block (issue #85) overrides normal enable/disable: the actions
+            // stay disabled regardless, while the menus are re-enabled at the end so the user can
+            // still switch language, open Help/About and quit.
+            if (_blocked) enabled = false;
+
             // Starting an operation: force the fields back to masked first. If the
             // user was holding the eye (Peek), disabling the button can swallow the
             // mouse/key-up that would re-mask, leaving the password visible for the
@@ -2017,6 +2030,9 @@ namespace IntercomFirmwareTool.App
             // Lock the language menu during an operation too, so the culture can't
             // change while a result is mid-write (it re-renders freely once idle).
             LangMenu.IsEnabled = enabled;
+            // The settings menu (update-check toggle / check-now / About) locks with the rest
+            // during an operation; the blocked-state override at the end re-enables it.
+            SettingsMenu.IsEnabled = enabled;
             // The three clear buttons are content-aware (enabled only when their field
             // has something to clear); UpdateBuildEnabled below drives them from the
             // current paths + _uiEnabled, so they aren't set here.
@@ -2037,6 +2053,14 @@ namespace IntercomFirmwareTool.App
             // The download card's Start button is gated on _uiEnabled too, so refresh it:
             // a running build/verify must disable it (no concurrent operation).
             UpdateDlStartEnabled();
+
+            // Under an unsafe-version block, keep the escape hatches usable: language switch,
+            // settings/Help/About, and (always) the window's close button.
+            if (_blocked)
+            {
+                LangMenu.IsEnabled = true;
+                SettingsMenu.IsEnabled = true;
+            }
         }
 
         // Whether the UI is currently interactive (false during a build/verify op).

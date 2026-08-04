@@ -473,4 +473,19 @@ Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de co
 
   <!-- ================= Scroll cue ================= -->
   <data name="Scroll_More" xml:space="preserve"><value>Nuevas opciones abajo</value></data>
+  <!-- ================= Update check (#85) ================= -->
+  <data name="Settings_MenuTooltip" xml:space="preserve"><value>Ajustes</value></data>
+  <data name="Settings_CheckOnStartup" xml:space="preserve"><value>Buscar actualizaciones al iniciar</value></data>
+  <data name="Settings_CheckNow" xml:space="preserve"><value>Buscar actualizaciones ahora…</value></data>
+  <data name="Settings_About" xml:space="preserve"><value>Acerca de</value></data>
+  <data name="Update_Download" xml:space="preserve"><value>Descargar</value></data>
+  <data name="Update_Dismiss" xml:space="preserve"><value>Recordar más tarde</value></data>
+  <data name="Update_Available" xml:space="preserve"><value>Hay una versión más reciente disponible ({0}).</value></data>
+  <data name="Update_Unsafe" xml:space="preserve"><value>Esta versión ya no es segura — actualiza a la {0} o posterior.</value></data>
+  <data name="Update_None" xml:space="preserve"><value>Estás usando la versión más reciente.</value></data>
+  <data name="Update_Failed" xml:space="preserve"><value>No se pudo buscar actualizaciones ahora. Inténtalo más tarde.</value></data>
+  <data name="Update_DevBuild" xml:space="preserve"><value>Esta es una compilación de desarrollo; la búsqueda de actualizaciones está desactivada.</value></data>
+  <data name="Update_CheckTitle" xml:space="preserve"><value>Buscar actualizaciones</value></data>
+  <data name="About_Title" xml:space="preserve"><value>Acerca de Intercom Firmware Tool</value></data>
+  <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Versión {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>

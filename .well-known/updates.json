@@ -1,0 +1,6 @@
+{
+  "_comment": "Update manifest for the app's startup update check (issue #85). 'latestVersion' is bumped automatically by the update-manifest workflow when a GitHub Release is published; 'minimumSupportedVersion' is bumped MANUALLY, only to retroactively flag an old build unsafe (a running build below it is hard-blocked in-app). Always keep minimumSupportedVersion <= latestVersion. Before the first release these stay 0.0.0, which the app reads as 'nothing newer, nothing unsafe'.",
+  "schemaVersion": 1,
+  "latestVersion": "0.0.0",
+  "minimumSupportedVersion": "0.0.0"
+}

@@ -1,0 +1,83 @@
+name: update manifest
+
+# When a GitHub Release is PUBLISHED (a human clicks Publish on the #79 draft), bump
+# 'latestVersion' in .well-known/updates.json — the manifest the in-app startup update check
+# (#85) reads — to the released tag, so users get nudged to it. Prereleases are skipped (the
+# nudge ignores them). 'minimumSupportedVersion' is NEVER touched here; it is maintained by hand,
+# only to retroactively flag an old build unsafe.
+#
+# This job pushes one line to the default branch, so it checks out WITH credentials (unlike the
+# read-only lint/build jobs). It requires that this workflow is allowed to push to the default
+# branch (a branch-protection/ruleset bypass for the github-actions app, or no PR requirement on
+# that branch). If it cannot push, the run fails but nothing breaks: a stale 'latestVersion' just
+# means no nudge (fail-safe), and a maintainer can bump the one line by hand.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable version to set as latestVersion (e.g. 1.2.3)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-manifest
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          # This job commits the manifest bump, so it needs the token persisted for `git push`.
+          persist-credentials: true
+
+      - name: Bump latestVersion in the update manifest
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Resolve the target version: the manual dispatch input, else the published release tag
+          # (strip a leading 'v'). Publishing a PRERELEASE never bumps latestVersion — the nudge
+          # deliberately ignores prereleases.
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="$INPUT_VERSION"
+          else
+            if [ "${PRERELEASE:-}" = "true" ]; then
+              echo "Prerelease ${TAG:-} — the update nudge ignores prereleases; not bumping."
+              exit 0
+            fi
+            version="${TAG#v}"
+          fi
+
+          # Only auto-bump to a stable X.Y.Z (no prerelease/build suffix).
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$version' is not a stable X.Y.Z version; not bumping."
+            exit 1
+          fi
+
+          file=.well-known/updates.json
+          tmp="$(mktemp)"
+          jq --arg v "$version" '.latestVersion = $v' "$file" > "$tmp"
+          mv "$tmp" "$file"
+
+          if git diff --quiet -- "$file"; then
+            echo "latestVersion already $version — nothing to do."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+          git commit -m "chore(updates): set latestVersion to $version [skip ci]"
+          git push origin HEAD:master
+          echo "Set latestVersion=$version"

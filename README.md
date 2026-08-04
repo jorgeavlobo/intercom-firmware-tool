@@ -32,6 +32,16 @@ gh attestation verify IntercomFirmwareTool-vX.Y.Z-win-x64-portable.exe --repo jo
 
 > **Required prerequisite — tag-protection ruleset.** The build-time tag anchoring guarantees the artifact, its attestation, and the tag describe the same commit *only* while a repo **ruleset** on `refs/tags/v*` keeps that tag immutable. Create one (Settings → Rules → Rulesets → New tag ruleset) that **restricts tag updates and deletions** for `v*`, with **no bypass actor** that could move a release tag (leave tag *creation* allowed so the release workflow can anchor the tag). The atomic tag creation in the workflow prevents a *conflicting* tag; only this ruleset prevents an existing release tag from being force-*moved* between build and publish. Without it, a collaborator with tag-update permission could rebind a `vX.Y.Z` tag to a different commit than its published assets. (Because the ruleset blocks deletions, the workflow's best-effort rollback of a *failed* dispatch cannot remove the tag it anchored — delete such a leftover tag out-of-band, or bump the version.)
 
+## Automatic update check (optional)
+
+On startup the app quietly checks whether a newer release is available and, if so, shows a small **"a newer version is available"** banner with a **Download** button that opens this repository's [Releases page](../../releases). It **never downloads or runs anything itself** — you download and verify the new build exactly as above. The banner is dismissible ("Remind me later" nags once per version); the rest of the app stays fully usable.
+
+It is deliberately unobtrusive and **fails open**: the check is asynchronous and time-boxed, and no internet, a timeout, a rate-limit, a malformed response, or opting out simply means **no banner** — the app never blocks or waits on it, and works fully offline. Development builds (version `0.0.0`) never nag.
+
+The one case that disables actions is a **maintainer-flagged unsafe version**: if the running build is older than a `minimumSupportedVersion` the maintainer has published (e.g. to retire a build with a serious bug), a red banner asks you to update and the firmware actions are disabled — but you can always still read the message, switch language, open **⚙️ → About**, and quit. This only ever triggers on that explicit, sanity-checked signal, never by accident.
+
+**Privacy / opt-out.** The check makes one HTTPS request to GitHub (`raw.githubusercontent.com`), which sees your IP address and a generic `User-Agent`. It sends no personal data and downloads nothing. To turn it off entirely, open the **⚙️ settings menu** (top-right) and untick **"Check for updates on startup"** — the choice is remembered, and with it off the app makes no network call for updates. The same menu has **"Check for updates now…"** for an on-demand check and **About** (which shows the running version).
+
 ## Download official firmware (optional)
 
 The tool can fetch the original, unmodified firmware straight from the official

@@ -473,4 +473,19 @@ Enable it only on an authenticated, trusted broker. Enable the remote command ch
 
   <!-- ================= Scroll cue ================= -->
   <data name="Scroll_More" xml:space="preserve"><value>New options below</value></data>
+  <!-- ================= Update check (#85) ================= -->
+  <data name="Settings_MenuTooltip" xml:space="preserve"><value>Settings</value></data>
+  <data name="Settings_CheckOnStartup" xml:space="preserve"><value>Check for updates on startup</value></data>
+  <data name="Settings_CheckNow" xml:space="preserve"><value>Check for updates now…</value></data>
+  <data name="Settings_About" xml:space="preserve"><value>About</value></data>
+  <data name="Update_Download" xml:space="preserve"><value>Download</value></data>
+  <data name="Update_Dismiss" xml:space="preserve"><value>Remind me later</value></data>
+  <data name="Update_Available" xml:space="preserve"><value>A newer version ({0}) is available.</value></data>
+  <data name="Update_Unsafe" xml:space="preserve"><value>This version is no longer safe to use — please update to {0} or newer.</value></data>
+  <data name="Update_None" xml:space="preserve"><value>You are running the latest version.</value></data>
+  <data name="Update_Failed" xml:space="preserve"><value>Couldn’t check for updates right now. Please try again later.</value></data>
+  <data name="Update_DevBuild" xml:space="preserve"><value>This is a development build; update checks are disabled.</value></data>
+  <data name="Update_CheckTitle" xml:space="preserve"><value>Check for updates</value></data>
+  <data name="About_Title" xml:space="preserve"><value>About Intercom Firmware Tool</value></data>
+  <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Version {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>

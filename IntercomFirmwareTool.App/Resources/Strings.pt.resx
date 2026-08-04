@@ -473,4 +473,19 @@ Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comando
 
   <!-- ================= Scroll cue ================= -->
   <data name="Scroll_More" xml:space="preserve"><value>Novas opções abaixo</value></data>
+  <!-- ================= Update check (#85) ================= -->
+  <data name="Settings_MenuTooltip" xml:space="preserve"><value>Definições</value></data>
+  <data name="Settings_CheckOnStartup" xml:space="preserve"><value>Verificar atualizações no arranque</value></data>
+  <data name="Settings_CheckNow" xml:space="preserve"><value>Verificar atualizações agora…</value></data>
+  <data name="Settings_About" xml:space="preserve"><value>Acerca de</value></data>
+  <data name="Update_Download" xml:space="preserve"><value>Transferir</value></data>
+  <data name="Update_Dismiss" xml:space="preserve"><value>Lembrar mais tarde</value></data>
+  <data name="Update_Available" xml:space="preserve"><value>Está disponível uma versão mais recente ({0}).</value></data>
+  <data name="Update_Unsafe" xml:space="preserve"><value>Esta versão já não é segura — atualize para a {0} ou posterior.</value></data>
+  <data name="Update_None" xml:space="preserve"><value>Está a usar a versão mais recente.</value></data>
+  <data name="Update_Failed" xml:space="preserve"><value>Não foi possível verificar atualizações agora. Tenta novamente mais tarde.</value></data>
+  <data name="Update_DevBuild" xml:space="preserve"><value>Esta é uma compilação de desenvolvimento; a verificação de atualizações está desativada.</value></data>
+  <data name="Update_CheckTitle" xml:space="preserve"><value>Verificar atualizações</value></data>
+  <data name="About_Title" xml:space="preserve"><value>Acerca do Intercom Firmware Tool</value></data>
+  <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Versão {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>
