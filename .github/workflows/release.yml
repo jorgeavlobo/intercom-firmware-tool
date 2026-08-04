@@ -80,7 +80,14 @@ jobs:
           # metadata (Copilot/CodeRabbit).
           semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
           if ! printf '%s' "$v" | grep -qE "$semver"; then
-            echo "::error::invalid version '$v' (expected SemVer 2.0.0, e.g. 1.2.3 or 1.2.3-rc.1)"; exit 1
+            # Keep the raw (rejected) value OUT of the ::error:: workflow command: a dispatched
+            # version containing a newline or %-escape could otherwise inject fake log commands /
+            # annotations. Strip control chars and print it on a plain, prefixed line instead, so
+            # it can never start a '::' command line (Copilot).
+            v_safe="$(printf '%s' "$v" | tr -d '\000-\037')"
+            printf 'rejected version input: %s\n' "$v_safe"
+            echo "::error::invalid version (expected SemVer 2.0.0, e.g. 1.2.3 or 1.2.3-rc.1)"
+            exit 1
           fi
           # A SemVer prerelease (e.g. 1.2.3-rc.1) → mark the GitHub Release as a prerelease so
           # it isn't presented as the Latest/production release. The prerelease is the part
@@ -198,8 +205,10 @@ jobs:
           # 'refs/tags/v*' tag-protection ruleset (restrict updates + deletions); the create-ref
           # alone only prevents a conflicting creation (Codex/CodeRabbit; see the README note).
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # stdout is the created-ref JSON (noise); let stderr through so a real failure
+            # (e.g. a 422 the message below only guesses at) is visible in the logs (Copilot).
             if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-                 -f ref="refs/tags/${TAG}" -f sha="$COMMIT_SHA" >/dev/null 2>&1; then
+                 -f ref="refs/tags/${TAG}" -f sha="$COMMIT_SHA" >/dev/null; then
               echo "::error::could not create tag ${TAG} at ${COMMIT_SHA} (it likely already exists) — delete the stale tag or bump the version, then re-run."
               exit 1
             fi
@@ -215,16 +224,19 @@ jobs:
           # raced a replacement release onto $TAG after the guard above, a tag-scoped upload would
           # push our assets onto THEIR release and a tag-scoped delete could remove it — possibly
           # a published one (Codex, CodeRabbit). Create returns both id and upload_url in one call.
+          # Capture id+upload_url from stdout; DON'T suppress stderr, so a create failure (race,
+          # permissions, validation) surfaces its real reason in the logs. `|| true` keeps the
+          # empty-result handling below in charge of the exit, not set -e (Copilot).
           created="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
             -f tag_name="$TAG" -f name="$TAG" -F draft=true -F prerelease="$PRERELEASE" \
-            -F generate_release_notes=true --jq '[.id, .upload_url] | @tsv' 2>/dev/null || true)"
+            -F generate_release_notes=true --jq '[.id, .upload_url] | @tsv' || true)"
           release_id="${created%%$'\t'*}"
           upload_url="${created#*$'\t'}"
           if [ -z "$created" ] || [ -z "$release_id" ] || [ "$release_id" = "$upload_url" ]; then
             # We created nothing (e.g. a release for $TAG already exists from a race) — do NOT
             # delete anyone's release; just roll back the tag we anchored on the dispatch path.
             if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null || true
             fi
             echo "::error::could not create the draft release for ${TAG} (a release for it may already exist)."
             exit 1
@@ -241,9 +253,11 @@ jobs:
             # the '+' file, breaking checksum verification. Every other char we emit (letters,
             # digits, '.', '-') is query-safe (CodeRabbit).
             asset_q="${asset//+/%2B}"
+            # stdout is the uploaded-asset JSON (noise); let stderr through so an upload failure
+            # (size limit, auth, transient network) is diagnosable from the logs (Copilot).
             if ! gh api --method POST "${upload_url}?name=${asset_q}" \
                  --header "Content-Type: application/octet-stream" \
-                 --input "$f" >/dev/null 2>&1; then
+                 --input "$f" >/dev/null; then
               upload_failed="$asset"
               break
             fi
@@ -255,9 +269,9 @@ jobs:
             # tag, so it no-ops and the (correct, $COMMIT_SHA) tag is left to remove out-of-band
             # or reuse. We grant the workflow NO ruleset bypass — a bypass that can delete/move
             # release tags would reopen the window this anchoring closes (CodeRabbit).
-            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}" >/dev/null 2>&1 || true
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}" >/dev/null || true
             if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null || true
             fi
             echo "::error::failed to upload asset '${upload_failed}' to the draft release for ${TAG} (removed our partial draft; a tag may remain anchored — delete it out-of-band or bump the version before re-running)."
             exit 1
