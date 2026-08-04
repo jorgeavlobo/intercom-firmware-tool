@@ -38,7 +38,10 @@ namespace IntercomFirmwareTool.App
 
         private static HttpClient CreateHttpClient()
         {
-            var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = true })
+            // No auto-redirect: the manifest lives at a fixed raw.githubusercontent.com URL, so a
+            // redirect (to another host, or downgraded to HTTP) is unexpected — a 3xx is not a
+            // success status, so FetchManifestAsync treats it as a failure and fails open.
+            var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false })
             {
                 Timeout = HttpTimeout,
             };
@@ -136,6 +139,11 @@ namespace IntercomFirmwareTool.App
 
         private void ApplyUpdateStatus(UpdateStatus status, bool manual)
         {
+            // An unsafe-version block is terminal for the session: once actions are disabled with
+            // the red banner shown, never let a later result (a manual re-check, or re-enabling the
+            // setting) hide that banner and leave the actions disabled with no explanation.
+            if (_blocked) return;
+
             switch (status.Kind)
             {
                 case UpdateStatusKind.UpdateAvailable:
