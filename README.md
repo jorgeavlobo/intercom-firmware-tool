@@ -23,7 +23,10 @@ Each release also carries a **SLSA build-provenance attestation** — confirm it
 gh attestation verify IntercomFirmwareTool-vX.Y.Z-win-x64-portable.exe --repo jorgeavlobo/intercom-firmware-tool
 ```
 
-> **Note:** the `.exe` is not yet code-signed, so Windows SmartScreen may show *"Windows protected your PC"* on first run — click **More info → Run anyway**. Verify the checksum/attestation above first. (Code signing is tracked in issue #84.)
+> **Note — unsigned build:** the `.exe` is not yet code-signed (tracked in issue #84), so on a first run Windows may push back in two ways. Verify the checksum/attestation above first, then:
+>
+> - **SmartScreen** — *"Windows protected your PC"*: click **More info → Run anyway**.
+> - **Antivirus false positive** — Defender may flag the single-file `-portable.exe` as a threat (e.g. a `…!ml` heuristic detection like `Wacatac`/`Wacapew`). This is a **known false positive** for unsigned, self-extracting .NET single-file executables — not an actual infection. The build already ships **uncompressed** to minimise it. If it still trips: use the **`…-win-x64.zip`** (loose-folder) download instead — it is the same app without the single-file packaging and is not flagged.
 
 **Cutting a release** (maintainer): push a `vX.Y.Z` tag, or run the **release** workflow from the Actions tab with a version. Either produces a **draft** Release with the assets attached — review it, then click **Publish**. The `vX.Y.Z` tag is anchored to the built commit during the release run (the manual dispatch creates it in the draft-release step, after build + attestation, never deferred to publish). If you discard a dispatch draft instead of publishing, its `vX.Y.Z` tag remains behind — with the ruleset below active, removing it is a deliberate out-of-band action (temporarily relax the ruleset, or just bump the version); see the note.
 
