@@ -155,11 +155,12 @@ jobs:
       # (MainWindow.xaml.cs). So extract ALL bundled content (not just native libraries) on
       # first run — BaseDirectory then resolves to that run directory, where the three DLLs
       # land, satisfying both the runtime loader and the startup check (Codex).
-      # ReadyToRun is intentionally NOT used: crossgen emits its own DiskPartitionInfo.dll under
-      # obj\...\R2R\ that collides with the loose copy Core ships next to the app (SharpExt4's
-      # mixed-mode helper), failing publish at the copy step (NETSDK1152) or the single-file
-      # bundler (duplicate BundleRelativePath). Without R2R the publish matches the known-good
-      # dev build. The startup cost is negligible for this desktop tool; revisit if it matters.
+      # ReadyToRun is intentionally NOT used: crossgen emits its own R2R copy of
+      # DiskPartitionInfo.dll (SharpExt4's managed helper, declared in SharpExt4.deps.json) that
+      # collides with the SDK-resolved runtime-dependency copy at the same relative path, failing
+      # publish at the copy step (NETSDK1152) or the single-file bundler (duplicate
+      # BundleRelativePath). Without R2R the publish matches the known-good dev build. The startup
+      # cost is negligible for this desktop tool; revisit if it matters.
       - name: Publish single-file .exe (self-contained)
         shell: pwsh
         env:
