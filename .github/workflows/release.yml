@@ -166,12 +166,6 @@ jobs:
           set -euo pipefail
           # the two primary assets + their .sha256 sidecars.
           files=(dist/*.exe dist/*.zip dist/*.exe.sha256 dist/*.zip.sha256)
-          # A SemVer prerelease (1.2.3-rc.1) is marked as a GitHub prerelease so it is not
-          # surfaced as Latest/production (Codex).
-          pre=()
-          if [ "$PRERELEASE" = "true" ]; then
-            pre=(--prerelease)
-          fi
           # Refuse if ANY release for this tag already exists (draft or published) rather
           # than clobbering it. gh release upload --clobber deletes-then-uploads each asset
           # non-atomically and can't enforce draft state, so a re-run could race a manual
@@ -207,26 +201,41 @@ jobs:
           fi
 
           # The tag now exists on both paths (pushed, or just created above), so the release
-          # binds to it — no --target needed, so the published commit cannot differ from the
-          # attested one. `gh release create` uploads assets in SEPARATE API calls, so a nonzero
-          # exit can mean the draft record was created but an asset upload failed — i.e. the draft
-          # EXISTS. On a dispatch failure, delete that draft FIRST (never leave a publishable,
-          # partially-populated draft behind), then best-effort remove the anchor tag. Order
-          # matters: a lingering draft plus a deleted/re-createable tag would let the tag be
-          # recreated at another commit and the draft published against it — the exact mismatch
-          # this anchoring prevents (Codex).
+          # binds to it — no target_commitish needed, so the published commit cannot differ from
+          # the attested one.
           #
-          # The tag delete is best-effort (|| true): once the REQUIRED 'v*' ruleset restricts
-          # deletions the workflow token cannot delete the tag, so it no-ops and the (correct,
-          # $COMMIT_SHA) tag is left to remove out-of-band or reuse. We do NOT grant the workflow
-          # a ruleset bypass to force the delete — a bypass that can delete/move release tags
-          # would reopen the very window this anchoring closes (CodeRabbit).
-          if ! gh release create "$TAG" --draft --generate-notes --title "$TAG" "${pre[@]}" "${files[@]}"; then
+          # Create the draft record and upload assets as SEPARATE steps, and on failure delete
+          # only the release WE created — identified by the API id returned at creation — never
+          # "whichever release owns $TAG". `gh release create` bundles create+upload and
+          # `gh release delete` targets a release by tag alone, so if another actor raced a
+          # release onto $TAG after the guard above, a tag-scoped rollback could delete THEIR
+          # (possibly published) release. Deleting by our own id makes the rollback touch only
+          # our draft (Codex).
+          release_id="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+            -f tag_name="$TAG" -f name="$TAG" -F draft=true -F prerelease="$PRERELEASE" \
+            -F generate_release_notes=true --jq '.id' 2>/dev/null || true)"
+          if [ -z "$release_id" ]; then
+            # We created nothing (e.g. a release for $TAG already exists from a race) — do NOT
+            # delete anyone's release; just roll back the tag we anchored on the dispatch path.
             if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-              gh release delete "$TAG" --yes >/dev/null 2>&1 || true
               gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
             fi
-            echo "::error::failed to create the draft release for ${TAG} (any partial draft was removed; a tag may remain anchored — delete it out-of-band or bump the version before re-running)."
+            echo "::error::could not create the draft release for ${TAG} (a release for it may already exist)."
+            exit 1
+          fi
+          if ! gh release upload "$TAG" "${files[@]}"; then
+            # Our draft is partial — delete OUR release by id (never a tag-scoped delete), then
+            # best-effort roll back the anchor tag. The tag delete is best-effort (|| true): once
+            # the REQUIRED 'v*' ruleset restricts deletions the workflow token cannot delete the
+            # tag, so it no-ops and the (correct, $COMMIT_SHA) tag is left to remove out-of-band
+            # or reuse. We do NOT grant the workflow a ruleset bypass to force the delete — a
+            # bypass that can delete/move release tags would reopen the window this closes
+            # (CodeRabbit).
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}" >/dev/null 2>&1 || true
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
+            fi
+            echo "::error::failed to upload assets to the draft release for ${TAG} (removed our partial draft; a tag may remain anchored — delete it out-of-band or bump the version before re-running)."
             exit 1
           fi
           echo "Draft release $TAG created (tag ${TAG} anchored at ${COMMIT_SHA}) — review it in the Releases tab and click Publish."
