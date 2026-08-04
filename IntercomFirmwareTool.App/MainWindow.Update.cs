@@ -105,22 +105,27 @@ namespace IntercomFirmwareTool.App
         {
             try
             {
+                // ResponseHeadersRead means HttpClient.Timeout only covers up to the headers, so
+                // bound the WHOLE fetch (headers + body) with one linked token — otherwise a server
+                // that trickles or stalls the body could hang the read indefinitely (a leaked
+                // fire-and-forget task) instead of failing open.
+                using var cts = new CancellationTokenSource(HttpTimeout);
                 using var resp = await Http
-                    .GetAsync(ManifestUrl, HttpCompletionOption.ResponseHeadersRead, CancellationToken.None)
+                    .GetAsync(ManifestUrl, HttpCompletionOption.ResponseHeadersRead, cts.Token)
                     .ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode)
                     return null;
                 if (resp.Content.Headers.ContentLength is long declared && declared > MaxManifestBytes)
                     return null;
 
-                await using var stream = await resp.Content.ReadAsStreamAsync(CancellationToken.None)
+                await using var stream = await resp.Content.ReadAsStreamAsync(cts.Token)
                     .ConfigureAwait(false);
 
                 // Bounded read: never buffer more than the cap (+1 byte to detect an over-cap body).
                 var buffer = new byte[MaxManifestBytes + 1];
                 int total = 0, read;
                 while (total < buffer.Length &&
-                       (read = await stream.ReadAsync(buffer.AsMemory(total), CancellationToken.None)
+                       (read = await stream.ReadAsync(buffer.AsMemory(total), cts.Token)
                            .ConfigureAwait(false)) > 0)
                 {
                     total += read;

@@ -36,6 +36,9 @@ public class SemanticVersionTests
     [InlineData("1.2.3-rc..1")]   // empty identifier
     [InlineData("1.2.3-rc.01")]   // numeric identifier with leading zero
     [InlineData("1.2.3-rc!1")]    // illegal character
+    [InlineData("1.2.3+")]        // empty build metadata
+    [InlineData("1.2.3+bad!")]    // illegal character in build metadata
+    [InlineData("1.2.3+a..b")]    // empty build-metadata identifier
     [InlineData("abc")]
     public void TryParse_rejects_invalid(string? input)
     {

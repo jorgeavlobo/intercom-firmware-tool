@@ -58,10 +58,17 @@ public sealed record SemanticVersion : IComparable<SemanticVersion>
         if (s.Length > 0 && (s[0] == 'v' || s[0] == 'V'))
             s = s[1..];
 
-        // Strip build metadata (ignored for precedence); it must be the last '+'-delimited part.
+        // Strip build metadata (ignored for precedence) — but VALIDATE it first, so a malformed
+        // suffix such as "1.1.0+" or "1.1.0+bad!" is rejected rather than silently accepted as
+        // "1.1.0". Otherwise a typo'd manifest could still parse and drive a hard block instead of
+        // failing open.
         int plus = s.IndexOf('+');
         if (plus >= 0)
+        {
+            if (!IsValidBuildMetadata(s[(plus + 1)..]))
+                return false;
             s = s[..plus];
+        }
 
         // Split off the pre-release part (everything after the first '-').
         string core;
@@ -134,6 +141,25 @@ public sealed record SemanticVersion : IComparable<SemanticVersion>
                 return false;
         }
         return s.Length > 0;
+    }
+
+    /// <summary>Build metadata: one or more dot-separated non-empty identifiers of [0-9A-Za-z-]
+    /// (leading zeros allowed, unlike numeric pre-release identifiers).</summary>
+    private static bool IsValidBuildMetadata(string meta)
+    {
+        if (meta.Length == 0)
+            return false;
+        foreach (string id in meta.Split('.'))
+        {
+            if (id.Length == 0)
+                return false;
+            foreach (char c in id)
+            {
+                if (!(char.IsAsciiLetterOrDigit(c) || c == '-'))
+                    return false;
+            }
+        }
+        return true;
     }
 
     /// <summary>
