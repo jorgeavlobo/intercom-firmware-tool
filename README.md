@@ -40,7 +40,7 @@ It is deliberately unobtrusive and **fails open**: the check is asynchronous and
 
 The one case that disables actions is a **maintainer-flagged unsafe version**: if the running build is older than a `minimumSupportedVersion` the maintainer has published (e.g. to retire a build with a serious bug), a red banner asks you to update and the firmware actions are disabled — but you can always still read the message, switch language, open **⚙️ → About**, and quit. This only ever triggers on that explicit, sanity-checked signal, never by accident.
 
-**Privacy / opt-out.** The check makes one HTTPS request to GitHub (`raw.githubusercontent.com`), which sees your IP address and a generic `User-Agent`. It sends no personal data and downloads nothing. To turn it off entirely, open the **⚙️ settings menu** (top-right) and untick **"Check for updates on startup"** — the choice is remembered, and with it off the app makes no network call for updates. The same menu has **"Check for updates now…"** for an on-demand check and **About** (which shows the running version).
+**Privacy / opt-out.** The check makes one HTTPS request to GitHub (`raw.githubusercontent.com`), which sees your IP address and an app-identifying `User-Agent` (`IntercomFirmwareTool-UpdateCheck`). It sends no personal data and downloads nothing. To turn it off entirely, open the **⚙️ settings menu** (top-right) and untick **"Check for updates on startup"** — the choice is remembered, and with it off the app makes no network call for updates. The same menu has **"Check for updates now…"** for an on-demand check and **About** (which shows the running version).
 
 ## Download official firmware (optional)
 

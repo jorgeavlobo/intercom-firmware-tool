@@ -58,8 +58,11 @@ public sealed record UpdateManifest(
                 ReadString(root, "minimumSupportedVersion"));
             return true;
         }
-        catch (JsonException)
+        catch (Exception)
         {
+            // Deliberately broad: this is a best-effort, fail-open parse (issue #85). ANY failure
+            // reading the manifest must yield "no manifest" — so the caller shows no banner and the
+            // app stays usable — never an exception surfacing to the caller.
             return false;
         }
     }

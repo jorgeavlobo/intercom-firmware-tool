@@ -69,8 +69,8 @@ public class UpdateCheckerTests
     }
 
     [Fact]
-    public void Unparseable_latest_is_UpToDate()  // fail open — no nag
-        => Assert.Equal(UpdateStatusKind.UpToDate, UpdateChecker.Evaluate(V("1.2.0"), M("not-a-version")).Kind);
+    public void Unparseable_latest_is_Unknown()  // can't determine the latest ⇒ fail open, no nag
+        => Assert.Equal(UpdateStatusKind.Unknown, UpdateChecker.Evaluate(V("1.2.0"), M("not-a-version")).Kind);
 
     // ---- Block (Unsupported) — only on the full, sane signal -----------------------------------
 
@@ -109,9 +109,11 @@ public class UpdateCheckerTests
     [Fact]
     public void Minimum_without_parseable_latest_never_blocks()
     {
-        // No sane 'latest' to gate against ⇒ do not block.
+        // No sane 'latest' to gate against ⇒ do not block; and with no latest to compare, the
+        // result is Unknown rather than a false "up to date".
         var s = UpdateChecker.Evaluate(V("1.0.0"), M(null, minimum: "1.1.0"));
-        Assert.Equal(UpdateStatusKind.UpToDate, s.Kind);
+        Assert.NotEqual(UpdateStatusKind.Unsupported, s.Kind);
+        Assert.Equal(UpdateStatusKind.Unknown, s.Kind);
     }
 
     [Fact]

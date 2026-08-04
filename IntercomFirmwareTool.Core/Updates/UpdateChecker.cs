@@ -99,6 +99,9 @@ public static class UpdateChecker
             return UpdateStatus.Available(latest);
         }
 
-        return UpdateStatus.UpToDate;
+        // Genuinely "up to date" only when we actually parsed a latest to compare against. If
+        // latestVersion was missing or unparseable we can't claim the user is on the latest — a
+        // manual check should report that it couldn't check, not "you're up to date".
+        return latest is not null ? UpdateStatus.UpToDate : UpdateStatus.Unknown;
     }
 }
