@@ -88,6 +88,17 @@
     <None Update="lib\SharpExt4\SharpExt4.dll">
       <CopyToOutputDirectory>Never</CopyToOutputDirectory>
     </None>
+    <!-- SharpExt4.dll (mixed-mode C++/CLI) imports VCRUNTIME140.dll, which is NOT part of a
+         clean Windows install and is NOT supplied by dotnet self-contained publish. The release
+         workflow (#79) drops the Microsoft-redistributable vcruntime140.dll here just before
+         publishing so it ships app-local (flattened to the output root, next to SharpExt4, and
+         bundled into the single-file for first-run extraction). This is an `Update` on an
+         optional file: it's a no-op for local/CI builds where the DLL is absent (those hosts
+         already have the VC++ runtime), and only takes effect in the release build. -->
+    <None Update="lib\SharpExt4\vcruntime140.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>vcruntime140.dll</TargetPath>
+    </None>
   </ItemGroup>
 
 </Project>

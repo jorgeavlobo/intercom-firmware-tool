@@ -1,0 +1,350 @@
+name: release
+
+# Build + publish a downloadable Windows x64 release (issue #79). Tag-driven: pushing a
+# vX.Y.Z tag (or a manual dispatch with a version) builds the self-contained WPF app and
+# creates a DRAFT GitHub Release with a single-file .exe + a self-contained .zip, each with
+# a .sha256, plus a SLSA build-provenance attestation. A human reviews the draft and clicks
+# Publish. The .exe is UNSIGNED for now (see #84); integrity comes from the checksums + the
+# attestation until code signing lands.
+#
+# The vX.Y.Z git tag is anchored to the built commit during the release run — the tag-push
+# event already carries it; a manual dispatch creates it (at the build's commit) in the
+# draft-release step, after build + attestation but never deferred to a later human Publish.
+# The atomic create-ref stops a CONFLICTING tag, but immutability — the tag not
+# being force-MOVED between anchoring and publish — depends on a repo tag-protection ruleset
+# on 'refs/tags/v*' that restricts UPDATES and DELETIONS (creation stays allowed so this
+# workflow can anchor the tag; no bypass actor that could move release tags). That ruleset
+# is a REQUIRED prerequisite; only with it active can the artifact, its attestation, and the
+# tag never describe different commits. See the README "Cutting a release" note.
+#
+# Context values (inputs, ref, sha) are passed to run: steps via env: — never interpolated
+# directly into a script — to avoid template injection (actionlint/zizmor).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 1.2.0 (a vX.Y.Z tag is created at this commit before the draft)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One release per version; do NOT cancel an in-progress publish. On a dispatch run
+  # github.ref is the default branch, which would serialize unrelated manual releases — so
+  # key by the version instead. Prefix the manual input with 'v' (it is entered without one,
+  # e.g. 1.2.0) so a dispatch and a tag push for the same version share one group
+  # (Copilot/CodeRabbit).
+  group: release-${{ inputs.version && (startsWith(inputs.version, 'v') && inputs.version || format('v{0}', inputs.version)) || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write # create the (draft) Release + upload assets
+      id-token: write # OIDC for the SLSA attestation
+      attestations: write # write the provenance attestation
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # gh authenticates via GH_TOKEN below (not git config), so no persisted creds.
+          persist-credentials: false
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Determine version + tag
+        id: ver
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            v="$INPUT_VERSION"
+          else
+            v="$REF_NAME"
+          fi
+          v="${v#v}"   # strip a leading 'v'
+          # Reject any control character (newline, CR, tab, …) BEFORE validating. grep below is
+          # line-oriented, so a multiline dispatch value like $'1.2.3\ntag=wrong' would otherwise
+          # pass (its first line is valid SemVer) and then the `echo "…$v…"` lines would inject
+          # extra 'tag='/'version=' records into $GITHUB_OUTPUT — the LAST one wins, overriding
+          # steps.ver.outputs.tag with an arbitrary name (e.g. 'wrong-win-x64') that is OUTSIDE
+          # the 'v*' tag-protection ruleset. Require a single clean line (Codex).
+          case "$v" in
+            *[[:cntrl:]]*)
+              echo "::error::invalid version (must be a single line with no control characters)"
+              exit 1 ;;
+          esac
+          # Strict SemVer 2.0.0 (this value becomes the git tag AND the MSBuild Version):
+          # core with no leading zeros; an optional dot-separated prerelease where NUMERIC
+          # identifiers may not have leading zeros (alphanumerics may); optional build
+          # metadata (Copilot/CodeRabbit).
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if ! printf '%s' "$v" | grep -qE "$semver"; then
+            # Keep the raw (rejected) value OUT of the ::error:: workflow command: a dispatched
+            # version containing a newline or %-escape could otherwise inject fake log commands /
+            # annotations. Strip control chars and print it on a plain, prefixed line instead, so
+            # it can never start a '::' command line (Copilot).
+            v_safe="$(printf '%s' "$v" | tr -d '\000-\037')"
+            printf 'rejected version input: %s\n' "$v_safe"
+            echo "::error::invalid version (expected SemVer 2.0.0, e.g. 1.2.3 or 1.2.3-rc.1)"
+            exit 1
+          fi
+          # A SemVer prerelease (e.g. 1.2.3-rc.1) → mark the GitHub Release as a prerelease so
+          # it isn't presented as the Latest/production release. The prerelease is the part
+          # after the first '-' but BEFORE any '+' build metadata, so strip build metadata
+          # first (a '-' inside '+build' does not make it a prerelease) (Codex).
+          core_and_pre="${v%%+*}"
+          if [ "$core_and_pre" != "${core_and_pre#*-}" ]; then prerelease=true; else prerelease=false; fi
+          {
+            echo "version=$v"
+            echo "tag=v$v"
+            echo "base=IntercomFirmwareTool-v$v-win-x64"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing v$v (prerelease=$prerelease)"
+
+      - name: Bundle the Visual C++ runtime app-local (SharpExt4 needs VCRUNTIME140.dll)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # SharpExt4.dll (mixed-mode C++/CLI) imports VCRUNTIME140.dll, which a clean Windows
+          # install does NOT have (it ships with the VC++ Redistributable) and which dotnet
+          # self-contained publish does NOT supply. Drop the Microsoft-redistributable copy into
+          # lib\SharpExt4\ so the csproj ships it app-local — beside SharpExt4 in the .zip and
+          # bundled into the single-file for first-run extraction — making the "runs on a clean
+          # machine" promise true (Codex).
+          #
+          # Prefer the official VC++ redistributable copy from the VS install; fall back to the
+          # system copy (the same signed DLL). Redistributing VCRUNTIME140 app-local is a
+          # supported Microsoft scenario.
+          $src = Get-ChildItem 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT\vcruntime140.dll' -ErrorAction SilentlyContinue |
+                 Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $src) { $src = Join-Path $env:SystemRoot 'System32\vcruntime140.dll' }
+          if (-not (Test-Path $src)) { throw "VCRUNTIME140.dll not found on the runner" }
+          # Only bundle a genuine, valid Microsoft-signed runtime. Require a Valid Authenticode
+          # signature AND a signer whose certificate Organization is Microsoft Corporation —
+          # matching the 'O=Microsoft Corporation' RDN, not merely any subject that contains the
+          # word "Microsoft" (which a different vendor's cert could). Guard a null signer cert
+          # (Copilot).
+          $sig = Get-AuthenticodeSignature $src
+          if ($sig.Status -ne 'Valid' -or -not $sig.SignerCertificate -or
+              $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            throw "VCRUNTIME140.dll at $src is not a valid Microsoft-signed binary (status=$($sig.Status), subject=$($sig.SignerCertificate.Subject))"
+          }
+          $dest = 'IntercomFirmwareTool.Core/lib/SharpExt4/vcruntime140.dll'
+          Copy-Item $src $dest -Force
+          $ver = (Get-Item $dest).VersionInfo.FileVersion
+          $sha = (Get-FileHash $dest -Algorithm SHA256).Hash.ToLower()
+          Write-Host "Bundled VCRUNTIME140.dll from $src (version $ver, sha256 $sha)"
+
+      # SharpExt4.dll is a mixed-mode C++/CLI assembly (it imports Ijwhost.dll) that can't be
+      # loaded from the in-memory single-file bundle, and the app checks for SharpExt4 /
+      # DiskPartitionInfo / Ijwhost.dll next to AppContext.BaseDirectory at startup
+      # (MainWindow.xaml.cs). So extract ALL bundled content (not just native libraries) on
+      # first run — BaseDirectory then resolves to that run directory, where the three DLLs
+      # land, satisfying both the runtime loader and the startup check (Codex).
+      - name: Publish single-file .exe (self-contained, ReadyToRun)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          # IncludeSourceRevisionInInformationalVersion=false → the shipped .exe's
+          # InformationalVersion ("Product version") is exactly $VERSION, not "$VERSION+<git-sha>"
+          # (the SDK appends the commit id by default), so the file's version metadata matches the
+          # release tag / the in-app update check's expectation (Copilot).
+          dotnet publish IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:IncludeAllContentForSelfExtract=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:PublishReadyToRun=true `
+            -p:Version=$env:VERSION `
+            -p:IncludeSourceRevisionInInformationalVersion=false `
+            -o out/exe
+
+      - name: Publish self-contained folder (for the .zip)
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          dotnet publish IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=false `
+            -p:PublishReadyToRun=true `
+            -p:Version=$env:VERSION `
+            -p:IncludeSourceRevisionInInformationalVersion=false `
+            -o out/folder
+
+      - name: Package assets + checksums
+        shell: pwsh
+        env:
+          BASE: ${{ steps.ver.outputs.base }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = $env:BASE
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          # Require EXACTLY one .exe from the single-file publish. A self-contained single-file
+          # publish emits one apphost .exe; if it ever produced more (a runtime/diagnostic tool),
+          # picking the first would risk shipping the wrong binary — so fail loudly instead
+          # (Copilot).
+          $exes = @(Get-ChildItem out/exe -Filter *.exe)
+          if ($exes.Count -ne 1) { throw "expected exactly one .exe in out/exe, found $($exes.Count): $($exes.Name -join ', ')" }
+          $exe = $exes[0]
+          Copy-Item $exe.FullName (Join-Path dist "$base.exe")
+          Compress-Archive -Path out/folder/* -DestinationPath (Join-Path dist "$base.zip") -Force
+          # SHA-256 sidecar for each primary asset (lowercase hex, two spaces, filename).
+          Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            "$hash  $($_.Name)" | Out-File -FilePath "$($_.FullName).sha256" -Encoding ascii -NoNewline
+          }
+          Get-ChildItem dist -File | ForEach-Object { Write-Host $_.Name }
+
+      - name: Attest build provenance (SLSA) for the release assets
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: |
+            dist/*.exe
+            dist/*.zip
+
+      - name: Create the DRAFT release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMIT_SHA: ${{ github.sha }}
+          PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # the two primary assets + their .sha256 sidecars. Glob each category under nullglob so
+          # a MISSING artifact expands to nothing (not the literal 'dist/*.exe'), then require
+          # exactly one of each — fail early and clearly instead of trying to upload a literal
+          # glob pattern if packaging dropped an asset (Copilot).
+          shopt -s nullglob
+          exe=(dist/*.exe); zip=(dist/*.zip); exe_sha=(dist/*.exe.sha256); zip_sha=(dist/*.zip.sha256)
+          shopt -u nullglob
+          if [ "${#exe[@]}" -ne 1 ] || [ "${#zip[@]}" -ne 1 ] || [ "${#exe_sha[@]}" -ne 1 ] || [ "${#zip_sha[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one each of dist/*.exe, dist/*.zip and their .sha256 sidecars (found exe=${#exe[@]} zip=${#zip[@]} exe.sha256=${#exe_sha[@]} zip.sha256=${#zip_sha[@]})"
+            exit 1
+          fi
+          files=("${exe[@]}" "${zip[@]}" "${exe_sha[@]}" "${zip_sha[@]}")
+          # Refuse if ANY release for this tag already exists (draft or published) rather
+          # than clobbering it. gh release upload --clobber deletes-then-uploads each asset
+          # non-atomically and can't enforce draft state, so a re-run could race a manual
+          # publish, briefly drop assets, or attach a different commit's build to an existing
+          # release. Deleting the stale draft (or bumping the version) is an explicit,
+          # auditable action; overwriting in place is not (Codex/CodeRabbit).
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::a release for $TAG already exists — delete that (draft) release or bump the version, then re-run. Not overwriting it."
+            exit 1
+          fi
+
+          # Provenance invariant: the artifact, its SLSA attestation, and the git tag the
+          # release is published under must all describe THIS build's commit — and that binding
+          # must be fixed the moment the tag is created (here, before the draft), not deferred to
+          # a later human "Publish" click.
+          #
+          # A tag-PUSH run already satisfies this: the tag is fixed at $COMMIT_SHA before the
+          # build, so nothing can rebind it. A workflow_dispatch run does NOT get a tag from the
+          # event, and letting the draft create the tag on publish leaves the whole review
+          # window open — someone could push $TAG at a different commit and the published
+          # release would bind to it while the assets/attestation describe $COMMIT_SHA (Codex,
+          # CodeRabbit). So on dispatch we ANCHOR the tag now: create refs/tags/$TAG at
+          # $COMMIT_SHA via a create-ref, which is atomic and FAILS (422) if the ref already
+          # exists — closing the creation window and doubling as the refuse-on-exists guard.
+          # Keeping the anchored tag from being force-MOVED before publish needs the REQUIRED
+          # 'refs/tags/v*' tag-protection ruleset (restrict updates + deletions); the create-ref
+          # alone only prevents a conflicting creation (Codex/CodeRabbit; see the README note).
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # stdout is the created-ref JSON (noise); let stderr through so a real failure
+            # (e.g. a 422 the message below only guesses at) is visible in the logs (Copilot).
+            if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+                 -f ref="refs/tags/${TAG}" -f sha="$COMMIT_SHA" >/dev/null; then
+              echo "::error::could not create tag ${TAG} at ${COMMIT_SHA} (it likely already exists) — delete the stale tag or bump the version, then re-run."
+              exit 1
+            fi
+          fi
+
+          # The tag now exists on both paths (pushed, or just created above), so the release
+          # binds to it — no target_commitish needed, so the published commit cannot differ from
+          # the attested one.
+          #
+          # Every release operation here — create, per-asset upload, and cleanup — targets ONLY
+          # the record this run created, by its API id / release-scoped upload_url. Never a
+          # tag-scoped `gh release create|upload|delete`: those resolve by tag, so if an actor
+          # raced a replacement release onto $TAG after the guard above, a tag-scoped upload would
+          # push our assets onto THEIR release and a tag-scoped delete could remove it — possibly
+          # a published one (Codex, CodeRabbit). Create returns both id and upload_url in one call.
+          # Capture id+upload_url from stdout; DON'T suppress stderr, so a create failure (race,
+          # permissions, validation) surfaces its real reason in the logs. `|| true` keeps the
+          # empty-result handling below in charge of the exit, not set -e (Copilot).
+          created="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+            -f tag_name="$TAG" -f name="$TAG" -F draft=true -F prerelease="$PRERELEASE" \
+            -F generate_release_notes=true --jq '[.id, .upload_url] | @tsv' || true)"
+          release_id="${created%%$'\t'*}"
+          upload_url="${created#*$'\t'}"
+          if [ -z "$created" ] || [ -z "$release_id" ] || [ "$release_id" = "$upload_url" ]; then
+            # We created nothing (e.g. a release for $TAG already exists from a race) — do NOT
+            # delete anyone's release; just roll back the tag we anchored on the dispatch path.
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null || true
+            fi
+            echo "::error::could not create the draft release for ${TAG} (a release for it may already exist)."
+            exit 1
+          fi
+          # Upload each asset to OUR release via its upload_url (strip the RFC 6570 {?name,label}
+          # template). A tag-scoped `gh release upload` could target a raced replacement release.
+          upload_url="${upload_url%%\{*}"
+          upload_failed=""
+          for f in "${files[@]}"; do
+            asset="$(basename "$f")"
+            # Percent-encode the one query-unsafe char our filenames can contain: SemVer build
+            # metadata allows '+' (e.g. v1.2.3+build), which a query string decodes to a space —
+            # GitHub would then store the asset with a space while its .sha256 sidecar still names
+            # the '+' file, breaking checksum verification. Every other char we emit (letters,
+            # digits, '.', '-') is query-safe (CodeRabbit).
+            asset_q="${asset//+/%2B}"
+            # stdout is the uploaded-asset JSON (noise); let stderr through so an upload failure
+            # (size limit, auth, transient network) is diagnosable from the logs (Copilot).
+            if ! gh api --method POST "${upload_url}?name=${asset_q}" \
+                 --header "Content-Type: application/octet-stream" \
+                 --input "$f" >/dev/null; then
+              upload_failed="$asset"
+              break
+            fi
+          done
+          if [ -n "$upload_failed" ]; then
+            # A partial upload — delete OUR release by id (never a tag-scoped delete). Report the
+            # ACTUAL outcome: if this delete also fails (e.g. a transient GitHub outage) the draft
+            # is still there — publishable with missing assets — and the existence guard will block
+            # a re-run, so we must NOT claim it was removed. Name the release id so it can be
+            # deleted by hand (Codex).
+            if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}" >/dev/null; then
+              draft_state="removed the partial draft"
+            else
+              draft_state="COULD NOT remove the partial draft (release id ${release_id}) — delete it manually; it is publishable with missing assets and will block a re-run"
+            fi
+            # Best-effort roll back the anchor tag (|| true): once the REQUIRED 'v*' ruleset
+            # restricts deletions the workflow token cannot delete the tag, so it no-ops and the
+            # (correct, $COMMIT_SHA) tag is left to remove out-of-band or reuse. We grant the
+            # workflow NO ruleset bypass — a bypass that can delete/move release tags would reopen
+            # the window this anchoring closes (CodeRabbit).
+            if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null || true
+            fi
+            echo "::error::failed to upload asset '${upload_failed}' to the draft release for ${TAG} — ${draft_state}. (A tag may remain anchored — delete it out-of-band or bump the version before re-running.)"
+            exit 1
+          fi
+          echo "Draft release $TAG created (tag ${TAG} anchored at ${COMMIT_SHA}) — review it in the Releases tab and click Publish."
