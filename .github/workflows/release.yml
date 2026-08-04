@@ -2,10 +2,11 @@ name: release
 
 # Build + publish a downloadable Windows x64 release (issue #79). Tag-driven: pushing a
 # vX.Y.Z tag (or a manual dispatch with a version) builds the self-contained WPF app and
-# creates a DRAFT GitHub Release with a single-file .exe + a self-contained .zip, each with
-# a .sha256, plus a SLSA build-provenance attestation. A human reviews the draft and clicks
-# Publish. The .exe is UNSIGNED for now (see #84); integrity comes from the checksums + the
-# attestation until code signing lands.
+# creates a DRAFT GitHub Release with three assets — a portable single-file .exe, that same
+# .exe zipped (-portable.zip, for browsers/AV that block a raw .exe), and the loose
+# self-contained folder (.zip) — each with a .sha256, plus a SLSA build-provenance
+# attestation. A human reviews the draft and clicks Publish. The .exe is UNSIGNED for now
+# (see #84); integrity comes from the checksums + the attestation until code signing lands.
 #
 # The vX.Y.Z git tag is anchored to the built commit during the release run — the tag-push
 # event already carries it; a manual dispatch creates it (at the build's commit) in the
@@ -206,7 +207,20 @@ jobs:
           $exes = @(Get-ChildItem out/exe -Filter *.exe)
           if ($exes.Count -ne 1) { throw "expected exactly one .exe in out/exe, found $($exes.Count): $($exes.Name -join ', ')" }
           $exe = $exes[0]
-          Copy-Item $exe.FullName (Join-Path dist "$base.exe")
+          # Three assets:
+          #   1. $base-portable.exe      — the self-contained single-file portable build.
+          #   2. $base-portable.zip      — that same portable .exe zipped, for browsers / AV that
+          #                                block a raw .exe download (same program, just wrapped).
+          #   3. $base.zip               — the loose self-contained FOLDER (extract-and-run; avoids
+          #                                the single-file's first-run temp extraction).
+          Copy-Item $exe.FullName (Join-Path dist "$base-portable.exe")
+          # Zip the portable .exe with ONLY its basename at the archive root — run Compress-Archive
+          # from INSIDE dist so no 'dist/' path prefix is embedded, and unzipping yields the .exe
+          # directly (Copilot).
+          Push-Location dist
+          try { Compress-Archive -Path "$base-portable.exe" -DestinationPath "$base-portable.zip" -Force }
+          finally { Pop-Location }
+          # Loose-folder zip: out/folder/* puts the files at the archive root (no top-level folder).
           Compress-Archive -Path out/folder/* -DestinationPath (Join-Path dist "$base.zip") -Force
           # SHA-256 sidecar for each primary asset (lowercase hex, two spaces, filename).
           Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object {
@@ -227,23 +241,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.ver.outputs.tag }}
+          BASE: ${{ steps.ver.outputs.base }}
           EVENT_NAME: ${{ github.event_name }}
           COMMIT_SHA: ${{ github.sha }}
           PRERELEASE: ${{ steps.ver.outputs.prerelease }}
         run: |
           set -euo pipefail
-          # the two primary assets + their .sha256 sidecars. Glob each category under nullglob so
-          # a MISSING artifact expands to nothing (not the literal 'dist/*.exe'), then require
-          # exactly one of each — fail early and clearly instead of trying to upload a literal
-          # glob pattern if packaging dropped an asset (Copilot).
-          shopt -s nullglob
-          exe=(dist/*.exe); zip=(dist/*.zip); exe_sha=(dist/*.exe.sha256); zip_sha=(dist/*.zip.sha256)
-          shopt -u nullglob
-          if [ "${#exe[@]}" -ne 1 ] || [ "${#zip[@]}" -ne 1 ] || [ "${#exe_sha[@]}" -ne 1 ] || [ "${#zip_sha[@]}" -ne 1 ]; then
-            echo "::error::expected exactly one each of dist/*.exe, dist/*.zip and their .sha256 sidecars (found exe=${#exe[@]} zip=${#zip[@]} exe.sha256=${#exe_sha[@]} zip.sha256=${#zip_sha[@]})"
-            exit 1
-          fi
-          files=("${exe[@]}" "${zip[@]}" "${exe_sha[@]}" "${zip_sha[@]}")
+          # Build the upload list from the EXACT asset names packaging produced (derived from BASE:
+          # the portable .exe, its .zip wrapper, and the loose-folder .zip), plus a .sha256 sidecar
+          # for each, and require every one to exist. Checking exact names — not just glob counts —
+          # catches a packaging rename bug the counts alone would miss and keeps the upload matching
+          # the names the README documents (Copilot).
+          files=()
+          for a in "${BASE}-portable.exe" "${BASE}-portable.zip" "${BASE}.zip"; do
+            files+=("dist/$a" "dist/$a.sha256")
+          done
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::missing expected release asset: $f (packaging did not produce it)"; exit 1
+            fi
+          done
           # Refuse if ANY release for this tag already exists (draft or published) rather
           # than clobbering it. gh release upload --clobber deletes-then-uploads each asset
           # non-atomically and can't enforce draft state, so a re-run could race a manual

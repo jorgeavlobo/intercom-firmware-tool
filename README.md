@@ -4,14 +4,15 @@
 
 Windows x64 builds are published on the [Releases page](../../releases). Each release `vX.Y.Z` includes:
 
-- **`IntercomFirmwareTool-vX.Y.Z-win-x64.exe`** — self-contained single-file executable; runs on a clean Windows x64 machine with **no .NET installed** (the required Visual C++ runtime that the disk-image library depends on is bundled app-local, so no VC++ Redistributable is needed either).
-- **`IntercomFirmwareTool-vX.Y.Z-win-x64.zip`** — the same self-contained build as a folder, if you prefer an archive (or if antivirus flags the single-file's first-run temp-extraction).
-- **`*.sha256`** — SHA-256 checksums for each asset.
+- **`IntercomFirmwareTool-vX.Y.Z-win-x64-portable.exe`** — **portable** self-contained single-file executable; runs on a clean Windows x64 machine with **no .NET installed** (the required Visual C++ runtime that the disk-image library depends on is bundled app-local, so no VC++ Redistributable is needed either). This is the one most people want.
+- **`IntercomFirmwareTool-vX.Y.Z-win-x64-portable.zip`** — the exact same portable `.exe`, just zipped — for browsers or antivirus that block a raw `.exe` download. Unzip and run.
+- **`IntercomFirmwareTool-vX.Y.Z-win-x64.zip`** — the same app as a **loose set of files** (executable + its DLLs), if you prefer an archive or if antivirus flags the single-file's first-run temp-extraction. Extract the archive into a folder of its own, then run the `.exe` alongside the extracted DLLs.
+- **`*.sha256`** — SHA-256 checksums, one per asset.
 
-**Verify your download** (PowerShell) — compares the file's hash against the published `.sha256` and prints `True` if they match:
+**Verify your download** (PowerShell) — compares the file's hash against its published `.sha256` and prints `True` if they match (works for any of the assets — point `$file` at the one you downloaded):
 
 ```powershell
-$file = ".\IntercomFirmwareTool-vX.Y.Z-win-x64.exe"
+$file = ".\IntercomFirmwareTool-vX.Y.Z-win-x64-portable.exe"
 $expected = ((Get-Content "$file.sha256" -Raw) -split '\s+')[0]
 (Get-FileHash $file -Algorithm SHA256).Hash -ieq $expected
 ```
@@ -19,7 +20,7 @@ $expected = ((Get-Content "$file.sha256" -Raw) -split '\s+')[0]
 Each release also carries a **SLSA build-provenance attestation** — confirm it was built by this repository's CI:
 
 ```bash
-gh attestation verify IntercomFirmwareTool-vX.Y.Z-win-x64.exe --repo jorgeavlobo/intercom-firmware-tool
+gh attestation verify IntercomFirmwareTool-vX.Y.Z-win-x64-portable.exe --repo jorgeavlobo/intercom-firmware-tool
 ```
 
 > **Note:** the `.exe` is not yet code-signed, so Windows SmartScreen may show *"Windows protected your PC"* on first run — click **More info → Run anyway**. Verify the checksum/attestation above first. (Code signing is tracked in issue #84.)
