@@ -74,13 +74,15 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- TargetPath flattens the path: the DLLs go to the output ROOT (next to
-         the .exe), not to bin\...\lib\SharpExt4\. The native Ijwhost.dll is
-         only found by the loader if it sits next to the executable. -->
-    <None Update="lib\SharpExt4\DiskPartitionInfo.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <TargetPath>DiskPartitionInfo.dll</TargetPath>
-    </None>
+    <!-- TargetPath flattens the path: the DLL goes to the output ROOT (next to the .exe),
+         not to bin\...\lib\SharpExt4\. Ijwhost.dll is the native C++/CLI host that the loader
+         must find beside the executable, and it is NOT listed in SharpExt4.deps.json, so this
+         manual copy is its ONLY source — keep it.
+         (DiskPartitionInfo.dll is deliberately NOT copied here: SharpExt4.deps.json declares it
+         as a runtime dependency, so the SDK already resolves it to the output root. A second
+         manual copy of it made `dotnet publish` fail with NETSDK1152 / a duplicate single-file
+         bundle entry — the loose copy vs the auto-resolved one. `dotnet build` tolerated the
+         duplicate, which is why only the release workflow surfaced it. #79 follow-up.) -->
     <None Update="lib\SharpExt4\Ijwhost.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <TargetPath>Ijwhost.dll</TargetPath>
