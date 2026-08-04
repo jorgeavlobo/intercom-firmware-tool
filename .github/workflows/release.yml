@@ -133,10 +133,15 @@ jobs:
                  Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
           if (-not $src) { $src = Join-Path $env:SystemRoot 'System32\vcruntime140.dll' }
           if (-not (Test-Path $src)) { throw "VCRUNTIME140.dll not found on the runner" }
-          # Only bundle a genuine, valid Microsoft-signed runtime.
+          # Only bundle a genuine, valid Microsoft-signed runtime. Require a Valid Authenticode
+          # signature AND a signer whose certificate Organization is Microsoft Corporation —
+          # matching the 'O=Microsoft Corporation' RDN, not merely any subject that contains the
+          # word "Microsoft" (which a different vendor's cert could). Guard a null signer cert
+          # (Copilot).
           $sig = Get-AuthenticodeSignature $src
-          if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Microsoft') {
-            throw "VCRUNTIME140.dll at $src is not validly Microsoft-signed (status=$($sig.Status))"
+          if ($sig.Status -ne 'Valid' -or -not $sig.SignerCertificate -or
+              $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            throw "VCRUNTIME140.dll at $src is not a valid Microsoft-signed binary (status=$($sig.Status), subject=$($sig.SignerCertificate.Subject))"
           }
           $dest = 'IntercomFirmwareTool.Core/lib/SharpExt4/vcruntime140.dll'
           Copy-Item $src $dest -Force
@@ -223,8 +228,18 @@ jobs:
           PRERELEASE: ${{ steps.ver.outputs.prerelease }}
         run: |
           set -euo pipefail
-          # the two primary assets + their .sha256 sidecars.
-          files=(dist/*.exe dist/*.zip dist/*.exe.sha256 dist/*.zip.sha256)
+          # the two primary assets + their .sha256 sidecars. Glob each category under nullglob so
+          # a MISSING artifact expands to nothing (not the literal 'dist/*.exe'), then require
+          # exactly one of each — fail early and clearly instead of trying to upload a literal
+          # glob pattern if packaging dropped an asset (Copilot).
+          shopt -s nullglob
+          exe=(dist/*.exe); zip=(dist/*.zip); exe_sha=(dist/*.exe.sha256); zip_sha=(dist/*.zip.sha256)
+          shopt -u nullglob
+          if [ "${#exe[@]}" -ne 1 ] || [ "${#zip[@]}" -ne 1 ] || [ "${#exe_sha[@]}" -ne 1 ] || [ "${#zip_sha[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one each of dist/*.exe, dist/*.zip and their .sha256 sidecars (found exe=${#exe[@]} zip=${#zip[@]} exe.sha256=${#exe_sha[@]} zip.sha256=${#zip_sha[@]})"
+            exit 1
+          fi
+          files=("${exe[@]}" "${zip[@]}" "${exe_sha[@]}" "${zip_sha[@]}")
           # Refuse if ANY release for this tag already exists (draft or published) rather
           # than clobbering it. gh release upload --clobber deletes-then-uploads each asset
           # non-atomically and can't enforce draft state, so a re-run could race a manual
