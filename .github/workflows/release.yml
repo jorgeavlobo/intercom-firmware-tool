@@ -171,11 +171,17 @@ jobs:
           # InformationalVersion ("Product version") is exactly $VERSION, not "$VERSION+<git-sha>"
           # (the SDK appends the commit id by default), so the file's version metadata matches the
           # release tag / the in-app update check's expectation (Copilot).
+          # EnableCompressionInSingleFile is deliberately OFF: a COMPRESSED single-file bundle is a
+          # packed blob that Windows Defender's heuristic/ML engines routinely flag as malware
+          # (Wacatac/Wacapew false positives) — leaving it uncompressed makes the bundle a plain
+          # concatenation and materially cuts those false positives on the UNSIGNED build. The
+          # trade-off is a larger .exe. The real fix (Authenticode signing, which also clears
+          # SmartScreen) is tracked in #84; the loose-folder .zip stays the reliable unsigned option.
           dotnet publish IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=true `
             -p:IncludeAllContentForSelfExtract=true `
-            -p:EnableCompressionInSingleFile=true `
+            -p:EnableCompressionInSingleFile=false `
             -p:Version=$env:VERSION `
             -p:IncludeSourceRevisionInInformationalVersion=false `
             -o out/exe

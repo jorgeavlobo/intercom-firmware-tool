@@ -19,6 +19,10 @@
     <Authors>jorgeavlobo</Authors>
     <Company>jorgeavlobo</Company>
     <Description>Firmware customization tool for BTicino / Legrand Classe 100X / 300X intercoms.</Description>
+    <!-- Complete file version-info metadata. Blank/sparse metadata nudges antivirus
+         heuristic/ML scoring toward "suspicious"; a full set (Product/Company/Description/
+         Copyright + an icon) is one of the cheap, sign-free ways to lower that score. -->
+    <Copyright>Copyright © 2026 jorgeavlobo</Copyright>
   </PropertyGroup>
 
   <ItemGroup>
