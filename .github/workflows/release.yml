@@ -7,9 +7,10 @@ name: release
 # Publish. The .exe is UNSIGNED for now (see #84); integrity comes from the checksums + the
 # attestation until code signing lands.
 #
-# The vX.Y.Z git tag is anchored to the built commit at BUILD time (the tag-push event
-# already carries it; a manual dispatch creates it before the draft), never deferred to
-# publish. The atomic create-ref stops a CONFLICTING tag, but immutability — the tag not
+# The vX.Y.Z git tag is anchored to the built commit during the release run — the tag-push
+# event already carries it; a manual dispatch creates it (at the build's commit) in the
+# draft-release step, after build + attestation but never deferred to a later human Publish.
+# The atomic create-ref stops a CONFLICTING tag, but immutability — the tag not
 # being force-MOVED between anchoring and publish — depends on a repo tag-protection ruleset
 # on 'refs/tags/v*' that restricts UPDATES and DELETIONS (creation stays allowed so this
 # workflow can anchor the tag; no bypass actor that could move release tags). That ruleset
@@ -191,7 +192,8 @@ jobs:
 
           # Provenance invariant: the artifact, its SLSA attestation, and the git tag the
           # release is published under must all describe THIS build's commit — and that binding
-          # must be immutable from build time, not deferred to a later human "Publish" click.
+          # must be fixed the moment the tag is created (here, before the draft), not deferred to
+          # a later human "Publish" click.
           #
           # A tag-PUSH run already satisfies this: the tag is fixed at $COMMIT_SHA before the
           # build, so nothing can rebind it. A workflow_dispatch run does NOT get a tag from the
