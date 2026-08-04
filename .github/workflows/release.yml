@@ -136,8 +136,13 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $base = $env:BASE
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $exe = Get-ChildItem out/exe -Filter *.exe | Select-Object -First 1
-          if (-not $exe) { throw 'no .exe produced by the single-file publish' }
+          # Require EXACTLY one .exe from the single-file publish. A self-contained single-file
+          # publish emits one apphost .exe; if it ever produced more (a runtime/diagnostic tool),
+          # picking the first would risk shipping the wrong binary — so fail loudly instead
+          # (Copilot).
+          $exes = @(Get-ChildItem out/exe -Filter *.exe)
+          if ($exes.Count -ne 1) { throw "expected exactly one .exe in out/exe, found $($exes.Count): $($exes.Name -join ', ')" }
+          $exe = $exes[0]
           Copy-Item $exe.FullName (Join-Path dist "$base.exe")
           Compress-Archive -Path out/folder/* -DestinationPath (Join-Path dist "$base.zip") -Force
           # SHA-256 sidecar for each primary asset (lowercase hex, two spaces, filename).
@@ -230,7 +235,13 @@ jobs:
           upload_failed=""
           for f in "${files[@]}"; do
             asset="$(basename "$f")"
-            if ! gh api --method POST "${upload_url}?name=${asset}" \
+            # Percent-encode the one query-unsafe char our filenames can contain: SemVer build
+            # metadata allows '+' (e.g. v1.2.3+build), which a query string decodes to a space —
+            # GitHub would then store the asset with a space while its .sha256 sidecar still names
+            # the '+' file, breaking checksum verification. Every other char we emit (letters,
+            # digits, '.', '-') is query-safe (CodeRabbit).
+            asset_q="${asset//+/%2B}"
+            if ! gh api --method POST "${upload_url}?name=${asset_q}" \
                  --header "Content-Type: application/octet-stream" \
                  --input "$f" >/dev/null 2>&1; then
               upload_failed="$asset"
