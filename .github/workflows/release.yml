@@ -2,10 +2,11 @@ name: release
 
 # Build + publish a downloadable Windows x64 release (issue #79). Tag-driven: pushing a
 # vX.Y.Z tag (or a manual dispatch with a version) builds the self-contained WPF app and
-# creates a DRAFT GitHub Release with a single-file .exe + a self-contained .zip, each with
-# a .sha256, plus a SLSA build-provenance attestation. A human reviews the draft and clicks
-# Publish. The .exe is UNSIGNED for now (see #84); integrity comes from the checksums + the
-# attestation until code signing lands.
+# creates a DRAFT GitHub Release with three assets — a portable single-file .exe, that same
+# .exe zipped (-portable.zip, for browsers/AV that block a raw .exe), and the loose
+# self-contained folder (.zip) — each with a .sha256, plus a SLSA build-provenance
+# attestation. A human reviews the draft and clicks Publish. The .exe is UNSIGNED for now
+# (see #84); integrity comes from the checksums + the attestation until code signing lands.
 #
 # The vX.Y.Z git tag is anchored to the built commit during the release run — the tag-push
 # event already carries it; a manual dispatch creates it (at the build's commit) in the
@@ -206,7 +207,15 @@ jobs:
           $exes = @(Get-ChildItem out/exe -Filter *.exe)
           if ($exes.Count -ne 1) { throw "expected exactly one .exe in out/exe, found $($exes.Count): $($exes.Name -join ', ')" }
           $exe = $exes[0]
-          Copy-Item $exe.FullName (Join-Path dist "$base.exe")
+          # Three assets:
+          #   1. $base-portable.exe      — the self-contained single-file portable build.
+          #   2. $base-portable.zip      — that same portable .exe zipped, for browsers / AV that
+          #                                block a raw .exe download (same program, just wrapped).
+          #   3. $base.zip               — the loose self-contained FOLDER (extract-and-run; avoids
+          #                                the single-file's first-run temp extraction).
+          $portableExe = Join-Path dist "$base-portable.exe"
+          Copy-Item $exe.FullName $portableExe
+          Compress-Archive -Path $portableExe -DestinationPath (Join-Path dist "$base-portable.zip") -Force
           Compress-Archive -Path out/folder/* -DestinationPath (Join-Path dist "$base.zip") -Force
           # SHA-256 sidecar for each primary asset (lowercase hex, two spaces, filename).
           Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object {
@@ -232,15 +241,16 @@ jobs:
           PRERELEASE: ${{ steps.ver.outputs.prerelease }}
         run: |
           set -euo pipefail
-          # the two primary assets + their .sha256 sidecars. Glob each category under nullglob so
-          # a MISSING artifact expands to nothing (not the literal 'dist/*.exe'), then require
-          # exactly one of each — fail early and clearly instead of trying to upload a literal
-          # glob pattern if packaging dropped an asset (Copilot).
+          # the three primary assets + their .sha256 sidecars: one -portable.exe, plus two zips
+          # (-portable.zip wrapping that exe, and the loose-folder .zip). Glob each category under
+          # nullglob so a MISSING artifact expands to nothing (not the literal 'dist/*.exe'), then
+          # require the exact expected counts — fail early and clearly instead of uploading a
+          # literal glob pattern if packaging dropped an asset (Copilot).
           shopt -s nullglob
           exe=(dist/*.exe); zip=(dist/*.zip); exe_sha=(dist/*.exe.sha256); zip_sha=(dist/*.zip.sha256)
           shopt -u nullglob
-          if [ "${#exe[@]}" -ne 1 ] || [ "${#zip[@]}" -ne 1 ] || [ "${#exe_sha[@]}" -ne 1 ] || [ "${#zip_sha[@]}" -ne 1 ]; then
-            echo "::error::expected exactly one each of dist/*.exe, dist/*.zip and their .sha256 sidecars (found exe=${#exe[@]} zip=${#zip[@]} exe.sha256=${#exe_sha[@]} zip.sha256=${#zip_sha[@]})"
+          if [ "${#exe[@]}" -ne 1 ] || [ "${#zip[@]}" -ne 2 ] || [ "${#exe_sha[@]}" -ne 1 ] || [ "${#zip_sha[@]}" -ne 2 ]; then
+            echo "::error::expected 1 .exe + 2 .zip in dist/ and their .sha256 sidecars (found exe=${#exe[@]} zip=${#zip[@]} exe.sha256=${#exe_sha[@]} zip.sha256=${#zip_sha[@]})"
             exit 1
           fi
           files=("${exe[@]}" "${zip[@]}" "${exe_sha[@]}" "${zip_sha[@]}")
