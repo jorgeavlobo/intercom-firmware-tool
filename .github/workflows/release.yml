@@ -155,7 +155,12 @@ jobs:
       # (MainWindow.xaml.cs). So extract ALL bundled content (not just native libraries) on
       # first run — BaseDirectory then resolves to that run directory, where the three DLLs
       # land, satisfying both the runtime loader and the startup check (Codex).
-      - name: Publish single-file .exe (self-contained, ReadyToRun)
+      # ReadyToRun is intentionally NOT used: crossgen emits its own DiskPartitionInfo.dll under
+      # obj\...\R2R\ that collides with the loose copy Core ships next to the app (SharpExt4's
+      # mixed-mode helper), failing publish at the copy step (NETSDK1152) or the single-file
+      # bundler (duplicate BundleRelativePath). Without R2R the publish matches the known-good
+      # dev build. The startup cost is negligible for this desktop tool; revisit if it matters.
+      - name: Publish single-file .exe (self-contained)
         shell: pwsh
         env:
           VERSION: ${{ steps.ver.outputs.version }}
@@ -169,7 +174,6 @@ jobs:
             -p:PublishSingleFile=true `
             -p:IncludeAllContentForSelfExtract=true `
             -p:EnableCompressionInSingleFile=true `
-            -p:PublishReadyToRun=true `
             -p:Version=$env:VERSION `
             -p:IncludeSourceRevisionInInformationalVersion=false `
             -o out/exe
@@ -182,7 +186,6 @@ jobs:
           dotnet publish IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=false `
-            -p:PublishReadyToRun=true `
             -p:Version=$env:VERSION `
             -p:IncludeSourceRevisionInInformationalVersion=false `
             -o out/folder
