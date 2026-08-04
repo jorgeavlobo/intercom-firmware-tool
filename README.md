@@ -8,10 +8,12 @@ Windows x64 builds are published on the [Releases page](../../releases). Each re
 - **`IntercomFirmwareTool-vX.Y.Z-win-x64.zip`** — the same self-contained build as a folder, if you prefer an archive (or if antivirus flags the single-file's first-run temp-extraction).
 - **`*.sha256`** — SHA-256 checksums for each asset.
 
-**Verify your download** (PowerShell) — compare against the matching `.sha256`:
+**Verify your download** (PowerShell) — compares the file's hash against the published `.sha256` and prints `True` if they match:
 
 ```powershell
-Get-FileHash .\IntercomFirmwareTool-vX.Y.Z-win-x64.exe -Algorithm SHA256
+$file = ".\IntercomFirmwareTool-vX.Y.Z-win-x64.exe"
+$expected = (Get-Content "$file.sha256").Split(" ")[0]
+(Get-FileHash $file -Algorithm SHA256).Hash -ieq $expected
 ```
 
 Each release also carries a **SLSA build-provenance attestation** — confirm it was built by this repository's CI:
