@@ -149,6 +149,11 @@ namespace IntercomFirmwareTool.App
             // setting) hide that banner and leave the actions disabled with no explanation.
             if (_blocked) return;
 
+            // Respect a mid-flight opt-out: if the user disabled the check while an AUTOMATIC
+            // request was still in flight, drop its result. A manual "Check now" is an explicit
+            // request, so it still applies.
+            if (!manual && !AppSettings.Load().UpdateCheckEnabled) return;
+
             switch (status.Kind)
             {
                 case UpdateStatusKind.UpdateAvailable:

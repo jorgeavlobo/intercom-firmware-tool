@@ -39,7 +39,10 @@ public sealed record SemanticVersion : IComparable<SemanticVersion>
         Major = major;
         Minor = minor;
         Patch = patch;
-        Prerelease = prerelease is { Count: > 0 } ? prerelease : null;
+        // Defensive copy into an immutable collection: TryParse hands us a string[], and exposing
+        // it directly would let a caller cast Prerelease back to string[] and mutate it — changing
+        // CompareTo / GetHashCode / ToString after construction.
+        Prerelease = prerelease is { Count: > 0 } ? new List<string>(prerelease).AsReadOnly() : null;
     }
 
     /// <summary>

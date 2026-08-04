@@ -59,9 +59,11 @@ jobs:
             version="${TAG#v}"
           fi
 
-          # Only auto-bump to a stable X.Y.Z (no prerelease/build suffix).
-          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::'$version' is not a stable X.Y.Z version; not bumping."
+          # Only auto-bump to a stable X.Y.Z (no prerelease/build suffix, and no leading zeros in
+          # any component — SemanticVersion.TryParse rejects '01.2.3', so accepting it here would
+          # write a value the app can't parse and silently fail open).
+          if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::'$version' is not a stable X.Y.Z version (no leading zeros); not bumping."
             exit 1
           fi
 
