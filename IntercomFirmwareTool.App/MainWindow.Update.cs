@@ -183,6 +183,9 @@ namespace IntercomFirmwareTool.App
             // Informational banner coexists ABOVE the (still visible) safety warning.
             UpdateBlockBanner.Visibility = Visibility.Collapsed;
             UpdateBanner.Visibility = Visibility.Visible;
+            // LiveSetting alone is inert in WPF — raise the notification so a screen reader
+            // announces the newly shown banner.
+            AnnounceLiveRegion(TxtUpdateBanner);
         }
 
         private void ShowUnsupported(SemanticVersion minimum)
@@ -193,6 +196,9 @@ namespace IntercomFirmwareTool.App
             UpdateBanner.Visibility = Visibility.Collapsed;
             RiskBanner.Visibility = Visibility.Collapsed;
             UpdateBlockBanner.Visibility = Visibility.Visible;
+            // Assertive live region — announce the mandatory message so a screen-reader user hears
+            // WHY the controls just became disabled.
+            AnnounceLiveRegion(TxtUpdateBlockBanner);
             EnterUnsupportedBlockedState();
         }
 

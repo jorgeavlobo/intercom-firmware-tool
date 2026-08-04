@@ -11,6 +11,7 @@ public class SemanticVersionTests
     [InlineData("0.0.0", 0, 0, 0, false)]
     [InlineData("10.20.30", 10, 20, 30, false)]
     [InlineData("1.2.3-rc.1", 1, 2, 3, true)]
+    [InlineData("1.2.3-alpha-beta", 1, 2, 3, true)]   // internal hyphen inside an identifier
     [InlineData("1.2.3+build.5", 1, 2, 3, false)]     // build metadata ignored
     [InlineData("1.2.3-rc.1+build.5", 1, 2, 3, true)]
     public void TryParse_accepts_valid(string input, int major, int minor, int patch, bool isPre)
@@ -39,6 +40,7 @@ public class SemanticVersionTests
     [InlineData("1.2.3+")]        // empty build metadata
     [InlineData("1.2.3+bad!")]    // illegal character in build metadata
     [InlineData("1.2.3+a..b")]    // empty build-metadata identifier
+    [InlineData("2147483648.0.0")] // numeric core overflows int
     [InlineData("abc")]
     public void TryParse_rejects_invalid(string? input)
     {

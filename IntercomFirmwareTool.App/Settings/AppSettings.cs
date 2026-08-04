@@ -78,8 +78,16 @@ namespace IntercomFirmwareTool.App.Settings
                 mutate(data);
                 try
                 {
-                    Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-                    File.WriteAllText(FilePath, JsonSerializer.Serialize(data, JsonOptions));
+                    string path = FilePath;
+                    string dir = Path.GetDirectoryName(path)!;
+                    Directory.CreateDirectory(dir);
+                    // Write to a temp file in the SAME directory, then atomically move it over the
+                    // target. File.WriteAllText truncates the destination in place, so a crash
+                    // mid-write would leave partial JSON that Load treats as corrupt and resets to
+                    // defaults — silently re-enabling the update check after the user opted out.
+                    string tmp = Path.Combine(dir, "settings.json.tmp");
+                    File.WriteAllText(tmp, JsonSerializer.Serialize(data, JsonOptions));
+                    File.Move(tmp, path, overwrite: true);
                 }
                 catch { /* best-effort; a failed save just means the choice isn't remembered */ }
             }
