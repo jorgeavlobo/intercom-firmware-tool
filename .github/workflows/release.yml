@@ -241,24 +241,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.ver.outputs.tag }}
+          BASE: ${{ steps.ver.outputs.base }}
           EVENT_NAME: ${{ github.event_name }}
           COMMIT_SHA: ${{ github.sha }}
           PRERELEASE: ${{ steps.ver.outputs.prerelease }}
         run: |
           set -euo pipefail
-          # the three primary assets + their .sha256 sidecars: one -portable.exe, plus two zips
-          # (-portable.zip wrapping that exe, and the loose-folder .zip). Glob each category under
-          # nullglob so a MISSING artifact expands to nothing (not the literal 'dist/*.exe'), then
-          # require the exact expected counts — fail early and clearly instead of uploading a
-          # literal glob pattern if packaging dropped an asset (Copilot).
-          shopt -s nullglob
-          exe=(dist/*.exe); zip=(dist/*.zip); exe_sha=(dist/*.exe.sha256); zip_sha=(dist/*.zip.sha256)
-          shopt -u nullglob
-          if [ "${#exe[@]}" -ne 1 ] || [ "${#zip[@]}" -ne 2 ] || [ "${#exe_sha[@]}" -ne 1 ] || [ "${#zip_sha[@]}" -ne 2 ]; then
-            echo "::error::expected 1 .exe + 2 .zip in dist/ and their .sha256 sidecars (found exe=${#exe[@]} zip=${#zip[@]} exe.sha256=${#exe_sha[@]} zip.sha256=${#zip_sha[@]})"
-            exit 1
-          fi
-          files=("${exe[@]}" "${zip[@]}" "${exe_sha[@]}" "${zip_sha[@]}")
+          # Build the upload list from the EXACT asset names packaging produced (derived from BASE:
+          # the portable .exe, its .zip wrapper, and the loose-folder .zip), plus a .sha256 sidecar
+          # for each, and require every one to exist. Checking exact names — not just glob counts —
+          # catches a packaging rename bug the counts alone would miss and keeps the upload matching
+          # the names the README documents (Copilot).
+          files=()
+          for a in "${BASE}-portable.exe" "${BASE}-portable.zip" "${BASE}.zip"; do
+            files+=("dist/$a" "dist/$a.sha256")
+          done
+          for f in "${files[@]}"; do
+            if [ ! -f "$f" ]; then
+              echo "::error::missing expected release asset: $f (packaging did not produce it)"; exit 1
+            fi
+          done
           # Refuse if ANY release for this tag already exists (draft or published) rather
           # than clobbering it. gh release upload --clobber deletes-then-uploads each asset
           # non-atomically and can't enforce draft state, so a re-run could race a manual
