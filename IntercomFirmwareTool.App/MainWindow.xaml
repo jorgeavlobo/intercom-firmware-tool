@@ -589,9 +589,14 @@
                       VerticalAlignment="Center"
                       ToolTip="{loc:Loc Settings_MenuTooltip}"
                       AutomationProperties.Name="{loc:Loc Settings_MenuTooltip}">
-                    <MenuItem Header="&#xE713;" FontFamily="Segoe MDL2 Assets"
-                              ToolTip="{loc:Loc Settings_MenuTooltip}"
+                    <!-- Glyph in a header TextBlock, NOT FontFamily on the MenuItem: FontFamily is
+                         inheritable, so setting the icon font on the parent item would render the
+                         submenu labels ("Check for updates…", "About") in the icon font too. -->
+                    <MenuItem ToolTip="{loc:Loc Settings_MenuTooltip}"
                               AutomationProperties.Name="{loc:Loc Settings_MenuTooltip}">
+                        <MenuItem.Header>
+                            <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets"/>
+                        </MenuItem.Header>
                         <MenuItem x:Name="MnuCheckUpdatesStartup" IsCheckable="True"
                                   Header="{loc:Loc Settings_CheckOnStartup}"
                                   Click="MnuCheckUpdatesStartup_Click"/>
