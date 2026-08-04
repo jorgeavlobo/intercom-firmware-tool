@@ -215,6 +215,10 @@ namespace IntercomFirmwareTool.App
         {
             _blocked = true;
             SetButtonsEnabled(false); // honours _blocked: disables actions but re-enables the menus
+            // SetButtonsEnabled doesn't manage the download card or the MQTT test button; lock those
+            // too. If a download is in flight, leave it running — its finally re-runs SetDownloadBusy,
+            // which now keeps the controls disabled because _blocked is set.
+            if (!_downloading) SetDownloadBusy(false);
         }
 
         /// <summary>Re-renders the imperatively-set banner text after a language switch.</summary>

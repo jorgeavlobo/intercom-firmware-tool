@@ -481,30 +481,35 @@ namespace IntercomFirmwareTool.App
             // the Cancel button while the transfer continued and every other op stays locked —
             // the operation would look like it vanished, with no way to cancel. Disabling the
             // toggle pins it in its current (open) state.
-            TglDownload.IsEnabled = !busy;
-            foreach (var r in ModelPills.Children.OfType<RadioButton>()) r.IsEnabled = !busy;
-            foreach (var r in VersionPillButtons()) r.IsEnabled = !busy;
-            TxtDlFolder.IsEnabled = !busy; // click-to-browse box: dead while a download runs
-            BtnDlBrowse.IsEnabled = !busy;
+            // An unsafe-version block (issue #85) outranks the download's own enable/disable: the
+            // restore state is "enabled" only when NOT busy AND NOT blocked, so a download that
+            // finishes while a block is active never hands the actions back to a blocked build.
+            // (BtnDlStart and Build are separately gated on _uiEnabled below, so they stay off too.)
+            bool enabled = !busy && !_blocked;
+
+            TglDownload.IsEnabled = enabled;
+            foreach (var r in ModelPills.Children.OfType<RadioButton>()) r.IsEnabled = enabled;
+            foreach (var r in VersionPillButtons()) r.IsEnabled = enabled;
+            TxtDlFolder.IsEnabled = enabled; // click-to-browse box: dead while a download runs
+            BtnDlBrowse.IsEnabled = enabled;
             BtnDlCancel.IsEnabled = busy;
             // Lock the other operation launchers while a download runs (a build already blocks
             // the download; this is the mirror). They share the Result/status surface, and a
             // download's completion mutates the selected firmware — so they must not overlap.
-            BtnVerify.IsEnabled = !busy;
-            BtnSelfTest.IsEnabled = !busy;
-            BtnGenKey.IsEnabled = !busy;
+            BtnVerify.IsEnabled = enabled;
+            BtnSelfTest.IsEnabled = enabled;
+            BtnGenKey.IsEnabled = enabled;
             // The firmware picker box, too: ChooseFirmwareAsync no-ops while _downloading, so leaving
             // it enabled/focusable would just swallow clicks; lock it like the other browse fields.
-            // (A download and a build are mutually exclusive, so !busy is the right restore state.)
-            TxtFwzPath.IsEnabled = !busy;
+            TxtFwzPath.IsEnabled = enabled;
             // Also the MQTT connection test: a download's completion changes the HA node id, which
             // would silently invalidate an in-flight test.
-            BtnMqttTest.IsEnabled = !busy;
+            BtnMqttTest.IsEnabled = enabled;
             // And the output row: completion overwrites _outputPath with the auto-suggested path,
             // so don't let the user edit/clear it mid-download.
-            TxtOutputPath.IsEnabled = !busy && _fwzPath != null;
-            LblOutput.IsEnabled = !busy && _fwzPath != null;
-            BtnClearOutput.IsEnabled = !busy && _fwzPath != null && _outputPath != null;
+            TxtOutputPath.IsEnabled = enabled && _fwzPath != null;
+            LblOutput.IsEnabled = enabled && _fwzPath != null;
+            BtnClearOutput.IsEnabled = enabled && _fwzPath != null && _outputPath != null;
             if (busy)
             {
                 BtnDlStart.Tag = "busy";      // keep it full-colour while disabled
