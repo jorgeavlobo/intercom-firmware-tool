@@ -282,17 +282,25 @@ jobs:
             fi
           done
           if [ -n "$upload_failed" ]; then
-            # A partial upload — delete OUR release by id (never a tag-scoped delete), then
-            # best-effort roll back the anchor tag. The tag delete is best-effort (|| true): once
-            # the REQUIRED 'v*' ruleset restricts deletions the workflow token cannot delete the
-            # tag, so it no-ops and the (correct, $COMMIT_SHA) tag is left to remove out-of-band
-            # or reuse. We grant the workflow NO ruleset bypass — a bypass that can delete/move
-            # release tags would reopen the window this anchoring closes (CodeRabbit).
-            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}" >/dev/null || true
+            # A partial upload — delete OUR release by id (never a tag-scoped delete). Report the
+            # ACTUAL outcome: if this delete also fails (e.g. a transient GitHub outage) the draft
+            # is still there — publishable with missing assets — and the existence guard will block
+            # a re-run, so we must NOT claim it was removed. Name the release id so it can be
+            # deleted by hand (Codex).
+            if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}" >/dev/null; then
+              draft_state="removed the partial draft"
+            else
+              draft_state="COULD NOT remove the partial draft (release id ${release_id}) — delete it manually; it is publishable with missing assets and will block a re-run"
+            fi
+            # Best-effort roll back the anchor tag (|| true): once the REQUIRED 'v*' ruleset
+            # restricts deletions the workflow token cannot delete the tag, so it no-ops and the
+            # (correct, $COMMIT_SHA) tag is left to remove out-of-band or reuse. We grant the
+            # workflow NO ruleset bypass — a bypass that can delete/move release tags would reopen
+            # the window this anchoring closes (CodeRabbit).
             if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
               gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null || true
             fi
-            echo "::error::failed to upload asset '${upload_failed}' to the draft release for ${TAG} (removed our partial draft; a tag may remain anchored — delete it out-of-band or bump the version before re-running)."
+            echo "::error::failed to upload asset '${upload_failed}' to the draft release for ${TAG} — ${draft_state}. (A tag may remain anchored — delete it out-of-band or bump the version before re-running.)"
             exit 1
           fi
           echo "Draft release $TAG created (tag ${TAG} anchored at ${COMMIT_SHA}) — review it in the Releases tab and click Publish."
