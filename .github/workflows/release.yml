@@ -204,17 +204,18 @@ jobs:
           # binds to it — no target_commitish needed, so the published commit cannot differ from
           # the attested one.
           #
-          # Create the draft record and upload assets as SEPARATE steps, and on failure delete
-          # only the release WE created — identified by the API id returned at creation — never
-          # "whichever release owns $TAG". `gh release create` bundles create+upload and
-          # `gh release delete` targets a release by tag alone, so if another actor raced a
-          # release onto $TAG after the guard above, a tag-scoped rollback could delete THEIR
-          # (possibly published) release. Deleting by our own id makes the rollback touch only
-          # our draft (Codex).
-          release_id="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+          # Every release operation here — create, per-asset upload, and cleanup — targets ONLY
+          # the record this run created, by its API id / release-scoped upload_url. Never a
+          # tag-scoped `gh release create|upload|delete`: those resolve by tag, so if an actor
+          # raced a replacement release onto $TAG after the guard above, a tag-scoped upload would
+          # push our assets onto THEIR release and a tag-scoped delete could remove it — possibly
+          # a published one (Codex, CodeRabbit). Create returns both id and upload_url in one call.
+          created="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
             -f tag_name="$TAG" -f name="$TAG" -F draft=true -F prerelease="$PRERELEASE" \
-            -F generate_release_notes=true --jq '.id' 2>/dev/null || true)"
-          if [ -z "$release_id" ]; then
+            -F generate_release_notes=true --jq '[.id, .upload_url] | @tsv' 2>/dev/null || true)"
+          release_id="${created%%$'\t'*}"
+          upload_url="${created#*$'\t'}"
+          if [ -z "$created" ] || [ -z "$release_id" ] || [ "$release_id" = "$upload_url" ]; then
             # We created nothing (e.g. a release for $TAG already exists from a race) — do NOT
             # delete anyone's release; just roll back the tag we anchored on the dispatch path.
             if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
@@ -223,19 +224,31 @@ jobs:
             echo "::error::could not create the draft release for ${TAG} (a release for it may already exist)."
             exit 1
           fi
-          if ! gh release upload "$TAG" "${files[@]}"; then
-            # Our draft is partial — delete OUR release by id (never a tag-scoped delete), then
+          # Upload each asset to OUR release via its upload_url (strip the RFC 6570 {?name,label}
+          # template). A tag-scoped `gh release upload` could target a raced replacement release.
+          upload_url="${upload_url%%\{*}"
+          upload_failed=""
+          for f in "${files[@]}"; do
+            asset="$(basename "$f")"
+            if ! gh api --method POST "${upload_url}?name=${asset}" \
+                 --header "Content-Type: application/octet-stream" \
+                 --input "$f" >/dev/null 2>&1; then
+              upload_failed="$asset"
+              break
+            fi
+          done
+          if [ -n "$upload_failed" ]; then
+            # A partial upload — delete OUR release by id (never a tag-scoped delete), then
             # best-effort roll back the anchor tag. The tag delete is best-effort (|| true): once
             # the REQUIRED 'v*' ruleset restricts deletions the workflow token cannot delete the
             # tag, so it no-ops and the (correct, $COMMIT_SHA) tag is left to remove out-of-band
-            # or reuse. We do NOT grant the workflow a ruleset bypass to force the delete — a
-            # bypass that can delete/move release tags would reopen the window this closes
-            # (CodeRabbit).
+            # or reuse. We grant the workflow NO ruleset bypass — a bypass that can delete/move
+            # release tags would reopen the window this anchoring closes (CodeRabbit).
             gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}" >/dev/null 2>&1 || true
             if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
               gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1 || true
             fi
-            echo "::error::failed to upload assets to the draft release for ${TAG} (removed our partial draft; a tag may remain anchored — delete it out-of-band or bump the version before re-running)."
+            echo "::error::failed to upload asset '${upload_failed}' to the draft release for ${TAG} (removed our partial draft; a tag may remain anchored — delete it out-of-band or bump the version before re-running)."
             exit 1
           fi
           echo "Draft release $TAG created (tag ${TAG} anchored at ${COMMIT_SHA}) — review it in the Releases tab and click Publish."
