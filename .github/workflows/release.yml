@@ -75,6 +75,17 @@ jobs:
             v="$REF_NAME"
           fi
           v="${v#v}"   # strip a leading 'v'
+          # Reject any control character (newline, CR, tab, …) BEFORE validating. grep below is
+          # line-oriented, so a multiline dispatch value like $'1.2.3\ntag=wrong' would otherwise
+          # pass (its first line is valid SemVer) and then the `echo "…$v…"` lines would inject
+          # extra 'tag='/'version=' records into $GITHUB_OUTPUT — the LAST one wins, overriding
+          # steps.ver.outputs.tag with an arbitrary name (e.g. 'wrong-win-x64') that is OUTSIDE
+          # the 'v*' tag-protection ruleset. Require a single clean line (Codex).
+          case "$v" in
+            *[[:cntrl:]]*)
+              echo "::error::invalid version (must be a single line with no control characters)"
+              exit 1 ;;
+          esac
           # Strict SemVer 2.0.0 (this value becomes the git tag AND the MSBuild Version):
           # core with no leading zeros; an optional dot-separated prerelease where NUMERIC
           # identifiers may not have leading zeros (alphanumerics may); optional build
@@ -115,6 +126,10 @@ jobs:
         env:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
+          # IncludeSourceRevisionInInformationalVersion=false → the shipped .exe's
+          # InformationalVersion ("Product version") is exactly $VERSION, not "$VERSION+<git-sha>"
+          # (the SDK appends the commit id by default), so the file's version metadata matches the
+          # release tag / the in-app update check's expectation (Copilot).
           dotnet publish IntercomFirmwareTool.App/IntercomFirmwareTool.App.csproj `
             -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=true `
@@ -122,6 +137,7 @@ jobs:
             -p:EnableCompressionInSingleFile=true `
             -p:PublishReadyToRun=true `
             -p:Version=$env:VERSION `
+            -p:IncludeSourceRevisionInInformationalVersion=false `
             -o out/exe
 
       - name: Publish self-contained folder (for the .zip)
@@ -134,6 +150,7 @@ jobs:
             -p:PublishSingleFile=false `
             -p:PublishReadyToRun=true `
             -p:Version=$env:VERSION `
+            -p:IncludeSourceRevisionInInformationalVersion=false `
             -o out/folder
 
       - name: Package assets + checksums

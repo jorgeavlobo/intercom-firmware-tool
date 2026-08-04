@@ -12,7 +12,7 @@ Windows x64 builds are published on the [Releases page](../../releases). Each re
 
 ```powershell
 $file = ".\IntercomFirmwareTool-vX.Y.Z-win-x64.exe"
-$expected = (Get-Content "$file.sha256").Split(" ")[0]
+$expected = ((Get-Content "$file.sha256" -Raw) -split '\s+')[0]
 (Get-FileHash $file -Algorithm SHA256).Hash -ieq $expected
 ```
 
