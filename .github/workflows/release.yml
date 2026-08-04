@@ -213,9 +213,14 @@ jobs:
           #                                block a raw .exe download (same program, just wrapped).
           #   3. $base.zip               — the loose self-contained FOLDER (extract-and-run; avoids
           #                                the single-file's first-run temp extraction).
-          $portableExe = Join-Path dist "$base-portable.exe"
-          Copy-Item $exe.FullName $portableExe
-          Compress-Archive -Path $portableExe -DestinationPath (Join-Path dist "$base-portable.zip") -Force
+          Copy-Item $exe.FullName (Join-Path dist "$base-portable.exe")
+          # Zip the portable .exe with ONLY its basename at the archive root — run Compress-Archive
+          # from INSIDE dist so no 'dist/' path prefix is embedded, and unzipping yields the .exe
+          # directly (Copilot).
+          Push-Location dist
+          try { Compress-Archive -Path "$base-portable.exe" -DestinationPath "$base-portable.zip" -Force }
+          finally { Pop-Location }
+          # Loose-folder zip: out/folder/* puts the files at the archive root (no top-level folder).
           Compress-Archive -Path out/folder/* -DestinationPath (Join-Path dist "$base.zip") -Force
           # SHA-256 sidecar for each primary asset (lowercase hex, two spaces, filename).
           Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object {

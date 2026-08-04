@@ -6,7 +6,7 @@ Windows x64 builds are published on the [Releases page](../../releases). Each re
 
 - **`IntercomFirmwareTool-vX.Y.Z-win-x64-portable.exe`** — **portable** self-contained single-file executable; runs on a clean Windows x64 machine with **no .NET installed** (the required Visual C++ runtime that the disk-image library depends on is bundled app-local, so no VC++ Redistributable is needed either). This is the one most people want.
 - **`IntercomFirmwareTool-vX.Y.Z-win-x64-portable.zip`** — the exact same portable `.exe`, just zipped — for browsers or antivirus that block a raw `.exe` download. Unzip and run.
-- **`IntercomFirmwareTool-vX.Y.Z-win-x64.zip`** — the same app as a **loose folder** (executable + its DLLs as separate files), if you prefer an archive or if antivirus flags the single-file's first-run temp-extraction. Extract the whole folder and run the `.exe` inside it.
+- **`IntercomFirmwareTool-vX.Y.Z-win-x64.zip`** — the same app as a **loose set of files** (executable + its DLLs), if you prefer an archive or if antivirus flags the single-file's first-run temp-extraction. Extract the archive into a folder of its own, then run the `.exe` alongside the extracted DLLs.
 - **`*.sha256`** — SHA-256 checksums, one per asset.
 
 **Verify your download** (PowerShell) — compares the file's hash against its published `.sha256` and prints `True` if they match (works for any of the assets — point `$file` at the one you downloaded):
