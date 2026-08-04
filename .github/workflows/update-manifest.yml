@@ -111,6 +111,16 @@ jobs:
             fi
             echo "push failed (attempt $attempt) — syncing with master and retrying"
             git pull --rebase origin master
+            # Re-validate the invariant AFTER the rebase: a concurrent push may have raised
+            # minimumSupportedVersion on its own JSON line — git auto-merges the separate lines
+            # cleanly, but the merged manifest could now be 'minimum > latest', which UpdateChecker
+            # treats as absurd and stops blocking unsafe builds. Never push that.
+            remin="$(jq -r '.minimumSupportedVersion // "0.0.0"' "$file")"
+            relatest="$(jq -r '.latestVersion // "0.0.0"' "$file")"
+            if ! sort_le "$remin" "$relatest"; then
+              echo "::error::after rebase, minimumSupportedVersion '$remin' > latestVersion '$relatest'; aborting to avoid an absurd manifest."
+              exit 1
+            fi
           done
           echo "::error::could not push the latestVersion bump after 3 attempts"
           exit 1
