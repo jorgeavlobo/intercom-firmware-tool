@@ -59,6 +59,17 @@ jobs:
             version="${TAG#v}"
           fi
 
+          # Reject any control/non-printable character (newline, tab, …) FIRST: grep matches line
+          # by line, so a multiline workflow_dispatch input like "1.2.3<newline>junk" would pass the
+          # format check on its first line and then be written whole into the manifest — an
+          # unparseable latestVersion that fails the app open (no nudge, no block). Same hardening
+          # the release workflow applies to its version input.
+          case "$version" in
+            *[![:print:]]*)
+              echo "::error::version contains control or non-printable characters; not bumping."
+              exit 1 ;;
+          esac
+
           # Only auto-bump to a stable X.Y.Z (no prerelease/build suffix, and no leading zeros in
           # any component — SemanticVersion.TryParse rejects '01.2.3', so accepting it here would
           # write a value the app can't parse and silently fail open).
