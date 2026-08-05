@@ -74,11 +74,16 @@ namespace IntercomFirmwareTool.App.Settings
         {
             lock (Gate)
             {
-                var data = LoadUnlocked();
-                mutate(data);
                 string? tmp = null;
                 try
                 {
+                    // Load → mutate → persist all inside the try: a throwing mutator (or any I/O
+                    // failure) must never escape — Update is best-effort and documented not to throw
+                    // to callers (it runs from UI event handlers). A mutator that throws simply
+                    // leaves the on-disk settings unchanged.
+                    var data = LoadUnlocked();
+                    mutate(data);
+
                     string path = FilePath;
                     string dir = Path.GetDirectoryName(path)!;
                     Directory.CreateDirectory(dir);
