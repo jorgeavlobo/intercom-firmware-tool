@@ -37,6 +37,9 @@ jobs:
           ref: master
           # This job commits the manifest bump, so it needs the token persisted for `git push`.
           persist-credentials: true
+          # Full history: the push-retry loop's `git pull --rebase` can fail against an advanced
+          # master with the default shallow fetch-depth=1.
+          fetch-depth: 0
 
       - name: Bump latestVersion in the update manifest
         env:

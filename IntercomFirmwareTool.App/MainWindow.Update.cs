@@ -149,10 +149,14 @@ namespace IntercomFirmwareTool.App
             // setting) hide that banner and leave the actions disabled with no explanation.
             if (_blocked) return;
 
+            // Snapshot the settings once — avoids repeated disk reads and a mid-method
+            // inconsistency if the file changed between the opt-out and dismissal checks.
+            var settings = AppSettings.Load();
+
             // Respect a mid-flight opt-out: if the user disabled the check while an AUTOMATIC
             // request was still in flight, drop its result. A manual "Check now" is an explicit
             // request, so it still applies.
-            if (!manual && !AppSettings.Load().UpdateCheckEnabled) return;
+            if (!manual && !settings.UpdateCheckEnabled) return;
 
             switch (status.Kind)
             {
@@ -161,7 +165,7 @@ namespace IntercomFirmwareTool.App
                     // A routine (automatic) check honours a per-version dismissal; a manual "Check
                     // now" always re-surfaces the offer.
                     if (!manual &&
-                        string.Equals(version, AppSettings.Load().LastDismissedUpdateVersion, StringComparison.Ordinal))
+                        string.Equals(version, settings.LastDismissedUpdateVersion, StringComparison.Ordinal))
                     {
                         HideInformationalBanner();
                         return;
