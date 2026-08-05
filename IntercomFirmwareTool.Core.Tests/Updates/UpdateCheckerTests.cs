@@ -57,8 +57,8 @@ public class UpdateCheckerTests
     }
 
     [Fact]
-    public void Prerelease_latest_is_ignored_by_default()
-        => Assert.Equal(UpdateStatusKind.UpToDate, UpdateChecker.Evaluate(V("1.2.0"), M("1.3.0-rc.1")).Kind);
+    public void Prerelease_latest_is_ignored_by_default()  // ignored ⇒ latest indeterminate ⇒ Unknown
+        => Assert.Equal(UpdateStatusKind.Unknown, UpdateChecker.Evaluate(V("1.2.0"), M("1.3.0-rc.1")).Kind);
 
     [Fact]
     public void Prerelease_latest_surfaces_when_opted_in()

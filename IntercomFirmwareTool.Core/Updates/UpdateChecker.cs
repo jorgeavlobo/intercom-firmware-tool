@@ -90,18 +90,19 @@ public static class UpdateChecker
             return UpdateStatus.Unsupported(minimum);
         }
 
-        // Informational nudge: a newer release is available. Pre-release "latest" values are
-        // ignored unless the user opted into pre-releases.
-        if (latest is not null &&
-            (includePrereleases || !latest.IsPrerelease) &&
-            current.CompareTo(latest) < 0)
-        {
-            return UpdateStatus.Available(latest);
-        }
+        // We can only reason about "latest" when it's one we actually consider: a stable version,
+        // or any version when the user opted into pre-releases. A missing/unparseable latest, or a
+        // pre-release we're ignoring, leaves the latest indeterminate.
+        bool haveComparableLatest = latest is not null && (includePrereleases || !latest.IsPrerelease);
 
-        // Genuinely "up to date" only when we actually parsed a latest to compare against. If
-        // latestVersion was missing or unparseable we can't claim the user is on the latest — a
-        // manual check should report that it couldn't check, not "you're up to date".
-        return latest is not null ? UpdateStatus.UpToDate : UpdateStatus.Unknown;
+        // Informational nudge: a newer release is available.
+        if (haveComparableLatest && current.CompareTo(latest!) < 0)
+            return UpdateStatus.Available(latest!);
+
+        // Only claim "up to date" when we truly determined the latest; otherwise fail open as
+        // Unknown, so a manual check reports it couldn't determine one instead of a false "you're
+        // on the latest" (matters when latestVersion is missing/unparseable or an ignored
+        // pre-release — the automatic check treats Unknown and UpToDate identically anyway).
+        return haveComparableLatest ? UpdateStatus.UpToDate : UpdateStatus.Unknown;
     }
 }

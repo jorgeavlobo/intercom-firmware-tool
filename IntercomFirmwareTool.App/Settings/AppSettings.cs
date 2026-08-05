@@ -8,7 +8,7 @@ namespace IntercomFirmwareTool.App.Settings
     /// The persisted user settings, stored as JSON at
     /// <c>%AppData%\IntercomFirmwareTool\settings.json</c>. One flat model for the whole app so a
     /// write of one setting preserves the others (the earlier language-only writer overwrote the
-    /// file wholesale — see <see cref="AppSettings"/>).
+    /// file wholesale).
     /// </summary>
     internal sealed class AppSettingsData
     {
