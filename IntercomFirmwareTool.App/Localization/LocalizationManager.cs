@@ -2,11 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Globalization;
-using System.IO;
 using System.Linq;
 using System.Resources;
-using System.Text.Json;
 using System.Threading;
+using IntercomFirmwareTool.App.Settings;
 
 namespace IntercomFirmwareTool.App.Localization
 {
@@ -126,36 +125,16 @@ namespace IntercomFirmwareTool.App.Localization
             return "en";
         }
 
-        // Persistence: %AppData%\IntercomFirmwareTool\settings.json
-        private static string SettingsPath => Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "IntercomFirmwareTool", "settings.json");
-
+        // Persistence lives in the shared settings store (%AppData%\IntercomFirmwareTool\
+        // settings.json), which does a read-modify-write so saving the language never drops the
+        // other settings (update-check opt-out, dismissed version).
         private static string? LoadSavedCode()
         {
-            try
-            {
-                if (!File.Exists(SettingsPath)) return null;
-                using var doc = JsonDocument.Parse(File.ReadAllText(SettingsPath));
-                if (doc.RootElement.TryGetProperty("language", out var el))
-                {
-                    string? code = el.GetString();
-                    if (!string.IsNullOrWhiteSpace(code) && Languages.Any(l => l.Code == code))
-                        return code;
-                }
-            }
-            catch { /* missing/corrupt settings — fall back to the system language */ }
-            return null;
+            string? code = AppSettings.Load().Language;
+            return !string.IsNullOrWhiteSpace(code) && Languages.Any(l => l.Code == code) ? code : null;
         }
 
-        private static void SaveCode(string code)
-        {
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-                File.WriteAllText(SettingsPath, JsonSerializer.Serialize(new { language = code }));
-            }
-            catch { /* best-effort; a failed save just means we ask the OS next launch */ }
-        }
+        private static void SaveCode(string code) =>
+            AppSettings.Update(s => s.Language = code);
     }
 }

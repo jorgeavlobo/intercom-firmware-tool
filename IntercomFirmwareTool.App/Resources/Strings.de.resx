@@ -473,4 +473,19 @@ Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. 
 
   <!-- ================= Scroll cue ================= -->
   <data name="Scroll_More" xml:space="preserve"><value>Neue Optionen unten</value></data>
+  <!-- ================= Update check (#85) ================= -->
+  <data name="Settings_MenuTooltip" xml:space="preserve"><value>Einstellungen</value></data>
+  <data name="Settings_CheckOnStartup" xml:space="preserve"><value>Beim Start nach Updates suchen</value></data>
+  <data name="Settings_CheckNow" xml:space="preserve"><value>Jetzt nach Updates suchen…</value></data>
+  <data name="Settings_About" xml:space="preserve"><value>Info</value></data>
+  <data name="Update_Download" xml:space="preserve"><value>Herunterladen</value></data>
+  <data name="Update_Dismiss" xml:space="preserve"><value>Später erinnern</value></data>
+  <data name="Update_Available" xml:space="preserve"><value>Eine neuere Version ({0}) ist verfügbar.</value></data>
+  <data name="Update_Unsafe" xml:space="preserve"><value>Diese Version ist nicht mehr sicher — bitte auf {0} oder neuer aktualisieren.</value></data>
+  <data name="Update_None" xml:space="preserve"><value>Sie verwenden die neueste Version.</value></data>
+  <data name="Update_Failed" xml:space="preserve"><value>Nach Updates konnte gerade nicht gesucht werden. Bitte später erneut versuchen.</value></data>
+  <data name="Update_DevBuild" xml:space="preserve"><value>Dies ist ein Entwicklungs-Build; die Update-Suche ist deaktiviert.</value></data>
+  <data name="Update_CheckTitle" xml:space="preserve"><value>Nach Updates suchen</value></data>
+  <data name="About_Title" xml:space="preserve"><value>Über Intercom Firmware Tool</value></data>
+  <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Version {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>

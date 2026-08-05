@@ -1,0 +1,146 @@
+name: update manifest
+
+# When a GitHub Release is PUBLISHED (a human clicks Publish on the #79 draft), bump
+# 'latestVersion' in .well-known/updates.json — the manifest the in-app startup update check
+# (#85) reads — to the released tag, so users get nudged to it. Prereleases are skipped (the
+# nudge ignores them). 'minimumSupportedVersion' is NEVER touched here; it is maintained by hand,
+# only to retroactively flag an old build unsafe.
+#
+# This job pushes one line to the default branch, so it checks out WITH credentials (unlike the
+# read-only lint/build jobs). It requires that this workflow is allowed to push to the default
+# branch (a branch-protection/ruleset bypass for the github-actions app, or no PR requirement on
+# that branch). If it cannot push, the run fails but nothing breaks: a stale 'latestVersion' just
+# means no nudge (fail-safe), and a maintainer can bump the one line by hand.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable version to set as latestVersion (e.g. 1.2.3)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-manifest
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          # This job commits the manifest bump, so it needs the token persisted for `git push`.
+          persist-credentials: true
+          # Full history: the push-retry loop's `git pull --rebase` can fail against an advanced
+          # master with the default shallow fetch-depth=1.
+          fetch-depth: 0
+
+      - name: Bump latestVersion in the update manifest
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          # Resolve the target version: the manual dispatch input, else the published release tag
+          # (strip a leading 'v'). Publishing a PRERELEASE never bumps latestVersion — the nudge
+          # deliberately ignores prereleases.
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="$INPUT_VERSION"
+          else
+            if [ "${PRERELEASE:-}" = "true" ]; then
+              echo "Prerelease ${TAG:-} — the update nudge ignores prereleases; not bumping."
+              exit 0
+            fi
+            version="${TAG#v}"
+          fi
+
+          # Reject any control/non-printable character (newline, tab, …) FIRST: grep matches line
+          # by line, so a multiline workflow_dispatch input like "1.2.3<newline>junk" would pass the
+          # format check on its first line and then be written whole into the manifest — an
+          # unparseable latestVersion that fails the app open (no nudge, no block). Same hardening
+          # the release workflow applies to its version input.
+          case "$version" in
+            *[![:print:]]*)
+              echo "::error::version contains control or non-printable characters; not bumping."
+              exit 1 ;;
+          esac
+
+          # Drop any SemVer build metadata: a tag like v1.2.3+meta is a stable release the release
+          # workflow accepts, and the app's SemanticVersion ignores build metadata for precedence —
+          # so normalise to the plain X.Y.Z we compare and store. (Without this the format check
+          # below would reject '1.2.3+meta' and the manifest would stay stale.)
+          version="${version%%+*}"
+
+          # Only auto-bump to a stable X.Y.Z (no prerelease/build suffix, and no leading zeros in
+          # any component — SemanticVersion.TryParse rejects '01.2.3', so accepting it here would
+          # write a value the app can't parse and silently fail open).
+          if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::'$version' is not a stable X.Y.Z version (no leading zeros); not bumping."
+            exit 1
+          fi
+
+          file=.well-known/updates.json
+
+          # Never move latestVersion BACKWARDS, and never break the invariant the in-app block
+          # relies on (minimumSupportedVersion <= latestVersion) — either would silently disable
+          # the unsafe-version block. A backport release (e.g. 1.2.4 after 1.3.0) or a stale
+          # dispatch input would otherwise regress it. sort -V handles the stable X.Y.Z values this
+          # step accepts; sort_le "$a" "$b" is true when a <= b.
+          sort_le() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]; }
+          current="$(jq -r '.latestVersion // "0.0.0"' "$file")"
+          minimum="$(jq -r '.minimumSupportedVersion // "0.0.0"' "$file")"
+          if ! sort_le "$current" "$version"; then
+            echo "::error::'$version' is older than the current latestVersion '$current'; not bumping."
+            exit 1
+          fi
+          if ! sort_le "$minimum" "$version"; then
+            echo "::error::'$version' is below minimumSupportedVersion '$minimum'; not bumping."
+            exit 1
+          fi
+
+          tmp="$(mktemp)"
+          jq --arg v "$version" '.latestVersion = $v' "$file" > "$tmp"
+          mv "$tmp" "$file"
+
+          if git diff --quiet -- "$file"; then
+            echo "latestVersion already $version — nothing to do."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+          git commit -m "chore(updates): set latestVersion to $version [skip ci]"
+
+          # Push with a small rebase-and-retry loop: 'concurrency' serializes runs of THIS workflow
+          # but not other pushes to master, so a plain push could be non-fast-forward and lose the
+          # bump. Re-sync and retry a few times before failing (fail-safe — a maintainer can then
+          # bump the one line by hand).
+          for attempt in 1 2 3; do
+            if git push origin HEAD:master; then
+              echo "Set latestVersion=$version"
+              exit 0
+            fi
+            echo "push failed (attempt $attempt) — syncing with master and retrying"
+            git pull --rebase origin master
+            # Re-validate the invariant AFTER the rebase: a concurrent push may have raised
+            # minimumSupportedVersion on its own JSON line — git auto-merges the separate lines
+            # cleanly, but the merged manifest could now be 'minimum > latest', which UpdateChecker
+            # treats as absurd and stops blocking unsafe builds. Never push that.
+            remin="$(jq -r '.minimumSupportedVersion // "0.0.0"' "$file")"
+            relatest="$(jq -r '.latestVersion // "0.0.0"' "$file")"
+            if ! sort_le "$remin" "$relatest"; then
+              echo "::error::after rebase, minimumSupportedVersion '$remin' > latestVersion '$relatest'; aborting to avoid an absurd manifest."
+              exit 1
+            fi
+          done
+          echo "::error::could not push the latestVersion bump after 3 attempts"
+          exit 1

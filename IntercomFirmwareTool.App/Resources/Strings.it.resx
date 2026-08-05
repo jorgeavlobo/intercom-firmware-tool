@@ -473,4 +473,19 @@ Abilitalo solo su un broker autenticato e attendibile. Abilitare il canale dei c
 
   <!-- ================= Scroll cue ================= -->
   <data name="Scroll_More" xml:space="preserve"><value>Nuove opzioni sotto</value></data>
+  <!-- ================= Update check (#85) ================= -->
+  <data name="Settings_MenuTooltip" xml:space="preserve"><value>Impostazioni</value></data>
+  <data name="Settings_CheckOnStartup" xml:space="preserve"><value>Controlla aggiornamenti all’avvio</value></data>
+  <data name="Settings_CheckNow" xml:space="preserve"><value>Controlla aggiornamenti ora…</value></data>
+  <data name="Settings_About" xml:space="preserve"><value>Informazioni</value></data>
+  <data name="Update_Download" xml:space="preserve"><value>Scarica</value></data>
+  <data name="Update_Dismiss" xml:space="preserve"><value>Ricordamelo più tardi</value></data>
+  <data name="Update_Available" xml:space="preserve"><value>È disponibile una versione più recente ({0}).</value></data>
+  <data name="Update_Unsafe" xml:space="preserve"><value>Questa versione non è più sicura — aggiorna alla {0} o successiva.</value></data>
+  <data name="Update_None" xml:space="preserve"><value>Stai usando la versione più recente.</value></data>
+  <data name="Update_Failed" xml:space="preserve"><value>Impossibile controllare gli aggiornamenti ora. Riprova più tardi.</value></data>
+  <data name="Update_DevBuild" xml:space="preserve"><value>Questa è una build di sviluppo; i controlli degli aggiornamenti sono disattivati.</value></data>
+  <data name="Update_CheckTitle" xml:space="preserve"><value>Controllo aggiornamenti</value></data>
+  <data name="About_Title" xml:space="preserve"><value>Informazioni su Intercom Firmware Tool</value></data>
+  <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Versione {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>

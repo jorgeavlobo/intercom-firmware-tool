@@ -44,8 +44,14 @@ jobs:
         run: dotnet restore IntercomFirmwareTool.slnx
 
       - name: Build (Release)
-        # Build the whole solution (Core + App). PlatformTarget=x64 is set in the csprojs
-        # (required by the native SharpExt4/Ijwhost dependency), so no explicit platform
+        # Build the whole solution (Core + App + Core.Tests). PlatformTarget=x64 is set in the
+        # csprojs (required by the native SharpExt4/Ijwhost dependency), so no explicit platform
         # flag is needed here. Warnings-as-errors is intentionally NOT set yet; this gate
         # first establishes that the solution compiles at all.
         run: dotnet build IntercomFirmwareTool.slnx -c Release --no-restore
+
+      - name: Test (Core.Tests)
+        # Run the unit tests for the pure update-check decision logic (issue #85). These exercise
+        # only Core's Updates types (SemanticVersion / UpdateManifest / UpdateChecker) — no network,
+        # no UI, no SharpExt4 — so they run fast and deterministically on the Windows runner.
+        run: dotnet test IntercomFirmwareTool.Core.Tests/IntercomFirmwareTool.Core.Tests.csproj -c Release --no-build

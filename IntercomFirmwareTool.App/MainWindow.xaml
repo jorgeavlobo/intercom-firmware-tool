@@ -580,15 +580,93 @@
             <RowDefinition Height="Auto"/>   <!-- 4: result output (part of Advanced) -->
         </Grid.RowDefinitions>
 
-        <!-- Row 0: a discreet globe language menu (top-right), then the safety note -->
+        <!-- Row 0: a discreet top-right toolbar (settings gear + globe language menu),
+             the update banners (issue #85), then the safety note -->
         <StackPanel Grid.Row="0">
-            <Menu x:Name="LangMenu" HorizontalAlignment="Right" Background="Transparent"
-                  Margin="0,0,0,6" Padding="0"
-                  ToolTip="{loc:Loc Lang_MenuTooltip}"
-                  AutomationProperties.Name="{loc:Loc Lang_MenuTooltip}">
-                <MenuItem x:Name="LangMenuRoot"/>
-            </Menu>
-            <Border Background="#FFFFF8EC" BorderBrush="#FFF0DBA8"
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,6">
+                <!-- Settings gear: startup update-check opt-out, manual check, About -->
+                <Menu x:Name="SettingsMenu" Background="Transparent" Padding="0"
+                      VerticalAlignment="Center"
+                      ToolTip="{loc:Loc Settings_MenuTooltip}"
+                      AutomationProperties.Name="{loc:Loc Settings_MenuTooltip}">
+                    <!-- Glyph in a header TextBlock, NOT FontFamily on the MenuItem: FontFamily is
+                         inheritable, so setting the icon font on the parent item would render the
+                         submenu labels ("Check for updates…", "About") in the icon font too. -->
+                    <MenuItem ToolTip="{loc:Loc Settings_MenuTooltip}"
+                              AutomationProperties.Name="{loc:Loc Settings_MenuTooltip}">
+                        <MenuItem.Header>
+                            <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets"/>
+                        </MenuItem.Header>
+                        <MenuItem x:Name="MnuCheckUpdatesStartup" IsCheckable="True"
+                                  Header="{loc:Loc Settings_CheckOnStartup}"
+                                  Click="MnuCheckUpdatesStartup_Click"/>
+                        <MenuItem x:Name="MnuCheckNow" Header="{loc:Loc Settings_CheckNow}"
+                                  Click="MnuCheckNow_Click"/>
+                        <Separator/>
+                        <MenuItem x:Name="MnuAbout" Header="{loc:Loc Settings_About}"
+                                  Click="MnuAbout_Click"/>
+                    </MenuItem>
+                </Menu>
+                <Menu x:Name="LangMenu" Background="Transparent" Padding="0"
+                      VerticalAlignment="Center"
+                      ToolTip="{loc:Loc Lang_MenuTooltip}"
+                      AutomationProperties.Name="{loc:Loc Lang_MenuTooltip}">
+                    <MenuItem x:Name="LangMenuRoot"/>
+                </Menu>
+            </StackPanel>
+
+            <!-- Mandatory "unsafe version" banner (red, non-dismissible): replaces the safety
+                 warning below and disables the actions. Shown only when the running build is
+                 below the maintainer-flagged minimum-supported version. -->
+            <Border x:Name="UpdateBlockBanner" Visibility="Collapsed"
+                    Background="#FFFDECEA" BorderBrush="#FFE9A79F"
+                    BorderThickness="1" CornerRadius="8" Padding="13,11" Margin="0,0,0,14">
+                <DockPanel LastChildFill="True">
+                    <Border DockPanel.Dock="Left" Width="26" Height="26" CornerRadius="13"
+                            Background="#FFF7D2CC" VerticalAlignment="Top" Margin="0,0,11,0">
+                        <TextBlock Text="&#xE7BA;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                   Foreground="#FFB42318" HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+                    </Border>
+                    <Button x:Name="BtnUpdateBlockDownload" DockPanel.Dock="Right"
+                            VerticalAlignment="Center" Margin="10,0,0,0" Padding="12,5"
+                            Content="{loc:Loc Update_Download}" Click="BtnUpdateDownload_Click"/>
+                    <!-- LiveSetting sits on the TextBlock (the element AnnounceLiveRegion raises the
+                         event on), so screen readers announce the mandatory message. -->
+                    <TextBlock x:Name="TxtUpdateBlockBanner" TextWrapping="Wrap"
+                               VerticalAlignment="Center" Foreground="#FF7A160E"
+                               AutomationProperties.LiveSetting="Assertive"/>
+                </DockPanel>
+            </Border>
+
+            <!-- Informational "update available" banner (blue, dismissible): coexists ABOVE the
+                 safety warning; all controls stay enabled. -->
+            <Border x:Name="UpdateBanner" Visibility="Collapsed"
+                    Background="#FFEAF3FE" BorderBrush="#FFAFD3F2"
+                    BorderThickness="1" CornerRadius="8" Padding="13,11" Margin="0,0,0,14">
+                <DockPanel LastChildFill="True">
+                    <Border DockPanel.Dock="Left" Width="26" Height="26" CornerRadius="13"
+                            Background="#FFD2E6FB" VerticalAlignment="Top" Margin="0,0,11,0">
+                        <TextBlock Text="&#xE946;" FontFamily="Segoe MDL2 Assets" FontSize="13"
+                                   Foreground="#FF1B6FC4" HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+                    </Border>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal"
+                                VerticalAlignment="Center" Margin="10,0,0,0">
+                        <Button x:Name="BtnUpdateDownload" Padding="12,5"
+                                Content="{loc:Loc Update_Download}" Click="BtnUpdateDownload_Click"/>
+                        <Button x:Name="BtnUpdateDismiss" Margin="8,0,0,0" Padding="12,5"
+                                Content="{loc:Loc Update_Dismiss}" Click="BtnUpdateDismiss_Click"/>
+                    </StackPanel>
+                    <!-- LiveSetting sits on the TextBlock (the element AnnounceLiveRegion raises the
+                         event on), so screen readers announce the update message. -->
+                    <TextBlock x:Name="TxtUpdateBanner" TextWrapping="Wrap"
+                               VerticalAlignment="Center" Foreground="#FF12456E"
+                               AutomationProperties.LiveSetting="Polite"/>
+                </DockPanel>
+            </Border>
+
+            <Border x:Name="RiskBanner" Background="#FFFFF8EC" BorderBrush="#FFF0DBA8"
                     BorderThickness="1" CornerRadius="8" Padding="13,11" Margin="0,0,0,14">
                 <DockPanel LastChildFill="True">
                     <!-- Warning glyph in a soft amber badge -->

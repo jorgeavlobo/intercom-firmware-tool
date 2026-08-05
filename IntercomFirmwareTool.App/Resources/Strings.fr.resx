@@ -473,4 +473,19 @@ Ne l'activez que sur un broker authentifié et de confiance. Activer le canal de
 
   <!-- ================= Scroll cue ================= -->
   <data name="Scroll_More" xml:space="preserve"><value>Nouvelles options ci-dessous</value></data>
+  <!-- ================= Update check (#85) ================= -->
+  <data name="Settings_MenuTooltip" xml:space="preserve"><value>Paramètres</value></data>
+  <data name="Settings_CheckOnStartup" xml:space="preserve"><value>Vérifier les mises à jour au démarrage</value></data>
+  <data name="Settings_CheckNow" xml:space="preserve"><value>Vérifier les mises à jour…</value></data>
+  <data name="Settings_About" xml:space="preserve"><value>À propos</value></data>
+  <data name="Update_Download" xml:space="preserve"><value>Télécharger</value></data>
+  <data name="Update_Dismiss" xml:space="preserve"><value>Me le rappeler plus tard</value></data>
+  <data name="Update_Available" xml:space="preserve"><value>Une version plus récente ({0}) est disponible.</value></data>
+  <data name="Update_Unsafe" xml:space="preserve"><value>Cette version n’est plus sûre — veuillez passer à la {0} ou une version ultérieure.</value></data>
+  <data name="Update_None" xml:space="preserve"><value>Vous utilisez la dernière version.</value></data>
+  <data name="Update_Failed" xml:space="preserve"><value>Impossible de vérifier les mises à jour pour le moment. Réessayez plus tard.</value></data>
+  <data name="Update_DevBuild" xml:space="preserve"><value>Il s’agit d’une version de développement ; la vérification des mises à jour est désactivée.</value></data>
+  <data name="Update_CheckTitle" xml:space="preserve"><value>Vérification des mises à jour</value></data>
+  <data name="About_Title" xml:space="preserve"><value>À propos d’Intercom Firmware Tool</value></data>
+  <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Version {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>
