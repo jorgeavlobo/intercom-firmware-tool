@@ -208,6 +208,12 @@ namespace IntercomFirmwareTool.App
             // Assertive live region — announce the mandatory message so a screen-reader user hears
             // WHY the controls just became disabled.
             AnnounceLiveRegion(TxtUpdateBlockBanner);
+            // The banner lives inside the scrollable body; if the user had scrolled past the header,
+            // bring it into view so a sighted user can see WHY the actions just disabled (and the
+            // Download button). Deferred to Loaded priority so the just-shown banner is laid out
+            // before we scroll to it.
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded,
+                new Action(() => UpdateBlockBanner.BringIntoView()));
             EnterUnsupportedBlockedState();
         }
 
