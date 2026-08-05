@@ -620,8 +620,7 @@
                  below the maintainer-flagged minimum-supported version. -->
             <Border x:Name="UpdateBlockBanner" Visibility="Collapsed"
                     Background="#FFFDECEA" BorderBrush="#FFE9A79F"
-                    BorderThickness="1" CornerRadius="8" Padding="13,11" Margin="0,0,0,14"
-                    AutomationProperties.LiveSetting="Assertive">
+                    BorderThickness="1" CornerRadius="8" Padding="13,11" Margin="0,0,0,14">
                 <DockPanel LastChildFill="True">
                     <Border DockPanel.Dock="Left" Width="26" Height="26" CornerRadius="13"
                             Background="#FFF7D2CC" VerticalAlignment="Top" Margin="0,0,11,0">
@@ -632,8 +631,11 @@
                     <Button x:Name="BtnUpdateBlockDownload" DockPanel.Dock="Right"
                             VerticalAlignment="Center" Margin="10,0,0,0" Padding="12,5"
                             Content="{loc:Loc Update_Download}" Click="BtnUpdateDownload_Click"/>
+                    <!-- LiveSetting sits on the TextBlock (the element AnnounceLiveRegion raises the
+                         event on), so screen readers announce the mandatory message. -->
                     <TextBlock x:Name="TxtUpdateBlockBanner" TextWrapping="Wrap"
-                               VerticalAlignment="Center" Foreground="#FF7A160E"/>
+                               VerticalAlignment="Center" Foreground="#FF7A160E"
+                               AutomationProperties.LiveSetting="Assertive"/>
                 </DockPanel>
             </Border>
 
@@ -641,8 +643,7 @@
                  safety warning; all controls stay enabled. -->
             <Border x:Name="UpdateBanner" Visibility="Collapsed"
                     Background="#FFEAF3FE" BorderBrush="#FFAFD3F2"
-                    BorderThickness="1" CornerRadius="8" Padding="13,11" Margin="0,0,0,14"
-                    AutomationProperties.LiveSetting="Polite">
+                    BorderThickness="1" CornerRadius="8" Padding="13,11" Margin="0,0,0,14">
                 <DockPanel LastChildFill="True">
                     <Border DockPanel.Dock="Left" Width="26" Height="26" CornerRadius="13"
                             Background="#FFD2E6FB" VerticalAlignment="Top" Margin="0,0,11,0">
@@ -657,8 +658,11 @@
                         <Button x:Name="BtnUpdateDismiss" Margin="8,0,0,0" Padding="12,5"
                                 Content="{loc:Loc Update_Dismiss}" Click="BtnUpdateDismiss_Click"/>
                     </StackPanel>
+                    <!-- LiveSetting sits on the TextBlock (the element AnnounceLiveRegion raises the
+                         event on), so screen readers announce the update message. -->
                     <TextBlock x:Name="TxtUpdateBanner" TextWrapping="Wrap"
-                               VerticalAlignment="Center" Foreground="#FF12456E"/>
+                               VerticalAlignment="Center" Foreground="#FF12456E"
+                               AutomationProperties.LiveSetting="Polite"/>
                 </DockPanel>
             </Border>
 
