@@ -15,8 +15,9 @@ public enum UpdateStatusKind
     Unsupported,
 
     /// <summary>The check could not produce a confident answer (dev build, offline, timeout,
-    /// malformed/absent manifest, unknown schema with no nudge): treated exactly like
-    /// <see cref="UpToDate"/> — no banner, app fully usable.</summary>
+    /// malformed/absent manifest, a schema older than understood, or a latest that can't be
+    /// determined): treated exactly like <see cref="UpToDate"/> — no banner, app fully usable.
+    /// (A NEWER schema is not Unknown — it still nudges; it only disables the block.)</summary>
     Unknown,
 }
 
