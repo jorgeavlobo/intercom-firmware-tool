@@ -583,9 +583,10 @@ namespace IntercomFirmwareTool.App
         private void ApplyDownloadLanguage()
         {
             if (_availableFw.Count > 0) BuildModelPills(); // re-selects _dlModelLine/_dlSelected
-            // Freshly rebuilt pills default to enabled, so re-apply the busy lock if a download
-            // is running (the language menu stays usable mid-download).
-            if (_downloading) SetDownloadBusy(true);
+            // Freshly rebuilt pills default to enabled, so re-apply the lock if a download is
+            // running OR an unsafe-version block (issue #85) is active — otherwise a language switch
+            // (which stays usable in both states) would re-enable the newly created selectors.
+            if (_downloading || _blocked) SetDownloadBusy(_downloading);
             BtnDlStart.Content = _downloading ? L("Dl_Downloading") : L("Dl_Start");
             RenderDlStatus();
             // Re-localize the in-progress line too (e.g. a stalled "Starting download…"): the
