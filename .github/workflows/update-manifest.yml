@@ -70,6 +70,12 @@ jobs:
               exit 1 ;;
           esac
 
+          # Drop any SemVer build metadata: a tag like v1.2.3+meta is a stable release the release
+          # workflow accepts, and the app's SemanticVersion ignores build metadata for precedence —
+          # so normalise to the plain X.Y.Z we compare and store. (Without this the format check
+          # below would reject '1.2.3+meta' and the manifest would stay stale.)
+          version="${version%%+*}"
+
           # Only auto-bump to a stable X.Y.Z (no prerelease/build suffix, and no leading zeros in
           # any component — SemanticVersion.TryParse rejects '01.2.3', so accepting it here would
           # write a value the app can't parse and silently fail open).
