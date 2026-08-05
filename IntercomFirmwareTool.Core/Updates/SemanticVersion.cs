@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Numerics;
 
 namespace IntercomFirmwareTool.Core.Updates;
 
@@ -205,8 +204,10 @@ public sealed record SemanticVersion : IComparable<SemanticVersion>
         bool aNum = IsAllDigits(a);
         bool bNum = IsAllDigits(b);
         if (aNum && bNum)
-            return BigInteger.Parse(a, CultureInfo.InvariantCulture)
-                .CompareTo(BigInteger.Parse(b, CultureInfo.InvariantCulture));
+            // Both numeric with NO leading zeros (enforced in TryParse), so magnitude follows
+            // length, then ordinal — comparing without parsing avoids a BigInteger allocation (and
+            // the CPU/memory cost a hostile manifest with a huge digit run could otherwise force).
+            return a.Length != b.Length ? a.Length.CompareTo(b.Length) : string.CompareOrdinal(a, b);
         if (aNum) return -1; // numeric identifiers have lower precedence than alphanumeric
         if (bNum) return 1;
         return string.CompareOrdinal(a, b);

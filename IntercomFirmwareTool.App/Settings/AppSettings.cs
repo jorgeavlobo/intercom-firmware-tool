@@ -76,20 +76,27 @@ namespace IntercomFirmwareTool.App.Settings
             {
                 var data = LoadUnlocked();
                 mutate(data);
+                string? tmp = null;
                 try
                 {
                     string path = FilePath;
                     string dir = Path.GetDirectoryName(path)!;
                     Directory.CreateDirectory(dir);
-                    // Write to a temp file in the SAME directory, then atomically move it over the
-                    // target. File.WriteAllText truncates the destination in place, so a crash
+                    // Write to a UNIQUE temp file in the SAME directory, then atomically move it over
+                    // the target. File.WriteAllText truncates the destination in place, so a crash
                     // mid-write would leave partial JSON that Load treats as corrupt and resets to
-                    // defaults — silently re-enabling the update check after the user opted out.
-                    string tmp = Path.Combine(dir, "settings.json.tmp");
+                    // defaults — silently re-enabling the update check after the user opted out. A
+                    // unique name avoids colliding with another instance or a crashed run's leftover.
+                    tmp = Path.Combine(dir, $"settings.{Guid.NewGuid():N}.tmp");
                     File.WriteAllText(tmp, JsonSerializer.Serialize(data, JsonOptions));
                     File.Move(tmp, path, overwrite: true);
                 }
                 catch { /* best-effort; a failed save just means the choice isn't remembered */ }
+                finally
+                {
+                    // Don't leave a temp behind if the move never happened.
+                    if (tmp is not null && File.Exists(tmp)) { try { File.Delete(tmp); } catch { /* ignore */ } }
+                }
             }
         }
     }
