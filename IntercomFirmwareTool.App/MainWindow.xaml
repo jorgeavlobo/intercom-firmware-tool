@@ -595,7 +595,10 @@
                     <MenuItem ToolTip="{loc:Loc Settings_MenuTooltip}"
                               AutomationProperties.Name="{loc:Loc Settings_MenuTooltip}">
                         <MenuItem.Header>
-                            <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets"/>
+                            <!-- FontSize 14 matches the language globe (built in code-behind) so
+                                 the two top-right icons render at the same size. -->
+                            <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="14"
+                                       VerticalAlignment="Center"/>
                         </MenuItem.Header>
                         <MenuItem x:Name="MnuCheckUpdatesStartup" IsCheckable="True"
                                   Header="{loc:Loc Settings_CheckOnStartup}"
