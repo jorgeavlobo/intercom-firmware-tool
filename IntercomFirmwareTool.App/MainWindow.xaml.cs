@@ -109,13 +109,19 @@ namespace IntercomFirmwareTool.App
             // current content: it opens showing the whole (collapsed) form with no vertical
             // scrollbar, and grows to absorb async reveals (e.g. the "download official firmware"
             // toggle that appears once the background probe finds a source) instead of clipping
-            // them behind a scrollbar. Cap that growth at the screen work area — past that (e.g.
-            // when Advanced is expanded) the body's ScrollViewer takes over. Set before the window
-            // is shown so the very first sizing already respects the cap.
-            SourceInitialized += (_, _) => MaxHeight = SystemParameters.WorkArea.Height;
+            // them behind a scrollbar. Cap that growth at the CURRENT monitor's work area — past
+            // that (e.g. when Advanced is expanded) the body's ScrollViewer takes over. Set before
+            // the window is shown so the very first sizing already respects the cap.
+            SourceInitialized += (_, _) => MaxHeight = CurrentMonitorWorkArea().Height;
+
+            // Keep the cap correct for whichever monitor the window is on — work areas differ per
+            // display, and LocationChanged fires when the user drags the window to another monitor.
+            LocationChanged += (_, _) => MaxHeight = CurrentMonitorWorkArea().Height;
 
             // Keep the auto-sizing window sensibly placed as its height changes (Advanced or the
-            // download card expanding/collapsing, or an async reveal):
+            // download card expanding/collapsing, or an async reveal). Uses the work area of the
+            // monitor the window is actually on (not SystemParameters.WorkArea, which only ever
+            // reports the primary display and would misplace the window on a secondary monitor):
             //  • growing → keep the bottom edge on-screen (grow downward, clamp up only if it would
             //    spill under the taskbar / off the work area);
             //  • shrinking → re-center vertically, like the initial CenterScreen, so collapsing a
@@ -125,7 +131,7 @@ namespace IntercomFirmwareTool.App
             SizeChanged += (_, e) =>
             {
                 if (double.IsNaN(Top)) return; // not positioned yet (before CenterScreen applies)
-                var work = SystemParameters.WorkArea;
+                var work = CurrentMonitorWorkArea();
                 if (e.HeightChanged && e.NewSize.Height < e.PreviousSize.Height)
                     Top = Math.Max(work.Top, work.Top + (work.Height - ActualHeight) / 2);
                 else if (Top + ActualHeight > work.Bottom)
