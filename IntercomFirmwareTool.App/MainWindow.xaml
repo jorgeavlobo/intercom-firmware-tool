@@ -729,10 +729,14 @@
                          PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown" PreviewKeyDown="TxtFwzPath_PreviewKeyDown"
                          Foreground="Gray"/>
 
-                <!-- Download official firmware (issue #23). Hidden until the startup
-                     availability probe finds at least one online, size-matching file. -->
+                <!-- Download official firmware (issue #23). Invisible until the startup
+                     availability probe finds at least one online, size-matching file, then
+                     revealed in place (OnAvailabilityReady). Visibility=Hidden (not Collapsed)
+                     RESERVES its layout slot from the first frame, so the auto-sized window opens
+                     at its final height and this async reveal fills the reserved space without a
+                     visible resize; if nothing is online it stays hidden (a small unused slot). -->
                 <ToggleButton x:Name="TglDownload" Style="{StaticResource DownloadLink}"
-                              Visibility="Collapsed" Margin="0,6,0,0"
+                              Visibility="Hidden" Margin="0,6,0,0"
                               Checked="TglDownload_Changed" Unchecked="TglDownload_Changed"
                               AutomationProperties.Name="{loc:Loc Dl_Toggle}"
                               ToolTip="{loc:Loc Dl_ToggleTip}"/>
