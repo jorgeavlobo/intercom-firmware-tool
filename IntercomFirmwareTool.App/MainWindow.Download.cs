@@ -371,7 +371,7 @@ namespace IntercomFirmwareTool.App
             bool open = TglDownload.IsChecked == true;
             DownloadCard.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
             if (open) DownloadCard.BringIntoView(); // scroll it into view in the page ScrollViewer
-            else _recenterPending = true; // collapsing shrinks the window — let SizeChanged re-center it
+            else RecenterAfterCollapse();           // collapsing shrinks the window — re-center it
         }
 
         private void DlFolder_MouseDown(object sender, MouseButtonEventArgs e)

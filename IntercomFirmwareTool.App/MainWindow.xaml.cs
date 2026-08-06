@@ -118,27 +118,18 @@ namespace IntercomFirmwareTool.App
             // display, and LocationChanged fires when the user drags the window to another monitor.
             LocationChanged += (_, _) => MaxHeight = CurrentMonitorWorkArea().Height;
 
-            // Keep the auto-sizing window sensibly placed as its height changes (Advanced or the
-            // download card expanding/collapsing, or an async reveal). Uses the work area of the
-            // monitor the window is actually on (not SystemParameters.WorkArea, which only ever
-            // reports the primary display and would misplace the window on a secondary monitor):
-            //  • a disclosure collapse (flagged via _recenterPending) → re-center vertically, like
-            //    the initial CenterScreen, so collapsing a section returns the window to the middle
-            //    instead of leaving it pinned wherever growth had pushed it. Gated on the flag so an
-            //    ORDINARY user resize (which also shrinks height) doesn't jump the window away from
-            //    the drag anchor;
-            //  • otherwise (growing, or any non-disclosure change) → just keep the bottom edge
-            //    on-screen (grow downward, clamp up only if it would spill off the work area).
-            SizeChanged += (_, e) =>
+            // Keep the auto-sizing window on-screen as its height changes (Advanced or the download
+            // card expanding, an async reveal, or a manual width drag): if growth pushed the bottom
+            // edge past the work area, nudge Top up. Uses the work area of the monitor the window is
+            // actually on (not SystemParameters.WorkArea, which only ever reports the primary display
+            // and would misplace the window on a secondary monitor). Re-centering after a disclosure
+            // COLLAPSE is handled separately (RecenterAfterCollapse), invoked only from the collapse
+            // handlers so an ordinary user resize can't trigger it.
+            SizeChanged += (_, _) =>
             {
                 if (double.IsNaN(Top)) return; // not positioned yet (before CenterScreen applies)
                 var work = CurrentMonitorWorkArea();
-                if (_recenterPending && e.HeightChanged && e.NewSize.Height < e.PreviousSize.Height)
-                {
-                    _recenterPending = false;
-                    Top = Math.Max(work.Top, work.Top + (work.Height - ActualHeight) / 2);
-                }
-                else if (Top + ActualHeight > work.Bottom)
+                if (Top + ActualHeight > work.Bottom)
                     Top = Math.Max(work.Top, work.Bottom - ActualHeight);
             };
 
@@ -1060,15 +1051,10 @@ namespace IntercomFirmwareTool.App
             ResultGroup.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
         }
 
-        // Tracks whether the Advanced section is currently expanded (and the window was grown for
-        // it): set when it opens so the one-time grow runs once per open, cleared when it closes so
-        // the collapse re-centers.
+        // Tracks whether the Advanced section is currently expanded, so a genuine collapse
+        // (expanded → collapsed) re-centers the window while an already-collapsed toggle event
+        // doesn't. SizeToContent handles the actual grow/shrink.
         private bool _advancedExpanded;
-        // Set the instant a disclosure (Advanced / the download card) is collapsed, and consumed by
-        // the next shrinking SizeChanged, so the window re-centers ONLY on those content-driven
-        // collapses — never on an ordinary user resize (which would otherwise jump the window away
-        // from the drag anchor on every height decrease).
-        private bool _recenterPending;
 
         /// <summary>
         /// Shows a short message in the always-visible status line under the Build
@@ -1238,36 +1224,32 @@ namespace IntercomFirmwareTool.App
             // stale. UpdateBuildEnabled runs both UpdateRequiredCues and
             // UpdateAdvancedVisibility.
             UpdateBuildEnabled();
-            if (TglAdvanced.IsChecked == true)
-            {
-                // Opening: grow once so the result output has room; after that SizeToContent keeps
-                // the window sized to the expanded content.
-                if (!_advancedExpanded)
-                {
-                    _advancedExpanded = true;
-
-                    // Work area of the monitor THIS window is on (not the primary —
-                    // SystemParameters.WorkArea only ever reports the primary display,
-                    // which would push us off-screen on a secondary monitor offset
-                    // above/below it). Falls back to the primary work area if the
-                    // native query is unavailable.
-                    Rect wa = CurrentMonitorWorkArea();
-                    double want = Math.Min(720, wa.Height);
-                    if (Height < want) Height = want;
-                    // The window's Top didn't change, so growing downward could push the
-                    // footer off-screen. Nudge Top up so the whole window stays within
-                    // this monitor's work area.
-                    if (Top + Height > wa.Bottom) Top = Math.Max(wa.Top, wa.Bottom - Height);
-                }
-            }
-            else if (_advancedExpanded)
-            {
-                // Closing: the content shrinks back, so let the SizeChanged handler re-center the
-                // window (this is a disclosure collapse, not a manual resize).
-                _recenterPending = true;
-                _advancedExpanded = false;
-            }
+            bool open = TglAdvanced.IsChecked == true;
+            // The window is SizeToContent=Height, so revealing/hiding the Advanced surface already
+            // grows/shrinks it to fit (the SizeChanged handler keeps it on-screen) — no explicit
+            // Height assignment, which would be ineffective under SizeToContent anyway. We only need
+            // to re-center on a genuine collapse (was expanded, now closed).
+            if (!open && _advancedExpanded) RecenterAfterCollapse();
+            _advancedExpanded = open;
         }
+
+        /// <summary>
+        /// Re-center the window vertically after a disclosure (Advanced, or the download card)
+        /// collapses, so it returns to the middle instead of staying wherever growth had pushed it.
+        /// Deferred to Loaded priority so it reads the FINAL height once the collapse's layout has
+        /// settled, and called ONLY from the collapse handlers — never from SizeChanged — so an
+        /// ordinary user resize can't trigger it (and a collapse that produces no shrink can't leave
+        /// a pending flag armed to hijack a later resize).
+        /// </summary>
+        private void RecenterAfterCollapse() =>
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() =>
+            {
+                if (double.IsNaN(Top)) return;
+                Rect work = CurrentMonitorWorkArea();
+                double top = work.Top + (work.Height - ActualHeight) / 2;
+                if (top + ActualHeight > work.Bottom) top = work.Bottom - ActualHeight;
+                Top = Math.Max(work.Top, top);
+            }));
 
         /// <summary>
         /// Work area (excluding the taskbar) of the monitor that currently contains
