@@ -149,10 +149,12 @@ namespace IntercomFirmwareTool.Core
             // non-null local so the contract is explicit at the single use site (and nullability
             // is satisfied without warnings).
             string url = fw.DownloadUrl!;
-            // Flipped the instant the pipeline hands back a response, so the catch below can tell a
-            // transport failure (no response — genuinely unreachable) apart from a post-response
-            // fault in Classify (the server DID answer — reachable, just not usable). Without it a
-            // stray Classify exception would be mis-reported to the UI as "offline".
+            // Flipped inside the pipeline callback the instant ANY attempt gets a response — even a
+            // retryable 5xx that Polly will retry — so the catch below can tell a pure transport
+            // failure (no response ever — genuinely unreachable) from a server that DID answer
+            // (reachable, just not usable, or a later retry/Classify fault). Setting it only AFTER
+            // the whole pipeline returns would miss the "503 then the retry fails at the transport
+            // layer" case, where ExecuteAsync throws and the server would be mis-reported as offline.
             bool responseReceived = false;
             try
             {
@@ -167,10 +169,12 @@ namespace IntercomFirmwareTool.Core
                     // A browser-ish UA/Accept avoids servers that 403 an unidentified client.
                     req.Headers.UserAgent.ParseAdd("IntercomFirmwareTool");
                     req.Headers.Accept.ParseAdd("application/octet-stream, */*");
-                    return await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token)
+                    HttpResponseMessage attempt = await _http
+                        .SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token)
                         .ConfigureAwait(false);
+                    responseReceived = true; // this attempt got a response (even if it's retried)
+                    return attempt;
                 }, ct).ConfigureAwait(false);
-                responseReceived = true;
 
                 using (resp)
                 {
