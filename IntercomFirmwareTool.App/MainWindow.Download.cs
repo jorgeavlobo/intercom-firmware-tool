@@ -52,9 +52,12 @@ namespace IntercomFirmwareTool.App
         private readonly FirmwareDownloader _downloader = new();
         private CancellationTokenSource? _dlCts;
         private bool _downloading;
-        // True when the startup probe couldn't reach any official firmware (offline / servers
-        // unreachable): the link is still shown, but muted and non-opening — a click warns.
+        // True when the startup probe found nothing to offer: the link is still shown, but muted
+        // and non-opening — a click warns. _dlNoInternet then distinguishes WHY: true = nothing was
+        // even reachable (offline), false = a server answered but had no usable firmware. It selects
+        // the correct tooltip/warning wording.
         private bool _dlOffline;
+        private bool _dlNoInternet;
         // Snapshot of the (always-editable) HA node id taken when a download starts, so
         // completion can tell whether the user retyped it mid-transfer and, if so, keep
         // their value instead of overwriting it with the model default.
@@ -111,8 +114,11 @@ namespace IntercomFirmwareTool.App
                     // reachable → a muted, non-opening link that explains itself and warns on click.
                     await Dispatcher.InvokeAsync(() =>
                     {
+                        // results == null only if ProbeAsync itself threw (e.g. cancellation on
+                        // shutdown) — treat as offline. Otherwise OnAvailabilityReady inspects the
+                        // per-entry Reachable flags to tell offline from reachable-but-empty.
                         if (results != null) OnAvailabilityReady(results);
-                        else ShowDownloadUnavailable();
+                        else ShowDownloadUnavailable(offline: true);
                     });
                 }
                 catch { /* dispatcher shutting down, etc. — nothing to surface */ }
@@ -140,9 +146,11 @@ namespace IntercomFirmwareTool.App
                 .Select(r => r.Firmware));
             if (_availableFw.Count == 0)
             {
-                // Servers answered but nothing customizable is currently offered: same muted,
-                // "can't download right now" treatment as being offline.
-                ShowDownloadUnavailable();
+                // Nothing to offer. If NO endpoint even answered, it's a connectivity problem
+                // (offline); if at least one answered but had nothing usable (404 / error page /
+                // size mismatch), the network is fine — say so instead of blaming the connection.
+                bool offline = !results.Any(r => r.Reachable);
+                ShowDownloadUnavailable(offline);
                 return;
             }
 
@@ -161,20 +169,27 @@ namespace IntercomFirmwareTool.App
         }
 
         /// <summary>
-        /// No official firmware could be reached (offline, or the servers returned nothing usable):
-        /// still reveal the entry point so the user knows the feature exists, but in a muted,
-        /// non-opening "offline" state — an explanatory tooltip, and a click warns instead of opening
-        /// the picker (see <see cref="TglDownload_Changed"/>). Fills the layout slot reserved at
-        /// startup, so the window height doesn't change.
+        /// No official firmware can be downloaded right now: still reveal the entry point so the user
+        /// knows the feature exists, but in a muted, non-opening state — an explanatory tooltip, and
+        /// a click warns instead of opening the picker (see <see cref="TglDownload_Changed"/>). Fills
+        /// the layout slot reserved at startup, so the window height doesn't change.
+        /// <paramref name="offline"/> selects the wording: true = nothing was reachable (blame the
+        /// connection), false = a server answered but had nothing usable (don't blame the connection).
         /// </summary>
-        private void ShowDownloadUnavailable()
+        private void ShowDownloadUnavailable(bool offline)
         {
             _dlOffline = true;
+            _dlNoInternet = offline;
             TglDownload.Tag = "offline";                 // drives the muted DownloadLink template trigger
-            TglDownload.ToolTip = L("Dl_OfflineTip");
+            TglDownload.ToolTip = L(DlUnavailableTipKey);
             TglDownload.Visibility = Visibility.Visible;
             NotifyContentRevealed();
         }
+
+        /// <summary>Tooltip/warning resource keys for the muted state, per the offline vs
+        /// reachable-but-empty distinction.</summary>
+        private string DlUnavailableTipKey => _dlNoInternet ? "Dl_OfflineTip" : "Dl_UnavailableTip";
+        private string DlUnavailableWarnKey => _dlNoInternet ? "Dl_OfflineWarn" : "Dl_UnavailableWarn";
 
         // ---- Model / version pills -------------------------------------------
 
@@ -347,7 +362,7 @@ namespace IntercomFirmwareTool.App
                 if (TglDownload.IsChecked == true)
                 {
                     TglDownload.IsChecked = false; // re-enters this handler unchecked (falls through, no card)
-                    MessageBox.Show(this, L("Dl_OfflineWarn"), L("Dl_Toggle"),
+                    MessageBox.Show(this, L(DlUnavailableWarnKey), L("Dl_Toggle"),
                         MessageBoxButton.OK, MessageBoxImage.Information);
                 }
                 return;
@@ -633,8 +648,9 @@ namespace IntercomFirmwareTool.App
         /// and the status line.</summary>
         private void ApplyDownloadLanguage()
         {
-            // The offline tooltip is set imperatively (not a {loc:Loc} binding), so re-apply it.
-            if (_dlOffline) TglDownload.ToolTip = L("Dl_OfflineTip");
+            // The unavailable-state tooltip is set imperatively (not a {loc:Loc} binding), so
+            // re-apply the correct one (offline vs reachable-but-empty) on a language switch.
+            if (_dlOffline) TglDownload.ToolTip = L(DlUnavailableTipKey);
             if (_availableFw.Count > 0) BuildModelPills(); // re-selects _dlModelLine/_dlSelected
             // Freshly rebuilt pills default to enabled, so re-apply the lock if a download is
             // running OR an unsafe-version block (issue #85) is active — otherwise a language switch

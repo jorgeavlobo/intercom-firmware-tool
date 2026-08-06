@@ -454,6 +454,8 @@ Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comando
   <data name="Dl_ToggleTip" xml:space="preserve"><value>Descarregar o firmware original da BTicino e verificá-lo automaticamente</value></data>
   <data name="Dl_OfflineTip" xml:space="preserve"><value>Sem ligação à internet — é necessária para descarregar o firmware oficial.</value></data>
   <data name="Dl_OfflineWarn" xml:space="preserve"><value>Não foi detetada ligação à internet.&#10;Liga-te à internet para descarregar o firmware oficial.</value></data>
+  <data name="Dl_UnavailableTip" xml:space="preserve"><value>De momento não há firmware oficial disponível para descarregar.</value></data>
+  <data name="Dl_UnavailableWarn" xml:space="preserve"><value>De momento não há firmware oficial disponível para descarregar.&#10;Tenta novamente mais tarde.</value></data>
   <data name="Dl_Title" xml:space="preserve"><value>Descarregar firmware oficial</value></data>
   <data name="Dl_Subtitle" xml:space="preserve"><value>Obtido da BTicino e verificado automaticamente</value></data>
   <data name="Dl_Legal" xml:space="preserve"><value>Este é o mesmo firmware original que pode descarregar manualmente da BTicino / Legrand. A ferramenta apenas o obtém por si e verifica-o byte a byte (tamanho + SHA-256) em relação ao original conhecido antes de ser utilizado.</value></data>

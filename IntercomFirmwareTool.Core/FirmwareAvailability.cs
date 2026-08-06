@@ -10,9 +10,13 @@ namespace IntercomFirmwareTool.Core
     /// <summary>
     /// The outcome of probing a known firmware's official download URL: whether it is reachable
     /// and appears to serve the expected file. <see cref="Reason"/> is a localized explanation
-    /// (available, or why not).
+    /// (available, or why not). <see cref="Reachable"/> is true whenever the server actually
+    /// answered — even with a 404/403, an HTML error page, or a size mismatch — and false only when
+    /// the request never completed (DNS/TLS/connection failure, exhausted retries): it lets the UI
+    /// tell "no internet" apart from "reachable but nothing to offer".
     /// </summary>
-    public sealed record FirmwareAvailability(KnownFirmware Firmware, bool Available, string Reason);
+    public sealed record FirmwareAvailability(
+        KnownFirmware Firmware, bool Available, string Reason, bool Reachable = true);
 
     /// <summary>
     /// Probes the official download URLs of the <b>customizable (Door Entry)</b> registry entries so
@@ -166,8 +170,10 @@ namespace IntercomFirmwareTool.Core
             }
             catch (Exception ex)
             {
-                // Unreachable / DNS / TLS / exhausted retries → not available.
-                return new FirmwareAvailability(fw, false, CoreStrings.Format("FD_ProbeUnreachable", SafeMsg(ex)));
+                // Unreachable / DNS / TLS / exhausted retries → not available AND not reachable
+                // (the server never answered), so the UI can attribute this to connectivity.
+                return new FirmwareAvailability(
+                    fw, false, CoreStrings.Format("FD_ProbeUnreachable", SafeMsg(ex)), Reachable: false);
             }
         }
 
