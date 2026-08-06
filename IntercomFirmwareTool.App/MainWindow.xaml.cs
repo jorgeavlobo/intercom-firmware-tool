@@ -114,14 +114,21 @@ namespace IntercomFirmwareTool.App
             // is shown so the very first sizing already respects the cap.
             SourceInitialized += (_, _) => MaxHeight = SystemParameters.WorkArea.Height;
 
-            // As the window auto-grows (async reveal, or Advanced expanding), keep it fully
-            // on-screen: growth extends the bottom edge, which could otherwise fall under the
-            // taskbar / off the work area.
-            SizeChanged += (_, _) =>
+            // Keep the auto-sizing window sensibly placed as its height changes (Advanced or the
+            // download card expanding/collapsing, or an async reveal):
+            //  • growing → keep the bottom edge on-screen (grow downward, clamp up only if it would
+            //    spill under the taskbar / off the work area);
+            //  • shrinking → re-center vertically, like the initial CenterScreen, so collapsing a
+            //    section returns the window to the middle instead of leaving it pinned wherever
+            //    growth had pushed it. This makes every disclosure (Advanced, Download) collapse
+            //    back to the same centred position it expanded from.
+            SizeChanged += (_, e) =>
             {
                 if (double.IsNaN(Top)) return; // not positioned yet (before CenterScreen applies)
                 var work = SystemParameters.WorkArea;
-                if (Top + ActualHeight > work.Bottom)
+                if (e.HeightChanged && e.NewSize.Height < e.PreviousSize.Height)
+                    Top = Math.Max(work.Top, work.Top + (work.Height - ActualHeight) / 2);
+                else if (Top + ActualHeight > work.Bottom)
                     Top = Math.Max(work.Top, work.Bottom - ActualHeight);
             };
 
