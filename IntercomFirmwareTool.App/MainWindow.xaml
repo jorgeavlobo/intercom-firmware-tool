@@ -753,7 +753,7 @@
 
                 <!-- Download official firmware (issue #23). Invisible until the startup availability
                      probe finishes, then revealed in place: enabled if a source is online, or muted
-                     and non-opening (Tag="offline", a click warns) if nothing could be reached.
+                     and non-opening (Tag="unavailable", a click warns) if nothing could be reached.
                      Visibility=Hidden (not Collapsed) RESERVES its layout slot from the first frame,
                      so the auto-sized window opens at its final height and the async reveal fills the
                      reserved space without a visible resize. -->

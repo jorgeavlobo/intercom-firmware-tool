@@ -108,7 +108,8 @@ namespace IntercomFirmwareTool.App
                     {
                         results = await checker.ProbeAsync(token).ConfigureAwait(false);
                     }
-                    catch { /* unreachable network / TLS / cancelled — treat as offline below */ }
+                    catch { /* best-effort probe: any failure leaves results null → the offline
+                             branch below (cancellation is handled first by the token check). */ }
                     if (token.IsCancellationRequested) return;
                     // Reveal the link either way: online → the normal picker; offline / no source
                     // reachable → a muted, non-opening link that explains itself and warns on click.
