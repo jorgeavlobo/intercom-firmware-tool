@@ -558,7 +558,10 @@
         </DrawingImage>
     </Window.Resources>
 
-    <Grid Margin="14">
+    <!-- Asymmetric inset: a smaller TOP margin so the top-right toolbar (gear + globe)
+         sits close to the title bar instead of floating with dead space above it; the
+         sides and bottom keep the roomier 14px breathing space. -->
+    <Grid Margin="14,6,14,14">
         <Grid.RowDefinitions>
             <RowDefinition Height="*"/>      <!-- scrollable body -->
             <RowDefinition Height="Auto"/>   <!-- pinned footer (diagnostics + support) -->
