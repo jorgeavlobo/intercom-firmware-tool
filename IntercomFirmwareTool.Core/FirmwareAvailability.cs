@@ -142,6 +142,11 @@ namespace IntercomFirmwareTool.Core
             // non-null local so the contract is explicit at the single use site (and nullability
             // is satisfied without warnings).
             string url = fw.DownloadUrl!;
+            // Flipped the instant the pipeline hands back a response, so the catch below can tell a
+            // transport failure (no response — genuinely unreachable) apart from a post-response
+            // fault in Classify (the server DID answer — reachable, just not usable). Without it a
+            // stray Classify exception would be mis-reported to the UI as "offline".
+            bool responseReceived = false;
             try
             {
                 HttpResponseMessage resp = await _pipeline.ExecuteAsync(async token =>
@@ -158,6 +163,7 @@ namespace IntercomFirmwareTool.Core
                     return await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token)
                         .ConfigureAwait(false);
                 }, ct).ConfigureAwait(false);
+                responseReceived = true;
 
                 using (resp)
                 {
@@ -170,10 +176,11 @@ namespace IntercomFirmwareTool.Core
             }
             catch (Exception ex)
             {
-                // Unreachable / DNS / TLS / exhausted retries → not available AND not reachable
-                // (the server never answered), so the UI can attribute this to connectivity.
+                // Not available. Reachable only if a response had already come back (a fault inside
+                // Classify) — a transport/DNS/TLS/timeout failure never answered, so the UI can
+                // attribute THAT to connectivity, but not a post-response local error.
                 return new FirmwareAvailability(
-                    fw, false, CoreStrings.Format("FD_ProbeUnreachable", SafeMsg(ex)), Reachable: false);
+                    fw, false, CoreStrings.Format("FD_ProbeUnreachable", SafeMsg(ex)), Reachable: responseReceived);
             }
         }
 
