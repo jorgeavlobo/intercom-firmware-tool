@@ -275,9 +275,69 @@ namespace IntercomFirmwareTool.App
             _ = RunUpdateCheckAsync(manual: true);
         }
 
-        private void MnuAbout_Click(object sender, RoutedEventArgs e) =>
-            MessageBox.Show(this, LFormat("About_Body", _displayVersion), L("About_Title"),
-                MessageBoxButton.OK, MessageBoxImage.Information);
+        private void MnuAbout_Click(object sender, RoutedEventArgs e) => ShowAboutDialog();
+
+        /// <summary>
+        /// Shows the About box as a small owned dialog instead of a plain <see cref="MessageBox"/>,
+        /// so the project URL is a real clickable link (opens the default browser via
+        /// <see cref="OpenUrl"/>). The body still comes from the single localized <c>About_Body</c>
+        /// string (all six languages untouched): each line is rendered as text, except a line that
+        /// parses as an absolute http/https URL, which becomes a <see cref="System.Windows.Documents.Hyperlink"/>.
+        /// </summary>
+        private void ShowAboutDialog()
+        {
+            var lines = new System.Windows.Controls.StackPanel();
+            foreach (string line in LFormat("About_Body", _displayVersion)
+                         .Replace("\r\n", "\n").Split('\n'))
+            {
+                var text = new System.Windows.Controls.TextBlock
+                {
+                    Margin = new Thickness(0, 0, 0, 2),
+                    TextWrapping = TextWrapping.Wrap,
+                };
+                if (Uri.TryCreate(line.Trim(), UriKind.Absolute, out var uri) &&
+                    (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+                {
+                    var link = new System.Windows.Documents.Hyperlink(
+                        new System.Windows.Documents.Run(line.Trim())) { NavigateUri = uri };
+                    link.RequestNavigate += Hyperlink_RequestNavigate;
+                    text.Inlines.Add(link);
+                }
+                else
+                {
+                    text.Text = line;
+                }
+                lines.Children.Add(text);
+            }
+
+            var ok = new System.Windows.Controls.Button
+            {
+                Content = L("Dialog_Ok"),
+                IsDefault = true,
+                IsCancel = true,
+                MinWidth = 84,
+                Padding = new Thickness(10, 4, 10, 4),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 16, 0, 0),
+            };
+
+            var panel = new System.Windows.Controls.StackPanel { Margin = new Thickness(20) };
+            panel.Children.Add(lines);
+            panel.Children.Add(ok);
+
+            var dialog = new Window
+            {
+                Title = L("About_Title"),
+                Content = panel,
+                Owner = this,
+                SizeToContent = SizeToContent.WidthAndHeight,
+                ResizeMode = ResizeMode.NoResize,
+                ShowInTaskbar = false,
+                WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            };
+            ok.Click += (_, _) => dialog.Close();
+            dialog.ShowDialog();
+        }
 
         private void TryInform(string key) =>
             MessageBox.Show(this, L(key), L("Update_CheckTitle"),

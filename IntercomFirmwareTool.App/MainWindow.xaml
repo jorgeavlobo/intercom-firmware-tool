@@ -8,7 +8,7 @@
         mc:Ignorable="d"
         Title="{loc:Loc Win_Title}"
         Icon="Assets/Icons/AppIcon.ico"
-        Height="540" Width="760" MinHeight="480" MinWidth="640"
+        SizeToContent="Height" Width="760" MinHeight="480" MinWidth="640"
         WindowStartupLocation="CenterScreen">
     <Window.Resources>
         <Style TargetType="TextBlock" x:Key="FieldLabel">
@@ -592,11 +592,12 @@
                     <!-- Glyph in a header TextBlock, NOT FontFamily on the MenuItem: FontFamily is
                          inheritable, so setting the icon font on the parent item would render the
                          submenu labels ("Check for updates…", "About") in the icon font too. -->
-                    <!-- Box model shared with the language menu item below (Height + symmetric
-                         Padding + centered content) so both top-level items — and their hover
-                         highlight — are the same vertical size with equal left/right insets;
+                    <!-- Match the language item's height EXACTLY via a binding (it's naturally a
+                         touch taller because it carries a text label), instead of a magic Height
+                         that would leave dead space above/below the lone gear glyph. Symmetric
+                         Padding + centered content keep the two buttons' box models coherent;
                          FontSize 14 matches the language globe glyph. -->
-                    <MenuItem Height="24" Padding="8,0"
+                    <MenuItem Height="{Binding ActualHeight, ElementName=LangMenuRoot}" Padding="8,0"
                               HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                               ToolTip="{loc:Loc Settings_MenuTooltip}"
                               AutomationProperties.Name="{loc:Loc Settings_MenuTooltip}">
@@ -618,9 +619,11 @@
                       VerticalAlignment="Center"
                       ToolTip="{loc:Loc Lang_MenuTooltip}"
                       AutomationProperties.Name="{loc:Loc Lang_MenuTooltip}">
-                    <!-- Same box model as the settings item above (Height + symmetric Padding +
-                         centered content) so both top-level items and their hover highlight match. -->
-                    <MenuItem x:Name="LangMenuRoot" Height="24" Padding="8,0"
+                    <!-- The height REFERENCE: this item sizes to its natural content (globe glyph +
+                         language label); the settings item above binds its Height to this one's
+                         ActualHeight. Same symmetric Padding + centered content so both top-level
+                         items and their hover highlight match. -->
+                    <MenuItem x:Name="LangMenuRoot" Padding="8,0"
                               HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
                 </Menu>
             </StackPanel>

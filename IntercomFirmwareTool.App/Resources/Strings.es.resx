@@ -486,6 +486,7 @@ Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de co
   <data name="Update_Failed" xml:space="preserve"><value>No se pudo buscar actualizaciones ahora. Inténtalo más tarde.</value></data>
   <data name="Update_DevBuild" xml:space="preserve"><value>Esta es una compilación de desarrollo; la búsqueda de actualizaciones está desactivada.</value></data>
   <data name="Update_CheckTitle" xml:space="preserve"><value>Buscar actualizaciones</value></data>
+  <data name="Dialog_Ok" xml:space="preserve"><value>Aceptar</value></data>
   <data name="About_Title" xml:space="preserve"><value>Acerca de Intercom Firmware Tool</value></data>
   <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Versión {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>

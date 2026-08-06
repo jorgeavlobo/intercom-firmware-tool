@@ -112,6 +112,20 @@ namespace IntercomFirmwareTool.App
             {
                 if (_shineStarted) return;
                 _shineStarted = true;
+                // The window opened with SizeToContent=Height so the whole (collapsed) form is
+                // visible on launch with no scrollbar. Freeze that startup height now (switch to
+                // Manual): from here on, opening Advanced scrolls the body via the ScrollViewer
+                // instead of growing the window. Clamp to the screen work area first so a small
+                // display (or a very tall localization) still fits and stays on-screen.
+                if (SizeToContent != SizeToContent.Manual)
+                {
+                    var work = SystemParameters.WorkArea;
+                    if (ActualHeight > work.Height) Height = work.Height;
+                    SizeToContent = SizeToContent.Manual;
+                    if (Top < work.Top) Top = work.Top;
+                    if (Top + ActualHeight > work.Bottom)
+                        Top = Math.Max(work.Top, work.Bottom - ActualHeight);
+                }
                 StartDonateShine();
                 // Arm the "new options below" scroll cue once the initial layout settles.
                 ArmScrollCue();

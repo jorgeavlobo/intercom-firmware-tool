@@ -486,6 +486,7 @@ Abilitalo solo su un broker autenticato e attendibile. Abilitare il canale dei c
   <data name="Update_Failed" xml:space="preserve"><value>Impossibile controllare gli aggiornamenti ora. Riprova più tardi.</value></data>
   <data name="Update_DevBuild" xml:space="preserve"><value>Questa è una build di sviluppo; i controlli degli aggiornamenti sono disattivati.</value></data>
   <data name="Update_CheckTitle" xml:space="preserve"><value>Controllo aggiornamenti</value></data>
+  <data name="Dialog_Ok" xml:space="preserve"><value>OK</value></data>
   <data name="About_Title" xml:space="preserve"><value>Informazioni su Intercom Firmware Tool</value></data>
   <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Versione {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>

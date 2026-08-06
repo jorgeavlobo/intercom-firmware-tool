@@ -486,6 +486,7 @@ Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. 
   <data name="Update_Failed" xml:space="preserve"><value>Nach Updates konnte gerade nicht gesucht werden. Bitte später erneut versuchen.</value></data>
   <data name="Update_DevBuild" xml:space="preserve"><value>Dies ist ein Entwicklungs-Build; die Update-Suche ist deaktiviert.</value></data>
   <data name="Update_CheckTitle" xml:space="preserve"><value>Nach Updates suchen</value></data>
+  <data name="Dialog_Ok" xml:space="preserve"><value>OK</value></data>
   <data name="About_Title" xml:space="preserve"><value>Über Intercom Firmware Tool</value></data>
   <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Version {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>
