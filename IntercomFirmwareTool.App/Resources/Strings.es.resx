@@ -452,6 +452,8 @@ Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de co
   <!-- ================= Download official firmware (issue #23) ================= -->
   <data name="Dl_Toggle" xml:space="preserve"><value>Descargar firmware oficial</value></data>
   <data name="Dl_ToggleTip" xml:space="preserve"><value>Descargar el firmware original de BTicino y verificarlo automáticamente</value></data>
+  <data name="Dl_OfflineTip" xml:space="preserve"><value>No se detectó conexión a internet: es necesaria para descargar el firmware oficial.</value></data>
+  <data name="Dl_OfflineWarn" xml:space="preserve"><value>No se detectó conexión a internet.&#10;Conéctate a internet para descargar el firmware oficial.</value></data>
   <data name="Dl_Title" xml:space="preserve"><value>Descargar firmware oficial</value></data>
   <data name="Dl_Subtitle" xml:space="preserve"><value>Obtenido de BTicino y verificado automáticamente</value></data>
   <data name="Dl_Legal" xml:space="preserve"><value>Es el mismo firmware original que puede descargar manualmente de BTicino / Legrand. La herramienta solo lo descarga por usted y lo verifica byte a byte (tamaño + SHA-256) con el original conocido antes de usarlo.</value></data>

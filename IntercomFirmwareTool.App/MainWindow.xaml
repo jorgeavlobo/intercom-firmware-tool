@@ -207,6 +207,18 @@
                                 <Setter TargetName="bd" Property="Background" Value="#170F6CBD"/>
                                 <Setter TargetName="bd" Property="BorderBrush" Value="#FF0F6CBD"/>
                             </Trigger>
+                            <!-- Offline/unavailable state (Tag="offline", set in code when the
+                                 startup probe can't reach the official firmware): render muted and
+                                 non-interactive-looking — grey text, no chevron, no hover highlight,
+                                 arrow cursor. The control stays ENABLED so a click can still warn
+                                 (TglDownload_Changed) instead of opening the card. Placed last so its
+                                 Transparent background wins over the hover/focus highlight. -->
+                            <Trigger Property="Tag" Value="offline">
+                                <Setter Property="Foreground" Value="#FF9AA0A6"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                                <Setter TargetName="bd" Property="Background" Value="Transparent"/>
+                                <Setter TargetName="chev" Property="Visibility" Value="Collapsed"/>
+                            </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
@@ -729,12 +741,12 @@
                          PreviewMouseLeftButtonDown="TxtFwzPath_MouseDown" PreviewKeyDown="TxtFwzPath_PreviewKeyDown"
                          Foreground="Gray"/>
 
-                <!-- Download official firmware (issue #23). Invisible until the startup
-                     availability probe finds at least one online, size-matching file, then
-                     revealed in place (OnAvailabilityReady). Visibility=Hidden (not Collapsed)
-                     RESERVES its layout slot from the first frame, so the auto-sized window opens
-                     at its final height and this async reveal fills the reserved space without a
-                     visible resize; if nothing is online it stays hidden (a small unused slot). -->
+                <!-- Download official firmware (issue #23). Invisible until the startup availability
+                     probe finishes, then revealed in place: enabled if a source is online, or muted
+                     and non-opening (Tag="offline", a click warns) if nothing could be reached.
+                     Visibility=Hidden (not Collapsed) RESERVES its layout slot from the first frame,
+                     so the auto-sized window opens at its final height and the async reveal fills the
+                     reserved space without a visible resize. -->
                 <ToggleButton x:Name="TglDownload" Style="{StaticResource DownloadLink}"
                               Visibility="Hidden" Margin="0,6,0,0"
                               Checked="TglDownload_Changed" Unchecked="TglDownload_Changed"

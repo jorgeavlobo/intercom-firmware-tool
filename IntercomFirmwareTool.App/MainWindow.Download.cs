@@ -52,6 +52,9 @@ namespace IntercomFirmwareTool.App
         private readonly FirmwareDownloader _downloader = new();
         private CancellationTokenSource? _dlCts;
         private bool _downloading;
+        // True when the startup probe couldn't reach any official firmware (offline / servers
+        // unreachable): the link is still shown, but muted and non-opening — a click warns.
+        private bool _dlOffline;
         // Snapshot of the (always-editable) HA node id taken when a download starts, so
         // completion can tell whether the user retyped it mid-transfer and, if so, keep
         // their value instead of overwriting it with the model default.
@@ -97,11 +100,22 @@ namespace IntercomFirmwareTool.App
             {
                 try
                 {
-                    var results = await checker.ProbeAsync(token).ConfigureAwait(false);
+                    IReadOnlyList<FirmwareAvailability>? results = null;
+                    try
+                    {
+                        results = await checker.ProbeAsync(token).ConfigureAwait(false);
+                    }
+                    catch { /* unreachable network / TLS / cancelled — treat as offline below */ }
                     if (token.IsCancellationRequested) return;
-                    await Dispatcher.InvokeAsync(() => OnAvailabilityReady(results));
+                    // Reveal the link either way: online → the normal picker; offline / no source
+                    // reachable → a muted, non-opening link that explains itself and warns on click.
+                    await Dispatcher.InvokeAsync(() =>
+                    {
+                        if (results != null) OnAvailabilityReady(results);
+                        else ShowDownloadUnavailable();
+                    });
                 }
-                catch { /* unreachable network / cancelled — leave the link hidden */ }
+                catch { /* dispatcher shutting down, etc. — nothing to surface */ }
                 finally
                 {
                     // One-shot probe: release the HttpClient/handlers the instant it finishes rather
@@ -124,7 +138,13 @@ namespace IntercomFirmwareTool.App
             _availableFw.AddRange(results
                 .Where(r => r.Available && r.Firmware.IsCustomizable)
                 .Select(r => r.Firmware));
-            if (_availableFw.Count == 0) return; // nothing online — keep manual-only
+            if (_availableFw.Count == 0)
+            {
+                // Servers answered but nothing customizable is currently offered: same muted,
+                // "can't download right now" treatment as being offline.
+                ShowDownloadUnavailable();
+                return;
+            }
 
             // Default to the line of the newest online firmware (a sensible pick).
             _dlModelLine = _availableFw
@@ -132,9 +152,27 @@ namespace IntercomFirmwareTool.App
                 .First().Line;
 
             BuildModelPills();
+            _dlOffline = false;
+            TglDownload.Tag = null;   // clear any prior offline marker (the DownloadLink trigger)
             TglDownload.Visibility = Visibility.Visible;
             // A fast probe can reveal this entry point within the cue's arming delay; announce it so
             // the reveal isn't silently swallowed and the download section goes unnoticed below the fold.
+            NotifyContentRevealed();
+        }
+
+        /// <summary>
+        /// No official firmware could be reached (offline, or the servers returned nothing usable):
+        /// still reveal the entry point so the user knows the feature exists, but in a muted,
+        /// non-opening "offline" state — an explanatory tooltip, and a click warns instead of opening
+        /// the picker (see <see cref="TglDownload_Changed"/>). Fills the layout slot reserved at
+        /// startup, so the window height doesn't change.
+        /// </summary>
+        private void ShowDownloadUnavailable()
+        {
+            _dlOffline = true;
+            TglDownload.Tag = "offline";                 // drives the muted DownloadLink template trigger
+            TglDownload.ToolTip = L("Dl_OfflineTip");
+            TglDownload.Visibility = Visibility.Visible;
             NotifyContentRevealed();
         }
 
@@ -302,6 +340,19 @@ namespace IntercomFirmwareTool.App
 
         private void TglDownload_Changed(object sender, RoutedEventArgs e)
         {
+            // Offline/unavailable: the link is shown muted and must not open the card. It stays
+            // enabled so a click still reaches here — revert the toggle and explain why.
+            if (_dlOffline)
+            {
+                if (TglDownload.IsChecked == true)
+                {
+                    TglDownload.IsChecked = false; // re-enters this handler unchecked (falls through, no card)
+                    MessageBox.Show(this, L("Dl_OfflineWarn"), L("Dl_Toggle"),
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                return;
+            }
+
             bool open = TglDownload.IsChecked == true;
             DownloadCard.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
             if (open) DownloadCard.BringIntoView(); // scroll it into view in the page ScrollViewer
@@ -582,6 +633,8 @@ namespace IntercomFirmwareTool.App
         /// and the status line.</summary>
         private void ApplyDownloadLanguage()
         {
+            // The offline tooltip is set imperatively (not a {loc:Loc} binding), so re-apply it.
+            if (_dlOffline) TglDownload.ToolTip = L("Dl_OfflineTip");
             if (_availableFw.Count > 0) BuildModelPills(); // re-selects _dlModelLine/_dlSelected
             // Freshly rebuilt pills default to enabled, so re-apply the lock if a download is
             // running OR an unsafe-version block (issue #85) is active — otherwise a language switch

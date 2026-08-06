@@ -452,6 +452,8 @@ Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. 
   <!-- ================= Download official firmware (issue #23) ================= -->
   <data name="Dl_Toggle" xml:space="preserve"><value>Offizielle Firmware herunterladen</value></data>
   <data name="Dl_ToggleTip" xml:space="preserve"><value>Die Original-Firmware von BTicino herunterladen und automatisch überprüfen</value></data>
+  <data name="Dl_OfflineTip" xml:space="preserve"><value>Keine Internetverbindung erkannt – sie ist zum Herunterladen der offiziellen Firmware erforderlich.</value></data>
+  <data name="Dl_OfflineWarn" xml:space="preserve"><value>Es wurde keine Internetverbindung erkannt.&#10;Stellen Sie eine Internetverbindung her, um die offizielle Firmware herunterzuladen.</value></data>
   <data name="Dl_Title" xml:space="preserve"><value>Offizielle Firmware herunterladen</value></data>
   <data name="Dl_Subtitle" xml:space="preserve"><value>Von BTicino bezogen und automatisch überprüft</value></data>
   <data name="Dl_Legal" xml:space="preserve"><value>Dies ist dieselbe Original-Firmware, die Sie von BTicino / Legrand auch von Hand herunterladen können. Das Tool lädt sie nur für Sie herunter und prüft sie vor der Verwendung Byte für Byte (Größe + SHA-256) gegen das bekannte Original.</value></data>

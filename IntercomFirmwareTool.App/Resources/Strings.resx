@@ -452,6 +452,8 @@ Enable it only on an authenticated, trusted broker. Enable the remote command ch
   <!-- ================= Download official firmware (issue #23) ================= -->
   <data name="Dl_Toggle" xml:space="preserve"><value>Download official firmware</value></data>
   <data name="Dl_ToggleTip" xml:space="preserve"><value>Download the original firmware from BTicino and verify it automatically</value></data>
+  <data name="Dl_OfflineTip" xml:space="preserve"><value>No internet connection detected — it's required to download the official firmware.</value></data>
+  <data name="Dl_OfflineWarn" xml:space="preserve"><value>No internet connection was detected.&#10;Connect to the internet to download the official firmware.</value></data>
   <data name="Dl_Title" xml:space="preserve"><value>Download official firmware</value></data>
   <data name="Dl_Subtitle" xml:space="preserve"><value>Fetched from BTicino and verified automatically</value></data>
   <data name="Dl_Legal" xml:space="preserve"><value>This is the same original firmware you can download by hand from BTicino / Legrand. The tool simply fetches it for you and checks it byte-for-byte (size + SHA-256) against the known-good original before it is used.</value></data>
