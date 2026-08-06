@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.NetworkInformation;   // NetworkInterface.GetIsNetworkAvailable (offline detection)
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -115,11 +116,12 @@ namespace IntercomFirmwareTool.App
                     // reachable → a muted, non-opening link that explains itself and warns on click.
                     await Dispatcher.InvokeAsync(() =>
                     {
-                        // results == null only if ProbeAsync itself threw (e.g. cancellation on
-                        // shutdown) — treat as offline. Otherwise OnAvailabilityReady inspects the
-                        // per-entry Reachable flags to tell offline from reachable-but-empty.
+                        // results == null only if ProbeAsync itself threw (cancellation on shutdown,
+                        // or an unexpected fault) — not a connectivity signal, so show the neutral
+                        // "unavailable" state rather than a false "no internet". Otherwise
+                        // OnAvailabilityReady inspects the per-entry Reachable flags + network state.
                         if (results != null) OnAvailabilityReady(results);
-                        else ShowDownloadUnavailable(offline: true);
+                        else ShowDownloadUnavailable(offline: false);
                     });
                 }
                 catch { /* dispatcher shutting down, etc. — nothing to surface */ }
@@ -147,10 +149,13 @@ namespace IntercomFirmwareTool.App
                 .Select(r => r.Firmware));
             if (_availableFw.Count == 0)
             {
-                // Nothing to offer. If NO endpoint even answered, it's a connectivity problem
-                // (offline); if at least one answered but had nothing usable (404 / error page /
-                // size mismatch), the network is fine — say so instead of blaming the connection.
-                bool offline = !results.Any(r => r.Reachable);
+                // Nothing to offer. Only blame the user's connection ("no internet") when NO
+                // firmware endpoint answered AND the machine has no network at all. If a server
+                // answered (even an error), OR a network is up but the official BTicino/Legrand
+                // hosts are simply unreachable/down, the connection is fine — show the neutral
+                // "no firmware available" wording instead of falsely claiming the user is offline.
+                bool anyReachable = results.Any(r => r.Reachable);
+                bool offline = !anyReachable && !NetworkInterface.GetIsNetworkAvailable();
                 ShowDownloadUnavailable(offline);
                 return;
             }
