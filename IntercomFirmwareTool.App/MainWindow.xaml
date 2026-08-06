@@ -613,12 +613,15 @@
                     <!-- Glyph in a header TextBlock, NOT FontFamily on the MenuItem: FontFamily is
                          inheritable, so setting the icon font on the parent item would render the
                          submenu labels ("Check for updates…", "About") in the icon font too. -->
-                    <!-- Match the language item's height EXACTLY via a binding (it's naturally a
-                         touch taller because it carries a text label), instead of a magic Height
-                         that would leave dead space above/below the lone gear glyph. Symmetric
-                         Padding + centered content keep the two buttons' box models coherent;
+                    <!-- Match the language item's height (it's naturally a touch taller because it
+                         carries a text label) instead of a magic Height that would leave dead space
+                         above/below the lone gear glyph. MinHeight (not Height) bound to its
+                         ActualHeight: during the first measure ActualHeight is still 0, so binding
+                         Height would briefly collapse the gear — as a MinHeight, a 0 just lets the
+                         item size to its own glyph, then it grows to match once layout settles.
+                         Symmetric Padding + centered content keep the box models coherent;
                          FontSize 14 matches the language globe glyph. -->
-                    <MenuItem Height="{Binding ActualHeight, ElementName=LangMenuRoot}" Padding="8,0"
+                    <MenuItem MinHeight="{Binding ActualHeight, ElementName=LangMenuRoot}" Padding="8,0"
                               HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                               ToolTip="{loc:Loc Settings_MenuTooltip}"
                               AutomationProperties.Name="{loc:Loc Settings_MenuTooltip}">

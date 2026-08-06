@@ -56,7 +56,7 @@ namespace IntercomFirmwareTool.App
         // and non-opening — a click warns. _dlNoInternet then distinguishes WHY: true = nothing was
         // even reachable (offline), false = a server answered but had no usable firmware. It selects
         // the correct tooltip/warning wording.
-        private bool _dlOffline;
+        private bool _dlUnavailable;
         private bool _dlNoInternet;
         // Snapshot of the (always-editable) HA node id taken when a download starts, so
         // completion can tell whether the user retyped it mid-transfer and, if so, keep
@@ -160,7 +160,7 @@ namespace IntercomFirmwareTool.App
                 .First().Line;
 
             BuildModelPills();
-            _dlOffline = false;
+            _dlUnavailable = false;
             TglDownload.Tag = null;   // clear any prior offline marker (the DownloadLink trigger)
             TglDownload.Visibility = Visibility.Visible;
             // A fast probe can reveal this entry point within the cue's arming delay; announce it so
@@ -178,7 +178,7 @@ namespace IntercomFirmwareTool.App
         /// </summary>
         private void ShowDownloadUnavailable(bool offline)
         {
-            _dlOffline = true;
+            _dlUnavailable = true;
             _dlNoInternet = offline;
             TglDownload.Tag = "offline";                 // drives the muted DownloadLink template trigger
             TglDownload.ToolTip = L(DlUnavailableTipKey);
@@ -357,7 +357,7 @@ namespace IntercomFirmwareTool.App
         {
             // Offline/unavailable: the link is shown muted and must not open the card. It stays
             // enabled so a click still reaches here — revert the toggle and explain why.
-            if (_dlOffline)
+            if (_dlUnavailable)
             {
                 if (TglDownload.IsChecked == true)
                 {
@@ -650,7 +650,7 @@ namespace IntercomFirmwareTool.App
         {
             // The unavailable-state tooltip is set imperatively (not a {loc:Loc} binding), so
             // re-apply the correct one (offline vs reachable-but-empty) on a language switch.
-            if (_dlOffline) TglDownload.ToolTip = L(DlUnavailableTipKey);
+            if (_dlUnavailable) TglDownload.ToolTip = L(DlUnavailableTipKey);
             if (_availableFw.Count > 0) BuildModelPills(); // re-selects _dlModelLine/_dlSelected
             // Freshly rebuilt pills default to enabled, so re-apply the lock if a download is
             // running OR an unsafe-version block (issue #85) is active — otherwise a language switch
