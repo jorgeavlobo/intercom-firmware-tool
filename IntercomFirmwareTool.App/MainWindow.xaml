@@ -583,8 +583,14 @@
              make the form taller than the window, so a ScrollViewer keeps the lower
              fields reachable instead of clipped, while the footer below stays pinned. -->
         <Grid Grid.Row="0">
+        <!-- No horizontal padding: the body content (banners included) then keeps the SAME left
+             and right inset as the pinned footer below — both bounded only by the window's outer
+             margin — so every banner lines up symmetrically. A reserved right gutter here would push
+             the body 10px in on the right only, making the banners asymmetric with the footer. When
+             the vertical scrollbar does appear (Advanced expanded), it insets the content on its own,
+             as usual. -->
         <ScrollViewer x:Name="BodyScroll" VerticalScrollBarVisibility="Auto"
-                      HorizontalScrollBarVisibility="Disabled" Padding="0,0,10,0"
+                      HorizontalScrollBarVisibility="Disabled" Padding="0"
                       ScrollChanged="BodyScroll_ScrollChanged">
         <Grid>
         <Grid.RowDefinitions>
@@ -1360,7 +1366,7 @@
              RenderTransform is named so the code can slide/bounce it in. -->
         <Button x:Name="ScrollCue" Style="{StaticResource ScrollCueButton}"
                 VerticalAlignment="Bottom" HorizontalAlignment="Center"
-                Margin="0,0,10,12" Visibility="Collapsed" Opacity="0"
+                Margin="0,0,0,12" Visibility="Collapsed" Opacity="0"
                 RenderTransformOrigin="0.5,0.5" Click="ScrollCue_Click"
                 AutomationProperties.LiveSetting="Assertive">
             <Button.RenderTransform>
