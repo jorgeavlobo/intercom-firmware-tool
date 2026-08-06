@@ -122,18 +122,22 @@ namespace IntercomFirmwareTool.App
             // download card expanding/collapsing, or an async reveal). Uses the work area of the
             // monitor the window is actually on (not SystemParameters.WorkArea, which only ever
             // reports the primary display and would misplace the window on a secondary monitor):
-            //  • growing → keep the bottom edge on-screen (grow downward, clamp up only if it would
-            //    spill under the taskbar / off the work area);
-            //  • shrinking → re-center vertically, like the initial CenterScreen, so collapsing a
-            //    section returns the window to the middle instead of leaving it pinned wherever
-            //    growth had pushed it. This makes every disclosure (Advanced, Download) collapse
-            //    back to the same centred position it expanded from.
+            //  • a disclosure collapse (flagged via _recenterPending) → re-center vertically, like
+            //    the initial CenterScreen, so collapsing a section returns the window to the middle
+            //    instead of leaving it pinned wherever growth had pushed it. Gated on the flag so an
+            //    ORDINARY user resize (which also shrinks height) doesn't jump the window away from
+            //    the drag anchor;
+            //  • otherwise (growing, or any non-disclosure change) → just keep the bottom edge
+            //    on-screen (grow downward, clamp up only if it would spill off the work area).
             SizeChanged += (_, e) =>
             {
                 if (double.IsNaN(Top)) return; // not positioned yet (before CenterScreen applies)
                 var work = CurrentMonitorWorkArea();
-                if (e.HeightChanged && e.NewSize.Height < e.PreviousSize.Height)
+                if (_recenterPending && e.HeightChanged && e.NewSize.Height < e.PreviousSize.Height)
+                {
+                    _recenterPending = false;
                     Top = Math.Max(work.Top, work.Top + (work.Height - ActualHeight) / 2);
+                }
                 else if (Top + ActualHeight > work.Bottom)
                     Top = Math.Max(work.Top, work.Bottom - ActualHeight);
             };
@@ -1056,8 +1060,14 @@ namespace IntercomFirmwareTool.App
             ResultGroup.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
         }
 
-        private double? _heightBeforeAdvanced;
-        private double? _topBeforeAdvanced;
+        // One-time guard so opening Advanced grows the window only on the FIRST open of a session
+        // (subsequent toggles just let SizeToContent + the re-center handler do their thing).
+        private bool _advancedGrew;
+        // Set the instant a disclosure (Advanced / the download card) is collapsed, and consumed by
+        // the next shrinking SizeChanged, so the window re-centers ONLY on those content-driven
+        // collapses — never on an ordinary user resize (which would otherwise jump the window away
+        // from the drag anchor on every height decrease).
+        private bool _recenterPending;
 
         /// <summary>
         /// Shows a short message in the always-visible status line under the Build
@@ -1229,12 +1239,11 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
             if (TglAdvanced.IsChecked == true)
             {
-                // Opening: remember the current size/position, then grow so the result
-                // output has room (only if we haven't already grown for this session).
-                if (_heightBeforeAdvanced == null)
+                // Opening: grow so the result output has room (only once per session; after that
+                // SizeToContent already keeps the window sized to the expanded content).
+                if (!_advancedGrew)
                 {
-                    _heightBeforeAdvanced = Height;
-                    _topBeforeAdvanced = Top;
+                    _advancedGrew = true;
 
                     // Work area of the monitor THIS window is on (not the primary —
                     // SystemParameters.WorkArea only ever reports the primary display,
@@ -1250,13 +1259,12 @@ namespace IntercomFirmwareTool.App
                     if (Top + Height > wa.Bottom) Top = Math.Max(wa.Top, wa.Bottom - Height);
                 }
             }
-            else if (_heightBeforeAdvanced != null)
+            else if (_advancedGrew)
             {
-                // Closing: restore the size AND position from before Advanced was opened.
-                Height = _heightBeforeAdvanced.Value;
-                if (_topBeforeAdvanced != null) Top = _topBeforeAdvanced.Value;
-                _heightBeforeAdvanced = null;
-                _topBeforeAdvanced = null;
+                // Closing: the content shrinks back, so let the SizeChanged handler re-center the
+                // window (this is a disclosure collapse, not a manual resize).
+                _recenterPending = true;
+                _advancedGrew = false;
             }
         }
 
