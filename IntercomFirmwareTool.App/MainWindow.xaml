@@ -645,7 +645,7 @@
                       ToolTip="{loc:Loc Lang_MenuTooltip}"
                       AutomationProperties.Name="{loc:Loc Lang_MenuTooltip}">
                     <!-- The height REFERENCE: this item sizes to its natural content (globe glyph +
-                         language label); the settings item above binds its Height to this one's
+                         language label); the settings item above binds its MinHeight to this one's
                          ActualHeight. Same symmetric Padding + centered content so both top-level
                          items and their hover highlight match. -->
                     <MenuItem x:Name="LangMenuRoot" Padding="8,0"
@@ -753,7 +753,8 @@
 
                 <!-- Download official firmware (issue #23). Invisible until the startup availability
                      probe finishes, then revealed in place: enabled if a source is online, or muted
-                     and non-opening (Tag="unavailable", a click warns) if nothing could be reached.
+                     and non-opening (Tag="unavailable", a click warns) if nothing usable was found —
+                     whether offline or a server answered with nothing to offer.
                      Visibility=Hidden (not Collapsed) RESERVES its layout slot from the first frame,
                      so the auto-sized window opens at its final height and the async reveal fills the
                      reserved space without a visible resize. -->

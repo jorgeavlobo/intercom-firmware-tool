@@ -92,9 +92,9 @@ namespace IntercomFirmwareTool.App
             _availChecker = null; // idempotent: a second Stop won't re-dispose a released checker
         }
 
-        /// <summary>Probe the official URLs off the UI thread; on completion, marshal
-        /// back to build the pills. Best-effort — any failure just leaves the link
-        /// hidden and manual file-picking as the only path.</summary>
+        /// <summary>Probe the official URLs off the UI thread; on completion, marshal back to build
+        /// the pills (online) or reveal a muted, non-opening "unavailable" link (offline / nothing
+        /// to offer). Best-effort — manual file-picking is always available regardless.</summary>
         private void StartAvailabilityProbe()
         {
             var checker = new FirmwareAvailabilityChecker();
