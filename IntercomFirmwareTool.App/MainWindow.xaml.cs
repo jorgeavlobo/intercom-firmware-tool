@@ -105,6 +105,26 @@ namespace IntercomFirmwareTool.App
             // the blank form (also sets the Build button's initial disabled state).
             UpdateBuildEnabled();
 
+            // The window uses SizeToContent=Height, so it always auto-sizes its height to the
+            // current content: it opens showing the whole (collapsed) form with no vertical
+            // scrollbar, and grows to absorb async reveals (e.g. the "download official firmware"
+            // toggle that appears once the background probe finds a source) instead of clipping
+            // them behind a scrollbar. Cap that growth at the screen work area — past that (e.g.
+            // when Advanced is expanded) the body's ScrollViewer takes over. Set before the window
+            // is shown so the very first sizing already respects the cap.
+            SourceInitialized += (_, _) => MaxHeight = SystemParameters.WorkArea.Height;
+
+            // As the window auto-grows (async reveal, or Advanced expanding), keep it fully
+            // on-screen: growth extends the bottom edge, which could otherwise fall under the
+            // taskbar / off the work area.
+            SizeChanged += (_, _) =>
+            {
+                if (double.IsNaN(Top)) return; // not positioned yet (before CenterScreen applies)
+                var work = SystemParameters.WorkArea;
+                if (Top + ActualHeight > work.Bottom)
+                    Top = Math.Max(work.Top, work.Bottom - ActualHeight);
+            };
+
             // Start the subtle "shine" on the donate buttons once the visual tree
             // (and their templates) are ready. Loaded can fire again on reparent, so
             // guard to start the loops only once per window instance.
@@ -112,20 +132,6 @@ namespace IntercomFirmwareTool.App
             {
                 if (_shineStarted) return;
                 _shineStarted = true;
-                // The window opened with SizeToContent=Height so the whole (collapsed) form is
-                // visible on launch with no scrollbar. Freeze that startup height now (switch to
-                // Manual): from here on, opening Advanced scrolls the body via the ScrollViewer
-                // instead of growing the window. Clamp to the screen work area first so a small
-                // display (or a very tall localization) still fits and stays on-screen.
-                if (SizeToContent != SizeToContent.Manual)
-                {
-                    var work = SystemParameters.WorkArea;
-                    if (ActualHeight > work.Height) Height = work.Height;
-                    SizeToContent = SizeToContent.Manual;
-                    if (Top < work.Top) Top = work.Top;
-                    if (Top + ActualHeight > work.Bottom)
-                        Top = Math.Max(work.Top, work.Bottom - ActualHeight);
-                }
                 StartDonateShine();
                 // Arm the "new options below" scroll cue once the initial layout settles.
                 ArmScrollCue();
