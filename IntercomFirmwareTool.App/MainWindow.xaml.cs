@@ -1060,9 +1060,10 @@ namespace IntercomFirmwareTool.App
             ResultGroup.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
         }
 
-        // One-time guard so opening Advanced grows the window only on the FIRST open of a session
-        // (subsequent toggles just let SizeToContent + the re-center handler do their thing).
-        private bool _advancedGrew;
+        // Tracks whether the Advanced section is currently expanded (and the window was grown for
+        // it): set when it opens so the one-time grow runs once per open, cleared when it closes so
+        // the collapse re-centers.
+        private bool _advancedExpanded;
         // Set the instant a disclosure (Advanced / the download card) is collapsed, and consumed by
         // the next shrinking SizeChanged, so the window re-centers ONLY on those content-driven
         // collapses — never on an ordinary user resize (which would otherwise jump the window away
@@ -1239,11 +1240,11 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
             if (TglAdvanced.IsChecked == true)
             {
-                // Opening: grow so the result output has room (only once per session; after that
-                // SizeToContent already keeps the window sized to the expanded content).
-                if (!_advancedGrew)
+                // Opening: grow once so the result output has room; after that SizeToContent keeps
+                // the window sized to the expanded content.
+                if (!_advancedExpanded)
                 {
-                    _advancedGrew = true;
+                    _advancedExpanded = true;
 
                     // Work area of the monitor THIS window is on (not the primary —
                     // SystemParameters.WorkArea only ever reports the primary display,
@@ -1259,12 +1260,12 @@ namespace IntercomFirmwareTool.App
                     if (Top + Height > wa.Bottom) Top = Math.Max(wa.Top, wa.Bottom - Height);
                 }
             }
-            else if (_advancedGrew)
+            else if (_advancedExpanded)
             {
                 // Closing: the content shrinks back, so let the SizeChanged handler re-center the
                 // window (this is a disclosure collapse, not a manual resize).
                 _recenterPending = true;
-                _advancedGrew = false;
+                _advancedExpanded = false;
             }
         }
 

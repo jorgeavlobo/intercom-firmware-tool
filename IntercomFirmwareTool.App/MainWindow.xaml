@@ -207,13 +207,14 @@
                                 <Setter TargetName="bd" Property="Background" Value="#170F6CBD"/>
                                 <Setter TargetName="bd" Property="BorderBrush" Value="#FF0F6CBD"/>
                             </Trigger>
-                            <!-- Offline/unavailable state (Tag="offline", set in code when the
-                                 startup probe can't reach the official firmware): render muted and
-                                 non-interactive-looking — grey text, no chevron, no hover highlight,
-                                 arrow cursor. The control stays ENABLED so a click can still warn
-                                 (TglDownload_Changed) instead of opening the card. Placed last so its
-                                 Transparent background wins over the hover/focus highlight. -->
-                            <Trigger Property="Tag" Value="offline">
+                            <!-- Unavailable state (Tag="unavailable", set in code when the startup
+                                 probe can't offer any firmware — offline OR reachable-but-empty):
+                                 render muted and non-interactive-looking — grey text, no chevron, no
+                                 hover highlight, arrow cursor. The control stays ENABLED so a click
+                                 can still warn (TglDownload_Changed) instead of opening the card.
+                                 Placed last so its Transparent background wins over the hover/focus
+                                 highlight. -->
+                            <Trigger Property="Tag" Value="unavailable">
                                 <Setter Property="Foreground" Value="#FF9AA0A6"/>
                                 <Setter Property="Cursor" Value="Arrow"/>
                                 <Setter TargetName="bd" Property="Background" Value="Transparent"/>

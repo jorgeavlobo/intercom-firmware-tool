@@ -180,7 +180,7 @@ namespace IntercomFirmwareTool.App
         {
             _dlUnavailable = true;
             _dlNoInternet = offline;
-            TglDownload.Tag = "offline";                 // drives the muted DownloadLink template trigger
+            TglDownload.Tag = "unavailable";             // drives the muted DownloadLink template trigger
             TglDownload.ToolTip = L(DlUnavailableTipKey);
             TglDownload.Visibility = Visibility.Visible;
             NotifyContentRevealed();
