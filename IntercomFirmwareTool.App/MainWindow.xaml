@@ -592,11 +592,13 @@
                     <!-- Glyph in a header TextBlock, NOT FontFamily on the MenuItem: FontFamily is
                          inheritable, so setting the icon font on the parent item would render the
                          submenu labels ("Check for updates…", "About") in the icon font too. -->
-                    <MenuItem ToolTip="{loc:Loc Settings_MenuTooltip}"
+                    <!-- Height + centered content are shared with the language menu item below so
+                         both top-level items (and their hover highlight) are exactly the same
+                         vertical size; FontSize 14 matches the language globe glyph. -->
+                    <MenuItem Height="24" VerticalContentAlignment="Center"
+                              ToolTip="{loc:Loc Settings_MenuTooltip}"
                               AutomationProperties.Name="{loc:Loc Settings_MenuTooltip}">
                         <MenuItem.Header>
-                            <!-- FontSize 14 matches the language globe (built in code-behind) so
-                                 the two top-right icons render at the same size. -->
                             <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="14"
                                        VerticalAlignment="Center"/>
                         </MenuItem.Header>
@@ -614,7 +616,9 @@
                       VerticalAlignment="Center"
                       ToolTip="{loc:Loc Lang_MenuTooltip}"
                       AutomationProperties.Name="{loc:Loc Lang_MenuTooltip}">
-                    <MenuItem x:Name="LangMenuRoot"/>
+                    <!-- Same Height + centered content as the settings item above, so both
+                         top-level items (and their hover highlight) match vertically. -->
+                    <MenuItem x:Name="LangMenuRoot" Height="24" VerticalContentAlignment="Center"/>
                 </Menu>
             </StackPanel>
 
