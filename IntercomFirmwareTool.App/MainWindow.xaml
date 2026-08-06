@@ -592,10 +592,12 @@
                     <!-- Glyph in a header TextBlock, NOT FontFamily on the MenuItem: FontFamily is
                          inheritable, so setting the icon font on the parent item would render the
                          submenu labels ("Check for updates…", "About") in the icon font too. -->
-                    <!-- Height + centered content are shared with the language menu item below so
-                         both top-level items (and their hover highlight) are exactly the same
-                         vertical size; FontSize 14 matches the language globe glyph. -->
-                    <MenuItem Height="24" VerticalContentAlignment="Center"
+                    <!-- Box model shared with the language menu item below (Height + symmetric
+                         Padding + centered content) so both top-level items — and their hover
+                         highlight — are the same vertical size with equal left/right insets;
+                         FontSize 14 matches the language globe glyph. -->
+                    <MenuItem Height="24" Padding="8,0"
+                              HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
                               ToolTip="{loc:Loc Settings_MenuTooltip}"
                               AutomationProperties.Name="{loc:Loc Settings_MenuTooltip}">
                         <MenuItem.Header>
@@ -616,9 +618,10 @@
                       VerticalAlignment="Center"
                       ToolTip="{loc:Loc Lang_MenuTooltip}"
                       AutomationProperties.Name="{loc:Loc Lang_MenuTooltip}">
-                    <!-- Same Height + centered content as the settings item above, so both
-                         top-level items (and their hover highlight) match vertically. -->
-                    <MenuItem x:Name="LangMenuRoot" Height="24" VerticalContentAlignment="Center"/>
+                    <!-- Same box model as the settings item above (Height + symmetric Padding +
+                         centered content) so both top-level items and their hover highlight match. -->
+                    <MenuItem x:Name="LangMenuRoot" Height="24" Padding="8,0"
+                              HorizontalContentAlignment="Center" VerticalContentAlignment="Center"/>
                 </Menu>
             </StackPanel>
 
