@@ -860,7 +860,23 @@ async fn announce(
     // eventloop is gone, so a reconnect re-runs announce and retries (CodeRabbit).
     let light_gate_ok = match &light {
         Some(light) => light.announce_avail().await,
-        None => true,
+        None => {
+            // Feature DISABLED: there is no controller, but the broker can still retain a
+            // light_avail=online from a previous ENABLED run (and its discovery configs until
+            // ha::reconcile tombstones them below). Assert `offline` here — an AWAITED retained
+            // publish, before the bridge `online` — so the stale switch isn't briefly available
+            // and can't accept a command the absent controller would drop (Codex).
+            match client
+                .publish(&cfg.topic_light_avail, QoS::AtMostOnce, true, "offline")
+                .await
+            {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!("btmqttd: publish light-disabled availability failed: {e}");
+                    false
+                }
+            }
+        }
     };
     if light_gate_ok {
         if let Err(e) = client
