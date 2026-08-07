@@ -167,7 +167,8 @@ namespace IntercomFirmwareTool.App
 
             BuildModelPills();
             _dlUnavailable = false;
-            TglDownload.Tag = null;   // clear any prior offline marker (the DownloadLink trigger)
+            TglDownload.Tag = null;                     // clear any prior offline marker (the DownloadLink trigger)
+            TglDownload.ToolTip = L("Dl_ToggleTip");    // restore the normal tooltip (a re-probe may have recovered)
             TglDownload.Visibility = Visibility.Visible;
             // A fast probe can reveal this entry point within the cue's arming delay; announce it so
             // the reveal isn't silently swallowed and the download section goes unnoticed below the fold.
@@ -362,12 +363,18 @@ namespace IntercomFirmwareTool.App
         private void TglDownload_Changed(object sender, RoutedEventArgs e)
         {
             // Offline/unavailable: the link is shown muted and must not open the card. It stays
-            // enabled so a click still reaches here — revert the toggle and explain why.
+            // enabled so a click still reaches here — revert the toggle, RE-RUN the probe (so the
+            // "try again later" advice is actually actionable: if connectivity or the sources have
+            // come back, the link becomes usable without restarting the app), then explain the
+            // current state. The re-probe runs in the background; its result re-applies the muted
+            // state or reveals the enabled picker. Guarded so a click during an in-flight probe
+            // doesn't start a second one.
             if (_dlUnavailable)
             {
                 if (TglDownload.IsChecked == true)
                 {
                     TglDownload.IsChecked = false; // re-enters this handler unchecked (falls through, no card)
+                    if (_availChecker is null) StartAvailabilityProbe();
                     MessageBox.Show(this, L(DlUnavailableWarnKey), L("Dl_Toggle"),
                         MessageBoxButton.OK, MessageBoxImage.Information);
                 }
@@ -655,9 +662,12 @@ namespace IntercomFirmwareTool.App
         /// and the status line.</summary>
         private void ApplyDownloadLanguage()
         {
-            // The unavailable-state tooltip is set imperatively (not a {loc:Loc} binding), so
-            // re-apply the correct one (offline vs reachable-but-empty) on a language switch.
+            // The download toggle's tooltip is set imperatively once a state is applied (not a
+            // {loc:Loc} binding), so re-apply the correct one on a language switch: the unavailable
+            // wording (offline vs reachable-but-empty) while muted, or the normal tooltip once a
+            // (re-)probe has revealed the enabled picker.
             if (_dlUnavailable) TglDownload.ToolTip = L(DlUnavailableTipKey);
+            else if (_availableFw.Count > 0) TglDownload.ToolTip = L("Dl_ToggleTip");
             if (_availableFw.Count > 0) BuildModelPills(); // re-selects _dlModelLine/_dlSelected
             // Freshly rebuilt pills default to enabled, so re-apply the lock if a download is
             // running OR an unsafe-version block (issue #85) is active — otherwise a language switch
