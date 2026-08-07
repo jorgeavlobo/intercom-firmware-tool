@@ -138,10 +138,15 @@ async fn run() -> Result<(), String> {
         clear_persisted_light("feature disabled").await;
         (None, None)
     } else if let Some(where_) = {
-        // Enabled: a WHERE LEARNED at runtime (persisted) wins over the build-time value, so a
-        // unit that shipped blank keeps what it learned across reboots.
-        let learned = tokio::task::spawn_blocking(persist::read_light_where).await.unwrap_or(None);
-        learned.or_else(|| cfg.light_where.clone())
+        // Enabled. A build-time WHERE is AUTHORITATIVE: when the installer configured one, use it
+        // so a later firmware can re-point the light and the reflash-surviving learned cache (on
+        // the cfg/extra partition) can't silently override the newly-configured address (Codex).
+        // Only when the build left WHERE blank (learn mode) do we fall back to what this unit
+        // LEARNED at runtime and persisted, so a unit that shipped blank keeps it across reboots.
+        match cfg.light_where.clone() {
+            Some(w) => Some(w),
+            None => tokio::task::spawn_blocking(persist::read_light_where).await.unwrap_or(None),
+        }
     } {
         let where_for_read = where_.clone();
         let restore = tokio::task::spawn_blocking(move || persist::read_light(&where_for_read))

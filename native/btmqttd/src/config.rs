@@ -130,10 +130,15 @@ impl Config {
             topic_call_state: get("TOPIC_CALL_STATE", "Bticino/call_state"),
             // Digits only — a WHERE like "112". Empty ⇒ unknown (learn mode when enabled).
             light_where: opt("LIGHT_WHERE").filter(|s| s.bytes().all(|b| b.is_ascii_digit())),
-            // "Has exterior light": the light subsystem runs when this is set OR a WHERE is
-            // present. The OR keeps an OLD conf (LIGHT_WHERE set, no LIGHT_ENABLED key) working.
-            light_enabled: flag("LIGHT_ENABLED")
-                || opt("LIGHT_WHERE").is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit())),
+            // "Has exterior light". When the installer wrote LIGHT_ENABLED it is AUTHORITATIVE
+            // ("1" enables, anything else disables) — so unticking the option reliably turns the
+            // subsystem off even if a stale numeric LIGHT_WHERE lingers in the conf (Copilot,
+            // Codex). Only an OLD conf that predates the key (LIGHT_ENABLED absent) falls back to
+            // "a numeric LIGHT_WHERE implies the feature", keeping legacy configs working.
+            light_enabled: match opt("LIGHT_ENABLED") {
+                Some(v) => v == "1",
+                None => opt("LIGHT_WHERE").is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit())),
+            },
             topic_light: get("TOPIC_LIGHT", "Bticino/light"),
             topic_light_avail: get("TOPIC_LIGHT_AVAIL", "Bticino/light_avail"),
             own_host: get("OWN_HOST", "127.0.0.1"),
@@ -421,5 +426,19 @@ EMPTY=
         // disabled entirely -> refused even with auth
         let off = "MQTT_HOST=h\nMQTT_USER=u\nMQTT_PASS=p\n";
         assert!(!Config::from_map(parse_env(off)).remote_shell_allowed());
+    }
+
+    #[test]
+    fn light_enabled_flag_is_authoritative_over_a_stale_where() {
+        let cfg = |s: &str| Config::from_map(parse_env(s));
+        // Explicit LIGHT_ENABLED=0 disables the subsystem even if a numeric LIGHT_WHERE lingers
+        // (the installer writes both keys; unticking "has exterior light" must win) — Copilot/Codex.
+        assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=0\nLIGHT_WHERE=112\n").light_enabled);
+        // Explicit LIGHT_ENABLED=1 enables even with a blank WHERE (learn mode).
+        assert!(cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\n").light_enabled);
+        // Legacy conf WITHOUT the key: a numeric LIGHT_WHERE still implies the feature.
+        assert!(cfg("MQTT_HOST=h\nLIGHT_WHERE=112\n").light_enabled);
+        // Nothing set at all -> disabled.
+        assert!(!cfg("MQTT_HOST=h\n").light_enabled);
     }
 }
