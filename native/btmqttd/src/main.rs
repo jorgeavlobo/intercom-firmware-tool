@@ -155,6 +155,13 @@ async fn run() -> Result<(), String> {
             None => tokio::task::spawn_blocking(persist::read_light_where).await.unwrap_or(None),
         }
     } {
+        // A CONFIGURED WHERE is authoritative, so FORGET any learned WHERE now — otherwise a later
+        // build that clears the field to enter learn mode would restore this stale learned address
+        // (e.g. an old `112`) and control the wrong relay instead of re-learning (Codex). Only the
+        // configured path clears it; the learn-mode path above is itself driven by that same file.
+        if cfg.light_where.is_some() {
+            clear_persisted_light_where("configured WHERE is authoritative").await;
+        }
         let where_for_read = where_.clone();
         let restore = tokio::task::spawn_blocking(move || persist::read_light(&where_for_read))
             .await
