@@ -440,7 +440,7 @@ Schlüssel: {1}</value></data>
   <data name="Field_MqttTopicKey" xml:space="preserve"><value>Tastenfeld:</value></data>
   <data name="Field_MqttTopicCmdResult" xml:space="preserve"><value>Befehlsergebnis:</value></data>
   <data name="Field_MqttTopicFileContent" xml:space="preserve"><value>Dateiinhalt:</value></data>
-  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>Der Fernbefehlskanal erlaubt es jedem, der im Empfangs-Topic veröffentlichen kann, Dateien zu lesen oder zu schreiben und Befehle auf dem Gerät auszuführen. Antworten werden im Klartext gesendet, wenn kein TLS konfiguriert ist.
+  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>Der Fernbefehlskanal erlaubt es jedem, der im Empfangs-Topic veröffentlichen kann, Dateien zu lesen oder zu schreiben und Befehle auf dem Gerät auszuführen. Ohne TLS werden die Anfragen, die Antworten sowie Benutzername und Passwort des Brokers im Klartext gesendet.
 
 Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. Fernbefehlskanal aktivieren?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal</value></data>
