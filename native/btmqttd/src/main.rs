@@ -58,13 +58,46 @@ fn main() {
             std::process::exit(1);
         }
     };
-    if let Err(e) = rt.block_on(run()) {
-        eprintln!("btmqttd: {e}");
-        std::process::exit(1);
+    let reexec = match rt.block_on(run()) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("btmqttd: {e}");
+            std::process::exit(1);
+        }
+    };
+    // Tear the runtime down (join workers, close their sockets) BEFORE replacing the process
+    // image, so the re-exec starts from a clean slate.
+    drop(rt);
+    if reexec {
+        reexec_self(); // returns ONLY on failure; on success the image is replaced
     }
 }
 
-async fn run() -> Result<(), String> {
+/// Re-exec this daemon in place (same PID, so `bt_service_watchdog`'s pgrep supervision is
+/// undisturbed) to activate a newly-learned light WHERE IMMEDIATELY. Exiting instead would leave
+/// the WHOLE bridge offline until the watchdog's next ~60 s poll respawns it (Codex). Called only
+/// AFTER the graceful shutdown in `run()`, so the learned WHERE is durably persisted and the MQTT
+/// `offline` will/DISCONNECT is already sent; the fresh process re-reads the config, picks up the
+/// persisted WHERE (learn-mode path), and reconnects. `exec` returns ONLY on error — then we fall
+/// back to a normal exit and the watchdog respawns as before.
+fn reexec_self() {
+    use std::os::unix::process::CommandExt;
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "btmqttd: re-exec: cannot resolve current exe ({e}); exiting for watchdog respawn"
+            );
+            return;
+        }
+    };
+    let err = std::process::Command::new(exe).args(std::env::args_os().skip(1)).exec();
+    eprintln!("btmqttd: re-exec failed ({err}); exiting for watchdog respawn");
+}
+
+/// Returns `Ok(true)` when the caller should RE-EXEC the daemon immediately (a WHERE was just
+/// learned), or `Ok(false)` for an ordinary signal-driven shutdown.
+async fn run() -> Result<bool, String> {
     let cfg = Arc::new(Config::load()?);
     if cfg.mqtt_host.is_empty() {
         return Err("MQTT_HOST is not set in the config".into());
@@ -454,14 +487,19 @@ async fn run() -> Result<(), String> {
         }
     }
 
+    // Set when the loop exits to activate a newly-learned WHERE (vs. an ordinary signal): the
+    // caller then RE-EXECs instead of exiting, so the bridge is back in under a second rather than
+    // after a full watchdog poll (~60 s).
+    let mut reexec = false;
     loop {
         tokio::select! {
             _ = sig_term.recv() => break,
             _ = sig_int.recv() => break,
-            // A WHERE was just LEARNED: shut down cleanly (same path as SIGTERM) so the init
-            // script/watchdog respawns btmqttd with the learned WHERE active.
+            // A WHERE was just LEARNED: shut down cleanly (same path as SIGTERM), then RE-EXEC so
+            // btmqttd comes straight back up with the learned WHERE active.
             _ = restart.notified() => {
                 eprintln!("btmqttd: restarting to activate a newly-learned light WHERE");
+                reexec = true;
                 break;
             }
             ev = eventloop.poll() => {
@@ -771,7 +809,7 @@ async fn run() -> Result<(), String> {
     drop(lock_tx);
     let _ = tokio::time::timeout(lock::MAX_PULSE + Duration::from_secs(1), lock_task).await;
     shutdown(&cfg, &client, &mut eventloop).await;
-    Ok(())
+    Ok(reexec)
 }
 
 /// Best-effort clear of the persisted stair-light record (bounded retries, log on ultimate
