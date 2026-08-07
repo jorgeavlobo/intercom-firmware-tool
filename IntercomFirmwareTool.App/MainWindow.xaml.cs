@@ -112,7 +112,15 @@ namespace IntercomFirmwareTool.App
             // them behind a scrollbar. Cap that growth at the CURRENT monitor's work area — past
             // that (e.g. when Advanced is expanded) the body's ScrollViewer takes over. Set before
             // the window is shown so the very first sizing already respects the cap.
-            SourceInitialized += (_, _) => MaxHeight = CurrentMonitorWorkArea().Height;
+            // Also hook the native resize-end message so a manual resize (which WPF turns
+            // SizeToContent OFF for) doesn't permanently freeze the auto-height — see
+            // RestoreSizeToContentHook.
+            SourceInitialized += (_, _) =>
+            {
+                MaxHeight = CurrentMonitorWorkArea().Height;
+                if (PresentationSource.FromVisual(this) is HwndSource src)
+                    src.AddHook(RestoreSizeToContentHook);
+            };
 
             // Keep the cap correct for whichever monitor the window is on — work areas differ per
             // display, and LocationChanged fires when the user drags the window to another monitor.
@@ -1250,6 +1258,23 @@ namespace IntercomFirmwareTool.App
                 if (top + ActualHeight > work.Bottom) top = work.Bottom - ActualHeight;
                 Top = Math.Max(work.Top, top);
             }));
+
+        private const int WM_EXITSIZEMOVE = 0x0232;
+
+        /// <summary>
+        /// The instant a user move/resize gesture ends, re-assert <see cref="SizeToContent"/>=Height.
+        /// WPF turns SizeToContent OFF (to Manual) as soon as the user drags a resize edge — even the
+        /// width — which would otherwise freeze the auto-height so Advanced / the download card no
+        /// longer grow or shrink the window (and a later collapse would just reposition it). Restoring
+        /// Height keeps the user's new width and snaps the height back to fit the current content. A
+        /// pure move never flips SizeToContent, so this no-ops there.
+        /// </summary>
+        private IntPtr RestoreSizeToContentHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg == WM_EXITSIZEMOVE && SizeToContent != SizeToContent.Height)
+                SizeToContent = SizeToContent.Height;
+            return IntPtr.Zero;
+        }
 
         /// <summary>
         /// Work area (excluding the taskbar) of the monitor that currently contains
