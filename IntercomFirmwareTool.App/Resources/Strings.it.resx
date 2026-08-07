@@ -366,7 +366,7 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Cancella il file {0}</value></data>
   <data name="Ph_MqttPem" xml:space="preserve"><value>(opzionale: scegli un file PEM)</value></data>
   <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Consenti il canale dei comandi remoti</value></data>
-  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Cosa aggiunge: via MQTT puoi leggere file, scrivere file ed eseguire qualsiasi comando sul citofono — di fatto il controllo e l'amministrazione remota completi. (I controlli di volume, muto e apertura funzionano anche senza.) Richiede l'autenticazione al broker: nome utente e password, oppure TLS reciproco.</value></data>
+  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Cosa aggiunge: via MQTT puoi leggere file, scrivere file ed eseguire qualsiasi comando sul citofono — di fatto il controllo e l'amministrazione remota completi. Richiede l'autenticazione al broker: nome utente e password, oppure TLS reciproco.</value></data>
   <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Concede l'accesso completo al dispositivo: chiunque possa pubblicare sul topic di ricezione può leggere o scrivere file ed eseguire comandi. Abilitalo solo con un broker autenticato e attendibile.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>broker MQTT</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>La porta MQTT deve essere compresa tra 1 e 65535.</value></data>

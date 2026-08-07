@@ -366,7 +366,7 @@ Abra Opções avançadas → Resultado para ver que verificações falharam.</va
   <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Limpar o ficheiro {0}</value></data>
   <data name="Ph_MqttPem" xml:space="preserve"><value>(opcional: escolha um ficheiro PEM)</value></data>
   <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Permitir canal de comandos remoto</value></data>
-  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>O que acrescenta: por MQTT pode ler ficheiros, escrever ficheiros e executar qualquer comando no intercomunicador — na prática, controlo e administração remota completos. (Os controlos de volume, silêncio e abertura funcionam sem isto.) Exige autenticação no broker: utilizador e palavra-passe, ou TLS mútuo.</value></data>
+  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>O que acrescenta: por MQTT pode ler ficheiros, escrever ficheiros e executar qualquer comando no intercomunicador — na prática, controlo e administração remota completos. Exige autenticação no broker: utilizador e palavra-passe, ou TLS mútuo.</value></data>
   <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Concede acesso total ao dispositivo: qualquer pessoa que possa publicar no tópico de receção pode ler ou escrever ficheiros e executar comandos. Ative-o apenas com um broker autenticado e de confiança.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>broker MQTT</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>A porta MQTT tem de estar entre 1 e 65535.</value></data>

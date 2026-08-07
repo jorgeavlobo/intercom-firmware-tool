@@ -51,13 +51,6 @@ namespace IntercomFirmwareTool.App
         // re-triggering its confirmation dialog.
         private bool _suppressMqttShell;
 
-        // Tracks whether client auth (user+pass or mutual TLS) was present on the
-        // previous UpdateRemoteShellEnabled pass, so the remote command channel is
-        // auto-selected exactly ONCE — on the false→true transition when auth first
-        // becomes available — and not re-selected on every later keystroke (which
-        // would fight a user who deliberately unticked it).
-        private bool _mqttAuthWasOk;
-
         // True while a "Test connection" is in flight, so the visibility pass can't
         // re-enable the Test button under it (a field edit would otherwise re-enable
         // it and allow a second, concurrent test).
@@ -653,10 +646,7 @@ namespace IntercomFirmwareTool.App
 
         /// <summary>The remote command channel is a DANGER option: keep it disabled
         /// until client authentication is configured (user+pass or mutual TLS), and
-        /// drop it if the auth that justified it is later removed. When auth first
-        /// becomes available it is auto-selected (this is the option that unlocks the
-        /// most functionality), once per false→true transition — a user who unticks it
-        /// is respected on subsequent edits.</summary>
+        /// drop it if the auth that justified it is later removed.</summary>
         private void UpdateRemoteShellEnabled()
         {
             bool hasAuth = TxtMqttUser.Text.Trim().Length > 0 && (_mqttPass?.Value.Length ?? 0) > 0;
@@ -670,23 +660,6 @@ namespace IntercomFirmwareTool.App
                 ChkMqttRemoteShell.IsChecked = false;
                 _suppressMqttShell = false;
             }
-            else if (MqttEnabled && authOk && !_mqttAuthWasOk && ChkMqttRemoteShell.IsChecked != true)
-            {
-                // Auth just became available (false→true): pre-select the command channel,
-                // the option that unlocks the most functionality. Set the transition flag
-                // BEFORE checking the box so the reentrant UpdateRemoteShellEnabled (via the
-                // Checked handler → UpdateBuildEnabled) sees no new transition and can't loop.
-                // Suppressed so it doesn't pop the confirmation dialog mid-typing; the
-                // always-visible warning below the box covers awareness, and the user can
-                // still untick it. A later manual untick is NOT overridden, because the flag
-                // remains true while auth persists.
-                _mqttAuthWasOk = true;
-                _suppressMqttShell = true;
-                ChkMqttRemoteShell.IsChecked = true;
-                _suppressMqttShell = false;
-            }
-
-            _mqttAuthWasOk = authOk;
         }
 
         // ---- Test connection (real MQTT CONNECT via MQTTnet) ----------------
