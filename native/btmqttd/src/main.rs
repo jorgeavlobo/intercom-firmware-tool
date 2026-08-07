@@ -127,6 +127,10 @@ async fn run() -> Result<(), String> {
     // and the init/watchdog respawns btmqttd with the learned WHERE bound (the state-persist
     // task is keyed by WHERE at startup — a clean restart is the simplest way to activate it).
     let restart = Arc::new(tokio::sync::Notify::new());
+    // LEARNABLE only in learn mode (a blank build-time WHERE). A CONFIGURED build's WHERE is
+    // authoritative and always bound by the resolution below, so the HA Learn button must not be
+    // able to persist a divergent address the daemon would then ignore on restart (Codex).
+    let light_learnable = cfg.light_where.is_none();
     #[allow(clippy::type_complexity)]
     let (light, light_persist): (
         Option<Arc<light::LightCtl>>,
@@ -134,8 +138,11 @@ async fn run() -> Result<(), String> {
     ) = if !cfg.light_enabled {
         // Feature DISABLED: forget any persisted light-state, so that re-enabling the same
         // WHERE later starts from an UNKNOWN baseline instead of restoring a value that may
-        // have gone stale while untracked (a physical toggle we didn't see) — Codex.
+        // have gone stale while untracked (a physical toggle we didn't see) — Codex. Also forget
+        // any LEARNED WHERE: disabling is a deliberate reset, so re-enabling in learn mode
+        // re-learns rather than silently restoring an address from a past life (CodeRabbit).
         clear_persisted_light("feature disabled").await;
+        clear_persisted_light_where("feature disabled").await;
         (None, None)
     } else if let Some(where_) = {
         // Enabled. A build-time WHERE is AUTHORITATIVE: when the installer configured one, use it
@@ -179,8 +186,14 @@ async fn run() -> Result<(), String> {
                 (None, true)
             }
         };
-        let (ctl, persist_rx) =
-            light::LightCtl::new(&cfg, client.clone(), initial, Some(where_.clone()), restart.clone());
+        let (ctl, persist_rx) = light::LightCtl::new(
+            &cfg,
+            client.clone(),
+            initial,
+            Some(where_.clone()),
+            light_learnable,
+            restart.clone(),
+        );
         let (persist_shutdown_tx, persist_shutdown_rx) = tokio::sync::oneshot::channel();
         // Pass the restored disk value as the persist task's durable BASELINE explicitly, so a
         // command/observe that bumps the channel before the task is first polled is still
@@ -199,7 +212,7 @@ async fn run() -> Result<(), String> {
         // marked UNAVAILABLE (via topic_light_avail = offline); no state-persist task runs
         // until a WHERE is learned (which restarts btmqttd into the where-known path above).
         let (ctl, _persist_rx) =
-            light::LightCtl::new(&cfg, client.clone(), None, None, restart.clone());
+            light::LightCtl::new(&cfg, client.clone(), None, None, light_learnable, restart.clone());
         (Some(ctl), None)
     };
 
@@ -772,6 +785,21 @@ async fn clear_persisted_light(reason: &str) {
     );
 }
 
+/// Best-effort clear of the persisted LEARNED WHERE (bounded retries, log on ultimate failure).
+/// Used when the feature is DISABLED, so disabling is a clean reset: re-enabling in learn mode
+/// re-learns rather than silently restoring an address from a past life (CodeRabbit).
+async fn clear_persisted_light_where(reason: &str) {
+    for _ in 0..3 {
+        if tokio::task::spawn_blocking(persist::clear_light_where).await.unwrap_or(false) {
+            return;
+        }
+    }
+    eprintln!(
+        "btmqttd: could not clear persisted learned LIGHT_WHERE ({reason}); re-enabling in learn \
+         mode later may restore the old learned address"
+    );
+}
+
 /// On-connect step 1: SUBSCRIBE to the command topic, then clear any stray retained
 /// command. Spawned (not inline) so awaiting the request-channel enqueue can't block
 /// the poll loop that drains it. The `online` announce is deferred to `announce()`,
@@ -820,6 +848,15 @@ async fn announce(
     volume: Arc<volume::VolumeCtl>,
     light: Option<Arc<light::LightCtl>>,
 ) {
+    // Assert the light-subsystem availability GATE *before* the bridge birth `online`. On a
+    // reflash from a configured WHERE to blank learn mode, the broker can still hold a retained
+    // light_avail=online from the previous run; publishing the current gate (offline in learn
+    // mode) first closes the window where HA would see the bridge online alongside that stale
+    // value and issue a light command the controller drops (WHERE still unbound) — Codex. seed()
+    // below re-asserts it (idempotent, retained).
+    if let Some(light) = &light {
+        light.publish_avail().await;
+    }
     if let Err(e) = client
         .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
         .await

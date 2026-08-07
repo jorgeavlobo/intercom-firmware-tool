@@ -227,6 +227,12 @@ pub struct LightCtl {
     /// The "Learn light" capture deadline: `Some(t)` while armed (until `t`), else `None`.
     /// A monitor frame `*8*21*<W>##` seen while armed teaches the WHERE (see [`observe`]).
     learn_until: Mutex<Option<Instant>>,
+    /// Whether this unit may LEARN (or re-learn) its WHERE. `false` for a CONFIGURED build (a
+    /// non-empty build-time `LIGHT_WHERE`): that address is authoritative and `main` always binds
+    /// it, so accepting a learned frame would persist an address the daemon then ignores on
+    /// restart — a false "learned" that keeps toggling the old actuator (Codex). `true` only in
+    /// learn mode (blank build), where the learned WHERE is what `main` actually binds.
+    learnable: bool,
     /// Retained state topic HA reads back (`on`/`off`).
     topic_light: String,
     /// Retained light-subsystem availability topic: `online` once a WHERE is known, `offline`
@@ -241,15 +247,17 @@ pub struct LightCtl {
 }
 
 impl LightCtl {
-    /// Build from config, restoring the persisted on/off (`initial`) so the switch keeps
-    /// the right state across a reboot. `cfg.light_where` MUST be set (the caller only
-    /// constructs this when the feature is enabled). Returns the controller AND the `watch`
-    /// receiver the caller must hand to [`run_persist`] (spawned as the drained persist task).
+    /// Build from config, restoring the persisted on/off (`initial`) so the switch keeps the
+    /// right state across a reboot. `where_` is the bound actuator WHERE (`None` in learn mode);
+    /// `learnable` is `true` only in learn mode (a blank build-time `LIGHT_WHERE`), where a learned
+    /// WHERE is what `main` binds. Returns the controller AND the `watch` receiver the caller must
+    /// hand to [`run_persist`] (spawned as the drained persist task).
     pub fn new(
         cfg: &Arc<Config>,
         client: AsyncClient,
         initial: Option<bool>,
         where_: Option<String>,
+        learnable: bool,
         restart: Arc<Notify>,
     ) -> (Arc<Self>, watch::Receiver<Option<bool>>) {
         let (persist_tx, persist_rx) = watch::channel(initial);
@@ -259,6 +267,7 @@ impl LightCtl {
             persist_tx,
             where_: Mutex::new(where_),
             learn_until: Mutex::new(None),
+            learnable,
             topic_light: cfg.topic_light.clone(),
             topic_light_avail: cfg.topic_light_avail.clone(),
             restart,
@@ -428,6 +437,16 @@ impl LightCtl {
     /// The "Learn light" button: open the capture window. The next physical stair-light press
     /// within [`LEARN_WINDOW`] teaches the WHERE (see `observe`/`adopt_learned_where`).
     pub async fn learn(&self) {
+        // A CONFIGURED build has a fixed, authoritative WHERE that `main` always binds; capturing
+        // a learned frame here would persist an address the daemon ignores on restart (a false
+        // "learned" that keeps toggling the old actuator) — so learning is refused. Learn mode
+        // (blank build) is the only place a learned WHERE is what `main` actually binds (Codex).
+        if !self.learnable {
+            eprintln!(
+                "btmqttd: light: ignoring learn — WHERE is fixed by configuration (LIGHT_WHERE)"
+            );
+            return;
+        }
         *self.learn_until.lock().expect("light learn mutex poisoned") =
             Some(Instant::now() + LEARN_WINDOW);
         eprintln!("btmqttd: light: learn armed — press the physical stair-light button once");
@@ -475,7 +494,9 @@ impl LightCtl {
 
     /// Publish the light-subsystem availability (retained): `online` once a WHERE is known,
     /// `offline` in learn mode. HA greys out the switch + resync until the WHERE is learned.
-    async fn publish_avail(&self) {
+    /// Public so `main` can assert the gate BEFORE the bridge birth `online`, closing the window
+    /// where HA would see a stale retained `online` and command a still-unbound light (Codex).
+    pub async fn publish_avail(&self) {
         let payload = if self.have_where() { "online" } else { "offline" };
         crate::sender::try_publish_retained(
             &self.client,

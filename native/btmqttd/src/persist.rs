@@ -158,6 +158,15 @@ pub fn store_light_where(where_: &str) -> bool {
     atomic_write_in(&dir, &light_where_file_in(&dir), where_.as_bytes())
 }
 
+/// Forget any LEARNED stair-light WHERE — called when the feature is DISABLED, so disabling is
+/// a clean reset: re-enabling in learn mode re-learns rather than silently restoring an address
+/// from a past life (CodeRabbit). Returns `true` when the file is gone (removed, or already
+/// absent). Blocking; call via `spawn_blocking`.
+#[must_use]
+pub fn clear_light_where() -> bool {
+    clear_light_where_in(&state_dir())
+}
+
 /// Read the persisted LEARNED WHERE (digits only). Returns `None` when absent, unreadable,
 /// or not a plain digit string — a caller then falls back to the build-time `LIGHT_WHERE`.
 pub fn read_light_where() -> Option<String> {
@@ -284,6 +293,10 @@ fn clear_in(dir: &Path) -> bool {
 
 fn clear_light_in(dir: &Path) -> bool {
     remove_or_absent(&light_file_in(dir))
+}
+
+fn clear_light_where_in(dir: &Path) -> bool {
+    remove_or_absent(&light_where_file_in(dir))
 }
 
 fn read_light_in(dir: &Path, want_where: &str) -> LightRestore {
@@ -481,6 +494,27 @@ mod tests {
         // Already absent, but the DIRECTORY still exists → the NotFound path now fsyncs the dir
         // (confirming durability for a retry after a prior dir-sync failure) and still succeeds.
         assert!(clear_light_in(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_light_where_in_removes_the_learned_address_and_is_idempotent() {
+        // The disabled-mode reset: a learned WHERE is durably forgotten, so re-enabling in learn
+        // mode reads back none (re-learns) instead of restoring the old address; clearing an
+        // already-absent file is still success.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(5000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("btmqttd-clearwhere-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(atomic_write_in(&dir, &light_where_file_in(&dir), b"112"));
+        assert_eq!(read_light_where_in(&dir).as_deref(), Some("112"));
+        assert!(clear_light_where_in(&dir)); // disabled-mode reset forgets it
+        assert!(read_light_where_in(&dir).is_none());
+        assert!(clear_light_where_in(&dir)); // already absent → still success
 
         let _ = std::fs::remove_dir_all(&dir);
     }
