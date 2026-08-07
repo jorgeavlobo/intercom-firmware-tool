@@ -105,6 +105,42 @@ namespace IntercomFirmwareTool.App
             // the blank form (also sets the Build button's initial disabled state).
             UpdateBuildEnabled();
 
+            // The window uses SizeToContent=Height, so it always auto-sizes its height to the
+            // current content: it opens showing the whole (collapsed) form with no vertical
+            // scrollbar, and grows to absorb async reveals (e.g. the "download official firmware"
+            // toggle that appears once the background probe finds a source) instead of clipping
+            // them behind a scrollbar. Cap that growth at the CURRENT monitor's work area — past
+            // that (e.g. when Advanced is expanded) the body's ScrollViewer takes over. Set before
+            // the window is shown so the very first sizing already respects the cap.
+            // Also hook the native resize-end message so a manual resize (which WPF turns
+            // SizeToContent OFF for) doesn't permanently freeze the auto-height — see
+            // RestoreSizeToContentHook.
+            SourceInitialized += (_, _) =>
+            {
+                MaxHeight = CurrentMonitorWorkArea().Height;
+                if (PresentationSource.FromVisual(this) is HwndSource src)
+                    src.AddHook(RestoreSizeToContentHook);
+            };
+
+            // Keep the cap correct for whichever monitor the window is on — work areas differ per
+            // display, and LocationChanged fires when the user drags the window to another monitor.
+            LocationChanged += (_, _) => MaxHeight = CurrentMonitorWorkArea().Height;
+
+            // Keep the auto-sizing window on-screen as its height changes (Advanced or the download
+            // card expanding, an async reveal, or a manual width drag): if growth pushed the bottom
+            // edge past the work area, nudge Top up. Uses the work area of the monitor the window is
+            // actually on (not SystemParameters.WorkArea, which only ever reports the primary display
+            // and would misplace the window on a secondary monitor). Re-centering after a disclosure
+            // COLLAPSE is handled separately (RecenterAfterCollapse), invoked only from the collapse
+            // handlers so an ordinary user resize can't trigger it.
+            SizeChanged += (_, _) =>
+            {
+                if (double.IsNaN(Top)) return; // not positioned yet (before CenterScreen applies)
+                var work = CurrentMonitorWorkArea();
+                if (Top + ActualHeight > work.Bottom)
+                    Top = Math.Max(work.Top, work.Bottom - ActualHeight);
+            };
+
             // Start the subtle "shine" on the donate buttons once the visual tree
             // (and their templates) are ready. Loaded can fire again on reparent, so
             // guard to start the loops only once per window instance.
@@ -1023,8 +1059,10 @@ namespace IntercomFirmwareTool.App
             ResultGroup.Visibility = advanced ? Visibility.Visible : Visibility.Collapsed;
         }
 
-        private double? _heightBeforeAdvanced;
-        private double? _topBeforeAdvanced;
+        // Tracks whether the Advanced section is currently expanded, so a genuine collapse
+        // (expanded → collapsed) re-centers the window while an already-collapsed toggle event
+        // doesn't. SizeToContent handles the actual grow/shrink.
+        private bool _advancedExpanded;
 
         /// <summary>
         /// Shows a short message in the always-visible status line under the Build
@@ -1194,37 +1232,48 @@ namespace IntercomFirmwareTool.App
             // stale. UpdateBuildEnabled runs both UpdateRequiredCues and
             // UpdateAdvancedVisibility.
             UpdateBuildEnabled();
-            if (TglAdvanced.IsChecked == true)
-            {
-                // Opening: remember the current size/position, then grow so the result
-                // output has room (only if we haven't already grown for this session).
-                if (_heightBeforeAdvanced == null)
-                {
-                    _heightBeforeAdvanced = Height;
-                    _topBeforeAdvanced = Top;
+            bool open = TglAdvanced.IsChecked == true;
+            // The window is SizeToContent=Height, so revealing/hiding the Advanced surface already
+            // grows/shrinks it to fit (the SizeChanged handler keeps it on-screen) — no explicit
+            // Height assignment, which would be ineffective under SizeToContent anyway. We only need
+            // to re-center on a genuine collapse (was expanded, now closed).
+            if (!open && _advancedExpanded) RecenterAfterCollapse();
+            _advancedExpanded = open;
+        }
 
-                    // Work area of the monitor THIS window is on (not the primary —
-                    // SystemParameters.WorkArea only ever reports the primary display,
-                    // which would push us off-screen on a secondary monitor offset
-                    // above/below it). Falls back to the primary work area if the
-                    // native query is unavailable.
-                    Rect wa = CurrentMonitorWorkArea();
-                    double want = Math.Min(720, wa.Height);
-                    if (Height < want) Height = want;
-                    // The window's Top didn't change, so growing downward could push the
-                    // footer off-screen. Nudge Top up so the whole window stays within
-                    // this monitor's work area.
-                    if (Top + Height > wa.Bottom) Top = Math.Max(wa.Top, wa.Bottom - Height);
-                }
-            }
-            else if (_heightBeforeAdvanced != null)
+        /// <summary>
+        /// Re-center the window vertically after a disclosure (Advanced, or the download card)
+        /// collapses, so it returns to the middle instead of staying wherever growth had pushed it.
+        /// Deferred to Loaded priority so it reads the FINAL height once the collapse's layout has
+        /// settled, and called ONLY from the collapse handlers — never from SizeChanged — so an
+        /// ordinary user resize can't trigger it (and a collapse that produces no shrink can't leave
+        /// a pending flag armed to hijack a later resize).
+        /// </summary>
+        private void RecenterAfterCollapse() =>
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() =>
             {
-                // Closing: restore the size AND position from before Advanced was opened.
-                Height = _heightBeforeAdvanced.Value;
-                if (_topBeforeAdvanced != null) Top = _topBeforeAdvanced.Value;
-                _heightBeforeAdvanced = null;
-                _topBeforeAdvanced = null;
-            }
+                if (double.IsNaN(Top)) return;
+                Rect work = CurrentMonitorWorkArea();
+                double top = work.Top + (work.Height - ActualHeight) / 2;
+                if (top + ActualHeight > work.Bottom) top = work.Bottom - ActualHeight;
+                Top = Math.Max(work.Top, top);
+            }));
+
+        private const int WM_EXITSIZEMOVE = 0x0232;
+
+        /// <summary>
+        /// The instant a user move/resize gesture ends, re-assert <see cref="SizeToContent"/>=Height.
+        /// WPF turns SizeToContent OFF (to Manual) as soon as the user drags a resize edge — even the
+        /// width — which would otherwise freeze the auto-height so Advanced / the download card no
+        /// longer grow or shrink the window (and a later collapse would just reposition it). Restoring
+        /// Height keeps the user's new width and snaps the height back to fit the current content. A
+        /// pure move never flips SizeToContent, so this no-ops there.
+        /// </summary>
+        private IntPtr RestoreSizeToContentHook(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg == WM_EXITSIZEMOVE && SizeToContent != SizeToContent.Height)
+                SizeToContent = SizeToContent.Height;
+            return IntPtr.Zero;
         }
 
         /// <summary>

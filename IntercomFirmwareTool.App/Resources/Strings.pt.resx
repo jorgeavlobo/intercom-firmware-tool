@@ -452,6 +452,10 @@ Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comando
   <!-- ================= Download official firmware (issue #23) ================= -->
   <data name="Dl_Toggle" xml:space="preserve"><value>Descarregar firmware oficial</value></data>
   <data name="Dl_ToggleTip" xml:space="preserve"><value>Descarregar o firmware original da BTicino e verificá-lo automaticamente</value></data>
+  <data name="Dl_OfflineTip" xml:space="preserve"><value>Sem ligação à internet — é necessária para descarregar o firmware oficial.</value></data>
+  <data name="Dl_OfflineWarn" xml:space="preserve"><value>Não foi detetada ligação à internet.&#10;Liga-te à internet para descarregar o firmware oficial.</value></data>
+  <data name="Dl_UnavailableTip" xml:space="preserve"><value>De momento não há firmware oficial disponível para descarregar.</value></data>
+  <data name="Dl_UnavailableWarn" xml:space="preserve"><value>De momento não há firmware oficial disponível para descarregar.&#10;Tenta novamente mais tarde.</value></data>
   <data name="Dl_Title" xml:space="preserve"><value>Descarregar firmware oficial</value></data>
   <data name="Dl_Subtitle" xml:space="preserve"><value>Obtido da BTicino e verificado automaticamente</value></data>
   <data name="Dl_Legal" xml:space="preserve"><value>Este é o mesmo firmware original que pode descarregar manualmente da BTicino / Legrand. A ferramenta apenas o obtém por si e verifica-o byte a byte (tamanho + SHA-256) em relação ao original conhecido antes de ser utilizado.</value></data>
@@ -486,6 +490,7 @@ Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comando
   <data name="Update_Failed" xml:space="preserve"><value>Não foi possível verificar atualizações agora. Tenta novamente mais tarde.</value></data>
   <data name="Update_DevBuild" xml:space="preserve"><value>Esta é uma compilação de desenvolvimento; a verificação de atualizações está desativada.</value></data>
   <data name="Update_CheckTitle" xml:space="preserve"><value>Verificar atualizações</value></data>
+  <data name="Dialog_Ok" xml:space="preserve"><value>OK</value></data>
   <data name="About_Title" xml:space="preserve"><value>Acerca do Intercom Firmware Tool</value></data>
   <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Versão {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>

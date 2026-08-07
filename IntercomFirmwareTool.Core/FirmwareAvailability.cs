@@ -12,7 +12,18 @@ namespace IntercomFirmwareTool.Core
     /// and appears to serve the expected file. <see cref="Reason"/> is a localized explanation
     /// (available, or why not).
     /// </summary>
-    public sealed record FirmwareAvailability(KnownFirmware Firmware, bool Available, string Reason);
+    public sealed record FirmwareAvailability(KnownFirmware Firmware, bool Available, string Reason)
+    {
+        /// <summary>
+        /// True whenever the server actually answered — even with a 404/403, an HTML error page, or
+        /// a size mismatch — and false only when the request never completed (DNS/TLS/connection
+        /// failure, exhausted retries). Lets the UI tell "no internet" apart from "reachable but
+        /// nothing to offer". An init-only property (not a positional parameter) so the record's
+        /// deconstruction/positional shape stays its three core fields; defaults true so the
+        /// reachable classifications don't have to set it.
+        /// </summary>
+        public bool Reachable { get; init; } = true;
+    }
 
     /// <summary>
     /// Probes the official download URLs of the <b>customizable (Door Entry)</b> registry entries so
@@ -138,6 +149,13 @@ namespace IntercomFirmwareTool.Core
             // non-null local so the contract is explicit at the single use site (and nullability
             // is satisfied without warnings).
             string url = fw.DownloadUrl!;
+            // Flipped inside the pipeline callback the instant ANY attempt gets a response — even a
+            // retryable 5xx that Polly will retry — so the catch below can tell a pure transport
+            // failure (no response ever — genuinely unreachable) from a server that DID answer
+            // (reachable, just not usable, or a later retry/Classify fault). Setting it only AFTER
+            // the whole pipeline returns would miss the "503 then the retry fails at the transport
+            // layer" case, where ExecuteAsync throws and the server would be mis-reported as offline.
+            bool responseReceived = false;
             try
             {
                 HttpResponseMessage resp = await _pipeline.ExecuteAsync(async token =>
@@ -151,8 +169,11 @@ namespace IntercomFirmwareTool.Core
                     // A browser-ish UA/Accept avoids servers that 403 an unidentified client.
                     req.Headers.UserAgent.ParseAdd("IntercomFirmwareTool");
                     req.Headers.Accept.ParseAdd("application/octet-stream, */*");
-                    return await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token)
+                    HttpResponseMessage attempt = await _http
+                        .SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token)
                         .ConfigureAwait(false);
+                    responseReceived = true; // this attempt got a response (even if it's retried)
+                    return attempt;
                 }, ct).ConfigureAwait(false);
 
                 using (resp)
@@ -166,8 +187,12 @@ namespace IntercomFirmwareTool.Core
             }
             catch (Exception ex)
             {
-                // Unreachable / DNS / TLS / exhausted retries → not available.
-                return new FirmwareAvailability(fw, false, CoreStrings.Format("FD_ProbeUnreachable", SafeMsg(ex)));
+                // Not available. Reachable only if a response had already come back (a fault inside
+                // Classify) — a transport/DNS/TLS/timeout failure never answered, so the UI can
+                // attribute THAT to connectivity, but not a post-response local error.
+                return new FirmwareAvailability(
+                    fw, false, CoreStrings.Format("FD_ProbeUnreachable", SafeMsg(ex)))
+                { Reachable = responseReceived };
             }
         }
 

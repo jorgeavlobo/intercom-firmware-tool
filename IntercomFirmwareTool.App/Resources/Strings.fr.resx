@@ -452,6 +452,10 @@ Ne l'activez que sur un broker authentifié et de confiance. Activer le canal de
   <!-- ================= Download official firmware (issue #23) ================= -->
   <data name="Dl_Toggle" xml:space="preserve"><value>Télécharger le firmware officiel</value></data>
   <data name="Dl_ToggleTip" xml:space="preserve"><value>Télécharger le firmware d'origine depuis BTicino et le vérifier automatiquement</value></data>
+  <data name="Dl_OfflineTip" xml:space="preserve"><value>Aucune connexion internet détectée — elle est requise pour télécharger le firmware officiel.</value></data>
+  <data name="Dl_OfflineWarn" xml:space="preserve"><value>Aucune connexion internet n'a été détectée.&#10;Connectez-vous à internet pour télécharger le firmware officiel.</value></data>
+  <data name="Dl_UnavailableTip" xml:space="preserve"><value>Aucun firmware officiel n'est disponible au téléchargement pour le moment.</value></data>
+  <data name="Dl_UnavailableWarn" xml:space="preserve"><value>Aucun firmware officiel n'est disponible au téléchargement pour le moment.&#10;Veuillez réessayer plus tard.</value></data>
   <data name="Dl_Title" xml:space="preserve"><value>Télécharger le firmware officiel</value></data>
   <data name="Dl_Subtitle" xml:space="preserve"><value>Récupéré depuis BTicino et vérifié automatiquement</value></data>
   <data name="Dl_Legal" xml:space="preserve"><value>Il s'agit du même firmware d'origine que vous pouvez télécharger manuellement depuis BTicino / Legrand. L'outil se contente de le récupérer pour vous et de le vérifier octet par octet (taille + SHA-256) par rapport à l'original connu avant utilisation.</value></data>
@@ -486,6 +490,7 @@ Ne l'activez que sur un broker authentifié et de confiance. Activer le canal de
   <data name="Update_Failed" xml:space="preserve"><value>Impossible de vérifier les mises à jour pour le moment. Réessayez plus tard.</value></data>
   <data name="Update_DevBuild" xml:space="preserve"><value>Il s’agit d’une version de développement ; la vérification des mises à jour est désactivée.</value></data>
   <data name="Update_CheckTitle" xml:space="preserve"><value>Vérification des mises à jour</value></data>
+  <data name="Dialog_Ok" xml:space="preserve"><value>OK</value></data>
   <data name="About_Title" xml:space="preserve"><value>À propos d’Intercom Firmware Tool</value></data>
   <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Version {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
 </root>
