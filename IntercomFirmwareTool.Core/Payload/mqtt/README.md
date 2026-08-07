@@ -119,7 +119,7 @@ re-run the tool for) is out of scope; the reservation above avoids all of it.
 | File | Role |
 |---|---|
 | `btmqttd` | SysV init script for the daemon itself (installed to `/etc/init.d/btmqttd`, symlinked from `/etc/rc5.d/S99zbtmqttd`). `start\|stop\|restart\|status` — the single control point that launches `/usr/sbin/btmqttd`. |
-| `bt_service_watchdog` | SysV init service (installed to `/etc/init.d/`, symlinked from `/etc/rc5.d/S99zBtServiceWatchdog`). Supervises dropbear/scsserver/mosquitto (restarts any that die) and reconciles `btmqttd` each pass via `/etc/init.d/btmqttd respawn`. |
+| `bt_service_watchdog` | SysV init service (installed to `/etc/init.d/`, symlinked from `/etc/rc5.d/S99zBtServiceWatchdog`). Supervises **only this tool's own daemons** — `dropbear` (SSH, which `bt_daemon` stops when the app stack starts) — and reconciles `btmqttd` each pass via `/etc/init.d/btmqttd respawn`. It deliberately does **not** restart the core BTicino services (`scsserver`/`mosquitto`/the `bt_daemon` app stack); the device manages those, and restarting them from here relaunched a colliding app stack that took the intercom down ~60s after boot. |
 
 Everything else is generated or embedded elsewhere:
 
