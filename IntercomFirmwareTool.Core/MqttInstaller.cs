@@ -179,12 +179,19 @@ namespace IntercomFirmwareTool.Core
         /// <summary>
         /// Stair-light SWITCH (opt-in): the WHO=8 actuator WHERE, digits only (e.g.
         /// <c>112</c>). Installation-specific — the same door-entry "light button" WHAT
-        /// (21/22) drives whatever WHERE the building wired. NULL/empty ⇒ the light entity
-        /// is DISABLED (no active switch): <c>LIGHT_WHERE</c> is still written (empty) and
-        /// <c>TOPIC_LIGHT</c> stays configured, and the retained <c>light.json</c> discovery
-        /// config is tombstoned so btmqttd clears any stale entity. The actuator is a
-        /// stateless toggle (firmware-confirmed), so btmqttd tracks + persists the state;
-        /// there is no readable state to poll.
+        /// (21/22) drives whatever WHERE the building wired. Whether the light subsystem ships
+        /// at all is governed by <see cref="HasExteriorLight"/> / <see cref="LightEnabled"/>,
+        /// NOT by this alone:
+        /// <list type="bullet">
+        /// <item>enabled + a digit WHERE here ⇒ the switch + resync ship bound to that WHERE;</item>
+        /// <item>enabled + this NULL/empty ⇒ <see cref="LightLearnMode"/>: the switch + resync ship
+        /// UNAVAILABLE and a Learn button is emitted so btmqttd learns the WHERE at runtime;</item>
+        /// <item>disabled ⇒ no light entities (the <c>light.json</c>/<c>light_resync.json</c>/
+        /// <c>light_learn.json</c> discovery configs are tombstoned), <c>LIGHT_WHERE</c> is written
+        /// empty, and <c>TOPIC_LIGHT</c> stays configured.</item>
+        /// </list>
+        /// The actuator is a stateless toggle (firmware-confirmed), so btmqttd tracks + persists the
+        /// state; there is no readable state to poll.
         /// </summary>
         public string? LightWhere { get; init; }
 
