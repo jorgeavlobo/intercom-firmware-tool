@@ -512,14 +512,24 @@ impl LightCtl {
     /// `publish_avail`'s drop-on-full try-publish would let the gate be dropped and the bridge
     /// `online` still queue after capacity frees, re-exposing the stale-`online` race on a
     /// configured→learn-mode reflash (CodeRabbit). Retained, QoS 1, like the reconnect seed.
-    pub async fn announce_avail(&self) {
+    ///
+    /// Returns `true` when the gate was queued. The caller MUST NOT publish the bridge birth
+    /// `online` on `false`: a failed gate leaves any stale retained `light_avail=online` in place,
+    /// so declaring the bridge online would re-open the race — better to defer `online` to the next
+    /// connect (a publish error means the eventloop is gone, which forces a reconnect + retry).
+    #[must_use]
+    pub async fn announce_avail(&self) -> bool {
         let payload = if self.have_where() { "online" } else { "offline" };
-        if let Err(e) = self
+        match self
             .client
             .publish(&self.topic_light_avail, QoS::AtLeastOnce, true, payload.as_bytes().to_vec())
             .await
         {
-            eprintln!("btmqttd: publish light availability gate failed: {e}");
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("btmqttd: publish light availability gate failed: {e}");
+                false
+            }
         }
     }
 }

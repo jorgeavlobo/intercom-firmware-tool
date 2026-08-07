@@ -855,14 +855,24 @@ async fn announce(
     // value and issue a light command the controller drops (WHERE still unbound) — Codex. seed()
     // below re-asserts it (idempotent, retained). An AWAITED, error-checked publish (not the
     // drop-on-full try-publish) so the bridge `online` cannot queue before this gate (CodeRabbit).
-    if let Some(light) = &light {
-        light.announce_avail().await;
-    }
-    if let Err(e) = client
-        .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
-        .await
-    {
-        eprintln!("btmqttd: publish online failed: {e}");
+    // If the gate FAILS to queue, DEFER the bridge `online`: declaring the bridge online while a
+    // stale retained light_avail=online lingers would re-open the race. A publish error means the
+    // eventloop is gone, so a reconnect re-runs announce and retries (CodeRabbit).
+    let light_gate_ok = match &light {
+        Some(light) => light.announce_avail().await,
+        None => true,
+    };
+    if light_gate_ok {
+        if let Err(e) = client
+            .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
+            .await
+        {
+            eprintln!("btmqttd: publish online failed: {e}");
+        }
+    } else {
+        eprintln!(
+            "btmqttd: deferring bridge online — light availability gate not queued (will retry on reconnect)"
+        );
     }
     if let Err(e) = client
         .publish(&cfg.topic_startd, QoS::AtMostOnce, true, start_iso.as_bytes().to_vec())
