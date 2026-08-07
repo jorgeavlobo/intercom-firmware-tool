@@ -449,7 +449,16 @@ impl LightCtl {
         // Disarm first so a second echo of the same press can't re-enter this path.
         *self.learn_until.lock().expect("light learn mutex poisoned") = None;
         if self.where_.lock().expect("light where mutex poisoned").as_deref() == Some(w) {
+            // The physical press that taught us this WHERE is a REAL toggle. `observe()` diverted
+            // it into this learn path before `apply_observe` could record it, and because the WHERE
+            // is unchanged there is no restart to re-seed state — so apply that toggle to the
+            // tracked state now (respecting the echo guard), or HA is left one toggle out of sync.
             eprintln!("btmqttd: light: learned WHERE {w} matches the current one — no change");
+            let flipped = self.st.lock().expect("light state mutex poisoned").apply_observe(Instant::now());
+            if flipped.is_some() {
+                self.enqueue_persist();
+                self.publish_current().await;
+            }
             return;
         }
         let w_owned = w.to_string();

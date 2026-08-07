@@ -586,6 +586,7 @@ namespace IntercomFirmwareTool.Core
                 opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
             };
             if (opts.LightEnabled) publishTopics.Add(opts.EffectiveTopicLight);
+            if (opts.LightEnabled) publishTopics.Add(opts.EffectiveTopicLightAvail);
             if (publishTopics.Distinct(StringComparer.Ordinal).Count() != publishTopics.Count)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
 
@@ -638,7 +639,9 @@ namespace IntercomFirmwareTool.Core
             // isn't a light command topic without the switch), so it can't form a self-loop —
             // exclude it when disabled, or a valid opt-out config whose namespace happens to
             // derive a colliding light topic would fail validation (Codex).
-            if (opts.LightEnabled && TopicFilterMatches(rxFilter, opts.EffectiveTopicLight))
+            if (opts.LightEnabled
+                && (TopicFilterMatches(rxFilter, opts.EffectiveTopicLight)
+                    || TopicFilterMatches(rxFilter, opts.EffectiveTopicLightAvail)))
                 throw new ArgumentException(
                     CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
         }
@@ -946,7 +949,10 @@ namespace IntercomFirmwareTool.Core
             // on/off state btmqttd tracks (no readable state); TOPIC_LIGHT_AVAIL gates HA's switch +
             // resync OFFLINE until a WHERE is known. Commands reuse TOPIC_RX (JSON actions).
             sb.Append(Conf("LIGHT_ENABLED", opts.HasExteriorLight ? "1" : "0"));
-            sb.Append(Conf("LIGHT_WHERE", opts.LightWhere ?? ""));
+            // Write the WHERE only when the light is ON. Emitting a leftover WHERE with
+            // LIGHT_ENABLED=0 would re-enable the subsystem device-side, because config.rs
+            // treats any valid LIGHT_WHERE as enabling (legacy-conf compatibility) — Codex.
+            sb.Append(Conf("LIGHT_WHERE", opts.HasExteriorLight ? (opts.LightWhere ?? "") : ""));
             sb.Append(Conf("TOPIC_LIGHT", opts.EffectiveTopicLight));
             sb.Append(Conf("TOPIC_LIGHT_AVAIL", opts.EffectiveTopicLightAvail));
 

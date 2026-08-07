@@ -451,7 +451,7 @@ Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comando
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de comandos remoto</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Um tópico está vazio, ocupa várias linhas ou um tópico de publicação contém um caráter universal MQTT ('+' ou '#').</value></data>
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>O id do nó Home Assistant só pode conter letras e dígitos ASCII, '_' ou '-'.</value></data>
-  <data name="MqttHint_LightWhere" xml:space="preserve"><value>O endereço da luz (WHERE) só pode conter dígitos, ou ficar vazio para desativar o interruptor de Luz.</value></data>
+  <data name="MqttHint_LightWhere" xml:space="preserve"><value>O endereço da luz (WHERE) só pode conter dígitos, ou ficar vazio para o aprender em tempo de execução.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>ligação recusada ou sem resposta.</value></data>
 
   <!-- ================= Download official firmware (issue #23) ================= -->

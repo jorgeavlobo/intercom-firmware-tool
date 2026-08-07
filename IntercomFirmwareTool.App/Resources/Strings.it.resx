@@ -451,7 +451,7 @@ Abilitalo solo su un broker autenticato e attendibile. Abilitare il canale dei c
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canale dei comandi remoti</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Un topic è vuoto, occupa più righe oppure un topic di pubblicazione contiene un carattere jolly MQTT ('+' o '#').</value></data>
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>L'id del nodo Home Assistant può contenere solo lettere e cifre ASCII, '_' o '-'.</value></data>
-  <data name="MqttHint_LightWhere" xml:space="preserve"><value>L'indirizzo della luce (WHERE) può contenere solo cifre, oppure essere lasciato vuoto per disattivare l'interruttore Luce.</value></data>
+  <data name="MqttHint_LightWhere" xml:space="preserve"><value>L'indirizzo della luce (WHERE) può contenere solo cifre, oppure essere lasciato vuoto per apprenderlo in fase di esecuzione.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>connessione rifiutata o nessuna risposta.</value></data>
 
   <!-- ================= Download official firmware (issue #23) ================= -->

@@ -451,7 +451,7 @@ Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. 
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Ein Topic ist leer, umfasst mehrere Zeilen oder ein Veröffentlichungs-Topic enthält einen MQTT-Platzhalter ('+' oder '#').</value></data>
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>Die Home-Assistant-Knoten-ID darf nur ASCII-Buchstaben, ASCII-Ziffern, '_' oder '-' enthalten.</value></data>
-  <data name="MqttHint_LightWhere" xml:space="preserve"><value>Die Lichtadresse (WHERE) darf nur Ziffern enthalten oder leer bleiben, um den Licht-Schalter zu deaktivieren.</value></data>
+  <data name="MqttHint_LightWhere" xml:space="preserve"><value>Die Lichtadresse (WHERE) darf nur Ziffern enthalten oder leer bleiben, um sie zur Laufzeit zu erlernen.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>Verbindung abgelehnt oder keine Antwort.</value></data>
 
   <!-- ================= Download official firmware (issue #23) ================= -->
