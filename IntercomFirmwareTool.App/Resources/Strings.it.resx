@@ -440,7 +440,7 @@ Chiave: {1}</value></data>
   <data name="Field_MqttTopicKey" xml:space="preserve"><value>Tastierino:</value></data>
   <data name="Field_MqttTopicCmdResult" xml:space="preserve"><value>Risultato comando:</value></data>
   <data name="Field_MqttTopicFileContent" xml:space="preserve"><value>Contenuto file:</value></data>
-  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>Il canale dei comandi remoti consente a chiunque possa pubblicare sul topic di ricezione di leggere o scrivere file ed eseguire comandi sul dispositivo. Senza TLS, le richieste, le risposte e nome utente e password del broker vengono inviati in chiaro.
+  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>Il canale dei comandi remoti consente a chiunque possa pubblicare sul topic di ricezione di leggere o scrivere file ed eseguire comandi sul dispositivo. Senza TLS, le richieste, le risposte, il nome utente e la password del broker vengono inviati in chiaro.
 
 Abilitalo solo su un broker autenticato e attendibile. Abilitare il canale dei comandi remoti?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canale dei comandi remoti</value></data>
