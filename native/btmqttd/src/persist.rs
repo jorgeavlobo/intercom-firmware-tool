@@ -55,6 +55,10 @@ const STATE_FILE: &str = "broker-ip";
 /// state instead of guessing — the actuator has no readable state to re-query.
 const LIGHT_FILE: &str = "light-state";
 
+/// The LEARNED stair-light WHERE (digits), persisted so a unit that shipped in learn mode
+/// (LIGHT_ENABLED with an empty WHERE) keeps the WHERE it learned across reboots.
+const LIGHT_WHERE_FILE: &str = "light-where";
+
 /// The state directory, honouring `$BTMQTTD_STATE_DIR` (tests/dev) like `config.rs`
 /// honours `$BTMQTTD_CONF`.
 fn state_dir() -> PathBuf {
@@ -143,6 +147,31 @@ pub fn store_light(where_: &str, on: Option<bool>) -> bool {
 #[must_use]
 pub fn clear_light() -> bool {
     clear_light_in(&state_dir())
+}
+
+/// Persist the LEARNED stair-light WHERE (digits) so a learn-mode unit keeps it across
+/// reboots. Atomic write + dir fsync like the other records. Returns `true` on success.
+/// Blocking; call via `spawn_blocking`.
+#[must_use]
+pub fn store_light_where(where_: &str) -> bool {
+    let dir = state_dir();
+    atomic_write_in(&dir, &light_where_file_in(&dir), where_.as_bytes())
+}
+
+/// Read the persisted LEARNED WHERE (digits only). Returns `None` when absent, unreadable,
+/// or not a plain digit string — a caller then falls back to the build-time `LIGHT_WHERE`.
+pub fn read_light_where() -> Option<String> {
+    read_light_where_in(&state_dir())
+}
+
+fn light_where_file_in(dir: &Path) -> PathBuf {
+    dir.join(LIGHT_WHERE_FILE)
+}
+
+fn read_light_where_in(dir: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(light_where_file_in(dir)).ok()?;
+    let t = s.trim();
+    (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit())).then(|| t.to_string())
 }
 
 // ---------------------------------------------------------------------------

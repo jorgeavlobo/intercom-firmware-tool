@@ -123,11 +123,26 @@ async fn run() -> Result<(), String> {
     // OWN task (`run_persist`), fed by a watch channel. That task is DRAINED at shutdown (via
     // the oneshot below) so a toggle actuated the instant before SIGTERM is still written —
     // the command worker is aborted, but the persist task is signalled + awaited.
+    // Restart signal: fired when a WHERE is LEARNED at runtime, so `main` shuts down cleanly
+    // and the init/watchdog respawns btmqttd with the learned WHERE bound (the state-persist
+    // task is keyed by WHERE at startup — a clean restart is the simplest way to activate it).
+    let restart = Arc::new(tokio::sync::Notify::new());
     #[allow(clippy::type_complexity)]
     let (light, light_persist): (
         Option<Arc<light::LightCtl>>,
         Option<(tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<()>)>,
-    ) = if let Some(where_) = cfg.light_where.clone() {
+    ) = if !cfg.light_enabled {
+        // Feature DISABLED: forget any persisted light-state, so that re-enabling the same
+        // WHERE later starts from an UNKNOWN baseline instead of restoring a value that may
+        // have gone stale while untracked (a physical toggle we didn't see) — Codex.
+        clear_persisted_light("feature disabled").await;
+        (None, None)
+    } else if let Some(where_) = {
+        // Enabled: a WHERE LEARNED at runtime (persisted) wins over the build-time value, so a
+        // unit that shipped blank keeps what it learned across reboots.
+        let learned = tokio::task::spawn_blocking(persist::read_light_where).await.unwrap_or(None);
+        learned.or_else(|| cfg.light_where.clone())
+    } {
         let where_for_read = where_.clone();
         let restore = tokio::task::spawn_blocking(move || persist::read_light(&where_for_read))
             .await
@@ -159,7 +174,8 @@ async fn run() -> Result<(), String> {
                 (None, true)
             }
         };
-        let (ctl, persist_rx) = light::LightCtl::new(&cfg, client.clone(), initial);
+        let (ctl, persist_rx) =
+            light::LightCtl::new(&cfg, client.clone(), initial, Some(where_.clone()), restart.clone());
         let (persist_shutdown_tx, persist_shutdown_rx) = tokio::sync::oneshot::channel();
         // Pass the restored disk value as the persist task's durable BASELINE explicitly, so a
         // command/observe that bumps the channel before the task is first polled is still
@@ -173,11 +189,13 @@ async fn run() -> Result<(), String> {
         ));
         (Some(ctl), Some((persist_shutdown_tx, persist_task)))
     } else {
-        // Feature DISABLED: forget any persisted light-state, so that re-enabling the same
-        // WHERE later starts from an UNKNOWN baseline instead of restoring a value that may
-        // have gone stale while untracked (a physical toggle we didn't see) — Codex.
-        clear_persisted_light("feature disabled").await;
-        (None, None)
+        // LEARN MODE: enabled but no WHERE yet (blank build + none learned). The controller
+        // exists so the Learn button works and the switch/resync entities are present but
+        // marked UNAVAILABLE (via topic_light_avail = offline); no state-persist task runs
+        // until a WHERE is learned (which restarts btmqttd into the where-known path above).
+        let (ctl, _persist_rx) =
+            light::LightCtl::new(&cfg, client.clone(), None, None, restart.clone());
+        (Some(ctl), None)
     };
 
     // Locks (issue #41) run on their OWN task, fed by a small channel: the command worker
@@ -415,6 +433,12 @@ async fn run() -> Result<(), String> {
         tokio::select! {
             _ = sig_term.recv() => break,
             _ = sig_int.recv() => break,
+            // A WHERE was just LEARNED: shut down cleanly (same path as SIGTERM) so the init
+            // script/watchdog respawns btmqttd with the learned WHERE active.
+            _ = restart.notified() => {
+                eprintln!("btmqttd: restarting to activate a newly-learned light WHERE");
+                break;
+            }
             ev = eventloop.poll() => {
                 match ev {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {

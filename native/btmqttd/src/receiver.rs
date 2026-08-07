@@ -220,6 +220,12 @@ enum Action {
     /// Stair-light SWITCH desired state — `on` (`true`) / `off` (`false`). The daemon
     /// toggles the actuator only when the tracked state differs (see `light.rs`).
     Light(bool),
+    /// Stair-light RESYNC button: correct the tracked state (unknown→on→off→on) WITHOUT
+    /// actuating the relay — realigns HA to the wall after a cold boot / missed press.
+    LightResync,
+    /// Stair-light LEARN button: open the capture window so the next physical press teaches
+    /// the actuator WHERE (for a unit that shipped without a known WHERE).
+    LightLearn,
 }
 
 /// Classify a JSON action object (`{"action":<name>,"value":…}`) into an [`Action`], or
@@ -245,6 +251,9 @@ fn parse_action(action: &str, v: &Value) -> Option<Action> {
             Some("off") => Some(Action::Light(false)),
             _ => None,
         },
+        // Stateless BUTTON presses — no "value" field.
+        "light_resync" => Some(Action::LightResync),
+        "light_learn" => Some(Action::LightLearn),
         _ => None,
     }
 }
@@ -278,6 +287,16 @@ async fn handle_action(
         Some(Action::Light(on)) => match light {
             Some(l) => l.command(on).await,
             None => eprintln!("btmqttd: ignored 'light' action — light feature not configured"),
+        },
+        // Resync: correct the tracked state only (no relay actuation). Learn: open the WHERE
+        // capture window. Both no-op when the light feature is off.
+        Some(Action::LightResync) => match light {
+            Some(l) => l.resync().await,
+            None => eprintln!("btmqttd: ignored 'light_resync' — light feature not configured"),
+        },
+        Some(Action::LightLearn) => match light {
+            Some(l) => l.learn().await,
+            None => eprintln!("btmqttd: ignored 'light_learn' — light feature not configured"),
         },
         None => eprintln!(
             "btmqttd: ignored action {action:?} (unknown, or missing/invalid value {:?})",

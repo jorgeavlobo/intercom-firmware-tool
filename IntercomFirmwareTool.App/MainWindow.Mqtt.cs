@@ -526,6 +526,16 @@ namespace IntercomFirmwareTool.App
             MqttTopicsPanel.Visibility = ChkMqttTopics.IsChecked == true
                 ? Visibility.Visible : Visibility.Collapsed;
 
+        /// <summary>"Has exterior light": reveal the WHERE field + learn hint. A blank WHERE with
+        /// the box ticked means the unit will LEARN the WHERE at runtime.</summary>
+        private void ChkMqttHasLight_Toggled(object sender, RoutedEventArgs e)
+        {
+            var vis = ChkMqttHasLight.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+            LightWherePanel.Visibility = vis;
+            LblMqttLightLearnHint.Visibility = vis;
+            UpdateBuildEnabled();
+        }
+
         /// <summary>Toggle whole-value reveal on the broker password.</summary>
         private void BtnMqttReveal_Click(object sender, RoutedEventArgs e)
         {
@@ -1340,10 +1350,12 @@ namespace IntercomFirmwareTool.App
                             return L("MqttHint_HaNodeId");
             }
 
-            // Stair-light WHERE — mirror the Core validator (Mqtt_InvalidLightWhere):
-            // opt-in, so an empty field is valid (feature off), but a non-empty value
-            // must be digits only (it becomes the *8*21*<WHERE>## actuator address). Fail
-            // here rather than let Build enable and then abort with the Core popup.
+            // Stair-light WHERE — mirror the Core validator (Mqtt_InvalidLightWhere): only when
+            // "has exterior light" is ticked (else the field is hidden and ignored). A BLANK
+            // WHERE is valid (learn it at runtime); a non-empty value must be digits only (it
+            // becomes the *8*21*<WHERE>## actuator address). Fail here rather than let Build
+            // enable and then abort with the Core popup.
+            if (ChkMqttHasLight.IsChecked == true)
             {
                 string where = TxtMqttLightWhere.Text.Trim();
                 if (where.Length > 0 && !where.All(char.IsAsciiDigit))
@@ -1443,12 +1455,13 @@ namespace IntercomFirmwareTool.App
                 // 100X/300X); the record default is a model-neutral fallback. The node id
                 // above is the machine id (auto-filled from the same model, editable).
                 HaDeviceName = _fwzMatch?.HaDeviceName ?? new MqttOptions("x").HaDeviceName,
-                // Stair-light SWITCH (opt-in): the WHO=8 actuator WHERE (digits) is
-                // installation-specific — the "light button" WHAT (21/22) is universal, but
-                // the WHERE the building wired is not, so each user enters their own (captured
-                // as `*8*21*<WHERE>##`). Empty ⇒ no light entity is emitted (feature off);
-                // Core validates it is digits-only.
+                // Exterior light (opt-in). "Has exterior light" ships the switch + resync + learn
+                // entities; the WHERE (digits) is installation-specific — captured as
+                // `*8*21*<WHERE>##`. A BLANK WHERE with the box ticked means LEARN it at runtime.
+                HasExteriorLight = ChkMqttHasLight.IsChecked == true,
                 LightWhere = NullIfEmpty(TxtMqttLightWhere.Text.Trim()),
+                // Secondary lock (opt-in): create its HA entity only when a second gate is wired.
+                HasSecondaryLock = ChkMqttSecondaryLock.IsChecked == true,
             };
 
             // Surface the Core validator's exact (localized) message as a clean

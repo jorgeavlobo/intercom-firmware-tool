@@ -188,6 +188,20 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         public string? LightWhere { get; init; }
 
+        /// <summary>"Has exterior light" opt-in (default false). When true the light subsystem
+        /// ships (switch + resync + learn entities) even if <see cref="LightWhere"/> is blank —
+        /// a blank WHERE means LEARN it at runtime. When false, no light entities are created.</summary>
+        public bool HasExteriorLight { get; init; }
+
+        /// <summary>"Has secondary lock" opt-in (default false). When true the Secondary Lock
+        /// button entity is created; when false it is tombstoned (not everyone wires a second
+        /// gate, so it shouldn't clutter HA). The Main Lock is always present.</summary>
+        public bool HasSecondaryLock { get; init; }
+
+        /// <summary>Retained light-availability topic. NULL (default) derives from the
+        /// <see cref="TopicLastWill"/> namespace (see <see cref="EffectiveTopicLightAvail"/>).</summary>
+        public string? TopicLightAvail { get; init; }
+
         /// <summary>Retained light-state topic (on/off) HA's light switch reads back.
         /// NULL (default) derives from the <see cref="TopicLastWill"/> namespace — see
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicLight"/>.</summary>
@@ -207,8 +221,18 @@ namespace IntercomFirmwareTool.Core
         public string EffectiveTopicCallState => TopicCallState ?? (TopicNamespace(TopicLastWill) + "call_state");
         /// <summary>The light state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicLight => TopicLight ?? (TopicNamespace(TopicLastWill) + "light");
-        /// <summary>Whether the stair-light switch is enabled — a non-empty <see cref="LightWhere"/>.</summary>
-        public bool LightEnabled => !string.IsNullOrEmpty(LightWhere);
+        /// <summary>The light-availability topic actually used (retained online/offline gate that
+        /// keeps HA's switch + resync unavailable until a WHERE is known). Defaults from the LWT
+        /// namespace like the other topics; btmqttd's default key must match (TOPIC_LIGHT_AVAIL).</summary>
+        public string EffectiveTopicLightAvail => TopicLightAvail ?? (TopicNamespace(TopicLastWill) + "light_avail");
+        /// <summary>Whether the exterior-light subsystem is present at all — the "has exterior
+        /// light" opt-in. When true the switch + resync + learn entities ship; the WHERE may be
+        /// known (from the build) or LEARNED at runtime (<see cref="LightLearnMode"/>).</summary>
+        public bool LightEnabled => HasExteriorLight;
+        /// <summary>Light enabled but no WHERE yet (blank field): the unit will LEARN the WHERE at
+        /// runtime. The switch + resync ship UNAVAILABLE (gated by the light-availability topic)
+        /// until the Learn button captures it.</summary>
+        public bool LightLearnMode => HasExteriorLight && string.IsNullOrEmpty(LightWhere);
 
         /// <summary>The namespace prefix of <paramref name="topic"/> — everything up to
         /// and INCLUDING the last '/', or "" when the topic has no '/'. Scopes the
@@ -509,10 +533,11 @@ namespace IntercomFirmwareTool.Core
             if (opts.AllowRemoteShell && !(opts.HasAuth || opts.HasMutualTls))
                 throw new ArgumentException(CoreStrings.Get("Mqtt_RemoteShellNeedsAuth"), nameof(opts));
 
-            // Stair-light WHERE (opt-in): digits only, matching btmqttd's LIGHT_WHERE parse
-            // (a non-numeric value is ignored device-side, silently disabling the feature).
-            // Reject it here where the user sees why.
-            if (opts.LightEnabled && !opts.LightWhere!.All(char.IsAsciiDigit))
+            // Stair-light WHERE: digits only, matching btmqttd's LIGHT_WHERE parse. A BLANK WHERE
+            // is allowed when the light is enabled — it means LEARN it at runtime — so only a
+            // non-empty, non-numeric value is rejected (here, where the user sees why).
+            if (opts.LightEnabled && !string.IsNullOrEmpty(opts.LightWhere)
+                && !opts.LightWhere.All(char.IsAsciiDigit))
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidLightWhere"), nameof(opts));
 
             // Topics must be non-empty and single-line (they are sourced into the
@@ -521,7 +546,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
                                       opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicLight })
+                                      opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
@@ -534,7 +559,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                       opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicLight })
+                                      opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
                 // prefix — both are subscription-only and invalid to PUBLISH to (a broker
                 // rejects the publish), so no publish topic (including the derived volume/
@@ -915,12 +940,15 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_FLOOR_CALL", opts.EffectiveTopicFloorCall));
             sb.Append(Conf("TOPIC_CALL_STATE", opts.EffectiveTopicCallState));
 
-            // Stair-light SWITCH (opt-in): LIGHT_WHERE is the WHO=8 actuator WHERE
-            // (installation-specific; empty ⇒ feature off, and btmqttd emits no light entity).
-            // TOPIC_LIGHT is the retained on/off state topic btmqttd tracks (the actuator has
-            // no readable state). Command reuses TOPIC_RX (a JSON action).
-            sb.Append(Conf("LIGHT_WHERE", opts.LightEnabled ? opts.LightWhere! : ""));
+            // Stair-light SWITCH (opt-in). LIGHT_ENABLED is the "has exterior light" choice: the
+            // subsystem runs when set, even with an EMPTY LIGHT_WHERE (learn mode — btmqttd learns
+            // the WHO=8 actuator WHERE from the first physical press). TOPIC_LIGHT is the retained
+            // on/off state btmqttd tracks (no readable state); TOPIC_LIGHT_AVAIL gates HA's switch +
+            // resync OFFLINE until a WHERE is known. Commands reuse TOPIC_RX (JSON actions).
+            sb.Append(Conf("LIGHT_ENABLED", opts.HasExteriorLight ? "1" : "0"));
+            sb.Append(Conf("LIGHT_WHERE", opts.LightWhere ?? ""));
             sb.Append(Conf("TOPIC_LIGHT", opts.EffectiveTopicLight));
+            sb.Append(Conf("TOPIC_LIGHT_AVAIL", opts.EffectiveTopicLightAvail));
 
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 
@@ -1005,6 +1033,8 @@ namespace IntercomFirmwareTool.Core
             ("main_lock.json", "button", "main_lock"),
             ("secondary_lock.json", "button", "secondary_lock"),
             ("light.json", "switch", "light"),
+            ("light_resync.json", "button", "light_resync"),
+            ("light_learn.json", "button", "light_learn"),
         };
 
         /// <summary>
@@ -1471,7 +1501,13 @@ namespace IntercomFirmwareTool.Core
                     }, HaJson)));
 
             AddLock("main_lock", "Main Lock", "main_lock", "mdi:lock");
-            AddLock("secondary_lock", "Secondary Lock", "secondary_lock", "mdi:lock-outline");
+            // Secondary Lock is OPT-IN (#not everyone wires a second gate): add it only when the
+            // installer enabled it, else TOMBSTONE the config (empty retained) so a previous
+            // build's entity is cleared from HA rather than lingering.
+            if (opts.HasSecondaryLock)
+                AddLock("secondary_lock", "Secondary Lock", "secondary_lock", "mdi:lock-outline");
+            else
+                entities.Add(new HaEntity("secondary_lock.json", Topic("button", "secondary_lock"), ""));
 
             // Stair-light SWITCH (opt-in). The actuator is a stateless TOGGLE with no readable
             // state (firmware-confirmed), so btmqttd tracks the on/off and publishes it retained
@@ -1481,6 +1517,17 @@ namespace IntercomFirmwareTool.Core
             // the non-idempotent lock pulses above. When the feature is OFF, TOMBSTONE the
             // config (empty retained) so turning it off in a later build drops the stale entity.
             if (opts.LightEnabled)
+            {
+                // Availability that ALSO gates on "a WHERE is known": both the device (LWT) and
+                // the light subsystem (EffectiveTopicLightAvail) must report online. The switch +
+                // resync use this so they show UNAVAILABLE in learn mode; the Learn button uses
+                // the plain device availability (it is how the user LEAVES learn mode).
+                var lightAvail = new[]
+                {
+                    new { topic = opts.TopicLastWill, payload_available = "online", payload_not_available = "offline" },
+                    new { topic = opts.EffectiveTopicLightAvail, payload_available = "online", payload_not_available = "offline" },
+                };
+
                 entities.Add(new HaEntity(
                     "light.json",
                     Topic("switch", "light"),
@@ -1497,13 +1544,63 @@ namespace IntercomFirmwareTool.Core
                         state_on = "on",
                         state_off = "off",
                         icon = "mdi:lightbulb",
+                        availability = lightAvail,
+                        availability_mode = "all",
+                        device,
+                    }, HaJson)));
+
+                // "Resync light state" — a CONFIG-section button that corrects the TRACKED state
+                // (unknown→on→off→on) WITHOUT actuating the relay, so the user realigns HA to the
+                // wall after a cold boot / a press missed while the daemon was down. Same WHERE-gated
+                // availability as the switch.
+                entities.Add(new HaEntity(
+                    "light_resync.json",
+                    Topic("button", "light_resync"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Resync light state",
+                        unique_id = $"{node}_light_resync",
+                        default_entity_id = EntId("button", "light_resync"),
+                        command_topic = controlTopic,
+                        qos = 0,
+                        payload_press = "{\"action\":\"light_resync\"}",
+                        icon = "mdi:sync",
+                        entity_category = "config",
+                        availability = lightAvail,
+                        availability_mode = "all",
+                        device,
+                    }, HaJson)));
+
+                // "Learn light" — a CONFIG-section button that opens the capture window; the user
+                // then presses the physical stair-light button once to teach the WHERE. Available
+                // whenever the device is online (it is the way OUT of learn mode), so it uses the
+                // plain device availability, not the WHERE-gated one.
+                entities.Add(new HaEntity(
+                    "light_learn.json",
+                    Topic("button", "light_learn"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Learn light",
+                        unique_id = $"{node}_light_learn",
+                        default_entity_id = EntId("button", "light_learn"),
+                        command_topic = controlTopic,
+                        qos = 0,
+                        payload_press = "{\"action\":\"light_learn\"}",
+                        icon = "mdi:school",
+                        entity_category = "config",
                         availability_topic = opts.TopicLastWill,
                         payload_available = "online",
                         payload_not_available = "offline",
                         device,
                     }, HaJson)));
+            }
             else
+            {
+                // Feature OFF → tombstone all three light configs so a prior build's entities clear.
                 entities.Add(new HaEntity("light.json", Topic("switch", "light"), ""));
+                entities.Add(new HaEntity("light_resync.json", Topic("button", "light_resync"), ""));
+                entities.Add(new HaEntity("light_learn.json", Topic("button", "light_learn"), ""));
+            }
 
             return entities;
         }

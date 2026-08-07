@@ -432,7 +432,12 @@ Clé : {1}</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Id de l'appareil :</value></data>
   <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identifiant de l'appareil Home Assistant et de ses entités. Distinct par unité donne à chaque pont son propre appareil HA ; pour plusieurs unités sur un même broker, définissez aussi des topics distincts (sinon ils se reflètent). Uniquement lettres et chiffres ASCII, « _ » ou « - ».</value></data>
   <data name="Field_MqttLightWhere" xml:space="preserve"><value>Adresse de la lumière (WHERE) :</value></data>
-  <data name="Tip_MqttLightWhere" xml:space="preserve"><value>Facultatif. L'adresse OpenWebNet (WHERE) du bouton de lumière d'escalier SUR VOTRE installation — les chiffres de la trame *8*21*&lt;WHERE&gt;## que le panneau envoie quand vous appuyez sur le bouton lumière (capturez-la sur le bus). Vide désactive l'interrupteur Lumière. Chiffres uniquement.</value></data>
+  <data name="Tip_MqttLightWhere" xml:space="preserve"><value>Facultatif. L'adresse OpenWebNet (WHERE) du bouton de lumière d'escalier SUR VOTRE installation — les chiffres de la trame *8*21*&lt;WHERE&gt;## que le panneau envoie quand vous appuyez sur le bouton lumière (capturez-la sur le bus). Vide : l'appareil l'apprend plus tard (depuis Home Assistant). Chiffres uniquement.</value></data>
+  <data name="Chk_MqttHasLight" xml:space="preserve"><value>L'unité a une lumière extérieure</value></data>
+  <data name="Tip_MqttHasLight" xml:space="preserve"><value>Cochez si votre entrée a une lumière commandée depuis le poste. Saisissez ensuite son adresse (WHERE), ou laissez-la vide pour l'apprendre plus tard depuis Home Assistant.</value></data>
+  <data name="Hint_MqttLightLearn" xml:space="preserve"><value>Vous ne connaissez pas l'adresse ? Laissez-la vide — l'unité l'apprend : appuyez sur « Learn light » dans Home Assistant, puis appuyez une fois sur le bouton physique de la lumière.</value></data>
+  <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>L'unité a une serrure secondaire</value></data>
+  <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Cochez pour ajouter un second bouton d'ouverture dans Home Assistant. Laissez décoché si votre installation n'a qu'un seul portail.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Réception (commandes) :</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Vidage du bus :</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Date de début :</value></data>
