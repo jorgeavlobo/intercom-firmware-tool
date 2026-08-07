@@ -366,8 +366,8 @@ Abra Avanzado → Resultado para ver qué comprobaciones fallaron.</value></data
   <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Borrar el archivo {0}</value></data>
   <data name="Ph_MqttPem" xml:space="preserve"><value>(opcional: elija un archivo PEM)</value></data>
   <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Permitir canal de comandos remoto</value></data>
-  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Habilita el canal de comandos MQTT protegido. Requiere autenticación en el broker (usuario y contraseña, o TLS mutuo).</value></data>
-  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>El canal de comandos remoto puede ejecutar comandos en el dispositivo. Actívelo solo con un broker autenticado y de confianza.</value></data>
+  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Qué añade: por MQTT puede leer archivos, escribir archivos y ejecutar cualquier comando en el portero — en la práctica, control y administración remotos completos. (Los controles de volumen, silencio y abrepuertas funcionan sin esto.) Requiere autenticación en el broker: usuario y contraseña, o TLS mutuo.</value></data>
+  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Concede acceso completo al dispositivo: cualquiera que pueda publicar en el topic de recepción puede leer o escribir archivos y ejecutar comandos. Actívelo solo con un broker autenticado y de confianza.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>broker MQTT</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>El puerto MQTT debe estar entre 1 y 65535.</value></data>
   <data name="MqttHint_Host" xml:space="preserve"><value>El host del broker debe ser una dirección IP o un nombre de host válido.</value></data>

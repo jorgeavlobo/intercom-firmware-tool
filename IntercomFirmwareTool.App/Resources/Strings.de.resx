@@ -366,8 +366,8 @@ Der Vorgang ist abgeschlossen.</value></data>
   <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Datei {0} löschen</value></data>
   <data name="Ph_MqttPem" xml:space="preserve"><value>(optional: eine PEM-Datei wählen)</value></data>
   <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal zulassen</value></data>
-  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Aktiviert den geschützten MQTT-Befehlskanal. Erfordert eine Broker-Authentifizierung (Benutzername und Passwort oder gegenseitiges TLS).</value></data>
-  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Der Fernbefehlskanal kann Befehle auf dem Gerät ausführen. Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker.</value></data>
+  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Was es hinzufügt: Über MQTT können Sie Dateien lesen, Dateien schreiben und beliebige Befehle auf der Türsprechanlage ausführen — praktisch die vollständige Fernsteuerung und -verwaltung. (Die Regler für Lautstärke, Stumm und Türöffner funktionieren auch ohne.) Erfordert eine Broker-Authentifizierung: Benutzername und Passwort oder gegenseitiges TLS.</value></data>
+  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Dies gewährt vollen Zugriff auf das Gerät: Wer im Empfangs-Topic veröffentlichen kann, kann Dateien lesen oder schreiben und Befehle ausführen. Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>MQTT-Broker</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>Der MQTT-Port muss zwischen 1 und 65535 liegen.</value></data>
   <data name="MqttHint_Host" xml:space="preserve"><value>Der Broker-Host muss eine gültige IP-Adresse oder ein gültiger Hostname sein.</value></data>

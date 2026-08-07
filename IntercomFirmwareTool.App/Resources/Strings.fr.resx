@@ -366,8 +366,8 @@ Ouvrez Avancé → Résultat pour voir quelles vérifications ont échoué.</val
   <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Effacer le fichier {0}</value></data>
   <data name="Ph_MqttPem" xml:space="preserve"><value>(facultatif : choisissez un fichier PEM)</value></data>
   <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Autoriser le canal de commandes à distance</value></data>
-  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Active le canal de commandes MQTT protégé. Nécessite une authentification auprès du broker (nom d'utilisateur et mot de passe, ou TLS mutuel).</value></data>
-  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Le canal de commandes à distance peut exécuter des commandes sur l'appareil. Ne l'activez qu'avec un broker authentifié et de confiance.</value></data>
+  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Ce que cela ajoute : via MQTT, vous pouvez lire des fichiers, écrire des fichiers et exécuter n'importe quelle commande sur le portier — en pratique, le contrôle et l'administration à distance complets. (Les commandes de volume, sourdine et gâche fonctionnent sans cela.) Nécessite une authentification auprès du broker : nom d'utilisateur et mot de passe, ou TLS mutuel.</value></data>
+  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Cela donne un accès complet à l'appareil : quiconque peut publier sur le topic de réception peut lire ou écrire des fichiers et exécuter des commandes. Ne l'activez qu'avec un broker authentifié et de confiance.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>broker MQTT</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>Le port MQTT doit être compris entre 1 et 65535.</value></data>
   <data name="MqttHint_Host" xml:space="preserve"><value>L'hôte du broker doit être une adresse IP ou un nom d'hôte valide.</value></data>
