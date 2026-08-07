@@ -494,9 +494,10 @@ impl LightCtl {
 
     /// Publish the light-subsystem availability (retained): `online` once a WHERE is known,
     /// `offline` in learn mode. HA greys out the switch + resync until the WHERE is learned.
-    /// Public so `main` can assert the gate BEFORE the bridge birth `online`, closing the window
-    /// where HA would see a stale retained `online` and command a still-unbound light (Codex).
-    pub async fn publish_avail(&self) {
+    /// Uses the drop-on-full `try_publish` because it runs on the reconnect `seed()` path where a
+    /// dropped publish is recovered by the sender loop's periodic reseed; the ORDERED startup gate
+    /// uses [`announce_avail`] instead.
+    async fn publish_avail(&self) {
         let payload = if self.have_where() { "online" } else { "offline" };
         crate::sender::try_publish_retained(
             &self.client,
@@ -504,6 +505,22 @@ impl LightCtl {
             QoS::AtLeastOnce,
             payload.as_bytes().to_vec(),
         );
+    }
+
+    /// Assert the availability gate with an AWAITED, error-checked publish — used by `main` at
+    /// startup so the bridge birth `online` is not published until this gate is actually QUEUED.
+    /// `publish_avail`'s drop-on-full try-publish would let the gate be dropped and the bridge
+    /// `online` still queue after capacity frees, re-exposing the stale-`online` race on a
+    /// configured→learn-mode reflash (CodeRabbit). Retained, QoS 1, like the reconnect seed.
+    pub async fn announce_avail(&self) {
+        let payload = if self.have_where() { "online" } else { "offline" };
+        if let Err(e) = self
+            .client
+            .publish(&self.topic_light_avail, QoS::AtLeastOnce, true, payload.as_bytes().to_vec())
+            .await
+        {
+            eprintln!("btmqttd: publish light availability gate failed: {e}");
+        }
     }
 }
 

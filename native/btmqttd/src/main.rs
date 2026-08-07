@@ -853,9 +853,10 @@ async fn announce(
     // light_avail=online from the previous run; publishing the current gate (offline in learn
     // mode) first closes the window where HA would see the bridge online alongside that stale
     // value and issue a light command the controller drops (WHERE still unbound) — Codex. seed()
-    // below re-asserts it (idempotent, retained).
+    // below re-asserts it (idempotent, retained). An AWAITED, error-checked publish (not the
+    // drop-on-full try-publish) so the bridge `online` cannot queue before this gate (CodeRabbit).
     if let Some(light) = &light {
-        light.publish_avail().await;
+        light.announce_avail().await;
     }
     if let Err(e) = client
         .publish(&cfg.topic_lastwill, QoS::AtMostOnce, true, "online")
