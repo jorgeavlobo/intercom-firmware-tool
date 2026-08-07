@@ -366,8 +366,8 @@ Apri Avanzate → Risultato per vedere quali controlli sono falliti.</value></da
   <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Cancella il file {0}</value></data>
   <data name="Ph_MqttPem" xml:space="preserve"><value>(opzionale: scegli un file PEM)</value></data>
   <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Consenti il canale dei comandi remoti</value></data>
-  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Abilita il canale dei comandi MQTT protetto. Richiede l'autenticazione al broker (nome utente e password, oppure TLS reciproco).</value></data>
-  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Il canale dei comandi remoti può eseguire comandi sul dispositivo. Abilitalo solo con un broker autenticato e attendibile.</value></data>
+  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Cosa aggiunge: via MQTT puoi leggere file, scrivere file ed eseguire qualsiasi comando sul citofono — di fatto il pieno controllo e la piena amministrazione da remoto. Richiede l'autenticazione al broker: nome utente e password, oppure TLS reciproco.</value></data>
+  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>Concede l'accesso completo al dispositivo: chiunque possa pubblicare sul topic di ricezione può leggere o scrivere file ed eseguire comandi. Abilitalo solo con un broker autenticato e attendibile.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>broker MQTT</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>La porta MQTT deve essere compresa tra 1 e 65535.</value></data>
   <data name="MqttHint_Host" xml:space="preserve"><value>L'host del broker deve essere un indirizzo IP o un nome host valido.</value></data>
@@ -440,7 +440,7 @@ Chiave: {1}</value></data>
   <data name="Field_MqttTopicKey" xml:space="preserve"><value>Tastierino:</value></data>
   <data name="Field_MqttTopicCmdResult" xml:space="preserve"><value>Risultato comando:</value></data>
   <data name="Field_MqttTopicFileContent" xml:space="preserve"><value>Contenuto file:</value></data>
-  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>Il canale dei comandi remoti consente a chiunque possa pubblicare sul topic di ricezione di eseguire comandi sul dispositivo. Le risposte vengono inviate in chiaro se il TLS non è configurato.
+  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>Il canale dei comandi remoti consente a chiunque possa pubblicare sul topic di ricezione di leggere o scrivere file ed eseguire comandi sul dispositivo. Le risposte vengono inviate in chiaro se il TLS non è configurato.
 
 Abilitalo solo su un broker autenticato e attendibile. Abilitare il canale dei comandi remoti?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canale dei comandi remoti</value></data>

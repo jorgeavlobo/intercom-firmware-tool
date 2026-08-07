@@ -366,8 +366,8 @@ Open Advanced → Result to see which checks failed.</value></data>
   <data name="Fmt_Aria_MqttClearFile" xml:space="preserve"><value>Clear the {0} file</value></data>
   <data name="Ph_MqttPem" xml:space="preserve"><value>(optional: choose a PEM file)</value></data>
   <data name="Chk_MqttRemoteShell" xml:space="preserve"><value>Allow remote command channel</value></data>
-  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>Enable the gated MQTT command channel. Requires broker authentication (username and password, or mutual TLS).</value></data>
-  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>The remote command channel can run commands on the device. Enable it only with an authenticated, trusted broker.</value></data>
+  <data name="Tip_MqttRemoteShell" xml:space="preserve"><value>What it adds: over MQTT you can read files, write files, and run any command on the intercom — effectively full remote control and administration. Requires broker authentication: username and password, or mutual TLS.</value></data>
+  <data name="Warn_MqttRemoteShell" xml:space="preserve"><value>This grants full access to the device: anyone able to publish to the receive topic can read or write files and run commands on it. Enable it only with an authenticated, trusted broker.</value></data>
   <data name="Miss_Mqtt" xml:space="preserve"><value>MQTT broker</value></data>
   <data name="MqttHint_Port" xml:space="preserve"><value>The MQTT port must be between 1 and 65535.</value></data>
   <data name="MqttHint_Host" xml:space="preserve"><value>The broker host must be a valid IP address or hostname.</value></data>
@@ -440,7 +440,7 @@ Key: {1}</value></data>
   <data name="Field_MqttTopicKey" xml:space="preserve"><value>Keypad:</value></data>
   <data name="Field_MqttTopicCmdResult" xml:space="preserve"><value>Command result:</value></data>
   <data name="Field_MqttTopicFileContent" xml:space="preserve"><value>File content:</value></data>
-  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>The remote command channel lets anyone able to publish to the receive topic run commands on the device. Replies are sent in cleartext unless TLS is configured.
+  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>The remote command channel lets anyone able to publish to the receive topic read or write files and run commands on the device. Replies are sent in cleartext unless TLS is configured.
 
 Enable it only on an authenticated, trusted broker. Enable the remote command channel?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Remote command channel</value></data>
