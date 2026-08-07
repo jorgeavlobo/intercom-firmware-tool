@@ -188,10 +188,15 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         public string? LightWhere { get; init; }
 
-        /// <summary>"Has exterior light" opt-in (default false). When true the light subsystem
-        /// ships (switch + resync + learn entities) even if <see cref="LightWhere"/> is blank —
-        /// a blank WHERE means LEARN it at runtime. When false, no light entities are created.</summary>
-        public bool HasExteriorLight { get; init; }
+        /// <summary>"Has exterior light" opt-in — a TRI-STATE. <c>true</c> ships the light
+        /// subsystem (switch + resync [+ learn when the WHERE is blank]) even if
+        /// <see cref="LightWhere"/> is blank — a blank WHERE means LEARN it at runtime. <c>false</c>
+        /// creates no light entities, authoritatively, even if a stale <see cref="LightWhere"/>
+        /// lingers. <c>null</c> (the default, for a Core-API caller that never set it) falls back to
+        /// the pre-opt-in behavior: the light is enabled iff <see cref="LightWhere"/> is populated,
+        /// so old callers that enabled the light by setting only <see cref="LightWhere"/> keep
+        /// working (Codex). The WPF app always sets this explicitly.</summary>
+        public bool? HasExteriorLight { get; init; }
 
         /// <summary>"Has secondary lock" opt-in (default false). When true the Secondary Lock
         /// button entity is created; when false it is tombstoned (not everyone wires a second
@@ -228,11 +233,11 @@ namespace IntercomFirmwareTool.Core
         /// <summary>Whether the exterior-light subsystem is present at all — the "has exterior
         /// light" opt-in. When true the switch + resync + learn entities ship; the WHERE may be
         /// known (from the build) or LEARNED at runtime (<see cref="LightLearnMode"/>).</summary>
-        public bool LightEnabled => HasExteriorLight;
+        public bool LightEnabled => HasExteriorLight ?? !string.IsNullOrEmpty(LightWhere);
         /// <summary>Light enabled but no WHERE yet (blank field): the unit will LEARN the WHERE at
         /// runtime. The switch + resync ship UNAVAILABLE (gated by the light-availability topic)
-        /// until the Learn button captures it.</summary>
-        public bool LightLearnMode => HasExteriorLight && string.IsNullOrEmpty(LightWhere);
+        /// until the Learn button captures it, and the Learn button is emitted ONLY in this mode.</summary>
+        public bool LightLearnMode => LightEnabled && string.IsNullOrEmpty(LightWhere);
 
         /// <summary>The namespace prefix of <paramref name="topic"/> — everything up to
         /// and INCLUDING the last '/', or "" when the topic has no '/'. Scopes the
@@ -958,11 +963,11 @@ namespace IntercomFirmwareTool.Core
             // the WHO=8 actuator WHERE from the first physical press). TOPIC_LIGHT is the retained
             // on/off state btmqttd tracks (no readable state); TOPIC_LIGHT_AVAIL gates HA's switch +
             // resync OFFLINE until a WHERE is known. Commands reuse TOPIC_RX (JSON actions).
-            sb.Append(Conf("LIGHT_ENABLED", opts.HasExteriorLight ? "1" : "0"));
+            sb.Append(Conf("LIGHT_ENABLED", opts.LightEnabled ? "1" : "0"));
             // Write the WHERE only when the light is ON. Emitting a leftover WHERE with
             // LIGHT_ENABLED=0 would re-enable the subsystem device-side, because config.rs
             // treats any valid LIGHT_WHERE as enabling (legacy-conf compatibility) — Codex.
-            sb.Append(Conf("LIGHT_WHERE", opts.HasExteriorLight ? (opts.LightWhere ?? "") : ""));
+            sb.Append(Conf("LIGHT_WHERE", opts.LightEnabled ? (opts.LightWhere ?? "") : ""));
             sb.Append(Conf("TOPIC_LIGHT", opts.EffectiveTopicLight));
             sb.Append(Conf("TOPIC_LIGHT_AVAIL", opts.EffectiveTopicLightAvail));
 
@@ -1590,25 +1595,33 @@ namespace IntercomFirmwareTool.Core
                 // "Learn light" — a CONFIG-section button that opens the capture window; the user
                 // then presses the physical stair-light button once to teach the WHERE. Available
                 // whenever the device is online (it is the way OUT of learn mode), so it uses the
-                // plain device availability, not the WHERE-gated one.
-                entities.Add(new HaEntity(
-                    "light_learn.json",
-                    Topic("button", "light_learn"),
-                    JsonSerializer.Serialize(new
-                    {
-                        name = "Learn light",
-                        unique_id = $"{node}_light_learn",
-                        default_entity_id = EntId("button", "light_learn"),
-                        command_topic = controlTopic,
-                        qos = 0,
-                        payload_press = "{\"action\":\"light_learn\"}",
-                        icon = "mdi:school",
-                        entity_category = "config",
-                        availability_topic = opts.TopicLastWill,
-                        payload_available = "online",
-                        payload_not_available = "offline",
-                        device,
-                    }, HaJson)));
+                // plain device availability, not the WHERE-gated one. Emitted ONLY in LEARN MODE
+                // (blank build WHERE): a CONFIGURED build has a fixed, authoritative WHERE that
+                // btmqttd's `learn()` guard refuses to override, so the button would be a guaranteed
+                // no-op — tombstone it instead (Codex).
+                if (opts.LightLearnMode)
+                    entities.Add(new HaEntity(
+                        "light_learn.json",
+                        Topic("button", "light_learn"),
+                        JsonSerializer.Serialize(new
+                        {
+                            name = "Learn light",
+                            unique_id = $"{node}_light_learn",
+                            default_entity_id = EntId("button", "light_learn"),
+                            command_topic = controlTopic,
+                            qos = 0,
+                            payload_press = "{\"action\":\"light_learn\"}",
+                            icon = "mdi:school",
+                            entity_category = "config",
+                            availability_topic = opts.TopicLastWill,
+                            payload_available = "online",
+                            payload_not_available = "offline",
+                            device,
+                        }, HaJson)));
+                else
+                    // Configured build → tombstone the Learn button (a previous learn-mode build may
+                    // have published it) so it doesn't linger as an inert control.
+                    entities.Add(new HaEntity("light_learn.json", Topic("button", "light_learn"), ""));
             }
             else
             {
