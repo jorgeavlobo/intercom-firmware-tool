@@ -432,7 +432,12 @@ Schlüssel: {1}</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Geräte-ID:</value></data>
   <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Kennung des Home-Assistant-Geräts und seiner Entitäten. Pro Einheit eigener Wert gibt jeder Bridge ihr eigenes HA-Gerät; für mehrere Einheiten an einem Broker auch eigene Topics festlegen (sonst spiegeln sie sich). Nur ASCII-Buchstaben, ASCII-Ziffern, '_' oder '-'.</value></data>
   <data name="Field_MqttLightWhere" xml:space="preserve"><value>Lichtadresse (WHERE):</value></data>
-  <data name="Tip_MqttLightWhere" xml:space="preserve"><value>Optional. Die OpenWebNet-Adresse (WHERE) des Treppenlicht-Tasters in IHRER Installation — die Ziffern im Rahmen *8*21*&lt;WHERE&gt;##, den das Panel beim Drücken der Lichttaste sendet (per Bus erfassen). Leer deaktiviert den Licht-Schalter. Nur Ziffern.</value></data>
+  <data name="Tip_MqttLightWhere" xml:space="preserve"><value>Optional. Die OpenWebNet-Adresse (WHERE) des Treppenlicht-Tasters in IHRER Installation — die Ziffern im Rahmen *8*21*&lt;WHERE&gt;##, den das Panel beim Drücken der Lichttaste sendet (per Bus erfassen). Leer: das Gerät lernt sie später (aus Home Assistant). Nur Ziffern.</value></data>
+  <data name="Chk_MqttHasLight" xml:space="preserve"><value>Die Einheit hat ein Außenlicht</value></data>
+  <data name="Tip_MqttHasLight" xml:space="preserve"><value>Aktivieren, wenn Ihr Eingang ein über das Panel gesteuertes Licht hat. Dann dessen Adresse (WHERE) eingeben oder leer lassen, um sie später aus Home Assistant zu lernen.</value></data>
+  <data name="Hint_MqttLightLearn" xml:space="preserve"><value>Adresse unbekannt? Leer lassen — die Einheit lernt sie: in Home Assistant „Learn light“ drücken, dann einmal die physische Lichttaste drücken.</value></data>
+  <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>Die Einheit hat ein zweites Schloss</value></data>
+  <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Aktivieren, um in Home Assistant eine zweite Türöffner-Taste hinzuzufügen. Aus lassen, wenn Ihre Installation nur ein Tor hat.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Empfang (Befehle):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Bus-Dump:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Startdatum:</value></data>
@@ -446,7 +451,7 @@ Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. 
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Fernbefehlskanal</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Ein Topic ist leer, umfasst mehrere Zeilen oder ein Veröffentlichungs-Topic enthält einen MQTT-Platzhalter ('+' oder '#').</value></data>
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>Die Home-Assistant-Knoten-ID darf nur ASCII-Buchstaben, ASCII-Ziffern, '_' oder '-' enthalten.</value></data>
-  <data name="MqttHint_LightWhere" xml:space="preserve"><value>Die Lichtadresse (WHERE) darf nur Ziffern enthalten oder leer bleiben, um den Licht-Schalter zu deaktivieren.</value></data>
+  <data name="MqttHint_LightWhere" xml:space="preserve"><value>Die Lichtadresse (WHERE) darf nur Ziffern enthalten oder leer bleiben, um sie zur Laufzeit zu erlernen.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>Verbindung abgelehnt oder keine Antwort.</value></data>
 
   <!-- ================= Download official firmware (issue #23) ================= -->

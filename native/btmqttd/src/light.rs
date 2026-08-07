@@ -46,11 +46,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rumqttc::{AsyncClient, QoS};
-use tokio::sync::{oneshot, watch, Mutex as AsyncMutex};
+use tokio::sync::{oneshot, watch, Mutex as AsyncMutex, Notify};
 use tokio::time::Instant;
 
 use crate::config::Config;
 use crate::receiver::forward_to_gateway;
+
+/// How long a "Learn light" press keeps the capture window open: press the button in HA,
+/// then press the PHYSICAL stair-light button once within this window to teach the WHERE.
+const LEARN_WINDOW: Duration = Duration::from_secs(60);
+
+/// Parse a stair-light press frame `*8*21*<WHERE>##` and return its WHERE (digits only).
+/// Used by the learn capture to adopt whatever actuator the physical button drives.
+fn parse_light_where(frame: &str) -> Option<&str> {
+    let w = frame.strip_prefix("*8*21*")?.strip_suffix("##")?;
+    (!w.is_empty() && w.bytes().all(|b| b.is_ascii_digit())).then_some(w)
+}
 
 /// Per-frame forward timeout for the toggle (loopback gateway; tight like the lock pulse).
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
@@ -172,6 +183,22 @@ impl State {
         self.on = self.on.map(|b| !b); // physical toggle; unknown stays unknown
         Some(self.on)
     }
+
+    /// Correct the TRACKED state only — the "resync" button. The relay is a blind toggle, so
+    /// after a cold boot (or a physical press while the daemon was down) our cache can be
+    /// wrong; this lets the user realign HA to the real relay WITHOUT actuating it. The cycle
+    /// is unknown → on → off → on, so from an unknown baseline one press establishes a known
+    /// state and each further press flips it — the user stops when HA matches the wall. Returns
+    /// the new state to publish + persist. Does NOT touch the echo-guard queue (no frame is
+    /// sent, so there is no echo to absorb).
+    fn resync(&mut self) -> Option<bool> {
+        self.on = Some(match self.on {
+            None => true,          // unknown → on (first press establishes a known state)
+            Some(true) => false,   // on → off
+            Some(false) => true,   // off → on
+        });
+        self.on
+    }
 }
 
 /// Owns the stair-light toggle state. Shared (`Arc`) between the command worker
@@ -192,36 +219,75 @@ pub struct LightCtl {
     /// the new state with no `.await` — it can't be lost to a task abort — and the drained
     /// task guarantees it reaches disk even at shutdown.
     persist_tx: watch::Sender<Option<bool>>,
-    /// The exact `*8*21*<WHERE>##` frame — sent to toggle AND matched on the monitor to
-    /// detect a physical press. Built once from the configured WHERE. (Persistence is keyed
-    /// by WHERE inside [`run_persist`], which owns its own copy.)
-    press_frame: String,
+    /// The stair-light actuator WHERE (digits). `None` = LEARN MODE (LIGHT_ENABLED with an
+    /// empty build-time WHERE and none learned yet): the switch/resync are inert and HA marks
+    /// them unavailable until [`learn`] captures the WHERE. Behind a plain mutex, only held
+    /// synchronously (never across `.await`), like `st`.
+    where_: Mutex<Option<String>>,
+    /// The "Learn light" capture deadline: `Some(t)` while armed (until `t`), else `None`.
+    /// A monitor frame `*8*21*<W>##` seen while armed teaches the WHERE (see [`observe`]).
+    learn_until: Mutex<Option<Instant>>,
+    /// Whether this unit may LEARN (or re-learn) its WHERE. `false` for a CONFIGURED build (a
+    /// non-empty build-time `LIGHT_WHERE`): that address is authoritative and `main` always binds
+    /// it, so accepting a learned frame would persist an address the daemon then ignores on
+    /// restart — a false "learned" that keeps toggling the old actuator (Codex). `true` only in
+    /// learn mode (blank build), where the learned WHERE is what `main` actually binds.
+    learnable: bool,
     /// Retained state topic HA reads back (`on`/`off`).
     topic_light: String,
+    /// Retained light-subsystem availability topic: `online` once a WHERE is known, `offline`
+    /// in learn mode — HA greys out the switch + resync until the WHERE is learned.
+    topic_light_avail: String,
+    /// Signalled when a WHERE is LEARNED: `main` treats it like SIGTERM and shuts down cleanly
+    /// so the init script respawns btmqttd, which comes up with the learned WHERE active (the
+    /// state-persist task is keyed by WHERE at startup, so a restart is the clean way to bind
+    /// it — far simpler than rebuilding that task live).
+    restart: Arc<Notify>,
     client: AsyncClient,
 }
 
 impl LightCtl {
-    /// Build from config, restoring the persisted on/off (`initial`) so the switch keeps
-    /// the right state across a reboot. `cfg.light_where` MUST be set (the caller only
-    /// constructs this when the feature is enabled). Returns the controller AND the `watch`
-    /// receiver the caller must hand to [`run_persist`] (spawned as the drained persist task).
+    /// Build from config, restoring the persisted on/off (`initial`) so the switch keeps the
+    /// right state across a reboot. `where_` is the bound actuator WHERE (`None` in learn mode);
+    /// `learnable` is `true` only in learn mode (a blank build-time `LIGHT_WHERE`), where a learned
+    /// WHERE is what `main` binds. Returns the controller AND the `watch` receiver the caller must
+    /// hand to [`run_persist`] (spawned as the drained persist task).
     pub fn new(
         cfg: &Arc<Config>,
         client: AsyncClient,
         initial: Option<bool>,
+        where_: Option<String>,
+        learnable: bool,
+        restart: Arc<Notify>,
     ) -> (Arc<Self>, watch::Receiver<Option<bool>>) {
-        let where_ = cfg.light_where.clone().unwrap_or_default();
         let (persist_tx, persist_rx) = watch::channel(initial);
         let ctl = Arc::new(LightCtl {
             st: Mutex::new(State { on: initial, pending: VecDeque::new(), next_gen: 0 }),
             io_lock: AsyncMutex::new(()),
             persist_tx,
-            press_frame: format!("*8*21*{where_}##"),
+            where_: Mutex::new(where_),
+            learn_until: Mutex::new(None),
+            learnable,
             topic_light: cfg.topic_light.clone(),
+            topic_light_avail: cfg.topic_light_avail.clone(),
+            restart,
             client,
         });
         (ctl, persist_rx)
+    }
+
+    /// The current `*8*21*<WHERE>##` frame, or `None` in learn mode (no WHERE yet).
+    fn press_frame(&self) -> Option<String> {
+        self.where_
+            .lock()
+            .expect("light where mutex poisoned")
+            .as_ref()
+            .map(|w| format!("*8*21*{w}##"))
+    }
+
+    /// Whether a WHERE is known (the switch/resync are live only then).
+    fn have_where(&self) -> bool {
+        self.where_.lock().expect("light where mutex poisoned").is_some()
     }
 
     /// Publish the cached state, RETAINED, so HA reflects it. `on`/`off` for a known state;
@@ -256,6 +322,7 @@ impl LightCtl {
     /// clears any stale value the broker still holds — e.g. from a previous `LIGHT_WHERE`).
     pub async fn seed(&self) {
         self.publish_current().await;
+        self.publish_avail().await; // re-assert online/offline (learn-mode gate) on reconnect
     }
 
     /// Publish the CURRENT cached state (retained), SERIALIZED via `io_lock` so a physical
@@ -285,6 +352,12 @@ impl LightCtl {
     /// released across the forward, so a physical press `observe()` applies in that window
     /// must COMPOSE with our injection, not be clobbered.
     pub async fn command(&self, desired_on: bool) {
+        // In learn mode (no WHERE yet) the switch is inert — HA also marks it unavailable
+        // via topic_light_avail, but guard here too in case a command still arrives.
+        let Some(press) = self.press_frame() else {
+            eprintln!("btmqttd: light: ignoring on/off — WHERE not set yet (use Learn light)");
+            return;
+        };
         let gen = {
             let mut st = self.st.lock().expect("light state mutex poisoned");
             if !st.needs_toggle(desired_on) {
@@ -292,7 +365,7 @@ impl LightCtl {
             }
             st.arm_guard(Instant::now()) // before forwarding: the echo may land immediately
         };
-        if let Err(e) = forward_to_gateway(&self.press_frame, FORWARD_TIMEOUT).await {
+        if let Err(e) = forward_to_gateway(&press, FORWARD_TIMEOUT).await {
             eprintln!("btmqttd: light toggle failed: {e}");
             // Actuation FAILED. If THIS command's echo was already absorbed during the forward,
             // its frame reached the bus (a real toggle) — reclaim it (flip + persist + publish).
@@ -324,7 +397,16 @@ impl LightCtl {
     /// panel press → flip the cache, enqueue persistence + republish. Any other frame is
     /// ignored, so the caller can hand every monitor frame here cheaply.
     pub async fn observe(&self, frame: &str) {
-        if frame != self.press_frame {
+        // Learn capture takes precedence: while the window is open, the first stair-light
+        // press `*8*21*<W>##` teaches the WHERE (see `adopt_learned_where`).
+        if self.learn_active() {
+            if let Some(w) = parse_light_where(frame) {
+                self.adopt_learned_where(w).await;
+            }
+            return;
+        }
+        let Some(press) = self.press_frame() else { return }; // learn mode: nothing to track
+        if frame != press {
             return;
         }
         let flipped = self
@@ -335,6 +417,119 @@ impl LightCtl {
         if flipped.is_some() {
             self.enqueue_persist();
             self.publish_current().await;
+        }
+    }
+
+    /// The "Resync light state" button: correct the TRACKED state without actuating the relay
+    /// (cycle unknown→on→off→on), so the user can realign HA to the real wall state after a
+    /// cold boot or a press missed while the daemon was down. No-op in learn mode (no WHERE,
+    /// so no meaningful state). Persists + republishes the new state.
+    pub async fn resync(&self) {
+        if !self.have_where() {
+            eprintln!("btmqttd: light: ignoring resync — WHERE not set yet");
+            return;
+        }
+        self.st.lock().expect("light state mutex poisoned").resync();
+        self.enqueue_persist();
+        self.publish_current().await;
+    }
+
+    /// The "Learn light" button: open the capture window. The next physical stair-light press
+    /// within [`LEARN_WINDOW`] teaches the WHERE (see `observe`/`adopt_learned_where`).
+    pub async fn learn(&self) {
+        // A CONFIGURED build has a fixed, authoritative WHERE that `main` always binds; capturing
+        // a learned frame here would persist an address the daemon ignores on restart (a false
+        // "learned" that keeps toggling the old actuator) — so learning is refused. Learn mode
+        // (blank build) is the only place a learned WHERE is what `main` actually binds (Codex).
+        if !self.learnable {
+            eprintln!(
+                "btmqttd: light: ignoring learn — WHERE is fixed by configuration (LIGHT_WHERE)"
+            );
+            return;
+        }
+        *self.learn_until.lock().expect("light learn mutex poisoned") =
+            Some(Instant::now() + LEARN_WINDOW);
+        eprintln!("btmqttd: light: learn armed — press the physical stair-light button once");
+    }
+
+    /// Whether the learn window is currently open (armed and not expired).
+    fn learn_active(&self) -> bool {
+        matches!(
+            *self.learn_until.lock().expect("light learn mutex poisoned"),
+            Some(t) if Instant::now() < t
+        )
+    }
+
+    /// Adopt a WHERE captured during learn: persist it durably, then signal `main` to restart
+    /// so the light comes up ACTIVE (the state-persist task is bound to the WHERE at startup,
+    /// so a clean restart is the simplest correct way to activate it). If it equals the WHERE
+    /// we already have, just disarm — no restart needed.
+    async fn adopt_learned_where(&self, w: &str) {
+        // Disarm first so a second echo of the same press can't re-enter this path.
+        *self.learn_until.lock().expect("light learn mutex poisoned") = None;
+        if self.where_.lock().expect("light where mutex poisoned").as_deref() == Some(w) {
+            // The physical press that taught us this WHERE is a REAL toggle. `observe()` diverted
+            // it into this learn path before `apply_observe` could record it, and because the WHERE
+            // is unchanged there is no restart to re-seed state — so apply that toggle to the
+            // tracked state now (respecting the echo guard), or HA is left one toggle out of sync.
+            eprintln!("btmqttd: light: learned WHERE {w} matches the current one — no change");
+            let flipped = self.st.lock().expect("light state mutex poisoned").apply_observe(Instant::now());
+            if flipped.is_some() {
+                self.enqueue_persist();
+                self.publish_current().await;
+            }
+            return;
+        }
+        let w_owned = w.to_string();
+        let stored = tokio::task::spawn_blocking(move || crate::persist::store_light_where(&w_owned))
+            .await
+            .unwrap_or(false);
+        if !stored {
+            eprintln!("btmqttd: light: could not persist learned WHERE {w} — try Learn again");
+            return;
+        }
+        eprintln!("btmqttd: light: learned WHERE {w} — restarting to activate it");
+        self.restart.notify_one();
+    }
+
+    /// Publish the light-subsystem availability (retained): `online` once a WHERE is known,
+    /// `offline` in learn mode. HA greys out the switch + resync until the WHERE is learned.
+    /// Uses the drop-on-full `try_publish` because it runs on the reconnect `seed()` path where a
+    /// dropped publish is recovered by the sender loop's periodic reseed; the ORDERED startup gate
+    /// uses [`announce_avail`] instead.
+    async fn publish_avail(&self) {
+        let payload = if self.have_where() { "online" } else { "offline" };
+        crate::sender::try_publish_retained(
+            &self.client,
+            &self.topic_light_avail,
+            QoS::AtLeastOnce,
+            payload.as_bytes().to_vec(),
+        );
+    }
+
+    /// Assert the availability gate with an AWAITED, error-checked publish — used by `main` at
+    /// startup so the bridge birth `online` is not published until this gate is actually QUEUED.
+    /// `publish_avail`'s drop-on-full try-publish would let the gate be dropped and the bridge
+    /// `online` still queue after capacity frees, re-exposing the stale-`online` race on a
+    /// configured→learn-mode reflash (CodeRabbit). Retained, QoS 1, like the reconnect seed.
+    ///
+    /// Returns `true` when the gate was queued. The caller MUST NOT publish the bridge birth
+    /// `online` on `false`: a failed gate leaves any stale retained `light_avail=online` in place,
+    /// so declaring the bridge online would re-open the race — better to defer `online` to the next
+    /// connect (a publish error means the eventloop is gone, which forces a reconnect + retry).
+    #[must_use]
+    pub async fn announce_avail(&self) -> bool {
+        let payload = if self.have_where() { "online" } else { "offline" };
+        match self
+            .client
+            .publish(&self.topic_light_avail, QoS::AtLeastOnce, true, payload.as_bytes().to_vec())
+            .await
+        {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("btmqttd: publish light availability gate failed: {e}");
+                false
+            }
         }
     }
 }
@@ -629,6 +824,28 @@ mod tests {
         // command()'s success commit runs LAST, flipping — not clobbering — the observation.
         assert_eq!(st.commit_actuation(true), Some(false));
         assert_eq!(st.on, Some(false)); // equals the relay after two toggles
+    }
+
+    #[test]
+    fn resync_cycles_unknown_on_off_on() {
+        // The resync button corrects the TRACKED state only: unknown → on → off → on, so the
+        // user can realign HA to the wall in at most a couple of presses.
+        let mut st = state(None);
+        assert_eq!(st.resync(), Some(true)); // unknown → on
+        assert_eq!(st.resync(), Some(false)); // on → off
+        assert_eq!(st.resync(), Some(true)); // off → on
+        // resync never queues an echo expectation (no frame is sent).
+        assert!(st.pending.is_empty());
+    }
+
+    #[test]
+    fn parse_light_where_accepts_only_digit_press_frames() {
+        assert_eq!(parse_light_where("*8*21*112##"), Some("112"));
+        assert_eq!(parse_light_where("*8*21*1##"), Some("1"));
+        assert_eq!(parse_light_where("*8*21*##"), None); // empty WHERE
+        assert_eq!(parse_light_where("*8*22*112##"), None); // release, not press
+        assert_eq!(parse_light_where("*8*21*11a##"), None); // non-digit
+        assert_eq!(parse_light_where("*1*1*21##"), None); // unrelated frame
     }
 
     #[tokio::test]

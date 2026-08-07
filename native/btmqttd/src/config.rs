@@ -51,13 +51,19 @@ pub struct Config {
     pub topic_entrance_panel_call: String,
     pub topic_floor_call: String,
     pub topic_call_state: String,
-    // Stair-light SWITCH (opt-in). `light_where` is the WHO=8 actuator WHERE (installation-
-    // specific, e.g. "112"); the feature is OFF unless it is set. The button toggles the
-    // relay (`*8*21*<where>##`) — there is NO discrete on/off and NO status query on this
-    // actuator (firmware-confirmed), so `topic_light` carries a TRACKED retained on/off.
-    // The COMMAND reuses TOPIC_RX (a small JSON action), so no extra subscription is added.
+    // Stair-light SWITCH (opt-in). `light_enabled` reflects the installer's "has exterior
+    // light" choice: when true the light subsystem RUNS even before a WHERE is known, so a
+    // build left blank can LEARN the WHERE at runtime (see light.rs). `light_where` is the
+    // WHO=8 actuator WHERE (installation-specific, e.g. "112"); None + light_enabled ⇒ learn
+    // mode. The button toggles the relay (`*8*21*<where>##`) — no discrete on/off and no
+    // status query (firmware-confirmed) — so `topic_light` carries a TRACKED retained on/off,
+    // and `topic_light_avail` gates HA's switch/resync entities OFFLINE until a WHERE is known.
+    // The COMMANDs reuse TOPIC_RX (small JSON actions: light / light_resync / light_learn), so
+    // no extra subscription is added.
+    pub light_enabled: bool,
     pub light_where: Option<String>,
     pub topic_light: String,
+    pub topic_light_avail: String,
     // OpenWebNet monitor endpoint (bus -> MQTT)
     pub own_host: String,
     pub own_port_mon: u16,
@@ -122,9 +128,19 @@ impl Config {
             topic_entrance_panel_call: get("TOPIC_ENTRANCE_PANEL_CALL", "Bticino/entrance_panel_call"),
             topic_floor_call: get("TOPIC_FLOOR_CALL", "Bticino/floor_call"),
             topic_call_state: get("TOPIC_CALL_STATE", "Bticino/call_state"),
-            // Digits only — a WHERE like "112". Empty/absent ⇒ the light feature is off.
+            // Digits only — a WHERE like "112". Empty ⇒ unknown (learn mode when enabled).
             light_where: opt("LIGHT_WHERE").filter(|s| s.bytes().all(|b| b.is_ascii_digit())),
+            // "Has exterior light". When the installer wrote LIGHT_ENABLED it is AUTHORITATIVE
+            // ("1" enables, anything else disables) — so unticking the option reliably turns the
+            // subsystem off even if a stale numeric LIGHT_WHERE lingers in the conf (Copilot,
+            // Codex). Only an OLD conf that predates the key (LIGHT_ENABLED absent) falls back to
+            // "a numeric LIGHT_WHERE implies the feature", keeping legacy configs working.
+            light_enabled: match opt("LIGHT_ENABLED") {
+                Some(v) => v == "1",
+                None => opt("LIGHT_WHERE").is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit())),
+            },
             topic_light: get("TOPIC_LIGHT", "Bticino/light"),
+            topic_light_avail: get("TOPIC_LIGHT_AVAIL", "Bticino/light_avail"),
             own_host: get("OWN_HOST", "127.0.0.1"),
             own_port_mon: opt("OWN_PORT_MON").and_then(|s| s.parse().ok()).unwrap_or(20000),
             // PAYLOAD_FORMAT defaults to json (mqtt_common.sh); anything but "raw" is json.
@@ -410,5 +426,19 @@ EMPTY=
         // disabled entirely -> refused even with auth
         let off = "MQTT_HOST=h\nMQTT_USER=u\nMQTT_PASS=p\n";
         assert!(!Config::from_map(parse_env(off)).remote_shell_allowed());
+    }
+
+    #[test]
+    fn light_enabled_flag_is_authoritative_over_a_stale_where() {
+        let cfg = |s: &str| Config::from_map(parse_env(s));
+        // Explicit LIGHT_ENABLED=0 disables the subsystem even if a numeric LIGHT_WHERE lingers
+        // (the installer writes both keys; unticking "has exterior light" must win) — Copilot/Codex.
+        assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=0\nLIGHT_WHERE=112\n").light_enabled);
+        // Explicit LIGHT_ENABLED=1 enables even with a blank WHERE (learn mode).
+        assert!(cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\n").light_enabled);
+        // Legacy conf WITHOUT the key: a numeric LIGHT_WHERE still implies the feature.
+        assert!(cfg("MQTT_HOST=h\nLIGHT_WHERE=112\n").light_enabled);
+        // Nothing set at all -> disabled.
+        assert!(!cfg("MQTT_HOST=h\n").light_enabled);
     }
 }

@@ -432,7 +432,12 @@ Clave: {1}</value></data>
   <data name="Field_MqttHaNodeId" xml:space="preserve"><value>Id del dispositivo:</value></data>
   <data name="Tip_MqttHaNodeId" xml:space="preserve"><value>Identificador del dispositivo de Home Assistant y sus entidades. Distinto por unidad da a cada puente su propio dispositivo HA; para varias unidades en un mismo broker, define también topics distintos (o se reflejan entre sí). Solo letras y dígitos ASCII, '_' o '-'.</value></data>
   <data name="Field_MqttLightWhere" xml:space="preserve"><value>Dirección de la luz (WHERE):</value></data>
-  <data name="Tip_MqttLightWhere" xml:space="preserve"><value>Opcional. La dirección OpenWebNet (WHERE) del botón de luz de escalera EN TU instalación — los dígitos de la trama *8*21*&lt;WHERE&gt;## que el panel envía al pulsar el botón de luz (captúralo del bus). Vacío desactiva el interruptor de Luz. Solo dígitos.</value></data>
+  <data name="Tip_MqttLightWhere" xml:space="preserve"><value>Opcional. La dirección OpenWebNet (WHERE) del botón de luz de escalera EN TU instalación — los dígitos de la trama *8*21*&lt;WHERE&gt;## que el panel envía al pulsar el botón de luz (captúralo del bus). Vacío: la aprende más tarde (desde Home Assistant). Solo dígitos.</value></data>
+  <data name="Chk_MqttHasLight" xml:space="preserve"><value>La unidad tiene luz exterior</value></data>
+  <data name="Tip_MqttHasLight" xml:space="preserve"><value>Marca si tu entrada tiene una luz controlada desde el panel. Luego introduce su dirección (WHERE), o déjala en blanco para aprenderla más tarde desde Home Assistant.</value></data>
+  <data name="Hint_MqttLightLearn" xml:space="preserve"><value>¿No sabes la dirección? Déjala en blanco — la unidad la aprende: pulsa “Learn light” en Home Assistant y luego pulsa una vez el botón físico de la luz.</value></data>
+  <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>La unidad tiene una cerradura secundaria</value></data>
+  <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Marca para añadir un segundo botón de apertura en Home Assistant. Déjalo sin marcar si tu instalación solo tiene una puerta.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Recepción (comandos):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Volcado del bus:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Fecha de inicio:</value></data>
@@ -446,7 +451,7 @@ Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de co
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de comandos remoto</value></data>
   <data name="MqttHint_Topic" xml:space="preserve"><value>Un tema está vacío, ocupa varias líneas o un tema de publicación contiene un comodín MQTT ('+' o '#').</value></data>
   <data name="MqttHint_HaNodeId" xml:space="preserve"><value>El id del nodo de Home Assistant solo puede contener letras y dígitos ASCII, '_' o '-'.</value></data>
-  <data name="MqttHint_LightWhere" xml:space="preserve"><value>La dirección de la luz (WHERE) solo puede contener dígitos, o dejarse vacía para desactivar el interruptor de Luz.</value></data>
+  <data name="MqttHint_LightWhere" xml:space="preserve"><value>La dirección de la luz (WHERE) solo puede contener dígitos, o dejarse vacía para aprenderla en tiempo de ejecución.</value></data>
   <data name="MqttTest_Refused" xml:space="preserve"><value>conexión rechazada o sin respuesta.</value></data>
 
   <!-- ================= Download official firmware (issue #23) ================= -->
