@@ -440,7 +440,7 @@ Clave: {1}</value></data>
   <data name="Field_MqttTopicKey" xml:space="preserve"><value>Teclado:</value></data>
   <data name="Field_MqttTopicCmdResult" xml:space="preserve"><value>Resultado del comando:</value></data>
   <data name="Field_MqttTopicFileContent" xml:space="preserve"><value>Contenido del archivo:</value></data>
-  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>El canal de comandos remoto permite que cualquiera que pueda publicar en el tema de recepción ejecute comandos en el dispositivo. Las respuestas se envían en texto plano si no se configura TLS.
+  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>El canal de comandos remoto permite que cualquiera que pueda publicar en el tema de recepción lea o escriba archivos y ejecute comandos en el dispositivo. Las respuestas se envían en texto plano si no se configura TLS.
 
 Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de comandos remoto?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de comandos remoto</value></data>

@@ -440,7 +440,7 @@ Clé : {1}</value></data>
   <data name="Field_MqttTopicKey" xml:space="preserve"><value>Clavier :</value></data>
   <data name="Field_MqttTopicCmdResult" xml:space="preserve"><value>Résultat de commande :</value></data>
   <data name="Field_MqttTopicFileContent" xml:space="preserve"><value>Contenu de fichier :</value></data>
-  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>Le canal de commandes à distance permet à quiconque peut publier sur le sujet de réception d'exécuter des commandes sur l'appareil. Les réponses sont envoyées en clair si le TLS n'est pas configuré.
+  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>Le canal de commandes à distance permet à quiconque peut publier sur le sujet de réception de lire ou écrire des fichiers et d'exécuter des commandes sur l'appareil. Les réponses sont envoyées en clair si le TLS n'est pas configuré.
 
 Ne l'activez que sur un broker authentifié et de confiance. Activer le canal de commandes à distance ?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Canal de commandes à distance</value></data>

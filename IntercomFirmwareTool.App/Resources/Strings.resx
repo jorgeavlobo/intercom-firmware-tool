@@ -440,7 +440,7 @@ Key: {1}</value></data>
   <data name="Field_MqttTopicKey" xml:space="preserve"><value>Keypad:</value></data>
   <data name="Field_MqttTopicCmdResult" xml:space="preserve"><value>Command result:</value></data>
   <data name="Field_MqttTopicFileContent" xml:space="preserve"><value>File content:</value></data>
-  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>The remote command channel lets anyone able to publish to the receive topic run commands on the device. Replies are sent in cleartext unless TLS is configured.
+  <data name="Msg_MqttRemoteShellConfirm" xml:space="preserve"><value>The remote command channel lets anyone able to publish to the receive topic read or write files and run commands on the device. Replies are sent in cleartext unless TLS is configured.
 
 Enable it only on an authenticated, trusted broker. Enable the remote command channel?</value></data>
   <data name="Cap_MqttRemoteShell" xml:space="preserve"><value>Remote command channel</value></data>
