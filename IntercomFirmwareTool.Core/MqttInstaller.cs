@@ -1020,7 +1020,7 @@ namespace IntercomFirmwareTool.Core
         };
 
         /// <summary>
-        /// The seven volume/lock/light CONTROL entities' identity — (JSON filename, discovery
+        /// The nine volume/lock/light CONTROL entities' identity — (JSON filename, discovery
         /// component, object id). Used by the TOMBSTONE path in
         /// <see cref="GenerateHaDiscovery"/> (when there is no concrete command topic) to
         /// emit the exact same config topics with an empty payload, so a previous build's
