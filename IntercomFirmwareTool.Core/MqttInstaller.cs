@@ -578,15 +578,20 @@ namespace IntercomFirmwareTool.Core
             // ONLY when the feature is enabled — it is otherwise derived but never published.
             // TopicRx is excluded: it is the sole SUBSCRIBE filter, and its self-loop overlap with
             // the publish topics is checked separately below.
+            // The light STATE topic is included ONLY when the feature is enabled — it is otherwise
+            // derived but never published. The light AVAILABILITY topic is included UNCONDITIONALLY:
+            // the daemon publishes it in every state — online/offline when enabled, and a retained
+            // offline even when DISABLED (the announce disabled-path gate) — so an alias onto it must
+            // always be rejected (Codex).
             var publishTopics = new List<string>
             {
                 opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill, opts.TopicKey,
                 opts.TopicCmdResult, opts.TopicFileContent, opts.EffectiveTopicVolume,
                 opts.EffectiveTopicMute, opts.EffectiveTopicEntrancePanelCall,
                 opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
+                opts.EffectiveTopicLightAvail,
             };
             if (opts.LightEnabled) publishTopics.Add(opts.EffectiveTopicLight);
-            if (opts.LightEnabled) publishTopics.Add(opts.EffectiveTopicLightAvail);
             if (publishTopics.Distinct(StringComparer.Ordinal).Count() != publishTopics.Count)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
 
@@ -639,9 +644,14 @@ namespace IntercomFirmwareTool.Core
             // isn't a light command topic without the switch), so it can't form a self-loop —
             // exclude it when disabled, or a valid opt-out config whose namespace happens to
             // derive a colliding light topic would fail validation (Codex).
-            if (opts.LightEnabled
-                && (TopicFilterMatches(rxFilter, opts.EffectiveTopicLight)
-                    || TopicFilterMatches(rxFilter, opts.EffectiveTopicLightAvail)))
+            if (opts.LightEnabled && TopicFilterMatches(rxFilter, opts.EffectiveTopicLight))
+                throw new ArgumentException(
+                    CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
+            // The AVAILABILITY topic is published in EVERY state (including the disabled-path
+            // retained offline), so its self-loop with TopicRx is checked UNCONDITIONALLY — an
+            // alias onto TopicRx would make the daemon consume its own availability publish as a
+            // command even with the light disabled (Codex).
+            if (TopicFilterMatches(rxFilter, opts.EffectiveTopicLightAvail))
                 throw new ArgumentException(
                     CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
         }
