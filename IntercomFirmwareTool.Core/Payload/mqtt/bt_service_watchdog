@@ -1,15 +1,17 @@
 #!/bin/sh
 ### BEGIN INIT INFO
 # Provides:          bt-service-watchdog
-# Required-Start:    $network dropbear mosquitto
+# Required-Start:    $network dropbear
 # Required-Stop:     $network
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
 # Short-Description: BTicino service watchdog
-# Description:       Monitors dropbear, scsserver, mosquitto and the btmqttd MQTT
-#                    bridge daemon and restarts any that die. Also launches btmqttd
-#                    at boot (first loop iteration). Runs independently of the bridge
-#                    so SSH and gate/intercom commands survive an MQTT failure.
+# Description:       Keeps THIS TOOL's own daemons alive — dropbear (SSH), which
+#                    bt_daemon stops when the app stack comes up, and the btmqttd
+#                    MQTT bridge — restarting them if they die. Deliberately does
+#                    NOT supervise the core BTicino services (scsserver, mosquitto,
+#                    the bt_daemon app stack); the device manages those itself, and
+#                    restarting them from here corrupts the running stack.
 ### END INIT INFO
 #
 # MIT-licensed reimplementation of fquinto's mqtt_scripts/bt_service_watchdog
@@ -22,15 +24,6 @@ LOGFILE=$LOGDIR/bt_watchdog.log
 INTERVAL=60
 
 log() { echo "$(date): $1" >> "$LOGFILE"; }
-
-ensure() {
-	# ensure <pgrep-name> <start-command...>
-	name="$1"; shift
-	if ! /usr/bin/pgrep -x "$name" > /dev/null 2>&1; then
-		log "$name not running - restarting"
-		"$@" >> "$LOGFILE" 2>&1
-	fi
-}
 
 # SSH is only "up" if something is LISTENING on port 22 - a per-connection
 # dropbear session fork keeps the process name alive even after the master
@@ -64,9 +57,19 @@ watchdog_loop() {
 
 	log "BTicino service watchdog started (PID $$)"
 	while : ; do
+		# Supervise ONLY the daemons this tool adds. dropbear (SSH) is legitimately
+		# ours to keep alive: bt_daemon stops it whenever the app stack comes up, so
+		# without this SSH would vanish for good the first time the intercom starts.
+		#
+		# We must NOT supervise the core BTicino services (scsserver, mosquitto, the
+		# bt_daemon app stack) — the device already manages those. An earlier version
+		# ran `ensure scsserver /etc/init.d/bt_daemon-apps.sh start`, which relaunched
+		# the ENTIRE app stack whenever scsserver was momentarily absent (e.g. during
+		# the up-to-100s Cortex-M0 wait at boot). That started a SECOND bt_daemon /
+		# openserver that collided with the first on the SCS socket ("Create socket to
+		# SCS server failed"), taking the screen and gate/intercom controls down about
+		# one INTERVAL (~60s) after every boot while SSH survived. Never do that again.
 		ensure_dropbear
-		ensure scsserver /etc/init.d/bt_daemon-apps.sh start
-		ensure mosquitto /etc/init.d/mosquitto start
 
 		# btmqttd is the native single-connection MQTT bridge daemon (issue #32),
 		# managed by its own init script (/etc/init.d/btmqttd). Delegate supervision
