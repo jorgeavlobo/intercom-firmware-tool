@@ -29,29 +29,34 @@ public class WatchdogScriptTests
         return reader.ReadToEnd();
     }
 
-    // Executable lines only: strip leading indentation and drop blank / comment lines,
-    // so a mention of a forbidden command inside an explanatory comment doesn't trip.
+    // Executable lines only: trim indentation and drop blank / comment lines, so a
+    // mention of a command inside an explanatory comment neither trips a "must-not"
+    // assertion nor satisfies a "must" one.
     private static string[] CodeLines(string script) =>
         script.Replace("\r\n", "\n").Split('\n')
-              .Select(l => l.TrimStart(' ', '\t'))
+              .Select(l => l.Trim())
               .Where(l => l.Length > 0 && !l.StartsWith('#'))
               .ToArray();
 
     [Fact]
     public void Watchdog_never_touches_the_core_bticino_services()
     {
+        // Reject ANY executable reference to a core service, not just the exact legacy
+        // command strings — a differently-spelled reintroduction must fail too. None of
+        // the legitimate executable lines mention these (btmqttd is not bt_daemon).
         string[] code = CodeLines(ReadWatchdog());
-        Assert.DoesNotContain(code, l => l.Contains("bt_daemon-apps.sh"));
-        Assert.DoesNotContain(code, l => l.Contains("ensure scsserver"));
-        Assert.DoesNotContain(code, l => l.Contains("ensure mosquitto"));
-        Assert.DoesNotContain(code, l => l.Contains("/etc/init.d/mosquitto"));
+        Assert.DoesNotContain(code, l =>
+            l.Contains("scsserver") ||
+            l.Contains("mosquitto") ||
+            l.Contains("bt_daemon"));
     }
 
     [Fact]
     public void Watchdog_still_keeps_ssh_and_the_bridge_alive()
     {
-        string script = ReadWatchdog();
-        Assert.Contains("ensure_dropbear", script);
-        Assert.Contains("/etc/init.d/btmqttd respawn", script);
+        // Assert on executable lines so the supervision cannot be satisfied by a comment.
+        string[] code = CodeLines(ReadWatchdog());
+        Assert.Contains(code, l => l.Contains("ensure_dropbear"));
+        Assert.Contains(code, l => l.Contains("/etc/init.d/btmqttd respawn"));
     }
 }
