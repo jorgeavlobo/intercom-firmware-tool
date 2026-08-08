@@ -14,9 +14,10 @@ every release and referenced from the
 > the `licenses/` subdirectory (which is why the links resolve). The single-file
 > portable `.exe`, by its nature, cannot embed sibling files — for that download the
 > same documents travel as flat standalone assets on the GitHub **Releases page**
-> (`THIRD-PARTY-NOTICES.md`, `LICENSE.txt`, `lwext4-LICENSE.txt`,
-> `lwext4-BSD-3-Clause-NOTICE.txt`, `DiskPartitionInfo-LICENSE.txt`,
-> `dotnet-runtime-LICENSE.txt`) accompanying it on the same release. Links to other repository documents (README, `CLEANROOM.md`)
+> (`THIRD-PARTY-NOTICES.md`, `LICENSE.txt`, `SharpExt4-LICENSE.txt`,
+> `lwext4-LICENSE.txt`, `lwext4-BSD-3-Clause-NOTICE.txt`,
+> `DiskPartitionInfo-LICENSE.txt`, `dotnet-runtime-LICENSE.txt`) accompanying it on
+> the same release. Links to other repository documents (README, `CLEANROOM.md`)
 > are absolute GitHub URLs so they resolve from anywhere.
 
 ## Licensing summary (read this first)
@@ -27,17 +28,18 @@ The two licensing questions here are **separate** and must not be conflated:
    GPL-2.0 terms attach to the shipped binary: its license text, the BSD-3-Clause
    notices for its BSD-licensed modules, and a corresponding-source path all have
    to travel with the release. Those obligations are addressed below.
-2. **`SharpExt4` (the wrapper) has no stated license.** Upstream declares no terms,
-   so there is **no explicit grant to redistribute `SharpExt4.dll` at all** — a
-   blocker that is independent of, and not cured by, the GPL-2.0 items above.
-   Clarification/permission is being sought (see
-   [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)).
+2. **`SharpExt4` (the wrapper) is MIT-licensed.** Upstream now publishes an explicit
+   **MIT** `LICENSE` (Copyright (c) 2021-2026 nickdu088), added via
+   [nickdu088/SharpExt4#28](https://github.com/nickdu088/SharpExt4/pull/28) (issue
+   [#27](https://github.com/nickdu088/SharpExt4/issues/27)), so the wrapper's own code
+   carries a clear redistribution grant. MIT is **GPL-2.0-compatible**, so it does not
+   conflict with the GPL-2.0 terms the `lwext4` link attaches to the combined binary.
 
 Because `lwext4` is statically linked in, the compiled `SharpExt4.dll` is a
 **combined work** based on `lwext4` (under GNU guidance, static linking makes a
-combined work, not a "mere aggregation"), which **would be conveyed under the GNU
-GPL v2** *to the extent it may be redistributed at all* — which, per (2), is
-currently unresolved.
+combined work, not a "mere aggregation"), **conveyed under the GNU GPL v2**; the
+MIT-licensed wrapper code within it is redistributable under both its own MIT grant
+and, as part of the combined work, the GPL-2.0.
 Whether the application itself is a derivative work of `lwext4` or merely uses it
 across a library boundary is **not settled here** and is part of #98. The
 application's **own source code is MIT-licensed**
@@ -57,12 +59,14 @@ for the full reasoning.
 - **SharpExt4 (the wrapper):** a mixed-mode C++/CLI assembly that exposes ext4
   read/write to .NET.
   - Source: <https://github.com/nickdu088/SharpExt4>
-  - **License status: UNRESOLVED.** The upstream repository declares no `LICENSE`
-    file and states no license terms, so no explicit redistribution grant exists
-    for the wrapper's own code. Until this is resolved (tracked in
-    [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)),
-    redistribution of `SharpExt4.dll` is **not fully authorized**, independently of
-    the GPL obligations below.
+  - **License: MIT**, Copyright (c) 2021-2026 nickdu088. Upstream added an explicit
+    `LICENSE` file via
+    [PR #28](https://github.com/nickdu088/SharpExt4/pull/28) (issue
+    [#27](https://github.com/nickdu088/SharpExt4/issues/27)), giving the wrapper's own
+    code a clear redistribution grant. Full text:
+    [`licenses/SharpExt4-LICENSE.txt`](licenses/SharpExt4-LICENSE.txt). The MIT terms
+    cover the wrapper's own source; the GPL-2.0 obligations below still apply to the
+    compiled DLL because of the statically-linked `lwext4`.
 
 - **lwext4 (compiled into the same DLL):**
   - Source: <https://github.com/gkostka/lwext4>
@@ -133,11 +137,11 @@ source for `SharpExt4.dll` (the `SharpExt4` wrapper, the vendored GPL-2.0 `lwext
 and the build scripts) is committed here as an immutable snapshot at
 [`third_party/SharpExt4/`](third_party/SharpExt4):
 
-- **Pinned commit:** `nickdu088/SharpExt4@359d5f425ab58a61e37869e9223f339c8763b13b`
-  (authoritative origin), mirrored durably at
-  `jorgeavlobo/SharpExt4@359d5f4` and archived in-repo as
-  [`third_party/SharpExt4/SharpExt4-359d5f4.zip`](third_party/SharpExt4/SharpExt4-359d5f4.zip)
-  (SHA-256 `38ed9eea791bc9b73ce9c81e401c24ce376831841111634f970d5f59875b7f77`).
+- **Pinned commit:** `nickdu088/SharpExt4@a9a41e1dcbc73a0ca38f7a89b1719dd794bbaa7e`
+  (authoritative origin — the `main` commit that added the wrapper's MIT `LICENSE`),
+  mirrored durably at `jorgeavlobo/SharpExt4` and archived in-repo as
+  [`third_party/SharpExt4/SharpExt4-a9a41e1.zip`](third_party/SharpExt4/SharpExt4-a9a41e1.zip)
+  (SHA-256 `17deba26c1dfaf04007ffa7bf337617ab9337ba1f25e8025d83d89eb57777d37`).
 - The archived source travels with every release (see the release assets), so the
   binary is **accompanied by its source** (GPL-2.0 §3(a)) in addition to the offer
   below.
@@ -161,11 +165,11 @@ The upstream source also remains at:
 - **lwext4 upstream:** <https://github.com/gkostka/lwext4>
 
 > **Honest scope (tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)):**
-> `SharpExt4.dll` is a prebuilt upstream binary; `359d5f4` is pinned as its
+> `SharpExt4.dll` is a prebuilt upstream binary; `a9a41e1` is pinned as its
 > corresponding-source revision but the project does not itself rebuild the DLL, so
-> byte-exact build-provenance is asserted, not independently proven. Separately, the
-> `SharpExt4` wrapper's **own license remains unresolved** (see the component note
-> above) — that is a redistribution question independent of these GPL obligations.
+> byte-exact build-provenance is asserted, not independently proven. The `SharpExt4`
+> wrapper's **own license is now resolved** — upstream publishes an explicit MIT
+> `LICENSE` at the pinned commit (see the component note above).
 >
 > **Remaining hardening (optional, tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)):**
 > the source is now pinned + mirrored and the copyright notices are enumerated in

@@ -247,6 +247,7 @@ jobs:
           # nested — their sibling license assets are on the release page) (Copilot).
           New-Item -ItemType Directory -Force -Path out/folder/licenses | Out-Null
           $licenseTexts = @(
+            'licenses/SharpExt4-LICENSE.txt',
             'licenses/lwext4-LICENSE.txt',
             'licenses/lwext4-BSD-3-Clause-NOTICE.txt',
             'licenses/DiskPartitionInfo-LICENSE.txt',
@@ -272,7 +273,7 @@ jobs:
           # artifacts whose source IS in the pinned archive; Ijwhost.dll is a companion runtime
           # dependency (its source is the .NET SDK, not this archive) verified separately.
           $sourceBoundHashes = @{
-            'third_party/SharpExt4/SharpExt4-359d5f4.zip'                  = '38ed9eea791bc9b73ce9c81e401c24ce376831841111634f970d5f59875b7f77'
+            'third_party/SharpExt4/SharpExt4-a9a41e1.zip'                  = '17deba26c1dfaf04007ffa7bf337617ab9337ba1f25e8025d83d89eb57777d37'
             'IntercomFirmwareTool.Core/lib/SharpExt4/SharpExt4.dll'        = 'b24f04afb4d317f8ae9c7510afb1dba41fc86175d6cbd2424a099c69eb1eef5e'
             'IntercomFirmwareTool.Core/lib/SharpExt4/DiskPartitionInfo.dll' = 'fa1786b06df60d2dcb967992e736790cb80ab9a766410c63c5c14fb0f6d604e7'
           }
@@ -295,7 +296,7 @@ jobs:
           # headers live in this archive, so bundling it in each ZIP means a ZIP download carries
           # them without needing the separate asset (Codex). The single-file .exe can't embed it and
           # is accompanied by the same archive as a sibling release asset.
-          Copy-Item 'third_party/SharpExt4/SharpExt4-359d5f4.zip' out/folder -Force
+          Copy-Item 'third_party/SharpExt4/SharpExt4-a9a41e1.zip' out/folder -Force
           # Portable .zip: it is the preferred download for many users, so it must ALSO carry the
           # compliance docs — not just sit beside them as sibling release assets (GitHub does not
           # auto-download siblings) (Codex). Stage the single-file .exe together with the notices in
@@ -307,7 +308,7 @@ jobs:
           foreach ($n in @('THIRD-PARTY-NOTICES.md', 'LICENSE.txt')) { Copy-Item $n $stage -Force }
           foreach ($n in $licenseTexts) { Copy-Item $n (Join-Path $stage 'licenses') -Force }
           # Bundle the corresponding source in the portable .zip too (see the loose-folder note above).
-          Copy-Item 'third_party/SharpExt4/SharpExt4-359d5f4.zip' $stage -Force
+          Copy-Item 'third_party/SharpExt4/SharpExt4-a9a41e1.zip' $stage -Force
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path dist "$base-portable.zip") -Force
           Remove-Item -Recurse -Force $stage
           # Loose-folder zip: out/folder/* puts the files at the archive root (no top-level folder).
@@ -351,13 +352,13 @@ jobs:
           # release assets too, so a download of only the portable .exe still comes with them. These
           # are staged into dist/ by the packaging step; they carry no .sha256 sidecar (they are
           # documentation, not attested binaries).
-          for a in THIRD-PARTY-NOTICES.md LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt; do
+          for a in THIRD-PARTY-NOTICES.md LICENSE.txt SharpExt4-LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt; do
             files+=("dist/$a")
           done
           # GPL-2.0 §3(a) corresponding source for SharpExt4.dll — uploaded straight from its repo
           # path (not staged into dist/), so it gets no .sha256 sidecar and is not SLSA-attested as
           # our build output (it is upstream source, pinned + mirrored) (#98).
-          files+=("third_party/SharpExt4/SharpExt4-359d5f4.zip")
+          files+=("third_party/SharpExt4/SharpExt4-a9a41e1.zip")
           for f in "${files[@]}"; do
             if [ ! -f "$f" ]; then
               echo "::error::missing expected release asset: $f (packaging did not produce it)"; exit 1

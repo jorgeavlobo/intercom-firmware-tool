@@ -12,14 +12,14 @@ here.
 
 The **authoritative, verbatim per-file** copyright and license statements ship with
 the binary **inside every release bundle** — the pinned corresponding-source archive
-`SharpExt4-359d5f4.zip` (headers under `lwext4/`) is included in both `.zip`
+`SharpExt4-a9a41e1.zip` (headers under `lwext4/`) is included in both `.zip`
 downloads and is also a standalone release asset accompanying the single-file
 `.exe`. This file is the aggregated summary; where an imported file's own terms
 differ (below), those verbatim in-archive headers govern.
 
 -----------------------------------------------------------------
 Copyright notices found in the vendored lwext4 revision
-(nickdu088/SharpExt4@359d5f4):
+(nickdu088/SharpExt4@a9a41e1):
 
   Copyright (c) 2013 Grzegorz Kostka (kostka.grzegorz@gmail.com)
   Copyright (c) 2014 Grzegorz Kostka (kostka.grzegorz@gmail.com)
