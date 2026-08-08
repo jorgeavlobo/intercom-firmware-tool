@@ -227,6 +227,15 @@ jobs:
           # only the portable .exe still gets them). Fail loudly if any is missing so a release can
           # never go out without them.
           # Root-level docs: into the folder root (and dist as flat standalone assets).
+          # Defensive: if the self-contained publish ever emits its own LICENSE.txt into
+          # out/folder, preserve it (rename to dotnet-publish-LICENSE.txt) before dropping the
+          # app's LICENSE.txt there, so -Force can't silently replace a runtime license with the
+          # application license (CodeRabbit). A current .NET self-contained publish does not emit
+          # one, so this normally no-ops.
+          $preexisting = Join-Path 'out/folder' 'LICENSE.txt'
+          if (Test-Path $preexisting) {
+            Move-Item $preexisting (Join-Path 'out/folder' 'dotnet-publish-LICENSE.txt') -Force
+          }
           foreach ($n in @('THIRD-PARTY-NOTICES.md', 'LICENSE.txt')) {
             if (-not (Test-Path $n)) { throw "compliance file missing from checkout: $n" }
             Copy-Item $n out/folder -Force

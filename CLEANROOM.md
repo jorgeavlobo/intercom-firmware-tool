@@ -114,19 +114,24 @@ attaches [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), the verbatim GPL-2.
 text ([`licenses/lwext4-LICENSE.txt`](licenses/lwext4-LICENSE.txt)), the
 BSD-3-Clause notice for lwext4's BSD-licensed modules
 ([`licenses/lwext4-BSD-3-Clause-NOTICE.txt`](licenses/lwext4-BSD-3-Clause-NOTICE.txt)),
-the app's own MIT text ([`LICENSE.txt`](LICENSE.txt)), and the DiskPartitionInfo
-MIT text as standalone release assets (flat leaf names on the Releases page), and
-also copies them **inside** the loose-folder `.zip` beside the binary (there the
+the app's own MIT text ([`LICENSE.txt`](LICENSE.txt)), the DiskPartitionInfo MIT
+text, and the .NET-runtime MIT text (for `Ijwhost.dll`) as standalone release
+assets (flat leaf names on the Releases page), and also copies them **inside both
+`.zip` archives** (portable and loose-folder) beside the binary (there the
 `licenses/` subdirectory is preserved, so the notice's links resolve). The
 app-local Microsoft `vcruntime140.dll` is documented too.
 
-**The license-text and notice obligations are handled; the corresponding-source
-obligation is not yet fully satisfiable.** `SharpExt4.dll` is a prebuilt binary
-whose exact build provenance (the `SharpExt4` commit + the `lwext4` revision it
-vendored) is **not yet identified**, and upstream `HEAD` is not necessarily the
-source that corresponds to the shipped binary. So the **written offer is
-conditional/pending** until that snapshot is pinned and mirrored — which is why no
-GPL-conveying release is published in the meantime.
+**The common license texts are staged; the exact per-file notices and the
+corresponding-source offer remain pending.** The verbatim GPL-2.0 text and the
+common BSD-3-Clause notice ship now, but the **exact per-file BSD-3-Clause
+copyright notices** for the embedded revision are not yet recorded (see
+[`licenses/lwext4-BSD-3-Clause-NOTICE.txt`](licenses/lwext4-BSD-3-Clause-NOTICE.txt)).
+`SharpExt4.dll` is a prebuilt binary whose exact build provenance (the `SharpExt4`
+commit + the `lwext4` revision it vendored) is **not yet identified**, and upstream
+`HEAD` is not necessarily the source that corresponds to the shipped binary. So the
+**written offer is conditional/pending** until that snapshot is pinned and mirrored
+and the per-file notices are recorded — which is why no GPL-conveying release is
+published until then.
 
 **The independent hard blocker.** The `SharpExt4` *wrapper's own* license is
 UNRESOLVED — upstream declares no terms — so there is no explicit grant to
@@ -160,8 +165,9 @@ repository's source; it is **not** a claim that the *combined binary* escapes
 GPL-2.0, nor a ruling on whether the application is a derivative work of `lwext4`
 (the app-vs-library boundary is left open — see #98). `lwext4` itself is a
 third-party dependency that does not incorporate this project's code; its GPL-2.0
-and BSD-3-Clause license texts and notices ship with every release, while its
-**corresponding-source offer is conditional** pending the pinned build snapshot
+text and the common BSD-3-Clause notice ship with every release, while the
+**exact per-file notices and the corresponding-source offer stay conditional**
+pending the pinned build snapshot
 (see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)). What remains before a
 public v1.0.0 — the `SharpExt4` wrapper's unresolved license, pinning/mirroring the
 exact upstream source, and the app-vs-library boundary — is tracked in
