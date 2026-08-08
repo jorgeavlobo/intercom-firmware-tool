@@ -48,8 +48,9 @@ them.
 - **Build options.** Optional "block firmware auto-updates (OTA)" (#21) and
   "keep `.sig` signature files" (#22) toggles.
 - **Automatic update check (opt-out).** On startup, quietly informs when a newer
-  release exists and hard-blocks only maintainer-flagged unsafe versions; makes
-  at most one time-boxed HTTPS request and downloads nothing (#85).
+  release exists and, for a maintainer-flagged unsafe build, disables the firmware
+  actions while keeping the app otherwise usable; makes at most one time-boxed
+  HTTPS request and downloads nothing (#85).
 - **Localization.** Full UI + core messages in six languages (English, Italian,
   Spanish, French, German, Portuguese), with resource parity.
 - **Release pipeline.** Tag-driven Windows x64 release producing a draft GitHub

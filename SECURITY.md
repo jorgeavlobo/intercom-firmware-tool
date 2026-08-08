@@ -48,14 +48,17 @@ The tool is built to be **safe by default** and hard to use destructively:
   known-good original before use; a file that fails verification is discarded.
   Prepared output is written to a *new* image, leaving your source untouched.
 - **Recovery-ready.** Because the original image is preserved and verifiable, you
-  can always return to stock firmware.
-- **Releases are verifiable.** Every released asset ships a SHA-256 checksum and
-  a [SLSA](https://slsa.dev/) build-provenance attestation proving it was built by
-  this repository's CI (`gh attestation verify …`). The attestation — not an
-  antivirus label — is the authoritative origin check for an unsigned build.
+  can use it to return to stock firmware whenever the device's official update
+  mechanism remains available and accepts the image.
+- **Releases are verifiable.** Every released desktop asset ships a SHA-256
+  checksum and a [SLSA](https://slsa.dev/) build-provenance attestation proving it
+  was built by this repository's CI (`gh attestation verify …`). The attestation —
+  not an antivirus label — is the authoritative origin check for an unsigned
+  build.
 - **The update check is opt-out, fails open, and downloads nothing.** It makes at
-  most one time-boxed HTTPS request to GitHub, sends no personal data, and never
-  downloads or runs anything itself.
+  most one time-boxed HTTPS request to GitHub, sends no application or user data,
+  and never downloads or runs anything itself. (Like any HTTPS request it exposes
+  your IP address and a fixed `User-Agent` to GitHub; nothing more.)
 
 ## Dangerous features are opt-in and off by default
 
@@ -64,9 +67,13 @@ labelled choice, disabled unless you turn it on:
 
 - **Remote command channel (`ALLOW_REMOTE_SHELL`).** The `btmqttd` bridge's
   `read_file` / `write_file` / `execute_command` capabilities are **off** unless
-  this flag is set **and** the MQTT client is authenticated. With it off, the
-  bridge only relays intercom events and gated light/lock/volume commands. See
-  [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full trust boundary.
+  this flag is set **and** the bridge's own broker connection is credentialed
+  (username + password, or mTLS) — the daemon refuses a root-capable channel over
+  an anonymous link. That self-check does not authenticate individual publishers;
+  **which clients may issue commands is governed by your MQTT broker's ACL on the
+  command topic**, so restrict that topic to intended, authenticated clients. With
+  the flag off, the bridge only relays intercom events and the light/lock/volume
+  controls. See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full trust boundary.
 - **SSH access.** Dropbear key-login and the optional ECDSA host key
   ([#37](../../issues/37)) / stable RSA host-key pinning ([#38](../../issues/38))
   are installed only when you enable SSH in the tool. No SSH `authorized_keys`

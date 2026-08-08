@@ -37,7 +37,9 @@ Three components, with distinct trust properties:
   command channel.
 - **The user's LAN and MQTT broker** — the transport the bridge depends on.
 - **Firmware integrity** — the guarantee that a prepared image derives from a
-  verified official image and nothing else.
+  verified official image plus the documented project payload (the `btmqttd`
+  daemon, its config, discovery JSON, init scripts) and the opt-in components you
+  explicitly selected (e.g. SSH host keys) — and nothing else.
 
 ## Actors and trust boundaries
 
@@ -45,26 +47,40 @@ Three components, with distinct trust properties:
 |---|---|---|
 | The user (operator) | Trusted | Owns the device; makes every opt-in choice. |
 | The desktop app | Trusted, offline w.r.t. the device | Never flashes; only prepares an image. |
-| The MQTT broker | Semi-trusted transport | The bridge authenticates to it; broker ACLs are a dependency (below). |
-| An authenticated MQTT client | Trusted **only** for the capabilities its auth grants | e.g. Home Assistant. |
-| A LAN peer / network attacker | Untrusted | Can see/replay traffic if TLS is off; cannot cross an authenticated boundary. |
+| The MQTT broker | Semi-trusted transport + **authorization point** | The bridge authenticates *to* it; the broker's ACLs decide who may publish commands (below). |
+| An MQTT publisher authorized on the command topic | Trusted **only** for the capabilities the broker's ACL grants it | e.g. Home Assistant. |
+| A LAN peer / network attacker | Untrusted | Can see/replay/inject traffic if TLS is off; cannot cross a TLS-authenticated broker boundary. |
 | The internet | Untrusted | Only the update check reaches it, outbound, downloading nothing. |
 
-The security-critical boundary is between **an authenticated MQTT client** and
-**everyone else on the network**.
+The security-critical boundary is between **a publisher the broker authorizes on
+the command topic** and everyone else on the network. `btmqttd` itself does not
+authenticate individual publishers — MQTT delivers it no per-message identity —
+so **the broker's authentication + topic ACLs are the authorization layer**. This
+is the single most important thing to configure correctly.
 
 ## The remote command channel (`btmqttd`)
 
 `btmqttd` opens **one** MQTT connection and subscribes to a command topic
-(`TOPIC_RX`, QoS 1, durable session). Commands fall into two tiers:
+(`TOPIC_RX`, QoS 1, durable session). Because the session is durable and QoS 1 is
+*at-least-once*, the broker may deliver a **delayed or duplicated** command after
+a reconnect. The command worker preserves order and bounds its queue, but it has
+no message-id, expiry, or de-duplication guard — so a replayed command **repeats
+its effect** (a second `light_press`, lock toggle, `volume_step`, or file/exec
+command). Treat commands as non-idempotent and rely on the transport (TLS +
+broker ACL) to keep the topic private, rather than on in-daemon replay defence.
+Commands fall into two tiers:
 
-### Tier 1 — always available (event relay + gated device controls)
+### Tier 1 — always available (event relay + device controls)
 
 Raw OpenWebNet frames forwarded to the local gateway, plus the structured
-light / lock / volume / call controls. These act only on the intercom's own
-OWN bus and are the intended, benign function of the bridge. They are still
-reachable only by a client that can publish to the broker's command topic — so
-the **broker ACL is the access-control boundary** for them.
+light / lock / volume / call controls. These act on the intercom's own OWN bus
+and are the bridge's intended function. Their access control is entirely the
+**broker ACL**: any publisher the broker admits to the command topic can invoke
+them. Note that **`lock` is not benign** — it drives the physical access-control
+asset (the highest-value asset above). It has no independent authorization,
+replay protection, or audit inside the bridge, so a publisher authorized on the
+command topic can open the door; lock down the command-topic ACL accordingly and
+prefer TLS so the channel cannot be sniffed or injected on the LAN.
 
 ### Tier 2 — `read_file` / `write_file` / `execute_command` (the shell gate)
 
@@ -74,13 +90,22 @@ conditions, both required**:
 
 1. **`ALLOW_REMOTE_SHELL=1`** must be set in `btmqttd.conf`. This is **off by
    default** and is a deliberate, clearly labelled opt-in in the installer.
-2. **The MQTT client must be authenticated** to the broker. An unauthenticated
-   publisher is rejected regardless of the flag.
+2. **The bridge's own broker connection must itself be credentialed** — either
+   username + password, or full mTLS (CA + client certificate + key). `btmqttd`
+   refuses to expose a root-capable channel over an anonymous/uncredentialed
+   broker link (`Config::remote_shell_allowed`). This is a property of the
+   bridge's *own* connection; it is **not** per-publisher authentication — the
+   daemon receives no publisher identity and cannot authenticate the sender of an
+   individual command.
 
 With the flag off (the default), Tier 2 does not exist — the commands are
-refused. This is the primary trust boundary of the whole system, and it is the
-single most important thing to lock down. It is covered by automated tests in the
-`btmqttd` Rust suite (`cargo test`) across the auth/TLS matrix.
+refused. This condition-2 self-check is covered by automated tests in the
+`btmqttd` Rust suite (`cargo test`) across the auth/TLS matrix. **Crucially, it
+does not decide *who* may publish** — that remains the broker's ACL (see below).
+So if the broker admits an anonymous or over-privileged publisher to the command
+topic while `ALLOW_REMOTE_SHELL=1`, that publisher reaches Tier 2. Restricting
+the command topic to intended, authenticated clients is therefore mandatory
+whenever the shell gate is enabled.
 
 ### Dependencies and caveats
 
@@ -104,9 +129,11 @@ single most important thing to lock down. It is covered by automated tests in th
 ([#43](../../issues/43)). Rediscovery only ever *proposes* an address — adoption
 is gated by the reconnect:
 
-- **With TLS**, the reconnect validates the broker's **pinned certificate**, so a
-  proposed host that is not the real broker fails the handshake and is never
-  adopted.
+- **With TLS**, the reconnect validates the broker's certificate against the
+  **CA pinned at install time** (plus the optional mTLS client credentials), so a
+  proposed host whose certificate does not chain to that CA fails the handshake
+  and is never adopted. (This is CA validation, not leaf-certificate/fingerprint
+  pinning.)
 - **Without TLS**, a candidate is adopted only when its ARP MAC matches the
   broker MAC captured during *Test connection* — a **trusted-LAN convenience, not
   authentication**.
@@ -139,11 +166,15 @@ solely by opting in. Access is guarded by the factory `/home/root` mode
 - Official firmware, if downloaded through the tool, is verified byte-for-byte
   (size + SHA-256) against the known-good original before use.
 - The embedded `btmqttd` ARM binary is guarded in CI by a two-tier provenance
-  check ([#72](../../issues/72)/[#76](../../issues/76)): its committed SHA-256 +
-  size must match the metadata, **and** a rebuild from fully pinned inputs must be
-  byte-for-byte identical. A supply-chain substitution of the binary fails CI.
-- Released desktop builds carry SHA-256 checksums and a SLSA provenance
-  attestation.
+  check ([#72](../../issues/72)/[#76](../../issues/76)): a metadata tier requires
+  its committed SHA-256 + size to match `PayloadBinaries.cs`/`THIRD_PARTY.md`, and
+  a reproduction tier rebuilds from fully pinned inputs and requires the result to
+  be byte-for-byte identical to the committed binary. On PRs that touch the daemon
+  the provenance workflow supplies that rebuild, so a supply-chain substitution of
+  the binary fails CI.
+- Released **desktop** builds (the Windows app) carry per-asset SHA-256 checksums
+  and a SLSA build-provenance attestation from the release workflow. This is a
+  distinct mechanism from the `btmqttd` binary provenance above.
 
 ## Non-goals / out of scope
 

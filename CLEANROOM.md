@@ -71,15 +71,20 @@ through vendored userland tools:
   `serde_json` Rust crate.
 - **`evtest`** (**GPL-2.0-or-later**) → replaced by the pure-Rust `evdev` crate.
 
-`btmqttd`'s ~65 bundled Rust crates are **all permissive**
+The 64 third-party crates that end up in the shipped binary (as inventoried in
+the notice file below; `Cargo.lock` additionally lists build-only and
+target-specific crates that are not linked in) are **all permissive**
 (MIT / Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0 — no copyleft). This is not
-just asserted; it is **enforced in CI** by `cargo-deny` against a permissive-only
-license allow-list ([`native/btmqttd/deny.toml`](native/btmqttd/deny.toml)) plus
-`dependency-review` across both the NuGet and Cargo graphs. Aggregated notices
-are in
-[`IntercomFirmwareTool.Core/Payload/vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](IntercomFirmwareTool.Core/Payload/vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt);
-provenance and integrity of the committed binary are in
-[`IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md`](IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md).
+just asserted; it is **enforced in CI**: `cargo-deny` checks the dependency
+graph's licenses against a permissive-only allow-list
+([`native/btmqttd/deny.toml`](native/btmqttd/deny.toml)), and `dependency-review`
+blocks a pull request that *adds* a non-permissive (or vulnerable) dependency to
+either the NuGet or the Cargo graph. Aggregated notices are in
+[`IntercomFirmwareTool.Core/Payload/vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](IntercomFirmwareTool.Core/Payload/vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
+Separately — and not a licensing check — the committed binary's byte-for-byte
+provenance and integrity are recorded in
+[`IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md`](IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md)
+and enforced by the provenance workflow.
 
 ## Why this holds up
 
