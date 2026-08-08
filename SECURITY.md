@@ -55,12 +55,12 @@ The tool is built to be **safe by default** and hard to use destructively:
   was built by this repository's CI (`gh attestation verify …`). The attestation —
   not an antivirus label — is the authoritative origin check for an unsigned
   build.
-- **The update check is opt-out, fails open, and downloads nothing.** It makes at
-  most one time-boxed HTTPS request to GitHub, sends no application or user data,
-  and never downloads or runs anything itself. (As with any HTTPS request, GitHub
-  still sees your IP address, a fixed `User-Agent`, and the ordinary
-  request/network metadata; the request carries no application or user data of its
-  own.)
+- **The update check is opt-out, fails open, and installs nothing.** It makes at
+  most one time-boxed HTTPS request to GitHub to fetch a small version manifest,
+  sends no application or user data, and never downloads or runs any firmware,
+  executable, or release asset itself. (As with any HTTPS request, GitHub still
+  sees your IP address, a fixed `User-Agent`, and the ordinary request/network
+  metadata; the request carries no application or user data of its own.)
 
 ## Dangerous features are opt-in and off by default
 
