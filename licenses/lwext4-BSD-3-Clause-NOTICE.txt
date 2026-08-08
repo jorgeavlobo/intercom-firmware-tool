@@ -11,9 +11,11 @@ notices are still required to accompany binary redistributions and are reproduce
 here.
 
 The **authoritative, verbatim per-file** copyright and license statements ship with
-the binary in the pinned corresponding-source archive
-(`third_party/SharpExt4/SharpExt4-359d5f4.zip`, under `lwext4/`); this file is the
-aggregated summary.
+the binary **inside every release bundle** — the pinned corresponding-source archive
+`SharpExt4-359d5f4.zip` (headers under `lwext4/`) is included in both `.zip`
+downloads and is also a standalone release asset accompanying the single-file
+`.exe`. This file is the aggregated summary; where an imported file's own terms
+differ (below), those verbatim in-archive headers govern.
 
 -----------------------------------------------------------------
 Copyright notices found in the vendored lwext4 revision
@@ -35,11 +37,22 @@ Copyright notices found in the vendored lwext4 revision
   Copyright (c) 1991, 1993 The Regents of the University of California
   Copyright (C) 1990-2, RSA Data Security, Inc. All rights reserved.
 
-Some imported files (e.g. the MD5 implementation from RSA Data Security, and files
-derived from NetBSD/OpenBSD/FreeBSD) carry their own permissive license text
-(BSD-2-Clause / ISC-style / the RSA MD5 license) in their headers rather than the
-3-clause BSD license below. Consult the per-file headers in the source archive for
-the exact terms that apply to each file.
+Some imported files carry their own permissive license text in their headers rather
+than the 3-clause BSD license below, and those verbatim terms ship in the source
+archive bundled with each release:
+
+  - `lwext4/src/ext4_hash.c` — a FreeBSD (Regents-style BSD) header, plus the
+    **RSA Data Security MD4 Message-Digest Algorithm** license grant for the
+    `ext2_half_md4()` code (must be identified as the "RSA Data Security, Inc. MD4
+    Message-Digest Algorithm").
+  - `lwext4/include/getopt.h` — the **ISC-style** license of Todd C. Miller, plus a
+    NetBSD Foundation BSD notice and a mingw-w64 runtime disclaimer.
+  - `lwext4/include/misc/queue.h` — a Regents of the University of California BSD
+    notice.
+  - `lwext4/include/misc/tree.h` — Niels Provos's BSD notice.
+
+Consult the per-file headers in the bundled source archive for the exact terms that
+apply to each file.
 
 -----------------------------------------------------------------
 3-clause BSD license — applies ONLY to the lwext4 contributor modules whose

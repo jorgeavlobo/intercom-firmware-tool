@@ -288,6 +288,14 @@ jobs:
               }
             }
           }
+          # Ship the corresponding-source archive INSIDE both binary ZIPs too (not only as a sibling
+          # release asset). lwext4 vendors a few imported files under their own permissive licenses
+          # (the RSA MD4 grant in ext4_hash.c, ISC in getopt.h, BSD variants in misc/queue.h and
+          # misc/tree.h) whose VERBATIM per-file terms must accompany binary redistribution; those
+          # headers live in this archive, so bundling it in each ZIP means a ZIP download carries
+          # them without needing the separate asset (Codex). The single-file .exe can't embed it and
+          # is accompanied by the same archive as a sibling release asset.
+          Copy-Item 'third_party/SharpExt4/SharpExt4-359d5f4.zip' out/folder -Force
           # Portable .zip: it is the preferred download for many users, so it must ALSO carry the
           # compliance docs — not just sit beside them as sibling release assets (GitHub does not
           # auto-download siblings) (Codex). Stage the single-file .exe together with the notices in
@@ -298,6 +306,8 @@ jobs:
           Copy-Item (Join-Path dist "$base-portable.exe") $stage -Force
           foreach ($n in @('THIRD-PARTY-NOTICES.md', 'LICENSE.txt')) { Copy-Item $n $stage -Force }
           foreach ($n in $licenseTexts) { Copy-Item $n (Join-Path $stage 'licenses') -Force }
+          # Bundle the corresponding source in the portable .zip too (see the loose-folder note above).
+          Copy-Item 'third_party/SharpExt4/SharpExt4-359d5f4.zip' $stage -Force
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path dist "$base-portable.zip") -Force
           Remove-Item -Recurse -Force $stage
           # Loose-folder zip: out/folder/* puts the files at the archive root (no top-level folder).
