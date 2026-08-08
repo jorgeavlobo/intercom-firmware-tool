@@ -188,10 +188,22 @@ jobs:
               --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null || true)"
           else
             # A PR is already open on the rolling branch; the force-push retargeted it to $version, so
-            # refresh its title/body to match.
-            gh pr edit "$existing" --title "$title" --body "$body" \
-              || echo "::warning::could not update PR #$existing title/body; it still points at the new branch tip."
-            echo "Reused open PR #$existing on $branch, retargeted to $version."
+            # refresh its title/body to match. If the edit FAILS (e.g. the PR closed in the narrow race
+            # between the lookup above and here), re-resolve and fall back to creating a replacement, so
+            # the pushed bump never ends up stranded on a branch with no open PR (CodeRabbit).
+            if gh pr edit "$existing" --title "$title" --body "$body"; then
+              echo "Reused open PR #$existing on $branch, retargeted to $version."
+            else
+              echo "::warning::could not edit PR #$existing (it may have closed); re-resolving and creating a replacement if needed."
+              existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
+                --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null || true)"
+              if [ -z "$existing" ]; then
+                gh pr create --base master --head "$branch" --title "$title" --body "$body" \
+                  || echo "::warning::could not open a replacement PR automatically; open it by hand for branch $branch"
+                existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
+                  --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null || true)"
+              fi
+            fi
           fi
 
           # Turn on auto-merge so the PR lands once the required checks pass, targeting the verified PR
