@@ -119,9 +119,15 @@ jobs:
 
           # Is a PR already open on the rolling branch, from THIS repo? `gh pr list --head` filters by
           # branch NAME only, so on a public repo it could match a fork's same-named branch; select
-          # isCrossRepository == false and use the verified number for edit/merge (Codex P1).
-          existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
-            --jq 'map(select(.isCrossRepository == false)) | .[0].number' 2>/dev/null || true)"
+          # isCrossRepository == false and use the verified number for edit/merge (Codex P1). Fail
+          # CLOSED if the query itself errors (transient API/auth): treating a failed lookup as "no PR"
+          # would skip the pending-version guard below and could force a lower version over a higher
+          # pending one, so abort instead (Codex P2). An empty result (no such PR) is fine and proceeds.
+          if ! existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
+            --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null)"; then
+            echo "::error::could not query the open rolling manifest PR; aborting rather than risk regressing a higher pending version."
+            exit 1
+          fi
 
           # Fetch the rolling branch (for the lease below, and to read its pending value). The
           # EFFECTIVE current latestVersion is the max of what's on master AND any value still pending
@@ -170,8 +176,9 @@ jobs:
             gh pr create --base master --head "$branch" --title "$title" --body "$body" \
               || echo "::warning::could not open the PR automatically; open it by hand for branch $branch"
             # Resolve the number we just created (same-repo filter) for the auto-merge step below.
+            # Non-fatal here: a miss only means auto-merge isn't enabled (a maintainer can merge).
             existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
-              --jq 'map(select(.isCrossRepository == false)) | .[0].number' 2>/dev/null || true)"
+              --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null || true)"
           else
             # A PR is already open on the rolling branch; the force-push retargeted it to $version, so
             # refresh its title/body to match.
