@@ -141,20 +141,27 @@ jobs:
           if git rev-parse -q --verify "origin/$branch" >/dev/null 2>&1; then
             pending_latest="$(git show "origin/$branch:$file" 2>/dev/null | jq -r '.latestVersion // "0.0.0"' 2>/dev/null || echo '0.0.0')"
           fi
-          current="$master_latest"
-          if ! sort_le "$pending_latest" "$current"; then current="$pending_latest"; fi
+          # The value master should end up at is the newest of: this release, master's current value,
+          # and whatever the rolling branch already carries (including an orphaned bump from a failed
+          # prior `gh pr create`). Framing it as this max resolves BOTH failure modes: a lower backport
+          # can't regress a higher pending/orphaned value, AND an orphaned higher value is recovered
+          # (opened as a PR) instead of being skipped as "nothing to do" while master stays stale
+          # (Codex). If master is already at that max, there is genuinely nothing to do.
+          target="$version"
+          if ! sort_le "$master_latest" "$target"; then target="$master_latest"; fi
+          if ! sort_le "$pending_latest" "$target"; then target="$pending_latest"; fi
 
-          # Never move latestVersion backwards (a legit backport release after a newer one just
-          # no-ops), and keep the invariant the in-app unsafe-version block relies on (minimum <=
-          # latest, else the block silently disables).
-          if sort_le "$version" "$current"; then
-            echo "'$version' is not newer than the effective latestVersion '$current' (master or a pending PR); nothing to do."
+          if [ "$target" = "$master_latest" ]; then
+            echo "master already at the newest latestVersion '$master_latest' (release '$version', rolling branch '$pending_latest'); nothing to do."
             exit 0
           fi
-          if ! sort_le "$minimum" "$version"; then
-            echo "::error::'$version' is below minimumSupportedVersion '$minimum'; not bumping."
+          # Keep the invariant the in-app unsafe-version block relies on (minimum <= latest).
+          if ! sort_le "$minimum" "$target"; then
+            echo "::error::target '$target' is below minimumSupportedVersion '$minimum'; not bumping."
             exit 1
           fi
+          # From here on, operate on the resolved target (commit message, PR title, and the write below).
+          version="$target"
 
           tmp="$(mktemp)"
           jq --arg v "$version" '.latestVersion = $v' "$file" > "$tmp"
