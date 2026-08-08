@@ -195,64 +195,90 @@ async fn run() -> Result<bool, String> {
         if cfg.light_where.is_some() {
             clear_persisted_light_where("configured WHERE is authoritative").await;
         }
-        let where_for_read = where_.clone();
-        let restore = tokio::task::spawn_blocking(move || persist::read_light(&where_for_read))
-            .await
-            // A JOIN failure (the blocking read panicked) is "couldn't read" — treat as Unreadable
-            // so we KEEP the record rather than deleting it.
-            .unwrap_or(persist::LightRestore::Unreadable);
-        // `initial` seeds the in-memory cache; `initial_uncertain` tells the persist task whether
-        // the on-disk value is known to match `initial` (so an observed value equal to it must
-        // still be durably written to overwrite a possibly-different record we couldn't read).
-        let (initial, initial_uncertain) = match restore {
-            // Normal reboot restore: a valid on/off record for THIS WHERE — disk matches `initial`.
-            persist::LightRestore::State(on) => (Some(on), false),
-            // No usable record (absent, a DIFFERENT WHERE's, or corrupt). Forget it, so a later
-            // switch BACK to an old WHERE starts unknown instead of restoring a stale value (Codex).
-            // Disk is now confirmed absent (= None), so the baseline is certain.
-            persist::LightRestore::Absent => {
-                clear_persisted_light("no valid state for the configured WHERE").await;
-                (None, false)
-            }
-            // Present but UNREADABLE (transient I/O). Do NOT clear — a valid state may still be on
-            // disk; keep it and retry next boot. Start the cache unknown, and mark the disk baseline
-            // UNCERTAIN so the first observed value is durably written (overwriting whatever record
-            // we couldn't read) rather than skipped as already-durable (Codex).
-            persist::LightRestore::Unreadable => {
-                eprintln!(
-                    "btmqttd: light: persisted state unreadable (I/O error) — keeping the record, \
-                     starting from unknown"
-                );
-                (None, true)
-            }
-        };
-        let (ctl, persist_rx) = light::LightCtl::new(
+        if cfg.light_momentary {
+            // MOMENTARY (staircase-timer install): the controller only forwards a PRESS — there is
+            // NO tracked on/off, so no state to restore and no persist task to run. (Any bistable
+            // state record for this WHERE is left untouched; it is read only by the bistable path,
+            // and a mode switch is rare.)
+            let (ctl, _persist_rx) = light::LightCtl::new(
+                &cfg,
+                client.clone(),
+                None,
+                Some(where_),
+                light_learnable,
+                true, // momentary
+                restart.clone(),
+            );
+            (Some(ctl), None)
+        } else {
+            let where_for_read = where_.clone();
+            let restore = tokio::task::spawn_blocking(move || persist::read_light(&where_for_read))
+                .await
+                // A JOIN failure (the blocking read panicked) is "couldn't read" — treat as Unreadable
+                // so we KEEP the record rather than deleting it.
+                .unwrap_or(persist::LightRestore::Unreadable);
+            // `initial` seeds the in-memory cache; `initial_uncertain` tells the persist task whether
+            // the on-disk value is known to match `initial` (so an observed value equal to it must
+            // still be durably written to overwrite a possibly-different record we couldn't read).
+            let (initial, initial_uncertain) = match restore {
+                // Normal reboot restore: a valid on/off record for THIS WHERE — disk matches `initial`.
+                persist::LightRestore::State(on) => (Some(on), false),
+                // No usable record (absent, a DIFFERENT WHERE's, or corrupt). Forget it, so a later
+                // switch BACK to an old WHERE starts unknown instead of restoring a stale value (Codex).
+                // Disk is now confirmed absent (= None), so the baseline is certain.
+                persist::LightRestore::Absent => {
+                    clear_persisted_light("no valid state for the configured WHERE").await;
+                    (None, false)
+                }
+                // Present but UNREADABLE (transient I/O). Do NOT clear — a valid state may still be on
+                // disk; keep it and retry next boot. Start the cache unknown, and mark the disk baseline
+                // UNCERTAIN so the first observed value is durably written (overwriting whatever record
+                // we couldn't read) rather than skipped as already-durable (Codex).
+                persist::LightRestore::Unreadable => {
+                    eprintln!(
+                        "btmqttd: light: persisted state unreadable (I/O error) — keeping the record, \
+                         starting from unknown"
+                    );
+                    (None, true)
+                }
+            };
+            let (ctl, persist_rx) = light::LightCtl::new(
+                &cfg,
+                client.clone(),
+                initial,
+                Some(where_.clone()),
+                light_learnable,
+                false, // bistable
+                restart.clone(),
+            );
+            let (persist_shutdown_tx, persist_shutdown_rx) = tokio::sync::oneshot::channel();
+            // Pass the restored disk value as the persist task's durable BASELINE explicitly, so a
+            // command/observe that bumps the channel before the task is first polled is still
+            // persisted (not mistaken for the restored value).
+            let persist_task = tokio::spawn(light::run_persist(
+                where_,
+                initial,
+                initial_uncertain,
+                persist_rx,
+                persist_shutdown_rx,
+            ));
+            (Some(ctl), Some((persist_shutdown_tx, persist_task)))
+        }
+    } else {
+        // LEARN MODE: enabled but no WHERE yet (blank build + none learned). The controller exists
+        // so the Learn button works and the switch/press + resync entities are present but marked
+        // UNAVAILABLE (via topic_light_avail = offline); no state-persist task runs until a WHERE is
+        // learned (which restarts btmqttd into the where-known path above). The momentary flag is
+        // carried through so command()/observe() behave correctly once the WHERE is learned too.
+        let (ctl, _persist_rx) = light::LightCtl::new(
             &cfg,
             client.clone(),
-            initial,
-            Some(where_.clone()),
+            None,
+            None,
             light_learnable,
+            cfg.light_momentary,
             restart.clone(),
         );
-        let (persist_shutdown_tx, persist_shutdown_rx) = tokio::sync::oneshot::channel();
-        // Pass the restored disk value as the persist task's durable BASELINE explicitly, so a
-        // command/observe that bumps the channel before the task is first polled is still
-        // persisted (not mistaken for the restored value).
-        let persist_task = tokio::spawn(light::run_persist(
-            where_,
-            initial,
-            initial_uncertain,
-            persist_rx,
-            persist_shutdown_rx,
-        ));
-        (Some(ctl), Some((persist_shutdown_tx, persist_task)))
-    } else {
-        // LEARN MODE: enabled but no WHERE yet (blank build + none learned). The controller
-        // exists so the Learn button works and the switch/resync entities are present but
-        // marked UNAVAILABLE (via topic_light_avail = offline); no state-persist task runs
-        // until a WHERE is learned (which restarts btmqttd into the where-known path above).
-        let (ctl, _persist_rx) =
-            light::LightCtl::new(&cfg, client.clone(), None, None, light_learnable, restart.clone());
         (Some(ctl), None)
     };
 

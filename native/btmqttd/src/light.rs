@@ -233,6 +233,11 @@ pub struct LightCtl {
     /// restart — a false "learned" that keeps toggling the old actuator (Codex). `true` only in
     /// learn mode (blank build), where the learned WHERE is what `main` actually binds.
     learnable: bool,
+    /// MOMENTARY light (staircase-timer install): the actuator is fired once to turn ON and the
+    /// physical installation auto-offs, so there is NO tracked state — [`press`] just forwards the
+    /// frame, and [`observe`]/[`command`]/[`resync`]/[`seed`]'s state work is skipped. HA gets a
+    /// press button (no switch/resync). `false` = the default BISTABLE toggle with tracked state.
+    momentary: bool,
     /// Retained state topic HA reads back (`on`/`off`).
     topic_light: String,
     /// Retained light-subsystem availability topic: `online` once a WHERE is known, `offline`
@@ -250,14 +255,16 @@ impl LightCtl {
     /// Build from config, restoring the persisted on/off (`initial`) so the switch keeps the
     /// right state across a reboot. `where_` is the bound actuator WHERE (`None` in learn mode);
     /// `learnable` is `true` only in learn mode (a blank build-time `LIGHT_WHERE`), where a learned
-    /// WHERE is what `main` binds. Returns the controller AND the `watch` receiver the caller must
-    /// hand to [`run_persist`] (spawned as the drained persist task).
+    /// WHERE is what `main` binds; `momentary` is `true` for a staircase-timer install (press-only,
+    /// no tracked state — `initial` is then unused and no persist task is spawned). Returns the
+    /// controller AND the `watch` receiver the caller must hand to [`run_persist`] (bistable only).
     pub fn new(
         cfg: &Arc<Config>,
         client: AsyncClient,
         initial: Option<bool>,
         where_: Option<String>,
         learnable: bool,
+        momentary: bool,
         restart: Arc<Notify>,
     ) -> (Arc<Self>, watch::Receiver<Option<bool>>) {
         let (persist_tx, persist_rx) = watch::channel(initial);
@@ -268,6 +275,7 @@ impl LightCtl {
             where_: Mutex::new(where_),
             learn_until: Mutex::new(None),
             learnable,
+            momentary,
             topic_light: cfg.topic_light.clone(),
             topic_light_avail: cfg.topic_light_avail.clone(),
             restart,
@@ -321,7 +329,11 @@ impl LightCtl {
     /// topics, so re-send the known state (or, while unknown, an empty retained payload that
     /// clears any stale value the broker still holds — e.g. from a previous `LIGHT_WHERE`).
     pub async fn seed(&self) {
-        self.publish_current().await;
+        // A MOMENTARY light has no tracked state → no state topic to re-assert; only the
+        // availability gate is republished. Bistable re-asserts its retained on/off.
+        if !self.momentary {
+            self.publish_current().await;
+        }
         self.publish_avail().await; // re-assert online/offline (learn-mode gate) on reconnect
     }
 
@@ -352,6 +364,15 @@ impl LightCtl {
     /// released across the forward, so a physical press `observe()` applies in that window
     /// must COMPOSE with our injection, not be clobbered.
     pub async fn command(&self, desired_on: bool) {
+        // A MOMENTARY install exposes a press button, not a switch, so a bistable on/off command
+        // should never arrive — but if a stale one does, honour "on" as a press and ignore "off"
+        // (the hardware owns the off), never touching the (non-existent) tracked state.
+        if self.momentary {
+            if desired_on {
+                self.press().await;
+            }
+            return;
+        }
         // In learn mode (no WHERE yet) the switch is inert — HA also marks it unavailable
         // via topic_light_avail, but guard here too in case a command still arrives.
         let Some(press) = self.press_frame() else {
@@ -392,6 +413,20 @@ impl LightCtl {
         self.publish_current().await;
     }
 
+    /// MOMENTARY "press": forward the actuator frame once (turn ON). The physical installation's
+    /// own timer switches it off, so there is NO tracked state, no persistence and no publish —
+    /// fire-and-forget. No-op if the WHERE is not known yet (learn mode; HA also marks the button
+    /// unavailable via `topic_light_avail`).
+    pub async fn press(&self) {
+        let Some(press) = self.press_frame() else {
+            eprintln!("btmqttd: light: ignoring press — WHERE not set yet (use Learn light)");
+            return;
+        };
+        if let Err(e) = forward_to_gateway(&press, FORWARD_TIMEOUT).await {
+            eprintln!("btmqttd: light press failed: {e}");
+        }
+    }
+
     /// Feed a monitor frame. When it is our WHERE's press (`*8*21*<WHERE>##`): if it is our
     /// own injected toggle's echo (within the guard) ignore it; otherwise it is a PHYSICAL
     /// panel press → flip the cache, enqueue persistence + republish. Any other frame is
@@ -403,6 +438,11 @@ impl LightCtl {
             if let Some(w) = parse_light_where(frame) {
                 self.adopt_learned_where(w).await;
             }
+            return;
+        }
+        // MOMENTARY tracks no state, so a physical press is nothing to record (the hardware auto-offs
+        // anyway). Learn capture above still runs; everything past here is bistable state tracking.
+        if self.momentary {
             return;
         }
         let Some(press) = self.press_frame() else { return }; // learn mode: nothing to track
@@ -425,6 +465,11 @@ impl LightCtl {
     /// cold boot or a press missed while the daemon was down. No-op in learn mode (no WHERE,
     /// so no meaningful state). Persists + republishes the new state.
     pub async fn resync(&self) {
+        // MOMENTARY has no tracked state to correct (HA doesn't even expose a resync button); guard
+        // in case a stale command arrives.
+        if self.momentary {
+            return;
+        }
         if !self.have_where() {
             eprintln!("btmqttd: light: ignoring resync — WHERE not set yet");
             return;

@@ -436,6 +436,13 @@ Key: {1}</value></data>
   <data name="Chk_MqttHasLight" xml:space="preserve"><value>The unit has an exterior light</value></data>
   <data name="Tip_MqttHasLight" xml:space="preserve"><value>Tick if your entrance has a light controlled from the panel. Then enter its address (WHERE), or leave it blank to learn it later from Home Assistant.</value></data>
   <data name="Hint_MqttLightLearn" xml:space="preserve"><value>Don't know the address? Leave it blank — the unit learns it: press “Learn light” in Home Assistant, then press the physical light button once.</value></data>
+  <data name="Lbl_MqttLightType" xml:space="preserve"><value>Exterior light type</value></data>
+  <data name="Rb_MqttLightBistable" xml:space="preserve"><value>Bistable — stays on</value></data>
+  <data name="Txt_MqttLightBistable" xml:space="preserve"><value>The same command turns the light on and off — it stays on until you send the command again.</value></data>
+  <data name="Tip_MqttLightBistable" xml:space="preserve"><value>For lights that stay on until switched off. Home Assistant shows an on/off switch with a tracked state, plus a Resync button to realign it after a reboot or a missed press. This is the most common wiring.</value></data>
+  <data name="Rb_MqttLightMomentary" xml:space="preserve"><value>Momentary — auto-off</value></data>
+  <data name="Txt_MqttLightMomentary" xml:space="preserve"><value>For installations that switch the light off automatically after a set time (staircase timer).</value></data>
+  <data name="Tip_MqttLightMomentary" xml:space="preserve"><value>A press turns the light on; your installation's own timer switches it off. Home Assistant shows a single “Turn on” button — press only, with no on/off state — because the hardware decides when the light goes off.</value></data>
   <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>The unit has a secondary gate</value></data>
   <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Tick to add a second gate button in Home Assistant. Leave off if your installation has only one gate.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receive (commands):</value></data>

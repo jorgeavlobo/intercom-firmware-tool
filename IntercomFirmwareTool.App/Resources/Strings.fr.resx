@@ -436,6 +436,13 @@ Clé : {1}</value></data>
   <data name="Chk_MqttHasLight" xml:space="preserve"><value>L'unité a une lumière extérieure</value></data>
   <data name="Tip_MqttHasLight" xml:space="preserve"><value>Cochez si votre entrée a une lumière commandée depuis le poste. Saisissez ensuite son adresse (WHERE), ou laissez-la vide pour l'apprendre plus tard depuis Home Assistant.</value></data>
   <data name="Hint_MqttLightLearn" xml:space="preserve"><value>Vous ne connaissez pas l'adresse ? Laissez-la vide — l'unité l'apprend : appuyez sur « Learn light » dans Home Assistant, puis appuyez une fois sur le bouton physique de la lumière.</value></data>
+  <data name="Lbl_MqttLightType" xml:space="preserve"><value>Type d'éclairage extérieur</value></data>
+  <data name="Rb_MqttLightBistable" xml:space="preserve"><value>Bistable — reste allumée</value></data>
+  <data name="Txt_MqttLightBistable" xml:space="preserve"><value>La même commande allume et éteint la lumière — elle reste allumée jusqu'à ce que vous renvoyiez la commande.</value></data>
+  <data name="Tip_MqttLightBistable" xml:space="preserve"><value>Pour les lumières qui restent allumées jusqu'à extinction. Home Assistant affiche un interrupteur on/off avec état suivi, plus un bouton Resync pour le réaligner après un redémarrage ou un appui manqué. C'est l'installation la plus courante.</value></data>
+  <data name="Rb_MqttLightMomentary" xml:space="preserve"><value>Momentanée — extinction automatique</value></data>
+  <data name="Txt_MqttLightMomentary" xml:space="preserve"><value>Pour les installations qui éteignent la lumière automatiquement après un certain temps (minuterie d'escalier).</value></data>
+  <data name="Tip_MqttLightMomentary" xml:space="preserve"><value>Un appui allume la lumière ; c'est la minuterie de votre installation qui l'éteint. Home Assistant affiche un seul bouton « Allumer » — appui uniquement, sans état on/off — car c'est le matériel qui décide quand la lumière s'éteint.</value></data>
   <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>L'unité a une serrure secondaire</value></data>
   <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Cochez pour ajouter un second bouton d'ouverture dans Home Assistant. Laissez décoché si votre installation n'a qu'un seul portail.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Réception (commandes) :</value></data>

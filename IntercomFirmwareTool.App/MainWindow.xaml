@@ -1289,6 +1289,23 @@
                     <CheckBox x:Name="ChkMqttHasLight" Margin="22,8,0,0"
                               Content="{loc:Loc Chk_MqttHasLight}" ToolTip="{loc:Loc Tip_MqttHasLight}"
                               Checked="ChkMqttHasLight_Toggled" Unchecked="ChkMqttHasLight_Toggled"/>
+                    <!-- Light type: how the physical installation behaves. Bistable (default) keeps
+                         the tracked on/off switch + resync; Momentary is for a staircase-timer that
+                         auto-offs, shown in HA as a single press button (no state). -->
+                    <StackPanel x:Name="LightTypePanel" Margin="40,6,0,0" Visibility="Collapsed">
+                        <TextBlock Text="{loc:Loc Lbl_MqttLightType}" FontWeight="SemiBold"
+                                   Margin="0,0,0,2"/>
+                        <RadioButton x:Name="RbMqttLightBistable" GroupName="MqttLightType"
+                                     IsChecked="True" Content="{loc:Loc Rb_MqttLightBistable}"
+                                     ToolTip="{loc:Loc Tip_MqttLightBistable}"/>
+                        <TextBlock Text="{loc:Loc Txt_MqttLightBistable}" Foreground="Gray"
+                                   FontSize="11" TextWrapping="Wrap" Margin="18,0,0,4"/>
+                        <RadioButton x:Name="RbMqttLightMomentary" GroupName="MqttLightType"
+                                     Content="{loc:Loc Rb_MqttLightMomentary}"
+                                     ToolTip="{loc:Loc Tip_MqttLightMomentary}"/>
+                        <TextBlock Text="{loc:Loc Txt_MqttLightMomentary}" Foreground="Gray"
+                                   FontSize="11" TextWrapping="Wrap" Margin="18,0,0,0"/>
+                    </StackPanel>
                     <StackPanel x:Name="LightWherePanel" Orientation="Horizontal" Margin="40,4,0,0"
                                 Visibility="Collapsed">
                         <TextBlock x:Name="LblMqttLightWhere" Text="{loc:Loc Field_MqttLightWhere}"
