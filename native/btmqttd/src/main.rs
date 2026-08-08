@@ -197,9 +197,11 @@ async fn run() -> Result<bool, String> {
         }
         if cfg.light_momentary {
             // MOMENTARY (staircase-timer install): the controller only forwards a PRESS — there is
-            // NO tracked on/off, so no state to restore and no persist task to run. (Any bistable
-            // state record for this WHERE is left untouched; it is read only by the bistable path,
-            // and a mode switch is rare.)
+            // NO tracked on/off, so no state to restore and no persist task to run. FORGET any
+            // bistable state record: the relay can change while running momentary (the hardware
+            // auto-offs), so a later switch back to bistable must start UNKNOWN, not restore a stale
+            // on/off that could toggle the next command the wrong way (CodeRabbit).
+            clear_persisted_light("momentary — no tracked state").await;
             let (ctl, _persist_rx) = light::LightCtl::new(
                 &cfg,
                 client.clone(),
@@ -270,6 +272,11 @@ async fn run() -> Result<bool, String> {
         // UNAVAILABLE (via topic_light_avail = offline); no state-persist task runs until a WHERE is
         // learned (which restarts btmqttd into the where-known path above). The momentary flag is
         // carried through so command()/observe() behave correctly once the WHERE is learned too.
+        // In momentary mode, forget any stale bistable state so a later bistable build starts unknown
+        // (CodeRabbit) — mirrors the where-known momentary branch above.
+        if cfg.light_momentary {
+            clear_persisted_light("momentary — no tracked state").await;
+        }
         let (ctl, _persist_rx) = light::LightCtl::new(
             &cfg,
             client.clone(),

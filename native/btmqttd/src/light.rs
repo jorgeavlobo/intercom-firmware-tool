@@ -418,6 +418,13 @@ impl LightCtl {
     /// fire-and-forget. No-op if the WHERE is not known yet (learn mode; HA also marks the button
     /// unavailable via `topic_light_avail`).
     pub async fn press(&self) {
+        // BISTABLE has no press button — a stray/stale `light_press` here would toggle the relay
+        // while bypassing command()'s state tracking + persistence + retained publish, desyncing
+        // HA's switch. Refuse it; bistable actuation goes through command() only (CodeRabbit).
+        if !self.momentary {
+            eprintln!("btmqttd: light: ignoring press — not a momentary light (use the switch)");
+            return;
+        }
         let Some(press) = self.press_frame() else {
             eprintln!("btmqttd: light: ignoring press — WHERE not set yet (use Learn light)");
             return;
@@ -513,11 +520,16 @@ impl LightCtl {
         // Disarm first so a second echo of the same press can't re-enter this path.
         *self.learn_until.lock().expect("light learn mutex poisoned") = None;
         if self.where_.lock().expect("light where mutex poisoned").as_deref() == Some(w) {
-            // The physical press that taught us this WHERE is a REAL toggle. `observe()` diverted
-            // it into this learn path before `apply_observe` could record it, and because the WHERE
-            // is unchanged there is no restart to re-seed state — so apply that toggle to the
-            // tracked state now (respecting the echo guard), or HA is left one toggle out of sync.
             eprintln!("btmqttd: light: learned WHERE {w} matches the current one — no change");
+            // A MOMENTARY light tracks no state, so the teaching press is nothing to record — just
+            // disarm (done above) and return, never publishing a retained state (CodeRabbit).
+            if self.momentary {
+                return;
+            }
+            // BISTABLE: the physical press that taught us this WHERE is a REAL toggle. `observe()`
+            // diverted it into this learn path before `apply_observe` could record it, and because
+            // the WHERE is unchanged there is no restart to re-seed state — so apply that toggle to
+            // the tracked state now (respecting the echo guard), or HA is left one toggle out of sync.
             let flipped = self.st.lock().expect("light state mutex poisoned").apply_observe(Instant::now());
             if flipped.is_some() {
                 self.enqueue_persist();

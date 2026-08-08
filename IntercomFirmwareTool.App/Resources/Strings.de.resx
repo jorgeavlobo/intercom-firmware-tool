@@ -438,11 +438,11 @@ Schlüssel: {1}</value></data>
   <data name="Hint_MqttLightLearn" xml:space="preserve"><value>Adresse unbekannt? Leer lassen — die Einheit lernt sie: in Home Assistant „Learn light“ drücken, dann einmal die physische Lichttaste drücken.</value></data>
   <data name="Lbl_MqttLightType" xml:space="preserve"><value>Art des Außenlichts</value></data>
   <data name="Rb_MqttLightBistable" xml:space="preserve"><value>Bistabil — bleibt an</value></data>
-  <data name="Txt_MqttLightBistable" xml:space="preserve"><value>Derselbe Befehl schaltet das Licht ein und aus — es bleibt an, bis du den Befehl erneut sendest.</value></data>
+  <data name="Txt_MqttLightBistable" xml:space="preserve"><value>Derselbe Befehl schaltet das Licht ein und aus — es bleibt an, bis Sie den Befehl erneut senden.</value></data>
   <data name="Tip_MqttLightBistable" xml:space="preserve"><value>Für Lichter, die an bleiben, bis sie ausgeschaltet werden. Home Assistant zeigt einen Ein/Aus-Schalter mit verfolgtem Zustand sowie eine Resync-Schaltfläche, um ihn nach einem Neustart oder einem verpassten Tastendruck neu auszurichten. Die häufigste Installation.</value></data>
   <data name="Rb_MqttLightMomentary" xml:space="preserve"><value>Momentan — automatisches Ausschalten</value></data>
   <data name="Txt_MqttLightMomentary" xml:space="preserve"><value>Für Installationen, die das Licht nach einer festgelegten Zeit automatisch ausschalten (Treppenlicht-Timer).</value></data>
-  <data name="Tip_MqttLightMomentary" xml:space="preserve"><value>Ein Druck schaltet das Licht ein; der Timer deiner Installation schaltet es aus. Home Assistant zeigt nur eine Schaltfläche „Einschalten“ — nur Druck, ohne Ein/Aus-Zustand — weil die Hardware entscheidet, wann das Licht ausgeht.</value></data>
+  <data name="Tip_MqttLightMomentary" xml:space="preserve"><value>Ein Druck schaltet das Licht ein; der Timer Ihrer Installation schaltet es aus. Home Assistant zeigt nur eine Schaltfläche „Einschalten“ — nur Druck, ohne Ein/Aus-Zustand — weil die Hardware entscheidet, wann das Licht ausgeht.</value></data>
   <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>Die Einheit hat ein zweites Schloss</value></data>
   <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Aktivieren, um in Home Assistant eine zweite Türöffner-Taste hinzuzufügen. Aus lassen, wenn Ihre Installation nur ein Tor hat.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Empfang (Befehle):</value></data>

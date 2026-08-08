@@ -58,8 +58,8 @@ pub struct Config {
     // mode. The button toggles the relay (`*8*21*<where>##`) — no discrete on/off and no
     // status query (firmware-confirmed) — so `topic_light` carries a TRACKED retained on/off,
     // and `topic_light_avail` gates HA's switch/resync entities OFFLINE until a WHERE is known.
-    // The COMMANDs reuse TOPIC_RX (small JSON actions: light / light_resync / light_learn), so
-    // no extra subscription is added.
+    // The COMMANDs reuse TOPIC_RX (small JSON actions: light / light_press / light_resync /
+    // light_learn), so no extra subscription is added.
     pub light_enabled: bool,
     // Light TYPE. `false` (default) = BISTABLE: a toggle actuator that stays on until switched off;
     // btmqttd tracks + publishes the on/off and exposes resync. `true` = MOMENTARY: a
