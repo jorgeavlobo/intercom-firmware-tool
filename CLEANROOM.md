@@ -104,10 +104,13 @@ notices must still travel with the binary) — and it is compiled into the shipp
 `SharpExt4.dll`. So, unlike the clean-room items above, this is a genuine
 **third-party GPL-2.0 binary that the Windows release distributes**.
 
-This is **not** clean-room-reproduced GPL source — no `lwext4` source is copied
-into or derived by this repository; it is a prebuilt dependency the release links
-against. Its GPL-2.0 terms nonetheless apply to the distributed binary and must be
-honored (license text, notices, and corresponding-source availability).
+This is **not** clean-room-reproduced GPL source — the clean-room reimplementation
+transcribes no `lwext4` source, and `lwext4` is a prebuilt dependency the release
+links against rather than derives from. (Its corresponding source *is* now
+deliberately vendored under [`third_party/SharpExt4/`](third_party/SharpExt4) to
+satisfy the GPL — that is a compliance artifact, not part of the clean-room work.)
+Its GPL-2.0 terms apply to the distributed binary and must be honored (license
+text, notices, and corresponding-source availability).
 
 **What the release wiring already ships for GPL-2.0.** The release workflow
 attaches [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), the verbatim GPL-2.0
