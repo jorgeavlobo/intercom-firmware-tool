@@ -17,8 +17,8 @@ Three components, with distinct trust properties:
 1. **The desktop app** (WPF, `net10.0-windows`) — runs on the user's PC.
    Prepares a firmware image; **never flashes the device** and never talks to it
    during preparation. Optionally downloads official firmware (verified
-   byte-for-byte) and, at runtime, makes at most one time-boxed update-check
-   request to GitHub.
+   byte-for-byte) and, at runtime, makes one automatic startup update-check
+   request to GitHub (plus one per user-initiated "Check now").
 2. **The installer/payload** (`IntercomFirmwareTool.Core`) — writes files into a
    copy of the ext4 rootfs inside the `.fwz`: the `btmqttd` daemon, its config,
    Home Assistant discovery JSON, SysV init scripts, and optionally SSH host keys.
@@ -66,9 +66,11 @@ is the single most important thing to configure correctly.
 a reconnect. The command worker preserves order and bounds its queue, but it has
 no message-id, expiry, or de-duplication guard — so a replayed command **repeats
 its effect** (a second `light_press`, lock toggle, `volume_step`, or file/exec
-command). Treat commands as non-idempotent and rely on the transport (TLS +
-broker ACL) to keep the topic private, rather than on in-daemon replay defence.
-Commands fall into two tiers:
+command). Treat commands as non-idempotent. TLS and broker ACLs restrict *who*
+can inject commands (unauthorized publishers), but they are **not replay
+protection**: a duplicate or delayed delivery from an *authorized* publisher still
+repeats, and the daemon provides no de-duplication or expiry. Commands fall into
+two tiers:
 
 ### Tier 1 — always available (event relay + device controls)
 
@@ -173,9 +175,11 @@ regeneration described below):
   is enabled.
 
 No `authorized_keys` mechanism exists in the factory firmware; it is created
-solely by opting in. Access is guarded by the factory `/home/root` mode
-(`0700 root:root`), so key files are unreachable by other users regardless of the
-`.ssh` directory mode.
+solely by this tool. Both generated key files —
+`/etc/dropbear/authorized_keys` and `/home/root/.ssh/authorized_keys` — are
+written `0600 root:root`. The home-directory key is additionally protected by the
+factory `/home/root` mode (`0700 root:root`), so it is unreachable by other users
+regardless of the `.ssh` directory mode.
 
 ## Firmware integrity
 

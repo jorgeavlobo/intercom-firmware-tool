@@ -1,11 +1,11 @@
 # Clean-room reimplementation methodology
 
-This project's **own code is intended to be MIT-licensed** — a top-level `LICENSE`
-file is not yet committed (tracked in [#98](../../issues/98)) — and it copies **no
-GPL-licensed *source*** into this repository: the tool reproduces the *functional
-result* of prior GPL-2.0 work through an independent implementation, without
-transcribing any GPL source. This document records how that is achieved and
-defended.
+This project ships an MIT `LICENSE.txt`, though its copyright line still holds the
+template placeholders `[year] [fullname]` — finalizing that attribution is tracked
+in [#98](../../issues/98). Its **own code** copies **no GPL-licensed *source***
+into this repository: the tool reproduces the *functional result* of prior GPL-2.0
+work through an independent implementation, without transcribing any GPL source.
+This document records how that is achieved and defended.
 
 One caveat up front, so this is not read as an absolute "no GPL anywhere" claim:
 the **Windows release binary bundles one third-party GPL-2.0 component** —
@@ -107,9 +107,12 @@ genuine **third-party GPL-2.0 binary that the Windows release distributes**.
 This is **not** clean-room-reproduced GPL source — no `lwext4` source is copied
 into or derived by this repository; it is a prebuilt dependency the release links
 against. Its GPL-2.0 terms nonetheless apply to the distributed binary and must be
-honored (license text, notices, and corresponding-source availability). Bringing
-the releases into full GPL-2.0 compliance — and settling the app-vs-library
-boundary — is tracked in [#98](../../issues/98).
+honored (license text, notices, and corresponding-source availability). The
+current release workflow uploads only the app binaries, checksums, and
+attestation — no `lwext4` license text or corresponding-source offer — so
+**v1.0.0 should not be published until this is resolved.** Bringing the releases
+into full GPL-2.0 compliance — and settling the app-vs-library boundary — is
+tracked in [#98](../../issues/98).
 
 ## Why this holds up
 
@@ -127,10 +130,10 @@ boundary — is tracked in [#98](../../issues/98).
   files, so reintroducing a copyleft *file* under the payload tree is caught by
   code review and this documented methodology, not by the license workflow.
 
-Together these keep the **intended MIT** licensing for the project's **own code**
-defensible (the `LICENSE` file is pending — [#98](../../issues/98)): it is an
-independent work that interoperates with the device, not a translation of GPL-2.0
-source. The separately-bundled GPL-2.0 `lwext4` (via SharpExt4) is a
+Together these keep the MIT licensing for the project's **own code** defensible
+(an MIT `LICENSE.txt` is present; only its `[year] [fullname]` attribution
+placeholders remain to be filled — [#98](../../issues/98)): it is an independent
+work that interoperates with the device, not a translation of GPL-2.0 source. The separately-bundled GPL-2.0 `lwext4` (via SharpExt4) is a
 third-party dependency, **not** a derivative of this project's code; satisfying
 its GPL-2.0 obligations for the releases is **outstanding** work tracked in
 [#98](../../issues/98) — the current releases do not yet ship its license text or

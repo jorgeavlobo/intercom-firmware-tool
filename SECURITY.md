@@ -41,8 +41,12 @@ is the mechanism used to retire a build with a known security-relevant bug.
 The tool is built to be **safe by default** and hard to use destructively:
 
 - **It never flashes the device.** The tool only *prepares* a firmware image on
-  your PC. You flash it yourself through the device's own official update
-  mechanism, so there is no remote-bricking path through this software.
+  your PC; you flash it yourself through the device's own official update
+  mechanism, so there is no remote firmware-flashing path through this software.
+  (This is about flashing only: if you enable `ALLOW_REMOTE_SHELL`, an authorized
+  MQTT publisher can still write the device rootfs or run commands — an
+  availability risk you accept by opting in, covered in
+  [`THREAT_MODEL.md`](THREAT_MODEL.md).)
 - **It never modifies the original firmware in place.** Official firmware is
   downloaded (optionally) and verified byte-for-byte (size + SHA-256) against the
   known-good original before use; a file that fails verification is discarded.
@@ -55,10 +59,15 @@ The tool is built to be **safe by default** and hard to use destructively:
   was built by this repository's CI (`gh attestation verify …`). The attestation —
   not an antivirus label — is the authoritative origin check for an unsigned
   build.
-- **The update check is opt-out, fails open, and installs nothing.** It makes at
-  most one time-boxed HTTPS request to GitHub to fetch a small version manifest,
-  sends no application or user data, and never downloads or runs any firmware,
-  executable, or release asset itself. (As with any HTTPS request, GitHub still
+- **The update check is opt-out, fails open, and installs nothing.** It makes
+  **one automatic, time-boxed** HTTPS request at startup to fetch a small version
+  manifest from GitHub (plus one more each time *you* click "Check for updates
+  now"), sends no application or user data, and never downloads or runs any
+  firmware, executable, or release asset itself. "Fails open" means a failed or
+  absent check never blocks the app — no internet, a timeout, or a malformed
+  manifest simply means no banner and full functionality; only a *successful*
+  check returning a maintainer-flagged unsafe version disables the firmware
+  actions (see **Supported versions**). (As with any HTTPS request, GitHub still
   sees your IP address, a fixed `User-Agent`, and the ordinary request/network
   metadata; the request carries no application or user data of its own.)
 
@@ -103,8 +112,11 @@ separate opt-in the way the items below are.)
 In scope: the desktop app, the `btmqttd` bridge and its payload/installer, and
 the CI/release pipeline in this repository.
 
-Out of scope: vulnerabilities in the underlying BTicino/Legrand firmware, in
-Home Assistant or your MQTT broker, or in third-party dependencies (report those
-upstream — though we welcome a heads-up so we can pin or update). Misuse of the
-opt-in features above on a network or device you do not own is out of scope by
+Out of scope: vulnerabilities in the underlying BTicino/Legrand firmware, or in
+Home Assistant / your MQTT broker and other upstream products you run separately
+(report those upstream). A vulnerability in a third-party component this project
+**bundles or ships** — for example the `btmqttd` crates, or `lwext4` via
+`SharpExt4.dll` — **is** in scope as a supply-chain report: please raise it here
+as well as upstream, so we can pin, patch, or re-vendor. Misuse of the opt-in
+features above on a network or device you do not own is out of scope by
 definition.
