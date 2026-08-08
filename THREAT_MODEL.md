@@ -47,9 +47,9 @@ Three components, with distinct trust properties:
 |---|---|---|
 | The user (operator) | Trusted | Owns the device; makes every opt-in choice. |
 | The desktop app | Trusted, offline w.r.t. the device | Never flashes; only prepares an image. |
-| The MQTT broker | Semi-trusted transport + **authorization point** | The bridge authenticates *to* it; the broker's ACLs decide who may publish commands (below). |
-| An MQTT publisher authorized on the command topic | Trusted **only** for the capabilities the broker's ACL grants it | e.g. Home Assistant. |
-| A LAN peer / network attacker | Untrusted | Can see/replay/inject traffic if TLS is off; cannot cross a TLS-authenticated broker boundary. |
+| The MQTT broker | Semi-trusted transport + **authorization point** | The bridge authenticates *to* it; the broker's own client authentication + topic ACLs decide who may publish commands (below). TLS protects and authenticates the *connection*, not publishers. |
+| An MQTT publisher authorized on the command topic | Trusted **only** for the capabilities the broker's ACL grants it | e.g. Home Assistant. An anonymous or mis-ACLed client must not be allowed to publish commands. |
+| A LAN peer / network attacker | Untrusted | Can see/replay/inject traffic if TLS is off. TLS stops it tampering with the connection, but does **not** by itself authorize publishers — broker auth + ACLs do. |
 | The internet | Untrusted | Only the update check reaches it, outbound, downloading nothing. |
 
 The security-critical boundary is between **a publisher the broker authorizes on

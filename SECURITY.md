@@ -57,13 +57,20 @@ The tool is built to be **safe by default** and hard to use destructively:
   build.
 - **The update check is opt-out, fails open, and downloads nothing.** It makes at
   most one time-boxed HTTPS request to GitHub, sends no application or user data,
-  and never downloads or runs anything itself. (Like any HTTPS request it exposes
-  your IP address and a fixed `User-Agent` to GitHub; nothing more.)
+  and never downloads or runs anything itself. (As with any HTTPS request, GitHub
+  still sees your IP address, a fixed `User-Agent`, and the ordinary
+  request/network metadata; the request carries no application or user data of its
+  own.)
 
 ## Dangerous features are opt-in and off by default
 
-Everything that widens the device's attack surface is a deliberate, clearly
-labelled choice, disabled unless you turn it on:
+The MQTT bridge itself is opt-in and off by default, and each capability below
+that widens the device's attack surface is a further deliberate, clearly labelled
+choice. (Note: once you install the bridge and configure a light/lock, its
+**Tier 1** light/lock/volume/call controls operate as normal MQTT controls —
+their access control is the broker's command-topic ACL, see
+[`THREAT_MODEL.md`](THREAT_MODEL.md); they are not individually gated behind a
+separate opt-in the way the items below are.)
 
 - **Remote command channel (`ALLOW_REMOTE_SHELL`).** The `btmqttd` bridge's
   `read_file` / `write_file` / `execute_command` capabilities are **off** unless
