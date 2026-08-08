@@ -50,7 +50,7 @@ Three components, with distinct trust properties:
 | The MQTT broker | Semi-trusted transport + **authorization point** | The bridge authenticates *to* it; the broker's own client authentication + topic ACLs decide who may publish commands (below). TLS protects and authenticates the *connection*, not publishers. |
 | An MQTT publisher authorized on the command topic | Trusted **only** for the capabilities the broker's ACL grants it | e.g. Home Assistant. An anonymous or mis-ACLed client must not be allowed to publish commands. |
 | A LAN peer / network attacker | Untrusted | Can see/replay/inject traffic if TLS is off. TLS stops it tampering with the connection, but does **not** by itself authorize publishers — broker auth + ACLs do. |
-| The internet | Untrusted | Outbound only, only from the desktop app, never touching the device: (a) the startup **update check** — one time-boxed request fetching a small version manifest from GitHub; (b) an automatic startup **firmware-availability probe** — headers-only `GET`s to the official Legrand/BTicino firmware URLs to list what's online (best-effort, retried on transient failure); and (c) the **firmware download** itself, only when you choose it, fetching the `.fwz` and verifying it byte-for-byte (size + SHA-256) before use. |
+| The internet | Untrusted | **Desktop app** (outbound, never touching the device): (a) the startup **update check** — one time-boxed request fetching a small version manifest from GitHub; (b) an automatic startup **firmware-availability probe** — headers-only `GET`s to the official Legrand/BTicino firmware URLs (best-effort, retried); (c) the **firmware download**, only when you choose it, verified byte-for-byte (size + SHA-256). **Device** (`btmqttd`, after flashing): opens an outbound MQTT connection to the broker you configure — normally a **LAN** broker (strongly recommended), but the installer does not restrict the address, so pointing it at a public/cloud broker sends the device's MQTT traffic over the internet (use TLS + auth if you do). |
 
 The security-critical boundary is between **a publisher the broker authorizes on
 the command topic** and everyone else on the network. `btmqttd` itself does not
@@ -113,8 +113,14 @@ whenever the shell gate is enabled.
 
 - **Broker ACL dependency.** `btmqttd` trusts that the broker enforces
   publish/subscribe ACLs. If *any* client can publish to the command topic, that
-  client inherits whatever tier is enabled. Configure per-client ACLs so only
-  intended clients (e.g. Home Assistant) can reach the command topic.
+  client inherits whatever tier is enabled — so configure per-client ACLs so only
+  intended clients (e.g. Home Assistant) can **publish** there. **Tier 2 also
+  demands subscribe ACLs on the response topics:** `read_file` publishes the
+  requested rootfs contents to `TOPIC_FILE_CONTENT`, and `execute_command`
+  publishes command output to `TOPIC_CMD_RESULT`, so any client allowed to
+  *subscribe* to those topics can read the returned secrets even if it cannot
+  publish commands. Restrict **both** publish (command topic) and subscribe
+  (response topics) to intended clients.
 - **Cleartext without TLS.** If the broker link is plaintext (`1883`), a LAN
   attacker can read and inject MQTT traffic — command payloads and events are
   exposed and injectable. Broker username/password auth is **not** a mitigation

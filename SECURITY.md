@@ -100,8 +100,13 @@ separate opt-in the way the items below are.)
   an anonymous link. That self-check does not authenticate individual publishers;
   **which clients may issue commands is governed by your MQTT broker's ACL on the
   command topic**, so restrict that topic to intended, authenticated clients. With
-  the flag off, the bridge only relays intercom events and the light/lock/volume
-  controls. See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full trust boundary.
+  the flag off, the bridge still relays intercom events **and forwards raw
+  OpenWebNet frames** to the local gateway (which can actuate the bus — e.g. open a
+  lock) alongside the structured light/lock/volume controls; these are all Tier 1,
+  gated only by the broker's command-topic ACL. Only the shell capabilities above
+  are behind the flag. When Tier 2 is on, also restrict *subscribe* on the
+  response topics (`read_file`/`execute_command` publish their output there). See
+  [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full trust boundary.
 - **Secondary lock and learnable exterior light.** These control real hardware
   and are added only when explicitly selected in the installer.
 - **Firmware auto-update block (OTA).** Blocking the device's own OTA updates is
