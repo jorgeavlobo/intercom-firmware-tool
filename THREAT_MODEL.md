@@ -15,10 +15,13 @@ independently.
 Three components, with distinct trust properties:
 
 1. **The desktop app** (WPF, `net10.0-windows`) — runs on the user's PC.
-   Prepares a firmware image; **never flashes the device** and never talks to it
-   during preparation. Optionally downloads official firmware (verified
-   byte-for-byte) and, at runtime, makes one automatic startup update-check
-   request to GitHub (plus one per user-initiated "Check now").
+   Prepares a firmware image; **never flashes** or intentionally manages the
+   device. (It has no *deliberate* device channel, but its LAN broker-discovery —
+   the startup mDNS and, if you enable the bridge with an empty broker, an
+   optional `/24` scan — can incidentally probe the intercom's address like any
+   other host on the link; see the actor table.) Optionally downloads official
+   firmware (verified byte-for-byte) and, at runtime, makes one automatic startup
+   update-check request to GitHub (plus one per user-initiated "Check now").
 2. **The installer/payload** (`IntercomFirmwareTool.Core`) — writes files into a
    copy of the ext4 rootfs inside the `.fwz`: the `btmqttd` daemon, its config,
    Home Assistant discovery JSON, SysV init scripts, and optionally SSH host keys.
@@ -46,7 +49,7 @@ Three components, with distinct trust properties:
 | Actor | Trust | Notes |
 |---|---|---|
 | The user (operator) | Trusted | Owns the device; makes every opt-in choice. |
-| The desktop app | Trusted; never talks to the *device* | Prepares an image (never flashes). Its network footprint: the update check + firmware probe/download (internet, below); **broker discovery** — an **mDNS/DNS-SD multicast query** (MQTT + Home Assistant on the local link) that fires **unconditionally at startup**, whether or not you ever enable the bridge; the further HA probes and a bounded LAN `/24` scan run **only** when you enable the bridge with the broker field left empty; and a **Test connection** that opens a real, credential-bearing MQTT connection to the broker you enter (possibly a public one). |
+| The desktop app | Trusted; never flashes or intentionally manages the *device* | Prepares an image (never flashes). Its network footprint: the update check + firmware probe/download (internet, below); **broker discovery** — an **mDNS/DNS-SD multicast query** (MQTT + Home Assistant on the local link) that fires **unconditionally at startup**, whether or not you ever enable the bridge; the further HA probes and a bounded LAN `/24` scan run **only** when you enable the bridge with the broker field left empty; and a **Test connection** that opens a real, credential-bearing MQTT connection to the broker you enter (possibly a public one). |
 | The MQTT broker | Semi-trusted transport + **authorization point** | The bridge authenticates *to* it; the broker's own client authentication + topic ACLs decide who may publish commands (below). TLS protects and authenticates the *connection*, not publishers. |
 | An MQTT publisher authorized on the command topic | Trusted **only** for the capabilities the broker's ACL grants it | e.g. Home Assistant. An anonymous or mis-ACLed client must not be allowed to publish commands. |
 | A LAN peer / network attacker | Untrusted | Can see/replay/inject traffic if TLS is off. TLS stops it tampering with the connection, but does **not** by itself authorize publishers — broker auth + ACLs do. |
