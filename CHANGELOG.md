@@ -65,10 +65,13 @@ them.
 - **Project documentation.** `SECURITY.md`, `THREAT_MODEL.md`, `CLEANROOM.md`,
   and this `CHANGELOG.md` (#14).
 - **Third-party license notices.** `THIRD-PARTY-NOTICES.md` plus verbatim license
-  texts under `licenses/`, wired into the release workflow so the GPL-2.0 `lwext4`
-  (embedded in `SharpExt4.dll`) license text and a written corresponding-source
-  offer ship with every release — as standalone assets and inside the loose-folder
-  `.zip` (#98).
+  texts under `licenses/` (lwext4 GPL-2.0 + its BSD-3-Clause notice,
+  DiskPartitionInfo MIT), documenting the bundled native components including the
+  app-local Microsoft `vcruntime140.dll`. Wired into the release workflow so they
+  ship with every release — as standalone assets and inside the loose-folder
+  `.zip`. The `SharpExt4` wrapper's own license is unresolved and the GPL-2.0
+  corresponding-source offer is pending an exact build snapshot; both gate the
+  first public release (#98).
 
 ### Changed
 

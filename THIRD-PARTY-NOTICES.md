@@ -4,19 +4,41 @@ The Windows build of **IntercomFirmwareTool** (the `.exe` and the DLLs beside it
 bundles the third-party native components listed below, in addition to the .NET
 runtime. This file records each component's origin, license, and — for the
 copyleft component — the corresponding-source obligation. It is distributed with
-every release and referenced from the [README](README.md#releases).
+every release and referenced from the
+[README](https://github.com/jorgeavlobo/intercom-firmware-tool/blob/master/README.md#releases).
 
-> The `licenses/…-LICENSE.txt` links below are repository paths; they also resolve
-> **inside the loose-folder `.zip`**, which keeps the `licenses/` subdirectory. On
-> the GitHub **Releases page** the same texts appear as flat standalone assets
-> (`lwext4-LICENSE.txt`, `DiskPartitionInfo-LICENSE.txt`) beside this file.
+> **Reading this from a release bundle?** The `licenses/…` links below are
+> repository paths that also resolve **inside the loose-folder `.zip`** (it keeps
+> the `licenses/` subdirectory). On the GitHub **Releases page** the same texts
+> appear as flat standalone assets (`lwext4-LICENSE.txt`,
+> `lwext4-BSD-3-Clause-NOTICE.txt`, `DiskPartitionInfo-LICENSE.txt`) beside this
+> file. Links to other repository documents (README, `CLEANROOM.md`) are absolute
+> GitHub URLs so they resolve from anywhere.
 
-The application's **own source code is MIT-licensed** ([`LICENSE.txt`](LICENSE.txt)).
-Because the release binary statically embeds a GPL-2.0 component (`lwext4`, via
-`SharpExt4.dll`), the **release binary as an aggregate is conveyed under the terms
-of the GNU GPL v2** — its corresponding source is this repository (MIT) plus the
-upstream sources named below. See [`CLEANROOM.md`](CLEANROOM.md) for the full
-licensing reasoning.
+## Licensing summary (read this first)
+
+The two licensing questions here are **separate** and must not be conflated:
+
+1. **`lwext4` is GPL-2.0.** It is statically compiled into `SharpExt4.dll`, so its
+   GPL-2.0 terms attach to the shipped binary: its license text, the BSD-3-Clause
+   notices for its BSD-licensed modules, and a corresponding-source path all have
+   to travel with the release. Those obligations are addressed below.
+2. **`SharpExt4` (the wrapper) has no stated license.** Upstream declares no terms,
+   so there is **no explicit grant to redistribute `SharpExt4.dll` at all** — a
+   blocker that is independent of, and not cured by, the GPL-2.0 items above.
+   Clarification/permission is being sought (see
+   [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)).
+
+Because `lwext4` is embedded, the operative reading is that the compiled
+`SharpExt4.dll` **as an aggregate would be conveyed under the GNU GPL v2** *to the
+extent it may be redistributed at all* — which, per (2), is currently unresolved.
+Whether the application itself is a derivative work of `lwext4` or merely uses it
+across a library boundary is **not settled here** and is part of #98. The
+application's **own source code is MIT-licensed**
+([`LICENSE.txt`](LICENSE.txt)); that is a statement about this repository's code,
+not a conclusion about the combined binary. See
+[`CLEANROOM.md`](https://github.com/jorgeavlobo/intercom-firmware-tool/blob/master/CLEANROOM.md)
+for the full reasoning.
 
 > This document is an engineering/compliance record, not legal advice.
 
@@ -31,17 +53,24 @@ licensing reasoning.
   - Source: <https://github.com/nickdu088/SharpExt4>
   - **License status: UNRESOLVED.** The upstream repository declares no `LICENSE`
     file and states no license terms, so no explicit redistribution grant exists
-    for the wrapper's own code. Clarification/permission is being sought from the
-    author (see the tracking issue [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)).
-    Until that is resolved, redistribution of `SharpExt4.dll` is **not fully
-    authorized**, independently of the GPL obligations below.
+    for the wrapper's own code. Until this is resolved (tracked in
+    [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)),
+    redistribution of `SharpExt4.dll` is **not fully authorized**, independently of
+    the GPL obligations below.
 
 - **lwext4 (compiled into the same DLL):**
   - Source: <https://github.com/gkostka/lwext4>
-  - **License: GPL-2.0.** Per lwext4's own README, `ext4_xattr.c` and
-    `ext4_extents.c` are GPLv2, which makes the whole library GPLv2 (the other
-    modules are BSD-3-Clause). Full license text:
-    [`licenses/lwext4-LICENSE.txt`](licenses/lwext4-LICENSE.txt).
+  - **License: GPL-2.0 (mixed tree).** Per lwext4's own README, most modules and
+    headers are **BSD-3-Clause**, but `ext4_xattr.c` and `ext4_extents.c` are
+    **GPLv2** — and because those are linked into the same library, the library as
+    a whole is distributed under **GPL-2.0**. Both notices ship:
+    - GPL-2.0 text: [`licenses/lwext4-LICENSE.txt`](licenses/lwext4-LICENSE.txt).
+    - BSD-3-Clause notice (required to accompany binary redistribution of the
+      BSD-licensed modules):
+      [`licenses/lwext4-BSD-3-Clause-NOTICE.txt`](licenses/lwext4-BSD-3-Clause-NOTICE.txt).
+  - **Exact revision: not yet pinned.** The specific `lwext4` revision compiled
+    into the tracked `SharpExt4.dll` is not recorded here — see the **Written
+    offer** and #98.
   - Corresponding source: see the **Written offer** below.
 
 ### `DiskPartitionInfo.dll` — DiskPartitionInfo
@@ -57,25 +86,53 @@ licensing reasoning.
   Microsoft .NET runtime, distributed under the **MIT License**
   (<https://github.com/dotnet/runtime>).
 
+### `vcruntime140.dll` — Microsoft Visual C++ runtime
+
+- The Visual C++ runtime that the mixed-mode `SharpExt4.dll` imports. It is bundled
+  **app-local** by the release workflow — copied, **unmodified**, from the
+  Microsoft-signed Visual C++ Redistributable on the CI runner (currently Visual
+  Studio 2022), after verifying a valid `O=Microsoft Corporation` Authenticode
+  signature.
+- **License:** redistributed as **Distributable Code** under the **Microsoft
+  Software License Terms** for the Visual Studio version used to build the app;
+  `vcruntime140.dll` is on that version's **REDIST list**. It is shipped unmodified
+  with Microsoft's copyright/trademark notices intact and is not covered by this
+  project's MIT or the GPL-2.0 above. Terms and the redistributable-files list:
+  <https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files>
+  and <https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution>.
+
 ---
 
 ## Written offer for corresponding source (GPL-2.0, for `lwext4`)
 
 The `lwext4` code embedded in `SharpExt4.dll` is licensed under the GNU General
-Public License, version 2. In accordance with that license, the **complete
-corresponding source** for the GPL-2.0 portions is available from:
+Public License, version 2, so a **complete-corresponding-source** path must
+accompany any GPL-conveying release.
+
+**Status: pending an exact source snapshot.** `SharpExt4.dll` is a prebuilt binary
+whose exact build provenance (the `SharpExt4` commit and the `lwext4` revision it
+vendored) is **not yet identified**. An upstream repository's moving `HEAD` is
+**not necessarily** the source that corresponds to the shipped binary, so this
+offer cannot yet be presented as fully satisfiable. Accordingly:
+
+- **No GPL-conveying release is published while this is unresolved** — the first
+  tagged release (`v1.0.0`) is gated on it (see `CLEANROOM.md` and #98).
+- Before any such release is published, the **exact** `SharpExt4` commit +
+  `lwext4` revision will be **pinned and mirrored in this repository**, making the
+  offer below self-contained rather than dependent on the upstream repositories
+  staying online.
+
+Once pinned, for **three (3) years** from the date of each release the maintainer
+will, on request, provide the complete corresponding source for the GPL-2.0
+`lwext4` code contained in the `SharpExt4.dll` shipped with that release — open an
+issue at <https://github.com/jorgeavlobo/intercom-firmware-tool/issues>. Upstream,
+the source lives at:
 
 - **lwext4:** <https://github.com/gkostka/lwext4>
 - **the wrapper that compiles it:** <https://github.com/nickdu088/SharpExt4>
 
-For **three (3) years** from the date of each release, the maintainer of this
-project will, on request, provide the complete corresponding source for the
-GPL-2.0 `lwext4` code contained in the `SharpExt4.dll` shipped with that release —
-open an issue at
-<https://github.com/jorgeavlobo/intercom-firmware-tool/issues>.
-
 > **To finalize (tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)):**
 > pin the exact upstream revision (`SharpExt4` commit + the `lwext4` revision it
-> vendors) that the shipped `SharpExt4.dll` was built from, and mirror that source
-> in this repository so the offer is self-contained rather than dependent on the
-> upstream repositories staying online.
+> vendors) that the shipped `SharpExt4.dll` was built from, record the applicable
+> per-file BSD-3-Clause copyright notices for that revision, and mirror that source
+> in this repository.

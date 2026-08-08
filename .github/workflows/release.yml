@@ -237,7 +237,7 @@ jobs:
           # flat copy into dist/ for the standalone release assets (GitHub release assets can't be
           # nested — their sibling license assets are on the release page) (Copilot).
           New-Item -ItemType Directory -Force -Path out/folder/licenses | Out-Null
-          foreach ($n in @('licenses/lwext4-LICENSE.txt', 'licenses/DiskPartitionInfo-LICENSE.txt')) {
+          foreach ($n in @('licenses/lwext4-LICENSE.txt', 'licenses/lwext4-BSD-3-Clause-NOTICE.txt', 'licenses/DiskPartitionInfo-LICENSE.txt')) {
             if (-not (Test-Path $n)) { throw "compliance file missing from checkout: $n" }
             Copy-Item $n out/folder/licenses -Force
             Copy-Item $n dist -Force
@@ -289,7 +289,7 @@ jobs:
           # release assets too, so a download of only the portable .exe still comes with them. These
           # are staged into dist/ by the packaging step; they carry no .sha256 sidecar (they are
           # documentation, not attested binaries).
-          for a in THIRD-PARTY-NOTICES.md LICENSE.txt lwext4-LICENSE.txt DiskPartitionInfo-LICENSE.txt; do
+          for a in THIRD-PARTY-NOTICES.md LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt; do
             files+=("dist/$a")
           done
           for f in "${files[@]}"; do
