@@ -257,6 +257,13 @@ jobs:
             Copy-Item $n out/folder/licenses -Force
             Copy-Item $n dist -Force
           }
+          # GPL-2.0 §3(a): the pinned corresponding source for SharpExt4.dll (wrapper + vendored
+          # lwext4 + build scripts) is shipped as a standalone release asset from its repo path
+          # (see the upload step), so the binary is ACCOMPANIED by its source, not merely offered
+          # it (#98). Guard that the pinned snapshot exists in the checkout.
+          if (-not (Test-Path 'third_party/SharpExt4/SharpExt4-359d5f4.zip')) {
+            throw "pinned SharpExt4 corresponding-source snapshot missing: third_party/SharpExt4/SharpExt4-359d5f4.zip"
+          }
           # Portable .zip: it is the preferred download for many users, so it must ALSO carry the
           # compliance docs — not just sit beside them as sibling release assets (GitHub does not
           # auto-download siblings) (Codex). Stage the single-file .exe together with the notices in
@@ -313,6 +320,10 @@ jobs:
           for a in THIRD-PARTY-NOTICES.md LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt; do
             files+=("dist/$a")
           done
+          # GPL-2.0 §3(a) corresponding source for SharpExt4.dll — uploaded straight from its repo
+          # path (not staged into dist/), so it gets no .sha256 sidecar and is not SLSA-attested as
+          # our build output (it is upstream source, pinned + mirrored) (#98).
+          files+=("third_party/SharpExt4/SharpExt4-359d5f4.zip")
           for f in "${files[@]}"; do
             if [ ! -f "$f" ]; then
               echo "::error::missing expected release asset: $f (packaging did not produce it)"; exit 1

@@ -72,9 +72,9 @@ for the full reasoning.
     - BSD-3-Clause notice (required to accompany binary redistribution of the
       BSD-licensed modules):
       [`licenses/lwext4-BSD-3-Clause-NOTICE.txt`](licenses/lwext4-BSD-3-Clause-NOTICE.txt).
-  - **Exact revision: not yet pinned.** The specific `lwext4` revision compiled
-    into the tracked `SharpExt4.dll` is not recorded here — see the **Written
-    offer** and #98.
+  - **Corresponding source: pinned + mirrored.** The `lwext4` source (vendored
+    inside SharpExt4) is included in the pinned corresponding-source snapshot at
+    [`third_party/SharpExt4/`](third_party/SharpExt4) — see the **Written offer**.
   - Corresponding source: see the **Written offer** below.
 
 ### `DiskPartitionInfo.dll` — DiskPartitionInfo
@@ -126,39 +126,46 @@ Public License, version 2; because it is statically linked into the DLL, the
 **complete-corresponding-source** path for the entire DLL (not merely `lwext4`)
 must accompany any GPL-conveying release.
 
-**Status: pending an exact source snapshot.** `SharpExt4.dll` is a prebuilt binary
-whose exact build provenance (the `SharpExt4` commit and the `lwext4` revision it
-vendored) is **not yet identified**. An upstream repository's moving `HEAD` is
-**not necessarily** the source that corresponds to the shipped binary, so this
-offer cannot yet be presented as fully satisfiable. Accordingly:
+**Status: source pinned + mirrored in this repository.** The complete corresponding
+source for `SharpExt4.dll` (the `SharpExt4` wrapper, the vendored GPL-2.0 `lwext4`,
+and the build scripts) is committed here as an immutable snapshot at
+[`third_party/SharpExt4/`](third_party/SharpExt4):
 
-- **No GPL-conveying release is published while this is unresolved** — the first
-  tagged release (`v1.0.0`) is gated on it (see `CLEANROOM.md` and #98).
-- Before any such release is published, the **exact** `SharpExt4` commit +
-  `lwext4` revision will be **pinned and mirrored in this repository**, making the
-  offer below self-contained rather than dependent on the upstream repositories
-  staying online.
+- **Pinned commit:** `nickdu088/SharpExt4@359d5f425ab58a61e37869e9223f339c8763b13b`
+  (authoritative origin), mirrored durably at
+  `jorgeavlobo/SharpExt4@359d5f4` and archived in-repo as
+  [`third_party/SharpExt4/SharpExt4-359d5f4.zip`](third_party/SharpExt4/SharpExt4-359d5f4.zip)
+  (SHA-256 `1df3bb51b9fd09f11a79b28533b2c40bc11007b95e59b9bc3ced226995ce8b86`).
+- The archived source travels with every release (see the release assets), so the
+  binary is **accompanied by its source** (GPL-2.0 §3(a)) in addition to the offer
+  below.
 
-Once pinned, this becomes an offer in the terms of **GPL-2.0 Section 3(b)**: for
-**at least three (3) years** from the date of each release, the maintainer will
-give **any third party**, for a charge no more than the cost of physically
-performing source distribution, a complete machine-readable copy of the **complete
-corresponding source for the entire GPL-covered `SharpExt4.dll`** conveyed with
-that release, on a medium customarily used for software interchange. Because the
-whole DLL is conveyed as a GPL aggregate, that corresponding source is **not just
-`lwext4`** — per GPL-2.0 §3 it is everything needed to rebuild the executable
-work: the **`SharpExt4` wrapper source**, the **embedded `lwext4`**, and the
-**scripts used to control its compilation and installation**. Request it by opening
-an issue at <https://github.com/jorgeavlobo/intercom-firmware-tool/issues>. Once the
-exact revisions are pinned, that corresponding source will be **mirrored in this
-repository** as an immutable snapshot (so the offer does not depend on the upstream
-repositories staying online); until then the upstream source lives at:
+As a further guarantee, this is also an offer in the terms of **GPL-2.0 Section
+3(b)**: for **at least three (3) years** from the date of each release, the
+maintainer will give **any third party**, for a charge no more than the cost of
+physically performing source distribution, a complete machine-readable copy of the
+**complete corresponding source for the entire GPL-covered `SharpExt4.dll`**
+conveyed with that release, on a medium customarily used for software interchange.
+Because the whole DLL is conveyed as a GPL aggregate, that corresponding source is
+**not just `lwext4`** — per GPL-2.0 §3 it is everything needed to rebuild the
+executable work: the **`SharpExt4` wrapper source**, the **embedded `lwext4`**, and
+the **scripts used to control its compilation and installation** (all present in
+the snapshot above). Request it by opening an issue at
+<https://github.com/jorgeavlobo/intercom-firmware-tool/issues>.
 
-- **lwext4:** <https://github.com/gkostka/lwext4>
-- **the wrapper that compiles it:** <https://github.com/nickdu088/SharpExt4>
+The upstream source also remains at:
 
-> **To finalize (tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)):**
-> pin the exact upstream revision (`SharpExt4` commit + the `lwext4` revision it
-> vendors) that the shipped `SharpExt4.dll` was built from, record the applicable
-> per-file BSD-3-Clause copyright notices for that revision, and mirror that source
-> in this repository.
+- **the wrapper (with vendored lwext4):** <https://github.com/nickdu088/SharpExt4>
+- **lwext4 upstream:** <https://github.com/gkostka/lwext4>
+
+> **Honest scope (tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)):**
+> `SharpExt4.dll` is a prebuilt upstream binary; `359d5f4` is pinned as its
+> corresponding-source revision but the project does not itself rebuild the DLL, so
+> byte-exact build-provenance is asserted, not independently proven. Separately, the
+> `SharpExt4` wrapper's **own license remains unresolved** (see the component note
+> above) — that is a redistribution question independent of these GPL obligations.
+
+> **Remaining hardening (optional, tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)):**
+> the source is now pinned + mirrored; what is left is to *rebuild* the DLL from this
+> snapshot in CI so build-provenance is proven rather than asserted, and to record
+> the applicable per-file BSD-3-Clause copyright notices for the pinned revision.
