@@ -33,11 +33,16 @@ paths, contents, permissions and ordering.
 
 ## Licensing
 
-This repository is **MIT**. The upstream `main.py` is **GPL-2.0** and is **not
-included here**, so the repository (source and releases) carries no GPL-licensed
-content. If you fetch `main.py` via the URL above for your own reference, that
-copy remains GPL-2.0 and its terms apply to *that* copy only — they do not affect
-this MIT project.
+This repository's own code is **MIT** and vendors **no GPL *source***. The
+upstream `main.py` is **GPL-2.0** and is **not included here**, so this GPL script
+contributes no GPL content to the source tree or the releases. If you fetch
+`main.py` via the URL above for your own reference, that copy remains GPL-2.0 and
+its terms apply to *that* copy only — they do not affect this MIT project.
+
+Separately (and unrelated to this script), the Windows **release binary** bundles
+one third-party GPL-2.0 component — `lwext4`, compiled into `SharpExt4.dll`. That
+is documented in [`CLEANROOM.md`](../../CLEANROOM.md), and its GPL-2.0 compliance
+is tracked in issue #98.
 
 ## The rootfs edits this script makes (map to our C# plan)
 
