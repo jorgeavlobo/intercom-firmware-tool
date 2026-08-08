@@ -42,8 +42,11 @@ derived from NetBSD/OpenBSD/FreeBSD) carry their own permissive license text
 the exact terms that apply to each file.
 
 -----------------------------------------------------------------
-3-clause BSD license (applies to the lwext4 contributor modules above,
-as stated in their file headers):
+3-clause BSD license — applies ONLY to the lwext4 contributor modules whose
+headers state it (e.g. Kostka, Kaho Ng, Princ, Sucha, Matyushin). It does NOT
+apply to the imported files noted above that carry a different license
+(BSD-2-Clause / ISC / the RSA MD5 license) or to the GPL-2.0 modules; for those,
+the license in each file's own header governs:
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions
