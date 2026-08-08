@@ -74,8 +74,9 @@ them.
   runtime tools (#12).
 - **Gold-standard on-device layout.** `btmqttd` installs to `/usr/sbin`, config
   under `/etc/btmqttd`, with its own SysV init script (#63, #64).
-- **Bridge is external-broker only.** Documented and enforced that `MQTT_HOST`
-  targets your broker, not the device's internal `127.0.0.1:60000` IPC bus (#36).
+- **Bridge targets an external broker.** Documented (and warned in the UI, though
+  not hard-rejected by validation) that `MQTT_HOST` should point at your broker,
+  not the device's internal `127.0.0.1:60000` IPC bus (#36).
 
 ### Fixed
 
