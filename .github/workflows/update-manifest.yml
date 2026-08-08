@@ -134,18 +134,23 @@ jobs:
           git checkout -b "$branch"
           git add "$file"
           git commit -m "chore(updates): set latestVersion to $version"
-          # Force-push the side branch (safe: it is a throwaway, never the protected master) so a
-          # re-run after a failed check refreshes it in place.
-          git push --force origin "HEAD:$branch"
+          # Push the side branch (a throwaway, never the protected master). Fetch its current remote
+          # state first so --force-with-lease has a lease ref: a re-run refreshes the branch in
+          # place, but a concurrent unexpected update is NOT clobbered (Copilot).
+          git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
+          git push --force-with-lease origin "HEAD:$branch"
 
-          # Open the PR if one isn't already open for this branch (idempotent across re-runs).
-          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number' 2>/dev/null)" ]; then
+          # Open the PR if one isn't already open for this branch (idempotent across re-runs). Keep
+          # the lookup non-fatal: under `set -e`, a failing `gh pr list` in a command substitution
+          # (auth/outage) would abort the step before the create/warn path runs (Copilot).
+          existing="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -z "$existing" ]; then
             gh pr create --base master --head "$branch" \
               --title "chore(updates): set latestVersion to $version" \
               --body "Automated update of \`.well-known/updates.json\` \`latestVersion\` to \`$version\` after the v$version release was published (issue #85). Merging this makes the in-app update check nudge users to v$version." \
               || echo "::warning::could not open the PR automatically — open it by hand for branch $branch"
           else
-            echo "A PR for $branch is already open — it was updated in place."
+            echo "A PR (#$existing) for $branch is already open — it was updated in place."
           fi
 
           # Turn on auto-merge so the PR lands on its own once the required checks pass. This only
@@ -156,5 +161,9 @@ jobs:
               || echo "::warning::could not enable auto-merge (is 'Allow auto-merge' enabled in repo settings?) — merge the PR by hand."
             echo "Opened PR to set latestVersion=$version and requested auto-merge."
           else
-            echo "::warning::MANIFEST_PAT secret is not set — the PR's required checks won't start under GITHUB_TOKEN, so auto-merge can't complete. A maintainer should merge the PR for branch $branch to set latestVersion=$version."
+            # No PAT: the PR exists but its required status checks will NOT start, because GitHub
+            # suppresses workflow runs for pull_request events created with GITHUB_TOKEN. With the
+            # master ruleset requiring those checks, a maintainer cannot just click merge — the
+            # checks must first be retriggered by a HUMAN-authored event (Codex, Copilot).
+            echo "::warning::MANIFEST_PAT is not set, so the PR opened for '$branch' has NO required status checks running (GitHub suppresses pull_request runs triggered by GITHUB_TOKEN). To land it, a maintainer must retrigger the checks with a human-authored event — close then reopen the PR, or push a commit to '$branch' with a personal token — and then merge. Alternatively, just set .well-known/updates.json latestVersion to $version by hand. Set the MANIFEST_PAT secret (+ enable 'Allow auto-merge') to make this fully automatic."
           fi
