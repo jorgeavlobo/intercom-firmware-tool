@@ -6,11 +6,17 @@ name: update manifest
 # nudge ignores them). 'minimumSupportedVersion' is NEVER touched here; it is maintained by hand,
 # only to retroactively flag an old build unsafe.
 #
-# This job pushes one line to the default branch, so it checks out WITH credentials (unlike the
-# read-only lint/build jobs). It requires that this workflow is allowed to push to the default
-# branch (a branch-protection/ruleset bypass for the github-actions app, or no PR requirement on
-# that branch). If it cannot push, the run fails but nothing breaks: a stale 'latestVersion' just
-# means no nudge (fail-safe), and a maintainer can bump the one line by hand.
+# The default branch requires changes to go through a pull request (branch ruleset), so this job
+# does NOT push to it directly. Instead it commits the one-line bump to a short-lived branch, opens
+# a PR, and turns on auto-merge — the PR merges itself once the required checks pass.
+#
+# GitHub gotcha: a PR opened with the built-in GITHUB_TOKEN does NOT trigger the `pull_request`
+# status checks (anti-recursion), so auto-merge would wait forever for checks that never start. To
+# make the flow fully autonomous, add a fine-grained PAT as the `MANIFEST_PAT` secret (Contents:
+# Read/Write, Pull requests: Read/Write); the job uses it when present so the checks run and the PR
+# auto-merges. WITHOUT the PAT the job still opens the PR (best effort) and a maintainer merges it.
+# Either way nothing breaks if it doesn't land: a stale 'latestVersion' just means no update nudge
+# (fail-safe), and a maintainer can bump the one line by hand.
 
 on:
   release:
@@ -23,6 +29,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: update-manifest
@@ -35,10 +42,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: master
-          # This job commits the manifest bump, so it needs the token persisted for `git push`.
+          # This job commits the bump to a side branch and opens a PR, so it needs the token
+          # persisted for `git push` of that branch. Prefer the PAT (so the PR's required checks
+          # run and auto-merge can complete); fall back to GITHUB_TOKEN.
+          token: ${{ secrets.MANIFEST_PAT || secrets.GITHUB_TOKEN }}
           persist-credentials: true
-          # Full history: the push-retry loop's `git pull --rebase` can fail against an advanced
-          # master with the default shallow fetch-depth=1.
+          # Full history: keep it robust against an advanced master.
           fetch-depth: 0
 
       - name: Bump latestVersion in the update manifest
@@ -46,6 +55,8 @@ jobs:
           TAG: ${{ github.event.release.tag_name }}
           PRERELEASE: ${{ github.event.release.prerelease }}
           INPUT_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ secrets.MANIFEST_PAT || secrets.GITHUB_TOKEN }}
+          HAVE_PAT: ${{ secrets.MANIFEST_PAT != '' }}
         run: |
           set -euo pipefail
 
@@ -115,32 +126,35 @@ jobs:
             exit 0
           fi
 
+          # The default branch requires a PR, so commit to a short-lived branch and open one rather
+          # than pushing to master. Branch name is version-scoped so re-runs update the same PR.
+          branch="chore/update-manifest-$version"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
           git add "$file"
-          git commit -m "chore(updates): set latestVersion to $version [skip ci]"
+          git commit -m "chore(updates): set latestVersion to $version"
+          # Force-push the side branch (safe: it is a throwaway, never the protected master) so a
+          # re-run after a failed check refreshes it in place.
+          git push --force origin "HEAD:$branch"
 
-          # Push with a small rebase-and-retry loop: 'concurrency' serializes runs of THIS workflow
-          # but not other pushes to master, so a plain push could be non-fast-forward and lose the
-          # bump. Re-sync and retry a few times before failing (fail-safe — a maintainer can then
-          # bump the one line by hand).
-          for attempt in 1 2 3; do
-            if git push origin HEAD:master; then
-              echo "Set latestVersion=$version"
-              exit 0
-            fi
-            echo "push failed (attempt $attempt) — syncing with master and retrying"
-            git pull --rebase origin master
-            # Re-validate the invariant AFTER the rebase: a concurrent push may have raised
-            # minimumSupportedVersion on its own JSON line — git auto-merges the separate lines
-            # cleanly, but the merged manifest could now be 'minimum > latest', which UpdateChecker
-            # treats as absurd and stops blocking unsafe builds. Never push that.
-            remin="$(jq -r '.minimumSupportedVersion // "0.0.0"' "$file")"
-            relatest="$(jq -r '.latestVersion // "0.0.0"' "$file")"
-            if ! sort_le "$remin" "$relatest"; then
-              echo "::error::after rebase, minimumSupportedVersion '$remin' > latestVersion '$relatest'; aborting to avoid an absurd manifest."
-              exit 1
-            fi
-          done
-          echo "::error::could not push the latestVersion bump after 3 attempts"
-          exit 1
+          # Open the PR if one isn't already open for this branch (idempotent across re-runs).
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number' 2>/dev/null)" ]; then
+            gh pr create --base master --head "$branch" \
+              --title "chore(updates): set latestVersion to $version" \
+              --body "Automated update of \`.well-known/updates.json\` \`latestVersion\` to \`$version\` after the v$version release was published (issue #85). Merging this makes the in-app update check nudge users to v$version." \
+              || echo "::warning::could not open the PR automatically — open it by hand for branch $branch"
+          else
+            echo "A PR for $branch is already open — it was updated in place."
+          fi
+
+          # Turn on auto-merge so the PR lands on its own once the required checks pass. This only
+          # completes when the checks actually RUN, which needs the PAT (a GITHUB_TOKEN PR doesn't
+          # trigger them). Without the PAT, leave the PR for a maintainer to merge.
+          if [ "${HAVE_PAT:-false}" = "true" ]; then
+            gh pr merge "$branch" --auto --squash \
+              || echo "::warning::could not enable auto-merge (is 'Allow auto-merge' enabled in repo settings?) — merge the PR by hand."
+            echo "Opened PR to set latestVersion=$version and requested auto-merge."
+          else
+            echo "::warning::MANIFEST_PAT secret is not set — the PR's required checks won't start under GITHUB_TOKEN, so auto-merge can't complete. A maintainer should merge the PR for branch $branch to set latestVersion=$version."
+          fi
