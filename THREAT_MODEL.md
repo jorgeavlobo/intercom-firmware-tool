@@ -114,10 +114,12 @@ whenever the shell gate is enabled.
   client inherits whatever tier is enabled. Configure per-client ACLs so only
   intended clients (e.g. Home Assistant) can reach the command topic.
 - **Cleartext without TLS.** If the broker link is plaintext (`1883`), a LAN
-  attacker can read and inject MQTT traffic. Command payloads and events are then
-  exposed, and — absent broker auth — injectable. **Use TLS (`8883`) with client
-  authentication** whenever Tier 2 is enabled; the installer supports a pinned CA
-  / mTLS configuration. Plaintext is a convenience for trusted-LAN, event-only
+  attacker can read and inject MQTT traffic — command payloads and events are
+  exposed and injectable. Broker username/password auth is **not** a mitigation
+  here: those credentials are themselves sent in cleartext, so the same attacker
+  can capture and replay them. **Use TLS (`8883`) with client authentication**
+  whenever Tier 2 is enabled; the installer supports a pinned CA / mTLS
+  configuration. Plaintext is a convenience for trusted-LAN, event-only
   deployments, not a secure command channel.
 - **Availability, not integrity, on the internal bus.** The bridge talks to the
   device's own OWN services over loopback; it does not defend against a
@@ -144,17 +146,21 @@ reservation + hostname, which never exercises rediscovery at all.
 
 ## SSH access
 
-SSH is opt-in. When enabled, the installer provisions Dropbear key-login and
-host keys:
+SSH is opt-in. Enabling SSH provisions Dropbear key-login. A **separate,
+also-optional** "Modern SSH host key" setting (off by default) then provisions
+the host-key improvements below; if it is left unchecked, neither applies and the
+device keeps its factory host-key behavior (including the per-boot RSA
+regeneration described below):
 
-- An optional **ECDSA P-256 host key** ([#37](../../issues/37)) so modern clients
-  connect (the device's Dropbear 2017.75 predates Ed25519 host-key support).
-  ECDSA — not Ed25519 — is chosen for exactly that compatibility reason.
+- An **ECDSA P-256 host key** ([#37](../../issues/37)) so modern clients connect
+  (the device's Dropbear 2017.75 predates Ed25519 host-key support). ECDSA — not
+  Ed25519 — is chosen for exactly that compatibility reason.
 - A **stable RSA host key** pinned via `DROPBEAR_RSAKEY` ([#38](../../issues/38)),
   fixing the factory behavior where a fresh RSA host key was regenerated every
   boot (the init copies the stable factory key to a volatile path only at
   runlevel 4, but the unit boots to runlevel 5). A stable host key is what makes
-  client-side host-key pinning meaningful.
+  client-side host-key pinning meaningful — and it exists only when this option
+  is enabled.
 
 No `authorized_keys` mechanism exists in the factory firmware; it is created
 solely by opting in. Access is guarded by the factory `/home/root` mode
