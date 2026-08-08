@@ -33,9 +33,11 @@ The two licensing questions here are **separate** and must not be conflated:
    Clarification/permission is being sought (see
    [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)).
 
-Because `lwext4` is embedded, the operative reading is that the compiled
-`SharpExt4.dll` **as an aggregate would be conveyed under the GNU GPL v2** *to the
-extent it may be redistributed at all* — which, per (2), is currently unresolved.
+Because `lwext4` is statically linked in, the compiled `SharpExt4.dll` is a
+**combined work** based on `lwext4` (under GNU guidance, static linking makes a
+combined work, not a "mere aggregation"), which **would be conveyed under the GNU
+GPL v2** *to the extent it may be redistributed at all* — which, per (2), is
+currently unresolved.
 Whether the application itself is a derivative work of `lwext4` or merely uses it
 across a library boundary is **not settled here** and is part of #98. The
 application's **own source code is MIT-licensed**
@@ -122,7 +124,7 @@ for the full reasoning.
 
 The `lwext4` code embedded in `SharpExt4.dll` is licensed under the GNU General
 Public License, version 2; because it is statically linked into the DLL, the
-**whole `SharpExt4.dll` is conveyed as a GPL aggregate**, so a
+**whole `SharpExt4.dll` is a combined work conveyed under GPL-2.0**, so a
 **complete-corresponding-source** path for the entire DLL (not merely `lwext4`)
 must accompany any GPL-conveying release.
 
@@ -146,7 +148,7 @@ maintainer will give **any third party**, for a charge no more than the cost of
 physically performing source distribution, a complete machine-readable copy of the
 **complete corresponding source for the entire GPL-covered `SharpExt4.dll`**
 conveyed with that release, on a medium customarily used for software interchange.
-Because the whole DLL is conveyed as a GPL aggregate, that corresponding source is
+Because the whole DLL is a GPL-2.0 combined work, that corresponding source is
 **not just `lwext4`** — per GPL-2.0 §3 it is everything needed to rebuild the
 executable work: the **`SharpExt4` wrapper source**, the **embedded `lwext4`**, and
 the **scripts used to control its compilation and installation** (all present in
@@ -164,7 +166,7 @@ The upstream source also remains at:
 > byte-exact build-provenance is asserted, not independently proven. Separately, the
 > `SharpExt4` wrapper's **own license remains unresolved** (see the component note
 > above) — that is a redistribution question independent of these GPL obligations.
-
+>
 > **Remaining hardening (optional, tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)):**
 > the source is now pinned + mirrored and the copyright notices are enumerated in
 > [`licenses/lwext4-BSD-3-Clause-NOTICE.txt`](licenses/lwext4-BSD-3-Clause-NOTICE.txt);

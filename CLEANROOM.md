@@ -143,22 +143,24 @@ proven by a CI rebuild.
 explicit grant to redistribute `SharpExt4.dll`, regardless of the GPL items above.
 A license request is open upstream ([nickdu088/SharpExt4#27](https://github.com/nickdu088/SharpExt4/issues/27) /
 [#28](https://github.com/nickdu088/SharpExt4/pull/28)); until the author responds,
-the maintainer **knowingly accepts this redistribution risk** in order to ship
-v1.0.0 (the practical exposure from a hobbyist author who publishes the DLL for
-reuse is low, but it is not a formal grant). If the author later merges a license,
-re-pin to that commit to clear the risk entirely. Whether the application is a
+the maintainer **knowingly accepts this redistribution risk** to ship v1.0.0 (the
+practical exposure from a hobbyist author who publishes the DLL for reuse is low,
+but it is **not** a formal grant, and this document is **not** a legal clearance).
+Obtaining the author's written permission or an explicit license (request open at
+`nickdu088/SharpExt4#27` / `#28`), and re-pinning to that licensed commit, would
+clear the risk entirely and is the recommended path. Whether the application is a
 *derivative work* of `lwext4` or merely uses it across a library boundary is a
-question deliberately left open; with the corresponding source now available it has
-little practical bearing on distribution.
+question **deliberately left open** and not resolved here.
 
-**Publishing decision.** The GPL-2.0 obligations for the bundled `lwext4` (license
-texts, notices, and — now — pinned/mirrored/shipped corresponding source) are
-handled, so v1.0.0 is publishable on that front. The one item that is *not* a
-formal grant — the `SharpExt4` wrapper's unresolved license — is a risk the
-maintainer **knowingly accepts** for this release; it is not a blocker imposed by
-this document. The residual hardening (a CI rebuild for proven provenance, and the
-author's license response) is tracked in
-[#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).
+**Publishing decision.** The GPL-2.0 corresponding-source, license-text, and notice
+obligations for the bundled `lwext4` are addressed to the best of the maintainer's
+ability (pinned/mirrored/shipped source + enumerated notices). What is **not**
+established is a redistribution grant for the `SharpExt4` wrapper itself — that
+remains an unresolved risk the maintainer **knowingly accepts** in deciding to
+publish v1.0.0. That decision, and the residual work (a CI rebuild for proven
+provenance, and the author's license response), rests with the maintainer and is
+tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98);
+nothing here should be read as legal advice that all requirements are satisfied.
 
 ## Why this holds up
 

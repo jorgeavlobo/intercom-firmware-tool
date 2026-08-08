@@ -3,10 +3,11 @@
 This directory holds the **complete corresponding source** for the prebuilt
 `SharpExt4.dll` that this project bundles
 (`IntercomFirmwareTool.Core/lib/SharpExt4/SharpExt4.dll`). Because that DLL
-statically links the GPL-2.0 `lwext4` library, the whole DLL is conveyed as a
-**GPL-2.0 aggregate**, and its corresponding source must be available (GPL-2.0 §3).
-This in-repo mirror makes that obligation **self-contained** — it does not depend on
-any upstream repository staying online.
+statically links the GPL-2.0 `lwext4` library, the whole DLL is a **combined work**
+based on `lwext4` (static linking makes a combined work under GNU guidance, not a
+"mere aggregation"), conveyed under GPL-2.0, and its corresponding source must be
+available (GPL-2.0 §3). This in-repo mirror makes that obligation **self-contained**
+— it does not depend on any upstream repository staying online.
 
 ## Pinned snapshot
 
@@ -35,20 +36,26 @@ The full source needed to rebuild the DLL:
 
 ## Binary ↔ source binding
 
-The shipped binaries this source corresponds to (SHA-256):
+The shipped binaries whose source **is** in this snapshot (SHA-256):
 
 | File | SHA-256 |
 | --- | --- |
 | `SharpExt4.dll` | `b24f04afb4d317f8ae9c7510afb1dba41fc86175d6cbd2424a099c69eb1eef5e` |
 | `DiskPartitionInfo.dll` | `fa1786b06df60d2dcb967992e736790cb80ab9a766410c63c5c14fb0f6d604e7` |
-| `Ijwhost.dll` | `9e955405b60acb095a89908d57fdd1d61e6454e91ae5b5ed5ab6804208ff1503` |
+
+Companion binary whose source is **not** in this snapshot:
+
+| File | SHA-256 | Source |
+| --- | --- | --- |
+| `Ijwhost.dll` | `9e955405b60acb095a89908d57fdd1d61e6454e91ae5b5ed5ab6804208ff1503` | Microsoft .NET runtime C++/CLI host shim (MIT) — from the .NET SDK, not from this archive. See [`../../licenses/dotnet-runtime-LICENSE.txt`](../../licenses/dotnet-runtime-LICENSE.txt). |
 
 > **Provenance note (honest scope).** `SharpExt4.dll` is a **prebuilt** binary
 > obtained from upstream; `359d5f4` is pinned as its corresponding source revision,
 > but the project does **not** independently rebuild the DLL from this source, so
 > byte-for-byte build-provenance is asserted, not proven. Rebuilding from this
-> snapshot with MSVC (VS2022, C++/CLI, `Release`/`x64`, .NET 6) reproduces an
-> equivalent DLL. Pinning to an exact rebuilt binary is tracked in
+> snapshot with MSVC (VS2022, C++/CLI, `Release`/`x64`, .NET 6) **is expected to
+> reproduce** an equivalent DLL, though no build/comparison record is included here.
+> Pinning to an exact rebuilt binary is tracked in
 > [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).
 
 See [`../../THIRD-PARTY-NOTICES.md`](../../THIRD-PARTY-NOTICES.md) for the full
