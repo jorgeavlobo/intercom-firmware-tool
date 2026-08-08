@@ -267,11 +267,11 @@ async fn run() -> Result<bool, String> {
             (Some(ctl), Some((persist_shutdown_tx, persist_task)))
         }
     } else {
-        // LEARN MODE: enabled but no WHERE yet (blank build + none learned). The controller exists
-        // so the Learn button works and the switch/press + resync entities are present but marked
-        // UNAVAILABLE (via topic_light_avail = offline); no state-persist task runs until a WHERE is
-        // learned (which restarts btmqttd into the where-known path above). The momentary flag is
-        // carried through so command()/observe() behave correctly once the WHERE is learned too.
+        // LEARN MODE: enabled but no WHERE yet (blank build + none learned). The controller exists so
+        // the Learn button works and the mode's control entity — a BISTABLE switch + resync, or a
+        // MOMENTARY press button (no resync) — is present but UNAVAILABLE (topic_light_avail=offline).
+        // No state-persist task runs until a WHERE is learned (restarting btmqttd into the where-known
+        // path above). The momentary flag is carried through so command()/observe() behave once learned.
         // In momentary mode, forget any stale bistable state so a later bistable build starts unknown
         // (CodeRabbit) — mirrors the where-known momentary branch above.
         if cfg.light_momentary {
