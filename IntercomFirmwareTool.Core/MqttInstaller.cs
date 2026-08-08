@@ -620,6 +620,23 @@ namespace IntercomFirmwareTool.Core
             if (publishTopics.Distinct(StringComparer.Ordinal).Count() != publishTopics.Count)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
 
+            // No daemon-PUBLISHED data topic may live under the HA discovery prefix. That namespace
+            // is owned by ha::reconcile for RETAINED entity configs (<prefix>/<component>/<node>/…/
+            // config); a data publish there would corrupt — or, for a retained EMPTY payload like the
+            // momentary light's on-connect state clear (LightCtl::seed), DELETE — an entity's config
+            // (Codex). Only meaningful when discovery is on (the prefix is otherwise unused). The
+            // defaults are namespace-disjoint (data under "Bticino/", discovery under
+            // "homeassistant/"), so this only rejects a caller that explicitly overrode a data topic
+            // into the discovery namespace.
+            if (opts.EnableHaDiscovery)
+            {
+                string discoRoot = opts.HaDiscoveryPrefix + "/";
+                foreach (var pub in publishTopics)
+                    if (pub.StartsWith(discoRoot, StringComparison.Ordinal))
+                        throw new ArgumentException(
+                            CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
+            }
+
             // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by
             // the broker against the UNDERLYING <filter> that btmqttd
             // subscribes to. So the checks below must run on <filter>, not the raw
