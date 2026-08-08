@@ -172,6 +172,13 @@ jobs:
 
           title="chore(updates): set latestVersion to $version"
           body="Automated update of \`.well-known/updates.json\` \`latestVersion\` to \`$version\` after the v$version release was published (issue #85). Merging this makes the in-app update check nudge users to v$version."
+          # Re-resolve the open rolling PR AFTER pushing: the create-vs-reuse decision must reflect the
+          # PR's state now, not the pre-guard snapshot. The prior PR may have merged/closed in between,
+          # which would otherwise make us edit a now-closed PR and never open a replacement (Codex).
+          # Non-fatal: both branches below tolerate a wrong guess (create errors if one exists; edit
+          # errors if none), so a transient failure just falls through to the create path.
+          existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
+            --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null || true)"
           if [ -z "$existing" ]; then
             gh pr create --base master --head "$branch" --title "$title" --body "$body" \
               || echo "::warning::could not open the PR automatically; open it by hand for branch $branch"
