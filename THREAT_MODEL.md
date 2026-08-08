@@ -139,7 +139,7 @@ whenever the shell gate is enabled.
 ## Broker rediscovery trust gate
 
 `btmqttd` can optionally rediscover a broker whose LAN IP changed
-([#43](../../issues/43)). Rediscovery only ever *proposes* an address — adoption
+([#43](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/43)). Rediscovery only ever *proposes* an address — adoption
 is gated by the reconnect:
 
 - **With TLS**, the reconnect validates the broker's certificate against the
@@ -173,10 +173,10 @@ host-key improvements below; if it is left unchecked, neither applies and the
 device keeps its factory host-key behavior (including the per-boot RSA
 regeneration described below):
 
-- An **ECDSA P-256 host key** ([#37](../../issues/37)) so modern clients connect
+- An **ECDSA P-256 host key** ([#37](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/37)) so modern clients connect
   (the device's Dropbear 2017.75 predates Ed25519 host-key support). ECDSA — not
   Ed25519 — is chosen for exactly that compatibility reason.
-- A **stable RSA host key** pinned via `DROPBEAR_RSAKEY` ([#38](../../issues/38)),
+- A **stable RSA host key** pinned via `DROPBEAR_RSAKEY` ([#38](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/38)),
   fixing the factory behavior where a fresh RSA host key was regenerated every
   boot (the init copies the stable factory key to a volatile path only at
   runlevel 4, but the unit boots to runlevel 5). A stable host key is what makes
@@ -195,7 +195,7 @@ regardless of the `.ssh` directory mode.
 - Official firmware, if downloaded through the tool, is verified byte-for-byte
   (size + SHA-256) against the known-good original before use.
 - The embedded `btmqttd` ARM binary is guarded in CI by a two-tier provenance
-  check ([#72](../../issues/72)/[#76](../../issues/76)): a metadata tier requires
+  check ([#72](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/72)/[#76](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/76)): a metadata tier requires
   its committed SHA-256 + size to match `PayloadBinaries.cs`/`THIRD_PARTY.md`, and
   a reproduction tier rebuilds from fully pinned inputs and requires the result to
   be byte-for-byte identical to the committed binary. On PRs that touch the daemon

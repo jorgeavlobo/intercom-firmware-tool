@@ -9,7 +9,7 @@ This document records how that is achieved and defended.
 One caveat up front, so this is not read as an absolute "no GPL anywhere" claim:
 the **Windows release binary bundles one third-party GPL-2.0 component** —
 `SharpExt4.dll`, which embeds the native `lwext4` library. That is disclosed and
-handled separately below (and tracked in [#98](../../issues/98)); it does not come
+handled separately below (and tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)); it does not come
 from copying GPL source into this tree, and it does not change the clean-room
 methodology described here.
 
@@ -111,7 +111,7 @@ current release workflow uploads only the app binaries, checksums, and
 attestation — no `lwext4` license text or corresponding-source offer — so
 **v1.0.0 should not be published until this is resolved.** Bringing the releases
 into full GPL-2.0 compliance — and settling the app-vs-library boundary — is
-tracked in [#98](../../issues/98).
+tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).
 
 ## Why this holds up
 
@@ -119,7 +119,7 @@ tracked in [#98](../../issues/98).
   (`fquinto/main.py`) is deliberately kept out of the tree, recorded only by
   provenance. (The release *binary* separately bundles the third-party GPL-2.0
   `lwext4` via SharpExt4 — disclosed above and tracked in
-  [#98](../../issues/98).)
+  [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).)
 - **Only interface facts were reproduced**, from a documented map, not from
   transcribed code.
 - **Copyleft runtime tools were eliminated** — a one-time architectural change
@@ -134,7 +134,7 @@ Together these keep the MIT licensing for the project's **own code** defensible
 with the device, not a translation of GPL-2.0 source. The separately-bundled GPL-2.0 `lwext4` (via SharpExt4) is a
 third-party dependency, **not** a derivative of this project's code; satisfying
 its GPL-2.0 obligations for the releases is **outstanding** work tracked in
-[#98](../../issues/98) — the current releases do not yet ship its license text or
+[#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98) — the current releases do not yet ship its license text or
 a corresponding-source offer.
 
 > This document explains the licensing methodology; it is not legal advice.

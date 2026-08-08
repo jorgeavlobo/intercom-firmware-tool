@@ -78,7 +78,7 @@ tool builds adds Dropbear SSH** — the login accounts and the boot symlink that
 starts it. What you configure is the *credentials* (a root password and/or an SSH
 public key; an `authorized_keys` entry is written only when you supply a key) and
 the optional **Modern SSH host key** handling (an ECDSA host key + a stable RSA
-pin, [#37](../../issues/37) / [#38](../../issues/38), off by default). Treat every
+pin, [#37](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/37) / [#38](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/38), off by default). Treat every
 image you build as SSH-exposed and give it a strong credential. No SSH
 `authorized_keys` mechanism exists in the factory firmware — it is created solely
 by this tool.
