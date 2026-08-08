@@ -7,8 +7,9 @@ name: update manifest
 # only to retroactively flag an old build unsafe.
 #
 # The default branch requires changes to go through a pull request (branch ruleset), so this job
-# does NOT push to it directly. Instead it commits the one-line bump to a short-lived branch, opens
-# a PR, and turns on auto-merge — the PR merges itself once the required checks pass.
+# does NOT push to it directly. Instead it commits the one-line bump to a single rolling side branch
+# ('chore/update-manifest', reused across releases so a still-pending bump doesn't spawn a competing
+# PR), opens a PR, and turns on auto-merge — the PR merges itself once the required checks pass.
 #
 # GitHub gotcha: a PR opened with the built-in GITHUB_TOKEN does NOT trigger the `pull_request`
 # status checks (anti-recursion), so auto-merge would wait forever for checks that never start. To
