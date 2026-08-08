@@ -13,10 +13,10 @@ every release and referenced from the
 > sit at the archive root next to the executable, and the license texts are under
 > the `licenses/` subdirectory (which is why the links resolve). The single-file
 > portable `.exe`, by its nature, cannot embed sibling files — for that download the
-> same texts travel as flat standalone assets on the GitHub **Releases page**
-> (`lwext4-LICENSE.txt`, `lwext4-BSD-3-Clause-NOTICE.txt`,
-> `DiskPartitionInfo-LICENSE.txt`, `dotnet-runtime-LICENSE.txt`) accompanying it on
-> the same release. Links to other repository documents (README, `CLEANROOM.md`)
+> same documents travel as flat standalone assets on the GitHub **Releases page**
+> (`THIRD-PARTY-NOTICES.md`, `LICENSE.txt`, `lwext4-LICENSE.txt`,
+> `lwext4-BSD-3-Clause-NOTICE.txt`, `DiskPartitionInfo-LICENSE.txt`,
+> `dotnet-runtime-LICENSE.txt`) accompanying it on the same release. Links to other repository documents (README, `CLEANROOM.md`)
 > are absolute GitHub URLs so they resolve from anywhere.
 
 ## Licensing summary (read this first)
