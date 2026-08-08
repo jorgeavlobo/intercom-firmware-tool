@@ -621,14 +621,15 @@ namespace IntercomFirmwareTool.Core
                 throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
 
             // No daemon-PUBLISHED data topic may live under the HA discovery prefix. That namespace
-            // is owned by ha::reconcile for RETAINED entity configs (<prefix>/<component>/<node>/…/
-            // config); a data publish there would corrupt — or, for a retained EMPTY payload like the
-            // momentary light's on-connect state clear (LightCtl::seed), DELETE — an entity's config
-            // (Codex). Only meaningful when discovery is on (the prefix is otherwise unused). The
+            // is owned by the discovery reconcile for RETAINED entity configs
+            // (<prefix>/<component>/<node>/…/config). This is enforced REGARDLESS of the discovery
+            // toggle: the manifest is installed either way — btmqttd publishes the configs retained
+            // when HA_DISCOVERY=1 and CLEARS them (empty retained) when HA_DISCOVERY=0 — so a data
+            // publish into that namespace would corrupt an entity's config, or, against an empty
+            // retained clear, DELETE it / delete the data topic's own retained value (Codex). The
             // defaults are namespace-disjoint (data under "Bticino/", discovery under
             // "homeassistant/"), so this only rejects a caller that explicitly overrode a data topic
             // into the discovery namespace.
-            if (opts.EnableHaDiscovery)
             {
                 string discoRoot = opts.HaDiscoveryPrefix + "/";
                 foreach (var pub in publishTopics)
