@@ -118,11 +118,13 @@ for the full reasoning.
 
 ---
 
-## Written offer for corresponding source (GPL-2.0, for `lwext4`)
+## Written offer for corresponding source (GPL-2.0, for the whole `SharpExt4.dll`)
 
 The `lwext4` code embedded in `SharpExt4.dll` is licensed under the GNU General
-Public License, version 2, so a **complete-corresponding-source** path must
-accompany any GPL-conveying release.
+Public License, version 2; because it is statically linked into the DLL, the
+**whole `SharpExt4.dll` is conveyed as a GPL aggregate**, so a
+**complete-corresponding-source** path for the entire DLL (not merely `lwext4`)
+must accompany any GPL-conveying release.
 
 **Status: pending an exact source snapshot.** `SharpExt4.dll` is a prebuilt binary
 whose exact build provenance (the `SharpExt4` commit and the `lwext4` revision it
@@ -140,12 +142,15 @@ offer cannot yet be presented as fully satisfiable. Accordingly:
 Once pinned, this becomes an offer in the terms of **GPL-2.0 Section 3(b)**: for
 **at least three (3) years** from the date of each release, the maintainer will
 give **any third party**, for a charge no more than the cost of physically
-performing source distribution, a complete machine-readable copy of the complete
-corresponding source for the GPL-2.0 `lwext4` code contained in the `SharpExt4.dll`
-shipped with that release, on a medium customarily used for software interchange —
-request it by opening an issue at
-<https://github.com/jorgeavlobo/intercom-firmware-tool/issues>. Once the exact
-revision is pinned, that corresponding source will be **mirrored in this
+performing source distribution, a complete machine-readable copy of the **complete
+corresponding source for the entire GPL-covered `SharpExt4.dll`** conveyed with
+that release, on a medium customarily used for software interchange. Because the
+whole DLL is conveyed as a GPL aggregate, that corresponding source is **not just
+`lwext4`** — per GPL-2.0 §3 it is everything needed to rebuild the executable
+work: the **`SharpExt4` wrapper source**, the **embedded `lwext4`**, and the
+**scripts used to control its compilation and installation**. Request it by opening
+an issue at <https://github.com/jorgeavlobo/intercom-firmware-tool/issues>. Once the
+exact revisions are pinned, that corresponding source will be **mirrored in this
 repository** as an immutable snapshot (so the offer does not depend on the upstream
 repositories staying online); until then the upstream source lives at:
 
