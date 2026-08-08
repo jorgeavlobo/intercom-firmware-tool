@@ -111,8 +111,11 @@ honored (license text, notices, and corresponding-source availability).
 **What the release now ships for GPL-2.0.** The release workflow attaches
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), the verbatim GPL-2.0 text
 ([`licenses/lwext4-LICENSE.txt`](licenses/lwext4-LICENSE.txt)), the app's own MIT
-text ([`LICENSE.txt`](LICENSE.txt)), and the DiskPartitionInfo MIT text as release
-assets, and also copies them **inside** the loose-folder `.zip` beside the binary.
+text ([`LICENSE.txt`](LICENSE.txt)), and the DiskPartitionInfo MIT text as
+standalone release assets (flat leaf names on the Releases page —
+`lwext4-LICENSE.txt`, `DiskPartitionInfo-LICENSE.txt`), and also copies them
+**inside** the loose-folder `.zip` beside the binary (there the `licenses/`
+subdirectory is preserved, so the notice's links resolve).
 `THIRD-PARTY-NOTICES.md` carries the required notices and a **written offer for the
 corresponding source** (valid three years). So the lwext4 license-text and
 corresponding-source obligations are satisfied for every published release.

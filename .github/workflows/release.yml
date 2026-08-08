@@ -226,15 +226,20 @@ jobs:
           # copy in dist/ so they are ALSO uploaded as standalone release assets (someone who takes
           # only the portable .exe still gets them). Fail loudly if any is missing so a release can
           # never go out without them.
-          $notices = @(
-            'THIRD-PARTY-NOTICES.md',
-            'LICENSE.txt',
-            'licenses/lwext4-LICENSE.txt',
-            'licenses/DiskPartitionInfo-LICENSE.txt'
-          )
-          foreach ($n in $notices) {
+          # Root-level docs: into the folder root (and dist as flat standalone assets).
+          foreach ($n in @('THIRD-PARTY-NOTICES.md', 'LICENSE.txt')) {
             if (-not (Test-Path $n)) { throw "compliance file missing from checkout: $n" }
             Copy-Item $n out/folder -Force
+            Copy-Item $n dist -Force
+          }
+          # License texts: keep them under licenses/ INSIDE the .zip so THIRD-PARTY-NOTICES.md's
+          # relative links (licenses/…-LICENSE.txt) resolve when read from the bundle; also drop a
+          # flat copy into dist/ for the standalone release assets (GitHub release assets can't be
+          # nested — their sibling license assets are on the release page) (Copilot).
+          New-Item -ItemType Directory -Force -Path out/folder/licenses | Out-Null
+          foreach ($n in @('licenses/lwext4-LICENSE.txt', 'licenses/DiskPartitionInfo-LICENSE.txt')) {
+            if (-not (Test-Path $n)) { throw "compliance file missing from checkout: $n" }
+            Copy-Item $n out/folder/licenses -Force
             Copy-Item $n dist -Force
           }
           # Zip the portable .exe with ONLY its basename at the archive root — run Compress-Archive

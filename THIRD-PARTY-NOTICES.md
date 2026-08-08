@@ -6,6 +6,11 @@ runtime. This file records each component's origin, license, and — for the
 copyleft component — the corresponding-source obligation. It is distributed with
 every release and referenced from the [README](README.md#releases).
 
+> The `licenses/…-LICENSE.txt` links below are repository paths; they also resolve
+> **inside the loose-folder `.zip`**, which keeps the `licenses/` subdirectory. On
+> the GitHub **Releases page** the same texts appear as flat standalone assets
+> (`lwext4-LICENSE.txt`, `DiskPartitionInfo-LICENSE.txt`) beside this file.
+
 The application's **own source code is MIT-licensed** ([`LICENSE.txt`](LICENSE.txt)).
 Because the release binary statically embeds a GPL-2.0 component (`lwext4`, via
 `SharpExt4.dll`), the **release binary as an aggregate is conveyed under the terms
