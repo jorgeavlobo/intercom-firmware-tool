@@ -120,7 +120,7 @@ jobs:
           # Is a PR already open on the rolling branch, from THIS repo? `gh pr list --head` filters by
           # branch NAME only, so on a public repo it could match a fork's same-named branch; select
           # isCrossRepository == false and use the verified number for edit/merge (Codex P1).
-          existing="$(gh pr list --head "$branch" --state open --json number,isCrossRepository \
+          existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
             --jq 'map(select(.isCrossRepository == false)) | .[0].number' 2>/dev/null || true)"
 
           # Fetch the rolling branch (for the lease below, and to read its pending value). The
@@ -170,7 +170,7 @@ jobs:
             gh pr create --base master --head "$branch" --title "$title" --body "$body" \
               || echo "::warning::could not open the PR automatically; open it by hand for branch $branch"
             # Resolve the number we just created (same-repo filter) for the auto-merge step below.
-            existing="$(gh pr list --head "$branch" --state open --json number,isCrossRepository \
+            existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
               --jq 'map(select(.isCrossRepository == false)) | .[0].number' 2>/dev/null || true)"
           else
             # A PR is already open on the rolling branch; the force-push retargeted it to $version, so
