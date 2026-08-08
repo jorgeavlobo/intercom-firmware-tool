@@ -56,8 +56,8 @@ pub struct Config {
     // build left blank can LEARN the WHERE at runtime (see light.rs). `light_where` is the
     // WHO=8 actuator WHERE (installation-specific, e.g. "112"); None + light_enabled ⇒ learn
     // mode. The button toggles the relay (`*8*21*<where>##`) — no discrete on/off and no
-    // status query (firmware-confirmed) — so `topic_light` carries a TRACKED retained on/off,
-    // and `topic_light_avail` gates HA's switch/resync entities OFFLINE until a WHERE is known.
+    // status query (firmware-confirmed). In BISTABLE mode `topic_light` carries a TRACKED retained
+    // on/off (see `light_momentary`); `topic_light_avail` gates HA's entities until a WHERE is known.
     // The COMMANDs reuse TOPIC_RX (small JSON actions: light / light_press / light_resync /
     // light_learn), so no extra subscription is added.
     pub light_enabled: bool,
