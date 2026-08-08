@@ -74,11 +74,14 @@ two tiers:
 
 ### Tier 1 — always available (event relay + device controls)
 
-Raw OpenWebNet frames forwarded to the local gateway, plus the structured
-light / lock / volume / call controls. These act on the intercom's own OWN bus
-and are the bridge's intended function. Their access control is entirely the
-**broker ACL**: any publisher the broker admits to the command topic can invoke
-them. Note that **`lock` is not benign** — it drives the physical access-control
+The **publisher-invocable** actions are raw OpenWebNet frames forwarded to the
+local gateway, plus the structured **light / lock / volume** controls (the set
+`parse_action` accepts: volume/mute/step, `main_lock`/`secondary_lock`, and the
+light on/off/press/resync/learn). Entrance-panel-call and floor-call are **not**
+controls — they are **outbound event relay**, published *by* the bridge from the
+bus. The invocable actions act on the intercom's own OWN bus and are the bridge's
+intended function. Their access control is entirely the **broker ACL**: any
+publisher the broker admits to the command topic can invoke them. Note that **`lock` is not benign** — it drives the physical access-control
 asset (the highest-value asset above). It has no independent authorization,
 replay protection, or audit inside the bridge, so a publisher authorized on the
 command topic can open the door; lock down the command-topic ACL accordingly and

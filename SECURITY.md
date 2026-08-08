@@ -88,7 +88,7 @@ by this tool.
 The MQTT bridge itself is opt-in and off by default, and each capability below
 that widens the device's attack surface is a further deliberate, clearly labelled
 choice. (Note: once you install the bridge and configure a light/lock, its
-**Tier 1** light/lock/volume/call controls operate as normal MQTT controls —
+**Tier 1** light/lock/volume controls (and the raw-frame path) operate as normal MQTT controls —
 their access control is the broker's command-topic ACL, see
 [`THREAT_MODEL.md`](THREAT_MODEL.md); they are not individually gated behind a
 separate opt-in the way the items below are.)
