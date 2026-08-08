@@ -7,10 +7,10 @@ Windows x64 builds are published on the [Releases page](../../releases). Each re
 - **`IntercomFirmwareTool-vX.Y.Z-win-x64-portable.exe`** — **portable** self-contained single-file executable; runs on a clean Windows x64 machine with **no .NET installed** (the required Visual C++ runtime that the disk-image library depends on is bundled app-local, so no VC++ Redistributable is needed either). This is the one most people want.
 - **`IntercomFirmwareTool-vX.Y.Z-win-x64-portable.zip`** — the exact same portable `.exe`, just zipped — for browsers or antivirus that block a raw `.exe` download. Unzip and run.
 - **`IntercomFirmwareTool-vX.Y.Z-win-x64.zip`** — the same app as a **loose set of files** (executable + its DLLs), if you prefer an archive or if antivirus flags the single-file's first-run temp-extraction. Extract the archive into a folder of its own, then run the `.exe` alongside the extracted DLLs.
-- **`*.sha256`** — SHA-256 checksums, one per asset.
+- **`*.sha256`** — SHA-256 checksums, one per **build** asset (the `.exe`/`.zip` files above). The licensing/notice documents below ship without checksum sidecars.
 - **`THIRD-PARTY-NOTICES.md`, `LICENSE.txt`, `lwext4-LICENSE.txt`, `lwext4-BSD-3-Clause-NOTICE.txt`, `DiskPartitionInfo-LICENSE.txt`, `dotnet-runtime-LICENSE.txt`** — licensing and third-party notices for the bundled native components. The disk-image library (`SharpExt4.dll`) statically embeds the **GPL-2.0** `lwext4`, so the compiled binary's applicable terms include the GNU GPL v2; these files carry the required license texts and notices. They also travel **inside both `.zip` archives** (portable and loose-folder) beside the executable; the single-file `.exe` is accompanied by them as assets on the same release. Note that `SharpExt4`'s own license is currently **unresolved** and the corresponding-source offer is **pending an exact build snapshot** — see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) and [`CLEANROOM.md`](CLEANROOM.md) for the full position.
 
-**Verify your download** (PowerShell) — compares the file's hash against its published `.sha256` and prints `True` if they match (works for any of the assets — point `$file` at the one you downloaded):
+**Verify your download** (PowerShell) — compares the file's hash against its published `.sha256` and prints `True` if they match (works for any of the `.exe`/`.zip` build assets — point `$file` at the one you downloaded):
 
 ```powershell
 $file = ".\IntercomFirmwareTool-vX.Y.Z-win-x64-portable.exe"
