@@ -166,6 +166,7 @@ The upstream source also remains at:
 > above) — that is a redistribution question independent of these GPL obligations.
 
 > **Remaining hardening (optional, tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98)):**
-> the source is now pinned + mirrored; what is left is to *rebuild* the DLL from this
-> snapshot in CI so build-provenance is proven rather than asserted, and to record
-> the applicable per-file BSD-3-Clause copyright notices for the pinned revision.
+> the source is now pinned + mirrored and the copyright notices are enumerated in
+> [`licenses/lwext4-BSD-3-Clause-NOTICE.txt`](licenses/lwext4-BSD-3-Clause-NOTICE.txt);
+> what is left is to *rebuild* the DLL from this snapshot in CI so build-provenance
+> is proven rather than asserted.

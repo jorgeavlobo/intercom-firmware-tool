@@ -78,9 +78,10 @@ them.
   `third_party/SharpExt4/`, and shipped as a release asset — so the binary is
   accompanied by its source (GPL-2.0 §3(a)) alongside the §3(b) written offer. The
   `SharpExt4` wrapper's own upstream license is still unresolved (a redistribution
-  risk the maintainer knowingly accepts for v1.0.0); optional hardening — a CI
-  rebuild for proven provenance and the exact per-file BSD notices — is tracked in
-  #98.
+  risk the maintainer knowingly accepts for v1.0.0). Copyright notices for every
+  holder in the vendored lwext4 are enumerated in
+  `licenses/lwext4-BSD-3-Clause-NOTICE.txt`; the only optional hardening left — a CI
+  rebuild for proven build-provenance — is tracked in #98.
 
 ### Changed
 
