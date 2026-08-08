@@ -8,12 +8,15 @@ every release and referenced from the
 [README](https://github.com/jorgeavlobo/intercom-firmware-tool/blob/master/README.md#releases).
 
 > **Reading this from a release bundle?** The `licenses/…` links below are
-> repository paths that also resolve **inside the loose-folder `.zip`** (it keeps
-> the `licenses/` subdirectory). On the GitHub **Releases page** the same texts
-> appear as flat standalone assets (`lwext4-LICENSE.txt`,
-> `lwext4-BSD-3-Clause-NOTICE.txt`, `DiskPartitionInfo-LICENSE.txt`) beside this
-> file. Links to other repository documents (README, `CLEANROOM.md`) are absolute
-> GitHub URLs so they resolve from anywhere.
+> repository paths that also resolve **inside both `.zip` archives** (the portable
+> `.zip` and the loose-folder `.zip`), which keep the `licenses/` subdirectory and
+> ship this file plus the license texts beside the executable. The single-file
+> portable `.exe`, by its nature, cannot embed sibling files — for that download the
+> same texts travel as flat standalone assets on the GitHub **Releases page**
+> (`lwext4-LICENSE.txt`, `lwext4-BSD-3-Clause-NOTICE.txt`,
+> `DiskPartitionInfo-LICENSE.txt`, `dotnet-runtime-LICENSE.txt`) accompanying it on
+> the same release. Links to other repository documents (README, `CLEANROOM.md`)
+> are absolute GitHub URLs so they resolve from anywhere.
 
 ## Licensing summary (read this first)
 
@@ -83,8 +86,11 @@ for the full reasoning.
 ### `Ijwhost.dll` — .NET C++/CLI host shim
 
 - The runtime host that loads the mixed-mode `SharpExt4.dll`. Part of the
-  Microsoft .NET runtime, distributed under the **MIT License**
-  (<https://github.com/dotnet/runtime>).
+  Microsoft **.NET runtime** (<https://github.com/dotnet/runtime>).
+- **License: MIT**, Copyright (c) .NET Foundation and Contributors. Full text:
+  [`licenses/dotnet-runtime-LICENSE.txt`](licenses/dotnet-runtime-LICENSE.txt).
+  This same MIT text also covers the other Microsoft .NET runtime files the
+  self-contained build bundles.
 
 ### `vcruntime140.dll` — Microsoft Visual C++ runtime
 

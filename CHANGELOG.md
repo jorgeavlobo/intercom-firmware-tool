@@ -66,12 +66,13 @@ them.
   and this `CHANGELOG.md` (#14).
 - **Third-party license notices.** `THIRD-PARTY-NOTICES.md` plus verbatim license
   texts under `licenses/` (lwext4 GPL-2.0 + its BSD-3-Clause notice,
-  DiskPartitionInfo MIT), documenting the bundled native components including the
-  app-local Microsoft `vcruntime140.dll`. Wired into the release workflow so they
-  ship with every release — as standalone assets and inside the loose-folder
-  `.zip`. The `SharpExt4` wrapper's own license is unresolved and the GPL-2.0
-  corresponding-source offer is pending an exact build snapshot; both gate the
-  first public release (#98).
+  DiskPartitionInfo MIT, and the .NET runtime MIT covering `Ijwhost.dll`),
+  documenting the bundled native components including the app-local Microsoft
+  `vcruntime140.dll`. Wired into the release workflow so they ship with every
+  release — as standalone assets and inside **both** `.zip` archives (portable and
+  loose-folder) beside the binary. The `SharpExt4` wrapper's own license is
+  unresolved and the GPL-2.0 corresponding-source offer is pending an exact build
+  snapshot; both gate the first public release (#98).
 
 ### Changed
 
