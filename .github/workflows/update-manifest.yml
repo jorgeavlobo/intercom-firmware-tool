@@ -128,12 +128,16 @@ jobs:
             exit 0
           fi
 
-          # The default branch requires a PR, so commit to a short-lived branch and open one rather
-          # than pushing to master. Branch name is version-scoped so re-runs update the same PR.
-          branch="chore/update-manifest-$version"
+          # The default branch requires a PR, so commit to a side branch and open one rather than
+          # pushing to master. Use ONE fixed rolling branch (not version-scoped): if a manifest PR is
+          # still pending when the next release fires, this reuses the same branch/PR and retargets it
+          # to the newer version, instead of opening a second PR that would fight the first over the
+          # same JSON line and get stuck in conflict (Codex). The branch is always rebuilt as
+          # "current master + the bump", so it never conflicts with master.
+          branch="chore/update-manifest"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$branch"
+          git checkout -B "$branch"
           git add "$file"
           git commit -m "chore(updates): set latestVersion to $version"
           # Push the side branch (a throwaway, never the protected master). Fetch its current remote
@@ -145,14 +149,18 @@ jobs:
           # Open the PR if one isn't already open for this branch (idempotent across re-runs). Keep
           # the lookup non-fatal: under `set -e`, a failing `gh pr list` in a command substitution
           # (auth/outage) would abort the step before the create/warn path runs (Copilot).
+          title="chore(updates): set latestVersion to $version"
+          body="Automated update of \`.well-known/updates.json\` \`latestVersion\` to \`$version\` after the v$version release was published (issue #85). Merging this makes the in-app update check nudge users to v$version."
           existing="$(gh pr list --head "$branch" --state open --json number --jq '.[0].number' 2>/dev/null || true)"
           if [ -z "$existing" ]; then
-            gh pr create --base master --head "$branch" \
-              --title "chore(updates): set latestVersion to $version" \
-              --body "Automated update of \`.well-known/updates.json\` \`latestVersion\` to \`$version\` after the v$version release was published (issue #85). Merging this makes the in-app update check nudge users to v$version." \
+            gh pr create --base master --head "$branch" --title "$title" --body "$body" \
               || echo "::warning::could not open the PR automatically — open it by hand for branch $branch"
           else
-            echo "A PR (#$existing) for $branch is already open — it was updated in place."
+            # A PR is already open on the rolling branch (a prior release's bump hasn't merged yet).
+            # The force-push above already retargeted it to $version; refresh its title/body to match.
+            gh pr edit "$existing" --title "$title" --body "$body" \
+              || echo "::warning::could not update PR #$existing title/body — it still points at the new branch tip."
+            echo "Reused open PR #$existing on $branch, retargeted to $version."
           fi
 
           # Turn on auto-merge so the PR lands on its own once the required checks pass. This only
