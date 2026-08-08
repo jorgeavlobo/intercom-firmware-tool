@@ -329,9 +329,13 @@ impl LightCtl {
     /// topics, so re-send the known state (or, while unknown, an empty retained payload that
     /// clears any stale value the broker still holds — e.g. from a previous `LIGHT_WHERE`).
     pub async fn seed(&self) {
-        // A MOMENTARY light has no tracked state → no state topic to re-assert; only the
-        // availability gate is republished. Bistable re-asserts its retained on/off.
-        if !self.momentary {
+        // A MOMENTARY light has no tracked state, so it never asserts an on/off. But a PRIOR bistable
+        // build may have left a retained `on`/`off` on TOPIC_LIGHT; discovery tombstones the switch
+        // entity, yet that retained value lingers on the broker — clear it with an empty retained
+        // payload so nothing stale is served (CodeRabbit). Bistable re-asserts its tracked on/off.
+        if self.momentary {
+            self.publish(None).await;
+        } else {
             self.publish_current().await;
         }
         self.publish_avail().await; // re-assert online/offline (learn-mode gate) on reconnect
