@@ -56,10 +56,11 @@ apply to each file.
 
 -----------------------------------------------------------------
 3-clause BSD license — applies ONLY to the lwext4 contributor modules whose
-headers state it (e.g. Kostka, Kaho Ng, Princ, Sucha, Matyushin). It does NOT
-apply to the imported files noted above that carry a different license
-(BSD-2-Clause / ISC / the RSA MD5 license) or to the GPL-2.0 modules; for those,
-the license in each file's own header governs:
+headers state it (e.g. Kostka, Kaho Ng, Princ, Sucha). It does NOT apply to the
+imported files noted above that carry a different license (BSD-2-Clause / ISC / the
+RSA MD4 license) — note that Zheng Liu and Matyushin appear under `ext4_hash.c`'s
+two-condition FreeBSD notice, not this 3-clause license — nor to the GPL-2.0
+modules; for those, the license in each file's own header governs:
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions
