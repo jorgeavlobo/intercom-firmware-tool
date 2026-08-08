@@ -634,7 +634,7 @@ namespace IntercomFirmwareTool.Core
                 foreach (var pub in publishTopics)
                     if (pub.StartsWith(discoRoot, StringComparison.Ordinal))
                         throw new ArgumentException(
-                            CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
+                            CoreStrings.Get("Mqtt_PublishTopicUnderDiscoveryPrefix"), nameof(opts));
             }
 
             // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by

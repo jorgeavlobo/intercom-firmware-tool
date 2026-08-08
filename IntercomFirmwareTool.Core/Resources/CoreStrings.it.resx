@@ -233,6 +233,9 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Mqtt_PublishTopicsMustDiffer" xml:space="preserve">
     <value>Ogni topic MQTT di pubblicazione deve essere distinto, altrimenti due entità di Home Assistant consumerebbero i dati l'una dell'altra, oppure lo stato conservato / la disponibilità verrebbero corrotti.</value>
   </data>
+  <data name="Mqtt_PublishTopicUnderDiscoveryPrefix" xml:space="preserve">
+    <value>Nessun topic di pubblicazione MQTT può trovarsi sotto il prefisso di discovery di Home Assistant: quello spazio dei nomi è riservato alla configurazione ritenuta delle entità, quindi pubblicarvi corromperebbe o eliminerebbe un'entità di Home Assistant.</value>
+  </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>Il topic di ricezione MQTT non è un filtro di sottoscrizione valido: '+' deve occupare un intero livello e '#' deve essere l'ultimo livello intero.</value>
   </data>
