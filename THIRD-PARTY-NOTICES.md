@@ -67,7 +67,7 @@ for the full reasoning.
 - **lwext4 (compiled into the same DLL):**
   - Source: <https://github.com/gkostka/lwext4>
   - **License: GPL-2.0 (mixed tree).** Per lwext4's own README, most modules and
-    headers are **BSD-3-Clause**, but `ext4_xattr.c` and `ext4_extents.c` are
+    headers are **BSD-3-Clause**, but `ext4_xattr.c` and `ext4_extent.c` are
     **GPLv2** — and because those are linked into the same library, the library as
     a whole is distributed under **GPL-2.0**. Both notices ship:
     - GPL-2.0 text: [`licenses/lwext4-LICENSE.txt`](licenses/lwext4-LICENSE.txt).

@@ -2,9 +2,9 @@ lwext4 — copyright notices for the vendored (compiled-in) source
 ================================================================
 
 `SharpExt4.dll` statically links the lwext4 library
-(https://github.com/gkostka/lwext4). Because two modules (`ext4_xattr.c` and
-`ext4_extents.c` / `ext4_extent.c`) are GPL-2.0, the library as a whole is
-distributed under the GNU GPL v2 (see `lwext4-LICENSE.txt`). The remaining modules
+(https://github.com/gkostka/lwext4). Because two modules
+(`lwext4/src/ext4_xattr.c` and `lwext4/src/ext4_extent.c`) are GPL-2.0, the library
+as a whole is distributed under the GNU GPL v2 (see `lwext4-LICENSE.txt`). The remaining modules
 are under permissive licenses — predominantly the 3-clause BSD license reproduced
 below, with a few imported files under other permissive terms. Their copyright
 notices are still required to accompany binary redistributions and are reproduced

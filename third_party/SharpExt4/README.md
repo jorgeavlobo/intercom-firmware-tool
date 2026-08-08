@@ -28,7 +28,7 @@ The full source needed to rebuild the DLL:
 - **`SharpExt4/`** — the mixed-mode C++/CLI wrapper (`.cpp`/`.h`) and its MSVC
   project files (`SharpExt4.vcxproj`, `SharpExt4.sln`).
 - **`lwext4/`** — the vendored **GPL-2.0** `lwext4` C library (its `ext4_xattr.c` /
-  `ext4_extents.c` are GPLv2, which makes the library GPLv2; the other modules are
+  `ext4_extent.c` are GPLv2, which makes the library GPLv2; the other modules are
   BSD-3-Clause — see the notices under [`../../licenses/`](../../licenses)).
 - **`DiskPartitionInfo/`** — the MIT-licensed MBR/GPT helper.
 - **`.github/workflows/msbuild.yml`** — the upstream build script (how the DLL is

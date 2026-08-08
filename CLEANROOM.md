@@ -98,7 +98,7 @@ and enforced by the provenance workflow.
 
 Reading and writing the device's ext4 rootfs (from inside the `.fwz`) is done via
 **SharpExt4**, a mixed-mode C++/CLI wrapper over the native **`lwext4`** C library.
-`lwext4` is **GPL-2.0** — its `ext4_xattr.c` / `ext4_extents.c` are GPLv2, which
+`lwext4` is **GPL-2.0** — its `ext4_xattr.c` / `ext4_extent.c` are GPLv2, which
 makes the whole library GPLv2 (the rest of the modules are BSD-3-Clause, whose
 notices must still travel with the binary) — and it is compiled into the shipped
 `SharpExt4.dll`. So, unlike the clean-room items above, this is a genuine
@@ -170,7 +170,7 @@ nothing here should be read as legal advice that all requirements are satisfied.
   clean-room *reimplementation*: our C#/Rust code is not a translation of GPL
   source. It is **not** a claim that the repository contains no GPL bytes at all —
   the release binary bundles the third-party GPL-2.0 `lwext4` via SharpExt4, and its
-  corresponding source (which includes the GPL `ext4_xattr.c` / `ext4_extents.c`) is
+  corresponding source (which includes the GPL `ext4_xattr.c` / `ext4_extent.c`) is
   now deliberately vendored under [`third_party/SharpExt4/`](third_party/SharpExt4)
   to satisfy the GPL, disclosed above and tracked in
   [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).

@@ -262,23 +262,30 @@ jobs:
           # (see the upload step), so the binary is ACCOMPANIED by its source — satisfying §3(a),
           # not only the §3(b) written offer (#98).
           #
-          # Fail CLOSED on the binary<->source binding: verify the pinned source archive AND the
-          # bundled SharpExt4 binaries against the SHA-256 values documented in
-          # third_party/SharpExt4/README.md. A future commit that swaps the archive or a DLL while
-          # keeping the same path would otherwise let a release ship a false correspondence
-          # (CodeRabbit). Update these expected hashes here and in that README together when the
-          # pinned revision is bumped.
-          $expectedHashes = @{
-            'third_party/SharpExt4/SharpExt4-359d5f4.zip'          = '1df3bb51b9fd09f11a79b28533b2c40bc11007b95e59b9bc3ced226995ce8b86'
+          # Fail CLOSED on content changes: verify the pinned source archive and the bundled
+          # binaries against the SHA-256 values documented in third_party/SharpExt4/README.md. A
+          # future commit that swaps the archive or a DLL while keeping the same path would
+          # otherwise let a release ship a false correspondence (CodeRabbit). Update these expected
+          # hashes here and in that README together when the pinned revision is bumped.
+          #
+          # Two maps, matching the README's split: the binary<->source BINDING covers only the
+          # artifacts whose source IS in the pinned archive; Ijwhost.dll is a companion runtime
+          # dependency (its source is the .NET SDK, not this archive) verified separately.
+          $sourceBoundHashes = @{
+            'third_party/SharpExt4/SharpExt4-359d5f4.zip'                  = '1df3bb51b9fd09f11a79b28533b2c40bc11007b95e59b9bc3ced226995ce8b86'
             'IntercomFirmwareTool.Core/lib/SharpExt4/SharpExt4.dll'        = 'b24f04afb4d317f8ae9c7510afb1dba41fc86175d6cbd2424a099c69eb1eef5e'
             'IntercomFirmwareTool.Core/lib/SharpExt4/DiskPartitionInfo.dll' = 'fa1786b06df60d2dcb967992e736790cb80ab9a766410c63c5c14fb0f6d604e7'
+          }
+          $runtimeDepHashes = @{
             'IntercomFirmwareTool.Core/lib/SharpExt4/Ijwhost.dll'          = '9e955405b60acb095a89908d57fdd1d61e6454e91ae5b5ed5ab6804208ff1503'
           }
-          foreach ($path in $expectedHashes.Keys) {
-            if (-not (Test-Path $path)) { throw "SharpExt4 compliance file missing from checkout: $path" }
-            $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
-            if ($actual -ne $expectedHashes[$path]) {
-              throw "SharpExt4 SHA-256 mismatch for $path : expected $($expectedHashes[$path]), got $actual. If this change is intentional, re-pin the corresponding source and update the hashes in third_party/SharpExt4/README.md and release.yml together."
+          foreach ($map in @($sourceBoundHashes, $runtimeDepHashes)) {
+            foreach ($path in $map.Keys) {
+              if (-not (Test-Path $path)) { throw "SharpExt4 compliance file missing from checkout: $path" }
+              $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actual -ne $map[$path]) {
+                throw "SharpExt4 SHA-256 mismatch for $path : expected $($map[$path]), got $actual. If this change is intentional, re-pin the corresponding source and update the hashes in third_party/SharpExt4/README.md and release.yml together."
+              }
             }
           }
           # Portable .zip: it is the preferred download for many users, so it must ALSO carry the
