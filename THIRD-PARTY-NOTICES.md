@@ -85,12 +85,20 @@ for the full reasoning.
 
 ### `Ijwhost.dll` — .NET C++/CLI host shim
 
-- The runtime host that loads the mixed-mode `SharpExt4.dll`. Part of the
-  Microsoft **.NET runtime** (<https://github.com/dotnet/runtime>).
-- **License: MIT**, Copyright (c) .NET Foundation and Contributors. Full text:
-  [`licenses/dotnet-runtime-LICENSE.txt`](licenses/dotnet-runtime-LICENSE.txt).
-  This same MIT text also covers the other Microsoft .NET runtime files the
-  self-contained build bundles.
+- The runtime host that loads the mixed-mode `SharpExt4.dll` (a native C++/CLI
+  interop shim from the Microsoft **.NET runtime**,
+  <https://github.com/dotnet/runtime>). It is the copy that ships **next to**
+  `SharpExt4.dll` (from the SharpExt4 build); pinning its exact runtime version is
+  part of #98.
+- **License: MIT** (this file), Copyright (c) .NET Foundation and Contributors.
+  Full text: [`licenses/dotnet-runtime-LICENSE.txt`](licenses/dotnet-runtime-LICENSE.txt).
+- **Scope note:** this MIT text applies to `Ijwhost.dll` (an MIT-licensed
+  dotnet/runtime component). The self-contained build *also* bundles the broader
+  Microsoft .NET runtime; on Windows that redistribution is governed by the
+  **Microsoft .NET Library License**, not blanket MIT — see Microsoft's
+  component-licensing guidance
+  (<https://github.com/dotnet/core/blob/main/license-information.md>). This notice
+  does not relicense those files.
 
 ### `vcruntime140.dll` — Microsoft Visual C++ runtime
 
@@ -128,11 +136,17 @@ offer cannot yet be presented as fully satisfiable. Accordingly:
   offer below self-contained rather than dependent on the upstream repositories
   staying online.
 
-Once pinned, for **three (3) years** from the date of each release the maintainer
-will, on request, provide the complete corresponding source for the GPL-2.0
-`lwext4` code contained in the `SharpExt4.dll` shipped with that release — open an
-issue at <https://github.com/jorgeavlobo/intercom-firmware-tool/issues>. Upstream,
-the source lives at:
+Once pinned, this becomes an offer in the terms of **GPL-2.0 Section 3(b)**: for
+**at least three (3) years** from the date of each release, the maintainer will
+give **any third party**, for a charge no more than the cost of physically
+performing source distribution, a complete machine-readable copy of the complete
+corresponding source for the GPL-2.0 `lwext4` code contained in the `SharpExt4.dll`
+shipped with that release, on a medium customarily used for software interchange —
+request it by opening an issue at
+<https://github.com/jorgeavlobo/intercom-firmware-tool/issues>. Once the exact
+revision is pinned, that corresponding source will be **mirrored in this
+repository** as an immutable snapshot (so the offer does not depend on the upstream
+repositories staying online); until then the upstream source lives at:
 
 - **lwext4:** <https://github.com/gkostka/lwext4>
 - **the wrapper that compiles it:** <https://github.com/nickdu088/SharpExt4>
