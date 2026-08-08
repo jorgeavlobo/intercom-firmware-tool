@@ -1,9 +1,16 @@
 # Clean-room reimplementation methodology
 
-This project is **MIT-licensed** and carries **no GPL-licensed content** in its
-source or its releases. This document records how that is achieved and defended:
-the tool reproduces the *functional result* of prior GPL-2.0 work through an
-independent implementation, without copying any GPL source.
+This project's **own code is MIT-licensed**, and it copies **no GPL-licensed
+*source*** into this repository: the tool reproduces the *functional result* of
+prior GPL-2.0 work through an independent implementation, without transcribing any
+GPL source. This document records how that is achieved and defended.
+
+One caveat up front, so this is not read as an absolute "no GPL anywhere" claim:
+the **Windows release binary bundles one third-party GPL-2.0 component** —
+`SharpExt4.dll`, which embeds the native `lwext4` library. That is disclosed and
+handled separately below (and tracked in [#98](../../issues/98)); it does not come
+from copying GPL source into this tree, and it does not change the clean-room
+methodology described here.
 
 It complements the provenance record in
 [`reference/fquinto/README.md`](reference/fquinto/README.md) and the licensing
@@ -86,11 +93,29 @@ provenance and integrity are recorded in
 [`IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md`](IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md)
 and enforced by the provenance workflow.
 
+## A bundled GPL-2.0 dependency: `SharpExt4` / `lwext4`
+
+Reading and writing the device's ext4 rootfs (from inside the `.fwz`) is done via
+**SharpExt4**, a mixed-mode C++/CLI wrapper over the native **`lwext4`** C library.
+`lwext4` is **GPL-2.0** — its `ext4_xattr.c` / `ext4_extents.c` are GPLv2, which
+makes the whole library GPLv2 (the rest is BSD-3-Clause) — and it is compiled into
+the shipped `SharpExt4.dll`. So, unlike the clean-room items above, this is a
+genuine **third-party GPL-2.0 binary that the Windows release distributes**.
+
+This is **not** clean-room-reproduced GPL source — no `lwext4` source is copied
+into or derived by this repository; it is a prebuilt dependency the release links
+against. Its GPL-2.0 terms nonetheless apply to the distributed binary and must be
+honored (license text, notices, and corresponding-source availability). Bringing
+the releases into full GPL-2.0 compliance — and settling the app-vs-library
+boundary — is tracked in [#98](../../issues/98).
+
 ## Why this holds up
 
-- **No GPL source is present** in the repository or its releases — the one
-  GPL reference file is deliberately kept out of the tree, recorded only by
-  provenance.
+- **No GPL *source* is copied into the repository** — the one GPL reference file
+  (`fquinto/main.py`) is deliberately kept out of the tree, recorded only by
+  provenance. (The release *binary* separately bundles the third-party GPL-2.0
+  `lwext4` via SharpExt4 — disclosed above and tracked in
+  [#98](../../issues/98).)
 - **Only interface facts were reproduced**, from a documented map, not from
   transcribed code.
 - **Copyleft runtime tools were eliminated** — a one-time architectural change
@@ -100,7 +125,10 @@ and enforced by the provenance workflow.
   files, so reintroducing a copyleft *file* under the payload tree is caught by
   code review and this documented methodology, not by the license workflow.
 
-Together these keep the MIT claim defensible: the repository is an independent
-work that interoperates with the device, not a derivative of GPL-2.0 code.
+Together these keep the MIT claim for the project's **own code** defensible: it is
+an independent work that interoperates with the device, not a translation of
+GPL-2.0 source. The separately-bundled GPL-2.0 `lwext4` (via SharpExt4) is a
+third-party dependency whose own terms are honored per
+[#98](../../issues/98) — not a derivative of this project's code.
 
 > This document explains the licensing methodology; it is not legal advice.
