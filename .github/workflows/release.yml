@@ -220,13 +220,57 @@ jobs:
           #   3. $base.zip               — the loose self-contained FOLDER (extract-and-run; avoids
           #                                the single-file's first-run temp extraction).
           Copy-Item $exe.FullName (Join-Path dist "$base-portable.exe")
-          # Zip the portable .exe with ONLY its basename at the archive root — run Compress-Archive
-          # from INSIDE dist so no 'dist/' path prefix is embedded, and unzipping yields the .exe
-          # directly (Copilot).
-          Push-Location dist
-          try { Compress-Archive -Path "$base-portable.exe" -DestinationPath "$base-portable.zip" -Force }
-          finally { Pop-Location }
+          # GPL-2.0 compliance (#98): the shipped SharpExt4.dll statically embeds GPL-2.0 lwext4,
+          # so every distributed copy must carry the license text + notices. Copy the compliance
+          # docs beside the binary in the loose folder so they ship INSIDE $base.zip, and stage a
+          # copy in dist/ so they are ALSO uploaded as standalone release assets (someone who takes
+          # only the portable .exe still gets them). Fail loudly if any is missing so a release can
+          # never go out without them.
+          # Root-level docs: into the folder root (and dist as flat standalone assets).
+          # Defensive: if the self-contained publish ever emits its own LICENSE.txt into
+          # out/folder, preserve it (rename to dotnet-publish-LICENSE.txt) before dropping the
+          # app's LICENSE.txt there, so -Force can't silently replace a runtime license with the
+          # application license (CodeRabbit). A current .NET self-contained publish does not emit
+          # one, so this normally no-ops.
+          $preexisting = Join-Path 'out/folder' 'LICENSE.txt'
+          if (Test-Path $preexisting) {
+            Move-Item $preexisting (Join-Path 'out/folder' 'dotnet-publish-LICENSE.txt') -Force
+          }
+          foreach ($n in @('THIRD-PARTY-NOTICES.md', 'LICENSE.txt')) {
+            if (-not (Test-Path $n)) { throw "compliance file missing from checkout: $n" }
+            Copy-Item $n out/folder -Force
+            Copy-Item $n dist -Force
+          }
+          # License texts: keep them under licenses/ INSIDE the .zip so THIRD-PARTY-NOTICES.md's
+          # relative links (licenses/…-LICENSE.txt) resolve when read from the bundle; also drop a
+          # flat copy into dist/ for the standalone release assets (GitHub release assets can't be
+          # nested — their sibling license assets are on the release page) (Copilot).
+          New-Item -ItemType Directory -Force -Path out/folder/licenses | Out-Null
+          $licenseTexts = @(
+            'licenses/lwext4-LICENSE.txt',
+            'licenses/lwext4-BSD-3-Clause-NOTICE.txt',
+            'licenses/DiskPartitionInfo-LICENSE.txt',
+            'licenses/dotnet-runtime-LICENSE.txt'
+          )
+          foreach ($n in $licenseTexts) {
+            if (-not (Test-Path $n)) { throw "compliance file missing from checkout: $n" }
+            Copy-Item $n out/folder/licenses -Force
+            Copy-Item $n dist -Force
+          }
+          # Portable .zip: it is the preferred download for many users, so it must ALSO carry the
+          # compliance docs — not just sit beside them as sibling release assets (GitHub does not
+          # auto-download siblings) (Codex). Stage the single-file .exe together with the notices in
+          # the same licenses/ layout as the loose zip, so the notice's relative links resolve, then
+          # zip that staging dir (the .exe stays at the archive root — no 'dist/' prefix).
+          $stage = Join-Path dist 'portable-stage'
+          New-Item -ItemType Directory -Force -Path $stage, (Join-Path $stage 'licenses') | Out-Null
+          Copy-Item (Join-Path dist "$base-portable.exe") $stage -Force
+          foreach ($n in @('THIRD-PARTY-NOTICES.md', 'LICENSE.txt')) { Copy-Item $n $stage -Force }
+          foreach ($n in $licenseTexts) { Copy-Item $n (Join-Path $stage 'licenses') -Force }
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path dist "$base-portable.zip") -Force
+          Remove-Item -Recurse -Force $stage
           # Loose-folder zip: out/folder/* puts the files at the archive root (no top-level folder).
+          # It now also contains the compliance docs staged above.
           Compress-Archive -Path out/folder/* -DestinationPath (Join-Path dist "$base.zip") -Force
           # SHA-256 sidecar for each primary asset (lowercase hex, two spaces, filename).
           Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' } | ForEach-Object {
@@ -261,6 +305,13 @@ jobs:
           files=()
           for a in "${BASE}-portable.exe" "${BASE}-portable.zip" "${BASE}.zip"; do
             files+=("dist/$a" "dist/$a.sha256")
+          done
+          # GPL-2.0 compliance (#98): attach the license text + third-party notices as standalone
+          # release assets too, so a download of only the portable .exe still comes with them. These
+          # are staged into dist/ by the packaging step; they carry no .sha256 sidecar (they are
+          # documentation, not attested binaries).
+          for a in THIRD-PARTY-NOTICES.md LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt; do
+            files+=("dist/$a")
           done
           for f in "${files[@]}"; do
             if [ ! -f "$f" ]; then
