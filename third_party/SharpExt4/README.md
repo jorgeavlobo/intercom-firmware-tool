@@ -25,12 +25,16 @@ available (GPL-2.0 §3). This in-repo mirror makes that obligation **self-contai
 
 The full source needed to rebuild the DLL:
 
+- **`SharpExt4.sln`** (at the archive root) — the Visual Studio solution.
 - **`SharpExt4/`** — the mixed-mode C++/CLI wrapper (`.cpp`/`.h`) and its MSVC
-  project files (`SharpExt4.vcxproj`, `SharpExt4.sln`).
+  project file (`SharpExt4.vcxproj`).
 - **`lwext4/`** — the vendored **GPL-2.0** `lwext4` C library (its `ext4_xattr.c` /
   `ext4_extent.c` are GPLv2, which makes the library GPLv2; the other modules are
   BSD-3-Clause — see the notices under [`../../licenses/`](../../licenses)).
-- **`DiskPartitionInfo/`** — the MIT-licensed MBR/GPT helper.
+- **`DiskPartitionInfo/`** — the MBR/GPT helper. Its MIT terms are not carried as a
+  `LICENSE` file inside the snapshot; this repo ships that text at
+  [`../../licenses/DiskPartitionInfo-LICENSE.txt`](../../licenses/DiskPartitionInfo-LICENSE.txt)
+  (Copyright (c) 2021 f1x3d).
 - **`.github/workflows/msbuild.yml`** — the upstream build script (how the DLL is
   compiled), i.e. the scripts used to control compilation, as GPL-2.0 §3 requires.
 
