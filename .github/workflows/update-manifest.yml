@@ -14,9 +14,11 @@ name: update manifest
 # status checks (anti-recursion), so auto-merge would wait forever for checks that never start. To
 # make the flow fully autonomous, add a fine-grained PAT as the `MANIFEST_PAT` secret (Contents:
 # Read/Write, Pull requests: Read/Write); the job uses it when present so the checks run and the PR
-# auto-merges. WITHOUT the PAT the job still opens the PR (best effort) and a maintainer merges it.
-# Either way nothing breaks if it doesn't land: a stale 'latestVersion' just means no update nudge
-# (fail-safe), and a maintainer can bump the one line by hand.
+# auto-merges. WITHOUT the PAT the job still opens the PR (best effort), but its required checks
+# never start, so a maintainer must first retrigger them with a human-authored event (close/reopen
+# the PR, or push with a personal token) and then merge. Either way nothing breaks if it doesn't
+# land: a stale 'latestVersion' just means no update nudge (fail-safe), and a maintainer can bump
+# the one line by hand.
 
 on:
   release:
@@ -155,7 +157,8 @@ jobs:
 
           # Turn on auto-merge so the PR lands on its own once the required checks pass. This only
           # completes when the checks actually RUN, which needs the PAT (a GITHUB_TOKEN PR doesn't
-          # trigger them). Without the PAT, leave the PR for a maintainer to merge.
+          # trigger them). Without the PAT the checks never start, so a maintainer must retrigger
+          # them (see the warning below) before the PR can be merged.
           if [ "${HAVE_PAT:-false}" = "true" ]; then
             gh pr merge "$branch" --auto --squash \
               || echo "::warning::could not enable auto-merge (is 'Allow auto-merge' enabled in repo settings?) — merge the PR by hand."
