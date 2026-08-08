@@ -64,6 +64,11 @@ them.
   (#79).
 - **Project documentation.** `SECURITY.md`, `THREAT_MODEL.md`, `CLEANROOM.md`,
   and this `CHANGELOG.md` (#14).
+- **Third-party license notices.** `THIRD-PARTY-NOTICES.md` plus verbatim license
+  texts under `licenses/`, wired into the release workflow so the GPL-2.0 `lwext4`
+  (embedded in `SharpExt4.dll`) license text and a written corresponding-source
+  offer ship with every release — as standalone assets and inside the loose-folder
+  `.zip` (#98).
 
 ### Changed
 

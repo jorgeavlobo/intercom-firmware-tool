@@ -106,12 +106,24 @@ genuine **third-party GPL-2.0 binary that the Windows release distributes**.
 This is **not** clean-room-reproduced GPL source — no `lwext4` source is copied
 into or derived by this repository; it is a prebuilt dependency the release links
 against. Its GPL-2.0 terms nonetheless apply to the distributed binary and must be
-honored (license text, notices, and corresponding-source availability). The
-current release workflow uploads only the app binaries, checksums, and
-attestation — no `lwext4` license text or corresponding-source offer — so
-**v1.0.0 should not be published until this is resolved.** Bringing the releases
-into full GPL-2.0 compliance — and settling the app-vs-library boundary — is
-tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).
+honored (license text, notices, and corresponding-source availability).
+
+**What the release now ships for GPL-2.0.** The release workflow attaches
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), the verbatim GPL-2.0 text
+([`licenses/lwext4-LICENSE.txt`](licenses/lwext4-LICENSE.txt)), the app's own MIT
+text ([`LICENSE.txt`](LICENSE.txt)), and the DiskPartitionInfo MIT text as release
+assets, and also copies them **inside** the loose-folder `.zip` beside the binary.
+`THIRD-PARTY-NOTICES.md` carries the required notices and a **written offer for the
+corresponding source** (valid three years). So the lwext4 license-text and
+corresponding-source obligations are satisfied for every published release.
+
+**What is still outstanding (the actual blocker).** The `SharpExt4` *wrapper's own*
+license is UNRESOLVED — upstream declares no terms — so there is no explicit grant
+to redistribute `SharpExt4.dll` at all, independently of the GPL obligations above.
+Until the author clarifies terms or grants permission, **v1.0.0 should not be
+published.** That, plus pinning the exact upstream revision and mirroring its
+source in-repo (so the offer is self-contained), and settling the app-vs-library
+boundary, is tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).
 
 ## Why this holds up
 
@@ -132,9 +144,11 @@ tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98
 Together these keep the MIT licensing for the project's **own code** defensible
 (the MIT grant is in `LICENSE.txt`): it is an independent work that interoperates
 with the device, not a translation of GPL-2.0 source. The separately-bundled GPL-2.0 `lwext4` (via SharpExt4) is a
-third-party dependency, **not** a derivative of this project's code; satisfying
-its GPL-2.0 obligations for the releases is **outstanding** work tracked in
-[#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98) — the current releases do not yet ship its license text or
-a corresponding-source offer.
+third-party dependency, **not** a derivative of this project's code; its GPL-2.0
+license text, notices, and corresponding-source offer now ship with every release
+(see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)). What remains before a
+public v1.0.0 — the `SharpExt4` wrapper's unresolved license, pinning/mirroring the
+exact upstream source, and the app-vs-library boundary — is tracked in
+[#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).
 
 > This document explains the licensing methodology; it is not legal advice.
