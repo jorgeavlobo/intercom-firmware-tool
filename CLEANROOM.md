@@ -128,7 +128,9 @@ boundary — is tracked in [#98](../../issues/98).
 Together these keep the MIT claim for the project's **own code** defensible: it is
 an independent work that interoperates with the device, not a translation of
 GPL-2.0 source. The separately-bundled GPL-2.0 `lwext4` (via SharpExt4) is a
-third-party dependency whose own terms are honored per
-[#98](../../issues/98) — not a derivative of this project's code.
+third-party dependency, **not** a derivative of this project's code; satisfying
+its GPL-2.0 obligations for the releases is **outstanding** work tracked in
+[#98](../../issues/98) — the current releases do not yet ship its license text or
+a corresponding-source offer.
 
 > This document explains the licensing methodology; it is not legal advice.

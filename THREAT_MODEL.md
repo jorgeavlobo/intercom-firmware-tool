@@ -144,7 +144,11 @@ The scan fallback is rate-limited and sweeps the **union of the last-confirmed
 `/24` and the immutable build-time `/24`** — up to two `/24`s (the same one when
 the broker has not moved subnet) — and every candidate still passes the trust
 gate above. The recommended configuration remains a DHCP reservation + hostname,
-which never exercises rediscovery at all.
+which makes an address change — and therefore *adoption* of a rediscovered
+broker — unnecessary. (It does not guarantee the scan never runs: after several
+consecutive connection failures — e.g. a prolonged broker outage or network
+partition — the daemon still runs mDNS and, failing that, the bounded `/24`
+sweep, regardless of the reservation.)
 
 ## SSH access
 

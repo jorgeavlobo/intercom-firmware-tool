@@ -40,11 +40,13 @@ them.
   `WHERE` (#67); a **learnable** exterior light with Resync and Learn buttons
   (#95); and a **momentary (staircase-timer)** light type that presses without
   tracking state, for installations whose hardware owns the off (#96).
-- **Broker rediscovery.** Opt-in recovery when the broker's LAN IP changes:
-  hostname canonicalization + pinned IP, captured broker MAC as a plaintext
-  trust anchor, mDNS/DNS-SD and a hardened `/24` scan, each behind a reconnect
-  trust gate (#43, #52). DHCP-reservation + hostname remains the recommended
-  setup.
+- **Broker rediscovery.** Recovery when the broker's LAN IP changes — **on by
+  default when the bridge is installed via the tool** (opt-out; the daemon itself
+  defaults off and self-gates, needing a hostname config plus a TLS or
+  captured-MAC trust anchor): hostname canonicalization + pinned IP, captured
+  broker MAC as a plaintext trust anchor, mDNS/DNS-SD and a hardened `/24` scan,
+  each behind a reconnect trust gate (#43, #52). DHCP-reservation + hostname
+  remains the recommended setup.
 - **Build options.** Optional "block firmware auto-updates (OTA)" (#21) and
   "keep `.sig` signature files" (#22) toggles.
 - **Automatic update check (opt-out).** On startup, quietly informs when a newer
