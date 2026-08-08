@@ -1,9 +1,11 @@
 # Clean-room reimplementation methodology
 
-This project's **own code is MIT-licensed**, and it copies **no GPL-licensed
-*source*** into this repository: the tool reproduces the *functional result* of
-prior GPL-2.0 work through an independent implementation, without transcribing any
-GPL source. This document records how that is achieved and defended.
+This project's **own code is intended to be MIT-licensed** — a top-level `LICENSE`
+file is not yet committed (tracked in [#98](../../issues/98)) — and it copies **no
+GPL-licensed *source*** into this repository: the tool reproduces the *functional
+result* of prior GPL-2.0 work through an independent implementation, without
+transcribing any GPL source. This document records how that is achieved and
+defended.
 
 One caveat up front, so this is not read as an absolute "no GPL anywhere" claim:
 the **Windows release binary bundles one third-party GPL-2.0 component** —
@@ -125,9 +127,10 @@ boundary — is tracked in [#98](../../issues/98).
   files, so reintroducing a copyleft *file* under the payload tree is caught by
   code review and this documented methodology, not by the license workflow.
 
-Together these keep the MIT claim for the project's **own code** defensible: it is
-an independent work that interoperates with the device, not a translation of
-GPL-2.0 source. The separately-bundled GPL-2.0 `lwext4` (via SharpExt4) is a
+Together these keep the **intended MIT** licensing for the project's **own code**
+defensible (the `LICENSE` file is pending — [#98](../../issues/98)): it is an
+independent work that interoperates with the device, not a translation of GPL-2.0
+source. The separately-bundled GPL-2.0 `lwext4` (via SharpExt4) is a
 third-party dependency, **not** a derivative of this project's code; satisfying
 its GPL-2.0 obligations for the releases is **outstanding** work tracked in
 [#98](../../issues/98) — the current releases do not yet ship its license text or

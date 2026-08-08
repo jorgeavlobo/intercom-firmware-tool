@@ -24,9 +24,11 @@ them.
   firmware straight from the official servers and verify it byte-for-byte
   (size + SHA-256) before use (#23, #68). Model/version catalog including
   Classe 100X, 300X and EOS Home + Security variants (#62, #65).
-- **SSH access (opt-in).** Provision Dropbear key-login, an optional **ECDSA
-  P-256 host key** so modern clients connect (#37), and a **stable RSA host key**
-  pinned via `DROPBEAR_RSAKEY` to stop per-boot host-key regeneration (#38).
+- **SSH access.** Every built image enables Dropbear SSH (the tool's core
+  function); you configure the credentials (root password and/or public key). An
+  optional **Modern SSH host key** setting adds an **ECDSA P-256 host key** so
+  modern clients connect (#37) and a **stable RSA host key** pinned via
+  `DROPBEAR_RSAKEY` to stop per-boot host-key regeneration (#38).
 - **MQTT bridge — `btmqttd`.** A single statically-linked Rust daemon
   (OpenWebNet bus ↔ external MQTT broker) with Home Assistant auto-discovery,
   replacing the previous shell/Python payload and its vendored `jq`/`evtest`
@@ -52,7 +54,8 @@ them.
 - **Automatic update check (opt-out).** On startup, quietly informs when a newer
   release exists and, for a maintainer-flagged unsafe build, disables the firmware
   actions while keeping the app otherwise usable; makes at most one time-boxed
-  HTTPS request and downloads nothing (#85).
+  HTTPS request that fetches a small version manifest and downloads no firmware,
+  executable, or release asset (#85).
 - **Localization.** Full UI + core messages in six languages (English, Italian,
   Spanish, French, German, Portuguese), with resource parity.
 - **Release pipeline.** Tag-driven Windows x64 release producing a draft GitHub

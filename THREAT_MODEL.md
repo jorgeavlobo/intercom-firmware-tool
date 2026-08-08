@@ -50,7 +50,7 @@ Three components, with distinct trust properties:
 | The MQTT broker | Semi-trusted transport + **authorization point** | The bridge authenticates *to* it; the broker's own client authentication + topic ACLs decide who may publish commands (below). TLS protects and authenticates the *connection*, not publishers. |
 | An MQTT publisher authorized on the command topic | Trusted **only** for the capabilities the broker's ACL grants it | e.g. Home Assistant. An anonymous or mis-ACLed client must not be allowed to publish commands. |
 | A LAN peer / network attacker | Untrusted | Can see/replay/inject traffic if TLS is off. TLS stops it tampering with the connection, but does **not** by itself authorize publishers — broker auth + ACLs do. |
-| The internet | Untrusted | Two outbound paths only: the startup update check (downloads nothing), and — when you choose it — the **official-firmware download** from the Legrand/BTicino servers, which fetches the `.fwz` and then verifies it byte-for-byte (size + SHA-256) before use. |
+| The internet | Untrusted | Outbound only, only from the desktop app, never touching the device: (a) the startup **update check** — one time-boxed request fetching a small version manifest from GitHub; (b) an automatic startup **firmware-availability probe** — headers-only `GET`s to the official Legrand/BTicino firmware URLs to list what's online (best-effort, retried on transient failure); and (c) the **firmware download** itself, only when you choose it, fetching the `.fwz` and verifying it byte-for-byte (size + SHA-256) before use. |
 
 The security-critical boundary is between **a publisher the broker authorizes on
 the command topic** and everyone else on the network. `btmqttd` itself does not
@@ -152,13 +152,15 @@ sweep, regardless of the reservation.)
 
 ## SSH access
 
-SSH is opt-in. Enabling SSH allows login by **root password and/or SSH public
-key**; an `authorized_keys` entry (key-login) is provisioned **only when you
-supply a public key** — a password-only build writes no `authorized_keys`. A
-**separate, also-optional** "Modern SSH host key" setting (off by default) then
-provisions the host-key improvements below; if it is left unchecked, neither
-applies and the device keeps its factory host-key behavior (including the
-per-boot RSA regeneration described below):
+SSH is the tool's **core function**, not an opt-in: **every image the tool builds
+enables Dropbear SSH** (login accounts + boot symlink). What is configurable is
+the login *credentials* — a **root password and/or SSH public key** — where an
+`authorized_keys` entry (key-login) is provisioned **only when you supply a public
+key** (a password-only build writes no `authorized_keys`). A **separate,
+also-optional** "Modern SSH host key" setting (off by default) then provisions the
+host-key improvements below; if it is left unchecked, neither applies and the
+device keeps its factory host-key behavior (including the per-boot RSA
+regeneration described below):
 
 - An **ECDSA P-256 host key** ([#37](../../issues/37)) so modern clients connect
   (the device's Dropbear 2017.75 predates Ed25519 host-key support). ECDSA — not

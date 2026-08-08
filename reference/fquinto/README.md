@@ -33,9 +33,10 @@ paths, contents, permissions and ordering.
 
 ## Licensing
 
-This repository's own code is **MIT** and vendors **no GPL *source***. The
-upstream `main.py` is **GPL-2.0** and is **not included here**, so this GPL script
-contributes no GPL content to the source tree or the releases. If you fetch
+This repository's own code is **intended to be MIT-licensed** (a top-level
+`LICENSE` file is pending — tracked in issue #98) and vendors **no GPL *source***.
+The upstream `main.py` is **GPL-2.0** and is **not included here**, so this GPL
+script contributes no GPL content to the source tree or the releases. If you fetch
 `main.py` via the URL above for your own reference, that copy remains GPL-2.0 and
 its terms apply to *that* copy only — they do not affect this MIT project.
 

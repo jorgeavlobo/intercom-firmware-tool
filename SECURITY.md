@@ -62,6 +62,18 @@ The tool is built to be **safe by default** and hard to use destructively:
   sees your IP address, a fixed `User-Agent`, and the ordinary request/network
   metadata; the request carries no application or user data of its own.)
 
+## SSH is enabled by every build
+
+Enabling SSH is the tool's **core function**, not an option: **every image the
+tool builds adds Dropbear SSH** — the login accounts and the boot symlink that
+starts it. What you configure is the *credentials* (a root password and/or an SSH
+public key; an `authorized_keys` entry is written only when you supply a key) and
+the optional **Modern SSH host key** handling (an ECDSA host key + a stable RSA
+pin, [#37](../../issues/37) / [#38](../../issues/38), off by default). Treat every
+image you build as SSH-exposed and give it a strong credential. No SSH
+`authorized_keys` mechanism exists in the factory firmware — it is created solely
+by this tool.
+
 ## Dangerous features are opt-in and off by default
 
 The MQTT bridge itself is opt-in and off by default, and each capability below
@@ -81,13 +93,6 @@ separate opt-in the way the items below are.)
   command topic**, so restrict that topic to intended, authenticated clients. With
   the flag off, the bridge only relays intercom events and the light/lock/volume
   controls. See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full trust boundary.
-- **SSH access.** Dropbear login is provisioned only when you enable SSH in the
-  tool; you choose a root password and/or a public key, and an `authorized_keys`
-  entry (key-login) is written **only if you supply a public key**. The ECDSA host
-  key ([#37](../../issues/37)) and stable RSA host-key pinning
-  ([#38](../../issues/38)) are a further, separate opt-in ("Modern SSH host key",
-  off by default). No SSH `authorized_keys` mechanism exists in the factory
-  firmware — it is created solely by opting in.
 - **Secondary lock and learnable exterior light.** These control real hardware
   and are added only when explicitly selected in the installer.
 - **Firmware auto-update block (OTA).** Blocking the device's own OTA updates is
