@@ -39,9 +39,12 @@ available (GPL-2.0 §3). This in-repo mirror makes that obligation **self-contai
 
 ## What the archive contains
 
-The full source needed to rebuild the DLL:
+The full source needed to rebuild the DLL. The archive extracts to a single
+top-level directory, **`SharpExt4-main/`**, which is the source-tree root; the
+paths below are relative to it:
 
-- **`SharpExt4.sln`** (at the archive root) — the Visual Studio solution.
+- **`SharpExt4.sln`** (at `SharpExt4-main/`, the extracted source-tree root) —
+  the Visual Studio solution.
 - **`SharpExt4/`** — the mixed-mode C++/CLI wrapper (`.cpp`/`.h`) and its MSVC
   project file (`SharpExt4.vcxproj`).
 - **`lwext4/`** — the vendored **GPL-2.0** `lwext4` C library (its `ext4_xattr.c` /
