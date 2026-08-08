@@ -70,7 +70,9 @@ them.
   documenting the bundled native components including the app-local Microsoft
   `vcruntime140.dll`. Wired into the release workflow so they ship with every
   release — as standalone assets and inside **both** `.zip` archives (portable and
-  loose-folder) beside the binary. Three items still gate the first public release
+  loose-folder), with `THIRD-PARTY-NOTICES.md`/`LICENSE.txt` at the archive root
+  and the license texts under `licenses/`. Three items still gate the first public
+  release
   (#98): the `SharpExt4` wrapper's own license is unresolved, the GPL-2.0
   corresponding-source offer is pending an exact build snapshot, and the
   app-versus-library (derivative-work) boundary is unsettled.

@@ -9,8 +9,9 @@ every release and referenced from the
 
 > **Reading this from a release bundle?** The `licenses/…` links below are
 > repository paths that also resolve **inside both `.zip` archives** (the portable
-> `.zip` and the loose-folder `.zip`), which keep the `licenses/` subdirectory and
-> ship this file plus the license texts beside the executable. The single-file
+> `.zip` and the loose-folder `.zip`): `THIRD-PARTY-NOTICES.md` and `LICENSE.txt`
+> sit at the archive root next to the executable, and the license texts are under
+> the `licenses/` subdirectory (which is why the links resolve). The single-file
 > portable `.exe`, by its nature, cannot embed sibling files — for that download the
 > same texts travel as flat standalone assets on the GitHub **Releases page**
 > (`lwext4-LICENSE.txt`, `lwext4-BSD-3-Clause-NOTICE.txt`,

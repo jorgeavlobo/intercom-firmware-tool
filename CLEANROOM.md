@@ -117,9 +117,10 @@ BSD-3-Clause notice for lwext4's BSD-licensed modules
 the app's own MIT text ([`LICENSE.txt`](LICENSE.txt)), the DiskPartitionInfo MIT
 text, and the .NET-runtime MIT text (for `Ijwhost.dll`) as standalone release
 assets (flat leaf names on the Releases page), and also copies them **inside both
-`.zip` archives** (portable and loose-folder) beside the binary (there the
-`licenses/` subdirectory is preserved, so the notice's links resolve). The
-app-local Microsoft `vcruntime140.dll` is documented too.
+`.zip` archives** (portable and loose-folder): `THIRD-PARTY-NOTICES.md` and
+`LICENSE.txt` at the archive root beside the binary, the license texts under a
+`licenses/` subdirectory (so the notice's links resolve). The app-local Microsoft
+`vcruntime140.dll` is documented too.
 
 **The common license texts are staged; the exact per-file notices and the
 corresponding-source offer remain pending.** The verbatim GPL-2.0 text and the
