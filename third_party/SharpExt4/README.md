@@ -12,22 +12,29 @@ available (GPL-2.0 §3). This in-repo mirror makes that obligation **self-contai
 ## Pinned snapshot
 
 - **Archive:** [`SharpExt4-359d5f4.zip`](SharpExt4-359d5f4.zip)
-- **SHA-256 (archive):** `375b321e33b1cf648606d9b86bc9d8383c1f7aa5f6ec82ee758a07b255bfe46f`
+- **SHA-256 (archive):** `38ed9eea791bc9b73ce9c81e401c24ce376831841111634f970d5f59875b7f77`
 - **Upstream (authoritative origin):** <https://github.com/nickdu088/SharpExt4>
 - **Pinned commit:** `359d5f425ab58a61e37869e9223f339c8763b13b`
 - **Durable public mirror:** <https://github.com/jorgeavlobo/SharpExt4> — the same
   commit, in a fork controlled by this project's maintainer, so the source stays
   reachable even if upstream is removed.
 
-> **One deliberate change vs. the raw upstream download.** Upstream ships the
-> vendored `DiskPartitionInfo/` source without its MIT license file, so a bare copy
-> of the archive would redistribute MIT-licensed source without the required notice.
-> This archive therefore adds **`DiskPartitionInfo/LICENSE`** (the MIT text,
-> Copyright (c) 2021 f1x3d) so the archive is self-contained; the archive comment
-> records this. Everything else is the verbatim upstream tree at the pinned commit.
-> To verify the upstream portion, download commit `359d5f4` from GitHub and compare
-> (it matches except for the added `DiskPartitionInfo/LICENSE`); the raw GitHub
-> download's own SHA-256 is
+> **Deliberate additions vs. the raw upstream download.** Upstream ships the source
+> without the license texts its own components require, so a bare copy of the
+> archive would redistribute GPL-2.0 and MIT source without the mandated license
+> files. To make the archive **self-contained**, three license texts that upstream
+> omitted were added (nothing else is changed — everything else is the verbatim
+> upstream tree at the pinned commit):
+>
+> - **`lwext4/LICENSE`** — the GNU GPL v2 text (GPL §1 requires it to accompany the
+>   GPL-covered source).
+> - **`lwext4/BSD-3-Clause-NOTICE.txt`** — the aggregate BSD-3-Clause notice (the
+>   authoritative per-file BSD terms are already in the lwext4 file headers).
+> - **`DiskPartitionInfo/LICENSE`** — the MIT text, Copyright (c) 2021 f1x3d.
+>
+> The archive comment records this. To verify the upstream portion, download commit
+> `359d5f4` from GitHub and compare (it matches except for the three added license
+> files); the raw GitHub download's own SHA-256 is
 > `1df3bb51b9fd09f11a79b28533b2c40bc11007b95e59b9bc3ced226995ce8b86`.
 
 ## What the archive contains
@@ -39,10 +46,12 @@ The full source needed to rebuild the DLL:
   project file (`SharpExt4.vcxproj`).
 - **`lwext4/`** — the vendored **GPL-2.0** `lwext4` C library (its `ext4_xattr.c` /
   `ext4_extent.c` are GPLv2, which makes the library GPLv2; the other modules are
-  BSD-3-Clause — see the notices under [`../../licenses/`](../../licenses)).
-- **`DiskPartitionInfo/`** — the MIT MBR/GPT helper. Upstream omitted its license
-  file, so this archive adds **`DiskPartitionInfo/LICENSE`** (the MIT text,
-  Copyright (c) 2021 f1x3d — see the note above); the same text is also at
+  BSD-3-Clause). The GPL-2.0 text (`lwext4/LICENSE`) and the BSD notice
+  (`lwext4/BSD-3-Clause-NOTICE.txt`) were added to the archive (see the note above);
+  the same texts are also under [`../../licenses/`](../../licenses).
+- **`DiskPartitionInfo/`** — the MIT MBR/GPT helper. `DiskPartitionInfo/LICENSE`
+  (the MIT text, Copyright (c) 2021 f1x3d) was added to the archive; the same text
+  is also at
   [`../../licenses/DiskPartitionInfo-LICENSE.txt`](../../licenses/DiskPartitionInfo-LICENSE.txt).
 - **`.github/workflows/msbuild.yml`** — the upstream build script (how the DLL is
   compiled), i.e. the scripts used to control compilation, as GPL-2.0 §3 requires.

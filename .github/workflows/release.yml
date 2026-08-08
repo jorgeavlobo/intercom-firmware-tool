@@ -272,7 +272,7 @@ jobs:
           # artifacts whose source IS in the pinned archive; Ijwhost.dll is a companion runtime
           # dependency (its source is the .NET SDK, not this archive) verified separately.
           $sourceBoundHashes = @{
-            'third_party/SharpExt4/SharpExt4-359d5f4.zip'                  = '375b321e33b1cf648606d9b86bc9d8383c1f7aa5f6ec82ee758a07b255bfe46f'
+            'third_party/SharpExt4/SharpExt4-359d5f4.zip'                  = '38ed9eea791bc9b73ce9c81e401c24ce376831841111634f970d5f59875b7f77'
             'IntercomFirmwareTool.Core/lib/SharpExt4/SharpExt4.dll'        = 'b24f04afb4d317f8ae9c7510afb1dba41fc86175d6cbd2424a099c69eb1eef5e'
             'IntercomFirmwareTool.Core/lib/SharpExt4/DiskPartitionInfo.dll' = 'fa1786b06df60d2dcb967992e736790cb80ab9a766410c63c5c14fb0f6d604e7'
           }

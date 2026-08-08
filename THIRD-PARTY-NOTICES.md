@@ -137,7 +137,7 @@ and the build scripts) is committed here as an immutable snapshot at
   (authoritative origin), mirrored durably at
   `jorgeavlobo/SharpExt4@359d5f4` and archived in-repo as
   [`third_party/SharpExt4/SharpExt4-359d5f4.zip`](third_party/SharpExt4/SharpExt4-359d5f4.zip)
-  (SHA-256 `375b321e33b1cf648606d9b86bc9d8383c1f7aa5f6ec82ee758a07b255bfe46f`).
+  (SHA-256 `38ed9eea791bc9b73ce9c81e401c24ce376831841111634f970d5f59875b7f77`).
 - The archived source travels with every release (see the release assets), so the
   binary is **accompanied by its source** (GPL-2.0 §3(a)) in addition to the offer
   below.
