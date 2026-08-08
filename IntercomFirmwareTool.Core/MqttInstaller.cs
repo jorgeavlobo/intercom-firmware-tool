@@ -611,10 +611,12 @@ namespace IntercomFirmwareTool.Core
                 opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
                 opts.EffectiveTopicLightAvail,
             };
-            // The light STATE topic is published ONLY by a BISTABLE enabled light (the switch's
-            // tracked on/off). A MOMENTARY light has no state and never publishes it, so it must not
-            // enter the collision set for that mode.
-            if (opts.LightEnabled && !opts.LightMomentary) publishTopics.Add(opts.EffectiveTopicLight);
+            // The light STATE topic is published whenever the light is ENABLED, in BOTH modes: a
+            // bistable light publishes the tracked on/off, and a momentary light publishes an empty
+            // retained payload on connect to clear any stale bistable value (LightCtl::seed). So it
+            // must be in the collision set for either mode — otherwise a momentary seed could delete
+            // an aliased retained stream (Codex).
+            if (opts.LightEnabled) publishTopics.Add(opts.EffectiveTopicLight);
             if (publishTopics.Distinct(StringComparer.Ordinal).Count() != publishTopics.Count)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
 
@@ -662,13 +664,13 @@ namespace IntercomFirmwareTool.Core
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
-            // The light STATE topic is only PUBLISHED by a BISTABLE enabled light; a disabled build
-            // (or a MOMENTARY light, which has no tracked state) derives EffectiveTopicLight but the
-            // daemon never publishes it (and TopicRx isn't a light command topic without the switch),
-            // so it can't form a self-loop — exclude it in those cases, or a valid config whose
-            // namespace happens to derive a colliding light topic would fail validation (Codex).
-            if (opts.LightEnabled && !opts.LightMomentary
-                && TopicFilterMatches(rxFilter, opts.EffectiveTopicLight))
+            // The light STATE topic is PUBLISHED whenever the light is ENABLED — a bistable light
+            // publishes the tracked on/off, and a momentary light publishes an empty retained clear
+            // on connect (LightCtl::seed) — so its self-loop with TopicRx is checked in both modes.
+            // A DISABLED build only derives EffectiveTopicLight and never publishes it, so it's
+            // excluded there (else a valid opt-out config whose namespace happens to derive a
+            // colliding light topic would fail validation) — Codex.
+            if (opts.LightEnabled && TopicFilterMatches(rxFilter, opts.EffectiveTopicLight))
                 throw new ArgumentException(
                     CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
             // The AVAILABILITY topic is published in EVERY state (including the disabled-path
