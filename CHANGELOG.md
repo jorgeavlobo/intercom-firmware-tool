@@ -84,9 +84,11 @@ them.
 
 ### Security
 
-- **Command channel is opt-in and authenticated.** `read_file`/`write_file`/
-  `execute_command` require both `ALLOW_REMOTE_SHELL=1` and an authenticated MQTT
-  client; off by default (see [`THREAT_MODEL.md`](THREAT_MODEL.md)).
+- **Command channel is opt-in and off by default.** `read_file`/`write_file`/
+  `execute_command` require `ALLOW_REMOTE_SHELL=1` **and** a credentialed bridge
+  connection to the broker; the daemon does not authenticate individual
+  publishers, so which clients may issue commands is governed by the broker's
+  command-topic ACL (see [`THREAT_MODEL.md`](THREAT_MODEL.md)).
 - **Reproducible, provenance-checked binary.** The embedded `btmqttd` ARM binary
   is guarded in CI by a two-tier check — committed SHA-256 + size must match the
   metadata, and a rebuild from fully pinned inputs must be byte-for-byte identical

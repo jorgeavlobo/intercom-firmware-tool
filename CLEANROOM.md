@@ -93,8 +93,12 @@ and enforced by the provenance workflow.
   provenance.
 - **Only interface facts were reproduced**, from a documented map, not from
   transcribed code.
-- **Copyleft runtime tools were eliminated**, and their absence is enforced by
-  automated license scanning on every PR.
+- **Copyleft runtime tools were eliminated** — a one-time architectural change
+  (`jq`/`evtest` removed in the Rust rewrite). CI's `cargo-deny` + `dependency-review`
+  enforce the permissive-only policy over the **dependency graph**, so no copyleft
+  crate can be pulled in; note this graph check does not scan arbitrary payload
+  files, so reintroducing a copyleft *file* under the payload tree is caught by
+  code review and this documented methodology, not by the license workflow.
 
 Together these keep the MIT claim defensible: the repository is an independent
 work that interoperates with the device, not a derivative of GPL-2.0 code.
