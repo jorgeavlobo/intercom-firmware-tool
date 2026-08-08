@@ -81,10 +81,13 @@ separate opt-in the way the items below are.)
   command topic**, so restrict that topic to intended, authenticated clients. With
   the flag off, the bridge only relays intercom events and the light/lock/volume
   controls. See [`THREAT_MODEL.md`](THREAT_MODEL.md) for the full trust boundary.
-- **SSH access.** Dropbear key-login and the optional ECDSA host key
-  ([#37](../../issues/37)) / stable RSA host-key pinning ([#38](../../issues/38))
-  are installed only when you enable SSH in the tool. No SSH `authorized_keys`
-  mechanism exists in the factory firmware — it is created solely by opting in.
+- **SSH access.** Dropbear login is provisioned only when you enable SSH in the
+  tool; you choose a root password and/or a public key, and an `authorized_keys`
+  entry (key-login) is written **only if you supply a public key**. The ECDSA host
+  key ([#37](../../issues/37)) and stable RSA host-key pinning
+  ([#38](../../issues/38)) are a further, separate opt-in ("Modern SSH host key",
+  off by default). No SSH `authorized_keys` mechanism exists in the factory
+  firmware — it is created solely by opting in.
 - **Secondary lock and learnable exterior light.** These control real hardware
   and are added only when explicitly selected in the installer.
 - **Firmware auto-update block (OTA).** Blocking the device's own OTA updates is
