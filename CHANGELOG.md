@@ -65,7 +65,7 @@ them.
 - **Project documentation.** `SECURITY.md`, `THREAT_MODEL.md`, `CLEANROOM.md`,
   and this `CHANGELOG.md` (#14).
 - **Third-party license notices.** `THIRD-PARTY-NOTICES.md` plus verbatim license
-  texts under `licenses/` (lwext4 GPL-2.0 + its BSD-3-Clause notice,
+  texts under `licenses/` (SharpExt4 MIT, lwext4 GPL-2.0 + its BSD-3-Clause notice,
   DiskPartitionInfo MIT, and the .NET runtime MIT covering `Ijwhost.dll`),
   documenting the bundled native components including the app-local Microsoft
   `vcruntime140.dll`. Wired into the release workflow so they ship with every
@@ -74,12 +74,14 @@ them.
   and the license texts under `licenses/`.
 - **GPL-2.0 corresponding source for `SharpExt4.dll`.** The complete corresponding
   source (the `SharpExt4` wrapper, the vendored GPL-2.0 `lwext4`, and the build
-  scripts) is pinned to `nickdu088/SharpExt4@359d5f4`, mirrored in-repo at
+  scripts) is pinned to `nickdu088/SharpExt4@a9a41e1`, mirrored in-repo at
   `third_party/SharpExt4/`, and shipped as a release asset — so the binary is
   accompanied by its source (GPL-2.0 §3(a)) alongside the §3(b) written offer. The
-  `SharpExt4` wrapper's own upstream license is still unresolved (a redistribution
-  risk the maintainer knowingly accepts for v1.0.0). Copyright notices for every
-  holder in the vendored lwext4 are enumerated in
+  `SharpExt4` wrapper's own license is now **resolved**: upstream added an explicit
+  **MIT** `LICENSE` (© 2021-2026 nickdu088) via nickdu088/SharpExt4#28, and the
+  corresponding source was re-pinned to that licensed commit (`a9a41e1`, byte-for-byte
+  identical to the earlier pin apart from the added `LICENSE`). Copyright notices for
+  every holder in the vendored lwext4 are enumerated in
   `licenses/lwext4-BSD-3-Clause-NOTICE.txt`; the only optional hardening left — a CI
   rebuild for proven build-provenance — is tracked in #98.
 
