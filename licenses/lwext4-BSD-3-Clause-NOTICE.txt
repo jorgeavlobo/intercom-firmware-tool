@@ -1,25 +1,66 @@
-lwext4 — BSD-3-Clause notice
-============================
+lwext4 — copyright notices for the vendored (compiled-in) source
+================================================================
 
-Most modules of the lwext4 library (https://github.com/gkostka/lwext4) are
-licensed under the 3-clause BSD license reproduced below. A few modules
-(notably `ext4_xattr.c` and `ext4_extents.c`) are instead licensed under the
-GNU GPL v2 — because those are linked into the same library, the library as a
-whole is distributed under the GPL v2 (see `lwext4-LICENSE.txt`). The BSD-3-Clause
-notice below is nonetheless still required to accompany binary redistributions of
-the BSD-licensed modules, and is reproduced here for that purpose.
+`SharpExt4.dll` statically links the lwext4 library
+(https://github.com/gkostka/lwext4). Because two modules
+(`lwext4/src/ext4_xattr.c` and `lwext4/src/ext4_extent.c`) are GPL-2.0, the library
+as a whole is distributed under the GNU GPL v2 (see `lwext4-LICENSE.txt`). The remaining modules
+are under permissive licenses — predominantly the 3-clause BSD license reproduced
+below, with a few imported files under other permissive terms. Their copyright
+notices are still required to accompany binary redistributions and are reproduced
+here.
 
-The authoritative, per-file copyright and license statements live in the headers
-of the corresponding lwext4 source. Individual files may carry additional
-contributors or years; this notice reproduces the common BSD-3-Clause text and
-the primary copyright. The exact per-file notices for the revision embedded in
-the shipped `SharpExt4.dll` are to be pinned as part of the corresponding-source
-work tracked in the project's compliance issue (#98).
+The **authoritative, verbatim per-file** copyright and license statements ship with
+the binary **inside every release bundle** — the pinned corresponding-source archive
+`SharpExt4-359d5f4.zip` (headers under `lwext4/`) is included in both `.zip`
+downloads and is also a standalone release asset accompanying the single-file
+`.exe`. This file is the aggregated summary; where an imported file's own terms
+differ (below), those verbatim in-archive headers govern.
 
 -----------------------------------------------------------------
+Copyright notices found in the vendored lwext4 revision
+(nickdu088/SharpExt4@359d5f4):
 
-Copyright (c) 2013 Grzegorz Kostka (kostka.grzegorz@gmail.com)
-All rights reserved.
+  Copyright (c) 2013 Grzegorz Kostka (kostka.grzegorz@gmail.com)
+  Copyright (c) 2014 Grzegorz Kostka (kostka.grzegorz@gmail.com)
+  Copyright (c) 2015 Grzegorz Kostka (kostka.grzegorz@gmail.com)
+  Copyright (c) 2017 Grzegorz Kostka (kostka.grzegorz@gmail.com)
+  Copyright (c) 2015 Kaho Ng (ngkaho1234@gmail.com)
+  Copyright (c) 2017 Kaho Ng (ngkaho1234@gmail.com)
+  Copyright (c) 2012 Frantisek Princ
+  Copyright (c) 2012 Martin Sucha
+  Copyright (c) 2012, Vyacheslav Matyushin
+  Copyright (c) 2010, 2013 Zheng Liu <lz@freebsd.org>
+  Copyright (c) 2000 The NetBSD Foundation, Inc.
+  Copyright (c) 2002 Todd C. Miller <Todd.Miller@courtesan.com>
+  Copyright 2002 Niels Provos <provos@citi.umich.edu> (misc/tree.h, RB-tree macros)
+  Copyright (c) 1991, 1993 The Regents of the University of California
+  Copyright (C) 1990-2, RSA Data Security, Inc. All rights reserved.
+
+Some imported files carry their own permissive license text in their headers rather
+than the 3-clause BSD license below, and those verbatim terms ship in the source
+archive bundled with each release:
+
+  - `lwext4/src/ext4_hash.c` — a FreeBSD (Regents-style BSD) header, plus the
+    **RSA Data Security MD4 Message-Digest Algorithm** license grant for the
+    `ext2_half_md4()` code (must be identified as the "RSA Data Security, Inc. MD4
+    Message-Digest Algorithm").
+  - `lwext4/include/getopt.h` — the **ISC-style** license of Todd C. Miller, plus a
+    NetBSD Foundation BSD notice and a mingw-w64 runtime disclaimer.
+  - `lwext4/include/misc/queue.h` — a Regents of the University of California BSD
+    notice.
+  - `lwext4/include/misc/tree.h` — Niels Provos's BSD notice.
+
+Consult the per-file headers in the bundled source archive for the exact terms that
+apply to each file.
+
+-----------------------------------------------------------------
+3-clause BSD license — applies ONLY to the lwext4 contributor modules whose
+headers state it (e.g. Kostka, Kaho Ng, Princ, Sucha). It does NOT apply to the
+imported files noted above that carry a different license (BSD-2-Clause / ISC / the
+RSA MD4 license) — note that Zheng Liu and Matyushin appear under `ext4_hash.c`'s
+two-condition FreeBSD notice, not this 3-clause license — nor to the GPL-2.0
+modules; for those, the license in each file's own header governs:
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions

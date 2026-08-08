@@ -98,16 +98,19 @@ and enforced by the provenance workflow.
 
 Reading and writing the device's ext4 rootfs (from inside the `.fwz`) is done via
 **SharpExt4**, a mixed-mode C++/CLI wrapper over the native **`lwext4`** C library.
-`lwext4` is **GPL-2.0** — its `ext4_xattr.c` / `ext4_extents.c` are GPLv2, which
+`lwext4` is **GPL-2.0** — its `ext4_xattr.c` / `ext4_extent.c` are GPLv2, which
 makes the whole library GPLv2 (the rest of the modules are BSD-3-Clause, whose
 notices must still travel with the binary) — and it is compiled into the shipped
 `SharpExt4.dll`. So, unlike the clean-room items above, this is a genuine
 **third-party GPL-2.0 binary that the Windows release distributes**.
 
-This is **not** clean-room-reproduced GPL source — no `lwext4` source is copied
-into or derived by this repository; it is a prebuilt dependency the release links
-against. Its GPL-2.0 terms nonetheless apply to the distributed binary and must be
-honored (license text, notices, and corresponding-source availability).
+This is **not** clean-room-reproduced GPL source — the clean-room reimplementation
+transcribes no `lwext4` source, and `lwext4` is a prebuilt dependency the release
+links against rather than derives from. (Its corresponding source *is* now
+deliberately vendored under [`third_party/SharpExt4/`](third_party/SharpExt4) to
+satisfy the GPL — that is a compliance artifact, not part of the clean-room work.)
+Its GPL-2.0 terms apply to the distributed binary and must be honored (license
+text, notices, and corresponding-source availability).
 
 **What the release wiring already ships for GPL-2.0.** The release workflow
 attaches [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md), the verbatim GPL-2.0
@@ -122,34 +125,58 @@ assets (flat leaf names on the Releases page), and also copies them **inside bot
 `licenses/` subdirectory (so the notice's links resolve). The app-local Microsoft
 `vcruntime140.dll` is documented too.
 
-**The common license texts are staged; the exact per-file notices and the
-corresponding-source offer remain pending.** The verbatim GPL-2.0 text and the
-common BSD-3-Clause notice ship now, but the **exact per-file BSD-3-Clause
-copyright notices** for the embedded revision are not yet recorded (see
-[`licenses/lwext4-BSD-3-Clause-NOTICE.txt`](licenses/lwext4-BSD-3-Clause-NOTICE.txt)).
-`SharpExt4.dll` is a prebuilt binary whose exact build provenance (the `SharpExt4`
-commit + the `lwext4` revision it vendored) is **not yet identified**, and upstream
-`HEAD` is not necessarily the source that corresponds to the shipped binary. So the
-**written offer is conditional/pending** until that snapshot is pinned and mirrored
-and the per-file notices are recorded — which is why no GPL-conveying release is
-published until then.
+**The corresponding-source obligation is now satisfied (source pinned + mirrored +
+shipped).** The complete corresponding source for `SharpExt4.dll` — the `SharpExt4`
+wrapper, the vendored GPL-2.0 `lwext4`, and the build scripts — is committed in-repo
+as an immutable snapshot at [`third_party/SharpExt4/`](third_party/SharpExt4),
+pinned to `nickdu088/SharpExt4@359d5f4` (mirrored durably at the maintainer's
+`jorgeavlobo/SharpExt4` fork), and it is **shipped as a release asset** so the
+binary is accompanied by its source (GPL-2.0 §3(a)) in addition to the written
+§3(b) offer. The verbatim GPL-2.0 text ships too, and the **copyright notices for
+every holder** in the vendored lwext4 (Kostka, Kaho Ng, Zheng Liu, and the imported
+RSA/NetBSD/OpenBSD/BSD files) are enumerated in
+[`licenses/lwext4-BSD-3-Clause-NOTICE.txt`](licenses/lwext4-BSD-3-Clause-NOTICE.txt),
+with the authoritative verbatim per-file headers present in the shipped source
+archive. One honest caveat remains (optional hardening, tracked in #98): the DLL is
+a prebuilt upstream binary, so byte-exact build-provenance is asserted rather than
+proven by a CI rebuild.
 
-**The independent hard blocker.** The `SharpExt4` *wrapper's own* license is
-UNRESOLVED — upstream declares no terms — so there is no explicit grant to
-redistribute `SharpExt4.dll` at all, regardless of the GPL items above. Nor is it
-settled here whether the application is a *derivative work* of `lwext4` or merely
-uses it across a library boundary — that question is deliberately left open.
-Until the author clarifies terms (or grants permission), the exact source is
-pinned/mirrored, and the boundary is settled, **v1.0.0 should not be published.**
-All of this is tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).
+**The remaining blocker — accepted as a known risk for v1.0.0.** The `SharpExt4`
+*wrapper's own* license is UNRESOLVED — upstream declares no terms — so there is no
+explicit grant to redistribute `SharpExt4.dll`, regardless of the GPL items above.
+A license request is open upstream ([nickdu088/SharpExt4#27](https://github.com/nickdu088/SharpExt4/issues/27) /
+[#28](https://github.com/nickdu088/SharpExt4/pull/28)); until the author responds,
+the maintainer **knowingly accepts this redistribution risk** to ship v1.0.0 (the
+practical exposure from a hobbyist author who publishes the DLL for reuse is low,
+but it is **not** a formal grant, and this document is **not** a legal clearance).
+Obtaining the author's written permission or an explicit license (request open at
+`nickdu088/SharpExt4#27` / `#28`), and re-pinning to that licensed commit, would
+clear the risk entirely and is the recommended path. Whether the application is a
+*derivative work* of `lwext4` or merely uses it across a library boundary is a
+question **deliberately left open** and not resolved here.
+
+**Publishing decision.** The GPL-2.0 corresponding-source, license-text, and notice
+obligations for the bundled `lwext4` are addressed to the best of the maintainer's
+ability (pinned/mirrored/shipped source + enumerated notices). What is **not**
+established is a redistribution grant for the `SharpExt4` wrapper itself — that
+remains an unresolved risk the maintainer **knowingly accepts** in deciding to
+publish v1.0.0. That decision, and the residual work (a CI rebuild for proven
+provenance, and the author's license response), rests with the maintainer and is
+tracked in [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98);
+nothing here should be read as legal advice that all requirements are satisfied.
 
 ## Why this holds up
 
-- **No GPL *source* is copied into the repository** — the one GPL reference file
-  (`fquinto/main.py`) is deliberately kept out of the tree, recorded only by
-  provenance. (The release *binary* separately bundles the third-party GPL-2.0
-  `lwext4` via SharpExt4 — disclosed above and tracked in
-  [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).)
+- **No GPL source is transcribed into this project's *own* code** — the one GPL
+  reference file used for behavioral research (`fquinto/main.py`) is deliberately
+  kept out of the tree, recorded only by provenance. This is a statement about the
+  clean-room *reimplementation*: our C#/Rust code is not a translation of GPL
+  source. It is **not** a claim that the repository contains no GPL bytes at all —
+  the release binary bundles the third-party GPL-2.0 `lwext4` via SharpExt4, and its
+  corresponding source (which includes the GPL `ext4_xattr.c` / `ext4_extent.c`) is
+  now deliberately vendored under [`third_party/SharpExt4/`](third_party/SharpExt4)
+  to satisfy the GPL, disclosed above and tracked in
+  [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).
 - **Only interface facts were reproduced**, from a documented map, not from
   transcribed code.
 - **Copyleft runtime tools were eliminated** — a one-time architectural change
@@ -166,12 +193,13 @@ repository's source; it is **not** a claim that the *combined binary* escapes
 GPL-2.0, nor a ruling on whether the application is a derivative work of `lwext4`
 (the app-vs-library boundary is left open — see #98). `lwext4` itself is a
 third-party dependency that does not incorporate this project's code; its GPL-2.0
-text and the common BSD-3-Clause notice ship with every release, while the
-**exact per-file notices and the corresponding-source offer stay conditional**
-pending the pinned build snapshot
-(see [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)). What remains before a
-public v1.0.0 — the `SharpExt4` wrapper's unresolved license, pinning/mirroring the
-exact upstream source, and the app-vs-library boundary — is tracked in
+text, the common BSD-3-Clause notice, **and its pinned/mirrored corresponding
+source** now ship with every release (see
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) and
+[`third_party/SharpExt4/`](third_party/SharpExt4)). What remains for v1.0.0 is the
+`SharpExt4` wrapper's unresolved license — a risk the maintainer knowingly accepts
+for now — plus optional hardening (a CI rebuild for proven provenance), all tracked
+in
 [#98](https://github.com/jorgeavlobo/intercom-firmware-tool/issues/98).
 
 > This document explains the licensing methodology; it is not legal advice.

@@ -257,6 +257,45 @@ jobs:
             Copy-Item $n out/folder/licenses -Force
             Copy-Item $n dist -Force
           }
+          # GPL-2.0 §3(a): the pinned corresponding source for SharpExt4.dll (wrapper + vendored
+          # lwext4 + build scripts) is shipped as a standalone release asset from its repo path
+          # (see the upload step), so the binary is ACCOMPANIED by its source — satisfying §3(a),
+          # not only the §3(b) written offer (#98).
+          #
+          # Fail CLOSED on content changes: verify the pinned source archive and the bundled
+          # binaries against the SHA-256 values documented in third_party/SharpExt4/README.md. A
+          # future commit that swaps the archive or a DLL while keeping the same path would
+          # otherwise let a release ship a false correspondence (CodeRabbit). Update these expected
+          # hashes here and in that README together when the pinned revision is bumped.
+          #
+          # Two maps, matching the README's split: the binary<->source BINDING covers only the
+          # artifacts whose source IS in the pinned archive; Ijwhost.dll is a companion runtime
+          # dependency (its source is the .NET SDK, not this archive) verified separately.
+          $sourceBoundHashes = @{
+            'third_party/SharpExt4/SharpExt4-359d5f4.zip'                  = '38ed9eea791bc9b73ce9c81e401c24ce376831841111634f970d5f59875b7f77'
+            'IntercomFirmwareTool.Core/lib/SharpExt4/SharpExt4.dll'        = 'b24f04afb4d317f8ae9c7510afb1dba41fc86175d6cbd2424a099c69eb1eef5e'
+            'IntercomFirmwareTool.Core/lib/SharpExt4/DiskPartitionInfo.dll' = 'fa1786b06df60d2dcb967992e736790cb80ab9a766410c63c5c14fb0f6d604e7'
+          }
+          $runtimeDepHashes = @{
+            'IntercomFirmwareTool.Core/lib/SharpExt4/Ijwhost.dll'          = '9e955405b60acb095a89908d57fdd1d61e6454e91ae5b5ed5ab6804208ff1503'
+          }
+          foreach ($map in @($sourceBoundHashes, $runtimeDepHashes)) {
+            foreach ($path in $map.Keys) {
+              if (-not (Test-Path $path)) { throw "SharpExt4 compliance file missing from checkout: $path" }
+              $actual = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($actual -ne $map[$path]) {
+                throw "SharpExt4 SHA-256 mismatch for $path : expected $($map[$path]), got $actual. If this change is intentional, re-pin the corresponding source and update the hashes in third_party/SharpExt4/README.md and release.yml together."
+              }
+            }
+          }
+          # Ship the corresponding-source archive INSIDE both binary ZIPs too (not only as a sibling
+          # release asset). lwext4 vendors a few imported files under their own permissive licenses
+          # (the RSA MD4 grant in ext4_hash.c, ISC in getopt.h, BSD variants in misc/queue.h and
+          # misc/tree.h) whose VERBATIM per-file terms must accompany binary redistribution; those
+          # headers live in this archive, so bundling it in each ZIP means a ZIP download carries
+          # them without needing the separate asset (Codex). The single-file .exe can't embed it and
+          # is accompanied by the same archive as a sibling release asset.
+          Copy-Item 'third_party/SharpExt4/SharpExt4-359d5f4.zip' out/folder -Force
           # Portable .zip: it is the preferred download for many users, so it must ALSO carry the
           # compliance docs — not just sit beside them as sibling release assets (GitHub does not
           # auto-download siblings) (Codex). Stage the single-file .exe together with the notices in
@@ -267,6 +306,8 @@ jobs:
           Copy-Item (Join-Path dist "$base-portable.exe") $stage -Force
           foreach ($n in @('THIRD-PARTY-NOTICES.md', 'LICENSE.txt')) { Copy-Item $n $stage -Force }
           foreach ($n in $licenseTexts) { Copy-Item $n (Join-Path $stage 'licenses') -Force }
+          # Bundle the corresponding source in the portable .zip too (see the loose-folder note above).
+          Copy-Item 'third_party/SharpExt4/SharpExt4-359d5f4.zip' $stage -Force
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path dist "$base-portable.zip") -Force
           Remove-Item -Recurse -Force $stage
           # Loose-folder zip: out/folder/* puts the files at the archive root (no top-level folder).
@@ -313,6 +354,10 @@ jobs:
           for a in THIRD-PARTY-NOTICES.md LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt; do
             files+=("dist/$a")
           done
+          # GPL-2.0 §3(a) corresponding source for SharpExt4.dll — uploaded straight from its repo
+          # path (not staged into dist/), so it gets no .sha256 sidecar and is not SLSA-attested as
+          # our build output (it is upstream source, pinned + mirrored) (#98).
+          files+=("third_party/SharpExt4/SharpExt4-359d5f4.zip")
           for f in "${files[@]}"; do
             if [ ! -f "$f" ]; then
               echo "::error::missing expected release asset: $f (packaging did not produce it)"; exit 1

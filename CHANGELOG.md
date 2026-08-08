@@ -71,11 +71,17 @@ them.
   `vcruntime140.dll`. Wired into the release workflow so they ship with every
   release — as standalone assets and inside **both** `.zip` archives (portable and
   loose-folder), with `THIRD-PARTY-NOTICES.md`/`LICENSE.txt` at the archive root
-  and the license texts under `licenses/`. Three items still gate the first public
-  release
-  (#98): the `SharpExt4` wrapper's own license is unresolved, the GPL-2.0
-  corresponding-source offer is pending an exact build snapshot, and the
-  app-versus-library (derivative-work) boundary is unsettled.
+  and the license texts under `licenses/`.
+- **GPL-2.0 corresponding source for `SharpExt4.dll`.** The complete corresponding
+  source (the `SharpExt4` wrapper, the vendored GPL-2.0 `lwext4`, and the build
+  scripts) is pinned to `nickdu088/SharpExt4@359d5f4`, mirrored in-repo at
+  `third_party/SharpExt4/`, and shipped as a release asset — so the binary is
+  accompanied by its source (GPL-2.0 §3(a)) alongside the §3(b) written offer. The
+  `SharpExt4` wrapper's own upstream license is still unresolved (a redistribution
+  risk the maintainer knowingly accepts for v1.0.0). Copyright notices for every
+  holder in the vendored lwext4 are enumerated in
+  `licenses/lwext4-BSD-3-Clause-NOTICE.txt`; the only optional hardening left — a CI
+  rebuild for proven build-provenance — is tracked in #98.
 
 ### Changed
 
