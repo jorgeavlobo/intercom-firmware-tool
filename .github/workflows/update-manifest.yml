@@ -130,12 +130,15 @@ jobs:
           fi
 
           # Fetch the rolling branch (for the lease below, and to read its pending value). The
-          # EFFECTIVE current latestVersion is the max of what's on master AND any value still pending
-          # in that open rolling PR, so a lower backport/dispatch never regresses a higher version
-          # already queued to merge (Codex P2).
+          # EFFECTIVE current latestVersion is the max of what's on master AND any value carried on the
+          # rolling branch, so a lower backport/dispatch never regresses a higher version already queued
+          # to merge (Codex P2). Read the branch value WHENEVER the branch exists, not only when an open
+          # PR does: if a prior run's `gh pr create` failed, the branch is orphaned (no PR) but may hold
+          # a NEWER version, and ignoring it would let a later lower bump overwrite and lose it (Codex).
+          # A stale, already-merged branch just carries an old value <= master, so honoring it is safe.
           git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
           pending_latest="0.0.0"
-          if [ -n "$existing" ] && git rev-parse -q --verify "origin/$branch" >/dev/null 2>&1; then
+          if git rev-parse -q --verify "origin/$branch" >/dev/null 2>&1; then
             pending_latest="$(git show "origin/$branch:$file" 2>/dev/null | jq -r '.latestVersion // "0.0.0"' 2>/dev/null || echo '0.0.0')"
           fi
           current="$master_latest"
