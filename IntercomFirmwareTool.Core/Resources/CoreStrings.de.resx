@@ -233,6 +233,9 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_PublishTopicsMustDiffer" xml:space="preserve">
     <value>Jedes MQTT-Veröffentlichungs-Topic muss eindeutig sein, sonst würden zwei Home-Assistant-Entitäten die Daten der jeweils anderen verarbeiten oder der beibehaltene Status / die Verfügbarkeit würde beschädigt.</value>
   </data>
+  <data name="Mqtt_PublishTopicUnderDiscoveryPrefix" xml:space="preserve">
+    <value>Kein MQTT-Publish-Topic darf unter dem Home-Assistant-Discovery-Präfix liegen — dieser Namensraum ist der beibehaltenen Entitätskonfiguration vorbehalten, sodass ein Publish dort eine Home-Assistant-Entität beschädigen oder löschen würde.</value>
+  </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>Das MQTT-Empfangs-Topic ist kein gültiger Abonnementfilter: '+' muss eine ganze Ebene belegen und '#' muss die letzte ganze Ebene sein.</value>
   </data>

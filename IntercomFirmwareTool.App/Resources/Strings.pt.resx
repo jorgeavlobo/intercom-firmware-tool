@@ -436,6 +436,13 @@ Chave: {1}</value></data>
   <data name="Chk_MqttHasLight" xml:space="preserve"><value>A unidade tem luz exterior</value></data>
   <data name="Tip_MqttHasLight" xml:space="preserve"><value>Marca se a tua entrada tem uma luz comandada a partir do painel. Depois insere o endereço (WHERE), ou deixa em branco para a aprender mais tarde a partir do Home Assistant.</value></data>
   <data name="Hint_MqttLightLearn" xml:space="preserve"><value>Não sabes o endereço? Deixa em branco — a unidade aprende-o: carrega em “Learn light” no Home Assistant e depois carrega uma vez no botão físico da luz.</value></data>
+  <data name="Lbl_MqttLightType" xml:space="preserve"><value>Tipo de luz exterior</value></data>
+  <data name="Rb_MqttLightBistable" xml:space="preserve"><value>Bistável — fica acesa</value></data>
+  <data name="Txt_MqttLightBistable" xml:space="preserve"><value>O mesmo comando liga e desliga a luz — fica acesa até enviares o comando outra vez.</value></data>
+  <data name="Tip_MqttLightBistable" xml:space="preserve"><value>Para luzes que ficam acesas até serem desligadas. O Home Assistant mostra um interruptor on/off com estado seguido, mais um botão Resync para o realinhar após um reinício ou uma pressão perdida. É a instalação mais comum.</value></data>
+  <data name="Rb_MqttLightMomentary" xml:space="preserve"><value>Momentâneo — apaga sozinho</value></data>
+  <data name="Txt_MqttLightMomentary" xml:space="preserve"><value>Para instalações que desligam a luz automaticamente após algum tempo (temporizador de escada).</value></data>
+  <data name="Tip_MqttLightMomentary" xml:space="preserve"><value>Uma pressão acende a luz; o temporizador da tua instalação é que a desliga. O Home Assistant mostra apenas um botão “Acender” — só pressão, sem estado on/off — porque é o hardware que decide quando a luz apaga.</value></data>
   <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>A unidade tem fechadura secundária</value></data>
   <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Marca para adicionar um segundo botão de abertura no Home Assistant. Deixa desmarcado se a tua instalação só tem um portão.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receção (comandos):</value></data>

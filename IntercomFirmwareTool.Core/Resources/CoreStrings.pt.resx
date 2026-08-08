@@ -233,6 +233,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_PublishTopicsMustDiffer" xml:space="preserve">
     <value>Cada tópico MQTT de publicação tem de ser distinto — caso contrário, duas entidades do Home Assistant consumiriam os dados uma da outra, ou o estado retido / disponibilidade seria corrompido.</value>
   </data>
+  <data name="Mqtt_PublishTopicUnderDiscoveryPrefix" xml:space="preserve">
+    <value>Nenhum tópico de publicação MQTT pode estar sob o prefixo de descoberta do Home Assistant — esse espaço de nomes é reservado à configuração retida das entidades, pelo que publicar aí corromperia ou apagaria uma entidade do Home Assistant.</value>
+  </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>O tópico de receção MQTT não é um filtro de subscrição válido: '+' tem de ocupar um nível inteiro e '#' tem de ser o último nível inteiro.</value>
   </data>

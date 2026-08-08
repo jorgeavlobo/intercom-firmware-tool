@@ -203,6 +203,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_PublishTopicsMustDiffer" xml:space="preserve">
     <value>Every MQTT publish topic must be distinct — otherwise two Home Assistant entities would consume each other's payloads, or the retained state / availability would be corrupted.</value>
   </data>
+  <data name="Mqtt_PublishTopicUnderDiscoveryPrefix" xml:space="preserve">
+    <value>No MQTT publish topic may live under the Home Assistant discovery prefix — that namespace is reserved for retained entity configuration, so publishing there would corrupt or delete a Home Assistant entity.</value>
+  </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>The MQTT receive topic is not a valid subscription filter: '+' must occupy a whole level and '#' must be the final whole level.</value>
   </data>

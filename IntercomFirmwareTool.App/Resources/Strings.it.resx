@@ -436,6 +436,13 @@ Chiave: {1}</value></data>
   <data name="Chk_MqttHasLight" xml:space="preserve"><value>L'unità ha una luce esterna</value></data>
   <data name="Tip_MqttHasLight" xml:space="preserve"><value>Seleziona se il tuo ingresso ha una luce comandata dal posto interno. Poi inserisci il suo indirizzo (WHERE), oppure lascialo vuoto per impararlo più tardi da Home Assistant.</value></data>
   <data name="Hint_MqttLightLearn" xml:space="preserve"><value>Non conosci l'indirizzo? Lascialo vuoto — l'unità lo impara: premi “Learn light” in Home Assistant, poi premi una volta il pulsante fisico della luce.</value></data>
+  <data name="Lbl_MqttLightType" xml:space="preserve"><value>Tipo di luce esterna</value></data>
+  <data name="Rb_MqttLightBistable" xml:space="preserve"><value>Bistabile — resta accesa</value></data>
+  <data name="Txt_MqttLightBistable" xml:space="preserve"><value>Lo stesso comando accende e spegne la luce — resta accesa finché non invii di nuovo il comando.</value></data>
+  <data name="Tip_MqttLightBistable" xml:space="preserve"><value>Per luci che restano accese finché non vengono spente. Home Assistant mostra un interruttore on/off con stato tracciato, più un pulsante Resync per riallinearlo dopo un riavvio o una pressione persa. È l'impianto più comune.</value></data>
+  <data name="Rb_MqttLightMomentary" xml:space="preserve"><value>Momentanea — spegnimento automatico</value></data>
+  <data name="Txt_MqttLightMomentary" xml:space="preserve"><value>Per impianti che spengono la luce automaticamente dopo un certo tempo (timer luci scale).</value></data>
+  <data name="Tip_MqttLightMomentary" xml:space="preserve"><value>Una pressione accende la luce; è il timer del tuo impianto a spegnerla. Home Assistant mostra un solo pulsante “Accendi” — solo pressione, senza stato on/off — perché è l'hardware a decidere quando la luce si spegne.</value></data>
   <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>L'unità ha una serratura secondaria</value></data>
   <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Seleziona per aggiungere un secondo pulsante di apertura in Home Assistant. Lascia deselezionato se l'impianto ha un solo cancello.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Ricezione (comandi):</value></data>

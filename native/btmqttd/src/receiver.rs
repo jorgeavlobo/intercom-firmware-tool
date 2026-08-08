@@ -218,8 +218,11 @@ enum Action {
     /// The variant carries WHICH actuator so one queue/task serialises both.
     Lock(Lock),
     /// Stair-light SWITCH desired state — `on` (`true`) / `off` (`false`). The daemon
-    /// toggles the actuator only when the tracked state differs (see `light.rs`).
+    /// toggles the actuator only when the tracked state differs (see `light.rs`). Bistable only.
     Light(bool),
+    /// Stair-light PRESS (momentary install): forward the actuator frame once to turn ON — the
+    /// physical staircase timer switches it off. No state (see `light.rs`).
+    LightPress,
     /// Stair-light RESYNC button: correct the tracked state (unknown→on→off→on) WITHOUT
     /// actuating the relay — realigns HA to the wall after a cold boot / missed press.
     LightResync,
@@ -252,6 +255,7 @@ fn parse_action(action: &str, v: &Value) -> Option<Action> {
             _ => None,
         },
         // Stateless BUTTON presses — no "value" field.
+        "light_press" => Some(Action::LightPress),
         "light_resync" => Some(Action::LightResync),
         "light_learn" => Some(Action::LightLearn),
         _ => None,
@@ -287,6 +291,11 @@ async fn handle_action(
         Some(Action::Light(on)) => match light {
             Some(l) => l.command(on).await,
             None => eprintln!("btmqttd: ignored 'light' action — light feature not configured"),
+        },
+        // Momentary press: forward one ON pulse; the installation's timer owns the off.
+        Some(Action::LightPress) => match light {
+            Some(l) => l.press().await,
+            None => eprintln!("btmqttd: ignored 'light_press' — light feature not configured"),
         },
         // Resync: correct the tracked state only (no relay actuation). Learn: open the WHERE
         // capture window. Both no-op when the light feature is off.
@@ -698,6 +707,10 @@ mod tests {
         // light: on/off only.
         assert_eq!(parse_action("light", &json!({"value": "on"})), Some(Action::Light(true)));
         assert_eq!(parse_action("light", &json!({"value": "off"})), Some(Action::Light(false)));
+        // light stateless buttons: press (momentary), resync, learn — no "value" field.
+        assert_eq!(parse_action("light_press", &json!({})), Some(Action::LightPress));
+        assert_eq!(parse_action("light_resync", &json!({})), Some(Action::LightResync));
+        assert_eq!(parse_action("light_learn", &json!({})), Some(Action::LightLearn));
     }
 
     #[test]

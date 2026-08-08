@@ -531,6 +531,7 @@ namespace IntercomFirmwareTool.App
         private void ChkMqttHasLight_Toggled(object sender, RoutedEventArgs e)
         {
             var vis = ChkMqttHasLight.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+            LightTypePanel.Visibility = vis;
             LightWherePanel.Visibility = vis;
             LblMqttLightLearnHint.Visibility = vis;
             UpdateBuildEnabled();
@@ -1460,6 +1461,9 @@ namespace IntercomFirmwareTool.App
                 // `*8*21*<WHERE>##`. A BLANK WHERE with the box ticked means LEARN it at runtime.
                 HasExteriorLight = ChkMqttHasLight.IsChecked == true,
                 LightWhere = NullIfEmpty(TxtMqttLightWhere.Text.Trim()),
+                // Light type: momentary (staircase-timer auto-off → press button, no state) vs the
+                // default bistable (tracked on/off switch + resync).
+                LightMomentary = RbMqttLightMomentary.IsChecked == true,
                 // Secondary lock (opt-in): create its HA entity only when a second gate is wired.
                 HasSecondaryLock = ChkMqttSecondaryLock.IsChecked == true,
             };

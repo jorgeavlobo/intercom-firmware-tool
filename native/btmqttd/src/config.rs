@@ -56,11 +56,16 @@ pub struct Config {
     // build left blank can LEARN the WHERE at runtime (see light.rs). `light_where` is the
     // WHO=8 actuator WHERE (installation-specific, e.g. "112"); None + light_enabled ⇒ learn
     // mode. The button toggles the relay (`*8*21*<where>##`) — no discrete on/off and no
-    // status query (firmware-confirmed) — so `topic_light` carries a TRACKED retained on/off,
-    // and `topic_light_avail` gates HA's switch/resync entities OFFLINE until a WHERE is known.
-    // The COMMANDs reuse TOPIC_RX (small JSON actions: light / light_resync / light_learn), so
-    // no extra subscription is added.
+    // status query (firmware-confirmed). In BISTABLE mode `topic_light` carries a TRACKED retained
+    // on/off (see `light_momentary`); `topic_light_avail` gates HA's entities until a WHERE is known.
+    // The COMMANDs reuse TOPIC_RX (small JSON actions: light / light_press / light_resync /
+    // light_learn), so no extra subscription is added.
     pub light_enabled: bool,
+    // Light TYPE. `false` (default) = BISTABLE: a toggle actuator that stays on until switched off;
+    // btmqttd tracks + publishes the on/off and exposes resync. `true` = MOMENTARY: a
+    // staircase-timer install that auto-offs; btmqttd only forwards a PRESS (turn on) and tracks no
+    // state (HA gets a press button, no switch/resync). Set from LIGHT_MODE=momentary.
+    pub light_momentary: bool,
     pub light_where: Option<String>,
     pub topic_light: String,
     pub topic_light_avail: String,
@@ -139,6 +144,9 @@ impl Config {
                 Some(v) => v == "1",
                 None => opt("LIGHT_WHERE").is_some_and(|s| s.bytes().all(|b| b.is_ascii_digit())),
             },
+            // Light TYPE: "momentary" = staircase-timer install (press-only, no tracked state);
+            // anything else (incl. absent) = the default BISTABLE toggle. Mirrors PAYLOAD_FORMAT.
+            light_momentary: opt("LIGHT_MODE").as_deref() == Some("momentary"),
             topic_light: get("TOPIC_LIGHT", "Bticino/light"),
             topic_light_avail: get("TOPIC_LIGHT_AVAIL", "Bticino/light_avail"),
             own_host: get("OWN_HOST", "127.0.0.1"),
@@ -440,5 +448,16 @@ EMPTY=
         assert!(cfg("MQTT_HOST=h\nLIGHT_WHERE=112\n").light_enabled);
         // Nothing set at all -> disabled.
         assert!(!cfg("MQTT_HOST=h\n").light_enabled);
+    }
+
+    #[test]
+    fn light_mode_selects_momentary_only_for_the_exact_token() {
+        let cfg = |s: &str| Config::from_map(parse_env(s));
+        // Explicit momentary.
+        assert!(cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\nLIGHT_MODE=momentary\n").light_momentary);
+        // Explicit bistable, and any other/absent value, default to bistable (not momentary).
+        assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\nLIGHT_MODE=bistable\n").light_momentary);
+        assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\n").light_momentary);
+        assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\nLIGHT_MODE=\n").light_momentary);
     }
 }

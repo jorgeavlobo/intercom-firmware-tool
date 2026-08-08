@@ -233,6 +233,9 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_PublishTopicsMustDiffer" xml:space="preserve">
     <value>Cada tema MQTT de publicación debe ser distinto; de lo contrario, dos entidades de Home Assistant consumirían los datos de la otra, o se corromperían el estado retenido / la disponibilidad.</value>
   </data>
+  <data name="Mqtt_PublishTopicUnderDiscoveryPrefix" xml:space="preserve">
+    <value>Ningún topic de publicación MQTT puede estar bajo el prefijo de descubrimiento de Home Assistant: ese espacio de nombres está reservado a la configuración retenida de las entidades, por lo que publicar ahí corrompería o eliminaría una entidad de Home Assistant.</value>
+  </data>
   <data name="Mqtt_InvalidSubscriptionFilter" xml:space="preserve">
     <value>El tema de recepción MQTT no es un filtro de suscripción válido: '+' debe ocupar un nivel completo y '#' debe ser el último nivel completo.</value>
   </data>

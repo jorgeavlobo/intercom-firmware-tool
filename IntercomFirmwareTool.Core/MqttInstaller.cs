@@ -205,6 +205,14 @@ namespace IntercomFirmwareTool.Core
         /// working (Codex). The WPF app always sets this explicitly.</summary>
         public bool? HasExteriorLight { get; init; }
 
+        /// <summary>Light type (default false = BISTABLE). <c>false</c>: a bistable/toggle actuator
+        /// that stays on until switched off — Home Assistant gets an on/off switch with tracked
+        /// state plus a Resync button. <c>true</c>: a MOMENTARY / staircase-timer installation that
+        /// switches the light off automatically — Home Assistant gets a single press button (no
+        /// on/off state, no Resync), because only "on" can be commanded and the hardware owns the
+        /// off. Learning the WHERE works in both modes. Ignored when the light is disabled.</summary>
+        public bool LightMomentary { get; init; }
+
         /// <summary>"Has secondary lock" opt-in (default false). When true the Secondary Lock
         /// button entity is created; when false it is tombstoned (not everyone wires a second
         /// gate, so it shouldn't clutter HA). The Main Lock is always present.</summary>
@@ -603,9 +611,32 @@ namespace IntercomFirmwareTool.Core
                 opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
                 opts.EffectiveTopicLightAvail,
             };
+            // The light STATE topic is published whenever the light is ENABLED, in BOTH modes: a
+            // bistable light publishes the tracked on/off, and a momentary light publishes an empty
+            // retained payload on connect to clear any stale bistable value (LightCtl::seed). So it
+            // must be in the collision set for either mode — otherwise a momentary seed could delete
+            // an aliased retained stream (Codex).
             if (opts.LightEnabled) publishTopics.Add(opts.EffectiveTopicLight);
             if (publishTopics.Distinct(StringComparer.Ordinal).Count() != publishTopics.Count)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
+
+            // No daemon-PUBLISHED data topic may live under the HA discovery prefix. That namespace
+            // is owned by the discovery reconcile for RETAINED entity configs
+            // (<prefix>/<component>/<node>/…/config). This is enforced REGARDLESS of the discovery
+            // toggle: the manifest is installed either way — btmqttd publishes the configs retained
+            // when HA_DISCOVERY=1 and CLEARS them (empty retained) when HA_DISCOVERY=0 — so a data
+            // publish into that namespace would corrupt an entity's config, or, against an empty
+            // retained clear, DELETE it / delete the data topic's own retained value (Codex). The
+            // defaults are namespace-disjoint (data under "Bticino/", discovery under
+            // "homeassistant/"), so this only rejects a caller that explicitly overrode a data topic
+            // into the discovery namespace.
+            {
+                string discoRoot = opts.HaDiscoveryPrefix + "/";
+                foreach (var pub in publishTopics)
+                    if (pub.StartsWith(discoRoot, StringComparison.Ordinal))
+                        throw new ArgumentException(
+                            CoreStrings.Get("Mqtt_PublishTopicUnderDiscoveryPrefix"), nameof(opts));
+            }
 
             // A shared-subscription TopicRx ("$share/<group>/<filter>") is matched by
             // the broker against the UNDERLYING <filter> that btmqttd
@@ -651,11 +682,12 @@ namespace IntercomFirmwareTool.Core
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
-            // The light STATE topic is only PUBLISHED when the feature is enabled; a disabled
-            // build derives EffectiveTopicLight but the daemon never publishes it (and TopicRx
-            // isn't a light command topic without the switch), so it can't form a self-loop —
-            // exclude it when disabled, or a valid opt-out config whose namespace happens to
-            // derive a colliding light topic would fail validation (Codex).
+            // The light STATE topic is PUBLISHED whenever the light is ENABLED — a bistable light
+            // publishes the tracked on/off, and a momentary light publishes an empty retained clear
+            // on connect (LightCtl::seed) — so its self-loop with TopicRx is checked in both modes.
+            // A DISABLED build only derives EffectiveTopicLight and never publishes it, so it's
+            // excluded there (else a valid opt-out config whose namespace happens to derive a
+            // colliding light topic would fail validation) — Codex.
             if (opts.LightEnabled && TopicFilterMatches(rxFilter, opts.EffectiveTopicLight))
                 throw new ArgumentException(
                     CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
@@ -975,6 +1007,10 @@ namespace IntercomFirmwareTool.Core
             // LIGHT_ENABLED=0 would re-enable the subsystem device-side, because config.rs
             // treats any valid LIGHT_WHERE as enabling (legacy-conf compatibility) — Codex.
             sb.Append(Conf("LIGHT_WHERE", opts.LightEnabled ? (opts.LightWhere ?? "") : ""));
+            // Light TYPE: "momentary" (staircase-timer install → press only, no tracked state) vs the
+            // default "bistable" (toggle with tracked on/off + resync). btmqttd branches its light
+            // controller and HA discovery on this.
+            sb.Append(Conf("LIGHT_MODE", opts.LightMomentary ? "momentary" : "bistable"));
             sb.Append(Conf("TOPIC_LIGHT", opts.EffectiveTopicLight));
             sb.Append(Conf("TOPIC_LIGHT_AVAIL", opts.EffectiveTopicLightAvail));
 
@@ -1042,7 +1078,7 @@ namespace IntercomFirmwareTool.Core
         };
 
         /// <summary>
-        /// The nine volume/lock/light CONTROL entities' identity — (JSON filename, discovery
+        /// The ten volume/lock/light CONTROL entities' identity — (JSON filename, discovery
         /// component, object id). Used by the TOMBSTONE path in
         /// <see cref="GenerateHaDiscovery"/> (when there is no concrete command topic) to
         /// emit the exact same config topics with an empty payload, so a previous build's
@@ -1061,6 +1097,7 @@ namespace IntercomFirmwareTool.Core
             ("main_lock.json", "button", "main_lock"),
             ("secondary_lock.json", "button", "secondary_lock"),
             ("light.json", "switch", "light"),
+            ("light_press.json", "button", "light_press"),
             ("light_resync.json", "button", "light_resync"),
             ("light_learn.json", "button", "light_learn"),
         };
@@ -1547,57 +1584,96 @@ namespace IntercomFirmwareTool.Core
             if (opts.LightEnabled)
             {
                 // Availability that ALSO gates on "a WHERE is known": both the device (LWT) and
-                // the light subsystem (EffectiveTopicLightAvail) must report online. The switch +
-                // resync use this so they show UNAVAILABLE in learn mode; the Learn button uses
-                // the plain device availability (it is how the user LEAVES learn mode).
+                // the light subsystem (EffectiveTopicLightAvail) must report online. The switch /
+                // press button + resync use this so they show UNAVAILABLE in learn mode; the Learn
+                // button uses the plain device availability (it is how the user LEAVES learn mode).
                 var lightAvail = new[]
                 {
                     new { topic = opts.TopicLastWill, payload_available = "online", payload_not_available = "offline" },
                     new { topic = opts.EffectiveTopicLightAvail, payload_available = "online", payload_not_available = "offline" },
                 };
 
-                entities.Add(new HaEntity(
-                    "light.json",
-                    Topic("switch", "light"),
-                    JsonSerializer.Serialize(new
-                    {
-                        name = "Light",
-                        unique_id = $"{node}_light",
-                        default_entity_id = EntId("switch", "light"),
-                        command_topic = controlTopic,
-                        qos = 1,
-                        payload_on = "{\"action\":\"light\",\"value\":\"on\"}",
-                        payload_off = "{\"action\":\"light\",\"value\":\"off\"}",
-                        state_topic = opts.EffectiveTopicLight,
-                        state_on = "on",
-                        state_off = "off",
-                        icon = "mdi:lightbulb",
-                        availability = lightAvail,
-                        availability_mode = "all",
-                        device,
-                    }, HaJson)));
+                if (opts.LightMomentary)
+                {
+                    // MOMENTARY (staircase-timer install): a single PRESS button that only turns the
+                    // light ON — the installation's own timer switches it off, so there is NO tracked
+                    // state, no state_topic, and no Resync. QoS 0 (fire-and-forget): a momentary press
+                    // is NOT idempotent (each re-triggers the timer/pulse), so we must NOT let a QoS-1
+                    // redelivery double-pulse it. Same WHERE-gated availability as the switch, so it's
+                    // unavailable in learn mode. Tombstone the bistable switch + resync a prior build
+                    // may have published.
+                    entities.Add(new HaEntity(
+                        "light_press.json",
+                        Topic("button", "light_press"),
+                        JsonSerializer.Serialize(new
+                        {
+                            name = "Light",
+                            unique_id = $"{node}_light_press",
+                            default_entity_id = EntId("button", "light_press"),
+                            command_topic = controlTopic,
+                            qos = 0,
+                            payload_press = "{\"action\":\"light_press\"}",
+                            icon = "mdi:lightbulb",
+                            availability = lightAvail,
+                            availability_mode = "all",
+                            device,
+                        }, HaJson)));
+                    entities.Add(new HaEntity("light.json", Topic("switch", "light"), ""));
+                    entities.Add(new HaEntity("light_resync.json", Topic("button", "light_resync"), ""));
+                }
+                else
+                {
+                    // BISTABLE (default): the actuator is a stateless TOGGLE with no readable state
+                    // (firmware-confirmed), so btmqttd tracks the on/off and publishes it retained to
+                    // EffectiveTopicLight; HA reads that as the switch state. The command is an ABSOLUTE
+                    // on/off action on TopicRx — btmqttd toggles only when the tracked state differs, so
+                    // a QoS-1 redelivery is harmless (idempotent set), unlike the momentary press above.
+                    entities.Add(new HaEntity(
+                        "light.json",
+                        Topic("switch", "light"),
+                        JsonSerializer.Serialize(new
+                        {
+                            name = "Light",
+                            unique_id = $"{node}_light",
+                            default_entity_id = EntId("switch", "light"),
+                            command_topic = controlTopic,
+                            qos = 1,
+                            payload_on = "{\"action\":\"light\",\"value\":\"on\"}",
+                            payload_off = "{\"action\":\"light\",\"value\":\"off\"}",
+                            state_topic = opts.EffectiveTopicLight,
+                            state_on = "on",
+                            state_off = "off",
+                            icon = "mdi:lightbulb",
+                            availability = lightAvail,
+                            availability_mode = "all",
+                            device,
+                        }, HaJson)));
 
-                // "Resync light state" — a CONFIG-section button that corrects the TRACKED state
-                // (unknown→on→off→on) WITHOUT actuating the relay, so the user realigns HA to the
-                // wall after a cold boot / a press missed while the daemon was down. Same WHERE-gated
-                // availability as the switch.
-                entities.Add(new HaEntity(
-                    "light_resync.json",
-                    Topic("button", "light_resync"),
-                    JsonSerializer.Serialize(new
-                    {
-                        name = "Resync light state",
-                        unique_id = $"{node}_light_resync",
-                        default_entity_id = EntId("button", "light_resync"),
-                        command_topic = controlTopic,
-                        qos = 0,
-                        payload_press = "{\"action\":\"light_resync\"}",
-                        icon = "mdi:sync",
-                        entity_category = "config",
-                        availability = lightAvail,
-                        availability_mode = "all",
-                        device,
-                    }, HaJson)));
+                    // "Resync light state" — a CONFIG-section button that corrects the TRACKED state
+                    // (unknown→on→off→on) WITHOUT actuating the relay, so the user realigns HA to the
+                    // wall after a cold boot / a press missed while the daemon was down. Same WHERE-gated
+                    // availability as the switch. Bistable-only (momentary has no tracked state).
+                    entities.Add(new HaEntity(
+                        "light_resync.json",
+                        Topic("button", "light_resync"),
+                        JsonSerializer.Serialize(new
+                        {
+                            name = "Resync light state",
+                            unique_id = $"{node}_light_resync",
+                            default_entity_id = EntId("button", "light_resync"),
+                            command_topic = controlTopic,
+                            qos = 0,
+                            payload_press = "{\"action\":\"light_resync\"}",
+                            icon = "mdi:sync",
+                            entity_category = "config",
+                            availability = lightAvail,
+                            availability_mode = "all",
+                            device,
+                        }, HaJson)));
+
+                    // A prior MOMENTARY build may have published the press button — tombstone it.
+                    entities.Add(new HaEntity("light_press.json", Topic("button", "light_press"), ""));
+                }
 
                 // "Learn light" — a CONFIG-section button that opens the capture window; the user
                 // then presses the physical stair-light button once to teach the WHERE. Available
@@ -1632,8 +1708,9 @@ namespace IntercomFirmwareTool.Core
             }
             else
             {
-                // Feature OFF → tombstone all three light configs so a prior build's entities clear.
+                // Feature OFF → tombstone all four light configs so a prior build's entities clear.
                 entities.Add(new HaEntity("light.json", Topic("switch", "light"), ""));
+                entities.Add(new HaEntity("light_press.json", Topic("button", "light_press"), ""));
                 entities.Add(new HaEntity("light_resync.json", Topic("button", "light_resync"), ""));
                 entities.Add(new HaEntity("light_learn.json", Topic("button", "light_learn"), ""));
             }
