@@ -1,8 +1,7 @@
 # Clean-room reimplementation methodology
 
-This project ships an MIT `LICENSE.txt`, though its copyright line still holds the
-template placeholders `[year] [fullname]` — finalizing that attribution is tracked
-in [#98](../../issues/98). Its **own code** copies **no GPL-licensed *source***
+This project's **own code is MIT-licensed** (top-level `LICENSE.txt`,
+`Copyright (c) 2026 jorgeavlobo`), and it copies **no GPL-licensed *source***
 into this repository: the tool reproduces the *functional result* of prior GPL-2.0
 work through an independent implementation, without transcribing any GPL source.
 This document records how that is achieved and defended.
@@ -131,9 +130,8 @@ tracked in [#98](../../issues/98).
   code review and this documented methodology, not by the license workflow.
 
 Together these keep the MIT licensing for the project's **own code** defensible
-(an MIT `LICENSE.txt` is present; only its `[year] [fullname]` attribution
-placeholders remain to be filled — [#98](../../issues/98)): it is an independent
-work that interoperates with the device, not a translation of GPL-2.0 source. The separately-bundled GPL-2.0 `lwext4` (via SharpExt4) is a
+(the MIT grant is in `LICENSE.txt`): it is an independent work that interoperates
+with the device, not a translation of GPL-2.0 source. The separately-bundled GPL-2.0 `lwext4` (via SharpExt4) is a
 third-party dependency, **not** a derivative of this project's code; satisfying
 its GPL-2.0 obligations for the releases is **outstanding** work tracked in
 [#98](../../issues/98) — the current releases do not yet ship its license text or
