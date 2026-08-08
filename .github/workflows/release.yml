@@ -259,8 +259,9 @@ jobs:
           }
           # GPL-2.0 §3(a): the pinned corresponding source for SharpExt4.dll (wrapper + vendored
           # lwext4 + build scripts) is shipped as a standalone release asset from its repo path
-          # (see the upload step), so the binary is ACCOMPANIED by its source, not merely offered
-          # it (#98). Guard that the pinned snapshot exists in the checkout.
+          # (see the upload step), so the binary is ACCOMPANIED by its source — satisfying §3(a),
+          # not only the §3(b) written offer (#98). Guard that the pinned snapshot exists in the
+          # checkout.
           if (-not (Test-Path 'third_party/SharpExt4/SharpExt4-359d5f4.zip')) {
             throw "pinned SharpExt4 corresponding-source snapshot missing: third_party/SharpExt4/SharpExt4-359d5f4.zip"
           }

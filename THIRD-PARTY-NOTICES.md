@@ -74,8 +74,8 @@ for the full reasoning.
       [`licenses/lwext4-BSD-3-Clause-NOTICE.txt`](licenses/lwext4-BSD-3-Clause-NOTICE.txt).
   - **Corresponding source: pinned + mirrored.** The `lwext4` source (vendored
     inside SharpExt4) is included in the pinned corresponding-source snapshot at
-    [`third_party/SharpExt4/`](third_party/SharpExt4) — see the **Written offer**.
-  - Corresponding source: see the **Written offer** below.
+    [`third_party/SharpExt4/`](third_party/SharpExt4); see the **Written offer**
+    below for the full terms.
 
 ### `DiskPartitionInfo.dll` — DiskPartitionInfo
 
