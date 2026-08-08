@@ -79,8 +79,8 @@ through vendored userland tools:
   `serde_json` Rust crate.
 - **`evtest`** (**GPL-2.0-or-later**) → replaced by the pure-Rust `evdev` crate.
 
-The 65 third-party crates that end up in the shipped binary (as inventoried in
-the notice file below; `Cargo.lock` additionally lists build-only and
+The third-party crates that end up in the shipped binary (inventoried in the
+notice file below; `Cargo.lock` additionally lists build-only and
 target-specific crates that are not linked in) are **all permissive**
 (MIT / Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0 — no copyleft). This is not
 just asserted; it is **enforced in CI**: `cargo-deny` checks the dependency
