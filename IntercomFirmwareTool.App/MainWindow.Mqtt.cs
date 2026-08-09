@@ -1461,7 +1461,8 @@ namespace IntercomFirmwareTool.App
                 string camTarget = TxtMqttCameraTarget.Text.Trim();
                 if (camTarget.Length > 0
                     && !string.Equals(camTarget, TxtMqttHost.Text.Trim(), StringComparison.OrdinalIgnoreCase)
-                    && !IPAddress.TryParse(camTarget, out _))
+                    && !(IPAddress.TryParse(camTarget, out var camIp)
+                         && camIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork))
                     return L("MqttHint_CameraTargetIp");
                 if (!TryParsePort(TxtMqttCameraVideoPort.Text, out int vp)
                     || !TryParsePort(TxtMqttCameraAudioPort.Text, out int ap))

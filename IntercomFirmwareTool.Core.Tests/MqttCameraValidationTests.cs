@@ -57,7 +57,9 @@ public class MqttCameraValidationTests
     [InlineData(40000, 70000)]      // out of range
     public void Rejects_equal_or_out_of_range_ports(int video, int audio)
     {
-        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(Cam("ha.local", video, audio)));
+        // Use an IPv4 target so it passes host validation and the throw is attributable to the
+        // port checks (a hostname would fail the non-broker-target rule first).
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(Cam("192.168.1.9", video, audio)));
     }
 
     [Fact]

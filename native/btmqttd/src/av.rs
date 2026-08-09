@@ -53,9 +53,9 @@ const TEARDOWN: &str = "*7*0*##";
 const AV_ACK: &[u8] = b"*#*1##";
 const AV_NACK: &[u8] = b"*#*0##";
 
-/// TOTAL attempts to send an "add client" frame (the loop runs `0..ADD_CLIENT_RETRIES`): one
+/// TOTAL attempts to send an "add client" frame (the loop runs `0..ADD_CLIENT_ATTEMPTS`): one
 /// initial send plus NACK retries, 3 in all (≤ the reference project's cap).
-const ADD_CLIENT_RETRIES: u32 = 3;
+const ADD_CLIENT_ATTEMPTS: u32 = 3;
 
 /// How long to wait for the `:30007` ACK/NACK for one "add client" frame. Loopback, tiny
 /// payload — a couple of seconds is generous and keeps a hung daemon from stalling arm.
@@ -231,10 +231,10 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
     Ok(sock)
 }
 
-/// Write one "add client" frame and wait for the daemon's ACK, retrying on NACK up to
-/// [`ADD_CLIENT_RETRIES`]. A NACK past the retries, an EOF, or a timeout is an error.
+/// Write one "add client" frame and wait for the daemon's ACK, resending on a NACK for up to
+/// [`ADD_CLIENT_ATTEMPTS`] total tries. A NACK on the last try, an EOF, or a timeout is an error.
 async fn add_client(sock: &mut TcpStream, frame: &str) -> std::io::Result<()> {
-    for _ in 0..ADD_CLIENT_RETRIES {
+    for _ in 0..ADD_CLIENT_ATTEMPTS {
         sock.write_all(frame.as_bytes()).await?;
         sock.flush().await?;
 
@@ -378,8 +378,8 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (mut s, _) = listener.accept().await.unwrap();
                 let mut b = [0u8; 64];
-                // NACK every add-client attempt (ADD_CLIENT_RETRIES of them).
-                for _ in 0..ADD_CLIENT_RETRIES {
+                // NACK every add-client attempt (ADD_CLIENT_ATTEMPTS of them).
+                for _ in 0..ADD_CLIENT_ATTEMPTS {
                     let _ = s.read(&mut b).await.unwrap();
                     s.write_all(AV_NACK).await.unwrap();
                     s.flush().await.unwrap();
