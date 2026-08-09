@@ -90,6 +90,16 @@ const HEALTHY_SESSION: Duration = Duration::from_secs(60);
 /// Run the camera A/V task: keep an OWN monitor session up and drive the `:30007`
 /// siphon from it. Owned by `main`, which sets `stopping` at shutdown; there is no
 /// half-actuated state to drain (we never send a teardown), so exiting is immediate.
+///
+/// KNOWN LIMITATION (issue #103, deferred to a hardware-tested follow-up): the siphon is
+/// SESSION-LOCAL — if the `:20000` monitor socket drops WHILE a call is live, `session`
+/// returns, its `:30007` socket closes, and the fan-out stops for the rest of that call;
+/// it re-arms only on the NEXT media-start frame. This is accepted for now because (a) on
+/// this device the monitor and `bt_av_media` are the same BTicino stack, so a monitor drop
+/// almost always means the media session ended too (nothing left to re-arm), and (b) the
+/// robust fix — persisting the siphon across a monitor reconnect — must also reconcile a
+/// teardown MISSED during the gap (else it stays wrongly "armed" and the NEXT call gets no
+/// camera), which needs on-hardware validation to get right. Tracked for Phase 1 follow-up.
 pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     let mut backoff = BACKOFF_INIT;
     while !stopping.load(Ordering::Relaxed) {
