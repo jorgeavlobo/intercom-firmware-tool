@@ -547,23 +547,26 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
-        /// <summary>Whether the SELECTED firmware exposes the hi-res camera branch. Only the Classe
-        /// 100X lacks it — its <c>bt_av_media</c> has no hi-res <c>multiudpsink</c>, so a 100X build
-        /// with hi-res selected would map to branch 0 and produce NO picture (CodeRabbit). Unknown
-        /// firmware (no registry match) is not restricted — the model can't be asserted, and Core has
-        /// no model to validate against.</summary>
+        /// <summary>Whether the SELECTED firmware exposes the hi-res camera branch. Enabled ONLY for a
+        /// recognized Classe 300X — its `bt_av_media` has the hi-res `multiudpsink`. Every other case
+        /// (the Classe 100X, which has no hi-res branch, AND unrecognized firmware) defaults to
+        /// Standard (low-res, branch 1), which works on every model. Fail-safe: we offer hi-res only
+        /// when we can positively assert the model supports it, never on an unknown (CodeRabbit). Every
+        /// customizable firmware is either "Classe 100X" or "Classe 300X", so this never restricts a
+        /// real 300X.</summary>
         private bool CameraModelSupportsHiRes =>
-            !string.Equals(_fwzMatch?.Line, "Classe 100X", StringComparison.Ordinal);
+            string.Equals(_fwzMatch?.Line, "Classe 300X", StringComparison.Ordinal);
 
-        /// <summary>Gate the hi-res camera option to models that support it: on a Classe 100X the
-        /// option is disabled and Standard (low-res) is forced. Called whenever the firmware selection
-        /// or the camera toggle changes, so switching to a 100X after ticking hi-res can't persist it.</summary>
+        /// <summary>Gate the hi-res camera option to a model that supports it (a recognized Classe
+        /// 300X): for every other model — the Classe 100X and unrecognized firmware — the option is
+        /// disabled and Standard (low-res) is forced. Called whenever the firmware selection or the
+        /// camera toggle changes, so switching away from a 300X after ticking hi-res can't persist it.</summary>
         private void RefreshCameraModelGating()
         {
             if (RbMqttCameraHiRes is null) return; // guard against calls before InitializeComponent
             bool hiRes = CameraModelSupportsHiRes;
             RbMqttCameraHiRes.IsEnabled = hiRes;
-            if (!hiRes) RbMqttCameraLowRes.IsChecked = true; // 100X: no hi-res branch — force Standard
+            if (!hiRes) RbMqttCameraLowRes.IsChecked = true; // no hi-res branch — force Standard
         }
 
         /// <summary>Build the ready-to-paste go2rtc config for the current camera settings and show it

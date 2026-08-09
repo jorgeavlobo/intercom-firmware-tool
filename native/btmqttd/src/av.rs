@@ -144,41 +144,23 @@ async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Resu
     // isn't lost. Accumulate across reads: TCP may split the 6-byte ACK.
     {
         let mut pre: Vec<u8> = Vec::new();
-        let ack_pos = tokio::time::timeout(MONITOR_ACK_TIMEOUT, async {
-            loop {
-                let n = sock.read(&mut buf).await?;
-                if n == 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "monitor closed before ACK",
-                    ));
-                }
-                pre.extend_from_slice(&buf[..n]);
-                if let Some(pos) = find_sub(&pre, AV_ACK) {
-                    return Ok(pos);
-                }
-                if find_sub(&pre, AV_NACK).is_some() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::ConnectionRefused,
-                        "monitor session refused (NACK)",
-                    ));
-                }
-                if pre.len() > MAX_CTRL_BYTES {
-                    // A peer streaming non-control bytes: don't grow the buffer unboundedly.
-                    // Erroring here makes `run` back off and reconnect.
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "monitor ACK not seen within the control-buffer cap",
-                    ));
-                }
-            }
-        })
+        let acked = tokio::time::timeout(
+            MONITOR_ACK_TIMEOUT,
+            read_until_ack_or_nack(&mut sock, &mut pre),
+        )
         .await
-        .map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::TimedOut, "monitor ACK timed out")
-        })??;
-        // Frame only the bytes AFTER the ACK (any pre-ACK banner is not a frame).
-        framer.push(&pre[ack_pos + AV_ACK.len()..], &mut frames);
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "monitor ACK timed out"))??;
+        if !acked {
+            // The gateway REFUSED the monitor session — back off and reconnect (see `run`).
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "monitor session refused (NACK)",
+            ));
+        }
+        // Frame only the bytes AFTER the ACK (any pre-ACK banner is not a frame). The helper
+        // returned Ok(true) only on a complete ACK, so the position is always present.
+        let pos = find_sub(&pre, AV_ACK).expect("ACK present when read_until_ack_or_nack is true");
+        framer.push(&pre[pos + AV_ACK.len()..], &mut frames);
     }
 
     loop {
@@ -256,43 +238,14 @@ async fn add_client(sock: &mut TcpStream, frame: &str) -> std::io::Result<()> {
         sock.write_all(frame.as_bytes()).await?;
         sock.flush().await?;
 
-        // Accumulate bytes until a COMPLETE ACK or NACK appears — a single `read` does not
-        // preserve OWN frame boundaries, so TCP may split the 6-byte `*#*1##` / `*#*0##`
-        // across reads. Checking one read in isolation would then misread a valid (but
-        // fragmented) ACK as an unexpected reply and drop the siphon. Bounded by ACK_TIMEOUT.
+        // Wait for the daemon's control reply (shared accumulate/scan/cap helper: TCP may split
+        // the 6-byte `*#*1##` / `*#*0##` across reads). Bounded by ACK_TIMEOUT.
         let mut resp: Vec<u8> = Vec::new();
-        let acked = tokio::time::timeout(ACK_TIMEOUT, async {
-            let mut buf = [0u8; 64];
-            loop {
-                let n = sock.read(&mut buf).await?;
-                if n == 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "av daemon closed",
-                    ));
-                }
-                resp.extend_from_slice(&buf[..n]);
-                if find_sub(&resp, AV_ACK).is_some() {
-                    return Ok(true);
-                }
-                if find_sub(&resp, AV_NACK).is_some() {
-                    return Ok(false);
-                }
-                if resp.len() > MAX_CTRL_BYTES {
-                    // A peer streaming non-control bytes: fail the attempt rather than grow
-                    // the buffer unboundedly (arm() then errors and is logged).
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "av daemon ACK not seen within the control-buffer cap",
-                    ));
-                }
-                // Neither yet: keep reading (a partial reply) until one completes or we time out.
-            }
-        })
-        .await
-        .map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::TimedOut, "av daemon ack timed out")
-        })??;
+        let acked = tokio::time::timeout(ACK_TIMEOUT, read_until_ack_or_nack(sock, &mut resp))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "av daemon ack timed out")
+            })??;
         if acked {
             return Ok(());
         }
@@ -325,6 +278,43 @@ async fn resolve_ipv4(host: &str) -> Option<Ipv4Addr> {
 /// slice past the monitor ACK so trailing bus bytes still reach the framer.
 fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+/// Read from `sock` into `acc`, accumulating ACROSS reads, until a COMPLETE control frame
+/// appears: `Ok(true)` on ACK (`*#*1##`), `Ok(false)` on NACK (`*#*0##`). A single `read`
+/// does not preserve OWN frame boundaries, so the 6-byte reply may be split across packets;
+/// this keeps reading until one completes. Errors on EOF, on an I/O failure, or when `acc`
+/// exceeds [`MAX_CTRL_BYTES`] (a peer streaming non-control bytes — the cap stops unbounded
+/// allocation). Callers add their OWN timeout and interpret the bool (the monitor also reads
+/// the ACK's position out of `acc` afterwards to frame the bytes trailing it). Shared by the
+/// monitor handshake and `add_client` so the accumulate/scan/cap logic lives in one place.
+async fn read_until_ack_or_nack(
+    sock: &mut TcpStream,
+    acc: &mut Vec<u8>,
+) -> std::io::Result<bool> {
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = sock.read(&mut buf).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "peer closed before ACK/NACK",
+            ));
+        }
+        acc.extend_from_slice(&buf[..n]);
+        if find_sub(acc, AV_ACK).is_some() {
+            return Ok(true);
+        }
+        if find_sub(acc, AV_NACK).is_some() {
+            return Ok(false);
+        }
+        if acc.len() > MAX_CTRL_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "ACK/NACK not seen within the control-buffer cap",
+            ));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -397,6 +387,58 @@ mod tests {
             });
             let mut client = TcpStream::connect(addr).await.unwrap();
             assert!(add_client(&mut client, "*7*300#1#2#3#4#40000#1*##").await.is_err());
+            let _ = server.await;
+        });
+    }
+
+    #[test]
+    fn read_until_ack_or_nack_reassembles_a_fragmented_ack() {
+        // The shared helper (used by BOTH the monitor handshake and add_client) must reassemble an
+        // ACK split across reads and report the position via the accumulator — this covers the
+        // monitor-ACK fragmentation path that has no socket-level test of its own.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut s, _) = listener.accept().await.unwrap();
+                // A pre-ACK banner, then the ACK split across writes, then a trailing bus frame.
+                s.write_all(b"junk*").await.unwrap();
+                s.flush().await.unwrap();
+                s.write_all(b"#*1##*7*300#127#0#0#1#5002#1*##").await.unwrap();
+                s.flush().await.unwrap();
+            });
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let mut acc = Vec::new();
+            assert!(read_until_ack_or_nack(&mut client, &mut acc).await.unwrap());
+            // The ACK is located within the accumulator, so a caller can frame the bytes past it.
+            let pos = find_sub(&acc, AV_ACK).unwrap();
+            assert!(acc[pos + AV_ACK.len()..].starts_with(b"*7*300#127#0#0#1#"));
+            server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn read_until_ack_or_nack_caps_a_flood_of_non_control_bytes() {
+        // A peer streaming non-control bytes must not grow the buffer unboundedly: past
+        // MAX_CTRL_BYTES the helper errors (which makes the monitor reconnect / the arm fail).
+        use tokio::io::AsyncWriteExt;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut s, _) = listener.accept().await.unwrap();
+                // Well over the cap, and never a control frame.
+                let flood = vec![b'x'; MAX_CTRL_BYTES + 1024];
+                let _ = s.write_all(&flood).await;
+                let _ = s.flush().await;
+            });
+            let mut client = TcpStream::connect(addr).await.unwrap();
+            let mut acc = Vec::new();
+            let err = read_until_ack_or_nack(&mut client, &mut acc).await.unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
             let _ = server.await;
         });
     }
