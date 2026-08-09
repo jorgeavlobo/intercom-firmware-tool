@@ -17,7 +17,7 @@ pub const DEFAULT_CFG_PATH: &str = "/etc/btmqttd/btmqttd.conf";
 pub const OWN_PORT_CMD: u16 = 30006;
 
 /// The on-board `bt_av_media` A/V daemon's command port (issue #103). A WHO=7
-/// `*7*300#IP#IP#IP#IP#PORT#BRANCH##` frame "adds a UDP client" to its GStreamer
+/// `*7*300#IP#IP#IP#IP#PORT#BRANCH*##` frame "adds a UDP client" to its GStreamer
 /// `multiudpsink`, fanning a cleartext RTP copy of the panel's H.264/speex to that
 /// `ip:port` — the mechanism `av.rs` uses to siphon the doorbell camera. Same on
 /// the C100X and C300X (firmware-verified). Adjacent to the command port above.

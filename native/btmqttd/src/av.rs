@@ -4,7 +4,7 @@
 //! ## Mechanism (firmware-verified on the Classe 100X and 300X)
 //! The on-board `bt_av_media` daemon encodes the entrance camera to a GStreamer
 //! `multiudpsink` (H.264 for video, speex for audio). Sending a WHO=7
-//! `*7*300#<ip>#<port>#<branch>##` frame to its command port (`:30007`) **adds a UDP
+//! `*7*300#<ip>#<port>#<branch>*##` frame to its command port (`:30007`) **adds a UDP
 //! client** to that sink — a non-disruptive fan-out: the panel keeps rendering to its own
 //! client while it *also* sends a cleartext RTP copy to the `ip:port` we name. So we
 //! never decode, transcode, or open `/dev/video` here — we just ask for a copy.
@@ -13,7 +13,7 @@
 //! It runs its **own** OWN monitor session (`:20000`), independent of `sender.rs`, so it
 //! can't perturb the reviewed call-state machine there. Whenever the panel brings an A/V
 //! session up — a ring, an answered call, or the eye/self-view — the bus carries the
-//! panel's own `*7*300#127#0#0#1#<port>#<branch>##` frames; we take that as "media is
+//! panel's own `*7*300#127#0#0#1#<port>#<branch>*##` frames; we take that as "media is
 //! live now" and **add our own client** on `:30007`, pointing the low-res H.264 (+ speex
 //! audio) at `camera_target` (the go2rtc/Home-Assistant host). When the panel tears the
 //! session down (`*7*0*##`) we simply drop our `:30007` connection.
