@@ -409,6 +409,7 @@ namespace IntercomFirmwareTool.App
                 // Reject and DE-SELECT: no build is allowed on an unrecognized or
                 // unmodifiable file.
                 _fwzPath = null;
+                _fwzMatch = null; // deselect the model too, so hi-res camera gating resets to unknown
                 _outputPath = null;
                 _fwzRejected = true;
                 TxtFwzPath.Text = L("Ph_Firmware_Invalid");
@@ -417,6 +418,7 @@ namespace IntercomFirmwareTool.App
                 TxtOutputPath.Foreground = Brushes.Gray;
                 LblOutput.IsEnabled = false;
                 TxtOutputPath.IsEnabled = false;
+                RefreshCameraModelGating(); // model unknown now — re-open the hi-res option
                 UpdateBuildEnabled();
 
                 SetResult(() => LF("Fmt_Result_Rejected", check.Message));
@@ -447,6 +449,7 @@ namespace IntercomFirmwareTool.App
                 TxtOutputPath.Foreground = Brushes.Gray;
                 LblOutput.IsEnabled = false;
                 TxtOutputPath.IsEnabled = false;
+                RefreshCameraModelGating(); // model unknown now — re-open the hi-res option
                 UpdateBuildEnabled();
 
                 SetResult(() => LF("Fmt_Result_Rejected", HsMsg()));

@@ -67,6 +67,12 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(2);
 /// here turns that into a backoff-reconnect instead of an infinite idle. Matches `sender.rs`.
 const MONITOR_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Ceiling on bytes accumulated while waiting for a control ACK/NACK. The reply is a 6-byte
+/// `*#*1##` / `*#*0##` (at most preceded by a tiny banner or one batched media frame), so a
+/// few KB is ample. The cap keeps a misbehaving peer that streams non-control bytes until the
+/// timeout from ballooning the accumulation buffer — overflow is an error (reconnect / fail).
+const MAX_CTRL_BYTES: usize = 4096;
+
 /// Idle cap on a monitor read, so a quiet bus still lets the loop re-check `stopping`
 /// and exit promptly at shutdown (the bus is rarely silent this long — dim/keepalive
 /// frames arrive — but the bound guarantees responsiveness regardless).
@@ -76,12 +82,18 @@ const READ_IDLE: Duration = Duration::from_secs(15);
 const BACKOFF_INIT: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
+/// A session that stayed up at least this long was HEALTHY: its eventual drop resets the
+/// backoff, so a long-stable monitor that finally hiccups reconnects promptly instead of
+/// inheriting a maxed-out delay (which could otherwise miss a ring). Mirrors `sender.rs`.
+const HEALTHY_SESSION: Duration = Duration::from_secs(60);
+
 /// Run the camera A/V task: keep an OWN monitor session up and drive the `:30007`
 /// siphon from it. Owned by `main`, which sets `stopping` at shutdown; there is no
 /// half-actuated state to drain (we never send a teardown), so exiting is immediate.
 pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     let mut backoff = BACKOFF_INIT;
     while !stopping.load(Ordering::Relaxed) {
+        let start = tokio::time::Instant::now();
         match session(&cfg, &stopping).await {
             // A clean return means `stopping` was observed — leave the loop.
             Ok(()) => break,
@@ -89,6 +101,11 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
         }
         if stopping.load(Ordering::Relaxed) {
             break;
+        }
+        // A session that ran healthy for a while shouldn't inherit a maxed-out backoff from
+        // earlier startup churn — reset so the reconnect is prompt (a 30 s wait could miss a ring).
+        if start.elapsed() >= HEALTHY_SESSION {
+            backoff = BACKOFF_INIT;
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(BACKOFF_MAX);
@@ -134,6 +151,14 @@ async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Resu
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionRefused,
                         "monitor session refused (NACK)",
+                    ));
+                }
+                if pre.len() > MAX_CTRL_BYTES {
+                    // A peer streaming non-control bytes: don't grow the buffer unboundedly.
+                    // Erroring here makes `run` back off and reconnect.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "monitor ACK not seen within the control-buffer cap",
                     ));
                 }
             }
@@ -242,6 +267,14 @@ async fn add_client(sock: &mut TcpStream, frame: &str) -> std::io::Result<()> {
                 }
                 if find_sub(&resp, AV_NACK).is_some() {
                     return Ok(false);
+                }
+                if resp.len() > MAX_CTRL_BYTES {
+                    // A peer streaming non-control bytes: fail the attempt rather than grow
+                    // the buffer unboundedly (arm() then errors and is logged).
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "av daemon ACK not seen within the control-buffer cap",
+                    ));
                 }
                 // Neither yet: keep reading (a partial reply) until one completes or we time out.
             }
