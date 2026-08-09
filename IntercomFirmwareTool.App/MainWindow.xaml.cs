@@ -496,6 +496,8 @@ namespace IntercomFirmwareTool.App
                 Path.GetDirectoryName(path) ?? "",
                 Path.GetFileNameWithoutExtension(path) + "_ssh.fwz");
             SetPathText(TxtOutputPath, _outputPath);
+            // The chosen model gates the hi-res camera option (100X has no hi-res branch).
+            RefreshCameraModelGating();
             UpdateBuildEnabled();
         }
 
@@ -518,6 +520,8 @@ namespace IntercomFirmwareTool.App
             LblOutput.IsEnabled = false;
             TxtOutputPath.IsEnabled = false;
             SetStatus(""); // don't leave "✓ Firmware verified." while nothing is selected
+            // Model no longer known — re-open the hi-res camera option (unknown model isn't restricted).
+            RefreshCameraModelGating();
             UpdateBuildEnabled();
         }
 

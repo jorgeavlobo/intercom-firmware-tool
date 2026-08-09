@@ -606,9 +606,16 @@ namespace IntercomFirmwareTool.Core
             // port and break go2rtc's demux.
             if (opts.CameraEnabled)
             {
-                if (string.IsNullOrWhiteSpace(opts.EffectiveCameraTargetHost)
-                    || opts.EffectiveCameraTargetHost.IndexOfAny(new[] { '\r', '\n' }) >= 0)
+                string camTarget = opts.EffectiveCameraTargetHost;
+                if (string.IsNullOrWhiteSpace(camTarget)
+                    || camTarget.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetRequired"), nameof(opts));
+                // The fan-out target must be a hostname or an IPv4 literal: btmqttd's av.rs sends the
+                // WHO=7 `*7*300#a#b#c#d#…` frame, whose address field is IPv4-only, and its resolver
+                // takes the first IPv4 a lookup yields. An IPv6 literal (or a URL / host:port string)
+                // would install but never arm — reject it here where the user sees why (CodeRabbit/Codex).
+                if (!IsHostnameOrIpv4(camTarget))
+                    throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidCameraTarget"), nameof(opts));
                 if (opts.CameraVideoPort is < 1 or > 65535 || opts.CameraAudioPort is < 1 or > 65535)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_CameraPortRange"), nameof(opts));
                 if (opts.CameraVideoPort == opts.CameraAudioPort)
@@ -2097,6 +2104,18 @@ namespace IntercomFirmwareTool.Core
                 ? Convert.ToHexStringLower(SHA256.HashData(buf)) : "";
             checks.Add(new($"{bin.InstallPath} SHA-256 matches embedded {bin.Name}",
                 string.Equals(sha, bin.Sha256Hex, StringComparison.Ordinal), sha));
+        }
+
+        /// <summary>A hostname or an IPv4 literal — but NOT an IPv6 literal. Used for the camera
+        /// fan-out target, which btmqttd delivers via the IPv4-only OWN `*7*300#a#b#c#d#…` frame
+        /// (its resolver takes the first IPv4 a lookup returns), so an IPv6 target would install but
+        /// never arm. A literal that parses as an IP must be IPv4; any other value goes through the
+        /// same hostname rules as <see cref="IsValidHost"/> (which rejects URLs and `host:port`).</summary>
+        private static bool IsHostnameOrIpv4(string host)
+        {
+            if (IPAddress.TryParse(host, out var ip))
+                return ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork;
+            return IsValidHost(host);
         }
 
         private static bool IsValidHost(string host)

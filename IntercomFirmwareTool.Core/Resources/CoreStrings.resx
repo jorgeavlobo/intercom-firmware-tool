@@ -203,6 +203,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_CameraPortsMustDiffer" xml:space="preserve">
     <value>The camera video and audio ports must be different.</value>
   </data>
+  <data name="Mqtt_InvalidCameraTarget" xml:space="preserve">
+    <value>The camera target host must be a hostname or an IPv4 address (not an IPv6 address, a URL, or host:port).</value>
+  </data>
   <data name="Mqtt_CredentialNewline" xml:space="preserve">
     <value>The MQTT username or password contains a line break; credentials must be a single line.</value>
   </data>

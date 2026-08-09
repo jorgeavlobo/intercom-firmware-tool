@@ -462,6 +462,7 @@ Key: {1}</value></data>
   <data name="Cap_MqttGo2Rtc" xml:space="preserve"><value>go2rtc camera setup</value></data>
   <data name="MqttHint_CameraPort" xml:space="preserve"><value>The camera UDP ports must be numbers between 1 and 65535.</value></data>
   <data name="MqttHint_CameraPortsDiffer" xml:space="preserve"><value>The camera video and audio ports must be different.</value></data>
+  <data name="MqttHint_CameraTarget" xml:space="preserve"><value>The camera target host must be on a single line.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receive (commands):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Bus dump:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Start date:</value></data>

@@ -206,6 +206,9 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Mqtt_CameraPortsMustDiffer" xml:space="preserve">
     <value>Le porte video e audio della telecamera devono essere diverse.</value>
   </data>
+  <data name="Mqtt_InvalidCameraTarget" xml:space="preserve">
+    <value>L'host di destinazione della telecamera deve essere un nome host o un indirizzo IPv4 (non un indirizzo IPv6, un URL o host:porta).</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} non esiste nell'immagine; impossibile applicare la patch del bridge MQTT.</value>
   </data>

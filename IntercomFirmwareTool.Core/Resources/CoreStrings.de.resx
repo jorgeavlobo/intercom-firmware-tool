@@ -206,6 +206,9 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_CameraPortsMustDiffer" xml:space="preserve">
     <value>Die Video- und Audioports der Kamera müssen unterschiedlich sein.</value>
   </data>
+  <data name="Mqtt_InvalidCameraTarget" xml:space="preserve">
+    <value>Der Ziel-Host der Kamera muss ein Hostname oder eine IPv4-Adresse sein (keine IPv6-Adresse, keine URL und kein Host:Port).</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} existiert im Abbild nicht; der MQTT-Brücken-Patch kann nicht angewendet werden.</value>
   </data>
