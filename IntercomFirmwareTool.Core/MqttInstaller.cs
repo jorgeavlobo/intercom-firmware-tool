@@ -99,6 +99,44 @@ namespace IntercomFirmwareTool.Core
         /// <summary>OpenWebNet gateway plaintext OwnPort for the socket monitor session.</summary>
         public int OwnPortMon { get; init; } = 20000;
 
+        // --- Live doorbell camera (Phase 1, #103) --------------------------------------
+        /// <summary>"Expose the entrance-panel camera" opt-in (default false). When true, btmqttd's
+        /// <c>av.rs</c> siphons the panel's cleartext A/V off the on-board <c>bt_av_media</c> daemon
+        /// (:30007) whenever the panel brings an A/V session up (ring / answer / self-view) and fans
+        /// the RTP out to <see cref="EffectiveCameraTargetHost"/> — no SIP, no on-device transcode.
+        /// A go2rtc stream on the target host turns it into a Home Assistant camera.</summary>
+        public bool CameraEnabled { get; init; }
+
+        /// <summary>Host the siphoned RTP is fanned out to (the go2rtc / Home Assistant host). NULL
+        /// or blank (default) means "use <see cref="MqttHost"/>" (go2rtc typically runs alongside
+        /// Home Assistant) — see <see cref="EffectiveCameraTargetHost"/>. May be a hostname or an
+        /// IPv4; btmqttd resolves it to an IPv4 at runtime (the OWN fan-out frame is IPv4-only).</summary>
+        public string? CameraTargetHost { get; init; }
+
+        /// <summary>UDP port on the target for the VIDEO (H.264) RTP fan-out. Must match the
+        /// generated go2rtc SDP. Default 40000. Must differ from <see cref="CameraAudioPort"/>.</summary>
+        public int CameraVideoPort { get; init; } = 40000;
+
+        /// <summary>UDP port on the target for the AUDIO (speex) RTP fan-out. Default 40002. Must
+        /// differ from <see cref="CameraVideoPort"/>.</summary>
+        public int CameraAudioPort { get; init; } = 40002;
+
+        /// <summary>Siphon the HI-RES video branch instead of low-res (default false = low-res). The
+        /// low-res branch (<c>1</c>) is the UNIVERSAL default — it is the only one siphonable on the
+        /// C100X and is present on the C300X; hi-res (<c>0</c>) is C300X-only. Maps to
+        /// <see cref="CameraBranch"/>.</summary>
+        public bool CameraHiRes { get; init; }
+
+        /// <summary>The <c>bt_av_media</c> multiudpsink branch for video: <c>0</c> hi-res (C300X only)
+        /// or <c>1</c> low-res (universal). Derived from <see cref="CameraHiRes"/>.</summary>
+        public int CameraBranch => CameraHiRes ? 0 : 1;
+
+        /// <summary>The camera fan-out target actually used: the explicit
+        /// <see cref="CameraTargetHost"/>, or <see cref="MqttHost"/> when it is null/blank (go2rtc
+        /// usually lives with Home Assistant). Mirrors btmqttd's <c>CAMERA_TARGET_HOST</c> default.</summary>
+        public string EffectiveCameraTargetHost =>
+            string.IsNullOrWhiteSpace(CameraTargetHost) ? MqttHost : CameraTargetHost!;
+
         /// <summary>Home Assistant MQTT discovery topic prefix (HA default is "homeassistant").</summary>
         public string HaDiscoveryPrefix { get; init; } = "homeassistant";
         /// <summary>
@@ -560,6 +598,23 @@ namespace IntercomFirmwareTool.Core
                 && !opts.LightWhere.All(char.IsAsciiDigit))
                 throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidLightWhere"), nameof(opts));
 
+            // Live doorbell camera (#103): validate only when enabled. The fan-out target must
+            // resolve to something (it defaults to MQTT_HOST, so an empty target here means MQTT_HOST
+            // itself is blank — reject where the user sees why, rather than shipping a daemon that
+            // can't resolve its target). The two UDP ports must be in range and DISTINCT — video and
+            // audio are separate RTP streams; aliasing them would interleave two payload types on one
+            // port and break go2rtc's demux.
+            if (opts.CameraEnabled)
+            {
+                if (string.IsNullOrWhiteSpace(opts.EffectiveCameraTargetHost)
+                    || opts.EffectiveCameraTargetHost.IndexOfAny(new[] { '\r', '\n' }) >= 0)
+                    throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetRequired"), nameof(opts));
+                if (opts.CameraVideoPort is < 1 or > 65535 || opts.CameraAudioPort is < 1 or > 65535)
+                    throw new ArgumentException(CoreStrings.Get("Mqtt_CameraPortRange"), nameof(opts));
+                if (opts.CameraVideoPort == opts.CameraAudioPort)
+                    throw new ArgumentException(CoreStrings.Get("Mqtt_CameraPortsMustDiffer"), nameof(opts));
+            }
+
             // Topics must be non-empty and single-line (they are sourced into the
             // .conf and used as MQTT topic filters).
             foreach (var t in new[] { opts.TopicRx, opts.TopicDump, opts.TopicStartDate,
@@ -1013,6 +1068,18 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("LIGHT_MODE", opts.LightMomentary ? "momentary" : "bistable"));
             sb.Append(Conf("TOPIC_LIGHT", opts.EffectiveTopicLight));
             sb.Append(Conf("TOPIC_LIGHT_AVAIL", opts.EffectiveTopicLightAvail));
+
+            // Live doorbell camera (#103): opt-in. When enabled, av.rs adds a UDP client to the
+            // on-board bt_av_media daemon on every A/V session and fans the cleartext RTP to
+            // CAMERA_TARGET_HOST:CAMERA_{VIDEO,AUDIO}_PORT (where a go2rtc stream turns it into an
+            // HA camera). CAMERA_BRANCH selects the video multiudpsink branch: 1 = low-res
+            // (universal), 0 = hi-res (C300X only). The target defaults to MQTT_HOST device-side too,
+            // but we write the resolved value so a later MQTT_HOST edit can't silently move it.
+            sb.Append("CAMERA_ENABLED=").Append(opts.CameraEnabled ? '1' : '0').Append('\n');
+            sb.Append(Conf("CAMERA_TARGET_HOST", opts.EffectiveCameraTargetHost));
+            sb.Append("CAMERA_VIDEO_PORT=").Append(opts.CameraVideoPort).Append('\n');
+            sb.Append("CAMERA_AUDIO_PORT=").Append(opts.CameraAudioPort).Append('\n');
+            sb.Append("CAMERA_BRANCH=").Append(opts.CameraBranch).Append('\n');
 
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 

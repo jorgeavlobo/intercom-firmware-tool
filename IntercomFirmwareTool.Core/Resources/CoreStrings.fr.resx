@@ -197,6 +197,15 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
     <value>L'adresse de la lumière (WHERE) ne doit contenir que des chiffres.</value>
   </data>
+  <data name="Mqtt_CameraTargetRequired" xml:space="preserve">
+    <value>L'hôte de destination de la caméra est requis lorsque la caméra est activée (renseignez-le, ou définissez l'hôte du broker MQTT utilisé par défaut).</value>
+  </data>
+  <data name="Mqtt_CameraPortRange" xml:space="preserve">
+    <value>Les ports UDP de la caméra doivent être compris entre 1 et 65535.</value>
+  </data>
+  <data name="Mqtt_CameraPortsMustDiffer" xml:space="preserve">
+    <value>Les ports vidéo et audio de la caméra doivent être différents.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} n'existe pas dans l'image ; impossible d'appliquer le correctif du pont MQTT.</value>
   </data>

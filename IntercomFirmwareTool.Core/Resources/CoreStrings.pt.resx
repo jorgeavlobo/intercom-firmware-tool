@@ -197,6 +197,15 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
     <value>O endereço da luz (WHERE) deve conter apenas dígitos.</value>
   </data>
+  <data name="Mqtt_CameraTargetRequired" xml:space="preserve">
+    <value>O anfitrião de destino da câmara é obrigatório quando a câmara está ativada (defina-o, ou defina o anfitrião do broker MQTT que serve de predefinição).</value>
+  </data>
+  <data name="Mqtt_CameraPortRange" xml:space="preserve">
+    <value>As portas UDP da câmara devem estar entre 1 e 65535.</value>
+  </data>
+  <data name="Mqtt_CameraPortsMustDiffer" xml:space="preserve">
+    <value>As portas de vídeo e áudio da câmara devem ser diferentes.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} não existe na imagem; não é possível aplicar o patch da ponte MQTT.</value>
   </data>
