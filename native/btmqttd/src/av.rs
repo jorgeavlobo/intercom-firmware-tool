@@ -395,8 +395,9 @@ mod tests {
     fn read_until_ack_or_nack_reassembles_a_fragmented_ack() {
         // The shared helper (used by BOTH the monitor handshake and add_client) must reassemble an
         // ACK split across reads and report the position via the accumulator — this covers the
-        // monitor-ACK fragmentation path that has no socket-level test of its own.
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // monitor-ACK fragmentation path that has no socket-level test of its own. Only the server
+        // side writes here; the client reads via the helper, so just AsyncWriteExt is needed.
+        use tokio::io::AsyncWriteExt;
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
