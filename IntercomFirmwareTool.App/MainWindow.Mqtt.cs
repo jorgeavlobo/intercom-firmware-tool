@@ -1499,11 +1499,17 @@ namespace IntercomFirmwareTool.App
             bool hostIsName = hostTrim.Length > 0 && !IPAddress.TryParse(hostTrim, out _);
             string? hostIp = hostIsName ? NullIfEmpty(TxtMqttHostIp.Text.Trim()) : null;
 
-            // Camera fan-out ports (issue #103). Parse to fail-closed 0 when unparseable so Core's
-            // Validate rejects it with a clean popup rather than silently installing a default; the
-            // Build gate (MqttStructuralError) already blocks a bad value before we get here.
-            int camVideoPort = int.TryParse(TxtMqttCameraVideoPort.Text.Trim(), out int cvp) ? cvp : 0;
-            int camAudioPort = int.TryParse(TxtMqttCameraAudioPort.Text.Trim(), out int cap) ? cap : 0;
+            // Camera fan-out ports (issue #103). When the camera is ENABLED, fail-closed to 0 on an
+            // unparseable value so Core's Validate rejects it with a clean popup (the Build gate
+            // already blocks it earlier). When DISABLED, write the sane defaults instead of 0: the
+            // conf always carries CAMERA_*_PORT, so a 0 here would strand a later manual
+            // CAMERA_ENABLED=1 (or a library caller reusing these options) with a port that can never
+            // arm (Copilot). Defaults match the MqttOptions record (40000/40002).
+            bool cameraOn = ChkMqttCamera.IsChecked == true;
+            int camVideoPort =
+                int.TryParse(TxtMqttCameraVideoPort.Text.Trim(), out int cvp) ? cvp : (cameraOn ? 0 : 40000);
+            int camAudioPort =
+                int.TryParse(TxtMqttCameraAudioPort.Text.Trim(), out int cap) ? cap : (cameraOn ? 0 : 40002);
 
             var opts = new MqttOptions(
                 hostTrim,
