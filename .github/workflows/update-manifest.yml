@@ -145,9 +145,19 @@ jobs:
           # remote but the fetch errors (transient network/auth), fail closed. Otherwise pending_latest
           # would fall back to 0.0.0 (regressing a higher queued version) and the force-with-lease below
           # would push without a fresh lease (CodeRabbit). A branch that simply doesn't exist is fine.
+          # `git ls-remote --exit-code` returns 2 when the branch genuinely does not exist, but other
+          # nonzero codes (e.g. 128) when the query itself fails. Only exit 2 means "absent, skip the
+          # fetch"; any other failure must fail closed, or we'd re-mask a transient error and leave
+          # pending_latest at 0.0.0 / push without a fresh lease (CodeRabbit).
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             if ! git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
               echo "::error::could not fetch the existing rolling branch '$branch'; aborting rather than risk regressing a higher pending version or pushing without a fresh lease."
+              exit 1
+            fi
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              echo "::error::could not determine whether rolling branch '$branch' exists (git ls-remote exit $status); aborting rather than risk regressing a higher pending version."
               exit 1
             fi
           fi
