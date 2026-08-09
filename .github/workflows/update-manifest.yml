@@ -114,6 +114,12 @@ jobs:
 
           # sort_le a b  ->  true when a <= b (sort -V handles the stable X.Y.Z values this step accepts).
           sort_le() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]; }
+          # Resolve the open rolling PR number from THIS repo (prints empty when none). Centralised so the
+          # same-repo + base-master + open-state filter can never drift between call sites (CodeRabbit).
+          resolve_pr() {
+            gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
+              --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty'
+          }
           master_latest="$(jq -r '.latestVersion // "0.0.0"' "$file")"
           minimum="$(jq -r '.minimumSupportedVersion // "0.0.0"' "$file")"
 
@@ -123,8 +129,7 @@ jobs:
           # CLOSED if the query itself errors (transient API/auth): treating a failed lookup as "no PR"
           # would skip the pending-version guard below and could force a lower version over a higher
           # pending one, so abort instead (Codex P2). An empty result (no such PR) is fine and proceeds.
-          if ! existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
-            --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null)"; then
+          if ! existing="$(resolve_pr 2>/dev/null)"; then
             echo "::error::could not query the open rolling manifest PR; aborting rather than risk regressing a higher pending version."
             exit 1
           fi
@@ -136,7 +141,16 @@ jobs:
           # PR does: if a prior run's `gh pr create` failed, the branch is orphaned (no PR) but may hold
           # a NEWER version, and ignoring it would let a later lower bump overwrite and lose it (Codex).
           # A stale, already-merged branch just carries an old value <= master, so honoring it is safe.
-          git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null || true
+          # Distinguish a genuinely-absent branch from a fetch that FAILED: if the branch exists on the
+          # remote but the fetch errors (transient network/auth), fail closed. Otherwise pending_latest
+          # would fall back to 0.0.0 (regressing a higher queued version) and the force-with-lease below
+          # would push without a fresh lease (CodeRabbit). A branch that simply doesn't exist is fine.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            if ! git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+              echo "::error::could not fetch the existing rolling branch '$branch'; aborting rather than risk regressing a higher pending version or pushing without a fresh lease."
+              exit 1
+            fi
+          fi
           pending_latest="0.0.0"
           if git rev-parse -q --verify "origin/$branch" >/dev/null 2>&1; then
             pending_latest="$(git show "origin/$branch:$file" 2>/dev/null | jq -r '.latestVersion // "0.0.0"' 2>/dev/null || echo '0.0.0')"
@@ -187,15 +201,13 @@ jobs:
           # which would otherwise make us edit a now-closed PR and never open a replacement (Codex).
           # Non-fatal: both branches below tolerate a wrong guess (create errors if one exists; edit
           # errors if none), so a transient failure just falls through to the create path.
-          existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
-            --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null || true)"
+          existing="$(resolve_pr 2>/dev/null || true)"
           if [ -z "$existing" ]; then
             gh pr create --base master --head "$branch" --title "$title" --body "$body" \
               || echo "::warning::could not open the PR automatically; open it by hand for branch $branch"
             # Resolve the number we just created (same-repo filter) for the auto-merge step below.
             # Non-fatal here: a miss only means auto-merge isn't enabled (a maintainer can merge).
-            existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
-              --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null || true)"
+            existing="$(resolve_pr 2>/dev/null || true)"
           else
             # A PR is already open on the rolling branch; the force-push retargeted it to $version, so
             # refresh its title/body to match. If the edit FAILS (e.g. the PR closed in the narrow race
@@ -205,13 +217,11 @@ jobs:
               echo "Reused open PR #$existing on $branch, retargeted to $version."
             else
               echo "::warning::could not edit PR #$existing (it may have closed); re-resolving and creating a replacement if needed."
-              existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
-                --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null || true)"
+              existing="$(resolve_pr 2>/dev/null || true)"
               if [ -z "$existing" ]; then
                 gh pr create --base master --head "$branch" --title "$title" --body "$body" \
                   || echo "::warning::could not open a replacement PR automatically; open it by hand for branch $branch"
-                existing="$(gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
-                  --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty' 2>/dev/null || true)"
+                existing="$(resolve_pr 2>/dev/null || true)"
               fi
             fi
           fi
