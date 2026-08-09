@@ -93,10 +93,14 @@ jobs:
           # below would reject '1.2.3+meta' and the manifest would stay stale.)
           version="${version%%+*}"
 
-          # Only auto-bump to a stable X.Y.Z (no prerelease/build suffix, and no leading zeros in
-          # any component — SemanticVersion.TryParse rejects '01.2.3', so accepting it here would
-          # write a value the app can't parse and silently fail open).
-          if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+          # A stable version is X.Y.Z with no prerelease/build suffix and no leading zeros in any
+          # component (SemanticVersion.TryParse rejects '01.2.3'). Reused to validate every version
+          # value this job handles — the release input AND the values it reads back from JSON — so a
+          # malformed one can never be compared with sort -V or written into the manifest (the app
+          # would then fail open, no nudge).
+          is_stable_ver() { printf '%s' "$1" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; }
+
+          if ! is_stable_ver "$version"; then
             echo "::error::'$version' is not a stable X.Y.Z version (no leading zeros); not bumping."
             exit 1
           fi
@@ -122,6 +126,18 @@ jobs:
           }
           master_latest="$(jq -r '.latestVersion // "0.0.0"' "$file")"
           minimum="$(jq -r '.minimumSupportedVersion // "0.0.0"' "$file")"
+          # These come from the manifest on master (latestVersion is written by this workflow;
+          # minimumSupportedVersion is hand-maintained). If either was corrupted to a non-stable value,
+          # the sort -V comparisons below would be unreliable and we could propagate an unparseable
+          # value the app can't read — fail closed so a human fixes .well-known/updates.json (Copilot).
+          if ! is_stable_ver "$master_latest"; then
+            echo "::error::master's latestVersion '$master_latest' is not a stable X.Y.Z; fix .well-known/updates.json before releasing."
+            exit 1
+          fi
+          if ! is_stable_ver "$minimum"; then
+            echo "::error::master's minimumSupportedVersion '$minimum' is not a stable X.Y.Z; fix .well-known/updates.json."
+            exit 1
+          fi
 
           # Is a PR already open on the rolling branch, from THIS repo? `gh pr list --head` filters by
           # branch NAME only, so on a public repo it could match a fork's same-named branch; select
@@ -164,6 +180,14 @@ jobs:
           pending_latest="0.0.0"
           if git rev-parse -q --verify "origin/$branch" >/dev/null 2>&1; then
             pending_latest="$(git show "origin/$branch:$file" 2>/dev/null | jq -r '.latestVersion // "0.0.0"' 2>/dev/null || echo '0.0.0')"
+          fi
+          # The rolling branch is only ever written by this workflow (validated), but guard anyway: a
+          # corrupted/hand-edited branch value must not be selected as target and written back. Ignore a
+          # non-stable pending value (treat as 0.0.0) rather than fail closed, so a bad transient branch
+          # can't block releases indefinitely (Copilot).
+          if ! is_stable_ver "$pending_latest"; then
+            echo "::warning::rolling branch '$branch' carries a non-stable latestVersion '$pending_latest'; ignoring it."
+            pending_latest="0.0.0"
           fi
           # The value master should end up at is the newest of: this release, master's current value,
           # and whatever the rolling branch already carries (including an orphaned bump from a failed
