@@ -98,7 +98,14 @@ jobs:
           # value this job handles — the release input AND the values it reads back from JSON — so a
           # malformed one can never be compared with sort -V or written into the manifest (the app
           # would then fail open, no nudge).
-          is_stable_ver() { printf '%s' "$1" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; }
+          # Reject embedded control/newline chars FIRST: grep -E evaluates the anchored regex per
+          # LINE, so a value like "2.0.0<newline>junk" would otherwise pass on its first line and be
+          # treated as a valid version (then propagated) — the same trap the release-version check
+          # above guards against (Codex).
+          is_stable_ver() {
+            case "$1" in *[![:print:]]*) return 1 ;; esac
+            printf '%s' "$1" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          }
 
           if ! is_stable_ver "$version"; then
             echo "::error::'$version' is not a stable X.Y.Z version (no leading zeros); not bumping."
