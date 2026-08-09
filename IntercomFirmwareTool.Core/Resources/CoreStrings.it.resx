@@ -209,6 +209,9 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Mqtt_InvalidCameraTarget" xml:space="preserve">
     <value>L'host di destinazione della telecamera deve essere un nome host o un indirizzo IPv4 (non un indirizzo IPv6, un URL o host:porta).</value>
   </data>
+  <data name="Mqtt_CameraTargetUnresolvable" xml:space="preserve">
+    <value>Un host di destinazione della telecamera diverso dal broker MQTT deve essere un indirizzo IPv4 — il citofono non può risolvere altri nomi LAN o mDNS. Lascialo vuoto per usare l'host del broker, oppure inserisci l'indirizzo IP di go2rtc.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} non esiste nell'immagine; impossibile applicare la patch del bridge MQTT.</value>
   </data>

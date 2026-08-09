@@ -206,6 +206,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_InvalidCameraTarget" xml:space="preserve">
     <value>The camera target host must be a hostname or an IPv4 address (not an IPv6 address, a URL, or host:port).</value>
   </data>
+  <data name="Mqtt_CameraTargetUnresolvable" xml:space="preserve">
+    <value>A camera target host that differs from the MQTT broker must be an IPv4 address — the intercom can't resolve other LAN or mDNS names. Leave it blank to use the broker host, or enter go2rtc's IP address.</value>
+  </data>
   <data name="Mqtt_CredentialNewline" xml:space="preserve">
     <value>The MQTT username or password contains a line break; credentials must be a single line.</value>
   </data>

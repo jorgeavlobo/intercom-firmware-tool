@@ -209,6 +209,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_InvalidCameraTarget" xml:space="preserve">
     <value>O anfitrião de destino da câmara deve ser um nome de anfitrião ou um endereço IPv4 (não um endereço IPv6, um URL ou anfitrião:porta).</value>
   </data>
+  <data name="Mqtt_CameraTargetUnresolvable" xml:space="preserve">
+    <value>Um anfitrião de destino da câmara diferente do broker MQTT deve ser um endereço IPv4 — o intercomunicador não consegue resolver outros nomes de LAN ou mDNS. Deixe em branco para usar o anfitrião do broker, ou introduza o endereço IP do go2rtc.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} não existe na imagem; não é possível aplicar o patch da ponte MQTT.</value>
   </data>

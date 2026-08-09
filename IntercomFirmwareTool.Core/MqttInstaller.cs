@@ -616,6 +616,16 @@ namespace IntercomFirmwareTool.Core
                 // would install but never arm — reject it here where the user sees why (CodeRabbit/Codex).
                 if (!IsHostnameOrIpv4(camTarget))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidCameraTarget"), nameof(opts));
+                // Device resolvability: the installer pins ONLY MQTT_HOST in /etc/hosts, and the
+                // daemon's musl resolver consults /etc/hosts then public DNS — never the LAN/mDNS
+                // resolver (see Payload/mqtt/README.md). So a blank target (⇒ MQTT_HOST) or one equal
+                // to it resolves via that pin, and an IPv4 literal is trivially resolvable; but any
+                // OTHER explicit hostname would never resolve on the device and the camera could never
+                // arm. Require such a target to be an IPv4 literal (Codex).
+                if (!string.IsNullOrWhiteSpace(opts.CameraTargetHost)
+                    && !string.Equals(opts.CameraTargetHost, opts.MqttHost, StringComparison.OrdinalIgnoreCase)
+                    && !IPAddress.TryParse(opts.CameraTargetHost, out _))
+                    throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetUnresolvable"), nameof(opts));
                 if (opts.CameraVideoPort is < 1 or > 65535 || opts.CameraAudioPort is < 1 or > 65535)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_CameraPortRange"), nameof(opts));
                 if (opts.CameraVideoPort == opts.CameraAudioPort)
@@ -1083,7 +1093,12 @@ namespace IntercomFirmwareTool.Core
             // (universal), 0 = hi-res (C300X only). The target defaults to MQTT_HOST device-side too,
             // but we write the resolved value so a later MQTT_HOST edit can't silently move it.
             sb.Append("CAMERA_ENABLED=").Append(opts.CameraEnabled ? '1' : '0').Append('\n');
-            sb.Append(Conf("CAMERA_TARGET_HOST", opts.EffectiveCameraTargetHost));
+            // Only serialize the user's target when the camera is ENABLED. When disabled the value is
+            // irrelevant (av.rs never runs), and writing it would let an unvalidated multi-line target
+            // (a library caller, or a paste) inject a second KEY=value line — e.g. `x\nMQTT_HOST=bad`
+            // — that config.rs's line-based parse_env would honour, hijacking the broker even with the
+            // camera off (Codex). Disabled ⇒ empty, which config.rs falls back to MQTT_HOST for.
+            sb.Append(Conf("CAMERA_TARGET_HOST", opts.CameraEnabled ? opts.EffectiveCameraTargetHost : ""));
             sb.Append("CAMERA_VIDEO_PORT=").Append(opts.CameraVideoPort).Append('\n');
             sb.Append("CAMERA_AUDIO_PORT=").Append(opts.CameraAudioPort).Append('\n');
             sb.Append("CAMERA_BRANCH=").Append(opts.CameraBranch).Append('\n');

@@ -1455,6 +1455,14 @@ namespace IntercomFirmwareTool.App
                 // IPv4-vs-IPv6) is left to Core's Validate, which surfaces a clear popup (CodeRabbit).
                 if (TxtMqttCameraTarget.Text.IndexOfAny(NewlineChars) >= 0)
                     return L("MqttHint_CameraTarget");
+                // Mirror Core's device-resolvability rule: a target that differs from the broker host
+                // must be an IPv4 literal — the intercom resolves only /etc/hosts + public DNS, never
+                // LAN/mDNS names, so any other hostname would never arm the camera. Blank ⇒ broker.
+                string camTarget = TxtMqttCameraTarget.Text.Trim();
+                if (camTarget.Length > 0
+                    && !string.Equals(camTarget, TxtMqttHost.Text.Trim(), StringComparison.OrdinalIgnoreCase)
+                    && !IPAddress.TryParse(camTarget, out _))
+                    return L("MqttHint_CameraTargetIp");
                 if (!TryParsePort(TxtMqttCameraVideoPort.Text, out int vp)
                     || !TryParsePort(TxtMqttCameraAudioPort.Text, out int ap))
                     return L("MqttHint_CameraPort");

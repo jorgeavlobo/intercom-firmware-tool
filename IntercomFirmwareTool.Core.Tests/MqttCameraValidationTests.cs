@@ -21,12 +21,23 @@ public class MqttCameraValidationTests
         };
 
     [Theory]
-    [InlineData("ha.local")]        // hostname
-    [InlineData("192.168.1.9")]     // IPv4 literal
-    [InlineData(null)]              // blank → defaults to the (valid) broker host
-    public void Accepts_hostname_ipv4_and_blank_target(string? target)
+    [InlineData(null)]              // blank → defaults to the broker host (pinned in /etc/hosts)
+    [InlineData("broker.lan")]      // equals MqttHost → resolves via the broker's /etc/hosts pin
+    [InlineData("192.168.1.9")]     // IPv4 literal → trivially resolvable on the device
+    public void Accepts_blank_broker_host_or_ipv4(string? target)
     {
         MqttInstaller.Validate(Cam(target)); // must not throw
+    }
+
+    [Theory]
+    [InlineData("ha.local")]              // a different LAN/mDNS name the device can't resolve
+    [InlineData("homeassistant.local")]
+    [InlineData("go2rtc.example.com")]
+    public void Rejects_a_nonbroker_hostname_target(string target)
+    {
+        // The device pins only MQTT_HOST; any other hostname would never resolve, so it must be
+        // rejected in favour of an IPv4 literal (or blank ⇒ the broker host).
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(Cam(target)));
     }
 
     [Theory]
@@ -52,11 +63,12 @@ public class MqttCameraValidationTests
     [Fact]
     public void Disabled_camera_skips_camera_validation()
     {
-        // A target that would be rejected when enabled is ignored when the camera is off.
+        // A target that would be rejected when enabled is ignored when the camera is off — including
+        // a would-be config-injecting multi-line value, which the disabled path never serializes.
         MqttInstaller.Validate(new MqttOptions("broker.lan")
         {
             CameraEnabled = false,
-            CameraTargetHost = "::1",
+            CameraTargetHost = "x\nMQTT_HOST=bad",
         });
     }
 }
