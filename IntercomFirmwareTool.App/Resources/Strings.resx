@@ -445,6 +445,23 @@ Key: {1}</value></data>
   <data name="Tip_MqttLightMomentary" xml:space="preserve"><value>A press turns the light on; your installation's own timer switches it off. Home Assistant shows a single “Turn on” button — press only, with no on/off state — because the hardware decides when the light goes off.</value></data>
   <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>The unit has a secondary gate</value></data>
   <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Tick to add a second gate button in Home Assistant. Leave off if your installation has only one gate.</value></data>
+  <data name="Chk_MqttCamera" xml:space="preserve"><value>Expose the entrance camera (live video)</value></data>
+  <data name="Tip_MqttCamera" xml:space="preserve"><value>Tick to stream the entrance-panel camera to Home Assistant. The unit sends a copy of the live video (and audio) to a go2rtc host whenever the door rings, a call is answered, or you open the view. Requires go2rtc on the receiving host — use the button below to get its configuration.</value></data>
+  <data name="Field_MqttCameraTarget" xml:space="preserve"><value>go2rtc / HA host:</value></data>
+  <data name="Tip_MqttCameraTarget" xml:space="preserve"><value>The host that receives the video (where go2rtc runs — usually your Home Assistant machine). Leave blank to use the MQTT broker host. A hostname or an IPv4 address.</value></data>
+  <data name="Field_MqttCameraVideoPort" xml:space="preserve"><value>Video UDP port:</value></data>
+  <data name="Field_MqttCameraAudioPort" xml:space="preserve"><value>Audio UDP port:</value></data>
+  <data name="Tip_MqttCameraPorts" xml:space="preserve"><value>UDP ports on the receiving host for the video and audio streams. They must match the go2rtc configuration and be different from each other. Defaults 40000 / 40002.</value></data>
+  <data name="Lbl_MqttCameraQuality" xml:space="preserve"><value>Video quality</value></data>
+  <data name="Rb_MqttCameraLowRes" xml:space="preserve"><value>Standard (works on every model)</value></data>
+  <data name="Tip_MqttCameraLowRes" xml:space="preserve"><value>The low-resolution video branch — the only one available on the Classe 100X, and present on the 300X too. The safe universal choice.</value></data>
+  <data name="Rb_MqttCameraHiRes" xml:space="preserve"><value>High resolution (Classe 300X only)</value></data>
+  <data name="Tip_MqttCameraHiRes" xml:space="preserve"><value>The high-resolution video branch. Available only on the Classe 300X; on a 100X it produces no picture, so leave Standard selected.</value></data>
+  <data name="Hint_MqttCamera" xml:space="preserve"><value>The video is sent as a raw stream, so a go2rtc service on the receiving host is needed to view it in Home Assistant. Use the button to copy a ready-made go2rtc configuration.</value></data>
+  <data name="Btn_MqttCameraGo2Rtc" xml:space="preserve"><value>Show go2rtc setup…</value></data>
+  <data name="Cap_MqttGo2Rtc" xml:space="preserve"><value>go2rtc camera setup</value></data>
+  <data name="MqttHint_CameraPort" xml:space="preserve"><value>The camera UDP ports must be numbers between 1 and 65535.</value></data>
+  <data name="MqttHint_CameraPortsDiffer" xml:space="preserve"><value>The camera video and audio ports must be different.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receive (commands):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Bus dump:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Start date:</value></data>

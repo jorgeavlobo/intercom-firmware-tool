@@ -1325,6 +1325,68 @@
                               Content="{loc:Loc Chk_MqttSecondaryLock}"
                               ToolTip="{loc:Loc Tip_MqttSecondaryLock}"/>
 
+                    <!-- Live doorbell camera (opt-in, #103). btmqttd siphons the panel's cleartext
+                         A/V on each session and fans the RTP to a go2rtc host, which turns it into a
+                         Home Assistant camera. Reveals the fan-out target/ports, the video-quality
+                         choice (low-res is universal; hi-res is 300X-only), and a button that builds
+                         the ready-to-paste go2rtc config. -->
+                    <CheckBox x:Name="ChkMqttCamera" Margin="22,8,0,0"
+                              Content="{loc:Loc Chk_MqttCamera}" ToolTip="{loc:Loc Tip_MqttCamera}"
+                              Checked="ChkMqttCamera_Toggled" Unchecked="ChkMqttCamera_Toggled"/>
+                    <StackPanel x:Name="CameraPanel" Margin="40,6,0,0" Visibility="Collapsed">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <TextBlock x:Name="LblMqttCameraTarget" Grid.Row="0" Grid.Column="0"
+                                       Text="{loc:Loc Field_MqttCameraTarget}" VerticalAlignment="Center"
+                                       Margin="0,0,6,4"/>
+                            <TextBox x:Name="TxtMqttCameraTarget" Grid.Row="0" Grid.Column="1" Width="240"
+                                     HorizontalAlignment="Left" Margin="0,0,0,4"
+                                     Style="{StaticResource InputField}"
+                                     AutomationProperties.LabeledBy="{Binding ElementName=LblMqttCameraTarget}"
+                                     ToolTip="{loc:Loc Tip_MqttCameraTarget}"
+                                     TextChanged="MqttField_TextChanged"/>
+                            <TextBlock x:Name="LblMqttCameraVideoPort" Grid.Row="1" Grid.Column="0"
+                                       Text="{loc:Loc Field_MqttCameraVideoPort}" VerticalAlignment="Center"
+                                       Margin="0,0,6,4"/>
+                            <TextBox x:Name="TxtMqttCameraVideoPort" Grid.Row="1" Grid.Column="1" Width="100"
+                                     HorizontalAlignment="Left" Margin="0,0,0,4" Text="40000"
+                                     Style="{StaticResource InputField}"
+                                     AutomationProperties.LabeledBy="{Binding ElementName=LblMqttCameraVideoPort}"
+                                     ToolTip="{loc:Loc Tip_MqttCameraPorts}"
+                                     TextChanged="MqttField_TextChanged"/>
+                            <TextBlock x:Name="LblMqttCameraAudioPort" Grid.Row="2" Grid.Column="0"
+                                       Text="{loc:Loc Field_MqttCameraAudioPort}" VerticalAlignment="Center"
+                                       Margin="0,0,6,0"/>
+                            <TextBox x:Name="TxtMqttCameraAudioPort" Grid.Row="2" Grid.Column="1" Width="100"
+                                     HorizontalAlignment="Left" Text="40002"
+                                     Style="{StaticResource InputField}"
+                                     AutomationProperties.LabeledBy="{Binding ElementName=LblMqttCameraAudioPort}"
+                                     ToolTip="{loc:Loc Tip_MqttCameraPorts}"
+                                     TextChanged="MqttField_TextChanged"/>
+                        </Grid>
+                        <TextBlock Text="{loc:Loc Lbl_MqttCameraQuality}" FontWeight="SemiBold"
+                                   Margin="0,8,0,2"/>
+                        <RadioButton x:Name="RbMqttCameraLowRes" GroupName="MqttCameraQuality"
+                                     IsChecked="True" Content="{loc:Loc Rb_MqttCameraLowRes}"
+                                     ToolTip="{loc:Loc Tip_MqttCameraLowRes}"/>
+                        <RadioButton x:Name="RbMqttCameraHiRes" GroupName="MqttCameraQuality"
+                                     Margin="0,2,0,0" Content="{loc:Loc Rb_MqttCameraHiRes}"
+                                     ToolTip="{loc:Loc Tip_MqttCameraHiRes}"/>
+                        <TextBlock Text="{loc:Loc Hint_MqttCamera}" Foreground="Gray" FontSize="11"
+                                   TextWrapping="Wrap" Margin="0,6,0,0"/>
+                        <Button x:Name="BtnMqttCameraGo2Rtc" Content="{loc:Loc Btn_MqttCameraGo2Rtc}"
+                                HorizontalAlignment="Left" Margin="0,6,0,0" Padding="10,3"
+                                Click="BtnMqttCameraGo2Rtc_Click"/>
+                    </StackPanel>
+
                     <!-- Topics (collapsible, prefilled with the Home Assistant defaults) -->
                     <CheckBox x:Name="ChkMqttTopics" Margin="0,10,0,0"
                               Content="{loc:Loc Chk_MqttTopics}" ToolTip="{loc:Loc Tip_MqttTopics}"

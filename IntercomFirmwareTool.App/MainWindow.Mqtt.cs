@@ -537,6 +537,50 @@ namespace IntercomFirmwareTool.App
             UpdateBuildEnabled();
         }
 
+        /// <summary>"Expose the entrance camera": reveal the go2rtc fan-out target/ports and the
+        /// video-quality choice. The camera fields feed CAMERA_* in the generated .conf (issue #103).</summary>
+        private void ChkMqttCamera_Toggled(object sender, RoutedEventArgs e)
+        {
+            CameraPanel.Visibility = ChkMqttCamera.IsChecked == true
+                ? Visibility.Visible : Visibility.Collapsed;
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>Build the ready-to-paste go2rtc config for the current camera settings and show it
+        /// (also copied to the clipboard). Pure text via <see cref="Go2RtcConfig"/> — no I/O to the
+        /// device; the user pastes it into their go2rtc / Home Assistant host.</summary>
+        private void BtnMqttCameraGo2Rtc_Click(object sender, RoutedEventArgs e)
+        {
+            int vp = TryParsePort(TxtMqttCameraVideoPort.Text, out int a) ? a : 40000;
+            int ap = TryParsePort(TxtMqttCameraAudioPort.Text, out int b) ? b : 40002;
+            // The generator only reads the camera target + ports; MqttHost seeds the target default
+            // (go2rtc usually runs with HA). A blank host is stubbed so the guide still renders.
+            string host = TxtMqttHost.Text.Trim();
+            var opts = new MqttOptions(host.Length == 0 ? "your-ha-host" : host)
+            {
+                CameraTargetHost = NullIfEmpty(TxtMqttCameraTarget.Text.Trim()),
+                CameraVideoPort = vp,
+                CameraAudioPort = ap,
+            };
+            // The stream name follows the HA node id (sanitized inside the generator), so the SDP
+            // filename, go2rtc key and camera entity agree; fall back to "doorbell".
+            string streamName = NullIfEmpty(TxtMqttHaNodeId.Text.Trim()) ?? "doorbell";
+            string guide = Go2RtcConfig.BuildSetupGuide(opts, streamName);
+            try { Clipboard.SetText(guide); } catch { /* clipboard may be busy; still show the text */ }
+            MessageBox.Show(this, guide, L("Cap_MqttGo2Rtc"),
+                MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        /// <summary>Parse a UDP port: a trimmed integer in 1..65535. Mirrors the Core camera-port
+        /// validator so the Build gate and the Core popup agree.</summary>
+        private static bool TryParsePort(string text, out int port)
+        {
+            port = 0;
+            if (!int.TryParse(text.Trim(), out int v) || v < 1 || v > 65535) return false;
+            port = v;
+            return true;
+        }
+
         /// <summary>Toggle whole-value reveal on the broker password.</summary>
         private void BtnMqttReveal_Click(object sender, RoutedEventArgs e)
         {
@@ -1363,6 +1407,17 @@ namespace IntercomFirmwareTool.App
                     return L("MqttHint_LightWhere");
             }
 
+            // Live camera — mirror the Core validator (only when enabled). Both fan-out ports must be
+            // numeric and in 1..65535, and DISTINCT (video and audio are separate RTP streams). The
+            // target may be blank (it defaults to the broker host device-side), so it isn't gated here.
+            if (ChkMqttCamera.IsChecked == true)
+            {
+                if (!TryParsePort(TxtMqttCameraVideoPort.Text, out int vp)
+                    || !TryParsePort(TxtMqttCameraAudioPort.Text, out int ap))
+                    return L("MqttHint_CameraPort");
+                if (vp == ap) return L("MqttHint_CameraPortsDiffer");
+            }
+
             return null;
         }
 
@@ -1403,6 +1458,12 @@ namespace IntercomFirmwareTool.App
             string hostTrim = TxtMqttHost.Text.Trim();
             bool hostIsName = hostTrim.Length > 0 && !IPAddress.TryParse(hostTrim, out _);
             string? hostIp = hostIsName ? NullIfEmpty(TxtMqttHostIp.Text.Trim()) : null;
+
+            // Camera fan-out ports (issue #103). Parse to fail-closed 0 when unparseable so Core's
+            // Validate rejects it with a clean popup rather than silently installing a default; the
+            // Build gate (MqttStructuralError) already blocks a bad value before we get here.
+            int camVideoPort = int.TryParse(TxtMqttCameraVideoPort.Text.Trim(), out int cvp) ? cvp : 0;
+            int camAudioPort = int.TryParse(TxtMqttCameraAudioPort.Text.Trim(), out int cap) ? cap : 0;
 
             var opts = new MqttOptions(
                 hostTrim,
@@ -1466,6 +1527,14 @@ namespace IntercomFirmwareTool.App
                 LightMomentary = RbMqttLightMomentary.IsChecked == true,
                 // Secondary lock (opt-in): create its HA entity only when a second gate is wired.
                 HasSecondaryLock = ChkMqttSecondaryLock.IsChecked == true,
+                // Live doorbell camera (opt-in, #103): siphon the panel's A/V and fan the RTP to the
+                // go2rtc/HA host. A blank target defaults to the broker host device-side; low-res is
+                // the universal video branch (hi-res is 300X-only).
+                CameraEnabled = ChkMqttCamera.IsChecked == true,
+                CameraTargetHost = NullIfEmpty(TxtMqttCameraTarget.Text.Trim()),
+                CameraVideoPort = camVideoPort,
+                CameraAudioPort = camAudioPort,
+                CameraHiRes = RbMqttCameraHiRes.IsChecked == true,
             };
 
             // Surface the Core validator's exact (localized) message as a clean
