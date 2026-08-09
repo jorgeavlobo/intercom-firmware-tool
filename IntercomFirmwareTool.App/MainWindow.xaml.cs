@@ -418,7 +418,7 @@ namespace IntercomFirmwareTool.App
                 TxtOutputPath.Foreground = Brushes.Gray;
                 LblOutput.IsEnabled = false;
                 TxtOutputPath.IsEnabled = false;
-                RefreshCameraModelGating(); // model unknown now — re-open the hi-res option
+                RefreshCameraModelGating(); // model now unknown — re-assert gating (unknown ⇒ Standard)
                 UpdateBuildEnabled();
 
                 SetResult(() => LF("Fmt_Result_Rejected", check.Message));
@@ -449,7 +449,7 @@ namespace IntercomFirmwareTool.App
                 TxtOutputPath.Foreground = Brushes.Gray;
                 LblOutput.IsEnabled = false;
                 TxtOutputPath.IsEnabled = false;
-                RefreshCameraModelGating(); // model unknown now — re-open the hi-res option
+                RefreshCameraModelGating(); // model now unknown — re-assert gating (unknown ⇒ Standard)
                 UpdateBuildEnabled();
 
                 SetResult(() => LF("Fmt_Result_Rejected", HsMsg()));
@@ -523,7 +523,7 @@ namespace IntercomFirmwareTool.App
             LblOutput.IsEnabled = false;
             TxtOutputPath.IsEnabled = false;
             SetStatus(""); // don't leave "✓ Firmware verified." while nothing is selected
-            // Model no longer known — re-open the hi-res camera option (unknown model isn't restricted).
+            // Model no longer known — re-assert gating (unknown ⇒ Standard, hi-res disabled fail-safe).
             RefreshCameraModelGating();
             UpdateBuildEnabled();
         }

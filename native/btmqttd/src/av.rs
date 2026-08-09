@@ -53,8 +53,8 @@ const TEARDOWN: &str = "*7*0*##";
 const AV_ACK: &[u8] = b"*#*1##";
 const AV_NACK: &[u8] = b"*#*0##";
 
-/// How many times to re-send an "add client" frame on a NACK before giving up on it
-/// (mirrors the reference project's `≤3`).
+/// TOTAL attempts to send an "add client" frame (the loop runs `0..ADD_CLIENT_RETRIES`): one
+/// initial send plus NACK retries, 3 in all (≤ the reference project's cap).
 const ADD_CLIENT_RETRIES: u32 = 3;
 
 /// How long to wait for the `:30007` ACK/NACK for one "add client" frame. Loopback, tiny
