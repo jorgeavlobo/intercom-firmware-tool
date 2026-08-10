@@ -214,6 +214,21 @@ async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Resu
 /// daemon drops the clients when the connection closes or the panel tears down). Errors
 /// if the target can't be resolved or the daemon NACKs an "add client" past its retries.
 async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
+    // Fail fast on a port config the fan-out can't use (a hand-edited / corrupt conf: config.rs
+    // already maps 0 to the default, but guard here too, and reject equal video/audio ports which
+    // would collide two RTP streams on one UDP port and break go2rtc's demux) — Copilot.
+    if cfg.camera_video_port == 0 || cfg.camera_audio_port == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "camera video/audio port is 0",
+        ));
+    }
+    if cfg.camera_video_port == cfg.camera_audio_port {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "camera video and audio ports must differ",
+        ));
+    }
     let ip = resolve_ipv4(&cfg.camera_target).await.ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -225,6 +240,9 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
     let video = format!("*7*300#{ipf}#{}#{}*##", cfg.camera_video_port, cfg.camera_branch);
     let audio = format!("*7*300#{ipf}#{}#2*##", cfg.camera_audio_port);
 
+    // 127.0.0.1 BY DESIGN: `bt_av_media` is an on-device daemon and `:30007` is a command (write)
+    // endpoint — like the `:30006` gateway port in receiver.rs, which is also fixed to loopback.
+    // OWN_HOST governs only the MONITOR (read) endpoint (see receiver.rs / sender.rs).
     let mut sock = TcpStream::connect(("127.0.0.1", OWN_PORT_AV)).await?;
     add_client(&mut sock, &video).await?;
     add_client(&mut sock, &audio).await?;
@@ -441,6 +459,24 @@ mod tests {
             let err = read_until_ack_or_nack(&mut client, &mut acc).await.unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
             let _ = server.await;
+        });
+    }
+
+    #[test]
+    fn arm_rejects_equal_video_and_audio_ports() {
+        // Equal ports would collide two RTP streams on one UDP port; arm() must fail fast BEFORE
+        // touching :30007 (the guard returns before resolve/connect, so no socket is needed).
+        use std::collections::HashMap;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let mut m = HashMap::new();
+            m.insert("MQTT_HOST".to_string(), "h".to_string());
+            m.insert("CAMERA_TARGET_HOST".to_string(), "127.0.0.1".to_string());
+            m.insert("CAMERA_VIDEO_PORT".to_string(), "5000".to_string());
+            m.insert("CAMERA_AUDIO_PORT".to_string(), "5000".to_string());
+            let cfg = Arc::new(crate::config::Config::from_map(m));
+            let err = arm(&cfg).await.unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         });
     }
 

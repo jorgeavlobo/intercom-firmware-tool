@@ -187,8 +187,17 @@ impl Config {
             // broker host (go2rtc usually lives with HA). Branch clamped to lo/hi-res (1/0).
             camera_enabled: flag("CAMERA_ENABLED"),
             camera_target: get("CAMERA_TARGET_HOST", &get("MQTT_HOST", "")),
-            camera_video_port: opt("CAMERA_VIDEO_PORT").and_then(|s| s.parse().ok()).unwrap_or(40000),
-            camera_audio_port: opt("CAMERA_AUDIO_PORT").and_then(|s| s.parse().ok()).unwrap_or(40002),
+            // Reject port 0 (a hand-edited / corrupt conf) as well as an unparseable value: 0 would
+            // build an invalid `*7*300#…#0#…*##` frame the siphon can never use. Fall back to the
+            // default so a bad value degrades to a working port rather than a dead one (Copilot).
+            camera_video_port: opt("CAMERA_VIDEO_PORT")
+                .and_then(|s| s.parse().ok())
+                .filter(|p| *p != 0)
+                .unwrap_or(40000),
+            camera_audio_port: opt("CAMERA_AUDIO_PORT")
+                .and_then(|s| s.parse().ok())
+                .filter(|p| *p != 0)
+                .unwrap_or(40002),
             camera_branch: opt("CAMERA_BRANCH")
                 .and_then(|s| s.parse().ok())
                 .filter(|b| *b <= 1)
@@ -494,5 +503,23 @@ EMPTY=
         assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\nLIGHT_MODE=bistable\n").light_momentary);
         assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\n").light_momentary);
         assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\nLIGHT_MODE=\n").light_momentary);
+    }
+
+    #[test]
+    fn camera_ports_reject_zero_and_unparseable_falling_back_to_defaults() {
+        let cfg = |s: &str| Config::from_map(parse_env(s));
+        // A valid explicit port is kept.
+        let c = cfg("MQTT_HOST=h\nCAMERA_VIDEO_PORT=41000\nCAMERA_AUDIO_PORT=41002\n");
+        assert_eq!(c.camera_video_port, 41000);
+        assert_eq!(c.camera_audio_port, 41002);
+        // 0 (a hand-edited / corrupt conf) falls back to the default rather than building a port-0
+        // frame the siphon can never use.
+        let z = cfg("MQTT_HOST=h\nCAMERA_VIDEO_PORT=0\nCAMERA_AUDIO_PORT=0\n");
+        assert_eq!(z.camera_video_port, 40000);
+        assert_eq!(z.camera_audio_port, 40002);
+        // An unparseable / out-of-range value likewise falls back.
+        let bad = cfg("MQTT_HOST=h\nCAMERA_VIDEO_PORT=70000\nCAMERA_AUDIO_PORT=nope\n");
+        assert_eq!(bad.camera_video_port, 40000);
+        assert_eq!(bad.camera_audio_port, 40002);
     }
 }
