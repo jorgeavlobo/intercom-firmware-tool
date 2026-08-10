@@ -1,0 +1,105 @@
+name: ffmpeg minimal build (#120)
+
+# Builds the minimal, LGPL, static-musl armv7 ffmpeg for the on-device media server
+# (issue #120, Phase 1) per native/ffmpeg/BUILD.md, runs it under qemu to prove it
+# executes on the armv7 target, and uploads the binary + its SHA-256 as an artifact.
+# Manual/iterative for now (workflow_dispatch + branch pushes); once the binary is
+# committed, ffmpeg-provenance.yml will rebuild-and-byte-compare it like btmqttd.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/camera-ondevice-ffmpeg]
+    paths:
+      - 'native/ffmpeg/**'
+      - '.github/workflows/ffmpeg-build.yml'
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.13.0
+  FFMPEG_TAG: n7.1.1
+  # Deterministic build inputs (host-independent SHA-256).
+  SOURCE_DATE_EPOCH: '1700000000'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Zig ${{ env.ZIG_VERSION }} (pinned cross-compiler)
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: qemu-user-static (armv7 smoke test)
+        run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+
+      - name: Fetch FFmpeg ${{ env.FFMPEG_TAG }} source (pinned)
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o ffmpeg.tar.gz \
+            "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
+          mkdir ffmpeg-src
+          tar -xzf ffmpeg.tar.gz -C ffmpeg-src --strip-components=1
+
+      - name: Configure (minimal, LGPL, static musl armv7) + build
+        working-directory: ffmpeg-src
+        run: |
+          set -euxo pipefail
+          CFLAGS="-Os -ffile-prefix-map=$(pwd)=. -fdebug-prefix-map=$(pwd)=."
+          ./configure \
+            --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
+            --ar="zig ar" --ranlib="zig ranlib" --nm="zig nm" \
+            --host-cc=cc \
+            --enable-cross-compile --arch=arm --target-os=linux \
+            --pkg-config=false \
+            --disable-everything \
+            --disable-autodetect --disable-doc --disable-debug \
+            --disable-shared --enable-static --enable-small \
+            --disable-programs --enable-ffmpeg \
+            --disable-asm \
+            --enable-protocol=file,udp,rtp,rtsp,tcp \
+            --enable-demuxer=sdp,rtsp,rtp \
+            --enable-muxer=rtsp,rtp \
+            --enable-parser=h264 \
+            --enable-bsf=h264_mp4toannexb,extract_extradata \
+            --extra-cflags="$CFLAGS" \
+            --extra-ldflags="-static -s"
+          make -j"$(nproc)"
+          ls -la ffmpeg
+
+      - name: Verify — runs on armv7 + is LGPL (not GPL/nonfree)
+        working-directory: ffmpeg-src
+        run: |
+          set -euxo pipefail
+          qemu-arm-static ./ffmpeg -hide_banner -version | tee ver.txt
+          cfg="$(qemu-arm-static ./ffmpeg -hide_banner -version | grep -m1 'configuration:' || true)"
+          echo "$cfg"
+          if echo "$cfg" | grep -Eq -- '--enable-(gpl|nonfree)'; then
+            echo "::error::ffmpeg was built with GPL/nonfree — must be LGPL"; exit 1
+          fi
+          file ffmpeg
+
+      - name: SHA-256 + size (for PayloadBinaries.cs / THIRD_PARTY.md)
+        working-directory: ffmpeg-src
+        run: |
+          set -euxo pipefail
+          sha256sum ffmpeg | tee sha.txt
+          echo "size_bytes=$(stat -c '%s' ffmpeg)" | tee -a sha.txt
+          {
+            echo "### ffmpeg build result"
+            echo '```'
+            cat sha.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload ffmpeg binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-armv7-musl
+          path: |
+            ffmpeg-src/ffmpeg
+            ffmpeg-src/sha.txt
+            ffmpeg-src/ver.txt
+          if-no-files-found: error
