@@ -71,5 +71,8 @@ public class Go2RtcConfigTests
         // Explicit target wins.
         string guide2 = Go2RtcConfig.BuildSetupGuide(Opts(target: "192.168.1.9"), "doorbell");
         Assert.Contains("192.168.1.9", guide2);
+        // The video-only fallback must instruct `-an` (deleting the audio encoder flags alone
+        // leaves ffmpeg auto-selecting and failing to decode the SDP's audio stream) — Codex.
+        Assert.Contains("`-an`", guide);
     }
 }

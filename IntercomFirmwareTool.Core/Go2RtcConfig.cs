@@ -163,8 +163,10 @@ namespace IntercomFirmwareTool.Core
             sb.Append("Notes\n-----\n");
             sb.Append("- Video is copied through untouched (no re-encode, minimal latency).\n");
             sb.Append("- Audio is transcoded speex → Opus. If your go2rtc ffmpeg build cannot\n");
-            sb.Append("  decode speex, remove `-c:a libopus -ar 48000 -ac 1` for a video-only\n");
-            sb.Append("  stream.\n");
+            sb.Append("  decode speex, REPLACE `-c:a libopus -ar 48000 -ac 1` with `-an` for a\n");
+            sb.Append("  video-only stream. (Just deleting the audio flags is not enough —\n");
+            sb.Append("  ffmpeg would still auto-select the SDP's audio stream and fail to\n");
+            sb.Append("  decode it; `-an` drops audio outright.)\n");
             sb.Append(string.Create(ci,
                 $"- The low-res branch is used by default (universal; the only one the 100X\n" +
                 $"  exposes). On a 300X you may switch to the hi-res branch in the tool.\n"));
