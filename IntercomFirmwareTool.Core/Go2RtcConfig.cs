@@ -38,7 +38,8 @@ namespace IntercomFirmwareTool.Core
         /// <summary>RTP clock rate for the panel's speex audio (8 kHz, narrowband).</summary>
         public const int AudioClockRate = 8000;
 
-        /// <summary>H.264 SDP <c>profile-level-id</c> the panel advertises (Baseline / level 3.0).</summary>
+        /// <summary>H.264 SDP <c>profile-level-id</c> the panel advertises: Baseline, level 3.1
+        /// (<c>level_idc = 0x1f = 31 = 3.1</c>).</summary>
         public const string VideoProfileLevelId = "42801f";
 
         /// <summary>Fallback stream name when the caller supplies none / an all-invalid one.</summary>
@@ -80,7 +81,7 @@ namespace IntercomFirmwareTool.Core
             sb.Append("c=IN IP4 0.0.0.0\n");
             sb.Append("t=0 0\n");
             // Video: H.264 in RTP, payload type 96, 90 kHz. packetization-mode=1 (non-interleaved) is
-            // what the panel's GStreamer rtph264pay emits; profile-level-id is the verified Baseline 3.0.
+            // what the panel's GStreamer rtph264pay emits; profile-level-id is the verified Baseline 3.1.
             sb.Append(string.Create(ci, $"m=video {opts.CameraVideoPort} RTP/AVP {VideoPayloadType}\n"));
             sb.Append(string.Create(ci, $"a=rtpmap:{VideoPayloadType} H264/{VideoClockRate}\n"));
             sb.Append(string.Create(ci,

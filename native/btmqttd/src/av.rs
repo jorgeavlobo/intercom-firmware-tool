@@ -82,6 +82,13 @@ const READ_IDLE: Duration = Duration::from_secs(15);
 const BACKOFF_INIT: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
+/// Bound on the camera-target DNS lookup. arm() runs inline in the session loop, so an
+/// unbounded lookup against a misconfigured/unreachable resolver would block the monitor
+/// task and could miss the rest of a call. On timeout we treat the target as unresolvable
+/// (arm errors, is logged, and retries on the next media-start frame). A literal IPv4 — the
+/// usual target — never reaches the lookup, and the broker host resolves from /etc/hosts.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A session that stayed up at least this long was HEALTHY: its eventual drop resets the
 /// backoff, so a long-stable monitor that finally hiccups reconnects promptly instead of
 /// inheriting a maxed-out delay (which could otherwise miss a ring). Mirrors `sender.rs`.
@@ -281,8 +288,13 @@ async fn resolve_ipv4(host: &str) -> Option<Ipv4Addr> {
     if let Ok(v4) = host.parse::<Ipv4Addr>() {
         return Some(v4);
     }
-    // Port 0: we only want the address; the port in the frame comes from config.
-    let addrs = tokio::net::lookup_host((host, 0)).await.ok()?;
+    // Port 0: we only want the address; the port in the frame comes from config. Bound the
+    // lookup so a hung resolver can't stall the monitor task (timeout ⇒ unresolvable ⇒ None).
+    let addrs = match tokio::time::timeout(RESOLVE_TIMEOUT, tokio::net::lookup_host((host, 0))).await
+    {
+        Ok(Ok(addrs)) => addrs,
+        _ => return None, // resolver error or timeout
+    };
     for a in addrs {
         if let IpAddr::V4(v4) = a.ip() {
             return Some(v4);
@@ -482,11 +494,12 @@ mod tests {
 
     #[test]
     fn resolve_ipv4_accepts_literal() {
-        // A literal dotted IPv4 resolves synchronously (no DNS), so a tiny runtime is fine.
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        // A literal dotted IPv4 resolves synchronously (no DNS). enable_all() so the DNS path's
+        // bounded `tokio::time::timeout` has a time driver for the empty-target case below.
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let v4 = rt.block_on(resolve_ipv4("192.168.1.50"));
         assert_eq!(v4, Some(Ipv4Addr::new(192, 168, 1, 50)));
-        // An empty target yields nothing rather than a bogus address.
+        // An empty target yields nothing rather than a bogus address (the lookup errors, bounded).
         assert_eq!(rt.block_on(resolve_ipv4("")), None);
     }
 }
