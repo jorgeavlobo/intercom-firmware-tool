@@ -169,9 +169,14 @@ async fn handle_json(
         // On-demand viewing (issue #104): `view_camera` pokes the SIP UA to bring the idle panel A/V
         // session up (and refresh its idle-hangup timer); `stop_camera` ends it now instead of waiting
         // for the idle timeout. Same ungated posture as the other actions — TOPIC_RX is the trust
-        // boundary. try_send: Start is idempotent (the UA re-checks and refreshes on each poke) and a
-        // dropped Stop is self-correcting (idle timeout still fires), so dropping one when the bounded
-        // queue is momentarily full is harmless; it also can't block the worker.
+        // boundary. try_send (never blocks the worker): Start is idempotent (the UA re-checks and
+        // refreshes on each poke). A Stop dropped on a FULL queue is bounded and self-correcting:
+        // while a session is UP the UA drains view_rx every select turn, so 8 messages can't pile up;
+        // the queue only saturates while the UA is NOT draining (reconnect backoff / a sub-second
+        // connect), and in that state there is no active session to leave streaming — a session that
+        // then starts from a queued Start still auto-hangs-up after CAMERA_VIEW_IDLE_SECS, and the user
+        // can press Stop again once the queue drains. A parallel priority signal isn't worth the
+        // ordering complexity for that bounded case (Codex).
         if action == "view_camera" || action == "stop_camera" {
             let cmd = if action == "view_camera" { ViewCmd::Start } else { ViewCmd::Stop };
             match view_tx {

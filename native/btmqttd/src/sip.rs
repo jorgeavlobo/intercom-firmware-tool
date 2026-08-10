@@ -583,14 +583,14 @@ async fn session(
             biased;
             _ = wait_until_stopping(stopping) => {
                 let seed = std::mem::take(&mut acc);
-                cancel_pending_invite(&mut sock, &mut d, seed).await;
+                cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
                 return Ok(()); // shutdown: dialog cancelled, nothing left pinned
             }
             v = view_rx.recv() => match v {
                 Some(ViewCmd::Start) => continue, // redundant poke while establishing — keep waiting
                 Some(ViewCmd::Stop) | None => {    // user aborted the start (or the channel closed)
                     let seed = std::mem::take(&mut acc);
-                    cancel_pending_invite(&mut sock, &mut d, seed).await;
+                    cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
                     return Ok(());
                 }
             },
@@ -599,7 +599,7 @@ async fn session(
                     Ok(Ok(resp)) => break resp, // a clean final response — continue below
                     other => {
                         let seed = std::mem::take(&mut acc);
-                        cancel_pending_invite(&mut sock, &mut d, seed).await;
+                        cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
                         return match other {
                             Err(_) => Err(std::io::Error::new(
                                 std::io::ErrorKind::TimedOut,
@@ -689,8 +689,10 @@ async fn session(
                         // The dialog is CONFIRMED here (we ACKed a 2xx), so CANCEL is invalid — a
                         // best-effort BYE is what releases the panel. Returning without it would skip
                         // the teardown below and leave the camera session up until the panel's own
-                        // timeout (CodeRabbit). Same reasoning as the read-error arm.
-                        teardown_bye(&mut sock, &d).await;
+                        // timeout (CodeRabbit). If the BYE write fails the socket is dead ⇒ reconnect.
+                        if teardown_bye(&mut sock, &d).await.is_err() {
+                            bye_reconnect(cfg, &d).await;
+                        }
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             "in-dialog SIP request exceeded cap",
@@ -738,8 +740,9 @@ async fn session(
         // nothing to send
     } else if transport_lost {
         bye_reconnect(cfg, &d).await;
-    } else {
-        teardown_bye(&mut sock, &d).await;
+    } else if teardown_bye(&mut sock, &d).await.is_err() {
+        // The "live" socket turned out dead as we wrote the BYE ⇒ retry over a fresh connection.
+        bye_reconnect(cfg, &d).await;
     }
     eprintln!("btmqttd: on-demand session torn down (sip:{}@{})", d.aor, d.domain);
     Ok(())
@@ -758,7 +761,7 @@ async fn bye_reconnect(cfg: &Config, d: &Dialog) {
         if let Ok(a) = sock.local_addr() {
             d2.local_port = a.port();
         }
-        teardown_bye(&mut sock, &d2).await;
+        let _ = teardown_bye(&mut sock, &d2).await;
     }
 }
 
@@ -770,27 +773,18 @@ async fn write_all_flush(sock: &mut TcpStream, bytes: &[u8]) -> std::io::Result<
     sock.flush().await
 }
 
-/// Best-effort BYE for a CONFIRMED dialog: end it so the panel drops the camera session, then give
-/// the `200`-to-BYE a brief moment (we don't need to read it). All writes are best-effort — every
-/// caller is already tearing the session down. Used both on the normal idle/shutdown hang-up and on
-/// the confirmed-dialog error exits, so no post-confirmation path can leave the panel streaming.
-async fn teardown_bye(sock: &mut TcpStream, d: &Dialog) {
+/// BYE a CONFIRMED dialog on the given socket, then read the `200`-to-BYE best-effort. Returns the
+/// write/flush result so a caller on the LIVE-socket path can tell when the socket turned out dead
+/// (`ConnectionReset`/`BrokenPipe`) and fall back to `bye_reconnect` — otherwise a discarded write
+/// error would silently leave the panel streaming (Codex).
+async fn teardown_bye(sock: &mut TcpStream, d: &Dialog) -> std::io::Result<()> {
     let bye = build_bye(d, &format!("z9hG4bK{}", rand_hex(8)));
-    let _ = sock.write_all(bye.as_bytes()).await;
-    let _ = sock.flush().await;
+    write_all_flush(sock, bye.as_bytes()).await?;
     let mut scratch = [0u8; 256];
     let _ = tokio::time::timeout(Duration::from_secs(1), sock.read(&mut scratch)).await;
+    Ok(())
 }
 
-/// Best-effort teardown when the INVITE never gets a timely final response. Over TCP, closing the
-/// socket does NOT cancel a pending INVITE transaction, so:
-///  1. send `CANCEL` (matched to the INVITE by branch + CSeq), then
-///  2. drain framed responses for a bounded window — and if a 2xx to the INVITE *raced in* (the
-///     panel answered right as we gave up), CANCEL can't undo it, so we MUST confirm and tear that
-///     dialog down (`ACK` then `BYE`) or the panel keeps its camera streaming (Codex/CodeRabbit).
-///
-/// All writes are best-effort (`let _ =`): we're already on the error path and about to drop the
-/// connection; the goal is simply to leave the panel with no established session.
 /// Complete when `stopping` is observed true. Used to make the INVITE-response wait interruptible by
 /// daemon shutdown (a short poll — it only runs during the brief window we're awaiting that response,
 /// and `stopping` is set before the shutdown path bounds the task's join).
@@ -800,10 +794,31 @@ async fn wait_until_stopping(stopping: &AtomicBool) {
     }
 }
 
-async fn cancel_pending_invite(sock: &mut TcpStream, d: &mut Dialog, mut acc: Vec<u8>) {
-    let _ = sock.write_all(build_cancel(d).as_bytes()).await;
-    let _ = sock.flush().await;
+/// Best-effort teardown when the INVITE never gets a timely final response. Over TCP, closing the
+/// socket does NOT cancel a pending INVITE transaction, so:
+///  1. send `CANCEL` (matched to the INVITE by branch + CSeq) — and if that write fails because the
+///     signalling socket already died (EOF/reset that ended the response wait), retry it over a FRESH
+///     loopback connection so flexisip still cancels the forwarded transaction (Codex), then
+///  2. drain framed responses for a bounded window — and if a 2xx to the INVITE *raced in* (the panel
+///     answered right as we gave up), CANCEL can't undo it, so we MUST confirm and tear that dialog
+///     down (`ACK` then `BYE`) or the panel keeps its camera streaming (Codex/CodeRabbit).
+async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, acc: Vec<u8>) {
+    if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_ok() {
+        drain_after_cancel(sock, d, acc).await;
+    } else if let Ok(mut fresh) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
+        // The original socket was dead. CANCEL over a fresh connection (matched by branch/Call-ID);
+        // the racing 2xx, if any, went to the dead socket, so the fresh drain is genuinely best-effort.
+        if let Ok(a) = fresh.local_addr() {
+            d.local_port = a.port();
+        }
+        let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
+        drain_after_cancel(&mut fresh, d, Vec::new()).await;
+    }
+    // else: couldn't even reconnect — nothing more we can do.
+}
 
+/// Drain framed responses after a CANCEL for `CANCEL_DRAIN`, ACK+BYE-ing a racing INVITE 2xx.
+async fn drain_after_cancel(sock: &mut TcpStream, d: &mut Dialog, mut acc: Vec<u8>) {
     // `acc` is seeded with whatever `wait_final_response` had already read when the timeout fired —
     // possibly a partial (or even complete) INVITE 2xx — so we can finish framing it below.
     let mut buf = [0u8; 4096];
