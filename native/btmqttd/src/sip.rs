@@ -80,17 +80,19 @@ pub fn domain_from_registration(content: &str) -> Option<String> {
 
 /// Resolve `(aor_user, domain)` from config overrides, falling back to on-device files. `None` if
 /// the model or domain can't be determined — the caller then declines to originate.
-fn resolve_identity(cfg: &Config) -> Option<(String, String)> {
+async fn resolve_identity(cfg: &Config) -> Option<(String, String)> {
+    // tokio::fs (not std::fs): btmqttd runs on a single-threaded runtime, so a blocking read here
+    // would stall the MQTT loop, the OWN monitor and the camera siphon for its duration (Copilot).
     let aor = if !cfg.sip_local_aor.is_empty() {
         cfg.sip_local_aor.clone()
     } else {
-        let hn = std::fs::read_to_string(HOSTNAME_PATH).ok()?;
+        let hn = tokio::fs::read_to_string(HOSTNAME_PATH).await.ok()?;
         aor_user_for_hostname(&hn)?.to_string()
     };
     let domain = if !cfg.sip_domain.is_empty() {
         cfg.sip_domain.clone()
     } else {
-        let text = std::fs::read_to_string(DOMAIN_REGISTRATION_CONF).ok()?;
+        let text = tokio::fs::read_to_string(DOMAIN_REGISTRATION_CONF).await.ok()?;
         domain_from_registration(&text)?
     };
     Some((aor, domain))
@@ -266,6 +268,35 @@ pub fn contact_uri(msg: &str) -> Option<String> {
     }
 }
 
+/// True when `msg`'s request-line is a `BYE` — the panel ending the dialog from its side.
+pub fn is_bye(msg: &str) -> bool {
+    msg.lines().next().is_some_and(|l| l.starts_with("BYE "))
+}
+
+/// A `200 OK` to an in-dialog request (the panel's BYE), echoing the headers the transaction needs:
+/// every `Via` (in order), plus `From`/`To`/`Call-ID`/`CSeq`. `None` if a required header is absent
+/// (then we simply let the peer's retransmits lapse). Sent so the panel doesn't retransmit its BYE.
+pub fn build_ok_to(request: &str) -> Option<String> {
+    let mut out = String::from("SIP/2.0 200 OK\r\n");
+    for line in request.lines() {
+        if line.is_empty() {
+            break; // end of headers
+        }
+        if line.split_once(':').is_some_and(|(h, _)| h.trim().eq_ignore_ascii_case("Via")) {
+            out.push_str(line);
+            out.push_str("\r\n");
+        }
+    }
+    for name in ["From", "To", "Call-ID", "CSeq"] {
+        out.push_str(name);
+        out.push_str(": ");
+        out.push_str(header_value(request, name)?);
+        out.push_str("\r\n");
+    }
+    out.push_str("Content-Length: 0\r\n\r\n");
+    Some(out)
+}
+
 // ---- randomness for SIP tokens + the throwaway SRTP key --------------------------------------
 
 /// Fill `buf` with OS entropy (`/dev/urandom`). Falls back to a time-seeded xorshift only if the
@@ -361,7 +392,7 @@ async fn session(
     stopping: &Arc<AtomicBool>,
     view_rx: &mut mpsc::Receiver<()>,
 ) -> std::io::Result<()> {
-    let (aor, domain) = resolve_identity(cfg).ok_or_else(|| {
+    let (aor, domain) = resolve_identity(cfg).await.ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "cannot resolve SIP AOR/domain (model or domain-registration.conf missing)",
@@ -408,7 +439,16 @@ async fn session(
         return Err(std::io::Error::other(format!("INVITE rejected with {status}")));
     }
 
-    d.to_tag = to_tag(&final_resp).unwrap_or_default();
+    // A 2xx to INVITE MUST carry a To-tag — it's what makes the dialog "confirmed" and is echoed in
+    // the ACK and BYE. Without it the teardown is unreliable, so fail rather than send an ACK/BYE with
+    // an empty tag (Copilot). The Contact is the panel's in-dialog request target for ACK/BYE; a 2xx
+    // should include one, but fall back to the AOR (still routable via the proxy) if a peer omits it.
+    d.to_tag = to_tag(&final_resp).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "2xx to INVITE has no To-tag — cannot form a confirmed dialog for ACK/BYE",
+        )
+    })?;
     d.remote_target = contact_uri(&final_resp)
         .unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
 
@@ -417,33 +457,53 @@ async fn session(
     sock.flush().await?;
     eprintln!("btmqttd: on-demand session up (sip:{}@{})", d.aor, d.domain);
 
-    // Hold the session while views keep arriving; drain any responses/requests the panel sends.
+    // Hold the session while views keep arriving. The idle-hangup uses a PERSISTENT absolute
+    // deadline that only a real viewer poke (`view_rx`) refreshes — NOT socket traffic. Otherwise
+    // in-dialog chatter the panel sends (OPTIONS/re-INVITE/media stats) arriving more often than the
+    // idle window would keep resetting a per-iteration timer and pin the session open forever (Codex).
     let idle = Duration::from_secs(cfg.camera_view_idle_secs);
+    let mut deadline = tokio::time::Instant::now() + idle;
     let mut scratch = [0u8; 4096];
+    let mut panel_ended = false; // the panel tore the dialog down first ⇒ don't send our own BYE
     loop {
         if stopping.load(Ordering::Relaxed) {
             break;
         }
         tokio::select! {
             v = view_rx.recv() => match v {
-                Some(()) => continue,          // refreshed — keep holding
-                None => break,                 // shutting down
+                Some(()) => deadline = tokio::time::Instant::now() + idle, // refresh on a real view
+                None => break,                                            // shutting down
             },
             r = sock.read(&mut scratch) => match r {
-                Ok(0) => break,                // panel closed the dialog
-                Ok(_) => continue,             // ignore mid-dialog traffic (re-INVITE/OPTIONS/media stats)
+                Ok(0) => { panel_ended = true; break; } // panel closed the connection
+                Ok(n) => {
+                    // A panel-initiated BYE ends the dialog: acknowledge it (200 OK, else the panel
+                    // retransmits) and stop — we must NOT then send our own BYE to a dead dialog.
+                    let msg = String::from_utf8_lossy(&scratch[..n]);
+                    if is_bye(&msg) {
+                        if let Some(ok) = build_ok_to(&msg) {
+                            let _ = sock.write_all(ok.as_bytes()).await;
+                            let _ = sock.flush().await;
+                        }
+                        panel_ended = true;
+                        break;
+                    }
+                    // else: ignore other mid-dialog traffic; it does NOT refresh the idle deadline.
+                }
                 Err(e) => return Err(e),
             },
-            _ = tokio::time::sleep(idle) => break, // idle expiry ⇒ hang up
+            _ = tokio::time::sleep_until(deadline) => break, // idle expiry ⇒ hang up
         }
     }
 
-    // Teardown: BYE (best-effort — the session may already be gone).
-    let bye = build_bye(&d, &format!("z9hG4bK{}", rand_hex(8)));
-    let _ = sock.write_all(bye.as_bytes()).await;
-    let _ = sock.flush().await;
-    // Give the 200-to-BYE a brief moment; we don't strictly need to read it.
-    let _ = tokio::time::timeout(Duration::from_secs(1), sock.read(&mut scratch)).await;
+    // Teardown: send our BYE unless the panel already ended the dialog (we ACKed its BYE above).
+    if !panel_ended {
+        let bye = build_bye(&d, &format!("z9hG4bK{}", rand_hex(8)));
+        let _ = sock.write_all(bye.as_bytes()).await;
+        let _ = sock.flush().await;
+        // Give the 200-to-BYE a brief moment; we don't strictly need to read it.
+        let _ = tokio::time::timeout(Duration::from_secs(1), sock.read(&mut scratch)).await;
+    }
     eprintln!("btmqttd: on-demand session torn down (sip:{}@{})", d.aor, d.domain);
     Ok(())
 }
@@ -454,6 +514,19 @@ async fn wait_final_response(sock: &mut TcpStream) -> std::io::Result<String> {
     let mut acc: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
+        // Consume every COMPLETE message already buffered and return the first FINAL (>= 200). A
+        // message is complete only once its CRLFCRLF header terminator AND its Content-Length body
+        // have all arrived — returning on the status line alone could hand back a 200 whose
+        // To-tag/Contact haven't been read yet, so the ACK would carry an empty tag and the dialog
+        // would never confirm even though the panel accepted the INVITE (Codex).
+        while let Some(len) = complete_message_len(&acc) {
+            let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
+            acc.drain(..len);
+            match parse_status(&msg) {
+                Some(s) if s >= 200 => return Ok(msg),
+                _ => {} // 1xx provisional (or a stray in-dialog request) — keep reading
+            }
+        }
         let n = tokio::time::timeout(READ_CHUNK_TIMEOUT, sock.read(&mut buf))
             .await
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "SIP read stalled"))??;
@@ -470,42 +543,25 @@ async fn wait_final_response(sock: &mut TcpStream) -> std::io::Result<String> {
                 "SIP response exceeded cap",
             ));
         }
-        // The panel pipelines 100/180/200 as separate TCP segments. Scan for the last complete
-        // message and stop once its status is final (>= 200).
-        let text = String::from_utf8_lossy(&acc);
-        if let Some(status) = last_final_status(&text) {
-            if status >= 200 {
-                return Ok(extract_final_message(&text));
-            }
-        }
     }
 }
 
-/// The status code of the last complete response present in `text` (messages are separated by the
-/// blank line + start of the next `SIP/2.0` line). `None` while only provisional responses so far.
-fn last_final_status(text: &str) -> Option<u16> {
-    text.split("SIP/2.0 ")
-        .filter(|seg| !seg.is_empty())
-        .filter_map(|seg| seg.split_whitespace().next()?.parse::<u16>().ok())
-        .filter(|s| *s >= 200)
-        .last()
-}
-
-/// Extract the final (>= 200) response message from a buffer that may hold several pipelined
-/// responses, re-prefixing the `SIP/2.0 ` the split consumed.
-fn extract_final_message(text: &str) -> String {
-    let mut last = String::new();
-    for seg in text.split("SIP/2.0 ") {
-        if seg.is_empty() {
-            continue;
-        }
-        if let Some(code) = seg.split_whitespace().next().and_then(|c| c.parse::<u16>().ok()) {
-            if code >= 200 {
-                last = format!("SIP/2.0 {seg}");
-            }
-        }
-    }
-    last
+/// If `buf` begins with a COMPLETE SIP message — headers terminated by CRLFCRLF, followed by a body
+/// of `Content-Length` bytes (0 when the header is absent) — return that message's total byte length;
+/// else `None` (more bytes needed). Frames one message at a time, so pipelined 100/180/200 responses
+/// (and a 200's SDP body) are handled without ever returning a half-read message.
+fn complete_message_len(buf: &[u8]) -> Option<usize> {
+    let sep = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let header_end = sep + 4;
+    let headers = std::str::from_utf8(&buf[..sep]).ok()?;
+    let content_length = headers
+        .lines()
+        .filter_map(|l| l.split_once(':'))
+        .find(|(h, _)| h.trim().eq_ignore_ascii_case("Content-Length"))
+        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let total = header_end + content_length;
+    (buf.len() >= total).then_some(total)
 }
 
 #[cfg(test)]
@@ -547,12 +603,25 @@ mod tests {
     }
 
     #[test]
-    fn provisional_then_final_is_picked() {
-        let pipelined = "SIP/2.0 100 Trying\r\n\r\nSIP/2.0 180 Ringing\r\n\r\nSIP/2.0 200 Ok\r\nTo: <sip:x>;tag=t\r\n\r\n";
-        assert_eq!(last_final_status(pipelined), Some(200));
-        let only_provisional = "SIP/2.0 100 Trying\r\n\r\nSIP/2.0 180 Ringing\r\n\r\n";
-        assert_eq!(last_final_status(only_provisional), None);
-        assert!(extract_final_message(pipelined).starts_with("SIP/2.0 200 Ok"));
+    fn frames_complete_messages_and_skips_provisional() {
+        // Completeness needs BOTH the CRLFCRLF header terminator and the Content-Length body.
+        let full = b"SIP/2.0 200 Ok\r\nContent-Length: 4\r\n\r\nabcd";
+        assert_eq!(complete_message_len(full), Some(full.len()));
+        assert_eq!(complete_message_len(b"SIP/2.0 200 Ok\r\nContent-Length: 4\r\n\r\nab"), None); // body short
+        assert_eq!(complete_message_len(b"SIP/2.0 200 Ok\r\nContent-Len"), None); // headers unterminated
+
+        // Pipelined 100 then 200: frame one at a time; the provisional is skipped and the final's
+        // To-tag parses (the bug the framing fixes: a half-read 200 would lose the tag).
+        let mut acc =
+            b"SIP/2.0 100 Trying\r\nContent-Length: 0\r\n\r\nSIP/2.0 200 Ok\r\nTo: <sip:x>;tag=t\r\nContent-Length: 0\r\n\r\n"
+                .to_vec();
+        let l1 = complete_message_len(&acc).unwrap();
+        assert_eq!(parse_status(&String::from_utf8_lossy(&acc[..l1])), Some(100));
+        acc.drain(..l1);
+        let l2 = complete_message_len(&acc).unwrap();
+        let final_msg = String::from_utf8_lossy(&acc[..l2]).into_owned();
+        assert_eq!(parse_status(&final_msg), Some(200));
+        assert_eq!(to_tag(&final_msg).as_deref(), Some("t"));
     }
 
     #[test]
@@ -585,6 +654,25 @@ mod tests {
         assert!(bye.starts_with("BYE sip:c100x@127.0.0.1:41044;transport=tcp SIP/2.0\r\n"));
         assert!(bye.contains("CSeq: 22 BYE\r\n")); // incremented
         assert!(bye.contains("tag=paneltag"));
+    }
+
+    #[test]
+    fn acknowledges_a_panel_bye_with_a_matching_200_ok() {
+        let bye = "BYE sip:btmqttd@127.0.0.1:5060 SIP/2.0\r\n\
+                   Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKxyz\r\n\
+                   From: <sip:app@d>;tag=ft\r\n\
+                   To: <sip:c100x@d>;tag=tt\r\n\
+                   Call-ID: cid123\r\n\
+                   CSeq: 22 BYE\r\n\
+                   Content-Length: 0\r\n\r\n";
+        assert!(is_bye(bye));
+        assert!(!is_bye("SIP/2.0 200 Ok\r\n\r\n"));
+        let ok = build_ok_to(bye).unwrap();
+        assert!(ok.starts_with("SIP/2.0 200 OK\r\n"));
+        assert!(ok.contains("Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKxyz\r\n")); // echoed verbatim
+        assert!(ok.contains("Call-ID: cid123\r\n"));
+        assert!(ok.contains("CSeq: 22 BYE\r\n")); // same CSeq so the panel matches the transaction
+        assert!(ok.ends_with("Content-Length: 0\r\n\r\n"));
     }
 
     #[test]

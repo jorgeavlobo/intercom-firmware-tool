@@ -893,14 +893,16 @@ async fn run() -> Result<bool, String> {
         av_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
     }
-    // On-demand SIP UA (issue #104): stop it too. Dropping the trigger sender lets an in-flight
-    // session observe the closed channel (its select's `view_rx.recv()==None`) and send its BYE;
-    // the abort-and-await then bounds shutdown if a dialog is still mid-flight. (A guaranteed
-    // graceful BYE on shutdown is tracked as a follow-up.)
+    // On-demand SIP UA (issue #104): drain it gracefully. `stop(cmd_worker)` above already dropped
+    // that task's `view_tx` clone, so dropping THIS last sender closes `view_rx`; the SIP task then
+    // observes the closed channel (its `view_rx.recv()==None`) and sends its BYE to tear the panel
+    // session down cleanly. AWAIT it with a bound rather than abort()-ing: an abort can drop the task
+    // at an `.await` before the BYE is sent, leaving the panel session pinned (CodeRabbit). The 3 s
+    // cap keeps shutdown bounded if the dialog is wedged.
     if let Some(h) = sip_task {
         sip_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         drop(view_tx);
-        stop(h).await;
+        let _ = tokio::time::timeout(Duration::from_secs(3), h).await;
     }
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(reexec)
