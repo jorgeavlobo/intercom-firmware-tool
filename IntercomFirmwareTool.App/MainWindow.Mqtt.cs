@@ -1600,6 +1600,9 @@ namespace IntercomFirmwareTool.App
                 // Never persist hi-res for a model that lacks the branch (the Classe 100X): even if the
                 // radio were somehow checked, force low-res so the build can't produce a black camera.
                 CameraHiRes = RbMqttCameraHiRes.IsChecked == true && CameraModelSupportsHiRes,
+                // On-demand viewing (#104): only meaningful with the camera on (the checkbox lives
+                // inside the camera panel); Core also coerces it off when the camera is disabled.
+                CameraOnDemand = ChkMqttCamera.IsChecked == true && ChkMqttCameraOnDemand.IsChecked == true,
             };
 
             // Surface the Core validator's exact (localized) message as a clean

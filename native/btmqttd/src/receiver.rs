@@ -21,12 +21,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{self, Sender};
 
 use crate::config::{Config, OWN_PORT_CMD};
 use crate::light::LightCtl;
 use crate::lock::Lock;
 use crate::own;
+use crate::sip::ViewCmd;
 use crate::volume::VolumeCtl;
 
 /// Cap for read_file/write_file/execute_command payloads (256 KB), matching
@@ -74,6 +75,7 @@ pub async fn dispatch(
     vol: &Arc<VolumeCtl>,
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
+    view_tx: Option<&Sender<ViewCmd>>,
     payload: &[u8],
 ) {
     let text = match std::str::from_utf8(payload) {
@@ -84,7 +86,7 @@ pub async fn dispatch(
         }
     };
     for record in text.split('\n') {
-        dispatch_record(cfg, client, vol, lock, light, record).await;
+        dispatch_record(cfg, client, vol, lock, light, view_tx, record).await;
     }
 }
 
@@ -98,6 +100,7 @@ async fn dispatch_record(
     vol: &Arc<VolumeCtl>,
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
+    view_tx: Option<&Sender<ViewCmd>>,
     record: &str,
 ) {
     // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
@@ -109,7 +112,7 @@ async fn dispatch_record(
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
-        handle_json(cfg, client, vol, lock, light, record).await;
+        handle_json(cfg, client, vol, lock, light, view_tx, record).await;
     }
 }
 
@@ -139,6 +142,7 @@ async fn handle_json(
     vol: &Arc<VolumeCtl>,
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
+    view_tx: Option<&Sender<ViewCmd>>,
     msg: &str,
 ) {
     let v: Value = match serde_json::from_str(msg) {
@@ -162,6 +166,41 @@ async fn handle_json(
     // categorically more dangerous (code execution). These are the payloads the HA
     // volume/lock entities publish (via command_template / payload_press).
     if let Some(action) = v.get("action").and_then(Value::as_str) {
+        // On-demand viewing (issue #104): `view_camera` pokes the SIP UA to bring the idle panel A/V
+        // session up (and refresh its idle-hangup timer); `stop_camera` ends it now instead of waiting
+        // for the idle timeout. Same ungated posture as the other actions — TOPIC_RX is the trust
+        // boundary. try_send (never blocks the worker): Start is idempotent (the UA re-checks and
+        // refreshes on each poke). A Stop dropped on a FULL queue is bounded and self-correcting:
+        // while a session is UP the UA drains view_rx every select turn, so 8 messages can't pile up;
+        // the queue only saturates while the UA is NOT draining (reconnect backoff / a sub-second
+        // connect), and in that state there is no active session to leave streaming — a session that
+        // then starts from a queued Start still auto-hangs-up after CAMERA_VIEW_IDLE_SECS, and the user
+        // can press Stop again once the queue drains. A parallel priority signal isn't worth the
+        // ordering complexity for that bounded case (Codex).
+        if action == "view_camera" || action == "stop_camera" {
+            let cmd = if action == "view_camera" { ViewCmd::Start } else { ViewCmd::Stop };
+            match view_tx {
+                Some(tx) => match tx.try_send(cmd) {
+                    Ok(()) => {}
+                    // Bounded queue momentarily full (the UA isn't draining — reconnect backoff / a
+                    // sub-second connect). Harmless per the note above, but log it so a user who
+                    // pressed the HA button and saw nothing has something to correlate.
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        eprintln!("btmqttd: dropped {action} (on-demand trigger queue full)");
+                    }
+                    // Distinct from Full: the SIP task has exited (channel closed), so on-demand
+                    // viewing is effectively down until restart — log it differently for diagnosis.
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        eprintln!("btmqttd: dropped {action} (on-demand SIP task is gone)");
+                    }
+                },
+                None => eprintln!(
+                    "btmqttd: ignored {action}: on-demand viewing disabled \
+                     (needs CAMERA_ENABLED=1 and CAMERA_ONDEMAND_ENABLED=1)"
+                ),
+            }
+            return;
+        }
         handle_action(vol, lock, light, action, &v).await;
         return;
     }

@@ -525,4 +525,7 @@ Actívelo solo en un broker autenticado y de confianza. ¿Activar el canal de co
   <data name="Dialog_Ok" xml:space="preserve"><value>Aceptar</value></data>
   <data name="About_Title" xml:space="preserve"><value>Acerca de Intercom Firmware Tool</value></data>
   <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Versión {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
+  <data name="Chk_MqttCameraOnDemand" xml:space="preserve"><value>Ver la cámara bajo demanda (en cualquier momento, no solo al llamar)</value></data>
+  <data name="Tip_MqttCameraOnDemand" xml:space="preserve"><value>Marque para abrir la cámara de entrada cuando quiera, no solo mientras suena el timbre. Cuando se solicita, el cliente SIP de la unidad activa brevemente la sesión de la cámara; en Home Assistant aparecen los botones "Ver cámara" y "Detener cámara".</value></data>
+  <data name="Hint_MqttCameraOnDemand" xml:space="preserve"><value>Añade los botones "Ver cámara" y "Detener cámara" en Home Assistant: "Ver" activa la cámara bajo demanda, "Detener" la termina de inmediato. También se cuelga automáticamente tras un tiempo definido (pulse "Ver" de nuevo para seguir viendo), para que el panel nunca quede transmitiendo.</value></data>
 </root>

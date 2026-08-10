@@ -36,6 +36,7 @@ mod persist;
 mod receiver;
 mod rediscovery;
 mod sender;
+mod sip;
 mod volume;
 
 use std::sync::Arc;
@@ -300,6 +301,27 @@ async fn run() -> Result<bool, String> {
     let lock_stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let lock_task = tokio::spawn(lock::run(lock_rx, lock_stopping.clone()));
 
+    // On-demand viewing (Phase 2, issue #104): a loopback SIP UA that INVITEs the panel's local
+    // answer-machine to bring the idle A/V session up on a `view_camera` action, then BYEs it after
+    // an idle window. It drives ONLY signalling — the actual video is siphoned by `av`, which
+    // auto-arms when the panel starts streaming — so this is gated on `camera_enabled` (the media
+    // path) as well. `view_tx` feeds the trigger from receiver's action dispatch; `None` when the
+    // feature is off threads through as a no-op (and receiver logs an ignored `view_camera`).
+    let (sip_task, sip_stopping, view_tx): (
+        Option<tokio::task::JoinHandle<()>>,
+        Arc<std::sync::atomic::AtomicBool>,
+        Option<tokio::sync::mpsc::Sender<sip::ViewCmd>>,
+    ) = {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if cfg.camera_enabled && cfg.camera_ondemand_enabled {
+            let (tx, rx) = tokio::sync::mpsc::channel::<sip::ViewCmd>(8);
+            let task = tokio::spawn(sip::run(cfg.clone(), stopping.clone(), rx));
+            (Some(task), stopping, Some(tx))
+        } else {
+            (None, stopping, None)
+        }
+    };
+
     // Commands from TOPIC_RX go through a BOUNDED channel to a SINGLE ordered worker,
     // not a task-per-message. This does two things at once:
     //   * Order — the shell receiver consumed the subscription line-by-line, so
@@ -326,9 +348,10 @@ async fn run() -> Result<bool, String> {
         let volume = volume.clone();
         let lock_tx = lock_tx.clone();
         let light = light.clone();
+        let view_tx = view_tx.clone();
         async move {
             while let Some(payload) = cmd_rx.recv().await {
-                receiver::dispatch(&cfg, &client, &volume, &lock_tx, light.as_ref(), &payload).await;
+                receiver::dispatch(&cfg, &client, &volume, &lock_tx, light.as_ref(), view_tx.as_ref(), &payload).await;
             }
         }
     });
@@ -869,6 +892,17 @@ async fn run() -> Result<bool, String> {
     if let Some(h) = av_task {
         av_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
+    }
+    // On-demand SIP UA (issue #104): drain it gracefully. `stop(cmd_worker)` above already dropped
+    // that task's `view_tx` clone, so dropping THIS last sender closes `view_rx`; the SIP task then
+    // observes the closed channel (its `view_rx.recv()==None`) and sends its BYE to tear the panel
+    // session down cleanly. AWAIT it with a bound rather than abort()-ing: an abort can drop the task
+    // at an `.await` before the BYE is sent, leaving the panel session pinned (CodeRabbit). The 3 s
+    // cap keeps shutdown bounded if the dialog is wedged.
+    if let Some(h) = sip_task {
+        sip_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+        drop(view_tx);
+        let _ = tokio::time::timeout(Duration::from_secs(3), h).await;
     }
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(reexec)

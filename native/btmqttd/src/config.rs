@@ -111,6 +111,37 @@ pub struct Config {
     /// default — the only one siphonable on the C100X, and present on the C300X), `0` =
     /// hi-res (C300X only). Clamped to 0..=1; default 1.
     pub camera_branch: u8,
+
+    // --- On-demand viewing (Phase 2, issue #104) -----------------------------------
+    /// "View the entrance-panel camera on demand" (not only while ringing). When enabled,
+    /// `sip.rs` originates a loopback SIP INVITE to the panel's on-board UA (via the local
+    /// flexisip on `127.0.0.1:SIP_PORT`) to bring the idle A/V session up, then reuses the
+    /// Phase-1 `:30007` siphon for the actual video. Requires `camera_enabled` (the media
+    /// path). Opt-in; off by default.
+    pub camera_ondemand_enabled: bool,
+    /// The local flexisip plain-SIP port (loopback). Factory default 5060 on both models.
+    pub sip_port: u16,
+    /// The panel's local SIP domain (e.g. a `<uuid>.bs.iotleg.com`). Empty ⇒ discover at
+    /// runtime from `/etc/flexisip/domain-registration.conf`. An installer may pin it.
+    pub sip_domain: String,
+    /// The panel's local answer-machine AOR user (`c100x` / `c300x`). Empty ⇒ derive from
+    /// the model (`/etc/hostname`) at runtime. The INVITE targets `sip:<aor>@<domain>`.
+    pub sip_local_aor: String,
+    /// The `a=DEVADDR` value that turns the INVITE into a SILENT camerasliding pull instead of a
+    /// household-ringing intercom call (hardware-proven, issue #104). On the C100X this MUST be the
+    /// entrance module's UUID (the `id` of the `videodoorentry` `EU` module at OWN address 20 in
+    /// `/home/bticino/cfg/extra/.bt_eliot/mymodules`); the numeric OWN-address form (`20`) works only
+    /// on the C300X. Empty ⇒ auto-detect from `mymodules` at runtime. Without a resolved DEVADDR the
+    /// feature declines to originate (never rings the house).
+    pub sip_devaddr: String,
+    /// Maximum length of one on-demand viewing window, in seconds (default 30). A `view_camera`
+    /// request brings the session up and starts this countdown; when it elapses `sip.rs` hangs up
+    /// (BYE) so an on-demand pull never leaves the panel session pinned open. There is no continuous
+    /// "someone is watching" signal, so the timer is NOT extended by the video stream itself — only
+    /// by another explicit `view_camera` press (each press restarts the full window), and it is cut
+    /// short by a `stop_camera` press. Despite the historical `_idle_` name it is a fixed per-request
+    /// cap, not an inactivity timeout.
+    pub camera_view_idle_secs: u64,
 }
 
 impl Config {
@@ -202,6 +233,25 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .filter(|b| *b <= 1)
                 .unwrap_or(1),
+            // On-demand viewing (issue #104). Opt-in; domain/AOR default to empty ⇒ discovered
+            // on-device at runtime. Port 0 (bad conf) falls back to the flexisip default 5060.
+            camera_ondemand_enabled: flag("CAMERA_ONDEMAND_ENABLED"),
+            sip_port: opt("SIP_PORT")
+                .and_then(|s| s.parse().ok())
+                .filter(|p| *p != 0)
+                .unwrap_or(5060),
+            sip_domain: get("SIP_DOMAIN", ""),
+            sip_local_aor: get("SIP_LOCAL_AOR", ""),
+            sip_devaddr: get("SIP_DEVADDR", ""),
+            // Clamp to 1 s..=86400 s (1 day). >0 keeps a hand-edited 0 from disabling the hang-up; the
+            // upper cap keeps a huge hand-edited value from overflowing `Instant + Duration` (which
+            // panics) when sip.rs builds the viewing-window deadline (Copilot). 86400 s is far above any real
+            // on-demand view.
+            camera_view_idle_secs: opt("CAMERA_VIEW_IDLE_SECS")
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|n| *n > 0)
+                .map(|n| n.min(86_400))
+                .unwrap_or(30),
         }
     }
 
@@ -521,5 +571,19 @@ EMPTY=
         let bad = cfg("MQTT_HOST=h\nCAMERA_VIDEO_PORT=70000\nCAMERA_AUDIO_PORT=nope\n");
         assert_eq!(bad.camera_video_port, 40000);
         assert_eq!(bad.camera_audio_port, 40002);
+    }
+
+    #[test]
+    fn camera_view_idle_secs_clamps_zero_and_huge_values() {
+        let cfg = |s: &str| Config::from_map(parse_env(s));
+        // A sane value is kept.
+        assert_eq!(cfg("MQTT_HOST=h\nCAMERA_VIEW_IDLE_SECS=45\n").camera_view_idle_secs, 45);
+        // 0 (would disable the hang-up) falls back to the default.
+        assert_eq!(cfg("MQTT_HOST=h\nCAMERA_VIEW_IDLE_SECS=0\n").camera_view_idle_secs, 30);
+        // A huge hand-edited value is capped at 1 day so `Instant + Duration` can't overflow/panic.
+        assert_eq!(
+            cfg("MQTT_HOST=h\nCAMERA_VIEW_IDLE_SECS=18446744073709551615\n").camera_view_idle_secs,
+            86_400
+        );
     }
 }
