@@ -744,12 +744,17 @@ async fn session(
     }
     eprintln!("btmqttd: on-demand session up (sip:{}@{})", d.aor, d.domain);
 
-    // Hold the session while views keep arriving. The idle-hangup uses a PERSISTENT absolute
-    // deadline that only a real viewer poke (`view_rx`) refreshes — NOT socket traffic. Otherwise
-    // in-dialog chatter the panel sends (OPTIONS/re-INVITE/media stats) arriving more often than the
-    // idle window would keep resetting a per-iteration timer and pin the session open forever (Codex).
-    let idle = Duration::from_secs(cfg.camera_view_idle_secs);
-    let mut deadline = tokio::time::Instant::now() + idle;
+    // Hold the session for a FIXED maximum viewing window per request. `camera_view_idle_secs` is a
+    // per-request cap, NOT an inactivity timeout: there is no continuous "someone is watching" signal,
+    // so a single `view_camera` press bounds the session to one window and it auto-hangs-up when the
+    // window elapses. The deadline is renewed ONLY by another explicit `view_camera` press (`view_rx`
+    // Start = a fresh full window) and cut short by `stop_camera` (Stop) — deliberately NOT by socket
+    // traffic, or the in-dialog chatter the panel sends (OPTIONS/re-INVITE/media stats) would keep
+    // resetting the timer and pin the session open forever (Codex). To watch longer, raise
+    // CAMERA_VIEW_IDLE_SECS or press View again; true viewer-activity auto-extend is a deferred
+    // follow-up (no go2rtc consumer-count/heartbeat signal exists here yet).
+    let window = Duration::from_secs(cfg.camera_view_idle_secs);
+    let mut deadline = tokio::time::Instant::now() + window;
     let mut scratch = [0u8; 4096];
     // FRAME in-dialog requests the same way `wait_final_response` frames responses: TCP can split a
     // panel BYE across reads, or coalesce it after other in-dialog traffic, so inspecting one raw
@@ -765,7 +770,8 @@ async fn session(
         }
         tokio::select! {
             v = view_rx.recv() => match v {
-                Some(ViewCmd::Start) => deadline = tokio::time::Instant::now() + idle, // refresh
+                // Another View press = a fresh full window (the only way to extend; no viewer heartbeat).
+                Some(ViewCmd::Start) => deadline = tokio::time::Instant::now() + window,
                 Some(ViewCmd::Stop) => break,  // user pressed "Stop Camera" ⇒ hang up now (our BYE)
                 None => break,                 // shutting down
             },

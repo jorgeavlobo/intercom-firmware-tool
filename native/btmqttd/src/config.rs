@@ -134,8 +134,13 @@ pub struct Config {
     /// on the C300X. Empty ⇒ auto-detect from `mymodules` at runtime. Without a resolved DEVADDR the
     /// feature declines to originate (never rings the house).
     pub sip_devaddr: String,
-    /// Hang up (send BYE) after this many seconds with no active viewer, so an on-demand
-    /// pull never leaves the panel session pinned open. Default 30.
+    /// Maximum length of one on-demand viewing window, in seconds (default 30). A `view_camera`
+    /// request brings the session up and starts this countdown; when it elapses `sip.rs` hangs up
+    /// (BYE) so an on-demand pull never leaves the panel session pinned open. There is no continuous
+    /// "someone is watching" signal, so the timer is NOT extended by the video stream itself — only
+    /// by another explicit `view_camera` press (each press restarts the full window), and it is cut
+    /// short by a `stop_camera` press. Despite the historical `_idle_` name it is a fixed per-request
+    /// cap, not an inactivity timeout.
     pub camera_view_idle_secs: u64,
 }
 

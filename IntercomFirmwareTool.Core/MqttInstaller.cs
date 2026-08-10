@@ -137,8 +137,13 @@ namespace IntercomFirmwareTool.Core
         /// <see cref="CameraEnabled"/> (the media path). Opt-in; off by default.</summary>
         public bool CameraOnDemand { get; init; }
 
-        /// <summary>Seconds with no viewer after which the on-demand SIP dialog is hung up (BYE) so a
-        /// pull never pins the panel session. The daemon clamps; default 30.</summary>
+        /// <summary>Maximum length of one on-demand viewing window, in seconds: a "View Camera" press
+        /// brings the SIP dialog up and starts this countdown, after which the daemon hangs it up (BYE)
+        /// so a pull never pins the panel session. It is a fixed per-request cap, NOT an inactivity
+        /// timeout — there is no continuous "someone is watching" signal, so it is extended only by
+        /// another View press (each restarts the full window) and cut short by "Stop Camera". Despite
+        /// the legacy <c>_idle_</c> name in the conf key it is not idle-based. The daemon clamps;
+        /// default 30.</summary>
         public int CameraViewIdleSecs { get; init; } = 30;
 
         /// <summary>The camera fan-out target actually used: the explicit
