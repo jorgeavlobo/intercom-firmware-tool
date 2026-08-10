@@ -526,6 +526,6 @@ Aktivieren Sie ihn nur mit einem authentifizierten, vertrauenswürdigen Broker. 
   <data name="About_Title" xml:space="preserve"><value>Über Intercom Firmware Tool</value></data>
   <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Version {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
   <data name="Chk_MqttCameraOnDemand" xml:space="preserve"><value>Kamera bei Bedarf ansehen (jederzeit, nicht nur beim Klingeln)</value></data>
-  <data name="Tip_MqttCameraOnDemand" xml:space="preserve"><value>Aktivieren, um die Türkamera jederzeit zu öffnen – nicht nur während es klingelt. Auf Anfrage weckt der SIP-Client der Einheit kurz die Kamerasitzung; in Home Assistant erscheint eine Schaltfläche „Kamera ansehen“.</value></data>
-  <data name="Hint_MqttCameraOnDemand" xml:space="preserve"><value>Fügt in Home Assistant eine Schaltfläche „Kamera ansehen“ hinzu, die die Kamera bei Bedarf weckt. Sie legt nach kurzer Inaktivität automatisch auf, damit das Panel nie dauerhaft streamt.</value></data>
+  <data name="Tip_MqttCameraOnDemand" xml:space="preserve"><value>Aktivieren, um die Türkamera jederzeit zu öffnen – nicht nur während es klingelt. Auf Anfrage weckt der SIP-Client der Einheit kurz die Kamerasitzung; in Home Assistant erscheinen die Schaltflächen „Kamera ansehen“ und „Kamera stoppen“.</value></data>
+  <data name="Hint_MqttCameraOnDemand" xml:space="preserve"><value>Fügt in Home Assistant die Schaltflächen „Kamera ansehen“ und „Kamera stoppen“ hinzu – „Ansehen“ weckt die Kamera bei Bedarf, „Stoppen“ beendet sie sofort. Sie legt außerdem nach kurzer Inaktivität automatisch auf, damit das Panel nie dauerhaft streamt.</value></data>
 </root>

@@ -21,7 +21,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{self, Sender};
 
 use crate::config::{Config, OWN_PORT_CMD};
 use crate::light::LightCtl;
@@ -180,14 +180,20 @@ async fn handle_json(
         if action == "view_camera" || action == "stop_camera" {
             let cmd = if action == "view_camera" { ViewCmd::Start } else { ViewCmd::Stop };
             match view_tx {
-                Some(tx) => {
-                    if tx.try_send(cmd).is_err() {
-                        // Bounded queue momentarily full (the UA isn't draining — reconnect backoff /
-                        // a sub-second connect). Harmless per the note above, but log it so a user who
-                        // pressed the HA button and saw nothing has something to correlate.
+                Some(tx) => match tx.try_send(cmd) {
+                    Ok(()) => {}
+                    // Bounded queue momentarily full (the UA isn't draining — reconnect backoff / a
+                    // sub-second connect). Harmless per the note above, but log it so a user who
+                    // pressed the HA button and saw nothing has something to correlate.
+                    Err(mpsc::error::TrySendError::Full(_)) => {
                         eprintln!("btmqttd: dropped {action} (on-demand trigger queue full)");
                     }
-                }
+                    // Distinct from Full: the SIP task has exited (channel closed), so on-demand
+                    // viewing is effectively down until restart — log it differently for diagnosis.
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        eprintln!("btmqttd: dropped {action} (on-demand SIP task is gone)");
+                    }
+                },
                 None => eprintln!(
                     "btmqttd: ignored {action}: on-demand viewing disabled \
                      (needs CAMERA_ENABLED=1 and CAMERA_ONDEMAND_ENABLED=1)"

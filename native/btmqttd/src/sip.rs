@@ -309,6 +309,33 @@ pub fn build_cancel(d: &Dialog) -> String {
     )
 }
 
+/// ACK a NON-2xx final response to the INVITE (RFC 3261 §17.1.1.3). Unlike the 2xx ACK (a new
+/// transaction to the panel's Contact), this ACK is part of the INVITE CLIENT transaction: same
+/// Request-URI as the INVITE (`sip:<aor>@<domain>`), the SAME top `Via` branch and CSeq NUMBER, plus
+/// the failure response's `To`-tag. It absorbs the transaction so the proxy/panel don't hold the
+/// server transaction until Timer H after a reject (486/401/407/…).
+pub fn build_ack_failure(d: &Dialog, to_tag: &str) -> String {
+    format!(
+        "ACK sip:{aor}@{domain} SIP/2.0\r\n\
+         Via: SIP/2.0/TCP 127.0.0.1:{lport};rport;branch={branch}\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:btmqttd@{domain}>;tag={ftag}\r\n\
+         To: <sip:{aor}@{domain}>;tag={ttag}\r\n\
+         Call-ID: {callid}\r\n\
+         CSeq: {cseq} ACK\r\n\
+         Content-Length: 0\r\n\
+         \r\n",
+        aor = d.aor,
+        domain = d.domain,
+        lport = d.local_port,
+        branch = d.branch,
+        ftag = d.from_tag,
+        ttag = to_tag,
+        callid = d.call_id,
+        cseq = d.cseq,
+    )
+}
+
 /// BYE to end the dialog (CSeq incremented; request-URI = the panel's learned Contact).
 pub fn build_bye(d: &Dialog, bye_branch: &str) -> String {
     format!(
@@ -427,10 +454,20 @@ pub fn build_ok_to(request: &str) -> Option<String> {
 
 // ---- randomness for SIP tokens + the throwaway SRTP key --------------------------------------
 
-/// Fill `buf` with OS entropy (`/dev/urandom`). Falls back to a time-seeded xorshift only if the
-/// device has no urandom (it always does) — SIP tags/branches need uniqueness, not secrecy, and the
-/// SRTP key is blackholed.
+/// Fill `buf` with OS entropy. Prefers the non-blocking `getrandom(2)` syscall over reading
+/// `/dev/urandom`: btmqttd runs on a single-threaded Tokio runtime, so a blocking file open+read on
+/// this (synchronous) path would stall the MQTT loop / OWN monitor / AV siphon for its duration. Falls
+/// back to `/dev/urandom`, then a time-seeded xorshift — SIP tags/branches need uniqueness, not
+/// secrecy, and the SRTP key is blackholed, so a degraded source is acceptable.
 fn fill_random(buf: &mut [u8]) {
+    // GRND_NONBLOCK: never wait on the entropy pool — return EAGAIN instead and let us fall back.
+    // Safe: writes exactly `buf.len()` bytes into `buf`; we only trust a full-length success.
+    let n = unsafe {
+        libc::getrandom(buf.as_mut_ptr() as *mut libc::c_void, buf.len(), libc::GRND_NONBLOCK)
+    };
+    if n >= 0 && n as usize == buf.len() {
+        return;
+    }
     use std::io::Read;
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
         if f.read_exact(buf).is_ok() {
@@ -616,15 +653,22 @@ async fn session(
 
     let status = parse_status(&final_resp)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no SIP status line"))?;
-    if status == 407 || status == 401 {
-        // flexisip challenged our loopback INVITE — trusted-hosts should prevent this. If it ever
-        // happens we need a registered identity + digest; surface it clearly for the hardware pass.
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "SIP auth required (flexisip did not trust the loopback UA) — needs a registered identity",
-        ));
-    }
     if !(200..300).contains(&status) {
+        // ACK any NON-2xx final (486 Busy, 401/407, other rejects) — RFC 3261 §17.1.1.3. The ACK is
+        // part of the INVITE client transaction: same Request-URI, top Via branch and CSeq number,
+        // plus the response's To-tag. Without it flexisip holds the INVITE server transaction until
+        // Timer H, so repeated busy/failed views would pile up stale transactions (Codex). Best-effort.
+        if let Some(tag) = to_tag(&final_resp) {
+            let _ = write_all_flush(&mut sock, build_ack_failure(&d, &tag).as_bytes()).await;
+        }
+        if status == 401 || status == 407 {
+            // flexisip challenged our loopback INVITE — trusted-hosts should prevent this. If it ever
+            // happens we need a registered identity + digest; surface it clearly for the hardware pass.
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "SIP auth required (flexisip did not trust the loopback UA) — needs a registered identity",
+            ));
+        }
         return Err(std::io::Error::other(format!("INVITE rejected with {status}")));
     }
 
@@ -705,15 +749,23 @@ async fn session(
                     while let Some(len) = complete_message_len(&inbound) {
                         let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
                         inbound.drain(..len);
-                        if !is_bye(&msg) {
-                            continue;
+                        if is_bye(&msg) {
+                            if let Some(ok) = build_ok_to(&msg) {
+                                let _ = sock.write_all(ok.as_bytes()).await;
+                                let _ = sock.flush().await;
+                            }
+                            panel_ended = true;
+                            break 'dialog;
                         }
-                        if let Some(ok) = build_ok_to(&msg) {
-                            let _ = sock.write_all(ok.as_bytes()).await;
-                            let _ = sock.flush().await;
+                        // A RETRANSMITTED INVITE 2xx (our first ACK was lost between flexisip and the
+                        // panel) must be re-ACKed — a UAC ACKs every 2xx or the panel times out the
+                        // confirmed dialog and the camera stops. Best-effort; a dead socket surfaces on
+                        // the next read as EOF/error and routes through bye_reconnect (Codex).
+                        if is_established_invite_2xx(&msg) {
+                            let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
+                            let _ = write_all_flush(&mut sock, ack.as_bytes()).await;
                         }
-                        panel_ended = true;
-                        break 'dialog;
+                        // else: other in-dialog traffic (OPTIONS/re-INVITE/media stats) — ignored.
                     }
                 }
                 // A socket error on a CONFIRMED dialog (ConnectionReset / BrokenPipe / …) means the
@@ -1129,6 +1181,33 @@ mod tests {
         // A provisional (or a missing CSeq) is not an established dialog either.
         assert!(!is_established_invite_2xx("SIP/2.0 100 Trying\r\nCSeq: 21 INVITE\r\n\r\n"));
         assert!(!is_established_invite_2xx("SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n"));
+    }
+
+    #[test]
+    fn failure_ack_is_in_transaction_and_targets_the_aor() {
+        let d = Dialog {
+            aor: "c100x".into(),
+            domain: "dev.example".into(),
+            local_port: 5555,
+            call_id: "abcd".into(),
+            from_tag: "ft".into(),
+            branch: "z9hG4bKinvitebranch".into(),
+            cseq: 21,
+            to_tag: String::new(),
+            remote_target: "sip:c100x@127.0.0.1:41044".into(), // NOT used by the failure ACK
+        };
+        let ack = build_ack_failure(&d, "paneltag");
+        // Request-URI is the ORIGINAL INVITE R-URI (the AOR), not the panel's Contact.
+        assert!(ack.starts_with("ACK sip:c100x@dev.example SIP/2.0\r\n"));
+        // In-transaction: SAME top Via branch and CSeq NUMBER as the INVITE, method ACK.
+        assert!(ack.contains("branch=z9hG4bKinvitebranch\r\n"));
+        assert!(ack.contains("CSeq: 21 ACK\r\n"));
+        // Carries the failure response's To-tag.
+        assert!(ack.contains("To: <sip:c100x@dev.example>;tag=paneltag\r\n"));
+        // Its top Via matches the INVITE's (branch + sent-by), like the CANCEL.
+        let invite = build_invite(&d, &build_sdp_offer(1, 2, "k", "da"));
+        let via = |m: &str| m.lines().find(|l| l.starts_with("Via:")).unwrap().to_string();
+        assert_eq!(via(&ack), via(&invite));
     }
 
     #[test]
