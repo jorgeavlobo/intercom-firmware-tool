@@ -181,7 +181,12 @@ async fn handle_json(
             let cmd = if action == "view_camera" { ViewCmd::Start } else { ViewCmd::Stop };
             match view_tx {
                 Some(tx) => {
-                    let _ = tx.try_send(cmd);
+                    if tx.try_send(cmd).is_err() {
+                        // Bounded queue momentarily full (the UA isn't draining — reconnect backoff /
+                        // a sub-second connect). Harmless per the note above, but log it so a user who
+                        // pressed the HA button and saw nothing has something to correlate.
+                        eprintln!("btmqttd: dropped {action} (on-demand trigger queue full)");
+                    }
                 }
                 None => eprintln!(
                     "btmqttd: ignored {action}: on-demand viewing disabled \

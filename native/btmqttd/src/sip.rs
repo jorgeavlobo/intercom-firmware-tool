@@ -804,7 +804,7 @@ async fn wait_until_stopping(stopping: &AtomicBool) {
 ///     down (`ACK` then `BYE`) or the panel keeps its camera streaming (Codex/CodeRabbit).
 async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, acc: Vec<u8>) {
     if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_ok() {
-        drain_after_cancel(sock, d, acc).await;
+        drain_after_cancel(sock, cfg, d, acc).await;
     } else if let Ok(mut fresh) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
         // The original socket was dead. CANCEL over a fresh connection — but its top `Via` MUST stay
         // byte-identical to the INVITE's (branch AND sent-by port), or flexisip won't match it to the
@@ -816,13 +816,13 @@ async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialo
         if let Ok(a) = fresh.local_addr() {
             d.local_port = a.port();
         }
-        drain_after_cancel(&mut fresh, d, Vec::new()).await;
+        drain_after_cancel(&mut fresh, cfg, d, Vec::new()).await;
     }
     // else: couldn't even reconnect — nothing more we can do.
 }
 
 /// Drain framed responses after a CANCEL for `CANCEL_DRAIN`, ACK+BYE-ing a racing INVITE 2xx.
-async fn drain_after_cancel(sock: &mut TcpStream, d: &mut Dialog, mut acc: Vec<u8>) {
+async fn drain_after_cancel(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, mut acc: Vec<u8>) {
     // `acc` is seeded with whatever `wait_final_response` had already read when the timeout fired —
     // possibly a partial (or even complete) INVITE 2xx — so we can finish framing it below.
     let mut buf = [0u8; 4096];
@@ -842,14 +842,17 @@ async fn drain_after_cancel(sock: &mut TcpStream, d: &mut Dialog, mut acc: Vec<u
                     d.to_tag = tag;
                     d.remote_target =
                         contact_uri(&msg).unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
-                    let _ = sock
-                        .write_all(build_ack(d, &format!("z9hG4bK{}", rand_hex(8))).as_bytes())
-                        .await;
-                    let _ = sock.flush().await;
-                    let _ = sock
-                        .write_all(build_bye(d, &format!("z9hG4bK{}", rand_hex(8))).as_bytes())
-                        .await;
-                    let _ = sock.flush().await;
+                    // ACK the 2xx, then BYE it. If the socket dies between the two (reset after ACK,
+                    // before BYE), teardown_bye returns Err and we retry the BYE over a fresh
+                    // connection — otherwise the accepted dialog would keep the camera streaming (Codex).
+                    let _ = write_all_flush(
+                        sock,
+                        build_ack(d, &format!("z9hG4bK{}", rand_hex(8))).as_bytes(),
+                    )
+                    .await;
+                    if teardown_bye(sock, d).await.is_err() {
+                        bye_reconnect(cfg, d).await;
+                    }
                 }
                 return;
             }

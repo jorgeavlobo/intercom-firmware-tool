@@ -1134,7 +1134,12 @@ namespace IntercomFirmwareTool.Core
             sb.Append("CAMERA_ONDEMAND_ENABLED=")
                 .Append(opts.CameraEnabled && opts.CameraOnDemand ? '1' : '0')
                 .Append('\n');
-            sb.Append("CAMERA_VIEW_IDLE_SECS=").Append(opts.CameraViewIdleSecs).Append('\n');
+            // Coerce a non-positive idle window to the default (30) HERE too, so the emitted conf is
+            // always a valid value rather than a 0/negative the daemon would silently override —
+            // keeping the written conf and the daemon's effective behaviour in step (Copilot).
+            sb.Append("CAMERA_VIEW_IDLE_SECS=")
+                .Append(opts.CameraViewIdleSecs > 0 ? opts.CameraViewIdleSecs : 30)
+                .Append('\n');
 
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 
