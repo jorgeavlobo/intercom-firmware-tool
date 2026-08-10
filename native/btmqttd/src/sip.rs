@@ -565,34 +565,52 @@ async fn session(
     // Await the final response to the INVITE. 1xx are provisional; 2xx confirms; >=300 is failure.
     // ONCE THE INVITE IS ON THE WIRE, EVERY exit other than a clean final response must run the
     // cancellation routine — over TCP, dropping the socket does NOT cancel the INVITE, so a late 200
-    // could otherwise pin the panel. Three such exits are handled together here:
-    //   * outer timeout (no final response within RESPONSE_TIMEOUT),
-    //   * reader error from wait_final_response (EOF / cap / read error — flexisip may already have
-    //     forwarded the INVITE, e.g. when it closes our leg before the panel's final response), and
-    //   * daemon shutdown while we're still waiting (run() can't interrupt an in-flight session and
-    //     main.rs bounds shutdown to a few seconds, so we must observe `stopping` ourselves).
-    // All three route through cancel_pending_invite (CANCEL + drain + ACK/BYE a racing 2xx). The read
-    // accumulator is owned HERE so a timeout mid-2xx carries the partial bytes into that drain (Codex).
+    // could otherwise pin the panel. The wait is a select over four events:
+    //   * a clean final response (the only path that continues to ACK the dialog),
+    //   * the outer RESPONSE_TIMEOUT deadline, or a reader error from wait_final_response,
+    //   * daemon shutdown (run() can't interrupt an in-flight session; main.rs bounds shutdown), and
+    //   * a `Stop` on view_rx — pressing "Stop Camera" WHILE the INVITE is still pending must abort the
+    //     start PROMPTLY, not sit queued up to RESPONSE_TIMEOUT while the panel establishes (Codex +
+    //     CodeRabbit). A redundant `Start` in this window is ignored (the INVITE already serves it).
+    // The timeout is an ABSOLUTE deadline (timeout_at) so a `Start` poke doesn't restart the 10 s
+    // budget each loop turn. All non-success exits route through cancel_pending_invite (CANCEL + drain
+    // + ACK/BYE a racing 2xx); the accumulator is owned HERE so a timeout mid-2xx carries its partial
+    // bytes into that drain.
     let mut acc: Vec<u8> = Vec::new();
-    let outcome = tokio::select! {
-        biased;
-        _ = wait_until_stopping(stopping) => None, // shutdown ⇒ abandon + cancel
-        res = tokio::time::timeout(RESPONSE_TIMEOUT, wait_final_response(&mut sock, &mut acc)) => Some(res),
-    };
-    let final_resp = match outcome {
-        Some(Ok(Ok(resp))) => resp, // a clean final response — the only path that continues
-        other => {
-            let seed = std::mem::take(&mut acc);
-            cancel_pending_invite(&mut sock, &mut d, seed).await;
-            return match other {
-                None => Ok(()), // graceful shutdown: dialog cancelled, nothing left pinned
-                Some(Err(_)) => Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "INVITE response timed out (CANCEL sent)",
-                )),
-                Some(Ok(Err(e))) => Err(e), // reader error; cancelled best-effort
-                Some(Ok(Ok(_))) => unreachable!("handled by the success arm above"),
-            };
+    let resp_deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
+    let final_resp = loop {
+        tokio::select! {
+            biased;
+            _ = wait_until_stopping(stopping) => {
+                let seed = std::mem::take(&mut acc);
+                cancel_pending_invite(&mut sock, &mut d, seed).await;
+                return Ok(()); // shutdown: dialog cancelled, nothing left pinned
+            }
+            v = view_rx.recv() => match v {
+                Some(ViewCmd::Start) => continue, // redundant poke while establishing — keep waiting
+                Some(ViewCmd::Stop) | None => {    // user aborted the start (or the channel closed)
+                    let seed = std::mem::take(&mut acc);
+                    cancel_pending_invite(&mut sock, &mut d, seed).await;
+                    return Ok(());
+                }
+            },
+            res = tokio::time::timeout_at(resp_deadline, wait_final_response(&mut sock, &mut acc)) => {
+                match res {
+                    Ok(Ok(resp)) => break resp, // a clean final response — continue below
+                    other => {
+                        let seed = std::mem::take(&mut acc);
+                        cancel_pending_invite(&mut sock, &mut d, seed).await;
+                        return match other {
+                            Err(_) => Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "INVITE response timed out (CANCEL sent)",
+                            )),
+                            Ok(Err(e)) => Err(e), // reader error; cancelled best-effort
+                            Ok(Ok(_)) => unreachable!("handled by the break arm above"),
+                        };
+                    }
+                }
+            }
         }
     };
 
@@ -689,10 +707,12 @@ async fn session(
                         break 'dialog;
                     }
                 }
-                // A confirmed dialog: a socket error must still BYE (best-effort) before propagating,
-                // or the panel keeps the camera up until its own timeout (same as the cap arm above).
+                // A socket error on a CONFIRMED dialog (ConnectionReset / BrokenPipe / …) means the
+                // signalling connection is gone — BYEing THIS dead socket would silently fail and leave
+                // the panel streaming, so tear the dialog down over a FRESH connection (like the Ok(0)
+                // EOF case) before propagating the error for backoff (Codex).
                 Err(e) => {
-                    teardown_bye(&mut sock, &d).await;
+                    bye_reconnect(cfg, &d).await;
                     return Err(e);
                 }
             },
