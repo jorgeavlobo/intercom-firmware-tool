@@ -125,7 +125,11 @@ pub fn devaddr_from_mymodules(content: &str, own_addr: &str) -> Option<String> {
         if !addr_match {
             continue;
         }
-        let Some(id) = m.get("id").and_then(Value::as_str) else {
+        // A blank `id` on an otherwise-matching module is corrupt/mid-update data: treat it as NO
+        // match (skip) rather than returning `Some("")`, which would pass resolve_identity's
+        // mandatory gate and emit an empty `a=DEVADDR:` — defeating the fail-closed guarantee that we
+        // never originate a ringing INVITE (Codex).
+        let Some(id) = m.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
             continue;
         };
         if hit.is_some() {
@@ -260,6 +264,32 @@ pub fn build_ack(d: &Dialog, ack_branch: &str) -> String {
         ftag = d.from_tag,
         aor = d.aor,
         ttag = d.to_tag,
+        callid = d.call_id,
+        cseq = d.cseq,
+    )
+}
+
+/// CANCEL a still-pending INVITE (RFC 3261 §9.1). It MUST reuse the INVITE's Request-URI, `Call-ID`,
+/// `From`-tag, `To` (no tag yet — the transaction isn't confirmed), CSeq NUMBER (method `CANCEL`) and,
+/// critically, the SAME top `Via` branch as the INVITE it cancels, so the proxy matches it to that
+/// transaction. Sent best-effort if the INVITE times out, so a late `200` can't bring the panel
+/// session up after we've walked away (a dropped TCP connection does not cancel a SIP transaction).
+pub fn build_cancel(d: &Dialog) -> String {
+    format!(
+        "CANCEL sip:{aor}@{domain} SIP/2.0\r\n\
+         Via: SIP/2.0/TCP 127.0.0.1:{lport};rport;branch={branch}\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:btmqttd@{domain}>;tag={ftag}\r\n\
+         To: <sip:{aor}@{domain}>\r\n\
+         Call-ID: {callid}\r\n\
+         CSeq: {cseq} CANCEL\r\n\
+         Content-Length: 0\r\n\
+         \r\n",
+        aor = d.aor,
+        domain = d.domain,
+        lport = d.local_port,
+        branch = d.branch,
+        ftag = d.from_tag,
         callid = d.call_id,
         cseq = d.cseq,
     )
@@ -497,9 +527,24 @@ async fn session(
     sock.flush().await?;
 
     // Await the final response to the INVITE. 1xx are provisional; 2xx confirms; >=300 is failure.
-    let final_resp = tokio::time::timeout(RESPONSE_TIMEOUT, wait_final_response(&mut sock))
-        .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "INVITE response timed out"))??;
+    let final_resp = match tokio::time::timeout(RESPONSE_TIMEOUT, wait_final_response(&mut sock)).await {
+        Ok(r) => r?,
+        Err(_) => {
+            // No final response in time. Over TCP, simply dropping the connection does NOT cancel the
+            // INVITE transaction, and a late 200 could still bring the panel session up after we
+            // return — pinning the door camera (the exact failure the fail-closed design avoids).
+            // Best-effort CANCEL on the same connection, then briefly drain the 200-to-CANCEL /
+            // 487-to-INVITE before closing (CodeRabbit).
+            let _ = sock.write_all(build_cancel(&d).as_bytes()).await;
+            let _ = sock.flush().await;
+            let mut drain = [0u8; 1024];
+            let _ = tokio::time::timeout(Duration::from_secs(1), sock.read(&mut drain)).await;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "INVITE response timed out (CANCEL sent)",
+            ));
+        }
+    };
 
     let status = parse_status(&final_resp)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no SIP status line"))?;
@@ -540,8 +585,14 @@ async fn session(
     let idle = Duration::from_secs(cfg.camera_view_idle_secs);
     let mut deadline = tokio::time::Instant::now() + idle;
     let mut scratch = [0u8; 4096];
+    // FRAME in-dialog requests the same way `wait_final_response` frames responses: TCP can split a
+    // panel BYE across reads, or coalesce it after other in-dialog traffic, so inspecting one raw
+    // read chunk could miss the `BYE ` prefix (⇒ no 200 OK, the panel retransmits) or see the prefix
+    // before its headers are complete (⇒ `build_ok_to` returns None yet we'd mark the dialog ended).
+    // Accumulate, then act only on COMPLETE messages (Codex + CodeRabbit).
+    let mut inbound: Vec<u8> = Vec::new();
     let mut panel_ended = false; // the panel tore the dialog down first ⇒ don't send our own BYE
-    loop {
+    'dialog: loop {
         if stopping.load(Ordering::Relaxed) {
             break;
         }
@@ -553,18 +604,30 @@ async fn session(
             r = sock.read(&mut scratch) => match r {
                 Ok(0) => { panel_ended = true; break; } // panel closed the connection
                 Ok(n) => {
-                    // A panel-initiated BYE ends the dialog: acknowledge it (200 OK, else the panel
-                    // retransmits) and stop — we must NOT then send our own BYE to a dead dialog.
-                    let msg = String::from_utf8_lossy(&scratch[..n]);
-                    if is_bye(&msg) {
+                    inbound.extend_from_slice(&scratch[..n]);
+                    if inbound.len() > MAX_SIP_BYTES {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "in-dialog SIP request exceeded cap",
+                        ));
+                    }
+                    // Drain every complete message now buffered. A panel-initiated BYE ends the
+                    // dialog: acknowledge it (200 OK, else the panel retransmits) and stop — we must
+                    // NOT then send our own BYE to a dead dialog. Other in-dialog traffic
+                    // (OPTIONS/re-INVITE/media stats) is ignored and does NOT refresh the deadline.
+                    while let Some(len) = complete_message_len(&inbound) {
+                        let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
+                        inbound.drain(..len);
+                        if !is_bye(&msg) {
+                            continue;
+                        }
                         if let Some(ok) = build_ok_to(&msg) {
                             let _ = sock.write_all(ok.as_bytes()).await;
                             let _ = sock.flush().await;
                         }
                         panel_ended = true;
-                        break;
+                        break 'dialog;
                     }
-                    // else: ignore other mid-dialog traffic; it does NOT refresh the idle deadline.
                 }
                 Err(e) => return Err(e),
             },
@@ -694,6 +757,12 @@ mod tests {
         // Garbage / missing modules array ⇒ None, not a panic.
         assert_eq!(devaddr_from_mymodules("not json", "20"), None);
         assert_eq!(devaddr_from_mymodules("{}", "20"), None);
+        // A matching EU@20 with a BLANK id is corrupt/mid-update data ⇒ None, NOT Some(""), so the
+        // mandatory gate can't be defeated into emitting an empty `a=DEVADDR:` (Codex).
+        let blank = r#"{"modules":[
+            {"system":"videodoorentry","deviceType":"EU","id":"",
+             "privateAddress":{"addressValues":[{"name":"address","value":"20"}]}}]}"#;
+        assert_eq!(devaddr_from_mymodules(blank, "20"), None);
     }
 
     #[test]
@@ -786,6 +855,53 @@ mod tests {
         assert!(ok.contains("Call-ID: cid123\r\n"));
         assert!(ok.contains("CSeq: 22 BYE\r\n")); // same CSeq so the panel matches the transaction
         assert!(ok.ends_with("Content-Length: 0\r\n\r\n"));
+    }
+
+    #[test]
+    fn cancel_reuses_the_invite_branch_and_cseq_number() {
+        let d = Dialog {
+            aor: "c100x".into(),
+            domain: "dev.example".into(),
+            local_port: 5555,
+            call_id: "abcd".into(),
+            from_tag: "ft".into(),
+            branch: "z9hG4bKinvitebranch".into(),
+            cseq: 21,
+            to_tag: String::new(), // not yet confirmed
+            remote_target: String::new(),
+        };
+        let cancel = build_cancel(&d);
+        assert!(cancel.starts_with("CANCEL sip:c100x@dev.example SIP/2.0\r\n"));
+        // MUST match the INVITE it cancels: same branch, same CSeq number, method CANCEL.
+        assert!(cancel.contains("branch=z9hG4bKinvitebranch\r\n"));
+        assert!(cancel.contains("CSeq: 21 CANCEL\r\n"));
+        // No To-tag (the transaction isn't confirmed) and no body.
+        assert!(cancel.contains("To: <sip:c100x@dev.example>\r\n"));
+        assert!(cancel.ends_with("Content-Length: 0\r\n\r\n"));
+    }
+
+    #[test]
+    fn a_panel_bye_split_across_reads_is_framed_before_acting() {
+        // Regression for the in-dialog framing fix (Codex/CodeRabbit): a BYE that arrives in two TCP
+        // chunks must only be recognized once BOTH halves have accumulated. Mirrors the loop's logic:
+        // accumulate, then act only on a message complete_message_len() confirms.
+        let bye = "BYE sip:btmqttd@127.0.0.1:5060 SIP/2.0\r\n\
+                   Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKsplit\r\n\
+                   From: <sip:app@d>;tag=ft\r\n\
+                   To: <sip:c100x@d>;tag=tt\r\n\
+                   Call-ID: cid\r\n\
+                   CSeq: 9 BYE\r\n\
+                   Content-Length: 0\r\n\r\n";
+        let (head, tail) = bye.split_at(40); // split mid-headers
+        let mut inbound = head.as_bytes().to_vec();
+        // First chunk: not yet a complete message, so nothing is acted upon.
+        assert_eq!(complete_message_len(&inbound), None);
+        // Second chunk completes it: now it frames, and the framed message is the BYE.
+        inbound.extend_from_slice(tail.as_bytes());
+        let len = complete_message_len(&inbound).expect("now complete");
+        let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
+        assert!(is_bye(&msg));
+        assert!(build_ok_to(&msg).is_some()); // the 200 OK we must send back is well-formed
     }
 
     #[test]
