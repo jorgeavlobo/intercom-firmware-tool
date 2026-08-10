@@ -59,8 +59,9 @@ public class MqttCameraConfTests
     [Fact]
     public void Disabled_camera_writes_an_empty_target()
     {
-        // Camera off: the target is irrelevant (av.rs never arms) and is never serialized — even a
-        // value that is set — so a stray multi-line paste can't inject a second KEY=value line.
+        // Camera off: the target is irrelevant (av.rs never arms). The CAMERA_TARGET_HOST line is
+        // still emitted, but its value is forced empty — the user's value is never written — so a
+        // stray multi-line paste can't inject a second KEY=value line.
         var conf = MqttInstaller.GenerateConf(new MqttOptions("broker.lan")
         {
             CameraEnabled = false,
