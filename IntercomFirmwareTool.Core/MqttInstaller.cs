@@ -1438,12 +1438,14 @@ namespace IntercomFirmwareTool.Core
             entities.Add(new HaEntity("doorbell.json", Topic("event", "doorbell"), ""));
 
             // Entrance-panel call: a momentary EVENT fired when the OUTDOOR door-station call is
-            // seen on the bus (WHO=8 `*8*1#1#4#21*<WHERE>##`). `event_types` lists "pressed";
-            // btmqttd publishes {"event_type":"pressed","where":…,"ts":…} NON-retained, so it fires
-            // once per ring and never re-fires on an HA reconnect. HA reads `event_type` from
-            // the JSON and exposes the extra `where` and `ts` keys as attributes.
+            // seen on the bus (WHO=8 `*8*1#1#4#21*<WHERE>##`). `event_types` lists "ring" — the
+            // standard type HA's `doorbell` device class defines/requires (a non-"ring" type is
+            // deprecated and stops working in HA 2027.4, issue #116). btmqttd publishes
+            // {"event_type":"ring","where":…,"ts":…} NON-retained, so it fires once per ring and never
+            // re-fires on an HA reconnect. HA reads `event_type` from the JSON and exposes the extra
+            // `where` and `ts` keys as attributes.
             //
-            // FRESHNESS (issue #71): a momentary "pressed" is only meaningful NOW. btmqttd already
+            // FRESHNESS (issue #71): a momentary "ring" is only meaningful NOW. btmqttd already
             // drops it at the source while the broker is offline (never queued for a late replay),
             // but the `ts` (UTC ISO-8601) is the END-TO-END backstop: gate any time-sensitive
             // automation on it so a stale event that somehow arrived late is ignored, e.g.
@@ -1466,7 +1468,7 @@ namespace IntercomFirmwareTool.Core
                     unique_id = $"{node}_entrance_panel_call",
                     default_entity_id = EntId("event", "entrance_panel_call"),
                     state_topic = opts.EffectiveTopicEntrancePanelCall,
-                    event_types = new[] { "pressed" },
+                    event_types = new[] { "ring" },
                     device_class = "doorbell",
                     icon = "mdi:bell-ring",
                     availability_topic = opts.TopicLastWill,
@@ -1478,7 +1480,7 @@ namespace IntercomFirmwareTool.Core
             // Floor call: a momentary EVENT fired when the dumb push-button at the apartment's
             // OWN front door is pressed (WHO=8 `*8*1#13#2*<WHERE>##`). Wholly INDEPENDENT from the
             // entrance-panel call above — a separate entity so automations never conflate the two.
-            // Same delivery model: {"event_type":"pressed","where":…,"ts":…} NON-retained, fires
+            // Same delivery model: {"event_type":"ring","where":…,"ts":…} NON-retained, fires
             // once per ring, and carries the same `ts` freshness stamp (gate time-sensitive
             // automations on it — see the entrance-panel entity above). btmqttd also SUPPRESSES the
             // concurrent dim-35 ringing so a floor call never surfaces on the entrance-panel
@@ -1492,7 +1494,7 @@ namespace IntercomFirmwareTool.Core
                     unique_id = $"{node}_floor_call",
                     default_entity_id = EntId("event", "floor_call"),
                     state_topic = opts.EffectiveTopicFloorCall,
-                    event_types = new[] { "pressed" },
+                    event_types = new[] { "ring" },
                     device_class = "doorbell",
                     icon = "mdi:doorbell",
                     availability_topic = opts.TopicLastWill,

@@ -624,7 +624,7 @@ async fn publish_frame(
     } else if let Some(muted) = dimension::parse_mute_report(frame) {
         volume.observe_mute(muted).await;
     } else if let Some(where_) = dimension::parse_entrance_panel_call(frame) {
-        // Entrance-panel CALL (outdoor door station): fire a momentary "pressed" event AND
+        // Entrance-panel CALL (outdoor door station): fire a momentary "ring" event AND
         // classify this call as an entrance-panel call. The `*#8**35*1` ringing frame arrives
         // BEFORE this classifying frame, so the classifier held it as Pending (Suppressed);
         // flush that held ring now that we know it's a real entrance call (arming the watchdog).
@@ -691,7 +691,7 @@ async fn publish_frame(
     outcome
 }
 
-/// Publish a momentary "pressed" call event (`kind` names it in the error log) to `topic`. Used
+/// Publish a momentary "ring" call event (`kind` names it in the error log) to `topic`. Used
 /// for BOTH the entrance-panel call and the floor call, which are wholly independent rings on
 /// separate HA `event` entities but share identical delivery semantics — one helper keeps the
 /// payload shape, QoS, retain flag and non-blocking behaviour defined in exactly one place.
@@ -790,20 +790,24 @@ impl MomentaryDebounce {
     }
 }
 
-/// Build the momentary "pressed" event payload: the HA `event_type`, the WHERE (informational),
+/// Build the momentary "ring" event payload: the HA `event_type`, the WHERE (informational),
 /// and `ts` — a UTC ISO-8601 stamp (same format as the bus-frame `ts`, see [`own::utc_now_iso`]).
+///
+/// `event_type` is `ring` (not `pressed`): both call events are published to HA `event` entities
+/// with `device_class: doorbell`, and HA's doorbell device class defines/requires the standard
+/// `ring` event type (a non-`ring` type is deprecated and stops working in HA 2027.4 — issue #116).
 ///
 /// The `ts` is the END-TO-END freshness guard, the transport-independent complement to the
 /// producer-side drop/purge (issue #71). The drop (offline gate) and purge (disconnect handler)
 /// stop a stale event at the source, but they lean on rumqttc internals; `ts` lets the CONSUMER
 /// enforce its own TTL regardless — an HA automation gated on `-1 <= now - ts < N s` (bounded both
 /// sides, -1 s tolerating whole-second `ts` + tiny clock skew; future-dated events can't read fresh)
-/// ignores any late "pressed", so a time-sensitive automation never fires after the fact even if a stale
+/// ignores any late "ring", so a time-sensitive automation never fires after the fact even if a stale
 /// event slipped past every transport layer. A momentary event has no meaning once stale, and
 /// freshness is only truly knowable where the meaning lives (the consumer).
 fn momentary_payload(where_: &str) -> String {
     serde_json::json!({
-        "event_type": "pressed",
+        "event_type": "ring",
         "where": where_,
         "ts": own::utc_now_iso(),
     })
@@ -928,12 +932,13 @@ mod tests {
 
     #[test]
     fn momentary_payload_carries_event_type_where_and_a_utc_ts() {
-        // The published "pressed" payload must carry the HA `event_type`, the WHERE, and a `ts`
+        // The published "ring" payload must carry the HA `event_type`, the WHERE, and a `ts`
         // so a consumer can enforce its own freshness TTL (issue #71, end-to-end guard). Parse it
         // back rather than string-match, so the assertion survives key reordering.
         let v: serde_json::Value =
             serde_json::from_str(&momentary_payload("1#1#4#21")).unwrap();
-        assert_eq!(v["event_type"], "pressed");
+        // `ring` (not `pressed`): required by HA's doorbell device class (issue #116).
+        assert_eq!(v["event_type"], "ring");
         assert_eq!(v["where"], "1#1#4#21");
         // ts is a UTC ISO-8601 stamp (Z suffix), matching the bus-frame `ts` format.
         assert!(v["ts"].as_str().unwrap().ends_with('Z'));
