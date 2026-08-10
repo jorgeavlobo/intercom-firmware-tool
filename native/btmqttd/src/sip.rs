@@ -773,6 +773,30 @@ async fn write_all_flush(sock: &mut TcpStream, bytes: &[u8]) -> std::io::Result<
     sock.flush().await
 }
 
+/// ACK a racing INVITE 2xx then BYE it on `sock`, reading the `200`-to-BYE best-effort. Returns Err
+/// if EITHER write fails, so the caller can redo the whole ACK+BYE over a fresh connection (a BYE to
+/// an un-ACKed 2xx is unreliable — this dialog was never ACKed on a live socket).
+async fn ack_then_bye(sock: &mut TcpStream, d: &Dialog) -> std::io::Result<()> {
+    write_all_flush(sock, build_ack(d, &format!("z9hG4bK{}", rand_hex(8))).as_bytes()).await?;
+    write_all_flush(sock, build_bye(d, &format!("z9hG4bK{}", rand_hex(8))).as_bytes()).await?;
+    let mut scratch = [0u8; 256];
+    let _ = tokio::time::timeout(Duration::from_secs(1), sock.read(&mut scratch)).await;
+    Ok(())
+}
+
+/// Redo an ACK+BYE for a racing 2xx over a FRESH loopback connection (with its new local port), when
+/// the original socket died before/between the ACK and BYE. Best-effort — if we can't reconnect,
+/// there's nothing more we can do.
+async fn ack_bye_reconnect(cfg: &Config, d: &Dialog) {
+    if let Ok(mut sock) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
+        let mut d2 = d.clone();
+        if let Ok(a) = sock.local_addr() {
+            d2.local_port = a.port();
+        }
+        let _ = ack_then_bye(&mut sock, &d2).await;
+    }
+}
+
 /// BYE a CONFIRMED dialog on the given socket, then read the `200`-to-BYE best-effort. Returns the
 /// write/flush result so a caller on the LIVE-socket path can tell when the socket turned out dead
 /// (`ConnectionReset`/`BrokenPipe`) and fall back to `bye_reconnect` — otherwise a discarded write
@@ -842,16 +866,12 @@ async fn drain_after_cancel(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, 
                     d.to_tag = tag;
                     d.remote_target =
                         contact_uri(&msg).unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
-                    // ACK the 2xx, then BYE it. If the socket dies between the two (reset after ACK,
-                    // before BYE), teardown_bye returns Err and we retry the BYE over a fresh
-                    // connection — otherwise the accepted dialog would keep the camera streaming (Codex).
-                    let _ = write_all_flush(
-                        sock,
-                        build_ack(d, &format!("z9hG4bK{}", rand_hex(8))).as_bytes(),
-                    )
-                    .await;
-                    if teardown_bye(sock, d).await.is_err() {
-                        bye_reconnect(cfg, d).await;
+                    // This 2xx was never ACKed on a live socket, so the teardown is ACK-then-BYE. If
+                    // EITHER write fails (socket reset before the ACK reaches flexisip, or between ACK
+                    // and BYE), redo BOTH over a fresh connection — a BYE alone to an unacknowledged
+                    // 2xx is unreliable and could leave the camera streaming (CodeRabbit).
+                    if ack_then_bye(sock, d).await.is_err() {
+                        ack_bye_reconnect(cfg, d).await;
                     }
                 }
                 return;
