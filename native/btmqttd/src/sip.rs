@@ -418,6 +418,23 @@ pub fn is_bye(msg: &str) -> bool {
     msg.lines().next().is_some_and(|l| l.starts_with("BYE "))
 }
 
+/// The SIP method of a REQUEST message — the first token of a request-line like
+/// `OPTIONS sip:… SIP/2.0`. `None` if `msg` is a RESPONSE (status-line starting `SIP/2.0`) or has no
+/// recognizable request-line. Used in the established-dialog hold loop to answer in-dialog requests
+/// (OPTIONS/re-INVITE/…) so the panel's transaction completes instead of timing out.
+fn request_method(msg: &str) -> Option<&str> {
+    let line = msg.lines().next()?;
+    if line.starts_with("SIP/2.0") {
+        return None; // a response, not a request
+    }
+    // request-line = METHOD SP Request-URI SP SIP-Version; require the trailing SIP-Version so a
+    // stray/garbled line isn't mistaken for a request.
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?;
+    let has_version = line.split_whitespace().next_back().is_some_and(|v| v.starts_with("SIP/2.0"));
+    (has_version && !method.is_empty()).then_some(method)
+}
+
 /// True when `msg`'s `CSeq` method is `INVITE` (case-insensitive) — i.e. the response belongs to the
 /// INVITE transaction, not to a `CANCEL`/`BYE`/`OPTIONS` we may also have in flight.
 fn cseq_is_invite(msg: &str) -> bool {
@@ -433,11 +450,15 @@ pub fn is_established_invite_2xx(msg: &str) -> bool {
     matches!(parse_status(msg), Some(s) if (200..300).contains(&s)) && cseq_is_invite(msg)
 }
 
-/// A `200 OK` to an in-dialog request (the panel's BYE), echoing the headers the transaction needs:
-/// every `Via` (in order), plus `From`/`To`/`Call-ID`/`CSeq`. `None` if a required header is absent
-/// (then we simply let the peer's retransmits lapse). Sent so the panel doesn't retransmit its BYE.
-pub fn build_ok_to(request: &str) -> Option<String> {
-    let mut out = String::from("SIP/2.0 200 OK\r\n");
+/// A bodyless response to an in-dialog request, echoing the headers the transaction needs: every
+/// `Via` (in order), plus `From`/`To`/`Call-ID`/`CSeq`. `status_line` is the full first line, e.g.
+/// `"SIP/2.0 200 OK"` or `"SIP/2.0 488 Not Acceptable Here"`. `None` if a required header is absent
+/// (then we simply let the peer's retransmits lapse). In-dialog the request's `To` already carries
+/// OUR local tag, so echoing it verbatim keeps the dialog identity correct.
+pub fn build_response_to(request: &str, status_line: &str) -> Option<String> {
+    let mut out = String::with_capacity(status_line.len() + 160);
+    out.push_str(status_line);
+    out.push_str("\r\n");
     for line in request.lines() {
         if line.is_empty() {
             break; // end of headers
@@ -455,6 +476,12 @@ pub fn build_ok_to(request: &str) -> Option<String> {
     }
     out.push_str("Content-Length: 0\r\n\r\n");
     Some(out)
+}
+
+/// A `200 OK` to an in-dialog request (the panel's BYE / OPTIONS), echoing the transaction headers.
+/// `None` if a required header is absent. Sent so the panel doesn't retransmit its request.
+pub fn build_ok_to(request: &str) -> Option<String> {
+    build_response_to(request, "SIP/2.0 200 OK")
 }
 
 // ---- randomness for SIP tokens + the throwaway SRTP key --------------------------------------
@@ -749,8 +776,9 @@ async fn session(
                     }
                     // Drain every complete message now buffered. A panel-initiated BYE ends the
                     // dialog: acknowledge it (200 OK, else the panel retransmits) and stop — we must
-                    // NOT then send our own BYE to a dead dialog. Other in-dialog traffic
-                    // (OPTIONS/re-INVITE/media stats) is ignored and does NOT refresh the deadline.
+                    // NOT then send our own BYE to a dead dialog. Every OTHER in-dialog request gets a
+                    // final response so the panel's transaction completes instead of timing out, but
+                    // NONE of them refreshes the idle deadline (only a real viewer poke does).
                     while let Some(len) = complete_message_len(&inbound) {
                         let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
                         inbound.drain(..len);
@@ -769,8 +797,31 @@ async fn session(
                         if is_established_invite_2xx(&msg) {
                             let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
                             let _ = write_all_flush(&mut sock, ack.as_bytes()).await;
+                            continue;
                         }
-                        // else: other in-dialog traffic (OPTIONS/re-INVITE/media stats) — ignored.
+                        // Answer in-dialog REQUESTS the panel sends mid-session. Leaving them
+                        // unanswered lets the peer transaction time out — and a session-refresh
+                        // re-INVITE that times out can make the panel tear down the camera dialog
+                        // BEFORE our idle deadline (Codex). We never renegotiate media:
+                        //   * OPTIONS               → 200 OK (in-dialog keepalive/capability probe)
+                        //   * re-INVITE / UPDATE    → 488 Not Acceptable Here — an explicit rejection
+                        //     that COMPLETES the transaction while leaving the existing session
+                        //     unchanged (RFC 3261 §14.2 / RFC 3311); a bare 200 OK would be a 2xx to an
+                        //     offer with no SDP answer, which is worse than a clean refusal.
+                        //   * anything else (INFO/NOTIFY/…) → 200 OK completes it with no session impact
+                        // Responses (e.g. a stray provisional) return None here and are ignored.
+                        if let Some(method) = request_method(&msg) {
+                            let resp = if method.eq_ignore_ascii_case("INVITE")
+                                || method.eq_ignore_ascii_case("UPDATE")
+                            {
+                                build_response_to(&msg, "SIP/2.0 488 Not Acceptable Here")
+                            } else {
+                                build_ok_to(&msg)
+                            };
+                            if let Some(resp) = resp {
+                                let _ = write_all_flush(&mut sock, resp.as_bytes()).await;
+                            }
+                        }
                     }
                 }
                 // A socket error on a CONFIRMED dialog (ConnectionReset / BrokenPipe / …) means the
@@ -1212,6 +1263,51 @@ mod tests {
         assert!(ok.contains("Call-ID: cid123\r\n"));
         assert!(ok.contains("CSeq: 22 BYE\r\n")); // same CSeq so the panel matches the transaction
         assert!(ok.ends_with("Content-Length: 0\r\n\r\n"));
+    }
+
+    #[test]
+    fn request_method_extracts_the_method_and_ignores_responses() {
+        assert_eq!(request_method("OPTIONS sip:x@127.0.0.1 SIP/2.0\r\n\r\n"), Some("OPTIONS"));
+        assert_eq!(request_method("INVITE sip:x@127.0.0.1 SIP/2.0\r\n\r\n"), Some("INVITE"));
+        assert_eq!(request_method("UPDATE sip:x@127.0.0.1 SIP/2.0\r\n\r\n"), Some("UPDATE"));
+        // A response is NOT a request — the hold loop must not treat a stray 200/1xx as one.
+        assert_eq!(request_method("SIP/2.0 200 OK\r\nCSeq: 1 OPTIONS\r\n\r\n"), None);
+        assert_eq!(request_method("SIP/2.0 180 Ringing\r\n\r\n"), None);
+        // A garbled first line without a SIP-Version token is not a request.
+        assert_eq!(request_method("garbage\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn in_dialog_options_gets_200_and_reinvite_gets_488() {
+        // An in-dialog OPTIONS keepalive: answer 200 OK echoing the transaction headers so the
+        // panel's OPTIONS transaction completes (no timeout), session untouched.
+        let options = "OPTIONS sip:btmqttd@127.0.0.1:5060 SIP/2.0\r\n\
+                       Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKopt\r\n\
+                       From: <sip:app@d>;tag=ft\r\n\
+                       To: <sip:c100x@d>;tag=tt\r\n\
+                       Call-ID: cid\r\n\
+                       CSeq: 30 OPTIONS\r\n\
+                       Content-Length: 0\r\n\r\n";
+        assert_eq!(request_method(options), Some("OPTIONS"));
+        let ok = build_ok_to(options).unwrap();
+        assert!(ok.starts_with("SIP/2.0 200 OK\r\n"));
+        assert!(ok.contains("CSeq: 30 OPTIONS\r\n"));
+        assert!(ok.contains("Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKopt\r\n"));
+
+        // A session-refresh re-INVITE: reject with 488 so the transaction completes without
+        // renegotiating media — the existing camera session continues (RFC 3261 §14.2).
+        let reinvite = "INVITE sip:btmqttd@127.0.0.1:5060 SIP/2.0\r\n\
+                        Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKrei\r\n\
+                        From: <sip:app@d>;tag=ft\r\n\
+                        To: <sip:c100x@d>;tag=tt\r\n\
+                        Call-ID: cid\r\n\
+                        CSeq: 31 INVITE\r\n\
+                        Content-Length: 0\r\n\r\n";
+        let rej = build_response_to(reinvite, "SIP/2.0 488 Not Acceptable Here").unwrap();
+        assert!(rej.starts_with("SIP/2.0 488 Not Acceptable Here\r\n"));
+        assert!(rej.contains("CSeq: 31 INVITE\r\n")); // same CSeq ⇒ panel matches its INVITE txn
+        assert!(rej.contains("To: <sip:c100x@d>;tag=tt\r\n")); // our local tag preserved
+        assert!(rej.ends_with("Content-Length: 0\r\n\r\n"));
     }
 
     #[test]
