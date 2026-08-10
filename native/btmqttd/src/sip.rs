@@ -213,7 +213,10 @@ pub fn build_sdp_offer(video_port: u16, audio_port: u16, srtp_key_b64: &str, dev
     )
 }
 
-/// The mutable per-call state we carry from the INVITE through ACK/BYE.
+/// The mutable per-call state we carry from the INVITE through ACK/BYE. `Clone` so a teardown over a
+/// FRESH connection (when the original signalling socket died mid-dialog) can reuse the dialog
+/// identity while swapping in the new local port.
+#[derive(Clone)]
 pub struct Dialog {
     pub aor: String,
     pub domain: String,
@@ -485,16 +488,28 @@ fn srtp_key() -> String {
 
 // ---- the driver ------------------------------------------------------------------------------
 
-/// Run the on-demand SIP UA. Waits for a view request on `view_rx`; each request brings the panel
-/// session up (if not already up) and refreshes an idle deadline. After
-/// `cfg.camera_view_idle_secs` with no further request the dialog is torn down (BYE) so the panel
-/// is never left pinned. Returns when `stopping` is observed (draining the active dialog first).
-pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, mut view_rx: mpsc::Receiver<()>) {
+/// A command on the trigger channel. `Start` = the HA "View Camera" button (bring the session up and
+/// refresh the idle timer); `Stop` = the HA "Stop Camera" button (end the on-demand view now instead
+/// of waiting for the idle timeout). A `Stop` received while idle is a harmless no-op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewCmd {
+    Start,
+    Stop,
+}
+
+/// Run the on-demand SIP UA. Waits for a `Start` on `view_rx`; each brings the panel session up (if
+/// not already up) and refreshes an idle deadline. After `cfg.camera_view_idle_secs` with no further
+/// request — or on an explicit `Stop` — the dialog is torn down (BYE) so the panel is never left
+/// pinned. Returns when `stopping` is observed (draining the active dialog first).
+pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, mut view_rx: mpsc::Receiver<ViewCmd>) {
     let mut backoff = BACKOFF_INIT;
     while !stopping.load(Ordering::Relaxed) {
-        // Idle until a view is requested (or the trigger channel closes ⇒ shutting down).
-        if view_rx.recv().await.is_none() {
-            return;
+        // Idle until a Start is requested (channel closed ⇒ shutting down). A Stop while idle has
+        // nothing to stop — ignore it and keep waiting.
+        match view_rx.recv().await {
+            None => return,
+            Some(ViewCmd::Stop) => continue,
+            Some(ViewCmd::Start) => {}
         }
         if stopping.load(Ordering::Relaxed) {
             return;
@@ -515,7 +530,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, mut view_rx: mpsc:
 async fn session(
     cfg: &Arc<Config>,
     stopping: &Arc<AtomicBool>,
-    view_rx: &mut mpsc::Receiver<()>,
+    view_rx: &mut mpsc::Receiver<ViewCmd>,
 ) -> std::io::Result<()> {
     let (aor, domain, devaddr) = resolve_identity(cfg).await.ok_or_else(|| {
         std::io::Error::new(
@@ -627,17 +642,22 @@ async fn session(
     // Accumulate, then act only on COMPLETE messages (Codex + CodeRabbit).
     let mut inbound: Vec<u8> = Vec::new();
     let mut panel_ended = false; // the panel tore the dialog down first ⇒ don't send our own BYE
+    let mut transport_lost = false; // the signalling socket died ⇒ BYE over a fresh connection
     'dialog: loop {
         if stopping.load(Ordering::Relaxed) {
             break;
         }
         tokio::select! {
             v = view_rx.recv() => match v {
-                Some(()) => deadline = tokio::time::Instant::now() + idle, // refresh on a real view
-                None => break,                                            // shutting down
+                Some(ViewCmd::Start) => deadline = tokio::time::Instant::now() + idle, // refresh
+                Some(ViewCmd::Stop) => break,  // user pressed "Stop Camera" ⇒ hang up now (our BYE)
+                None => break,                 // shutting down
             },
             r = sock.read(&mut scratch) => match r {
-                Ok(0) => { panel_ended = true; break; } // panel closed the connection
+                // TCP EOF is NOT a panel BYE — flexisip may have closed/restarted our loopback leg
+                // while the SIP dialog is still up. Treat it as transport loss and BYE over a fresh
+                // connection below, so the panel isn't left streaming until its own timeout (Codex).
+                Ok(0) => { transport_lost = true; break; }
                 Ok(n) => {
                     inbound.extend_from_slice(&scratch[..n]);
                     if inbound.len() > MAX_SIP_BYTES {
@@ -680,12 +700,39 @@ async fn session(
         }
     }
 
-    // Teardown: send our BYE unless the panel already ended the dialog (we ACKed its BYE above).
-    if !panel_ended {
+    // Teardown. Three cases:
+    //  * panel_ended — the panel already BYE'd (we ACKed it); sending our own BYE would hit a dead
+    //    dialog, so do nothing.
+    //  * transport_lost — our signalling socket died; the dialog may still be up at flexisip/panel,
+    //    so BYE over a FRESH loopback connection (the dialog is keyed by Call-ID/tags, not the TCP
+    //    connection) rather than writing into the dead socket.
+    //  * otherwise — normal idle/shutdown hang-up on the live socket.
+    if panel_ended {
+        // nothing to send
+    } else if transport_lost {
+        bye_reconnect(cfg, &d).await;
+    } else {
         teardown_bye(&mut sock, &d).await;
     }
     eprintln!("btmqttd: on-demand session torn down (sip:{}@{})", d.aor, d.domain);
     Ok(())
+}
+
+/// BYE a confirmed dialog whose ORIGINAL signalling socket died mid-session (TCP EOF from flexisip).
+/// Opens a fresh loopback connection and sends the in-dialog BYE there — a SIP dialog is identified
+/// by Call-ID + tags, not by the transport connection, so flexisip still routes it to the panel and
+/// the camera session ends instead of running to the panel's own timeout (Codex). Best-effort: if we
+/// can't even reconnect, there's nothing more we can do from here.
+async fn bye_reconnect(cfg: &Config, d: &Dialog) {
+    if let Ok(mut sock) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
+        // Reuse the dialog identity but advertise the NEW local port in Via/Contact so the 200-to-BYE
+        // routes back on this connection.
+        let mut d2 = d.clone();
+        if let Ok(a) = sock.local_addr() {
+            d2.local_port = a.port();
+        }
+        teardown_bye(&mut sock, &d2).await;
+    }
 }
 
 /// Best-effort BYE for a CONFIRMED dialog: end it so the panel drops the camera session, then give

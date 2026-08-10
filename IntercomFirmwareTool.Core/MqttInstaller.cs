@@ -1223,6 +1223,7 @@ namespace IntercomFirmwareTool.Core
             ("light_resync.json", "button", "light_resync"),
             ("light_learn.json", "button", "light_learn"),
             ("view_camera.json", "button", "view_camera"),
+            ("stop_camera.json", "button", "stop_camera"),
         };
 
         /// <summary>
@@ -1725,6 +1726,33 @@ namespace IntercomFirmwareTool.Core
                     }, HaJson)));
             else
                 entities.Add(new HaEntity("view_camera.json", Topic("button", "view_camera"), ""));
+
+            // On-demand viewing (#104): a companion "Stop Camera" button that ends the on-demand view
+            // immediately instead of waiting for the idle timeout — btmqttd sends the dialog's BYE, the
+            // panel drops its A/V session and the go2rtc/HA stream stops. Same opt-in/TOMBSTONE posture
+            // as "View Camera". (A live doorbell ring is a separate panel session and is unaffected.)
+            if (opts.CameraEnabled && opts.CameraOnDemand)
+                entities.Add(new HaEntity(
+                    "stop_camera.json",
+                    Topic("button", "stop_camera"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Stop Camera",
+                        unique_id = $"{node}_stop_camera",
+                        default_entity_id = EntId("button", "stop_camera"),
+                        command_topic = controlTopic,
+                        // QoS 0: a dropped Stop is self-correcting (the idle timeout still fires), and a
+                        // redelivered DUP is harmless (ending an already-ended view is a no-op).
+                        qos = 0,
+                        payload_press = "{\"action\":\"stop_camera\"}",
+                        icon = "mdi:cctv-off",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            else
+                entities.Add(new HaEntity("stop_camera.json", Topic("button", "stop_camera"), ""));
 
             // Stair-light SWITCH (opt-in). The actuator is a stateless TOGGLE with no readable
             // state (firmware-confirmed), so btmqttd tracks the on/off and publishes it retained

@@ -310,11 +310,11 @@ async fn run() -> Result<bool, String> {
     let (sip_task, sip_stopping, view_tx): (
         Option<tokio::task::JoinHandle<()>>,
         Arc<std::sync::atomic::AtomicBool>,
-        Option<tokio::sync::mpsc::Sender<()>>,
+        Option<tokio::sync::mpsc::Sender<sip::ViewCmd>>,
     ) = {
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if cfg.camera_enabled && cfg.camera_ondemand_enabled {
-            let (tx, rx) = tokio::sync::mpsc::channel::<()>(8);
+            let (tx, rx) = tokio::sync::mpsc::channel::<sip::ViewCmd>(8);
             let task = tokio::spawn(sip::run(cfg.clone(), stopping.clone(), rx));
             (Some(task), stopping, Some(tx))
         } else {
