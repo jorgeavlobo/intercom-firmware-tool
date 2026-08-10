@@ -641,9 +641,16 @@ async fn session(
     d.remote_target = contact_uri(&final_resp)
         .unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
 
-    // Confirm the dialog.
-    sock.write_all(build_ack(&d, &format!("z9hG4bK{}", rand_hex(8))).as_bytes()).await?;
-    sock.flush().await?;
+    // Confirm the dialog. If the ACK can't be written/flushed, the signalling socket died AFTER the
+    // panel accepted our INVITE (2xx) — the dialog may be active, so tear it down over a FRESH
+    // connection rather than leaving the panel streaming (CodeRabbit). This is the last confirmed-
+    // dialog exit; together with the hold-loop's EOF/read-error/cap arms, no post-2xx path can strand
+    // the panel.
+    let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
+    if let Err(e) = write_all_flush(&mut sock, ack.as_bytes()).await {
+        bye_reconnect(cfg, &d).await;
+        return Err(e);
+    }
     eprintln!("btmqttd: on-demand session up (sip:{}@{})", d.aor, d.domain);
 
     // Hold the session while views keep arriving. The idle-hangup uses a PERSISTENT absolute
@@ -753,6 +760,14 @@ async fn bye_reconnect(cfg: &Config, d: &Dialog) {
         }
         teardown_bye(&mut sock, &d2).await;
     }
+}
+
+/// Write a whole buffer and flush it, surfacing the first error. A tiny helper so a confirmed-dialog
+/// send (e.g. the ACK) can route a `ConnectionReset`/`BrokenPipe` through the fresh-connection
+/// teardown instead of a bare `?` that would skip it.
+async fn write_all_flush(sock: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
+    sock.write_all(bytes).await?;
+    sock.flush().await
 }
 
 /// Best-effort BYE for a CONFIRMED dialog: end it so the panel drops the camera session, then give
