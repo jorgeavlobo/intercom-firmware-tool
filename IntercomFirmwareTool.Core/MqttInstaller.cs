@@ -1135,11 +1135,11 @@ namespace IntercomFirmwareTool.Core
             // On-demand viewing (#104): sip.rs INVITEs the panel to bring the idle session up. Only
             // meaningful with the media path, so gate the ENABLED flag on CameraEnabled too — the
             // daemon does the same, but coercing here keeps a stray on-demand=1 from a camera-off
-            // conf from ever reading as active. The daemon clamps the idle window (>0, default 30).
+            // conf from ever reading as active. The daemon clamps the viewing window (>0, default 30).
             sb.Append("CAMERA_ONDEMAND_ENABLED=")
                 .Append(opts.CameraEnabled && opts.CameraOnDemand ? '1' : '0')
                 .Append('\n');
-            // Coerce a non-positive idle window to the default (30) HERE too, so the emitted conf is
+            // Coerce a non-positive viewing window to the default (30) HERE too, so the emitted conf is
             // always a valid value rather than a 0/negative the daemon would silently override —
             // keeping the written conf and the daemon's effective behaviour in step (Copilot).
             sb.Append("CAMERA_VIEW_IDLE_SECS=")
@@ -1723,7 +1723,7 @@ namespace IntercomFirmwareTool.Core
                         unique_id = $"{node}_view_camera",
                         default_entity_id = EntId("button", "view_camera"),
                         command_topic = controlTopic,
-                        // QoS 0: the poke is idempotent (the UA re-checks and refreshes its idle timer
+                        // QoS 0: the poke is idempotent (the UA re-checks and renews its viewing window
                         // on each press), so a redelivered DUP is harmless and a press lost during a
                         // reconnect is self-correcting — the user just presses again.
                         qos = 0,
@@ -1738,7 +1738,7 @@ namespace IntercomFirmwareTool.Core
                 entities.Add(new HaEntity("view_camera.json", Topic("button", "view_camera"), ""));
 
             // On-demand viewing (#104): a companion "Stop Camera" button that ends the on-demand view
-            // immediately instead of waiting for the idle timeout — btmqttd sends the dialog's BYE, the
+            // immediately instead of waiting for the viewing window to elapse — btmqttd sends the dialog's BYE, the
             // panel drops its A/V session and the go2rtc/HA stream stops. Same opt-in/TOMBSTONE posture
             // as "View Camera". (A live doorbell ring is a separate panel session and is unaffected.)
             if (opts.CameraEnabled && opts.CameraOnDemand)
@@ -1751,7 +1751,7 @@ namespace IntercomFirmwareTool.Core
                         unique_id = $"{node}_stop_camera",
                         default_entity_id = EntId("button", "stop_camera"),
                         command_topic = controlTopic,
-                        // QoS 0: a dropped Stop is self-correcting (the idle timeout still fires), and a
+                        // QoS 0: a dropped Stop is self-correcting (the viewing window still expires), and a
                         // redelivered DUP is harmless (ending an already-ended view is a no-op).
                         qos = 0,
                         payload_press = "{\"action\":\"stop_camera\"}",

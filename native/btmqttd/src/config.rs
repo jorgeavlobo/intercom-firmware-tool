@@ -245,7 +245,7 @@ impl Config {
             sip_devaddr: get("SIP_DEVADDR", ""),
             // Clamp to 1 s..=86400 s (1 day). >0 keeps a hand-edited 0 from disabling the hang-up; the
             // upper cap keeps a huge hand-edited value from overflowing `Instant + Duration` (which
-            // panics) when sip.rs builds the idle deadline (Copilot). 86400 s is far above any real
+            // panics) when sip.rs builds the viewing-window deadline (Copilot). 86400 s is far above any real
             // on-demand view.
             camera_view_idle_secs: opt("CAMERA_VIEW_IDLE_SECS")
                 .and_then(|s| s.parse::<u64>().ok())
