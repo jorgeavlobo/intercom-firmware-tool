@@ -1343,29 +1343,41 @@
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
                                 <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
                             </Grid.RowDefinitions>
                             <TextBlock x:Name="LblMqttCameraTarget" Grid.Row="0" Grid.Column="0"
                                        Text="{loc:Loc Field_MqttCameraTarget}" VerticalAlignment="Center"
                                        Margin="0,0,6,4"/>
+                            <!-- Locked by default: auto-follows the broker/HA host (issue #111). The
+                                 override checkbox below unlocks it for a distinct IPv4 go2rtc host. -->
                             <TextBox x:Name="TxtMqttCameraTarget" Grid.Row="0" Grid.Column="1" Width="240"
                                      HorizontalAlignment="Left" Margin="0,0,0,4"
-                                     Style="{StaticResource InputField}"
+                                     Style="{StaticResource InputField}" IsReadOnly="True"
                                      AutomationProperties.LabeledBy="{Binding ElementName=LblMqttCameraTarget}"
                                      ToolTip="{loc:Loc Tip_MqttCameraTarget}"
                                      TextChanged="MqttField_TextChanged"/>
-                            <TextBlock x:Name="LblMqttCameraVideoPort" Grid.Row="1" Grid.Column="0"
+                            <TextBlock x:Name="LblMqttCameraTargetHint" Grid.Row="1" Grid.Column="1"
+                                       Text="{loc:Loc Hint_MqttCameraTarget}" Foreground="Gray" FontSize="11"
+                                       TextWrapping="Wrap" Margin="0,0,0,4"/>
+                            <CheckBox x:Name="ChkMqttCameraHostOverride" Grid.Row="2" Grid.Column="1"
+                                      Content="{loc:Loc Chk_MqttCameraHostOverride}"
+                                      ToolTip="{loc:Loc Tip_MqttCameraHostOverride}" Margin="0,0,0,6"
+                                      Checked="ChkMqttCameraHostOverride_Toggled"
+                                      Unchecked="ChkMqttCameraHostOverride_Toggled"/>
+                            <TextBlock x:Name="LblMqttCameraVideoPort" Grid.Row="3" Grid.Column="0"
                                        Text="{loc:Loc Field_MqttCameraVideoPort}" VerticalAlignment="Center"
                                        Margin="0,0,6,4"/>
-                            <TextBox x:Name="TxtMqttCameraVideoPort" Grid.Row="1" Grid.Column="1" Width="100"
+                            <TextBox x:Name="TxtMqttCameraVideoPort" Grid.Row="3" Grid.Column="1" Width="100"
                                      HorizontalAlignment="Left" Margin="0,0,0,4"
                                      Style="{StaticResource InputField}"
                                      AutomationProperties.LabeledBy="{Binding ElementName=LblMqttCameraVideoPort}"
                                      ToolTip="{loc:Loc Tip_MqttCameraPorts}"
                                      TextChanged="MqttField_TextChanged"/>
-                            <TextBlock x:Name="LblMqttCameraAudioPort" Grid.Row="2" Grid.Column="0"
+                            <TextBlock x:Name="LblMqttCameraAudioPort" Grid.Row="4" Grid.Column="0"
                                        Text="{loc:Loc Field_MqttCameraAudioPort}" VerticalAlignment="Center"
                                        Margin="0,0,6,0"/>
-                            <TextBox x:Name="TxtMqttCameraAudioPort" Grid.Row="2" Grid.Column="1" Width="100"
+                            <TextBox x:Name="TxtMqttCameraAudioPort" Grid.Row="4" Grid.Column="1" Width="100"
                                      HorizontalAlignment="Left"
                                      Style="{StaticResource InputField}"
                                      AutomationProperties.LabeledBy="{Binding ElementName=LblMqttCameraAudioPort}"
