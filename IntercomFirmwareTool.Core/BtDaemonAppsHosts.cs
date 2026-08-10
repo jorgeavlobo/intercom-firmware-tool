@@ -35,6 +35,13 @@ namespace IntercomFirmwareTool.Core
 
         private const long MaxEditFileBytes = 4L * 1024 * 1024; // the init script is tiny
 
+        /// <summary>True when <paramref name="host"/> is the stock <c>openserver</c> alias every
+        /// image pins to <c>127.0.0.1</c> (case-insensitive). Used to reject it as a camera fan-out
+        /// target: the device would resolve it to loopback, so the siphon could never reach a
+        /// receiver (and would collide with the panel's own loopback media frames).</summary>
+        internal static bool IsStockLoopbackAlias(string host) =>
+            string.Equals(host, AnchorHost, StringComparison.OrdinalIgnoreCase);
+
         /// <summary>The exact <c>bt_hosts.sh add</c> command line for a mapping.</summary>
         internal static string MappingLine(string host, string ip) =>
             $"/bin/bt_hosts.sh add {host} {ip}";

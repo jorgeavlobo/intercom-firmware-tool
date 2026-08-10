@@ -38,6 +38,23 @@ public class MqttCameraValidationTests
         Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(Cam(target)));
     }
 
+    [Fact]
+    public void Rejects_a_camera_target_pinned_to_loopback_openserver()
+    {
+        // "openserver" is the stock device alias the installer pins to 127.0.0.1. When it is the
+        // broker host, a blank camera target defaults to it and would resolve to loopback on-device,
+        // so the camera could never arm — the IP-literal loopback check can't see a hostname mapping.
+        var opts = new MqttOptions("openserver") { CameraEnabled = true, CameraTargetHost = null };
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(opts));
+        // Case-insensitive, and also when set explicitly.
+        var opts2 = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraTargetHost = "OpenServer",
+        };
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(opts2));
+    }
+
     [Theory]
     [InlineData("ha.local")]              // a different LAN/mDNS name the device can't resolve
     [InlineData("homeassistant.local")]

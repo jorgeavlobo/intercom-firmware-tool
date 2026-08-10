@@ -625,6 +625,12 @@ namespace IntercomFirmwareTool.Core
                 if (IPAddress.TryParse(camTarget, out var camIp)
                     && (IPAddress.IsLoopback(camIp) || camIp.Equals(IPAddress.Any)))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetLoopback"), nameof(opts));
+                // Also reject the stock "openserver" alias: the device pins it to 127.0.0.1, so a
+                // camera target equal to it (e.g. a blank target when MQTT_HOST is "openserver")
+                // resolves to loopback on-device and never arms — the IP-literal check above can't
+                // see that a HOSTNAME maps to loopback (Codex).
+                if (BtDaemonAppsHosts.IsStockLoopbackAlias(camTarget))
+                    throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetLoopback"), nameof(opts));
                 // Device resolvability: the installer pins ONLY MQTT_HOST in /etc/hosts, and the
                 // daemon's musl resolver consults /etc/hosts then public DNS — never the LAN/mDNS
                 // resolver (see Payload/mqtt/README.md). So a blank target (⇒ MQTT_HOST) or one equal
