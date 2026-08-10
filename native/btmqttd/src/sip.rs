@@ -641,6 +641,11 @@ async fn session(
                 Ok(n) => {
                     inbound.extend_from_slice(&scratch[..n]);
                     if inbound.len() > MAX_SIP_BYTES {
+                        // The dialog is CONFIRMED here (we ACKed a 2xx), so CANCEL is invalid — a
+                        // best-effort BYE is what releases the panel. Returning without it would skip
+                        // the teardown below and leave the camera session up until the panel's own
+                        // timeout (CodeRabbit). Same reasoning as the read-error arm.
+                        teardown_bye(&mut sock, &d).await;
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             "in-dialog SIP request exceeded cap",
@@ -664,7 +669,12 @@ async fn session(
                         break 'dialog;
                     }
                 }
-                Err(e) => return Err(e),
+                // A confirmed dialog: a socket error must still BYE (best-effort) before propagating,
+                // or the panel keeps the camera up until its own timeout (same as the cap arm above).
+                Err(e) => {
+                    teardown_bye(&mut sock, &d).await;
+                    return Err(e);
+                }
             },
             _ = tokio::time::sleep_until(deadline) => break, // idle expiry ⇒ hang up
         }
@@ -672,14 +682,22 @@ async fn session(
 
     // Teardown: send our BYE unless the panel already ended the dialog (we ACKed its BYE above).
     if !panel_ended {
-        let bye = build_bye(&d, &format!("z9hG4bK{}", rand_hex(8)));
-        let _ = sock.write_all(bye.as_bytes()).await;
-        let _ = sock.flush().await;
-        // Give the 200-to-BYE a brief moment; we don't strictly need to read it.
-        let _ = tokio::time::timeout(Duration::from_secs(1), sock.read(&mut scratch)).await;
+        teardown_bye(&mut sock, &d).await;
     }
     eprintln!("btmqttd: on-demand session torn down (sip:{}@{})", d.aor, d.domain);
     Ok(())
+}
+
+/// Best-effort BYE for a CONFIRMED dialog: end it so the panel drops the camera session, then give
+/// the `200`-to-BYE a brief moment (we don't need to read it). All writes are best-effort — every
+/// caller is already tearing the session down. Used both on the normal idle/shutdown hang-up and on
+/// the confirmed-dialog error exits, so no post-confirmation path can leave the panel streaming.
+async fn teardown_bye(sock: &mut TcpStream, d: &Dialog) {
+    let bye = build_bye(d, &format!("z9hG4bK{}", rand_hex(8)));
+    let _ = sock.write_all(bye.as_bytes()).await;
+    let _ = sock.flush().await;
+    let mut scratch = [0u8; 256];
+    let _ = tokio::time::timeout(Duration::from_secs(1), sock.read(&mut scratch)).await;
 }
 
 /// Best-effort teardown when the INVITE never gets a timely final response. Over TCP, closing the
