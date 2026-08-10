@@ -91,6 +91,11 @@ namespace IntercomFirmwareTool.App
         // to mirror the broker host (issue #111), so mirroring never clears the broker test result.
         private bool _suppressMqttFieldChange;
 
+        // The last custom go2rtc host the user entered under the override, remembered so an accidental
+        // un-tick/re-tick of "use a different go2rtc host" restores it instead of forcing a retype
+        // (issue #111 UX; null = none stashed yet).
+        private string? _lastCameraHostOverride;
+
         // Active LAN broker discovery (#43, follow-up 2). mDNS runs in the background at
         // startup; the /24 scan is a heavier fallback run at most once, when the bridge is
         // enabled and mDNS found nothing. The pre-fill happens at most once and never
@@ -573,9 +578,27 @@ namespace IntercomFirmwareTool.App
         }
 
         /// <summary>"Use a different go2rtc host": unlock the target field for a manual (IPv4) entry.
-        /// Unchecked (the default) re-locks it and re-mirrors the broker/HA host (issue #111).</summary>
+        /// Unchecked (the default) re-locks it and re-mirrors the broker/HA host. The last custom host
+        /// is remembered across a toggle so an accidental un-tick/re-tick doesn't force a retype
+        /// (issue #111).</summary>
         private void ChkMqttCameraHostOverride_Toggled(object sender, RoutedEventArgs e)
         {
+            if (ChkMqttCameraHostOverride.IsChecked == true)
+            {
+                // Re-enabling override: restore the last custom host the user had entered, if any.
+                if (_lastCameraHostOverride is not null)
+                {
+                    _suppressMqttFieldChange = true;
+                    try { TxtMqttCameraTarget.Text = _lastCameraHostOverride; }
+                    finally { _suppressMqttFieldChange = false; }
+                }
+            }
+            else
+            {
+                // Leaving override: stash the custom host before ApplyCameraTargetLock mirrors the
+                // broker host over it, so re-enabling can bring it back.
+                _lastCameraHostOverride = NullIfEmpty(TxtMqttCameraTarget.Text.Trim());
+            }
             ApplyCameraTargetLock();
             UpdateBuildEnabled();
         }
