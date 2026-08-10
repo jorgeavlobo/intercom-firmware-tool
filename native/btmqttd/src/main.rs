@@ -351,7 +351,7 @@ async fn run() -> Result<bool, String> {
         broker_online.clone(),
     ));
     let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone(), broker_online.clone()));
-    // Live doorbell camera (issue #103): opt-in. When enabled, this task runs its OWN
+    // Live doorbell camera (issue #103): opt-in. When enabled, this task runs its own
     // OWN monitor (:20000, independent of `sender`) and, whenever the panel brings an A/V
     // session up, adds a UDP client on `bt_av_media` (:30007) so a cleartext RTP copy is
     // fanned out to the go2rtc/HA host. It publishes NOTHING to MQTT (it drives the on-box

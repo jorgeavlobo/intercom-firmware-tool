@@ -49,9 +49,11 @@ const DEVICE_MEDIA_PREFIX: &str = "*7*300#127#0#0#1#";
 /// Whole-session teardown emitted by the panel when the A/V session ends.
 const TEARDOWN: &str = "*7*0*##";
 
-/// A/V daemon reply frames (same control frames as the monitor ACK/NACK).
-const AV_ACK: &[u8] = b"*#*1##";
-const AV_NACK: &[u8] = b"*#*0##";
+/// A/V daemon reply frames. These are the SAME OpenWebNet control frames as the monitor
+/// ACK/NACK, so alias the shared `crate::own` definitions rather than re-spelling the bytes —
+/// the control-frame definition then has one source of truth and cannot drift (Copilot).
+const AV_ACK: &[u8] = crate::own::ACK;
+const AV_NACK: &[u8] = crate::own::NACK;
 
 /// TOTAL attempts to send an "add client" frame (the loop runs `0..ADD_CLIENT_ATTEMPTS`): one
 /// initial send plus NACK retries, 3 in all (≤ the reference project's cap).
