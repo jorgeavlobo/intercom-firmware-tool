@@ -418,14 +418,19 @@ pub fn is_bye(msg: &str) -> bool {
     msg.lines().next().is_some_and(|l| l.starts_with("BYE "))
 }
 
+/// True when `msg`'s `CSeq` method is `INVITE` (case-insensitive) — i.e. the response belongs to the
+/// INVITE transaction, not to a `CANCEL`/`BYE`/`OPTIONS` we may also have in flight.
+fn cseq_is_invite(msg: &str) -> bool {
+    header_value(msg, "CSeq")
+        .and_then(|c| c.split_whitespace().nth(1))
+        .is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
+}
+
 /// True when `msg` is a 2xx response to the INVITE transaction itself — i.e. an ESTABLISHED dialog
 /// we must ACK then BYE. Distinguished from the `200 OK` to our CANCEL (also 2xx, but `CSeq: N
 /// CANCEL`), which establishes nothing and must NOT trigger a teardown (CodeRabbit).
 pub fn is_established_invite_2xx(msg: &str) -> bool {
-    matches!(parse_status(msg), Some(s) if (200..300).contains(&s))
-        && header_value(msg, "CSeq")
-            .and_then(|c| c.split_whitespace().nth(1))
-            .is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
+    matches!(parse_status(msg), Some(s) if (200..300).contains(&s)) && cseq_is_invite(msg)
 }
 
 /// A `200 OK` to an in-dialog request (the panel's BYE), echoing the headers the transaction needs:
@@ -907,26 +912,39 @@ async fn drain_after_cancel(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, 
         while let Some(len) = complete_message_len(&acc) {
             let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
             acc.drain(..len);
-            // A 2xx to the INVITE (CSeq method INVITE) means the dialog established despite our
-            // CANCEL. Confirm it (ACK) and immediately end it (BYE) so nothing stays pinned. Needs
-            // the To-tag; if a peer omits it we can't form a valid ACK/BYE, so just stop (the socket
-            // close is our last resort). The `200 OK` to the CANCEL is ALSO 2xx but carries
-            // `CSeq: N CANCEL` and establishes nothing — it must NOT trigger a teardown, so we keep
-            // draining past it for a possible racing INVITE 2xx (CodeRabbit). 487/provisional: ignore.
-            if is_established_invite_2xx(&msg) {
-                if let Some(tag) = to_tag(&msg) {
-                    d.to_tag = tag;
-                    d.remote_target =
-                        contact_uri(&msg).unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
-                    // This 2xx was never ACKed on a live socket, so the teardown is ACK-then-BYE. If
-                    // EITHER write fails (socket reset before the ACK reaches flexisip, or between ACK
-                    // and BYE), redo BOTH over a fresh connection — a BYE alone to an unacknowledged
-                    // 2xx is unreliable and could leave the camera streaming (CodeRabbit).
-                    if ack_then_bye(sock, d).await.is_err() {
-                        ack_bye_reconnect(cfg, d).await;
+            // We only act on responses to the INVITE transaction. The `200 OK` to our CANCEL is also
+            // 2xx but carries `CSeq: N CANCEL` and needs no ACK — skip it and keep draining for the
+            // INVITE's own final response (CodeRabbit).
+            if !cseq_is_invite(&msg) {
+                continue;
+            }
+            match parse_status(&msg) {
+                // A 2xx to the INVITE means the dialog established despite our CANCEL. It was never
+                // ACKed on a live socket, so ACK-then-BYE; if EITHER write fails (socket reset before
+                // the ACK reaches flexisip, or between ACK and BYE), redo BOTH over a fresh connection
+                // (a BYE alone to an unacknowledged 2xx is unreliable) — CodeRabbit.
+                Some(s) if (200..300).contains(&s) => {
+                    if let Some(tag) = to_tag(&msg) {
+                        d.to_tag = tag;
+                        d.remote_target = contact_uri(&msg)
+                            .unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
+                        if ack_then_bye(sock, d).await.is_err() {
+                            ack_bye_reconnect(cfg, d).await;
+                        }
                     }
+                    return;
                 }
-                return;
+                // The normal terminal response to a cancelled INVITE is `487 Request Terminated` (or
+                // another non-2xx). That is ALSO a non-2xx final and requires an in-transaction ACK
+                // (build_ack_failure), or flexisip holds the server transaction until Timer H — the
+                // same stale-transaction accumulation the reject-path ACK fixes (Codex).
+                Some(s) if s >= 300 => {
+                    if let Some(tag) = to_tag(&msg) {
+                        let _ = write_all_flush(sock, build_ack_failure(d, &tag).as_bytes()).await;
+                    }
+                    return;
+                }
+                _ => {} // a 1xx provisional to the INVITE (unlikely post-CANCEL) — keep draining
             }
         }
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
