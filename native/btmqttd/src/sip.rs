@@ -548,21 +548,36 @@ async fn session(
     sock.flush().await?;
 
     // Await the final response to the INVITE. 1xx are provisional; 2xx confirms; >=300 is failure.
-    // The ONLY timeout is this outer budget; on expiry we don't just drop the socket (over TCP that
-    // does NOT cancel the INVITE, and a late 200 could then pin the panel) — we run the full
-    // cancellation routine, which sends CANCEL and, if a 2xx raced in, ACK/BYEs it (Codex/CodeRabbit).
-    // The read accumulator is owned HERE (not inside wait_final_response) so a timeout that fires
-    // mid-2xx doesn't discard the partial response with the dropped future — those bytes carry into
-    // the cancellation drain, which can then frame the accepted 2xx and tear it down (Codex).
+    // ONCE THE INVITE IS ON THE WIRE, EVERY exit other than a clean final response must run the
+    // cancellation routine — over TCP, dropping the socket does NOT cancel the INVITE, so a late 200
+    // could otherwise pin the panel. Three such exits are handled together here:
+    //   * outer timeout (no final response within RESPONSE_TIMEOUT),
+    //   * reader error from wait_final_response (EOF / cap / read error — flexisip may already have
+    //     forwarded the INVITE, e.g. when it closes our leg before the panel's final response), and
+    //   * daemon shutdown while we're still waiting (run() can't interrupt an in-flight session and
+    //     main.rs bounds shutdown to a few seconds, so we must observe `stopping` ourselves).
+    // All three route through cancel_pending_invite (CANCEL + drain + ACK/BYE a racing 2xx). The read
+    // accumulator is owned HERE so a timeout mid-2xx carries the partial bytes into that drain (Codex).
     let mut acc: Vec<u8> = Vec::new();
-    let final_resp = match tokio::time::timeout(RESPONSE_TIMEOUT, wait_final_response(&mut sock, &mut acc)).await {
-        Ok(r) => r?,
-        Err(_) => {
-            cancel_pending_invite(&mut sock, &mut d, acc).await;
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "INVITE response timed out (CANCEL sent)",
-            ));
+    let outcome = tokio::select! {
+        biased;
+        _ = wait_until_stopping(stopping) => None, // shutdown ⇒ abandon + cancel
+        res = tokio::time::timeout(RESPONSE_TIMEOUT, wait_final_response(&mut sock, &mut acc)) => Some(res),
+    };
+    let final_resp = match outcome {
+        Some(Ok(Ok(resp))) => resp, // a clean final response — the only path that continues
+        other => {
+            let seed = std::mem::take(&mut acc);
+            cancel_pending_invite(&mut sock, &mut d, seed).await;
+            return match other {
+                None => Ok(()), // graceful shutdown: dialog cancelled, nothing left pinned
+                Some(Err(_)) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "INVITE response timed out (CANCEL sent)",
+                )),
+                Some(Ok(Err(e))) => Err(e), // reader error; cancelled best-effort
+                Some(Ok(Ok(_))) => unreachable!("handled by the success arm above"),
+            };
         }
     };
 
@@ -676,6 +691,15 @@ async fn session(
 ///
 /// All writes are best-effort (`let _ =`): we're already on the error path and about to drop the
 /// connection; the goal is simply to leave the panel with no established session.
+/// Complete when `stopping` is observed true. Used to make the INVITE-response wait interruptible by
+/// daemon shutdown (a short poll — it only runs during the brief window we're awaiting that response,
+/// and `stopping` is set before the shutdown path bounds the task's join).
+async fn wait_until_stopping(stopping: &AtomicBool) {
+    while !stopping.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn cancel_pending_invite(sock: &mut TcpStream, d: &mut Dialog, mut acc: Vec<u8>) {
     let _ = sock.write_all(build_cancel(d).as_bytes()).await;
     let _ = sock.flush().await;
