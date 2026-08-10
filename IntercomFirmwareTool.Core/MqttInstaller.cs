@@ -131,6 +131,16 @@ namespace IntercomFirmwareTool.Core
         /// or <c>1</c> low-res (universal). Derived from <see cref="CameraHiRes"/>.</summary>
         public int CameraBranch => CameraHiRes ? 0 : 1;
 
+        /// <summary>On-demand viewing (Phase 2, #104): view the entrance camera at any time — not
+        /// only while ringing — by having btmqttd's SIP UA (<c>sip.rs</c>) bring the idle panel A/V
+        /// session up via a loopback INVITE, then reuse the Phase-1 siphon. Requires
+        /// <see cref="CameraEnabled"/> (the media path). Opt-in; off by default.</summary>
+        public bool CameraOnDemand { get; init; }
+
+        /// <summary>Seconds with no viewer after which the on-demand SIP dialog is hung up (BYE) so a
+        /// pull never pins the panel session. The daemon clamps; default 30.</summary>
+        public int CameraViewIdleSecs { get; init; } = 30;
+
         /// <summary>The camera fan-out target actually used: the explicit
         /// <see cref="CameraTargetHost"/>, or <see cref="MqttHost"/> when it is null/blank (go2rtc
         /// usually lives with Home Assistant). Mirrors btmqttd's <c>CAMERA_TARGET_HOST</c> default.</summary>
@@ -1117,6 +1127,14 @@ namespace IntercomFirmwareTool.Core
             sb.Append("CAMERA_VIDEO_PORT=").Append(opts.CameraVideoPort).Append('\n');
             sb.Append("CAMERA_AUDIO_PORT=").Append(opts.CameraAudioPort).Append('\n');
             sb.Append("CAMERA_BRANCH=").Append(opts.CameraBranch).Append('\n');
+            // On-demand viewing (#104): sip.rs INVITEs the panel to bring the idle session up. Only
+            // meaningful with the media path, so gate the ENABLED flag on CameraEnabled too — the
+            // daemon does the same, but coercing here keeps a stray on-demand=1 from a camera-off
+            // conf from ever reading as active. The daemon clamps the idle window (>0, default 30).
+            sb.Append("CAMERA_ONDEMAND_ENABLED=")
+                .Append(opts.CameraEnabled && opts.CameraOnDemand ? '1' : '0')
+                .Append('\n');
+            sb.Append("CAMERA_VIEW_IDLE_SECS=").Append(opts.CameraViewIdleSecs).Append('\n');
 
             sb.Append("ALLOW_REMOTE_SHELL=").Append(opts.AllowRemoteShell ? '1' : '0').Append('\n');
 
@@ -1204,6 +1222,7 @@ namespace IntercomFirmwareTool.Core
             ("light_press.json", "button", "light_press"),
             ("light_resync.json", "button", "light_resync"),
             ("light_learn.json", "button", "light_learn"),
+            ("view_camera.json", "button", "view_camera"),
         };
 
         /// <summary>
@@ -1677,6 +1696,35 @@ namespace IntercomFirmwareTool.Core
                 AddLock("secondary_lock", "Secondary Lock", "secondary_lock", "mdi:lock-outline");
             else
                 entities.Add(new HaEntity("secondary_lock.json", Topic("button", "secondary_lock"), ""));
+
+            // On-demand viewing (#104): a "View Camera" button that pokes btmqttd's SIP UA to bring
+            // the idle panel A/V session up (same {"action":...}-to-TopicRx pattern as the locks), so
+            // the go2rtc/HA camera has live video on demand — not only while ringing. Opt-in (needs
+            // the media path AND on-demand enabled); otherwise TOMBSTONE the config (empty retained)
+            // so a previous build's button is cleared from HA rather than lingering as a dead control.
+            if (opts.CameraEnabled && opts.CameraOnDemand)
+                entities.Add(new HaEntity(
+                    "view_camera.json",
+                    Topic("button", "view_camera"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "View Camera",
+                        unique_id = $"{node}_view_camera",
+                        default_entity_id = EntId("button", "view_camera"),
+                        command_topic = controlTopic,
+                        // QoS 0: the poke is idempotent (the UA re-checks and refreshes its idle timer
+                        // on each press), so a redelivered DUP is harmless and a press lost during a
+                        // reconnect is self-correcting — the user just presses again.
+                        qos = 0,
+                        payload_press = "{\"action\":\"view_camera\"}",
+                        icon = "mdi:cctv",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            else
+                entities.Add(new HaEntity("view_camera.json", Topic("button", "view_camera"), ""));
 
             // Stair-light SWITCH (opt-in). The actuator is a stateless TOGGLE with no readable
             // state (firmware-confirmed), so btmqttd tracks the on/off and publishes it retained

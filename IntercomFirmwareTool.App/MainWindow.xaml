@@ -1385,6 +1385,13 @@
                         <!-- Security disclosure: the fan-out is cleartext RTP over UDP (CodeRabbit). -->
                         <TextBlock Text="{loc:Loc Warn_MqttCameraCleartext}" Foreground="#C0392B"
                                    FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                        <!-- On-demand viewing (Phase 2, #104): also view the camera when NOT ringing,
+                             via btmqttd's loopback SIP UA. Sub-option of the camera feature. -->
+                        <CheckBox x:Name="ChkMqttCameraOnDemand" Margin="0,8,0,0"
+                                  Content="{loc:Loc Chk_MqttCameraOnDemand}"
+                                  ToolTip="{loc:Loc Tip_MqttCameraOnDemand}"/>
+                        <TextBlock Text="{loc:Loc Hint_MqttCameraOnDemand}" Foreground="Gray" FontSize="11"
+                                   TextWrapping="Wrap" Margin="22,2,0,0"/>
                         <Button x:Name="BtnMqttCameraGo2Rtc" Content="{loc:Loc Btn_MqttCameraGo2Rtc}"
                                 HorizontalAlignment="Left" Margin="0,6,0,0" Padding="10,3"
                                 Click="BtnMqttCameraGo2Rtc_Click"/>

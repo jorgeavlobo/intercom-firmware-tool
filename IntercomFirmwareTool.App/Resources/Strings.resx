@@ -447,6 +447,9 @@ Key: {1}</value></data>
   <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Tick to add a second gate button in Home Assistant. Leave off if your installation has only one gate.</value></data>
   <data name="Chk_MqttCamera" xml:space="preserve"><value>Expose the entrance camera (live video)</value></data>
   <data name="Tip_MqttCamera" xml:space="preserve"><value>Tick to stream the entrance-panel camera to Home Assistant. The unit sends a copy of the live video (and audio) to a go2rtc host whenever the door rings, a call is answered, or you open the view. Requires go2rtc on the receiving host — use the button below to get its configuration.</value></data>
+  <data name="Chk_MqttCameraOnDemand" xml:space="preserve"><value>View the camera on demand (any time, not only when ringing)</value></data>
+  <data name="Tip_MqttCameraOnDemand" xml:space="preserve"><value>Tick to also open the entrance camera whenever you want — not only while the door is ringing. On request, the unit's SIP client briefly wakes the camera session; a "View Camera" button appears in Home Assistant.</value></data>
+  <data name="Hint_MqttCameraOnDemand" xml:space="preserve"><value>Adds a "View Camera" button in Home Assistant that wakes the camera on demand. It hangs up automatically after a short idle, so the panel is never left streaming.</value></data>
   <data name="Field_MqttCameraTarget" xml:space="preserve"><value>go2rtc / HA host:</value></data>
   <data name="Tip_MqttCameraTarget" xml:space="preserve"><value>The host that receives the video (where go2rtc runs — usually your Home Assistant machine). Leave blank to use the MQTT broker host. If go2rtc is on a different machine, enter its IPv4 address — the intercom can't resolve other network names.</value></data>
   <data name="Field_MqttCameraVideoPort" xml:space="preserve"><value>Video UDP port:</value></data>

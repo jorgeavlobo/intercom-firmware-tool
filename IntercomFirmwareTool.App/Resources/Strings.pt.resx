@@ -525,4 +525,7 @@ Ative-o apenas num broker autenticado e de confiança. Ativar o canal de comando
   <data name="Dialog_Ok" xml:space="preserve"><value>OK</value></data>
   <data name="About_Title" xml:space="preserve"><value>Acerca do Intercom Firmware Tool</value></data>
   <data name="About_Body" xml:space="preserve"><value>Intercom Firmware Tool&#10;Versão {0}&#10;© 2026 jorgeavlobo&#10;https://github.com/jorgeavlobo/intercom-firmware-tool</value></data>
+  <data name="Chk_MqttCameraOnDemand" xml:space="preserve"><value>Ver a câmara a pedido (a qualquer momento, não só quando toca)</value></data>
+  <data name="Tip_MqttCameraOnDemand" xml:space="preserve"><value>Marque para abrir a câmara da entrada quando quiser — não apenas enquanto a campainha toca. A pedido, o cliente SIP da unidade acorda brevemente a sessão da câmara; aparece um botão "Ver Câmara" no Home Assistant.</value></data>
+  <data name="Hint_MqttCameraOnDemand" xml:space="preserve"><value>Adiciona um botão "Ver Câmara" no Home Assistant que acorda a câmara a pedido. Desliga automaticamente após um curto período de inatividade, para o painel nunca ficar a transmitir.</value></data>
 </root>
