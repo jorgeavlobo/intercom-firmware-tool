@@ -74,6 +74,7 @@ pub async fn dispatch(
     vol: &Arc<VolumeCtl>,
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
+    view_tx: Option<&Sender<()>>,
     payload: &[u8],
 ) {
     let text = match std::str::from_utf8(payload) {
@@ -84,7 +85,7 @@ pub async fn dispatch(
         }
     };
     for record in text.split('\n') {
-        dispatch_record(cfg, client, vol, lock, light, record).await;
+        dispatch_record(cfg, client, vol, lock, light, view_tx, record).await;
     }
 }
 
@@ -98,6 +99,7 @@ async fn dispatch_record(
     vol: &Arc<VolumeCtl>,
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
+    view_tx: Option<&Sender<()>>,
     record: &str,
 ) {
     // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
@@ -109,7 +111,7 @@ async fn dispatch_record(
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
-        handle_json(cfg, client, vol, lock, light, record).await;
+        handle_json(cfg, client, vol, lock, light, view_tx, record).await;
     }
 }
 
@@ -139,6 +141,7 @@ async fn handle_json(
     vol: &Arc<VolumeCtl>,
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
+    view_tx: Option<&Sender<()>>,
     msg: &str,
 ) {
     let v: Value = match serde_json::from_str(msg) {
@@ -162,6 +165,23 @@ async fn handle_json(
     // categorically more dangerous (code execution). These are the payloads the HA
     // volume/lock entities publish (via command_template / payload_press).
     if let Some(action) = v.get("action").and_then(Value::as_str) {
+        // On-demand viewing (issue #104): a `view_camera` action pokes the SIP UA to bring the
+        // idle panel A/V session up (and refresh its idle-hangup timer). Same ungated posture as
+        // the other actions — TOPIC_RX is the trust boundary. try_send: the trigger is idempotent
+        // and the UA re-checks on each poke, so dropping one when the (bounded) queue is momentarily
+        // full is harmless (a subsequent poke refreshes it); it also can't block the worker.
+        if action == "view_camera" {
+            match view_tx {
+                Some(tx) => {
+                    let _ = tx.try_send(());
+                }
+                None => eprintln!(
+                    "btmqttd: ignored view_camera: on-demand viewing disabled \
+                     (needs CAMERA_ENABLED=1 and CAMERA_ONDEMAND_ENABLED=1)"
+                ),
+            }
+            return;
+        }
         handle_action(vol, lock, light, action, &v).await;
         return;
     }

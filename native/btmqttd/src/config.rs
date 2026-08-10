@@ -111,6 +111,25 @@ pub struct Config {
     /// default — the only one siphonable on the C100X, and present on the C300X), `0` =
     /// hi-res (C300X only). Clamped to 0..=1; default 1.
     pub camera_branch: u8,
+
+    // --- On-demand viewing (Phase 2, issue #104) -----------------------------------
+    /// "View the entrance-panel camera on demand" (not only while ringing). When enabled,
+    /// `sip.rs` originates a loopback SIP INVITE to the panel's on-board UA (via the local
+    /// flexisip on `127.0.0.1:SIP_PORT`) to bring the idle A/V session up, then reuses the
+    /// Phase-1 `:30007` siphon for the actual video. Requires `camera_enabled` (the media
+    /// path). Opt-in; off by default.
+    pub camera_ondemand_enabled: bool,
+    /// The local flexisip plain-SIP port (loopback). Factory default 5060 on both models.
+    pub sip_port: u16,
+    /// The panel's local SIP domain (e.g. a `<uuid>.bs.iotleg.com`). Empty ⇒ discover at
+    /// runtime from `/etc/flexisip/domain-registration.conf`. An installer may pin it.
+    pub sip_domain: String,
+    /// The panel's local answer-machine AOR user (`c100x` / `c300x`). Empty ⇒ derive from
+    /// the model (`/etc/hostname`) at runtime. The INVITE targets `sip:<aor>@<domain>`.
+    pub sip_local_aor: String,
+    /// Hang up (send BYE) after this many seconds with no active viewer, so an on-demand
+    /// pull never leaves the panel session pinned open. Default 30.
+    pub camera_view_idle_secs: u64,
 }
 
 impl Config {
@@ -202,6 +221,19 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .filter(|b| *b <= 1)
                 .unwrap_or(1),
+            // On-demand viewing (issue #104). Opt-in; domain/AOR default to empty ⇒ discovered
+            // on-device at runtime. Port 0 (bad conf) falls back to the flexisip default 5060.
+            camera_ondemand_enabled: flag("CAMERA_ONDEMAND_ENABLED"),
+            sip_port: opt("SIP_PORT")
+                .and_then(|s| s.parse().ok())
+                .filter(|p| *p != 0)
+                .unwrap_or(5060),
+            sip_domain: get("SIP_DOMAIN", ""),
+            sip_local_aor: get("SIP_LOCAL_AOR", ""),
+            camera_view_idle_secs: opt("CAMERA_VIEW_IDLE_SECS")
+                .and_then(|s| s.parse().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(30),
         }
     }
 
