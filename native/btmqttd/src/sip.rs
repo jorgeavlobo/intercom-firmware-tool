@@ -58,9 +58,13 @@ const MYMODULES_PATH: &str = "/home/bticino/cfg/extra/.bt_eliot/mymodules";
 /// `detectDevAddrOnC100X()` hardcodes it). An installer can override the whole DEVADDR via config.
 const MAIN_ENTRANCE_OWN_ADDR: &str = "20";
 
-/// Response wait + overall INVITE timeout, and how long a single read may block.
+/// Overall INVITE-response budget. This is the SINGLE timeout on the response wait (it wraps the
+/// whole `wait_final_response`), so there is exactly one timeout exit — routed through
+/// `cancel_pending_invite` — and no faster per-read timeout that could drop the socket without a
+/// CANCEL (Codex/CodeRabbit).
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_CHUNK_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long we keep draining (framing responses, tearing down a racing 2xx) after sending CANCEL.
+const CANCEL_DRAIN: Duration = Duration::from_secs(2);
 /// Cap on a single SIP message we will buffer (offer/answer are ~2–3 KB; this bounds a hostile peer).
 const MAX_SIP_BYTES: usize = 65536;
 /// Reconnect backoff for the (rare) case the SIP socket / dialog fails.
@@ -527,18 +531,13 @@ async fn session(
     sock.flush().await?;
 
     // Await the final response to the INVITE. 1xx are provisional; 2xx confirms; >=300 is failure.
+    // The ONLY timeout is this outer budget; on expiry we don't just drop the socket (over TCP that
+    // does NOT cancel the INVITE, and a late 200 could then pin the panel) — we run the full
+    // cancellation routine, which sends CANCEL and, if a 2xx raced in, ACK/BYEs it (Codex/CodeRabbit).
     let final_resp = match tokio::time::timeout(RESPONSE_TIMEOUT, wait_final_response(&mut sock)).await {
         Ok(r) => r?,
         Err(_) => {
-            // No final response in time. Over TCP, simply dropping the connection does NOT cancel the
-            // INVITE transaction, and a late 200 could still bring the panel session up after we
-            // return — pinning the door camera (the exact failure the fail-closed design avoids).
-            // Best-effort CANCEL on the same connection, then briefly drain the 200-to-CANCEL /
-            // 487-to-INVITE before closing (CodeRabbit).
-            let _ = sock.write_all(build_cancel(&d).as_bytes()).await;
-            let _ = sock.flush().await;
-            let mut drain = [0u8; 1024];
-            let _ = tokio::time::timeout(Duration::from_secs(1), sock.read(&mut drain)).await;
+            cancel_pending_invite(&mut sock, &mut d).await;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "INVITE response timed out (CANCEL sent)",
@@ -647,6 +646,64 @@ async fn session(
     Ok(())
 }
 
+/// Best-effort teardown when the INVITE never gets a timely final response. Over TCP, closing the
+/// socket does NOT cancel a pending INVITE transaction, so:
+///  1. send `CANCEL` (matched to the INVITE by branch + CSeq), then
+///  2. drain framed responses for a bounded window — and if a 2xx to the INVITE *raced in* (the
+///     panel answered right as we gave up), CANCEL can't undo it, so we MUST confirm and tear that
+///     dialog down (`ACK` then `BYE`) or the panel keeps its camera streaming (Codex/CodeRabbit).
+///
+/// All writes are best-effort (`let _ =`): we're already on the error path and about to drop the
+/// connection; the goal is simply to leave the panel with no established session.
+async fn cancel_pending_invite(sock: &mut TcpStream, d: &mut Dialog) {
+    let _ = sock.write_all(build_cancel(d).as_bytes()).await;
+    let _ = sock.flush().await;
+
+    let mut acc: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4096];
+    let deadline = tokio::time::Instant::now() + CANCEL_DRAIN;
+    loop {
+        while let Some(len) = complete_message_len(&acc) {
+            let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
+            acc.drain(..len);
+            // A 2xx to the INVITE means the dialog established despite our CANCEL. Confirm it (ACK)
+            // and immediately end it (BYE) so nothing stays pinned. Needs the To-tag; if a peer
+            // omits it we can't form a valid ACK/BYE, so just stop (the socket close is our last
+            // resort). Non-2xx (487 to INVITE, 200 to CANCEL, …) needs no action.
+            if matches!(parse_status(&msg), Some(s) if (200..300).contains(&s)) {
+                if let Some(tag) = to_tag(&msg) {
+                    d.to_tag = tag;
+                    d.remote_target =
+                        contact_uri(&msg).unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
+                    let _ = sock
+                        .write_all(build_ack(d, &format!("z9hG4bK{}", rand_hex(8))).as_bytes())
+                        .await;
+                    let _ = sock.flush().await;
+                    let _ = sock
+                        .write_all(build_bye(d, &format!("z9hG4bK{}", rand_hex(8))).as_bytes())
+                        .await;
+                    let _ = sock.flush().await;
+                }
+                return;
+            }
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        match tokio::time::timeout(remaining, sock.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => {
+                acc.extend_from_slice(&buf[..n]);
+                if acc.len() > MAX_SIP_BYTES {
+                    return;
+                }
+            }
+            // EOF, read error, or the drain window elapsed ⇒ nothing more to do.
+            _ => return,
+        }
+    }
+}
+
 /// Read until the INVITE's FINAL response (skips `1xx` provisional). Accumulates bytes until a
 /// complete message with a `>= 200` status line is seen, or the cap/timeout trips.
 async fn wait_final_response(sock: &mut TcpStream) -> std::io::Result<String> {
@@ -666,9 +723,10 @@ async fn wait_final_response(sock: &mut TcpStream) -> std::io::Result<String> {
                 _ => {} // 1xx provisional (or a stray in-dialog request) — keep reading
             }
         }
-        let n = tokio::time::timeout(READ_CHUNK_TIMEOUT, sock.read(&mut buf))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "SIP read stalled"))??;
+        // No per-read timeout here: the caller wraps this whole call in `RESPONSE_TIMEOUT`, so a
+        // stalled read is bounded by that single outer budget and its expiry routes through the
+        // CANCEL path. A faster per-read timeout would return here without cancelling the INVITE.
+        let n = sock.read(&mut buf).await?;
         if n == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
