@@ -895,7 +895,14 @@ async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialo
         // on the connection the request arrived on (§18.2.2), so the original sent-by port doesn't
         // misroute the 200-to-BYE. Hence we do NOT overwrite `d.local_port` here.
         let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
-        drain_after_cancel(&mut fresh, cfg, d, Vec::new()).await;
+        // Carry `acc` (the bytes wait_final_response had already read) into the drain even on the
+        // reconnect path: if it holds a COMPLETE INVITE 2xx buffered just before the old socket died,
+        // drain_after_cancel frames and tears it down (ACK+BYE) — dropping it would leave the accepted
+        // camera session up (CodeRabbit). It frames the seed's complete messages BEFORE reading the
+        // fresh socket, so a complete buffered response is handled without mixing the two streams; a
+        // trailing partial from the dead stream carries nothing actionable (the racing INVITE 2xx went
+        // to the old socket, and the fresh socket only carries the 200-to-CANCEL, which needs no action).
+        drain_after_cancel(&mut fresh, cfg, d, acc).await;
     }
     // else: couldn't even reconnect — nothing more we can do.
 }
