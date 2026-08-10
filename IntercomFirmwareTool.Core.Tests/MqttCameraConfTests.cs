@@ -40,6 +40,22 @@ public class MqttCameraConfTests
         Assert.Contains("CAMERA_TARGET_HOST='192.168.1.9'\n", conf);
     }
 
+    [Theory]
+    [InlineData("broker.lan")]  // exactly the broker host
+    [InlineData("BROKER.LAN")]  // case-only difference — still redundant
+    public void A_target_equal_to_the_broker_host_writes_empty(string target)
+    {
+        // A target that just repeats the broker host is redundant: serialize blank so the device
+        // follows MQTT_HOST like the locked default, instead of pinning the literal (Copilot). The
+        // comparison is case-insensitive, matching the App validator and MqttInstaller.
+        var conf = MqttInstaller.GenerateConf(new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraTargetHost = target,
+        });
+        Assert.Contains("CAMERA_TARGET_HOST=''\n", conf);
+    }
+
     [Fact]
     public void Disabled_camera_writes_an_empty_target()
     {

@@ -1127,14 +1127,18 @@ namespace IntercomFirmwareTool.Core
             // MQTT_HOST — and, because av.rs re-resolves the target every session, the fan-out then
             // follows Home Assistant to a new IP (via the broker's /etc/hosts pin, #43) with no
             // reflash (#111). Writing the resolved host here would bake the current broker host in and
-            // defeat that. Only an explicit OVERRIDE (a distinct IPv4) is pinned. When the camera is
-            // DISABLED the value is irrelevant (av.rs never runs) and is left empty; writing a target
-            // then would also let an unvalidated multi-line value (a library caller, or a paste) inject
-            // a second KEY=value line — e.g. `x\nMQTT_HOST=bad` — that config.rs's line-based parse_env
-            // would honour, hijacking the broker even with the camera off (Codex). Empty is safe:
-            // config.rs treats a present-but-empty value as unset and falls back to MQTT_HOST.
+            // defeat that. Only a target DISTINCT from the broker host is pinned (validation requires
+            // such a target to be an IPv4 literal); a target that just equals MQTT_HOST is redundant
+            // and is left blank so it follows the broker like the locked default (Copilot). When the
+            // camera is DISABLED the value is irrelevant (av.rs never runs) and is left empty; writing a
+            // target then would also let an unvalidated multi-line value (a library caller, or a paste)
+            // inject a second KEY=value line — e.g. `x\nMQTT_HOST=bad` — that config.rs's line-based
+            // parse_env would honour, hijacking the broker even with the camera off (Codex). Empty is
+            // safe: config.rs treats a present-but-empty value as unset and falls back to MQTT_HOST.
             sb.Append(Conf("CAMERA_TARGET_HOST",
-                opts.CameraEnabled && !string.IsNullOrWhiteSpace(opts.CameraTargetHost)
+                opts.CameraEnabled
+                && !string.IsNullOrWhiteSpace(opts.CameraTargetHost)
+                && !string.Equals(opts.CameraTargetHost, opts.MqttHost, StringComparison.OrdinalIgnoreCase)
                     ? opts.CameraTargetHost! : ""));
             sb.Append("CAMERA_VIDEO_PORT=").Append(opts.CameraVideoPort).Append('\n');
             sb.Append("CAMERA_AUDIO_PORT=").Append(opts.CameraAudioPort).Append('\n');
