@@ -242,6 +242,16 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
             format!("camera_target '{}' did not resolve to an IPv4", cfg.camera_target),
         )
     })?;
+    // Reject a loopback target (127/8). The go2rtc/HA host is OFF-device, so loopback is never a
+    // real fan-out target — and worse, our add-client frame would then be `*7*300#127#0#0#1#…`,
+    // identical to DEVICE_MEDIA_PREFIX, so our own frame echoing on the monitor could be misread as
+    // a media-start "arm" signal and leave the task armed outside a real session (Copilot).
+    if ip.is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "camera_target must not be a loopback address (go2rtc/HA runs off-device)",
+        ));
+    }
     let o = ip.octets();
     let ipf = format!("{}#{}#{}#{}", o[0], o[1], o[2], o[3]);
     let video = format!("*7*300#{ipf}#{}#{}*##", cfg.camera_video_port, cfg.camera_branch);
@@ -486,6 +496,23 @@ mod tests {
             m.insert("CAMERA_TARGET_HOST".to_string(), "127.0.0.1".to_string());
             m.insert("CAMERA_VIDEO_PORT".to_string(), "5000".to_string());
             m.insert("CAMERA_AUDIO_PORT".to_string(), "5000".to_string());
+            let cfg = Arc::new(crate::config::Config::from_map(m));
+            let err = arm(&cfg).await.unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        });
+    }
+
+    #[test]
+    fn arm_rejects_a_loopback_target() {
+        // A loopback target would make our add-client frame collide with DEVICE_MEDIA_PREFIX
+        // (`*7*300#127#0#0#1#…`); arm() must reject it after resolution, before connecting.
+        use std::collections::HashMap;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let mut m = HashMap::new();
+            m.insert("MQTT_HOST".to_string(), "h".to_string());
+            m.insert("CAMERA_TARGET_HOST".to_string(), "127.0.0.1".to_string());
+            // default ports (40000/40002) are distinct and non-zero, so we reach the loopback check
             let cfg = Arc::new(crate::config::Config::from_map(m));
             let err = arm(&cfg).await.unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);

@@ -30,6 +30,14 @@ public class MqttCameraValidationTests
     }
 
     [Theory]
+    [InlineData("127.0.0.1")]   // loopback — go2rtc/HA runs off-device; also collides with the
+    [InlineData("127.1.2.3")]   // panel's own 127.0.0.1 media-start frames on the monitor
+    public void Rejects_a_loopback_target(string target)
+    {
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(Cam(target)));
+    }
+
+    [Theory]
     [InlineData("ha.local")]              // a different LAN/mDNS name the device can't resolve
     [InlineData("homeassistant.local")]
     [InlineData("go2rtc.example.com")]

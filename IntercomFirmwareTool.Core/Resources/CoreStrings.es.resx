@@ -212,6 +212,9 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_CameraTargetUnresolvable" xml:space="preserve">
     <value>Un host de destino de la cámara distinto del broker MQTT debe ser una dirección IPv4 — el portero automático no puede resolver otros nombres de LAN o mDNS. Déjalo en blanco para usar el host del broker o introduce la dirección IP de go2rtc.</value>
   </data>
+  <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
+    <value>El destino de la cámara no puede ser una dirección de loopback (127.x.x.x) — go2rtc / Home Assistant se ejecuta fuera del portero automático, por lo que el loopback nunca es un destino válido.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} no existe en la imagen; no se puede aplicar el parche del puente MQTT.</value>
   </data>

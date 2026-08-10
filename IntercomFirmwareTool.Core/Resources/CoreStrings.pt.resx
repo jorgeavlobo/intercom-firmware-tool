@@ -212,6 +212,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_CameraTargetUnresolvable" xml:space="preserve">
     <value>Um anfitrião de destino da câmara diferente do broker MQTT deve ser um endereço IPv4 — o intercomunicador não consegue resolver outros nomes de LAN ou mDNS. Deixe em branco para usar o anfitrião do broker, ou introduza o endereço IP do go2rtc.</value>
   </data>
+  <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
+    <value>O destino da câmara não pode ser um endereço de loopback (127.x.x.x) — o go2rtc / Home Assistant corre fora do intercomunicador, por isso o loopback nunca é um destino válido.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} não existe na imagem; não é possível aplicar o patch da ponte MQTT.</value>
   </data>

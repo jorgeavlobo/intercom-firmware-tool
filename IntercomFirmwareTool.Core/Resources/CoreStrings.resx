@@ -209,6 +209,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_CameraTargetUnresolvable" xml:space="preserve">
     <value>A camera target host that differs from the MQTT broker must be an IPv4 address — the intercom can't resolve other LAN or mDNS names. Leave it blank to use the broker host, or enter go2rtc's IP address.</value>
   </data>
+  <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
+    <value>The camera target must not be a loopback address (127.x.x.x) — go2rtc / Home Assistant runs off the intercom, so loopback is never a valid destination.</value>
+  </data>
   <data name="Mqtt_CredentialNewline" xml:space="preserve">
     <value>The MQTT username or password contains a line break; credentials must be a single line.</value>
   </data>
