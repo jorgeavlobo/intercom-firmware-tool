@@ -10,6 +10,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- The test project reads back GenerateConf's output (the byte-exact device .conf) to
+         assert the camera-target serialization (#111). Expose internals to it only. -->
+    <InternalsVisibleTo Include="IntercomFirmwareTool.Core.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="SharpExt4">
       <HintPath>lib\SharpExt4\SharpExt4.dll</HintPath>
     </Reference>

@@ -86,6 +86,16 @@ namespace IntercomFirmwareTool.App
         // unchanged (the hostname is pinned to the tested IP), so both must survive.
         private bool _suppressMqttBrokerInvalidation;
 
+        // Guards a PROGRAMMATIC write to a generic MQTT field (via MqttField_TextChanged) so it
+        // isn't treated as a user edit — used when the locked "go2rtc / HA host" field is auto-filled
+        // to mirror the broker host (issue #111), so mirroring never clears the broker test result.
+        private bool _suppressMqttFieldChange;
+
+        // The last custom go2rtc host the user entered under the override, remembered so an accidental
+        // un-tick/re-tick of "use a different go2rtc host" restores it instead of forcing a retype
+        // (issue #111 UX; null = none stashed yet).
+        private string? _lastCameraHostOverride;
+
         // Active LAN broker discovery (#43, follow-up 2). mDNS runs in the background at
         // startup; the /24 scan is a heavier fallback run at most once, when the bridge is
         // enabled and mDNS found nothing. The pre-fill happens at most once and never
@@ -391,6 +401,8 @@ namespace IntercomFirmwareTool.App
             // endpoint IS the captured one.
             if (_mqttBrokerMac != null && !BrokerStillAtCapturedMac())
                 ClearBrokerMac();
+            // Keep the locked camera target following the freshly-discovered broker host (issue #111).
+            ApplyCameraTargetLock();
             UpdateBuildEnabled();
         }
 
@@ -415,6 +427,9 @@ namespace IntercomFirmwareTool.App
         /// cascade.)</summary>
         private void MqttField_TextChanged(object sender, TextChangedEventArgs e)
         {
+            // A guarded programmatic write (e.g. mirroring the broker host into the locked camera
+            // target — issue #111) is not a user edit, so it must not clear the broker test result.
+            if (_suppressMqttFieldChange) { UpdateBuildEnabled(); return; }
             ClearMqttTestStatus();
             UpdateBuildEnabled();
         }
@@ -431,13 +446,21 @@ namespace IntercomFirmwareTool.App
             // Programmatic IP→hostname promotion (see CaptureBrokerMacAsync): the endpoint
             // is unchanged, so keep the captured MAC AND the green test result — only
             // refresh visibility/gate. The promotion sets the anchor note itself.
-            if (_suppressMqttBrokerInvalidation) { UpdateBuildEnabled(); return; }
+            if (_suppressMqttBrokerInvalidation)
+            {
+                ApplyCameraTargetLock();        // keep the locked camera target following the host (#111)
+                UpdateBuildEnabled();
+                return;
+            }
 
             if (_mqttBrokerMac != null && !BrokerStillAtCapturedMac())
                 ClearBrokerMac();               // different endpoint → anchor no longer applies
             else
                 RefreshMqttRediscoveryInfo();    // kept: adjust the note to the current host form
             ClearMqttTestStatus();
+            // The locked "go2rtc / HA host" mirror must track the edited broker host, or ticking the
+            // override later would serialize a stale target and stream to the old machine (#111).
+            ApplyCameraTargetLock();
             UpdateBuildEnabled();
         }
 
@@ -487,6 +510,8 @@ namespace IntercomFirmwareTool.App
                 if (hostName != null) TxtMqttHost.Text = hostName;
             }
             finally { _suppressMqttBrokerInvalidation = false; }
+            // Keep the locked camera target following the canonicalized broker host (#111).
+            ApplyCameraTargetLock();
         }
 
         /// <summary>Normalize the broker username when the field commits, so the value
@@ -548,7 +573,74 @@ namespace IntercomFirmwareTool.App
             CameraPanel.Visibility = ChkMqttCamera.IsChecked == true
                 ? Visibility.Visible : Visibility.Collapsed;
             RefreshCameraModelGating();
+            ApplyCameraTargetLock();
             UpdateBuildEnabled();
+        }
+
+        /// <summary>"Use a different go2rtc host": unlock the target field for a manual (IPv4) entry.
+        /// Unchecked (the default) re-locks it and re-mirrors the broker/HA host. The last custom host
+        /// is remembered across a toggle so an accidental un-tick/re-tick doesn't force a retype
+        /// (issue #111).</summary>
+        private void ChkMqttCameraHostOverride_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (ChkMqttCameraHostOverride.IsChecked == true)
+            {
+                // Re-enabling override: restore the last custom host the user had entered, if any.
+                if (_lastCameraHostOverride is not null)
+                {
+                    _suppressMqttFieldChange = true;
+                    try { TxtMqttCameraTarget.Text = _lastCameraHostOverride; }
+                    finally { _suppressMqttFieldChange = false; }
+                }
+            }
+            else
+            {
+                // Leaving override: stash the custom host before ApplyCameraTargetLock mirrors the
+                // broker host over it, so re-enabling can bring it back. Only remember a value that is
+                // actually a distinct override — if the field just holds the mirrored broker host (or
+                // is empty), stash null so re-ticking won't resurrect a stale "override". With null
+                // stashed, re-enabling doesn't clear the field: it unlocks whatever is shown (the
+                // mirrored broker host) for editing, and a build left on that broker-equal value
+                // serializes blank (GenerateConf drops a target equal to the broker host).
+                string custom = TxtMqttCameraTarget.Text.Trim();
+                _lastCameraHostOverride =
+                    custom.Length > 0
+                    && !string.Equals(custom, TxtMqttHost.Text.Trim(), StringComparison.OrdinalIgnoreCase)
+                        ? custom : null;
+            }
+            ApplyCameraTargetLock();
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>Lock (default) or unlock the "go2rtc / HA host" field per the override checkbox.
+        /// The daemon re-resolves <c>CAMERA_TARGET_HOST</c> every camera session (<c>av.rs::arm</c>),
+        /// so leaving it as the broker/HA host makes the fan-out follow Home Assistant to a new IP
+        /// automatically — no reflash (issue #111). While locked the field is read-only and mirrors
+        /// the broker host (name preferred) for display, and the build leaves the target blank so the
+        /// device defaults to that host; the override unlocks it for a distinct IPv4 go2rtc host.</summary>
+        private void ApplyCameraTargetLock()
+        {
+            // Guard against calls before InitializeComponent has created the controls.
+            if (TxtMqttCameraTarget is null || ChkMqttCameraHostOverride is null) return;
+
+            bool overridden = ChkMqttCameraHostOverride.IsChecked == true;
+            TxtMqttCameraTarget.IsReadOnly = !overridden;
+            if (LblMqttCameraTargetHint is not null)
+                LblMqttCameraTargetHint.Visibility = overridden ? Visibility.Collapsed : Visibility.Visible;
+
+            // Locked: mirror the broker/HA host into the read-only field (display only — the build
+            // ignores it while locked). Only while the camera panel is on, and via the suppress guard
+            // so the mirror never clears the broker test result.
+            if (!overridden && ChkMqttCamera.IsChecked == true)
+            {
+                string host = TxtMqttHost.Text.Trim();
+                if (TxtMqttCameraTarget.Text != host)
+                {
+                    _suppressMqttFieldChange = true;
+                    try { TxtMqttCameraTarget.Text = host; }
+                    finally { _suppressMqttFieldChange = false; }
+                }
+            }
         }
 
         /// <summary>Whether the SELECTED firmware exposes the hi-res camera branch. Enabled ONLY for a
@@ -599,7 +691,10 @@ namespace IntercomFirmwareTool.App
             string host = TxtMqttHost.Text.Trim();
             var opts = new MqttOptions(host.Length == 0 ? "your-ha-host" : host)
             {
-                CameraTargetHost = NullIfEmpty(TxtMqttCameraTarget.Text.Trim()),
+                // Locked (default) ⇒ blank so the device defaults to the broker/HA host (and follows
+                // it on an IP change); overridden ⇒ the user's distinct go2rtc host (issue #111).
+                CameraTargetHost = ChkMqttCameraHostOverride.IsChecked == true
+                    ? NullIfEmpty(TxtMqttCameraTarget.Text.Trim()) : null,
                 CameraVideoPort = vp,
                 CameraAudioPort = ap,
             };
@@ -1453,21 +1548,27 @@ namespace IntercomFirmwareTool.App
             // target may be blank (it defaults to the broker host device-side), so it isn't gated here.
             if (ChkMqttCamera.IsChecked == true)
             {
-                // Reject a CR/LF in the target before Core is reached: the value is sourced into the
-                // shell-quoted .conf, so it must be single-line (mirrors the credential/topic checks).
-                // A blank target is fine — Core defaults it to the broker host. Format (hostname vs.
-                // IPv4-vs-IPv6) is left to Core's Validate, which surfaces a clear popup (CodeRabbit).
-                if (TxtMqttCameraTarget.Text.IndexOfAny(NewlineChars) >= 0)
-                    return L("MqttHint_CameraTarget");
-                // Mirror Core's device-resolvability rule: a target that differs from the broker host
-                // must be an IPv4 literal — the intercom resolves only /etc/hosts + public DNS, never
-                // LAN/mDNS names, so any other hostname would never arm the camera. Blank ⇒ broker.
-                string camTarget = TxtMqttCameraTarget.Text.Trim();
-                if (camTarget.Length > 0
-                    && !string.Equals(camTarget, TxtMqttHost.Text.Trim(), StringComparison.OrdinalIgnoreCase)
-                    && !(IPAddress.TryParse(camTarget, out var camIp)
-                         && camIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork))
-                    return L("MqttHint_CameraTargetIp");
+                // The target is only user-entered when "use a different go2rtc host" is on; while
+                // locked it mirrors the broker host and the build blanks it (issue #111), so validate
+                // it only when overridden — otherwise there's nothing the user can get wrong here.
+                if (ChkMqttCameraHostOverride.IsChecked == true)
+                {
+                    // Reject a CR/LF in the target before Core is reached: the value is sourced into the
+                    // shell-quoted .conf, so it must be single-line (mirrors the credential/topic checks).
+                    // A blank target is fine — Core defaults it to the broker host. Format (hostname vs.
+                    // IPv4-vs-IPv6) is left to Core's Validate, which surfaces a clear popup (CodeRabbit).
+                    if (TxtMqttCameraTarget.Text.IndexOfAny(NewlineChars) >= 0)
+                        return L("MqttHint_CameraTarget");
+                    // Mirror Core's device-resolvability rule: a target that differs from the broker host
+                    // must be an IPv4 literal — the intercom resolves only /etc/hosts + public DNS, never
+                    // LAN/mDNS names, so any other hostname would never arm the camera. Blank ⇒ broker.
+                    string camTarget = TxtMqttCameraTarget.Text.Trim();
+                    if (camTarget.Length > 0
+                        && !string.Equals(camTarget, TxtMqttHost.Text.Trim(), StringComparison.OrdinalIgnoreCase)
+                        && !(IPAddress.TryParse(camTarget, out var camIp)
+                             && camIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork))
+                        return L("MqttHint_CameraTargetIp");
+                }
                 if (!TryParsePort(TxtMqttCameraVideoPort.Text, out int vp)
                     || !TryParsePort(TxtMqttCameraAudioPort.Text, out int ap))
                     return L("MqttHint_CameraPort");
@@ -1594,7 +1695,10 @@ namespace IntercomFirmwareTool.App
                 // go2rtc/HA host. A blank target defaults to the broker host device-side; low-res is
                 // the universal video branch (hi-res is 300X-only).
                 CameraEnabled = ChkMqttCamera.IsChecked == true,
-                CameraTargetHost = NullIfEmpty(TxtMqttCameraTarget.Text.Trim()),
+                // Locked (default) ⇒ blank so the device defaults to the broker/HA host and follows
+                // it on an IP change; overridden ⇒ the user's distinct IPv4 go2rtc host (issue #111).
+                CameraTargetHost = ChkMqttCameraHostOverride.IsChecked == true
+                    ? NullIfEmpty(TxtMqttCameraTarget.Text.Trim()) : null,
                 CameraVideoPort = camVideoPort,
                 CameraAudioPort = camAudioPort,
                 // Never persist hi-res for a model that lacks the branch (the Classe 100X): even if the
