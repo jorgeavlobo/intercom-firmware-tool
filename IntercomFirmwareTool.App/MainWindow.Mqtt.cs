@@ -441,13 +441,21 @@ namespace IntercomFirmwareTool.App
             // Programmatic IP→hostname promotion (see CaptureBrokerMacAsync): the endpoint
             // is unchanged, so keep the captured MAC AND the green test result — only
             // refresh visibility/gate. The promotion sets the anchor note itself.
-            if (_suppressMqttBrokerInvalidation) { UpdateBuildEnabled(); return; }
+            if (_suppressMqttBrokerInvalidation)
+            {
+                ApplyCameraTargetLock();        // keep the locked camera target following the host (#111)
+                UpdateBuildEnabled();
+                return;
+            }
 
             if (_mqttBrokerMac != null && !BrokerStillAtCapturedMac())
                 ClearBrokerMac();               // different endpoint → anchor no longer applies
             else
                 RefreshMqttRediscoveryInfo();    // kept: adjust the note to the current host form
             ClearMqttTestStatus();
+            // The locked "go2rtc / HA host" mirror must track the edited broker host, or ticking the
+            // override later would serialize a stale target and stream to the old machine (#111).
+            ApplyCameraTargetLock();
             UpdateBuildEnabled();
         }
 
@@ -497,6 +505,8 @@ namespace IntercomFirmwareTool.App
                 if (hostName != null) TxtMqttHost.Text = hostName;
             }
             finally { _suppressMqttBrokerInvalidation = false; }
+            // Keep the locked camera target following the canonicalized broker host (#111).
+            ApplyCameraTargetLock();
         }
 
         /// <summary>Normalize the broker username when the field commits, so the value
