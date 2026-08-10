@@ -194,6 +194,24 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
     <value>The light address (WHERE) must contain digits only.</value>
   </data>
+  <data name="Mqtt_CameraTargetRequired" xml:space="preserve">
+    <value>The camera target host is required when the camera is enabled (set it, or set the MQTT broker host it defaults to).</value>
+  </data>
+  <data name="Mqtt_CameraPortRange" xml:space="preserve">
+    <value>The camera UDP ports must be between 1 and 65535.</value>
+  </data>
+  <data name="Mqtt_CameraPortsMustDiffer" xml:space="preserve">
+    <value>The camera video and audio ports must be different.</value>
+  </data>
+  <data name="Mqtt_InvalidCameraTarget" xml:space="preserve">
+    <value>The camera target host must be a hostname or an IPv4 address (not an IPv6 address, a URL, or host:port).</value>
+  </data>
+  <data name="Mqtt_CameraTargetUnresolvable" xml:space="preserve">
+    <value>A camera target host that differs from the MQTT broker must be an IPv4 address — the intercom can't resolve other LAN or mDNS names. Leave it blank to use the broker host, or enter go2rtc's IP address.</value>
+  </data>
+  <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
+    <value>The camera target must be a routable address — not a loopback (127.x.x.x) or the unspecified 0.0.0.0 address. go2rtc / Home Assistant runs off the intercom.</value>
+  </data>
   <data name="Mqtt_CredentialNewline" xml:space="preserve">
     <value>The MQTT username or password contains a line break; credentials must be a single line.</value>
   </data>

@@ -445,6 +445,26 @@ Clave: {1}</value></data>
   <data name="Tip_MqttLightMomentary" xml:space="preserve"><value>Una pulsación enciende la luz; el temporizador de tu instalación la apaga. Home Assistant muestra un único botón “Encender” — solo pulsación, sin estado on/off — porque es el hardware quien decide cuándo se apaga la luz.</value></data>
   <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>La unidad tiene una cerradura secundaria</value></data>
   <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Marca para añadir un segundo botón de apertura en Home Assistant. Déjalo sin marcar si tu instalación solo tiene una puerta.</value></data>
+  <data name="Chk_MqttCamera" xml:space="preserve"><value>Exponer la cámara de entrada (vídeo en directo)</value></data>
+  <data name="Tip_MqttCamera" xml:space="preserve"><value>Marca para transmitir la cámara de la placa de entrada a Home Assistant. La unidad envía una copia del vídeo (y audio) en directo a un host go2rtc cada vez que suena la puerta, se responde una llamada o abres la vista. Requiere go2rtc en el host receptor — usa el botón de abajo para obtener la configuración.</value></data>
+  <data name="Field_MqttCameraTarget" xml:space="preserve"><value>Host go2rtc / HA:</value></data>
+  <data name="Tip_MqttCameraTarget" xml:space="preserve"><value>El host que recibe el vídeo (donde se ejecuta go2rtc — normalmente tu máquina de Home Assistant). Déjalo en blanco para usar el host del broker MQTT. Si go2rtc está en otra máquina, introduce su dirección IPv4 — el portero automático no puede resolver otros nombres de red.</value></data>
+  <data name="Field_MqttCameraVideoPort" xml:space="preserve"><value>Puerto UDP de vídeo:</value></data>
+  <data name="Field_MqttCameraAudioPort" xml:space="preserve"><value>Puerto UDP de audio:</value></data>
+  <data name="Tip_MqttCameraPorts" xml:space="preserve"><value>Puertos UDP en el host receptor para los flujos de vídeo y audio. Deben coincidir con la configuración de go2rtc y ser diferentes entre sí. Predeterminados 40000 / 40002.</value></data>
+  <data name="Lbl_MqttCameraQuality" xml:space="preserve"><value>Calidad de vídeo</value></data>
+  <data name="Rb_MqttCameraLowRes" xml:space="preserve"><value>Estándar (funciona en todos los modelos)</value></data>
+  <data name="Tip_MqttCameraLowRes" xml:space="preserve"><value>La rama de vídeo de baja resolución — la única disponible en el Classe 100X y presente también en el 300X. La opción universal segura.</value></data>
+  <data name="Rb_MqttCameraHiRes" xml:space="preserve"><value>Alta resolución (solo Classe 300X)</value></data>
+  <data name="Tip_MqttCameraHiRes" xml:space="preserve"><value>La rama de vídeo de alta resolución. Disponible solo en el Classe 300X; en un 100X no produce imagen, así que deja seleccionado Estándar.</value></data>
+  <data name="Hint_MqttCamera" xml:space="preserve"><value>El vídeo se envía como flujo en bruto, por lo que se necesita un servicio go2rtc en el host receptor para verlo en Home Assistant. Usa el botón para copiar una configuración go2rtc lista para usar.</value></data>
+  <data name="Warn_MqttCameraCleartext" xml:space="preserve"><value>⚠ El vídeo y el audio se envían sin cifrar (RTP en texto plano) por tu red local — cualquiera que pueda capturar ese tráfico puede ver y oír la cámara de la puerta. Usa una red de confianza y aislada (por ejemplo, una VLAN dedicada).</value></data>
+  <data name="Btn_MqttCameraGo2Rtc" xml:space="preserve"><value>Mostrar configuración de go2rtc…</value></data>
+  <data name="Cap_MqttGo2Rtc" xml:space="preserve"><value>Configuración de cámara go2rtc</value></data>
+  <data name="MqttHint_CameraPort" xml:space="preserve"><value>Los puertos UDP de la cámara deben ser números entre 1 y 65535.</value></data>
+  <data name="MqttHint_CameraPortsDiffer" xml:space="preserve"><value>Los puertos de vídeo y audio de la cámara deben ser diferentes.</value></data>
+  <data name="MqttHint_CameraTarget" xml:space="preserve"><value>El host de destino de la cámara debe estar en una sola línea.</value></data>
+  <data name="MqttHint_CameraTargetIp" xml:space="preserve"><value>Un destino de la cámara en otro host debe ser una dirección IPv4 — el portero automático no puede resolver otros nombres de red.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Recepción (comandos):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Volcado del bus:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Fecha de inicio:</value></data>

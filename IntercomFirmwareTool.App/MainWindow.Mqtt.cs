@@ -119,6 +119,10 @@ namespace IntercomFirmwareTool.App
             // calls UpdateBuildEnabled — can never fire during InitializeComponent,
             // before the password fields it reads are constructed.
             TxtMqttPort.Text = "1883";
+            // Same reason for the camera fan-out ports (they also use MqttField_TextChanged):
+            // set the defaults here, NOT via XAML Text=, so no handler runs mid-InitializeComponent.
+            TxtMqttCameraVideoPort.Text = "40000";
+            TxtMqttCameraAudioPort.Text = "40002";
 
             // Prefill the topic boxes with the record's defaults (Home Assistant set).
             var d = new MqttOptions("x"); // a throwaway just to read the default topics
@@ -535,6 +539,87 @@ namespace IntercomFirmwareTool.App
             LightWherePanel.Visibility = vis;
             LblMqttLightLearnHint.Visibility = vis;
             UpdateBuildEnabled();
+        }
+
+        /// <summary>"Expose the entrance camera": reveal the go2rtc fan-out target/ports and the
+        /// video-quality choice. The camera fields feed CAMERA_* in the generated .conf (issue #103).</summary>
+        private void ChkMqttCamera_Toggled(object sender, RoutedEventArgs e)
+        {
+            CameraPanel.Visibility = ChkMqttCamera.IsChecked == true
+                ? Visibility.Visible : Visibility.Collapsed;
+            RefreshCameraModelGating();
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>Whether the SELECTED firmware exposes the hi-res camera branch. Enabled ONLY for a
+        /// recognized Classe 300X — its `bt_av_media` has the hi-res `multiudpsink`. Every other case
+        /// (the Classe 100X, which has no hi-res branch, AND unrecognized firmware) defaults to
+        /// Standard (low-res, branch 1), which works on every model. Fail-safe: we offer hi-res only
+        /// when we can positively assert the model supports it, never on an unknown (CodeRabbit). Every
+        /// customizable firmware is either "Classe 100X" or "Classe 300X", so this never restricts a
+        /// real 300X.</summary>
+        private bool CameraModelSupportsHiRes =>
+            string.Equals(_fwzMatch?.Line, "Classe 300X", StringComparison.Ordinal);
+
+        /// <summary>Gate the hi-res camera option to a model that supports it (a recognized Classe
+        /// 300X): for every other model — the Classe 100X and unrecognized firmware — the option is
+        /// disabled and Standard (low-res) is forced. Called whenever the firmware selection or the
+        /// camera toggle changes, so switching away from a 300X after ticking hi-res can't persist it.</summary>
+        private void RefreshCameraModelGating()
+        {
+            if (RbMqttCameraHiRes is null) return; // guard against calls before InitializeComponent
+            bool hiRes = CameraModelSupportsHiRes;
+            RbMqttCameraHiRes.IsEnabled = hiRes;
+            if (!hiRes) RbMqttCameraLowRes.IsChecked = true; // no hi-res branch — force Standard
+        }
+
+        /// <summary>Build the ready-to-paste go2rtc config for the current camera settings and show it
+        /// (also copied to the clipboard). Pure text via <see cref="Go2RtcConfig"/> — no I/O to the
+        /// device; the user pastes it into their go2rtc / Home Assistant host.</summary>
+        private void BtnMqttCameraGo2Rtc_Click(object sender, RoutedEventArgs e)
+        {
+            // Reject invalid or equal ports BEFORE generating the guide — otherwise it would
+            // describe a configuration (default 40000/40002, or an unusable equal-port SDP) that
+            // doesn't match the camera form (CodeRabbit). Surface the same messages the Build gate uses.
+            if (!TryParsePort(TxtMqttCameraVideoPort.Text, out int vp)
+                || !TryParsePort(TxtMqttCameraAudioPort.Text, out int ap))
+            {
+                MessageBox.Show(this, L("MqttHint_CameraPort"), L("Cap_MqttInvalid"),
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            if (vp == ap)
+            {
+                MessageBox.Show(this, L("MqttHint_CameraPortsDiffer"), L("Cap_MqttInvalid"),
+                    MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+            // The generator only reads the camera target + ports; MqttHost seeds the target default
+            // (go2rtc usually runs with HA). A blank host is stubbed so the guide still renders.
+            string host = TxtMqttHost.Text.Trim();
+            var opts = new MqttOptions(host.Length == 0 ? "your-ha-host" : host)
+            {
+                CameraTargetHost = NullIfEmpty(TxtMqttCameraTarget.Text.Trim()),
+                CameraVideoPort = vp,
+                CameraAudioPort = ap,
+            };
+            // The stream name follows the HA node id (sanitized inside the generator), so the SDP
+            // filename, go2rtc key and camera entity agree; fall back to "doorbell".
+            string streamName = NullIfEmpty(TxtMqttHaNodeId.Text.Trim()) ?? "doorbell";
+            string guide = Go2RtcConfig.BuildSetupGuide(opts, streamName);
+            try { Clipboard.SetText(guide); } catch { /* clipboard may be busy; still show the text */ }
+            MessageBox.Show(this, guide, L("Cap_MqttGo2Rtc"),
+                MessageBoxButton.OK, MessageBoxImage.Information);
+        }
+
+        /// <summary>Parse a UDP port: a trimmed integer in 1..65535. Mirrors the Core camera-port
+        /// validator so the Build gate and the Core popup agree.</summary>
+        private static bool TryParsePort(string text, out int port)
+        {
+            port = 0;
+            if (!int.TryParse(text.Trim(), out int v) || v < 1 || v > 65535) return false;
+            port = v;
+            return true;
         }
 
         /// <summary>Toggle whole-value reveal on the broker password.</summary>
@@ -1363,6 +1448,32 @@ namespace IntercomFirmwareTool.App
                     return L("MqttHint_LightWhere");
             }
 
+            // Live camera — mirror the Core validator (only when enabled). Both fan-out ports must be
+            // numeric and in 1..65535, and DISTINCT (video and audio are separate RTP streams). The
+            // target may be blank (it defaults to the broker host device-side), so it isn't gated here.
+            if (ChkMqttCamera.IsChecked == true)
+            {
+                // Reject a CR/LF in the target before Core is reached: the value is sourced into the
+                // shell-quoted .conf, so it must be single-line (mirrors the credential/topic checks).
+                // A blank target is fine — Core defaults it to the broker host. Format (hostname vs.
+                // IPv4-vs-IPv6) is left to Core's Validate, which surfaces a clear popup (CodeRabbit).
+                if (TxtMqttCameraTarget.Text.IndexOfAny(NewlineChars) >= 0)
+                    return L("MqttHint_CameraTarget");
+                // Mirror Core's device-resolvability rule: a target that differs from the broker host
+                // must be an IPv4 literal — the intercom resolves only /etc/hosts + public DNS, never
+                // LAN/mDNS names, so any other hostname would never arm the camera. Blank ⇒ broker.
+                string camTarget = TxtMqttCameraTarget.Text.Trim();
+                if (camTarget.Length > 0
+                    && !string.Equals(camTarget, TxtMqttHost.Text.Trim(), StringComparison.OrdinalIgnoreCase)
+                    && !(IPAddress.TryParse(camTarget, out var camIp)
+                         && camIp.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork))
+                    return L("MqttHint_CameraTargetIp");
+                if (!TryParsePort(TxtMqttCameraVideoPort.Text, out int vp)
+                    || !TryParsePort(TxtMqttCameraAudioPort.Text, out int ap))
+                    return L("MqttHint_CameraPort");
+                if (vp == ap) return L("MqttHint_CameraPortsDiffer");
+            }
+
             return null;
         }
 
@@ -1403,6 +1514,19 @@ namespace IntercomFirmwareTool.App
             string hostTrim = TxtMqttHost.Text.Trim();
             bool hostIsName = hostTrim.Length > 0 && !IPAddress.TryParse(hostTrim, out _);
             string? hostIp = hostIsName ? NullIfEmpty(TxtMqttHostIp.Text.Trim()) : null;
+
+            // Camera fan-out ports (issue #103). When DISABLED, ALWAYS write the record defaults —
+            // the field is irrelevant then, and reading it could serialize an out-of-range value
+            // (e.g. 70000, or 0) that would strand a later manual CAMERA_ENABLED=1 (Copilot). When
+            // ENABLED, parse the field, failing closed to 0 on an unparseable value so Core's Validate
+            // rejects it with a clean popup (the Build gate already blocks it earlier).
+            bool cameraOn = ChkMqttCamera.IsChecked == true;
+            int camVideoPort = cameraOn
+                ? (int.TryParse(TxtMqttCameraVideoPort.Text.Trim(), out int cvp) ? cvp : 0)
+                : 40000;
+            int camAudioPort = cameraOn
+                ? (int.TryParse(TxtMqttCameraAudioPort.Text.Trim(), out int cap) ? cap : 0)
+                : 40002;
 
             var opts = new MqttOptions(
                 hostTrim,
@@ -1466,6 +1590,16 @@ namespace IntercomFirmwareTool.App
                 LightMomentary = RbMqttLightMomentary.IsChecked == true,
                 // Secondary lock (opt-in): create its HA entity only when a second gate is wired.
                 HasSecondaryLock = ChkMqttSecondaryLock.IsChecked == true,
+                // Live doorbell camera (opt-in, #103): siphon the panel's A/V and fan the RTP to the
+                // go2rtc/HA host. A blank target defaults to the broker host device-side; low-res is
+                // the universal video branch (hi-res is 300X-only).
+                CameraEnabled = ChkMqttCamera.IsChecked == true,
+                CameraTargetHost = NullIfEmpty(TxtMqttCameraTarget.Text.Trim()),
+                CameraVideoPort = camVideoPort,
+                CameraAudioPort = camAudioPort,
+                // Never persist hi-res for a model that lacks the branch (the Classe 100X): even if the
+                // radio were somehow checked, force low-res so the build can't produce a black camera.
+                CameraHiRes = RbMqttCameraHiRes.IsChecked == true && CameraModelSupportsHiRes,
             };
 
             // Surface the Core validator's exact (localized) message as a clean

@@ -197,6 +197,24 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
     <value>La dirección de la luz (WHERE) debe contener solo dígitos.</value>
   </data>
+  <data name="Mqtt_CameraTargetRequired" xml:space="preserve">
+    <value>El host de destino de la cámara es obligatorio cuando la cámara está activada (indícalo o define el host del broker MQTT que se usa por defecto).</value>
+  </data>
+  <data name="Mqtt_CameraPortRange" xml:space="preserve">
+    <value>Los puertos UDP de la cámara deben estar entre 1 y 65535.</value>
+  </data>
+  <data name="Mqtt_CameraPortsMustDiffer" xml:space="preserve">
+    <value>Los puertos de vídeo y audio de la cámara deben ser diferentes.</value>
+  </data>
+  <data name="Mqtt_InvalidCameraTarget" xml:space="preserve">
+    <value>El host de destino de la cámara debe ser un nombre de host o una dirección IPv4 (no una dirección IPv6, una URL ni host:puerto).</value>
+  </data>
+  <data name="Mqtt_CameraTargetUnresolvable" xml:space="preserve">
+    <value>Un host de destino de la cámara distinto del broker MQTT debe ser una dirección IPv4 — el portero automático no puede resolver otros nombres de LAN o mDNS. Déjalo en blanco para usar el host del broker o introduce la dirección IP de go2rtc.</value>
+  </data>
+  <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
+    <value>El destino de la cámara debe ser una dirección enrutable — no una dirección de loopback (127.x.x.x) ni la dirección no especificada 0.0.0.0. go2rtc / Home Assistant se ejecuta fuera del portero automático.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} no existe en la imagen; no se puede aplicar el parche del puente MQTT.</value>
   </data>

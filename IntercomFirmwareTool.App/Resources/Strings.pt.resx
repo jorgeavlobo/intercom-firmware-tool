@@ -445,6 +445,26 @@ Chave: {1}</value></data>
   <data name="Tip_MqttLightMomentary" xml:space="preserve"><value>Uma pressão acende a luz; o temporizador da tua instalação é que a desliga. O Home Assistant mostra apenas um botão “Acender” — só pressão, sem estado on/off — porque é o hardware que decide quando a luz apaga.</value></data>
   <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>A unidade tem fechadura secundária</value></data>
   <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Marca para adicionar um segundo botão de abertura no Home Assistant. Deixa desmarcado se a tua instalação só tem um portão.</value></data>
+  <data name="Chk_MqttCamera" xml:space="preserve"><value>Expor a câmara da entrada (vídeo em direto)</value></data>
+  <data name="Tip_MqttCamera" xml:space="preserve"><value>Ative para transmitir a câmara do posto de entrada para o Home Assistant. A unidade envia uma cópia do vídeo (e áudio) em direto para um servidor go2rtc sempre que a porta toca, uma chamada é atendida ou abre a visualização. Requer o go2rtc no servidor recetor — use o botão abaixo para obter a configuração.</value></data>
+  <data name="Field_MqttCameraTarget" xml:space="preserve"><value>Servidor go2rtc / HA:</value></data>
+  <data name="Tip_MqttCameraTarget" xml:space="preserve"><value>O anfitrião que recebe o vídeo (onde corre o go2rtc — normalmente a máquina do Home Assistant). Deixe em branco para usar o anfitrião do broker MQTT. Se o go2rtc estiver noutra máquina, introduza o seu endereço IPv4 — o intercomunicador não consegue resolver outros nomes de rede.</value></data>
+  <data name="Field_MqttCameraVideoPort" xml:space="preserve"><value>Porta UDP de vídeo:</value></data>
+  <data name="Field_MqttCameraAudioPort" xml:space="preserve"><value>Porta UDP de áudio:</value></data>
+  <data name="Tip_MqttCameraPorts" xml:space="preserve"><value>Portas UDP no servidor recetor para os fluxos de vídeo e áudio. Devem coincidir com a configuração do go2rtc e ser diferentes entre si. Predefinição 40000 / 40002.</value></data>
+  <data name="Lbl_MqttCameraQuality" xml:space="preserve"><value>Qualidade de vídeo</value></data>
+  <data name="Rb_MqttCameraLowRes" xml:space="preserve"><value>Padrão (funciona em todos os modelos)</value></data>
+  <data name="Tip_MqttCameraLowRes" xml:space="preserve"><value>O ramo de vídeo de baixa resolução — o único disponível no Classe 100X e também presente no 300X. A escolha universal segura.</value></data>
+  <data name="Rb_MqttCameraHiRes" xml:space="preserve"><value>Alta resolução (apenas Classe 300X)</value></data>
+  <data name="Tip_MqttCameraHiRes" xml:space="preserve"><value>O ramo de vídeo de alta resolução. Disponível apenas no Classe 300X; num 100X não produz imagem, por isso mantenha Padrão selecionado.</value></data>
+  <data name="Hint_MqttCamera" xml:space="preserve"><value>O vídeo é enviado como fluxo em bruto, pelo que é necessário um serviço go2rtc no servidor recetor para o ver no Home Assistant. Use o botão para copiar uma configuração go2rtc já pronta.</value></data>
+  <data name="Warn_MqttCameraCleartext" xml:space="preserve"><value>⚠ O vídeo e o áudio são enviados sem encriptação (RTP em texto simples) na sua rede local — qualquer pessoa que consiga capturar esse tráfego pode ver e ouvir a câmara da porta. Use uma rede fidedigna e isolada (por exemplo, uma VLAN dedicada).</value></data>
+  <data name="Btn_MqttCameraGo2Rtc" xml:space="preserve"><value>Mostrar configuração go2rtc…</value></data>
+  <data name="Cap_MqttGo2Rtc" xml:space="preserve"><value>Configuração da câmara go2rtc</value></data>
+  <data name="MqttHint_CameraPort" xml:space="preserve"><value>As portas UDP da câmara devem ser números entre 1 e 65535.</value></data>
+  <data name="MqttHint_CameraPortsDiffer" xml:space="preserve"><value>As portas de vídeo e áudio da câmara devem ser diferentes.</value></data>
+  <data name="MqttHint_CameraTarget" xml:space="preserve"><value>O anfitrião de destino da câmara deve estar numa única linha.</value></data>
+  <data name="MqttHint_CameraTargetIp" xml:space="preserve"><value>Um destino da câmara noutro anfitrião deve ser um endereço IPv4 — o intercomunicador não consegue resolver outros nomes de rede.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Receção (comandos):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Dump do barramento:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Data de início:</value></data>

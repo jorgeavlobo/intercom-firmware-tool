@@ -197,6 +197,24 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
     <value>Die Lichtadresse (WHERE) darf nur Ziffern enthalten.</value>
   </data>
+  <data name="Mqtt_CameraTargetRequired" xml:space="preserve">
+    <value>Der Ziel-Host der Kamera ist erforderlich, wenn die Kamera aktiviert ist (legen Sie ihn fest oder setzen Sie den MQTT-Broker-Host, der standardmäßig verwendet wird).</value>
+  </data>
+  <data name="Mqtt_CameraPortRange" xml:space="preserve">
+    <value>Die UDP-Ports der Kamera müssen zwischen 1 und 65535 liegen.</value>
+  </data>
+  <data name="Mqtt_CameraPortsMustDiffer" xml:space="preserve">
+    <value>Die Video- und Audioports der Kamera müssen unterschiedlich sein.</value>
+  </data>
+  <data name="Mqtt_InvalidCameraTarget" xml:space="preserve">
+    <value>Der Ziel-Host der Kamera muss ein Hostname oder eine IPv4-Adresse sein (keine IPv6-Adresse, keine URL und kein Host:Port).</value>
+  </data>
+  <data name="Mqtt_CameraTargetUnresolvable" xml:space="preserve">
+    <value>Ein Ziel-Host der Kamera, der sich vom MQTT-Broker unterscheidet, muss eine IPv4-Adresse sein — die Türsprechanlage kann keine anderen LAN- oder mDNS-Namen auflösen. Leer lassen, um den Broker-Host zu verwenden, oder die IP-Adresse von go2rtc eingeben.</value>
+  </data>
+  <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
+    <value>Das Kameraziel muss eine routbare Adresse sein — keine Loopback-Adresse (127.x.x.x) und nicht die unspezifizierte Adresse 0.0.0.0. go2rtc / Home Assistant läuft außerhalb der Türsprechanlage.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} existiert im Abbild nicht; der MQTT-Brücken-Patch kann nicht angewendet werden.</value>
   </data>

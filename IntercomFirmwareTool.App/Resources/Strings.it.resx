@@ -445,6 +445,26 @@ Chiave: {1}</value></data>
   <data name="Tip_MqttLightMomentary" xml:space="preserve"><value>Una pressione accende la luce; è il timer del tuo impianto a spegnerla. Home Assistant mostra un solo pulsante “Accendi” — solo pressione, senza stato on/off — perché è l'hardware a decidere quando la luce si spegne.</value></data>
   <data name="Chk_MqttSecondaryLock" xml:space="preserve"><value>L'unità ha una serratura secondaria</value></data>
   <data name="Tip_MqttSecondaryLock" xml:space="preserve"><value>Seleziona per aggiungere un secondo pulsante di apertura in Home Assistant. Lascia deselezionato se l'impianto ha un solo cancello.</value></data>
+  <data name="Chk_MqttCamera" xml:space="preserve"><value>Esponi la telecamera d'ingresso (video in diretta)</value></data>
+  <data name="Tip_MqttCamera" xml:space="preserve"><value>Seleziona per trasmettere la telecamera del posto esterno a Home Assistant. L'unità invia una copia del video (e dell'audio) in diretta a un host go2rtc ogni volta che il campanello suona, una chiamata viene risposta o apri la visualizzazione. Richiede go2rtc sull'host ricevente — usa il pulsante qui sotto per ottenere la configurazione.</value></data>
+  <data name="Field_MqttCameraTarget" xml:space="preserve"><value>Host go2rtc / HA:</value></data>
+  <data name="Tip_MqttCameraTarget" xml:space="preserve"><value>L'host che riceve il video (dove gira go2rtc — di solito la macchina di Home Assistant). Lascia vuoto per usare l'host del broker MQTT. Se go2rtc è su un'altra macchina, inserisci il suo indirizzo IPv4 — il citofono non può risolvere altri nomi di rete.</value></data>
+  <data name="Field_MqttCameraVideoPort" xml:space="preserve"><value>Porta UDP video:</value></data>
+  <data name="Field_MqttCameraAudioPort" xml:space="preserve"><value>Porta UDP audio:</value></data>
+  <data name="Tip_MqttCameraPorts" xml:space="preserve"><value>Porte UDP sull'host ricevente per i flussi video e audio. Devono corrispondere alla configurazione di go2rtc ed essere diverse tra loro. Valori predefiniti 40000 / 40002.</value></data>
+  <data name="Lbl_MqttCameraQuality" xml:space="preserve"><value>Qualità video</value></data>
+  <data name="Rb_MqttCameraLowRes" xml:space="preserve"><value>Standard (funziona su ogni modello)</value></data>
+  <data name="Tip_MqttCameraLowRes" xml:space="preserve"><value>Il ramo video a bassa risoluzione — l'unico disponibile sul Classe 100X e presente anche sul 300X. La scelta universale sicura.</value></data>
+  <data name="Rb_MqttCameraHiRes" xml:space="preserve"><value>Alta risoluzione (solo Classe 300X)</value></data>
+  <data name="Tip_MqttCameraHiRes" xml:space="preserve"><value>Il ramo video ad alta risoluzione. Disponibile solo sul Classe 300X; su un 100X non produce immagine, quindi lascia selezionato Standard.</value></data>
+  <data name="Hint_MqttCamera" xml:space="preserve"><value>Il video viene inviato come flusso grezzo, quindi è necessario un servizio go2rtc sull'host ricevente per visualizzarlo in Home Assistant. Usa il pulsante per copiare una configurazione go2rtc già pronta.</value></data>
+  <data name="Warn_MqttCameraCleartext" xml:space="preserve"><value>⚠ Il video e l'audio vengono inviati non cifrati (RTP in chiaro) sulla rete locale — chiunque possa catturare quel traffico può vedere e ascoltare la telecamera della porta. Usa una rete affidabile e isolata (es. una VLAN dedicata).</value></data>
+  <data name="Btn_MqttCameraGo2Rtc" xml:space="preserve"><value>Mostra configurazione go2rtc…</value></data>
+  <data name="Cap_MqttGo2Rtc" xml:space="preserve"><value>Configurazione telecamera go2rtc</value></data>
+  <data name="MqttHint_CameraPort" xml:space="preserve"><value>Le porte UDP della telecamera devono essere numeri tra 1 e 65535.</value></data>
+  <data name="MqttHint_CameraPortsDiffer" xml:space="preserve"><value>Le porte video e audio della telecamera devono essere diverse.</value></data>
+  <data name="MqttHint_CameraTarget" xml:space="preserve"><value>L'host di destinazione della telecamera deve essere su una sola riga.</value></data>
+  <data name="MqttHint_CameraTargetIp" xml:space="preserve"><value>Una destinazione della telecamera su un altro host deve essere un indirizzo IPv4 — il citofono non può risolvere altri nomi di rete.</value></data>
   <data name="Field_MqttTopicRx" xml:space="preserve"><value>Ricezione (comandi):</value></data>
   <data name="Field_MqttTopicDump" xml:space="preserve"><value>Dump del bus:</value></data>
   <data name="Field_MqttTopicStartDate" xml:space="preserve"><value>Data di inizio:</value></data>

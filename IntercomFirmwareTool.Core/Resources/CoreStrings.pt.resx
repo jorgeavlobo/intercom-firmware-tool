@@ -197,6 +197,24 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_InvalidLightWhere" xml:space="preserve">
     <value>O endereço da luz (WHERE) deve conter apenas dígitos.</value>
   </data>
+  <data name="Mqtt_CameraTargetRequired" xml:space="preserve">
+    <value>O anfitrião de destino da câmara é obrigatório quando a câmara está ativada (defina-o, ou defina o anfitrião do broker MQTT que serve de predefinição).</value>
+  </data>
+  <data name="Mqtt_CameraPortRange" xml:space="preserve">
+    <value>As portas UDP da câmara devem estar entre 1 e 65535.</value>
+  </data>
+  <data name="Mqtt_CameraPortsMustDiffer" xml:space="preserve">
+    <value>As portas de vídeo e áudio da câmara devem ser diferentes.</value>
+  </data>
+  <data name="Mqtt_InvalidCameraTarget" xml:space="preserve">
+    <value>O anfitrião de destino da câmara deve ser um nome de anfitrião ou um endereço IPv4 (não um endereço IPv6, um URL ou anfitrião:porta).</value>
+  </data>
+  <data name="Mqtt_CameraTargetUnresolvable" xml:space="preserve">
+    <value>Um anfitrião de destino da câmara diferente do broker MQTT deve ser um endereço IPv4 — o intercomunicador não consegue resolver outros nomes de LAN ou mDNS. Deixe em branco para usar o anfitrião do broker, ou introduza o endereço IP do go2rtc.</value>
+  </data>
+  <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
+    <value>O destino da câmara deve ser um endereço encaminhável — não um endereço de loopback (127.x.x.x) nem o endereço não especificado 0.0.0.0. O go2rtc / Home Assistant corre fora do intercomunicador.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} não existe na imagem; não é possível aplicar o patch da ponte MQTT.</value>
   </data>

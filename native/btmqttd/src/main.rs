@@ -23,6 +23,7 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("btmqttd targets Linux only — build and run host checks on Linux or WSL");
 
+mod av;
 mod config;
 mod dimension;
 mod ha;
@@ -350,6 +351,26 @@ async fn run() -> Result<bool, String> {
         broker_online.clone(),
     ));
     let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone(), broker_online.clone()));
+    // Live doorbell camera (issue #103): opt-in. When enabled, this task runs its own
+    // OWN monitor (:20000, independent of `sender`) and, whenever the panel brings an A/V
+    // session up, adds a UDP client on `bt_av_media` (:30007) so a cleartext RTP copy is
+    // fanned out to the go2rtc/HA host. It publishes NOTHING to MQTT (it drives the on-box
+    // A/V daemon, not the broker), so it is NOT one of the tasks aborted before the final
+    // retained `offline`; it is stopped separately at shutdown. There is no half-actuated
+    // state to drain (it never tears the session down — the panel owns that), so a plain
+    // `stopping`-flag + abort is enough. `None` (feature off) threads through as no-op.
+    let (av_task, av_stopping): (
+        Option<tokio::task::JoinHandle<()>>,
+        Arc<std::sync::atomic::AtomicBool>,
+    ) = {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = if cfg.camera_enabled {
+            Some(tokio::spawn(av::run(cfg.clone(), stopping.clone())))
+        } else {
+            None
+        };
+        (task, stopping)
+    };
     // Birth is split across two events: SUBSCRIBE to the command topic on ConnAck,
     // then ANNOUNCE (online + start_date + HA) only after the broker confirms the
     // subscription (SubAck success). announce_task is the one that publishes
@@ -841,6 +862,14 @@ async fn run() -> Result<bool, String> {
     lock_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
     drop(lock_tx);
     let _ = tokio::time::timeout(lock::MAX_PULSE + Duration::from_secs(1), lock_task).await;
+    // Camera A/V siphon (issue #103): signal it to stop, then abort-and-await. It publishes
+    // nothing to the broker (so its ordering vs. the final `offline` is irrelevant) and holds
+    // no half-actuated bus state (it never sends a teardown), so this is a plain stop — the
+    // dropped `:30007` socket lets the panel's own teardown reap our added client.
+    if let Some(h) = av_task {
+        av_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+        stop(h).await;
+    }
     shutdown(&cfg, &client, &mut eventloop).await;
     Ok(reexec)
 }

@@ -16,6 +16,13 @@ pub const DEFAULT_CFG_PATH: &str = "/etc/btmqttd/btmqttd.conf";
 /// are forwarded here). Fixed, as in StartMqttReceive (`OWN_PORT=30006`).
 pub const OWN_PORT_CMD: u16 = 30006;
 
+/// The on-board `bt_av_media` A/V daemon's command port (issue #103). A WHO=7
+/// `*7*300#IP#IP#IP#IP#PORT#BRANCH*##` frame "adds a UDP client" to its GStreamer
+/// `multiudpsink`, fanning a cleartext RTP copy of the panel's H.264/speex to that
+/// `ip:port` — the mechanism `av.rs` uses to siphon the doorbell camera. Same on
+/// the C100X and C300X (firmware-verified). Adjacent to the command port above.
+pub const OWN_PORT_AV: u16 = 30007;
+
 /// Directory holding the Home Assistant discovery manifest + payloads.
 pub const HA_DIR: &str = "/etc/btmqttd/ha";
 
@@ -86,6 +93,24 @@ pub struct Config {
     // the trust gate — a candidate is adopted only if its ARP MAC matches it.
     pub rediscovery: bool,
     pub broker_mac: Option<[u8; 6]>,
+
+    // --- Live doorbell camera (Phase 1, issue #103) --------------------------------
+    /// "Expose the entrance-panel camera". When enabled, `av.rs` opens its own OWN
+    /// monitor and, whenever the panel brings an A/V session up (a ring/answer/self-view),
+    /// siphons the cleartext RTP off `bt_av_media` (:30007) by adding our own UDP client,
+    /// fanning it out to `camera_target` for go2rtc/Home Assistant. Opt-in; off by default.
+    pub camera_enabled: bool,
+    /// Where to fan the siphoned RTP (the go2rtc/HA host). Defaults to `MQTT_HOST`
+    /// (go2rtc typically runs alongside Home Assistant). Resolved to an IPv4 at runtime.
+    pub camera_target: String,
+    /// UDP ports on `camera_target` for the video and audio RTP fan-out. Must match the
+    /// generated go2rtc SDP. Defaults 40000 (video) / 40002 (audio).
+    pub camera_video_port: u16,
+    pub camera_audio_port: u16,
+    /// Which `multiudpsink` branch to siphon for video: `1` = low-res H.264 (the universal
+    /// default — the only one siphonable on the C100X, and present on the C300X), `0` =
+    /// hi-res (C300X only). Clamped to 0..=1; default 1.
+    pub camera_branch: u8,
 }
 
 impl Config {
@@ -158,6 +183,25 @@ impl Config {
             client_id: opt("MQTT_CLIENT_ID"),
             rediscovery: flag("MQTT_REDISCOVERY"),
             broker_mac: opt("MQTT_BROKER_MAC").and_then(|s| crate::rediscovery::parse_mac(&s)),
+            // Live doorbell camera (issue #103). Opt-in; the fan-out target defaults to the
+            // broker host (go2rtc usually lives with HA). Branch clamped to lo/hi-res (1/0).
+            camera_enabled: flag("CAMERA_ENABLED"),
+            camera_target: get("CAMERA_TARGET_HOST", &get("MQTT_HOST", "")),
+            // Reject port 0 (a hand-edited / corrupt conf) as well as an unparseable value: 0 would
+            // build an invalid `*7*300#…#0#…*##` frame the siphon can never use. Fall back to the
+            // default so a bad value degrades to a working port rather than a dead one (Copilot).
+            camera_video_port: opt("CAMERA_VIDEO_PORT")
+                .and_then(|s| s.parse().ok())
+                .filter(|p| *p != 0)
+                .unwrap_or(40000),
+            camera_audio_port: opt("CAMERA_AUDIO_PORT")
+                .and_then(|s| s.parse().ok())
+                .filter(|p| *p != 0)
+                .unwrap_or(40002),
+            camera_branch: opt("CAMERA_BRANCH")
+                .and_then(|s| s.parse().ok())
+                .filter(|b| *b <= 1)
+                .unwrap_or(1),
         }
     }
 
@@ -459,5 +503,23 @@ EMPTY=
         assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\nLIGHT_MODE=bistable\n").light_momentary);
         assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\n").light_momentary);
         assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\nLIGHT_MODE=\n").light_momentary);
+    }
+
+    #[test]
+    fn camera_ports_reject_zero_and_unparseable_falling_back_to_defaults() {
+        let cfg = |s: &str| Config::from_map(parse_env(s));
+        // A valid explicit port is kept.
+        let c = cfg("MQTT_HOST=h\nCAMERA_VIDEO_PORT=41000\nCAMERA_AUDIO_PORT=41002\n");
+        assert_eq!(c.camera_video_port, 41000);
+        assert_eq!(c.camera_audio_port, 41002);
+        // 0 (a hand-edited / corrupt conf) falls back to the default rather than building a port-0
+        // frame the siphon can never use.
+        let z = cfg("MQTT_HOST=h\nCAMERA_VIDEO_PORT=0\nCAMERA_AUDIO_PORT=0\n");
+        assert_eq!(z.camera_video_port, 40000);
+        assert_eq!(z.camera_audio_port, 40002);
+        // An unparseable / out-of-range value likewise falls back.
+        let bad = cfg("MQTT_HOST=h\nCAMERA_VIDEO_PORT=70000\nCAMERA_AUDIO_PORT=nope\n");
+        assert_eq!(bad.camera_video_port, 40000);
+        assert_eq!(bad.camera_audio_port, 40002);
     }
 }
