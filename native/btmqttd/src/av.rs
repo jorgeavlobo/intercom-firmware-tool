@@ -344,11 +344,15 @@ async fn read_until_ack_or_nack(
             ));
         }
         acc.extend_from_slice(&buf[..n]);
-        if find_sub(acc, AV_ACK).is_some() {
-            return Ok(true);
-        }
-        if find_sub(acc, AV_NACK).is_some() {
-            return Ok(false);
+        // Decide on whichever control frame appears FIRST in the stream. The panel sends
+        // exactly one reply per request, so normally only one is ever present; but if a
+        // misbehaving peer emitted both in one buffer (a NACK then a stray ACK), honouring
+        // byte order is safer than letting a trailing ACK override the earlier refusal.
+        match (find_sub(acc, AV_ACK), find_sub(acc, AV_NACK)) {
+            (Some(a), Some(n)) => return Ok(a < n),
+            (Some(_), None) => return Ok(true),
+            (None, Some(_)) => return Ok(false),
+            (None, None) => {}
         }
         if acc.len() > MAX_CTRL_BYTES {
             return Err(std::io::Error::new(
@@ -492,6 +496,34 @@ mod tests {
             // The server writes are already best-effort (the client drops after the cap), so unwrap
             // the JoinHandle to surface a genuine server-task panic rather than swallowing it.
             server.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn read_until_ack_or_nack_honours_byte_order_when_both_frames_arrive() {
+        // The panel sends exactly one reply, but if a misbehaving peer ever put both a NACK and
+        // an ACK in one buffer, the outcome must follow byte order (the FIRST frame wins) rather
+        // than letting a trailing ACK override an earlier refusal. Cover both orderings.
+        use tokio::io::AsyncWriteExt;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            async fn outcome(payload: &'static [u8]) -> bool {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (mut s, _) = listener.accept().await.unwrap();
+                    s.write_all(payload).await.unwrap();
+                    s.flush().await.unwrap();
+                });
+                let mut client = TcpStream::connect(addr).await.unwrap();
+                let mut acc = Vec::new();
+                let got = read_until_ack_or_nack(&mut client, &mut acc).await.unwrap();
+                server.await.unwrap();
+                got
+            }
+            // NACK before ACK ⇒ refusal wins (false); ACK before NACK ⇒ success (true).
+            assert!(!outcome(b"*#*0##*#*1##").await);
+            assert!(outcome(b"*#*1##*#*0##").await);
         });
     }
 
