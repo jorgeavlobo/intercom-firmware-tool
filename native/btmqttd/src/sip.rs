@@ -551,10 +551,14 @@ async fn session(
     // The ONLY timeout is this outer budget; on expiry we don't just drop the socket (over TCP that
     // does NOT cancel the INVITE, and a late 200 could then pin the panel) — we run the full
     // cancellation routine, which sends CANCEL and, if a 2xx raced in, ACK/BYEs it (Codex/CodeRabbit).
-    let final_resp = match tokio::time::timeout(RESPONSE_TIMEOUT, wait_final_response(&mut sock)).await {
+    // The read accumulator is owned HERE (not inside wait_final_response) so a timeout that fires
+    // mid-2xx doesn't discard the partial response with the dropped future — those bytes carry into
+    // the cancellation drain, which can then frame the accepted 2xx and tear it down (Codex).
+    let mut acc: Vec<u8> = Vec::new();
+    let final_resp = match tokio::time::timeout(RESPONSE_TIMEOUT, wait_final_response(&mut sock, &mut acc)).await {
         Ok(r) => r?,
         Err(_) => {
-            cancel_pending_invite(&mut sock, &mut d).await;
+            cancel_pending_invite(&mut sock, &mut d, acc).await;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "INVITE response timed out (CANCEL sent)",
@@ -672,11 +676,12 @@ async fn session(
 ///
 /// All writes are best-effort (`let _ =`): we're already on the error path and about to drop the
 /// connection; the goal is simply to leave the panel with no established session.
-async fn cancel_pending_invite(sock: &mut TcpStream, d: &mut Dialog) {
+async fn cancel_pending_invite(sock: &mut TcpStream, d: &mut Dialog, mut acc: Vec<u8>) {
     let _ = sock.write_all(build_cancel(d).as_bytes()).await;
     let _ = sock.flush().await;
 
-    let mut acc: Vec<u8> = Vec::new();
+    // `acc` is seeded with whatever `wait_final_response` had already read when the timeout fired —
+    // possibly a partial (or even complete) INVITE 2xx — so we can finish framing it below.
     let mut buf = [0u8; 4096];
     let deadline = tokio::time::Instant::now() + CANCEL_DRAIN;
     loop {
@@ -725,8 +730,7 @@ async fn cancel_pending_invite(sock: &mut TcpStream, d: &mut Dialog) {
 
 /// Read until the INVITE's FINAL response (skips `1xx` provisional). Accumulates bytes until a
 /// complete message with a `>= 200` status line is seen, or the cap/timeout trips.
-async fn wait_final_response(sock: &mut TcpStream) -> std::io::Result<String> {
-    let mut acc: Vec<u8> = Vec::new();
+async fn wait_final_response(sock: &mut TcpStream, acc: &mut Vec<u8>) -> std::io::Result<String> {
     let mut buf = [0u8; 4096];
     loop {
         // Consume every COMPLETE message already buffered and return the first FINAL (>= 200). A
@@ -734,7 +738,7 @@ async fn wait_final_response(sock: &mut TcpStream) -> std::io::Result<String> {
         // have all arrived — returning on the status line alone could hand back a 200 whose
         // To-tag/Contact haven't been read yet, so the ACK would carry an empty tag and the dialog
         // would never confirm even though the panel accepted the INVITE (Codex).
-        while let Some(len) = complete_message_len(&acc) {
+        while let Some(len) = complete_message_len(acc) {
             let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
             acc.drain(..len);
             match parse_status(&msg) {
