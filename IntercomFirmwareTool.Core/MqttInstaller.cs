@@ -1200,8 +1200,8 @@ namespace IntercomFirmwareTool.Core
         };
 
         /// <summary>
-        /// The ten volume/lock/light CONTROL entities' identity — (JSON filename, discovery
-        /// component, object id). Used by the TOMBSTONE path in
+        /// The volume / lock / light / on-demand-camera CONTROL entities' identity — (JSON filename,
+        /// discovery component, object id). Used by the TOMBSTONE path in
         /// <see cref="GenerateHaDiscovery"/> (when there is no concrete command topic) to
         /// emit the exact same config topics with an empty payload, so a previous build's
         /// controls are cleared. The real-config path builds each entity inline (their

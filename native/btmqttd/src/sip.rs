@@ -806,12 +806,16 @@ async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialo
     if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_ok() {
         drain_after_cancel(sock, d, acc).await;
     } else if let Ok(mut fresh) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
-        // The original socket was dead. CANCEL over a fresh connection (matched by branch/Call-ID);
-        // the racing 2xx, if any, went to the dead socket, so the fresh drain is genuinely best-effort.
+        // The original socket was dead. CANCEL over a fresh connection — but its top `Via` MUST stay
+        // byte-identical to the INVITE's (branch AND sent-by port), or flexisip won't match it to the
+        // pending transaction (RFC 3261 §9.1). So build the CANCEL with the ORIGINAL local port first;
+        // the fresh TCP connection carries the 200-to-CANCEL back regardless of the Via sent-by (CodeRabbit).
+        let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
+        // Only AFTER the CANCEL do we adopt the fresh port — for the drain's racing-2xx ACK/BYE, which
+        // are SEPARATE transactions whose responses should route back on this connection.
         if let Ok(a) = fresh.local_addr() {
             d.local_port = a.port();
         }
-        let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
         drain_after_cancel(&mut fresh, d, Vec::new()).await;
     }
     // else: couldn't even reconnect — nothing more we can do.
@@ -1125,6 +1129,12 @@ mod tests {
         // No To-tag (the transaction isn't confirmed) and no body.
         assert!(cancel.contains("To: <sip:c100x@dev.example>\r\n"));
         assert!(cancel.ends_with("Content-Length: 0\r\n\r\n"));
+        // RFC 3261 §9.1: the CANCEL's top Via must be byte-identical to the INVITE's (branch AND
+        // sent-by port), so flexisip matches it — even when we resend over a fresh connection with a
+        // different local port, build_cancel must be given the ORIGINAL dialog (CodeRabbit).
+        let invite = build_invite(&d, &build_sdp_offer(1, 2, "k", "da"));
+        let via = |m: &str| m.lines().find(|l| l.starts_with("Via:")).unwrap().to_string();
+        assert_eq!(via(&cancel), via(&invite));
     }
 
     #[test]
