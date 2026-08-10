@@ -573,8 +573,8 @@ fn srtp_key() -> String {
 // ---- the driver ------------------------------------------------------------------------------
 
 /// A command on the trigger channel. `Start` = the HA "View Camera" button (bring the session up and
-/// refresh the idle timer); `Stop` = the HA "Stop Camera" button (end the on-demand view now instead
-/// of waiting for the idle timeout). A `Stop` received while idle is a harmless no-op.
+/// renew the viewing window); `Stop` = the HA "Stop Camera" button (end the on-demand view now instead
+/// of waiting for the window to elapse). A `Stop` received while no session is up is a harmless no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewCmd {
     Start,
@@ -582,9 +582,9 @@ pub enum ViewCmd {
 }
 
 /// Run the on-demand SIP UA. Waits for a `Start` on `view_rx`; each brings the panel session up (if
-/// not already up) and refreshes an idle deadline. After `cfg.camera_view_idle_secs` with no further
-/// request — or on an explicit `Stop` — the dialog is torn down (BYE) so the panel is never left
-/// pinned. Returns when `stopping` is observed (draining the active dialog first).
+/// not already up) and renews the viewing-window deadline. After `cfg.camera_view_idle_secs` with no
+/// further request — or on an explicit `Stop` — the dialog is torn down (BYE) so the panel is never
+/// left pinned. Returns when `stopping` is observed (draining the active dialog first).
 pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, mut view_rx: mpsc::Receiver<ViewCmd>) {
     let mut backoff = BACKOFF_INIT;
     while !stopping.load(Ordering::Relaxed) {
@@ -609,8 +609,8 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, mut view_rx: mpsc:
     }
 }
 
-/// One on-demand session: INVITE → ACK, hold while views keep arriving, then BYE. The idle timer is
-/// refreshed by every extra `view_rx` message received while the session is up.
+/// One on-demand session: INVITE → ACK, hold while views keep arriving, then BYE. The viewing-window
+/// deadline is renewed by every extra `view_rx` Start received while the session is up.
 async fn session(
     cfg: &Arc<Config>,
     stopping: &Arc<AtomicBool>,
@@ -799,7 +799,7 @@ async fn session(
                     // dialog: acknowledge it (200 OK, else the panel retransmits) and stop — we must
                     // NOT then send our own BYE to a dead dialog. Every OTHER in-dialog request gets a
                     // final response so the panel's transaction completes instead of timing out, but
-                    // NONE of them refreshes the idle deadline (only a real viewer poke does).
+                    // NONE of them renews the viewing-window deadline (only a real viewer poke does).
                     while let Some(len) = complete_message_len(&inbound) {
                         let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
                         inbound.drain(..len);
@@ -823,11 +823,11 @@ async fn session(
                         // Answer in-dialog REQUESTS the panel sends mid-session. Leaving them
                         // unanswered lets the peer transaction time out — and a session-refresh
                         // re-INVITE that times out can make the panel tear down the camera dialog
-                        // BEFORE our idle deadline (Codex). `in_dialog_answer` picks the response
+                        // BEFORE our window deadline (Codex). `in_dialog_answer` picks the response
                         // (OPTIONS/other → 200 OK; re-INVITE/UPDATE → 488, no media renegotiation).
                         // A write failure here (BrokenPipe/ConnectionReset) proves the confirmed
                         // dialog's signalling socket is dead — do NOT discard it and wait for the next
-                        // read / user command / idle deadline, which would leave the panel streaming
+                        // read / user command / window deadline, which would leave the panel streaming
                         // meanwhile. Tear down over a FRESH connection and surface the error for the
                         // session-backoff path, exactly like the read-error arm below (CodeRabbit).
                         if let Some(resp) = in_dialog_answer(&msg) {
@@ -847,7 +847,7 @@ async fn session(
                     return Err(e);
                 }
             },
-            _ = tokio::time::sleep_until(deadline) => break, // idle expiry ⇒ hang up
+            _ = tokio::time::sleep_until(deadline) => break, // viewing-window expiry ⇒ hang up
         }
     }
 
@@ -857,7 +857,7 @@ async fn session(
     //  * transport_lost — our signalling socket died; the dialog may still be up at flexisip/panel,
     //    so BYE over a FRESH loopback connection (the dialog is keyed by Call-ID/tags, not the TCP
     //    connection) rather than writing into the dead socket.
-    //  * otherwise — normal idle/shutdown hang-up on the live socket.
+    //  * otherwise — normal window-expiry/shutdown hang-up on the live socket.
     if panel_ended {
         // nothing to send
     } else if transport_lost {
