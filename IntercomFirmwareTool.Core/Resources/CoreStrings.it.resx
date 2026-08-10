@@ -213,7 +213,7 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
     <value>Un host di destinazione della telecamera diverso dal broker MQTT deve essere un indirizzo IPv4 — il citofono non può risolvere altri nomi LAN o mDNS. Lascialo vuoto per usare l'host del broker, oppure inserisci l'indirizzo IP di go2rtc.</value>
   </data>
   <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
-    <value>La destinazione della telecamera non può essere un indirizzo di loopback (127.x.x.x) — go2rtc / Home Assistant gira fuori dal citofono, quindi il loopback non è mai una destinazione valida.</value>
+    <value>La destinazione della telecamera deve essere un indirizzo instradabile — non un indirizzo di loopback (127.x.x.x) né l'indirizzo non specificato 0.0.0.0. go2rtc / Home Assistant gira fuori dal citofono.</value>
   </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} non esiste nell'immagine; impossibile applicare la patch del bridge MQTT.</value>

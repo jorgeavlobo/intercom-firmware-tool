@@ -616,11 +616,14 @@ namespace IntercomFirmwareTool.Core
                 // would install but never arm — reject it here where the user sees why (CodeRabbit/Codex).
                 if (!IsHostnameOrIpv4(camTarget))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidCameraTarget"), nameof(opts));
-                // Reject a loopback target (127/8). go2rtc/Home Assistant runs OFF the intercom, so
-                // loopback is never a real fan-out destination; device-side it would also make our
-                // add-client frame collide with the panel's own `*7*300#127#0#0#1#…` media-start
-                // signal (av.rs rejects it too, but fail here so a broken config never ships) — Copilot.
-                if (IPAddress.TryParse(camTarget, out var camIp) && IPAddress.IsLoopback(camIp))
+                // Reject an unroutable target — go2rtc/Home Assistant runs OFF the intercom, so
+                // neither loopback (127/8) nor the unspecified 0.0.0.0 wildcard is a real fan-out
+                // destination. Loopback would also make our add-client frame collide with the panel's
+                // own `*7*300#127#0#0#1#…` media-start signal (Copilot), and 0.0.0.0 would arm the
+                // siphon against a bind wildcard no receiver reads (Codex). av.rs rejects both too,
+                // but fail here so a broken config never ships.
+                if (IPAddress.TryParse(camTarget, out var camIp)
+                    && (IPAddress.IsLoopback(camIp) || camIp.Equals(IPAddress.Any)))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetLoopback"), nameof(opts));
                 // Device resolvability: the installer pins ONLY MQTT_HOST in /etc/hosts, and the
                 // daemon's musl resolver consults /etc/hosts then public DNS — never the LAN/mDNS

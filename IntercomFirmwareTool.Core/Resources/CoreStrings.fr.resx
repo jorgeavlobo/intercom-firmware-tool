@@ -213,7 +213,7 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
     <value>Un hôte de destination de la caméra différent du broker MQTT doit être une adresse IPv4 — l'interphone ne peut pas résoudre d'autres noms LAN ou mDNS. Laissez-le vide pour utiliser l'hôte du broker, ou saisissez l'adresse IP de go2rtc.</value>
   </data>
   <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
-    <value>La destination de la caméra ne peut pas être une adresse de loopback (127.x.x.x) — go2rtc / Home Assistant s'exécute hors de l'interphone, donc le loopback n'est jamais une destination valide.</value>
+    <value>La destination de la caméra doit être une adresse routable — pas une adresse de loopback (127.x.x.x) ni l'adresse non spécifiée 0.0.0.0. go2rtc / Home Assistant s'exécute hors de l'interphone.</value>
   </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} n'existe pas dans l'image ; impossible d'appliquer le correctif du pont MQTT.</value>
