@@ -114,7 +114,12 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
         match session(&cfg, &stopping).await {
             // A clean return means `stopping` was observed — leave the loop.
             Ok(()) => break,
-            Err(e) => eprintln!("btmqttd: camera monitor {}: {e}", cfg.own_port_mon),
+            // Log host AND port (and the "unavailable" suffix) so a mismatched OWN_HOST/port is
+            // diagnosable — same shape as sender.rs's monitor error (Copilot).
+            Err(e) => eprintln!(
+                "btmqttd: camera monitor {}:{} unavailable: {e}",
+                cfg.own_host, cfg.own_port_mon
+            ),
         }
         if stopping.load(Ordering::Relaxed) {
             break;
