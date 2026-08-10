@@ -596,8 +596,12 @@ namespace IntercomFirmwareTool.App
             else
             {
                 // Leaving override: stash the custom host before ApplyCameraTargetLock mirrors the
-                // broker host over it, so re-enabling can bring it back.
-                _lastCameraHostOverride = NullIfEmpty(TxtMqttCameraTarget.Text.Trim());
+                // broker host over it, so re-enabling can bring it back. Only remember a value that is
+                // actually a distinct override — if the field just holds the mirrored broker host (or
+                // is empty), stash null so re-ticking starts blank instead of resurrecting the host.
+                string custom = TxtMqttCameraTarget.Text.Trim();
+                _lastCameraHostOverride =
+                    custom.Length > 0 && custom != TxtMqttHost.Text.Trim() ? custom : null;
             }
             ApplyCameraTargetLock();
             UpdateBuildEnabled();
