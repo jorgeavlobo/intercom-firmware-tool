@@ -484,6 +484,21 @@ pub fn build_ok_to(request: &str) -> Option<String> {
     build_response_to(request, "SIP/2.0 200 OK")
 }
 
+/// The final response to answer an in-dialog request the panel sends mid-session, or `None` if `msg`
+/// is not a request (a response) or a required transaction header is missing. We never renegotiate
+/// media: a re-INVITE or UPDATE (offer/answer refresh methods) is rejected with `488 Not Acceptable
+/// Here`, which completes the transaction while leaving the existing session unchanged (RFC 3261
+/// §14.2 / RFC 3311) — a bare `200 OK` would be a 2xx to an offer with no SDP answer, worse than a
+/// clean refusal. Every other in-dialog request (OPTIONS keepalive, INFO, NOTIFY, …) gets `200 OK`.
+fn in_dialog_answer(msg: &str) -> Option<String> {
+    let method = request_method(msg)?;
+    if method.eq_ignore_ascii_case("INVITE") || method.eq_ignore_ascii_case("UPDATE") {
+        build_response_to(msg, "SIP/2.0 488 Not Acceptable Here")
+    } else {
+        build_ok_to(msg)
+    }
+}
+
 // ---- randomness for SIP tokens + the throwaway SRTP key --------------------------------------
 
 /// Fill `buf` with OS entropy. Prefers the non-blocking `getrandom(2)` syscall over reading
@@ -802,24 +817,17 @@ async fn session(
                         // Answer in-dialog REQUESTS the panel sends mid-session. Leaving them
                         // unanswered lets the peer transaction time out — and a session-refresh
                         // re-INVITE that times out can make the panel tear down the camera dialog
-                        // BEFORE our idle deadline (Codex). We never renegotiate media:
-                        //   * OPTIONS               → 200 OK (in-dialog keepalive/capability probe)
-                        //   * re-INVITE / UPDATE    → 488 Not Acceptable Here — an explicit rejection
-                        //     that COMPLETES the transaction while leaving the existing session
-                        //     unchanged (RFC 3261 §14.2 / RFC 3311); a bare 200 OK would be a 2xx to an
-                        //     offer with no SDP answer, which is worse than a clean refusal.
-                        //   * anything else (INFO/NOTIFY/…) → 200 OK completes it with no session impact
-                        // Responses (e.g. a stray provisional) return None here and are ignored.
-                        if let Some(method) = request_method(&msg) {
-                            let resp = if method.eq_ignore_ascii_case("INVITE")
-                                || method.eq_ignore_ascii_case("UPDATE")
-                            {
-                                build_response_to(&msg, "SIP/2.0 488 Not Acceptable Here")
-                            } else {
-                                build_ok_to(&msg)
-                            };
-                            if let Some(resp) = resp {
-                                let _ = write_all_flush(&mut sock, resp.as_bytes()).await;
+                        // BEFORE our idle deadline (Codex). `in_dialog_answer` picks the response
+                        // (OPTIONS/other → 200 OK; re-INVITE/UPDATE → 488, no media renegotiation).
+                        // A write failure here (BrokenPipe/ConnectionReset) proves the confirmed
+                        // dialog's signalling socket is dead — do NOT discard it and wait for the next
+                        // read / user command / idle deadline, which would leave the panel streaming
+                        // meanwhile. Tear down over a FRESH connection and surface the error for the
+                        // session-backoff path, exactly like the read-error arm below (CodeRabbit).
+                        if let Some(resp) = in_dialog_answer(&msg) {
+                            if let Err(e) = write_all_flush(&mut sock, resp.as_bytes()).await {
+                                bye_reconnect(cfg, &d).await;
+                                return Err(e);
                             }
                         }
                     }
@@ -1289,7 +1297,7 @@ mod tests {
                        CSeq: 30 OPTIONS\r\n\
                        Content-Length: 0\r\n\r\n";
         assert_eq!(request_method(options), Some("OPTIONS"));
-        let ok = build_ok_to(options).unwrap();
+        let ok = in_dialog_answer(options).unwrap();
         assert!(ok.starts_with("SIP/2.0 200 OK\r\n"));
         assert!(ok.contains("CSeq: 30 OPTIONS\r\n"));
         assert!(ok.contains("Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKopt\r\n"));
@@ -1303,11 +1311,45 @@ mod tests {
                         Call-ID: cid\r\n\
                         CSeq: 31 INVITE\r\n\
                         Content-Length: 0\r\n\r\n";
-        let rej = build_response_to(reinvite, "SIP/2.0 488 Not Acceptable Here").unwrap();
+        let rej = in_dialog_answer(reinvite).unwrap();
         assert!(rej.starts_with("SIP/2.0 488 Not Acceptable Here\r\n"));
         assert!(rej.contains("CSeq: 31 INVITE\r\n")); // same CSeq ⇒ panel matches its INVITE txn
         assert!(rej.contains("To: <sip:c100x@d>;tag=tt\r\n")); // our local tag preserved
         assert!(rej.ends_with("Content-Length: 0\r\n\r\n"));
+
+        // UPDATE is also an offer/answer refresh method ⇒ 488; INFO carries no media ⇒ 200 OK.
+        let update = "UPDATE sip:x SIP/2.0\r\nFrom: <sip:a>;tag=f\r\nTo: <sip:b>;tag=t\r\n\
+                      Call-ID: c\r\nCSeq: 32 UPDATE\r\nContent-Length: 0\r\n\r\n";
+        assert!(in_dialog_answer(update).unwrap().starts_with("SIP/2.0 488 "));
+        let info = "INFO sip:x SIP/2.0\r\nFrom: <sip:a>;tag=f\r\nTo: <sip:b>;tag=t\r\n\
+                    Call-ID: c\r\nCSeq: 33 INFO\r\nContent-Length: 0\r\n\r\n";
+        assert!(in_dialog_answer(info).unwrap().starts_with("SIP/2.0 200 OK"));
+        // A RESPONSE (not a request) is never answered.
+        assert!(in_dialog_answer("SIP/2.0 200 OK\r\nCSeq: 1 OPTIONS\r\n\r\n").is_none());
+    }
+
+    // A write failure while answering an in-dialog request proves the confirmed dialog's socket is
+    // dead. The hold loop routes that error to bye_reconnect + `return Err(e)` (same idiom as the
+    // read-error arm) so the panel is never left streaming. This test proves the precondition is
+    // reachable: once our write half is shut down, writing the OPTIONS `200 OK` fails deterministically
+    // (so the branch takes its teardown path rather than silently swallowing the error — CodeRabbit).
+    #[tokio::test]
+    async fn in_dialog_answer_write_failure_is_surfaced_not_swallowed() {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (_server, _) = listener.accept().await.unwrap();
+        client.shutdown().await.unwrap(); // close our write half ⇒ subsequent writes must error
+
+        let options = "OPTIONS sip:x SIP/2.0\r\nFrom: <sip:a>;tag=f\r\nTo: <sip:b>;tag=t\r\n\
+                       Call-ID: c\r\nCSeq: 40 OPTIONS\r\nContent-Length: 0\r\n\r\n";
+        let resp = in_dialog_answer(options).unwrap();
+        assert!(
+            write_all_flush(&mut client, resp.as_bytes()).await.is_err(),
+            "a dead socket must surface an error from the in-dialog answer write, not swallow it"
+        );
     }
 
     #[test]
