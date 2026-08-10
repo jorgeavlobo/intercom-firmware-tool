@@ -129,11 +129,12 @@ pub fn devaddr_from_mymodules(content: &str, own_addr: &str) -> Option<String> {
         if !addr_match {
             continue;
         }
-        // A blank `id` on an otherwise-matching module is corrupt/mid-update data: treat it as NO
-        // match (skip) rather than returning `Some("")`, which would pass resolve_identity's
-        // mandatory gate and emit an empty `a=DEVADDR:` — defeating the fail-closed guarantee that we
-        // never originate a ringing INVITE (Codex).
-        let Some(id) = m.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+        // A blank or whitespace-only `id` on an otherwise-matching module is corrupt/mid-update
+        // data: treat it as NO match (skip) rather than returning `Some("")` / `Some("  ")`, which
+        // would pass resolve_identity's mandatory gate and emit an empty/blank `a=DEVADDR:` —
+        // defeating the fail-closed guarantee that we never originate a ringing INVITE (Codex/CodeRabbit).
+        let Some(id) = m.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+        else {
             continue;
         };
         if hit.is_some() {
@@ -163,11 +164,17 @@ async fn resolve_identity(cfg: &Config) -> Option<(String, String, String)> {
         let text = tokio::fs::read_to_string(DOMAIN_REGISTRATION_CONF).await.ok()?;
         domain_from_registration(&text)?
     };
-    let devaddr = if !cfg.sip_devaddr.is_empty() {
-        cfg.sip_devaddr.clone()
-    } else {
-        let text = tokio::fs::read_to_string(MYMODULES_PATH).await.ok()?;
-        devaddr_from_mymodules(&text, MAIN_ENTRANCE_OWN_ADDR)?
+    // A whitespace-only SIP_DEVADDR override is treated as unset (fall through to auto-detect), and
+    // the auto-detected id is likewise trimmed+non-empty (above) — so the DEVADDR we emit is never
+    // blank, keeping the fail-closed gate intact (CodeRabbit).
+    let devaddr = {
+        let over = cfg.sip_devaddr.trim();
+        if !over.is_empty() {
+            over.to_string()
+        } else {
+            let text = tokio::fs::read_to_string(MYMODULES_PATH).await.ok()?;
+            devaddr_from_mymodules(&text, MAIN_ENTRANCE_OWN_ADDR)?
+        }
     };
     Some((aor, domain, devaddr))
 }
@@ -379,6 +386,16 @@ pub fn contact_uri(msg: &str) -> Option<String> {
 /// True when `msg`'s request-line is a `BYE` — the panel ending the dialog from its side.
 pub fn is_bye(msg: &str) -> bool {
     msg.lines().next().is_some_and(|l| l.starts_with("BYE "))
+}
+
+/// True when `msg` is a 2xx response to the INVITE transaction itself — i.e. an ESTABLISHED dialog
+/// we must ACK then BYE. Distinguished from the `200 OK` to our CANCEL (also 2xx, but `CSeq: N
+/// CANCEL`), which establishes nothing and must NOT trigger a teardown (CodeRabbit).
+pub fn is_established_invite_2xx(msg: &str) -> bool {
+    matches!(parse_status(msg), Some(s) if (200..300).contains(&s))
+        && header_value(msg, "CSeq")
+            .and_then(|c| c.split_whitespace().nth(1))
+            .is_some_and(|m| m.eq_ignore_ascii_case("INVITE"))
 }
 
 /// A `200 OK` to an in-dialog request (the panel's BYE), echoing the headers the transaction needs:
@@ -666,11 +683,13 @@ async fn cancel_pending_invite(sock: &mut TcpStream, d: &mut Dialog) {
         while let Some(len) = complete_message_len(&acc) {
             let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
             acc.drain(..len);
-            // A 2xx to the INVITE means the dialog established despite our CANCEL. Confirm it (ACK)
-            // and immediately end it (BYE) so nothing stays pinned. Needs the To-tag; if a peer
-            // omits it we can't form a valid ACK/BYE, so just stop (the socket close is our last
-            // resort). Non-2xx (487 to INVITE, 200 to CANCEL, …) needs no action.
-            if matches!(parse_status(&msg), Some(s) if (200..300).contains(&s)) {
+            // A 2xx to the INVITE (CSeq method INVITE) means the dialog established despite our
+            // CANCEL. Confirm it (ACK) and immediately end it (BYE) so nothing stays pinned. Needs
+            // the To-tag; if a peer omits it we can't form a valid ACK/BYE, so just stop (the socket
+            // close is our last resort). The `200 OK` to the CANCEL is ALSO 2xx but carries
+            // `CSeq: N CANCEL` and establishes nothing — it must NOT trigger a teardown, so we keep
+            // draining past it for a possible racing INVITE 2xx (CodeRabbit). 487/provisional: ignore.
+            if is_established_invite_2xx(&msg) {
                 if let Some(tag) = to_tag(&msg) {
                     d.to_tag = tag;
                     d.remote_target =
@@ -815,12 +834,22 @@ mod tests {
         // Garbage / missing modules array ⇒ None, not a panic.
         assert_eq!(devaddr_from_mymodules("not json", "20"), None);
         assert_eq!(devaddr_from_mymodules("{}", "20"), None);
-        // A matching EU@20 with a BLANK id is corrupt/mid-update data ⇒ None, NOT Some(""), so the
-        // mandatory gate can't be defeated into emitting an empty `a=DEVADDR:` (Codex).
+        // A matching EU@20 with a BLANK or whitespace-only id is corrupt/mid-update data ⇒ None, NOT
+        // Some("")/Some("  "), so the mandatory gate can't be defeated into emitting an empty/blank
+        // `a=DEVADDR:` (Codex/CodeRabbit).
         let blank = r#"{"modules":[
             {"system":"videodoorentry","deviceType":"EU","id":"",
              "privateAddress":{"addressValues":[{"name":"address","value":"20"}]}}]}"#;
         assert_eq!(devaddr_from_mymodules(blank, "20"), None);
+        let ws = r#"{"modules":[
+            {"system":"videodoorentry","deviceType":"EU","id":"   ",
+             "privateAddress":{"addressValues":[{"name":"address","value":"20"}]}}]}"#;
+        assert_eq!(devaddr_from_mymodules(ws, "20"), None);
+        // A valid id with surrounding whitespace is trimmed, not rejected.
+        let padded = r#"{"modules":[
+            {"system":"videodoorentry","deviceType":"EU","id":"  uuid-1  ",
+             "privateAddress":{"addressValues":[{"name":"address","value":"20"}]}}]}"#;
+        assert_eq!(devaddr_from_mymodules(padded, "20").as_deref(), Some("uuid-1"));
     }
 
     #[test]
@@ -913,6 +942,23 @@ mod tests {
         assert!(ok.contains("Call-ID: cid123\r\n"));
         assert!(ok.contains("CSeq: 22 BYE\r\n")); // same CSeq so the panel matches the transaction
         assert!(ok.ends_with("Content-Length: 0\r\n\r\n"));
+    }
+
+    #[test]
+    fn only_a_2xx_to_the_invite_counts_as_established() {
+        // A 200 to the INVITE (CSeq method INVITE) is an established dialog we must ACK/BYE.
+        let ok_invite = "SIP/2.0 200 OK\r\nCSeq: 21 INVITE\r\nTo: <sip:x>;tag=t\r\nContent-Length: 0\r\n\r\n";
+        assert!(is_established_invite_2xx(ok_invite));
+        // The 200 to our CANCEL is ALSO 2xx but CSeq method CANCEL — it establishes nothing, so it
+        // must NOT select the ACK/BYE path (regression for the racing-drain fix).
+        let ok_cancel = "SIP/2.0 200 OK\r\nCSeq: 21 CANCEL\r\nContent-Length: 0\r\n\r\n";
+        assert!(!is_established_invite_2xx(ok_cancel));
+        // 487 to the INVITE (the expected terminal response after CANCEL) is not 2xx ⇒ no teardown.
+        let req_terminated = "SIP/2.0 487 Request Terminated\r\nCSeq: 21 INVITE\r\nContent-Length: 0\r\n\r\n";
+        assert!(!is_established_invite_2xx(req_terminated));
+        // A provisional (or a missing CSeq) is not an established dialog either.
+        assert!(!is_established_invite_2xx("SIP/2.0 100 Trying\r\nCSeq: 21 INVITE\r\n\r\n"));
+        assert!(!is_established_invite_2xx("SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n"));
     }
 
     #[test]
