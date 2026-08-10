@@ -885,7 +885,8 @@ async fn wait_until_stopping(stopping: &AtomicBool) {
 ///     down (`ACK` then `BYE`) or the panel keeps its camera streaming (Codex/CodeRabbit).
 async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, acc: Vec<u8>) {
     if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_ok() {
-        drain_after_cancel(sock, cfg, d, acc).await;
+        // Same socket: `acc` was read from `sock`, so a trailing partial is a valid continuation.
+        drain_after_cancel(sock, cfg, d, acc, false).await;
     } else if let Ok(mut fresh) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
         // The original socket was dead. Resend over a fresh connection, but KEEP the INVITE's original
         // `Via` (branch AND sent-by port) unchanged: both the CANCEL and the drained non-2xx (487) ACK
@@ -898,20 +899,36 @@ async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialo
         // Carry `acc` (the bytes wait_final_response had already read) into the drain even on the
         // reconnect path: if it holds a COMPLETE INVITE 2xx buffered just before the old socket died,
         // drain_after_cancel frames and tears it down (ACK+BYE) — dropping it would leave the accepted
-        // camera session up (CodeRabbit). It frames the seed's complete messages BEFORE reading the
-        // fresh socket, so a complete buffered response is handled without mixing the two streams; a
-        // trailing partial from the dead stream carries nothing actionable (the racing INVITE 2xx went
-        // to the old socket, and the fresh socket only carries the 200-to-CANCEL, which needs no action).
-        drain_after_cancel(&mut fresh, cfg, d, acc).await;
+        // camera session up (CodeRabbit). `seed_foreign = true`: it frames the seed's COMPLETE messages
+        // first, then DISCARDS any trailing partial from the dead stream before reading the fresh socket
+        // — otherwise that partial would concatenate with the fresh socket's 200-to-CANCEL into one
+        // synthetic message and trigger a bogus ACK/BYE with mismatched dialog data (Codex).
+        drain_after_cancel(&mut fresh, cfg, d, acc, true).await;
     }
     // else: couldn't even reconnect — nothing more we can do.
 }
 
 /// Drain framed responses after a CANCEL for `CANCEL_DRAIN`, ACK+BYE-ing a racing INVITE 2xx.
-async fn drain_after_cancel(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, mut acc: Vec<u8>) {
+///
+/// `seed_foreign` distinguishes where `acc`'s seed bytes came from relative to `sock`:
+/// - `false` (same-socket path): `acc` was read from `sock` itself, so a trailing partial is the
+///   valid start of the NEXT message on that stream and must be kept and completed by later reads.
+/// - `true` (reconnect path): `acc` was read from a now-dead ORIGINAL socket while `sock` is a
+///   fresh connection. After framing the seed's COMPLETE messages, any trailing partial belongs to
+///   the dead stream and must be DISCARDED — concatenating it with `sock`'s bytes (e.g. the fresh
+///   socket's `200`-to-CANCEL) would frame a synthetic message whose status line and headers come
+///   from two different streams, causing a bogus ACK/BYE with mismatched dialog data (Codex).
+async fn drain_after_cancel(
+    sock: &mut TcpStream,
+    cfg: &Config,
+    d: &mut Dialog,
+    mut acc: Vec<u8>,
+    seed_foreign: bool,
+) {
     // `acc` is seeded with whatever `wait_final_response` had already read when the timeout fired —
     // possibly a partial (or even complete) INVITE 2xx — so we can finish framing it below.
     let mut buf = [0u8; 4096];
+    let mut first_pass = true;
     let deadline = tokio::time::Instant::now() + CANCEL_DRAIN;
     loop {
         while let Some(len) = complete_message_len(&acc) {
@@ -952,6 +969,14 @@ async fn drain_after_cancel(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, 
                 _ => {} // a 1xx provisional to the INVITE (unlikely post-CANCEL) — keep draining
             }
         }
+        // Seed fully framed. If it came from the dead original socket, drop any trailing partial
+        // now — before the first read from the fresh `sock` — so the two streams' bytes never merge
+        // into one synthetic message (Codex). On the same-socket path the residue is a legitimate
+        // continuation and is kept.
+        if first_pass && seed_foreign {
+            acc.clear();
+        }
+        first_pass = false;
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return;
