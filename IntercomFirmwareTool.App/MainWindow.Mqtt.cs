@@ -119,6 +119,10 @@ namespace IntercomFirmwareTool.App
             // calls UpdateBuildEnabled — can never fire during InitializeComponent,
             // before the password fields it reads are constructed.
             TxtMqttPort.Text = "1883";
+            // Same reason for the camera fan-out ports (they also use MqttField_TextChanged):
+            // set the defaults here, NOT via XAML Text=, so no handler runs mid-InitializeComponent.
+            TxtMqttCameraVideoPort.Text = "40000";
+            TxtMqttCameraAudioPort.Text = "40002";
 
             // Prefill the topic boxes with the record's defaults (Home Assistant set).
             var d = new MqttOptions("x"); // a throwaway just to read the default topics

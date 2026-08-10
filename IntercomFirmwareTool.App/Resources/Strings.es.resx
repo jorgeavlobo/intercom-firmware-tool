@@ -458,6 +458,7 @@ Clave: {1}</value></data>
   <data name="Rb_MqttCameraHiRes" xml:space="preserve"><value>Alta resolución (solo Classe 300X)</value></data>
   <data name="Tip_MqttCameraHiRes" xml:space="preserve"><value>La rama de vídeo de alta resolución. Disponible solo en el Classe 300X; en un 100X no produce imagen, así que deja seleccionado Estándar.</value></data>
   <data name="Hint_MqttCamera" xml:space="preserve"><value>El vídeo se envía como flujo en bruto, por lo que se necesita un servicio go2rtc en el host receptor para verlo en Home Assistant. Usa el botón para copiar una configuración go2rtc lista para usar.</value></data>
+  <data name="Warn_MqttCameraCleartext" xml:space="preserve"><value>⚠ El vídeo y el audio se envían sin cifrar (RTP en texto plano) por tu red local — cualquiera que pueda capturar ese tráfico puede ver y oír la cámara de la puerta. Usa una red de confianza y aislada (por ejemplo, una VLAN dedicada).</value></data>
   <data name="Btn_MqttCameraGo2Rtc" xml:space="preserve"><value>Mostrar configuración de go2rtc…</value></data>
   <data name="Cap_MqttGo2Rtc" xml:space="preserve"><value>Configuración de cámara go2rtc</value></data>
   <data name="MqttHint_CameraPort" xml:space="preserve"><value>Los puertos UDP de la cámara deben ser números entre 1 y 65535.</value></data>
