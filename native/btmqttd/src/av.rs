@@ -420,16 +420,23 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (mut s, _) = listener.accept().await.unwrap();
                 let mut b = [0u8; 64];
-                // NACK every add-client attempt (ADD_CLIENT_ATTEMPTS of them).
+                // NACK every add-client attempt (ADD_CLIENT_ATTEMPTS of them). Best-effort I/O:
+                // the client may drop after the last NACK, so bail out on an I/O error rather than
+                // panicking — that keeps `server.await.unwrap()` below meaningful (it then surfaces
+                // only a genuine task panic, not an expected disconnect race).
                 for _ in 0..ADD_CLIENT_ATTEMPTS {
-                    let _ = s.read(&mut b).await.unwrap();
-                    s.write_all(AV_NACK).await.unwrap();
-                    s.flush().await.unwrap();
+                    if s.read(&mut b).await.is_err() {
+                        break;
+                    }
+                    if s.write_all(AV_NACK).await.is_err() {
+                        break;
+                    }
+                    let _ = s.flush().await;
                 }
             });
             let mut client = TcpStream::connect(addr).await.unwrap();
             assert!(add_client(&mut client, "*7*300#1#2#3#4#40000#1*##").await.is_err());
-            let _ = server.await;
+            server.await.unwrap();
         });
     }
 
@@ -482,7 +489,9 @@ mod tests {
             let mut acc = Vec::new();
             let err = read_until_ack_or_nack(&mut client, &mut acc).await.unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-            let _ = server.await;
+            // The server writes are already best-effort (the client drops after the cap), so unwrap
+            // the JoinHandle to surface a genuine server-task panic rather than swallowing it.
+            server.await.unwrap();
         });
     }
 
