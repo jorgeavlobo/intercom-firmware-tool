@@ -601,7 +601,9 @@ namespace IntercomFirmwareTool.App
                 // is empty), stash null so re-ticking starts blank instead of resurrecting the host.
                 string custom = TxtMqttCameraTarget.Text.Trim();
                 _lastCameraHostOverride =
-                    custom.Length > 0 && custom != TxtMqttHost.Text.Trim() ? custom : null;
+                    custom.Length > 0
+                    && !string.Equals(custom, TxtMqttHost.Text.Trim(), StringComparison.OrdinalIgnoreCase)
+                        ? custom : null;
             }
             ApplyCameraTargetLock();
             UpdateBuildEnabled();
