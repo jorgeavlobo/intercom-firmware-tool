@@ -887,16 +887,14 @@ async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialo
     if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_ok() {
         drain_after_cancel(sock, cfg, d, acc).await;
     } else if let Ok(mut fresh) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
-        // The original socket was dead. CANCEL over a fresh connection — but its top `Via` MUST stay
-        // byte-identical to the INVITE's (branch AND sent-by port), or flexisip won't match it to the
-        // pending transaction (RFC 3261 §9.1). So build the CANCEL with the ORIGINAL local port first;
-        // the fresh TCP connection carries the 200-to-CANCEL back regardless of the Via sent-by (CodeRabbit).
+        // The original socket was dead. Resend over a fresh connection, but KEEP the INVITE's original
+        // `Via` (branch AND sent-by port) unchanged: both the CANCEL and the drained non-2xx (487) ACK
+        // are part of the INVITE client transaction and MUST reuse its top `Via`, or flexisip won't
+        // match them and the transaction lingers until Timer H (RFC 3261 §9.1 / §17.1.1.3 — CodeRabbit,
+        // Codex). Over TCP that's also fine for the drain's racing-2xx ACK/BYE: SIP sends responses back
+        // on the connection the request arrived on (§18.2.2), so the original sent-by port doesn't
+        // misroute the 200-to-BYE. Hence we do NOT overwrite `d.local_port` here.
         let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
-        // Only AFTER the CANCEL do we adopt the fresh port — for the drain's racing-2xx ACK/BYE, which
-        // are SEPARATE transactions whose responses should route back on this connection.
-        if let Ok(a) = fresh.local_addr() {
-            d.local_port = a.port();
-        }
         drain_after_cancel(&mut fresh, cfg, d, Vec::new()).await;
     }
     // else: couldn't even reconnect — nothing more we can do.

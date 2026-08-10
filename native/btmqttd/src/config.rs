@@ -238,9 +238,14 @@ impl Config {
             sip_domain: get("SIP_DOMAIN", ""),
             sip_local_aor: get("SIP_LOCAL_AOR", ""),
             sip_devaddr: get("SIP_DEVADDR", ""),
+            // Clamp to 1 s..=86400 s (1 day). >0 keeps a hand-edited 0 from disabling the hang-up; the
+            // upper cap keeps a huge hand-edited value from overflowing `Instant + Duration` (which
+            // panics) when sip.rs builds the idle deadline (Copilot). 86400 s is far above any real
+            // on-demand view.
             camera_view_idle_secs: opt("CAMERA_VIEW_IDLE_SECS")
-                .and_then(|s| s.parse().ok())
+                .and_then(|s| s.parse::<u64>().ok())
                 .filter(|n| *n > 0)
+                .map(|n| n.min(86_400))
                 .unwrap_or(30),
         }
     }
@@ -561,5 +566,19 @@ EMPTY=
         let bad = cfg("MQTT_HOST=h\nCAMERA_VIDEO_PORT=70000\nCAMERA_AUDIO_PORT=nope\n");
         assert_eq!(bad.camera_video_port, 40000);
         assert_eq!(bad.camera_audio_port, 40002);
+    }
+
+    #[test]
+    fn camera_view_idle_secs_clamps_zero_and_huge_values() {
+        let cfg = |s: &str| Config::from_map(parse_env(s));
+        // A sane value is kept.
+        assert_eq!(cfg("MQTT_HOST=h\nCAMERA_VIEW_IDLE_SECS=45\n").camera_view_idle_secs, 45);
+        // 0 (would disable the hang-up) falls back to the default.
+        assert_eq!(cfg("MQTT_HOST=h\nCAMERA_VIEW_IDLE_SECS=0\n").camera_view_idle_secs, 30);
+        // A huge hand-edited value is capped at 1 day so `Instant + Duration` can't overflow/panic.
+        assert_eq!(
+            cfg("MQTT_HOST=h\nCAMERA_VIEW_IDLE_SECS=18446744073709551615\n").camera_view_idle_secs,
+            86_400
+        );
     }
 }
