@@ -16,11 +16,20 @@
 //! the panel emits its media-start frame on the monitor. So the two modules coordinate implicitly
 //! through the panel's own session lifecycle — this file never touches `bt_av_media`.
 //!
+//! ## What makes it SILENT (hardware-proven, issue #104)
+//! An INVITE whose SDP is `m=video recvonly` but is otherwise plain RINGS the indoor unit as a
+//! normal intercom call. Two session-level SDP attributes flip it to a silent camerasliding pull:
+//! `a=DEVADDR:<uuid>` (the entrance camera to switch on — on the C100X the `id` of the
+//! `videodoorentry` `EU` module at OWN address 20 in `mymodules`; the numeric `20` form is
+//! C300X-only) and `a=nortpproxy:yes`. With both, the panel answers `200 OK` / `m=video sendonly`
+//! and the household stays quiet. `180 Ringing` still appears at the SIP layer — it does NOT mean
+//! the unit rang; `wait_final_response` skips it and waits for the `200`.
+//!
 //! ## Captured dialog (redacted), the ground truth this mirrors
 //! ```text
-//! INVITE sip:c100x@<domain>            CSeq: 21 INVITE   (SDP offer, RTP/SAVP)
-//!   <- 100 Trying / 180 Ringing (To adds ;tag=<panel>) / 200 OK (Contact: c100x@127.0.0.1:<ephem>)
-//! ACK  sip:c100x@127.0.0.1:<ephem>     CSeq: 21 ACK
+//! INVITE sip:c100x@<domain>            CSeq: 21 INVITE   (SDP: RTP/SAVP, a=nortpproxy:yes, a=DEVADDR:<uuid>)
+//!   <- 100 Trying / 180 Ringing (SIP-layer only; To adds ;tag=<panel>) / 200 OK (m=video sendonly)
+//! ACK  sip:c100x@127.0.0.1:<ephem>     CSeq: 21 ACK      (Contact: c100x@127.0.0.1:<ephem>)
 //!   ... session held; av.rs siphons :30007 ...
 //! BYE  sip:c100x@127.0.0.1:<ephem>     CSeq: 22 BYE
 //!   <- 200 OK
@@ -30,6 +39,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -41,6 +51,12 @@ use crate::config::Config;
 const DOMAIN_REGISTRATION_CONF: &str = "/etc/flexisip/domain-registration.conf";
 /// Model detection, same file the rest of the tool already uses.
 const HOSTNAME_PATH: &str = "/etc/hostname";
+/// The on-device plant topology (JSON): the `a=DEVADDR` that makes the INVITE a SILENT camerasliding
+/// pull is a module `id` in here (see `devaddr_from_mymodules`).
+const MYMODULES_PATH: &str = "/home/bticino/cfg/extra/.bt_eliot/mymodules";
+/// The OWN address of the main entrance panel — conventionally `20` on these plants (the reference
+/// `detectDevAddrOnC100X()` hardcodes it). An installer can override the whole DEVADDR via config.
+const MAIN_ENTRANCE_OWN_ADDR: &str = "20";
 
 /// Response wait + overall INVITE timeout, and how long a single read may block.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -78,9 +94,53 @@ pub fn domain_from_registration(content: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Resolve `(aor_user, domain)` from config overrides, falling back to on-device files. `None` if
-/// the model or domain can't be determined — the caller then declines to originate.
-async fn resolve_identity(cfg: &Config) -> Option<(String, String)> {
+/// The `a=DEVADDR` value — a port of the reference `detectDevAddrOnC100X()`. In the on-device
+/// `mymodules` JSON the entrance camera is the `videodoorentry` `EU` module at OWN address
+/// `own_addr` (conventionally `20`); its `id` (a UUID) is the DEVADDR that flips the INVITE from a
+/// household-ringing intercom call to a SILENT camerasliding pull (hardware-proven, issue #104).
+/// Returns the id only when EXACTLY ONE module matches — an ambiguous plant declines rather than
+/// guess (never ring the wrong / a household). Pure over the file contents, so it unit-tests.
+///
+/// The numeric OWN-address form works on the C300X but returns `486 Busy here` on the C100X, so we
+/// resolve the UUID here for universality; an installer can still pin either form via `SIP_DEVADDR`.
+pub fn devaddr_from_mymodules(content: &str, own_addr: &str) -> Option<String> {
+    let root: Value = serde_json::from_str(content).ok()?;
+    let modules = root.get("modules")?.as_array()?;
+    let mut hit: Option<String> = None;
+    for m in modules {
+        if m.get("system").and_then(Value::as_str) != Some("videodoorentry") {
+            continue;
+        }
+        if m.get("deviceType").and_then(Value::as_str) != Some("EU") {
+            continue;
+        }
+        let addr_match = m
+            .get("privateAddress")
+            .and_then(|p| p.get("addressValues"))
+            .and_then(Value::as_array)
+            .is_some_and(|vals| {
+                vals.iter()
+                    .any(|a| a.get("value").and_then(Value::as_str) == Some(own_addr))
+            });
+        if !addr_match {
+            continue;
+        }
+        let Some(id) = m.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if hit.is_some() {
+            return None; // more than one entrance at this address ⇒ ambiguous, decline
+        }
+        hit = Some(id.to_string());
+    }
+    hit
+}
+
+/// Resolve `(aor_user, domain, devaddr)` from config overrides, falling back to on-device files.
+/// `None` if the model, domain, OR the camerasliding DEVADDR can't be determined — the caller then
+/// declines to originate. The DEVADDR is MANDATORY on purpose: without it the INVITE would ring the
+/// household as a normal intercom call, so "cannot resolve it" must mean "do not send" (issue #104).
+async fn resolve_identity(cfg: &Config) -> Option<(String, String, String)> {
     // tokio::fs (not std::fs): btmqttd runs on a single-threaded runtime, so a blocking read here
     // would stall the MQTT loop, the OWN monitor and the camera siphon for its duration (Copilot).
     let aor = if !cfg.sip_local_aor.is_empty() {
@@ -95,7 +155,13 @@ async fn resolve_identity(cfg: &Config) -> Option<(String, String)> {
         let text = tokio::fs::read_to_string(DOMAIN_REGISTRATION_CONF).await.ok()?;
         domain_from_registration(&text)?
     };
-    Some((aor, domain))
+    let devaddr = if !cfg.sip_devaddr.is_empty() {
+        cfg.sip_devaddr.clone()
+    } else {
+        let text = tokio::fs::read_to_string(MYMODULES_PATH).await.ok()?;
+        devaddr_from_mymodules(&text, MAIN_ENTRANCE_OWN_ADDR)?
+    };
+    Some((aor, domain, devaddr))
 }
 
 // ---- SDP + SIP message construction ----------------------------------------------------------
@@ -104,13 +170,21 @@ async fn resolve_identity(cfg: &Config) -> Option<(String, String)> {
 /// from our side) and keep audio `inactive` — Phase 2 only needs the session UP; the actual media
 /// is siphoned cleartext by `av.rs`. The crypto key is a throwaway (the SRTP is blackholed). Ports
 /// are placeholders we never read.
-pub fn build_sdp_offer(video_port: u16, audio_port: u16, srtp_key_b64: &str) -> String {
+///
+/// The two session-level attributes are what make this a SILENT camerasliding pull rather than a
+/// household-ringing intercom call (hardware-proven, issue #104): `a=DEVADDR:<uuid>` selects the
+/// entrance camera to switch on, and `a=nortpproxy:yes` tells flexisip not to insert its media
+/// relay. An INVITE with the identical `m=video recvonly` but WITHOUT these rings the unit; WITH
+/// them the panel answers `200 OK`/`m=video sendonly` and the house stays quiet.
+pub fn build_sdp_offer(video_port: u16, audio_port: u16, srtp_key_b64: &str, devaddr: &str) -> String {
     format!(
         "v=0\r\n\
          o=btmqttd 0 0 IN IP4 127.0.0.1\r\n\
          s=btmqttd\r\n\
          c=IN IP4 127.0.0.1\r\n\
          t=0 0\r\n\
+         a=nortpproxy:yes\r\n\
+         a=DEVADDR:{devaddr}\r\n\
          m=audio {audio_port} RTP/SAVP 98 101\r\n\
          a=rtpmap:98 speex/8000\r\n\
          a=rtpmap:101 telephone-event/8000\r\n\
@@ -392,10 +466,11 @@ async fn session(
     stopping: &Arc<AtomicBool>,
     view_rx: &mut mpsc::Receiver<()>,
 ) -> std::io::Result<()> {
-    let (aor, domain) = resolve_identity(cfg).await.ok_or_else(|| {
+    let (aor, domain, devaddr) = resolve_identity(cfg).await.ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "cannot resolve SIP AOR/domain (model or domain-registration.conf missing)",
+            "cannot resolve SIP identity (model, domain-registration.conf, or camerasliding DEVADDR \
+             from mymodules missing) — declining so we never ring the household",
         )
     })?;
 
@@ -415,7 +490,8 @@ async fn session(
     };
 
     // INVITE with a throwaway-keyed SAVP offer; media is blackholed (av.rs does the real siphon).
-    let sdp = build_sdp_offer(cfg.camera_video_port, cfg.camera_audio_port, &srtp_key());
+    // The DEVADDR + nortpproxy in the SDP make it a silent camerasliding pull (no household ring).
+    let sdp = build_sdp_offer(cfg.camera_video_port, cfg.camera_audio_port, &srtp_key(), &devaddr);
     let invite = build_invite(&d, &sdp);
     sock.write_all(invite.as_bytes()).await?;
     sock.flush().await?;
@@ -587,6 +663,40 @@ mod tests {
     }
 
     #[test]
+    fn devaddr_selects_the_eu_module_at_own_address_20() {
+        // Mirrors the real C100X mymodules shape (UUIDs are placeholders): an IU at 112 (whose
+        // addressValues also carry an EUaddress=20 — must NOT match, it's deviceType IU), the main
+        // entrance EU at 20, a lock at 20, and a SECOND entrance EU at 21. Only the EU@20 id wins.
+        let conf = r#"{
+          "jsonrpc":"2.0",
+          "modules":[
+            {"system":"videodoorentry","deviceType":"IU","id":"iu-1",
+             "privateAddress":{"addressValues":[{"name":"address","value":"112"},
+                                                {"name":"EUaddress","value":"20"}]}},
+            {"system":"videodoorentry","deviceType":"EU","id":"eu-at-20",
+             "privateAddress":{"addressValues":[{"name":"address","value":"20"}]}},
+            {"system":"automation","deviceType":"Lock","id":"lock-20",
+             "privateAddress":{"addressValues":[{"name":"address","value":"20"}]}},
+            {"system":"videodoorentry","deviceType":"EU","id":"eu-at-21",
+             "privateAddress":{"addressValues":[{"name":"address","value":"21"}]}}
+          ]}"#;
+        assert_eq!(devaddr_from_mymodules(conf, "20").as_deref(), Some("eu-at-20"));
+        assert_eq!(devaddr_from_mymodules(conf, "21").as_deref(), Some("eu-at-21"));
+        // No entrance at this address ⇒ None (decline, don't guess).
+        assert_eq!(devaddr_from_mymodules(conf, "99"), None);
+        // Two entrances at the same address ⇒ ambiguous ⇒ None (never ring the wrong one).
+        let dup = r#"{"modules":[
+            {"system":"videodoorentry","deviceType":"EU","id":"a",
+             "privateAddress":{"addressValues":[{"name":"address","value":"20"}]}},
+            {"system":"videodoorentry","deviceType":"EU","id":"b",
+             "privateAddress":{"addressValues":[{"name":"address","value":"20"}]}}]}"#;
+        assert_eq!(devaddr_from_mymodules(dup, "20"), None);
+        // Garbage / missing modules array ⇒ None, not a panic.
+        assert_eq!(devaddr_from_mymodules("not json", "20"), None);
+        assert_eq!(devaddr_from_mymodules("{}", "20"), None);
+    }
+
+    #[test]
     fn status_and_headers_parse() {
         let msg = "SIP/2.0 200 Ok\r\n\
                    To: <sip:c100x@d>;tag=QockcBd\r\n\
@@ -637,13 +747,16 @@ mod tests {
             to_tag: "paneltag".into(),
             remote_target: "sip:c100x@127.0.0.1:41044;transport=tcp".into(),
         };
-        let sdp = build_sdp_offer(40000, 40002, "AAAA");
+        let sdp = build_sdp_offer(40000, 40002, "AAAA", "dev-addr-uuid");
         let invite = build_invite(&d, &sdp);
         assert!(invite.starts_with("INVITE sip:c100x@dev.example SIP/2.0\r\n"));
         assert!(invite.contains("CSeq: 21 INVITE\r\n"));
         assert!(invite.contains(&format!("Content-Length: {}\r\n", sdp.len())));
         assert!(invite.contains("m=video 40000 RTP/SAVP 97"));
         assert!(invite.contains("profile-level-id=42801F"));
+        // The two attributes that make it a silent camerasliding pull, not a ringing call (#104).
+        assert!(invite.contains("a=nortpproxy:yes\r\n"));
+        assert!(invite.contains("a=DEVADDR:dev-addr-uuid\r\n"));
 
         let ack = build_ack(&d, "z9hG4bKack1");
         assert!(ack.starts_with("ACK sip:c100x@127.0.0.1:41044;transport=tcp SIP/2.0\r\n"));

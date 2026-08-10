@@ -127,6 +127,13 @@ pub struct Config {
     /// The panel's local answer-machine AOR user (`c100x` / `c300x`). Empty ⇒ derive from
     /// the model (`/etc/hostname`) at runtime. The INVITE targets `sip:<aor>@<domain>`.
     pub sip_local_aor: String,
+    /// The `a=DEVADDR` value that turns the INVITE into a SILENT camerasliding pull instead of a
+    /// household-ringing intercom call (hardware-proven, issue #104). On the C100X this MUST be the
+    /// entrance module's UUID (the `id` of the `videodoorentry` `EU` module at OWN address 20 in
+    /// `/home/bticino/cfg/extra/.bt_eliot/mymodules`); the numeric OWN-address form (`20`) works only
+    /// on the C300X. Empty ⇒ auto-detect from `mymodules` at runtime. Without a resolved DEVADDR the
+    /// feature declines to originate (never rings the house).
+    pub sip_devaddr: String,
     /// Hang up (send BYE) after this many seconds with no active viewer, so an on-demand
     /// pull never leaves the panel session pinned open. Default 30.
     pub camera_view_idle_secs: u64,
@@ -230,6 +237,7 @@ impl Config {
                 .unwrap_or(5060),
             sip_domain: get("SIP_DOMAIN", ""),
             sip_local_aor: get("SIP_LOCAL_AOR", ""),
+            sip_devaddr: get("SIP_DEVADDR", ""),
             camera_view_idle_secs: opt("CAMERA_VIEW_IDLE_SECS")
                 .and_then(|s| s.parse().ok())
                 .filter(|n| *n > 0)
