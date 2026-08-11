@@ -16,7 +16,9 @@ every release and referenced from the
 > same documents travel as flat standalone assets on the GitHub **Releases page**
 > (`THIRD-PARTY-NOTICES.md`, `LICENSE.txt`, `SharpExt4-LICENSE.txt`,
 > `lwext4-LICENSE.txt`, `lwext4-BSD-3-Clause-NOTICE.txt`,
-> `DiskPartitionInfo-LICENSE.txt`, `dotnet-runtime-LICENSE.txt`) accompanying it on
+> `DiskPartitionInfo-LICENSE.txt`, `dotnet-runtime-LICENSE.txt`,
+> `btmqttd-THIRD-PARTY-LICENSES.txt`, `ffmpeg-COPYING.LGPLv2.1.txt`,
+> `musl-COPYRIGHT.txt`) accompanying it on
 > the same release. Links to other repository documents (README, `CLEANROOM.md`)
 > are absolute GitHub URLs so they resolve from anywhere.
 
@@ -121,6 +123,34 @@ for the full reasoning.
   project's MIT or the GPL-2.0 above. Terms and the redistributable-files list:
   <https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files>
   and <https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution>.
+
+### Embedded ARM binaries (`btmqttd`, `ffmpeg`)
+
+`IntercomFirmwareTool.Core` embeds two statically-linked **armv7 (musl)** binaries as
+assembly resources. The tool writes **`btmqttd`** onto the BTicino intercom's firmware for
+the optional MQTT bridge; **`ffmpeg`** is embedded for the upcoming on-device camera but is
+**not yet written to the device** (a later phase installs it). Both ship inside this DLL, so
+their notices travel with the release:
+
+- **`btmqttd`** — first-party MQTT bridge daemon (built from this repo's
+  `native/btmqttd/`). Its bundled Rust crates' notices (MIT / Apache-2.0 / ISC /
+  BSD-3-Clause / Unicode-3.0):
+  [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
+- **`ffmpeg`** — third-party, a minimal **LGPL-2.1-or-later** build of **FFmpeg `n7.1.1`**
+  (unmodified upstream). **Corresponding source** — the complete corresponding source
+  **accompanies this release**, in two parts: (1) the unmodified upstream FFmpeg `n7.1.1` source
+  as **`ffmpeg-n7.1.1-source.tar.gz`** (the same pinned, SHA-256-verified tarball the binary is
+  built from, so it provably matches), and (2) the scripts that control its configuration and
+  compilation as **`ffmpeg-n7.1.1-build-recipe.tar.gz`** (`build.sh` + `pins.env` + `BUILD.md`).
+  Both ship as standalone assets **and** bundled inside both `.zip` archives. No changes to FFmpeg
+  source were made. LGPL text:
+  [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](licenses/ffmpeg-COPYING.LGPLv2.1.txt).
+- **musl libc** (**MIT**) — statically linked into *both* binaries; its notice:
+  [`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt).
+
+Full provenance for these binaries — exact SHA-256, size, build toolchain, and
+reproducible-build recipe — is recorded in the repository at
+`IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md`.
 
 ---
 

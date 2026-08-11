@@ -44,7 +44,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Gate the release on the SAME byte-for-byte FFmpeg provenance the PR/push path enforces, but
+  # run it HERE on the release ref (a v* tag / dispatch — which ffmpeg-provenance.yml's own
+  # pull_request/push triggers don't cover). This rebuilds the vendored binary from the pinned,
+  # SHA-256-verified source and requires an exact byte match, so a release can never publish the
+  # embedded binary alongside "corresponding source" it wasn't built from (Codex). The publish
+  # job below `needs:` this, so publishing is blocked unless the binary↔source binding holds.
+  verify-ffmpeg:
+    uses: ./.github/workflows/ffmpeg-provenance.yml
+
   release:
+    needs: verify-ffmpeg
     runs-on: windows-latest
     permissions:
       contents: write # create the (draft) Release + upload assets
@@ -55,6 +65,47 @@ jobs:
         with:
           # gh authenticates via GH_TOKEN below (not git config), so no persisted creds.
           persist-credentials: false
+
+      - name: Fetch the pinned FFmpeg corresponding source (LGPL-2.1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The shipped assembly embeds the LGPL FFmpeg binary, so every release must be
+          # ACCOMPANIED by its complete corresponding source (LGPL-2.1's corresponding-source
+          # requirement) — not merely a link to an upstream tag that can move or disappear. Download
+          # the SAME pinned, SHA-256-verified source the build uses (single source:
+          # native/ffmpeg/pins.env), so the shipped source provably matches the vendored binary,
+          # then ship it as a release asset +
+          # inside both ZIPs — exactly like SharpExt4's GPL corresponding source. (No modifications
+          # were made to FFmpeg; the build recipe is native/ffmpeg/BUILD.md, also in the repo.)
+          tag="$(grep -E '^FFMPEG_TAG=' native/ffmpeg/pins.env | cut -d= -f2)"
+          want="$(grep -E '^FFMPEG_TARBALL_SHA256=' native/ffmpeg/pins.env | cut -d= -f2)"
+          out="ffmpeg-${tag}-source.tar.gz"
+          curl -fsSL -o "$out" "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${tag}.tar.gz"
+          got="$(sha256sum "$out" | awk '{print $1}')"
+          if [ "$got" != "$want" ]; then
+            echo "::error::FFmpeg corresponding-source SHA-256 mismatch: got $got expected $want"; exit 1
+          fi
+          echo "FFMPEG_SRC=$out" >> "$GITHUB_ENV"
+          echo "fetched FFmpeg corresponding source: $out ($got)"
+          # "Corresponding source" also includes the scripts that control HOW this specific binary
+          # is configured/compiled — the exact ./configure flags + pinned inputs — not just the
+          # upstream library source. Pointing at the (mutable) repo isn't a durable accompaniment,
+          # so ship an immutable copy of our build recipe with the release too (CodeRabbit).
+          recipe="ffmpeg-${tag}-build-recipe.tar.gz"
+          # Archive from the COMMITTED blobs (LF), NOT the working tree: on the windows-latest
+          # runner core.autocrlf could otherwise materialize these text files as CRLF, shipping a
+          # build.sh that fails under Linux `sh` (`set -eu\r`) and pins.env values with trailing
+          # \r. git archive emits git's stored bytes (LF); .gitattributes also pins
+          # native/ffmpeg/** to eol=lf as belt-and-suspenders (Codex).
+          # Keep the native/ffmpeg/ PREFIX (archive from HEAD with full paths, not HEAD:native/ffmpeg
+          # which would flatten to the archive root) so the extracted layout matches BUILD.md's own
+          # instruction `sh native/ffmpeg/build.sh "$SRC_DIR"` — a recipient can extract and follow
+          # the shipped recipe verbatim (Codex).
+          git archive --format=tar HEAD \
+            native/ffmpeg/build.sh native/ffmpeg/pins.env native/ffmpeg/BUILD.md | gzip -n > "$recipe"
+          echo "FFMPEG_RECIPE=$recipe" >> "$GITHUB_ENV"
+          echo "packaged FFmpeg build recipe: $recipe (build.sh + pins.env + BUILD.md)"
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -251,7 +302,16 @@ jobs:
             'licenses/lwext4-LICENSE.txt',
             'licenses/lwext4-BSD-3-Clause-NOTICE.txt',
             'licenses/DiskPartitionInfo-LICENSE.txt',
-            'licenses/dotnet-runtime-LICENSE.txt'
+            'licenses/dotnet-runtime-LICENSE.txt',
+            # Embedded ARM binaries: IntercomFirmwareTool.Core embeds btmqttd + ffmpeg as
+            # resources, so the shipped DLL distributes them — their notices must travel with
+            # every release. btmqttd's aggregated crate notice, ffmpeg's LGPL-2.1 text, and the
+            # shared musl-libc MIT COPYRIGHT (both binaries statically link musl) live in the
+            # same repo-root licenses/ dir as the others. See
+            # IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md (issues #72, #120).
+            'licenses/btmqttd-THIRD-PARTY-LICENSES.txt',
+            'licenses/ffmpeg-COPYING.LGPLv2.1.txt',
+            'licenses/musl-COPYRIGHT.txt'
           )
           foreach ($n in $licenseTexts) {
             if (-not (Test-Path $n)) { throw "compliance file missing from checkout: $n" }
@@ -297,6 +357,11 @@ jobs:
           # them without needing the separate asset (Codex). The single-file .exe can't embed it and
           # is accompanied by the same archive as a sibling release asset.
           Copy-Item 'third_party/SharpExt4/SharpExt4-a9a41e1.zip' out/folder -Force
+          # Same for the embedded LGPL FFmpeg binary: its complete corresponding source (the pinned,
+          # SHA-256-verified n7.1.1 tarball + our build recipe archive) accompanies the DLL inside
+          # the ZIP.
+          Copy-Item $env:FFMPEG_SRC out/folder -Force
+          Copy-Item $env:FFMPEG_RECIPE out/folder -Force
           # Portable .zip: it is the preferred download for many users, so it must ALSO carry the
           # compliance docs — not just sit beside them as sibling release assets (GitHub does not
           # auto-download siblings) (Codex). Stage the single-file .exe together with the notices in
@@ -309,6 +374,8 @@ jobs:
           foreach ($n in $licenseTexts) { Copy-Item $n (Join-Path $stage 'licenses') -Force }
           # Bundle the corresponding source in the portable .zip too (see the loose-folder note above).
           Copy-Item 'third_party/SharpExt4/SharpExt4-a9a41e1.zip' $stage -Force
+          Copy-Item $env:FFMPEG_SRC $stage -Force
+          Copy-Item $env:FFMPEG_RECIPE $stage -Force
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path dist "$base-portable.zip") -Force
           Remove-Item -Recurse -Force $stage
           # Loose-folder zip: out/folder/* puts the files at the archive root (no top-level folder).
@@ -352,13 +419,19 @@ jobs:
           # release assets too, so a download of only the portable .exe still comes with them. These
           # are staged into dist/ by the packaging step; they carry no .sha256 sidecar (they are
           # documentation, not attested binaries).
-          for a in THIRD-PARTY-NOTICES.md LICENSE.txt SharpExt4-LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt; do
+          for a in THIRD-PARTY-NOTICES.md LICENSE.txt SharpExt4-LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt btmqttd-THIRD-PARTY-LICENSES.txt ffmpeg-COPYING.LGPLv2.1.txt musl-COPYRIGHT.txt; do
             files+=("dist/$a")
           done
           # GPL-2.0 §3(a) corresponding source for SharpExt4.dll — uploaded straight from its repo
           # path (not staged into dist/), so it gets no .sha256 sidecar and is not SLSA-attested as
           # our build output (it is upstream source, pinned + mirrored) (#98).
           files+=("third_party/SharpExt4/SharpExt4-a9a41e1.zip")
+          # LGPL-2.1 corresponding source for the embedded FFmpeg binary — the pinned,
+          # SHA-256-verified n7.1.1 tarball + our immutable build recipe (build.sh + pins.env +
+          # BUILD.md), both packaged at the start of this job. Uploaded as standalone assets too, so
+          # a download of only the portable .exe (which can't embed them) is still accompanied by
+          # the complete corresponding source (#120).
+          files+=("$FFMPEG_SRC" "$FFMPEG_RECIPE")
           for f in "${files[@]}"; do
             if [ ! -f "$f" ]; then
               echo "::error::missing expected release asset: $f (packaging did not produce it)"; exit 1

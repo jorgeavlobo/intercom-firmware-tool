@@ -1,0 +1,175 @@
+name: ffmpeg binary provenance (#120)
+
+# Guards the vendored, third-party minimal ffmpeg (issue #120) in two tiers, both FATAL —
+# the same model as btmqttd, because the ffmpeg build is byte-reproducible (every input is
+# pinned + SHA-256-verified, and no absolute build path leaks into the output — see
+# native/ffmpeg/BUILD.md):
+#   - metadata: the committed binary's SHA-256 + size must match PayloadBinaries.cs AND
+#     THIRD_PARTY.md (catches a binary or metadata changed without the other).
+#   - reproduction: rebuild from the pinned source (with the pinned zig) and require the
+#     rebuilt binary's SHA-256 to equal the committed binary's, byte-for-byte. A mismatch
+#     means the vendored binary is out of sync with the pinned source. The rebuild also runs
+#     under qemu-arm and must be LGPL (not GPL/nonfree).
+
+on:
+  pull_request:
+    paths:
+      - 'native/ffmpeg/**'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg'
+      - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
+      # The other two version-bearing files check-doc-versions.sh guards, so a PR editing
+      # only one of them (introducing a stale FFmpeg tag / Zig version) still triggers the
+      # backstop (CodeRabbit).
+      - 'THIRD-PARTY-NOTICES.md'
+      - 'IntercomFirmwareTool.Core/IntercomFirmwareTool.Core.csproj'
+      - '.github/workflows/ffmpeg-provenance.yml'
+      # Also re-verify when the refresh recipe changes: a change to ffmpeg-build.yml (a pin
+      # or configure flag) that drifts from this workflow's recipe must be caught against
+      # the committed binary here, since a refresh push ([skip ci], GITHUB_TOKEN) won't
+      # start this workflow on its own (Codex).
+      - '.github/workflows/ffmpeg-build.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'native/ffmpeg/**'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg'
+      - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
+      - 'THIRD-PARTY-NOTICES.md'
+      - 'IntercomFirmwareTool.Core/IntercomFirmwareTool.Core.csproj'
+      - '.github/workflows/ffmpeg-provenance.yml'
+      - '.github/workflows/ffmpeg-build.yml'
+  workflow_dispatch:
+  # Reusable: release.yml calls this as a gating job so a RELEASE (a v* tag, which the
+  # pull_request/push triggers above don't cover) can't publish the vendored binary alongside
+  # "corresponding source" it wasn't built from — the same byte-for-byte rebuild runs on the
+  # release ref before publishing (Codex).
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Do NOT cancel-in-progress. When release.yml calls this as its `verify-ffmpeg` gate, two
+  # manual releases of DIFFERENT versions dispatched from the same branch would share this
+  # group (same github.ref); cancelling would fail one release's required gate and silently skip
+  # its publish. Queue instead of cancel — a short provenance run serializing is harmless, and a
+  # superseded PR run finishing wastes only a couple of CPU-minutes (Codex).
+  cancel-in-progress: false
+
+# Every run: step below uses `set -o pipefail` (a bash builtin), so declare bash explicitly
+# rather than depending on the runner's default shell staying bash (Copilot).
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The Zig/FFmpeg version + SHA-256 pins and SOURCE_DATE_EPOCH live in the single-source
+  # native/ffmpeg/pins.env (loaded in the first step below), shared with ffmpeg-build.yml so
+  # they can't drift between the two workflows. Only workflow-specific paths live here.
+  BIN: IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg
+
+jobs:
+  provenance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job only reads the repo (no push), so don't persist the token in
+          # .git/config — avoids credential leakage (zizmor artipacked).
+          persist-credentials: false
+
+      - name: Load pinned build inputs (native/ffmpeg/pins.env — shared with ffmpeg-build.yml)
+        run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' native/ffmpeg/pins.env >> "$GITHUB_ENV"
+
+      - name: Docs mention the pinned FFmpeg/Zig versions (backstop for a pins-vs-notices drift)
+        # Same shared guard ffmpeg-build.yml runs before committing a refresh: assert every
+        # version-bearing notice + the project metadata names the pinned upstream version, so a
+        # PR that bumps native/ffmpeg/pins.env (in this path filter) without updating the prose
+        # that points LGPL recipients at the corresponding source fails here.
+        run: sh native/ffmpeg/check-doc-versions.sh
+
+      - name: Metadata integrity (committed SHA-256 + size ↔ PayloadBinaries.cs ↔ THIRD_PARTY.md)
+        run: |
+          set -euxo pipefail
+          sha="$(sha256sum "$BIN" | awk '{print $1}')"
+          size="$(stat -c '%s' "$BIN")"
+          echo "committed ffmpeg: sha256=$sha size=$size"
+          pb=IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
+          tp=IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md
+          grep -q "$sha" "$pb" || { echo "::error::SHA-256 not found in PayloadBinaries.cs"; exit 1; }
+          grep -q "$sha" "$tp" || { echo "::error::SHA-256 not found in THIRD_PARTY.md"; exit 1; }
+          # Also verify the SIZE in both files (in their respective formats) matches the
+          # actual binary, so metadata size can't drift undetected. Group into thousands
+          # with commas, then derive the underscore form by substitution — do NOT run the
+          # same sed with '_' as the separator: '_' is a word character, so it never forms
+          # the \B/\> boundary that stops the group from re-matching, and the ':a;…;ta'
+          # loop spins forever (GNU sed 4.9).
+          cs="$(printf '%s' "$size" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"   # size grouped in thousands with commas
+          us="${cs//,/_}"                                                  # same, but '_' separators (C# int literal)
+          grep -q "Length: ${us}," "$pb" || { echo "::error::size ${us} not recorded in PayloadBinaries.cs"; exit 1; }
+          grep -q "${cs} bytes" "$tp"    || { echo "::error::size ${cs} not recorded in THIRD_PARTY.md"; exit 1; }
+
+      - name: Committed binary runs on armv7 + is LGPL
+        run: |
+          set -euxo pipefail
+          sudo apt-get update && sudo apt-get install -y qemu-user-static
+          qemu-arm-static "$BIN" -hide_banner -version | tee committed.ver
+          if grep -m1 'configuration:' committed.ver | grep -Eq -- '--enable-(gpl|nonfree)'; then
+            echo "::error::committed ffmpeg is GPL/nonfree — must be LGPL"; exit 1
+          fi
+
+      - name: Install the pinned Zig (SHA-256 verified — no third-party action)
+        run: |
+          set -euxo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o zig.tar.xz "$url"
+          got="$(sha256sum zig.tar.xz | awk '{print $1}')"
+          if [ "$got" != "$ZIG_SHA256" ]; then
+            echo "::error::zig tarball SHA-256 mismatch: got $got expected $ZIG_SHA256"; exit 1
+          fi
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Reproducible rebuild from the pinned source (must match native/ffmpeg/BUILD.md)
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o ffmpeg.tar.gz \
+            "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
+          got="$(sha256sum ffmpeg.tar.gz | awk '{print $1}')"
+          if [ "$got" != "$FFMPEG_TARBALL_SHA256" ]; then
+            echo "::error::FFmpeg source SHA-256 mismatch: got $got expected $FFMPEG_TARBALL_SHA256"; exit 1
+          fi
+          # Build OUTSIDE the git worktree ($RUNNER_TEMP): FFmpeg's ffbuild/version.sh runs
+          # `git describe`, and inside our repo's worktree it would stamp THIS repo's commit
+          # hash as the ffmpeg version — different every commit, breaking the byte match. No
+          # surrounding .git → deterministic version. MUST match ffmpeg-build.yml.
+          rm -rf "$RUNNER_TEMP/ffmpeg-src"
+          mkdir "$RUNNER_TEMP/ffmpeg-src"
+          tar -xzf ffmpeg.tar.gz -C "$RUNNER_TEMP/ffmpeg-src" --strip-components=1
+          # Build via the SHARED recipe — the SAME native/ffmpeg/build.sh that ffmpeg-build.yml
+          # uses to produce the committed binary, so this independent rebuild can't drift from
+          # it. build.sh is under native/ffmpeg/**, which is in this workflow's path filter, so
+          # any recipe change re-runs this byte-for-byte check against the committed binary.
+          sh "$GITHUB_WORKSPACE/native/ffmpeg/build.sh" "$RUNNER_TEMP/ffmpeg-src"
+
+      - name: Reproduction is byte-for-byte + LGPL
+        run: |
+          set -euxo pipefail
+          reb="$RUNNER_TEMP/ffmpeg-src/ffmpeg"
+          qemu-arm-static "$reb" -hide_banner -version | tee rebuilt.ver
+          if grep -m1 'configuration:' rebuilt.ver | grep -Eq -- '--enable-(gpl|nonfree)'; then
+            echo "::error::rebuilt ffmpeg is GPL/nonfree"; exit 1
+          fi
+          committed_sha="$(sha256sum "$BIN" | awk '{print $1}')"
+          rebuilt_sha="$(sha256sum "$reb"  | awk '{print $1}')"
+          echo "committed sha256=$committed_sha"
+          echo "rebuilt   sha256=$rebuilt_sha"
+          # Gate on a LITERAL byte-for-byte comparison of the two files (the SHA-256 values
+          # above are logged for diagnostics only).
+          if ! cmp -s "$BIN" "$reb"; then
+            echo "::error::rebuilt ffmpeg is not byte-identical to the committed binary ($committed_sha vs $rebuilt_sha) — the vendored binary is out of sync with the pinned source. Refresh it via ffmpeg-build.yml."; exit 1
+          fi
+          echo "Byte-for-byte provenance OK (rebuilt == committed, LGPL)."

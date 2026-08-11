@@ -18,7 +18,11 @@ userland tools those scripts required: **`jq`** (JSON, now done natively with
 `serde_json`) and **`evtest`** (keypad, now done natively with the pure-Rust
 `evdev` crate). Removing `jq`/`evtest` also removes their copyleft obligations
 (`evtest` was GPL-2.0-or-later; the static `jq` bundled LGPL-2.1 glibc): the
-firmware image and this assembly no longer carry any GPL/LGPL component.
+**MQTT bridge** (`btmqttd` + its scripts) no longer carries any GPL/LGPL
+component. (Separately, this assembly does embed the **LGPL-2.1** `ffmpeg` for
+the on-device camera — see the `ffmpeg` section below. It is embedded now but is
+**not yet written to the device**; the on-device camera install lands in a later
+phase (1c). Its LGPL notice + source are documented there.)
 
 `btmqttd` is a **statically-linked musl** binary, so it needs no runtime
 interpreter, no shared libraries, and none of the device tools the shell bridge
@@ -28,7 +32,7 @@ launch/respawn the daemon, not in `btmqttd` itself.) It bundles ~65
 Rust crates, **all under permissive licenses** — MIT, Apache-2.0, ISC,
 BSD-3-Clause and Unicode-3.0 — with **no copyleft**. The aggregated dependency
 license texts and per-crate copyright notices travel with the binary in
-[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
+[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](../../../licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
 
 ## Provenance & integrity
 
@@ -46,7 +50,7 @@ license texts and per-crate copyright notices travel with the binary in
 | Statically bundles | ~65 Rust crates (MIT / Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0 — all permissive) + musl libc (MIT) |
 | License | permissive only — see SPDX below |
 | SPDX expression | `MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0` |
-| License texts | [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt) |
+| License texts | [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](../../../licenses/btmqttd-THIRD-PARTY-LICENSES.txt) |
 
 The SHA-256 above is also enforced at load time by `PayloadBinaries` (the
 accessor throws if the embedded binary's bytes do not match), so a corrupted or
@@ -58,7 +62,7 @@ swapped binary cannot be silently installed.
 same license as the rest of this repository. The shipped binary is **statically
 linked**, so the notices of the components it *contains* must travel with it —
 that is the purpose of
-[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt),
+[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](../../../licenses/btmqttd-THIRD-PARTY-LICENSES.txt),
 which reproduces, once each, the full MIT, Apache License 2.0, ISC,
 BSD-3-Clause and Unicode-3.0 texts together with the real per-crate copyright
 lines. The load-bearing non-MIT/Apache components are:
@@ -75,6 +79,12 @@ lines. The load-bearing non-MIT/Apache components are:
 
 Every other crate is MIT and/or Apache-2.0 (we elect MIT where offered). None is
 copyleft.
+
+Beyond the Rust crates, the static binary links **musl libc** (MIT) via Rust's
+`*-musleabihf` target. musl is not a crate, so its notice is not in the aggregated
+crate file above; the MIT copyright + permission notice ships separately in
+[`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt) — the same shared musl
+notice used by `ffmpeg`.
 
 ## Build & reproducibility
 
@@ -118,3 +128,74 @@ and carries no such obligation for the image. Because every bundled component is
 permissive, meeting these obligations is limited to **reproducing the notices** —
 there is no copyleft source-offer requirement, unlike the previous `jq`/`evtest`
 binaries this daemon replaces.
+
+---
+
+## `ffmpeg` — minimal LGPL build for the on-device media server (issue #120)
+
+Unlike `btmqttd` (our own program), **`ffmpeg` is genuinely third-party** — a minimal,
+**LGPL-2.1-or-later** build of [FFmpeg](https://ffmpeg.org/) `n7.1.1`, cross-compiled to
+a static-musl armv7 hard-float binary and embedded in `IntercomFirmwareTool.Core`. The
+on-device media server (#120) runs it so go2rtc can read the panel's cleartext RTP via an
+SDP and **copy** the H.264 into RTSP — no decode, no encode, no transcode. Built per
+[`../../../native/ffmpeg/BUILD.md`](../../../native/ffmpeg/BUILD.md).
+
+It is compiled `--disable-everything` plus only the RTP/SDP→RTSP H.264-copy path, **never**
+`--enable-gpl`/`--enable-nonfree` and with no GPL-only libraries (no x264/x265/…), so the
+whole binary is LGPL. No decoders/encoders are built.
+
+### Provenance & integrity
+
+| Field | `ffmpeg` |
+|---|---|
+| File | `armhf/ffmpeg` |
+| Size | 2,024,432 bytes |
+| SHA-256 | `03ceacf28bcd54de19c9f813cf558480834f981635659f359839aa6023ba4ecf` |
+| ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
+| ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
+| Upstream | FFmpeg `n7.1.1` (release tag) |
+| Build toolchain | `zig cc` 0.13.0 (bundled musl) per `BUILD.md` |
+| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp` · `--disable-asm` |
+| License | **LGPL-2.1-or-later** (FFmpeg) **AND MIT** (statically-linked musl libc) |
+| License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](../../../licenses/ffmpeg-COPYING.LGPLv2.1.txt) · [`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt) |
+| SPDX expression | `LGPL-2.1-or-later AND MIT` |
+
+The SHA-256 + size are enforced on read by `PayloadBinaries`. **Byte-reproducible** — like
+`btmqttd`: with every build input pinned (Zig `0.13.0` and the FFmpeg `n7.1.1` source, both
+SHA-256-verified) and no absolute build path leaking into the output (see `BUILD.md`), the
+build is deterministic. So [`ffmpeg-provenance.yml`](../../../.github/workflows/ffmpeg-provenance.yml)
+enforces **byte-for-byte** provenance: the metadata check (committed binary ↔ this table ↔
+`PayloadBinaries`) **plus** a fresh rebuild from the pinned source whose SHA-256 must equal
+the committed binary's (and which runs under `qemu-arm` and is LGPL, not GPL/nonfree). A
+mismatch means the vendored binary is out of sync with the pinned source — the same
+guarantee `btmqttd` provides. Refreshed via
+[`ffmpeg-build.yml`](../../../.github/workflows/ffmpeg-build.yml) (dispatch-only).
+
+### LGPL-2.1 obligations
+
+The binary is a **standalone program** built from FFmpeg's own LGPL sources (statically
+linked), so distributing it requires (a) shipping the **LGPL-2.1 license text** — done, in
+`licenses/ffmpeg-COPYING.LGPLv2.1.txt`, which travels with the assembly — and (b) providing the
+**corresponding source**. Every release **accompanies** the binary with the complete corresponding
+source, in two parts, shipped by `.github/workflows/release.yml` as standalone assets **and**
+bundled inside both `.zip` archives: (1) the unmodified upstream **FFmpeg `n7.1.1`** source as
+`ffmpeg-n7.1.1-source.tar.gz`, downloaded from the pinned tag and **SHA-256-verified against the
+same digest the binary is built from** (`native/ffmpeg/pins.env`), so the shipped source provably
+corresponds to the shipped binary; and (2) the scripts that control its configuration and
+compilation as `ffmpeg-n7.1.1-build-recipe.tar.gz` (`build.sh` + `pins.env` + `BUILD.md`), so
+recipients have the exact recipe immutably, not via a mutable repo link. No changes to FFmpeg
+source were made. As with `btmqttd`, the embedded resource is compiled into `IntercomFirmwareTool.Core`
+unconditionally. In **Phase 1a** (this change) the firmware image does **not** contain
+`ffmpeg`: it is not in `PayloadBinaries.All`, so `MqttInstaller` never writes it to the
+device. The firmware image carries `ffmpeg` only once the on-device camera install lands
+in **Phase 1c** (#120).
+
+### musl libc (MIT) — statically linked
+
+`zig cc` statically links **musl libc** into the binary. musl is MIT-licensed; its COPYRIGHT
+grants an exception for public headers and CRT files, but the general libc objects linked
+from `libc.a` are **not** covered by that exception, so the MIT copyright + permission notice
+must ship with the distribution. It does — [`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt),
+sourced from the pinned Zig distribution (which bundles musl) and embedded in the assembly.
+The same upstream musl license also covers `btmqttd`'s statically-linked musl, so both
+binaries share this one notice.

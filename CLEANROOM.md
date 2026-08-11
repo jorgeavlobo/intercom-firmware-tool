@@ -88,7 +88,7 @@ graph's licenses against a permissive-only allow-list
 ([`native/btmqttd/deny.toml`](native/btmqttd/deny.toml)), and `dependency-review`
 blocks a pull request that *adds* a non-permissive (or vulnerable) dependency to
 either the NuGet or the Cargo graph. Aggregated notices are in
-[`IntercomFirmwareTool.Core/Payload/vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](IntercomFirmwareTool.Core/Payload/vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
+[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
 Separately — and not a licensing check — the committed binary's byte-for-byte
 provenance and integrity are recorded in
 [`IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md`](IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md)

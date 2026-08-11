@@ -1,0 +1,182 @@
+name: ffmpeg binary refresh (#120)
+
+# Deliberate, dispatch-only refresh of the vendored minimal LGPL ffmpeg (issue #120).
+# It builds the binary reproducibly from the pinned, SHA-256-verified FFmpeg source with
+# the pinned, SHA-256-verified Zig, and commits the result (binary + LGPL text). The build
+# is byte-reproducible (built outside the git worktree so FFmpeg's version isn't stamped
+# with this repo's commit hash, and no absolute build path leaks in — see BUILD.md), so
+# ffmpeg-provenance.yml can then rebuild and require a byte-for-byte match, exactly like
+# btmqttd. Run this only when intentionally bumping the pins/recipe. The final step rewrites
+# the recorded sha256 + size in PayloadBinaries.cs and THIRD_PARTY.md in the SAME commit, so
+# no manual metadata follow-up is needed (a version bump still requires updating the prose
+# version strings — check-doc-versions.sh enforces that; see BUILD.md 'Refreshing the binary').
+
+on:
+  workflow_dispatch:
+
+# This job COMMITS the rebuilt binary back to the branch, so it needs write access and the
+# checkout token persisted for the push (unlike the read-only provenance job).
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Every run: step below relies on bash (the reproduction helper uses `local`; the scripts use
+# `set -o pipefail`), so declare it explicitly rather than depending on the runner's default
+# shell staying bash (Copilot).
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The Zig/FFmpeg version + SHA-256 pins and SOURCE_DATE_EPOCH live in the single-source
+  # native/ffmpeg/pins.env (loaded in the first step below), shared with ffmpeg-provenance.yml
+  # so they can't drift between the two workflows. Only workflow-specific paths live here.
+  BIN: IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg
+  # The third-party license texts live in the repo-root licenses/ dir (their single canonical
+  # home, shared with THIRD-PARTY-NOTICES.md + the release bundle); the .csproj Link-embeds
+  # them from there. This refresh rewrites them in place.
+  LIC: licenses/ffmpeg-COPYING.LGPLv2.1.txt
+  # musl's own license: zig cc statically links musl libc objects into the binary, and
+  # musl's MIT exception covers only headers/CRT — the linked libc.a objects still require
+  # the notice. Sourced from the pinned zig distribution (which bundles musl).
+  MUSL_LIC: licenses/musl-COPYRIGHT.txt
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # persist-credentials left at its default (true): this job pushes the rebuilt
+        # binary, so it needs the token in .git/config for `git push`.
+
+      - name: Load pinned build inputs (native/ffmpeg/pins.env — shared with provenance)
+        run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' native/ffmpeg/pins.env >> "$GITHUB_ENV"
+
+      - name: Docs mention the pinned FFmpeg/Zig versions (fail the refresh if pins bumped, docs didn't)
+        # A pin bump in pins.env only re-derives the binary's size + SHA-256 below; the upstream
+        # VERSION is also written, in prose, into the notices + project metadata that direct LGPL
+        # recipients to the corresponding source. Refuse to build/commit a refresh until those
+        # match the loaded pins. Shared guard, so provenance runs the identical check on PRs.
+        run: sh native/ffmpeg/check-doc-versions.sh
+
+      - name: Install the pinned Zig (SHA-256 verified — no third-party action)
+        run: |
+          set -euxo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o zig.tar.xz "$url"
+          got="$(sha256sum zig.tar.xz | awk '{print $1}')"
+          if [ "$got" != "$ZIG_SHA256" ]; then
+            echo "::error::zig tarball SHA-256 mismatch: got $got expected $ZIG_SHA256"; exit 1
+          fi
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Build the minimal LGPL ffmpeg from the pinned source (twice — reproduction check)
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o ffmpeg.tar.gz \
+            "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
+          got="$(sha256sum ffmpeg.tar.gz | awk '{print $1}')"
+          if [ "$got" != "$FFMPEG_TARBALL_SHA256" ]; then
+            echo "::error::FFmpeg source SHA-256 mismatch: got $got expected $FFMPEG_TARBALL_SHA256"; exit 1
+          fi
+          # Build OUTSIDE the git worktree ($RUNNER_TEMP, not the checked-out repo). FFmpeg's
+          # ffbuild/version.sh runs `git describe`, and if the source sits inside our repo's
+          # worktree git walks up and stamps THIS repo's commit hash as the "ffmpeg version"
+          # (the `ffmpeg version <hash>` banner) — which changes every commit and breaks the
+          # byte-for-byte match. With no surrounding .git, the version is deterministic.
+          # CFLAGS is just -Os: no -ffile-prefix-map, whose value would embed the absolute
+          # build path into FFmpeg's `configuration:` string. -j1 (serial): FFmpeg's parallel
+          # build is not byte-reproducible across runs. Keep this recipe identical to
+          # ffmpeg-provenance.yml.
+          build() {
+            local dir="$1"
+            rm -rf "$dir"; mkdir "$dir"
+            tar -xzf ffmpeg.tar.gz -C "$dir" --strip-components=1
+            # SHARED recipe — the single source of truth also used by ffmpeg-provenance.yml,
+            # so the two workflows can never drift.
+            sh "$GITHUB_WORKSPACE/native/ffmpeg/build.sh" "$dir" >/dev/null
+          }
+          # Build TWICE in independent scratch dirs and require byte-identical output BEFORE
+          # committing. A refresh commit is pushed with [skip ci] by GITHUB_TOKEN, which does
+          # NOT start ffmpeg-provenance.yml — so without this, a refreshed binary would never
+          # get an independent byte-for-byte rebuild until a later human PR (Codex). This
+          # proves the committed bytes are reproducible from the pinned source at refresh time.
+          build "$RUNNER_TEMP/ffmpeg-src"
+          build "$RUNNER_TEMP/ffmpeg-verify"
+          a="$(sha256sum "$RUNNER_TEMP/ffmpeg-src/ffmpeg"    | awk '{print $1}')"
+          b="$(sha256sum "$RUNNER_TEMP/ffmpeg-verify/ffmpeg" | awk '{print $1}')"
+          echo "reproduction: build#1=$a build#2=$b"
+          # Gate on a LITERAL byte-for-byte comparison of the two files (the SHA-256 values
+          # above are logged for diagnostics only).
+          if ! cmp -s "$RUNNER_TEMP/ffmpeg-src/ffmpeg" "$RUNNER_TEMP/ffmpeg-verify/ffmpeg"; then
+            echo "::error::ffmpeg build is NOT byte-identical across builds ($a vs $b) — refusing to commit"; exit 1
+          fi
+
+      - name: Verify the rebuilt binary runs on armv7 + is LGPL
+        run: |
+          set -euxo pipefail
+          sudo apt-get update && sudo apt-get install -y qemu-user-static
+          qemu-arm-static "$RUNNER_TEMP/ffmpeg-src/ffmpeg" -hide_banner -version | tee built.ver
+          if grep -m1 'configuration:' built.ver | grep -Eq -- '--enable-(gpl|nonfree)'; then
+            echo "::error::rebuilt ffmpeg is GPL/nonfree — must be LGPL"; exit 1
+          fi
+
+      - name: Vendor the binary + its LGPL text, update metadata, then commit atomically
+        env:
+          PB: IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
+          TP: IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md
+        run: |
+          set -euxo pipefail
+          # cp over the already-tracked files preserves their committed mode (no spurious
+          # mode change in the diff); both destination paths already exist in the tree.
+          cp -f "$RUNNER_TEMP/ffmpeg-src/ffmpeg" "$BIN"
+          cp -f "$RUNNER_TEMP/ffmpeg-src/COPYING.LGPLv2.1" "$LIC"
+          # Vendor musl's license from the pinned zig distribution (bundles musl). The static
+          # binary links musl libc objects, whose MIT notice is required (the musl exception
+          # only waives headers/CRT). The same upstream musl license also covers btmqttd's
+          # statically-linked musl, so this one notice is shared by both binaries.
+          musl_copyright="$(find "$PWD/zig-linux-x86_64-${ZIG_VERSION}" -path '*/musl/COPYRIGHT' -print -quit)"
+          [ -n "$musl_copyright" ] || { echo "::error::musl COPYRIGHT not found in the zig distribution"; exit 1; }
+          cp -f "$musl_copyright" "$MUSL_LIC"
+          FF_SHA="$(sha256sum "$BIN" | awk '{print $1}')"
+          FF_SIZE="$(stat -c '%s' "$BIN")"
+          cs="$(printf '%s' "$FF_SIZE" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"   # size grouped in thousands with commas
+          us="${cs//,/_}"                                                     # same, but '_' separators (C# int literal)
+          # Rewrite the recorded SHA-256 + size in BOTH metadata files IN THE SAME COMMIT, so
+          # a refresh never leaves an inconsistent tree (PayloadBinaries.Read would otherwise
+          # reject the new binary against a stale hash, and tests would fail, until a manual
+          # follow-up — Codex). sed is range-scoped to ONLY the ffmpeg entries, so btmqttd's
+          # metadata is never touched: PayloadBinaries.cs's Ffmpeg record (Name:"ffmpeg" → the
+          # closing '};' of its object-initializer, NOT ');' — the record ends with the
+          # AdditionalLicenseResourceNames initializer, so stop at '};' to keep the range from
+          # spilling past the record into whatever ');' comes next — Copilot), and THIRD_PARTY.md's
+          # ffmpeg table (armhf/ffmpeg → SPDX expression).
+          sed -i "/Name: \"ffmpeg\"/,/};/{
+            s/Length: [0-9_]*,/Length: ${us},/
+            s/Sha256Hex: \"[0-9a-f]*\",/Sha256Hex: \"${FF_SHA}\",/
+          }" "$PB"
+          sed -i "\#armhf/ffmpeg#,/SPDX expression/{
+            s/| Size | [0-9,]* bytes |/| Size | ${cs} bytes |/
+            s/| SHA-256 | \`[0-9a-f]*\` |/| SHA-256 | \`${FF_SHA}\` |/
+          }" "$TP"
+          # Fail fast if ANY of the four substitutions didn't land (e.g. a table/record layout
+          # change made a sed stop matching). Check the SIZE rewrites too, not just the SHAs: a
+          # stale Length pushed with [skip ci] would make PayloadBinaries.Read(Ffmpeg) reject the
+          # binary, and this bot push starts no build/provenance run to catch it (Codex).
+          grep -q "Sha256Hex: \"${FF_SHA}\"" "$PB" || { echo "::error::PayloadBinaries.cs sha not updated"; exit 1; }
+          grep -q "Length: ${us},"           "$PB" || { echo "::error::PayloadBinaries.cs size (${us}) not updated"; exit 1; }
+          grep -q "\`${FF_SHA}\`" "$TP"            || { echo "::error::THIRD_PARTY.md sha not updated"; exit 1; }
+          grep -q "${cs} bytes"   "$TP"            || { echo "::error::THIRD_PARTY.md size (${cs}) not updated"; exit 1; }
+          echo "metadata updated: sha256=${FF_SHA} size=${FF_SIZE} (${us})"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$BIN" "$LIC" "$MUSL_LIC" "$PB" "$TP"
+          if git diff --cached --quiet; then
+            echo "no change to the vendored ffmpeg — nothing to commit"; exit 0
+          fi
+          git commit -m "#120 Phase 1a: refresh vendored ffmpeg (sha256=${FF_SHA}, ${FF_SIZE} bytes) [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

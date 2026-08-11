@@ -46,11 +46,20 @@ namespace IntercomFirmwareTool.Core
     /// Rust daemon whose bundled crates are all permissive (MIT / Apache-2.0 / ISC /
     /// BSD-3-Clause / Unicode-3.0 — no copyleft). See
     /// <c>Payload/vendor/THIRD_PARTY.md</c> for provenance and integrity data, and
-    /// <c>Payload/vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt</c> for the
+    /// <c>licenses/btmqttd-THIRD-PARTY-LICENSES.txt</c> (repo-root licenses/ dir) for the
     /// aggregated dependency license texts.
     /// </summary>
     public static class PayloadBinaries
     {
+        /// <summary>
+        /// musl libc's MIT license notice. BOTH shipped binaries statically link musl libc
+        /// objects — <c>btmqttd</c> via the Rust <c>*-musleabihf</c> target, <c>ffmpeg</c>
+        /// via <c>zig cc</c> — and musl's exception waives only headers/CRT, so the linked
+        /// libc.a objects require the notice. The same upstream license text covers both.
+        /// </summary>
+        private const string MuslCopyrightResource =
+            "IntercomFirmwareTool.Core.licenses.musl-COPYRIGHT.txt";
+
         /// <summary>
         /// <c>btmqttd</c> — the single-connection MQTT bridge daemon (issue #32),
         /// a statically-linked armv7 hard-float (musl) ELF that REPLACES the entire
@@ -67,11 +76,42 @@ namespace IntercomFirmwareTool.Core
             Sha256Hex: "4dfad4661fddc488ccb438217daca58d8b8afaa2725832eed8cfc9ef3bd75ed4",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.btmqttd",
             LicenseResourceName:
-                "IntercomFirmwareTool.Core.Payload.vendor.licenses.btmqttd-THIRD-PARTY-LICENSES.txt",
+                "IntercomFirmwareTool.Core.licenses.btmqttd-THIRD-PARTY-LICENSES.txt",
             // The static binary bundles ~65 Rust crates; the mandatory notices span
             // MIT, Apache-2.0, ISC (ring/webpki/untrusted), BSD-3-Clause (subtle) and
             // Unicode-3.0 (unicode-ident). All texts are in the aggregated notice file.
-            LicenseSpdx: "MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0");
+            LicenseSpdx: "MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0")
+        {
+            // Also statically links musl libc (MIT) — its COPYRIGHT ships alongside the
+            // aggregated crate notices. (SPDX already lists MIT, from the crates.)
+            AdditionalLicenseResourceNames = new[] { MuslCopyrightResource },
+        };
+
+        /// <summary>
+        /// <c>ffmpeg</c> — a minimal, LGPL, statically-linked armv7 hard-float (musl) build for the
+        /// on-device media server (issue #120): the on-device go2rtc runs it to read the panel's
+        /// cleartext RTP via an SDP and <b>copy</b> the H.264 into RTSP — no decode/encode. Unlike
+        /// the first-party <see cref="Btmqttd"/>, this is a <b>third-party</b> binary (FFmpeg n7.1.1,
+        /// <c>LGPL-2.1-or-later</c>), built per <c>native/ffmpeg/BUILD.md</c> and byte-reproducible
+        /// (every input pinned + SHA-verified; <c>ffmpeg-provenance.yml</c> enforces a byte-for-byte
+        /// rebuild match, like btmqttd). Declared + embedded here; the installer wires it in Phase 1c,
+        /// so it is deliberately NOT in <see cref="All"/> yet — the vendored binary lands with no
+        /// change to install behaviour.
+        /// </summary>
+        public static readonly ArmBinary Ffmpeg = new(
+            Name: "ffmpeg",
+            InstallPath: "/usr/sbin/ffmpeg",
+            Length: 2_024_432,
+            Sha256Hex: "03ceacf28bcd54de19c9f813cf558480834f981635659f359839aa6023ba4ecf",
+            ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.ffmpeg",
+            LicenseResourceName:
+                "IntercomFirmwareTool.Core.licenses.ffmpeg-COPYING.LGPLv2.1.txt",
+            // FFmpeg core is LGPL-2.1; the static binary also links musl libc (MIT), hence
+            // the compound expression and the extra musl notice below.
+            LicenseSpdx: "LGPL-2.1-or-later AND MIT")
+        {
+            AdditionalLicenseResourceNames = new[] { MuslCopyrightResource },
+        };
 
         /// <summary>The complete third-party notice (Markdown).</summary>
         public const string ThirdPartyNoticeResourceName =
