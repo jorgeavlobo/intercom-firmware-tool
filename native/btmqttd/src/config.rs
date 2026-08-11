@@ -110,7 +110,7 @@ pub struct Config {
     /// siphons the cleartext RTP off `bt_av_media` (:30007) by adding our own UDP client,
     /// fanning it out to `camera_target` for go2rtc/Home Assistant. Opt-in; off by default.
     pub camera_enabled: bool,
-    /// Where to fan the siphoned RTP. In OFF-device mode this is the go2rtc/HA host and
+    /// Where to fan the siphoned RTP. In off-device mode this is the go2rtc/HA host and
     /// defaults to `MQTT_HOST` (go2rtc typically runs alongside Home Assistant). In on-device
     /// mode (`camera_ondevice`) it is pinned to [`CAMERA_ONDEVICE_TARGET`] (`127.0.0.2`) and
     /// `CAMERA_TARGET_HOST` is ignored. Resolved to an IPv4 at runtime.

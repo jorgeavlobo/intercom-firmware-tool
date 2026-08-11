@@ -271,10 +271,11 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
 /// Validate the resolved siphon target, applying the on-device loopback carve-out. Pure (no
 /// I/O), so it is unit-testable without opening a socket to `bt_av_media`.
 ///
-/// With an OFF-device go2rtc/HA host:
-///   * loopback (127/8) is never a real destination — and worse, our add-client frame would
-///     then be `*7*300#127#0#0#1#…`, identical to DEVICE_MEDIA_PREFIX, so our own frame echoing
-///     on the monitor could be misread as a media-start "arm" signal (Copilot);
+/// With an off-device go2rtc/HA host:
+///   * loopback (127/8) is never a real off-device destination, so it is unroutable — and
+///     `127.0.0.1` SPECIFICALLY is worse still: our add-client frame would be
+///     `*7*300#127#0#0#1#…`, identical to DEVICE_MEDIA_PREFIX, so our own frame echoing on the
+///     monitor could be misread as a media-start "arm" signal (Copilot);
 ///   * the unspecified 0.0.0.0 is a local bind wildcard, not a routable host — the daemon would
 ///     report the siphon armed while no receiver ever gets the RTP (Codex).
 ///
