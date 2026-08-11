@@ -11,7 +11,13 @@
 # prose, into several notices and the project metadata. If those aren't updated in lockstep
 # the commit identifies the wrong upstream release and — load-bearing for LGPL — points
 # recipients at the wrong "corresponding source" tag, even though every automated check still
-# passes. This guard fails loudly until each version-bearing file mentions the pinned version.
+# passes.
+#
+# This guard is EXHAUSTIVE, not presence-only: it requires (1) the pinned version to appear in
+# each version-bearing file, and (2) EVERY structured version token in those files to equal the
+# pin — so a partial bump that updates one occurrence but leaves another stale (e.g. the
+# displayed version updated but a `/tree/n7.1.1` corresponding-source URL left behind — Codex)
+# still fails.
 #
 # Requires FFMPEG_TAG and ZIG_VERSION in the environment (the caller loads them from pins.env).
 set -eu
@@ -23,37 +29,51 @@ set -eu
 root="${GITHUB_WORKSPACE:-$(git rev-parse --show-toplevel 2>/dev/null || echo .)}"
 cd "$root"
 
-fail=0
-need() {  # need <file> <literal-version-string>
-  if ! grep -Fq "$2" "$1"; then
-    echo "::error file=$1::'$1' does not mention '$2' — pins.env drifted from the version-bearing docs; update it (see native/ffmpeg/BUILD.md, 'Refreshing the binary')." >&2
-    fail=1
-  fi
-}
+# The FFmpeg tag is named in every notice + the project metadata that tells an LGPL recipient
+# which upstream source to fetch. The Zig toolchain version is a build input, documented only
+# in the build docs.
+FF_FILES='native/ffmpeg/BUILD.md
+THIRD-PARTY-NOTICES.md
+IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md
+IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
+IntercomFirmwareTool.Core/IntercomFirmwareTool.Core.csproj'
+ZIG_FILES='native/ffmpeg/BUILD.md
+IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
 
-# The FFmpeg tag (e.g. n7.1.1) is named in every notice + the project metadata that tells an
-# LGPL recipient which upstream source to fetch.
-for f in \
-  native/ffmpeg/BUILD.md \
-  THIRD-PARTY-NOTICES.md \
-  IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md \
-  IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs \
-  IntercomFirmwareTool.Core/IntercomFirmwareTool.Core.csproj
-do
-  need "$f" "$FFMPEG_TAG"
+fail=0
+
+# (1) Presence — the pinned version must appear at all (an all-tokens-match check alone would
+#     pass vacuously on a file that dropped every reference).
+for f in $FF_FILES; do
+  grep -Fq "$FFMPEG_TAG" "$f" || { echo "::error file=$f::does not mention pinned FFmpeg tag '$FFMPEG_TAG'" >&2; fail=1; }
+done
+for f in $ZIG_FILES; do
+  grep -Fq "$ZIG_VERSION" "$f" || { echo "::error file=$f::does not mention pinned Zig version '$ZIG_VERSION'" >&2; fail=1; }
 done
 
-# The Zig toolchain version is documented only in the build docs (it's a build input, not a
-# shipped-component version), so check just those.
-for f in \
-  native/ffmpeg/BUILD.md \
-  IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md
-do
-  need "$f" "$ZIG_VERSION"
+# (2) No stale occurrence — every structured version token must equal the pin.
+# FFmpeg release tags are the distinctive `n<maj>.<min>.<patch>` shape; every such token in
+# these files IS the ffmpeg tag (incl. corresponding-source URLs like `/tree/n7.1.1`), so each
+# must equal the pin. The two-part release *series* `n7.1` mentioned in BUILD.md is not a tag
+# and is intentionally not matched (three numeric groups required).
+for f in $FF_FILES; do
+  for tok in $(grep -oE 'n[0-9]+\.[0-9]+\.[0-9]+' "$f" 2>/dev/null || true); do
+    [ "$tok" = "$FFMPEG_TAG" ] || { echo "::error file=$f::stale FFmpeg tag '$tok' (pinned '$FFMPEG_TAG') — every n<x.y.z> reference, including corresponding-source URLs, must match the pin" >&2; fail=1; }
+  done
+done
+
+# Zig's version is a bare semver whose shape collides with unrelated versions (rustc, cross-gcc,
+# kernel, NuGet packages), so only validate a semver that sits in a zig context: right after
+# "zig" (allowing a few separators like ` cc `) or after an "x86_64-" download-name prefix.
+for f in $ZIG_FILES; do
+  for tok in $(grep -oiE '(zig[^0-9]{0,8}|x86_64-)[0-9]+\.[0-9]+\.[0-9]+' "$f" 2>/dev/null \
+                 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true); do
+    [ "$tok" = "$ZIG_VERSION" ] || { echo "::error file=$f::stale Zig version '$tok' (pinned '$ZIG_VERSION')" >&2; fail=1; }
+  done
 done
 
 if [ "$fail" -ne 0 ]; then
-  echo "check-doc-versions.sh: version-bearing docs are out of sync with native/ffmpeg/pins.env (FFmpeg $FFMPEG_TAG, Zig $ZIG_VERSION)." >&2
+  echo "check-doc-versions.sh: version-bearing docs are out of sync with native/ffmpeg/pins.env (FFmpeg $FFMPEG_TAG, Zig $ZIG_VERSION); see BUILD.md 'Refreshing the binary'." >&2
   exit 1
 fi
-echo "check-doc-versions.sh: docs match pins (FFmpeg $FFMPEG_TAG, Zig $ZIG_VERSION)."
+echo "check-doc-versions.sh: all version references match pins (FFmpeg $FFMPEG_TAG, Zig $ZIG_VERSION)."
