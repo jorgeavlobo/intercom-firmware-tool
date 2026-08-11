@@ -10,6 +10,12 @@ name: ffmpeg binary refresh (#120)
 
 on:
   workflow_dispatch:
+  # TEMP bootstrap trigger (removed again once the -j1 binary is committed): fires this
+  # dispatch-only workflow on a self-path push so it regenerates the byte-reproducible
+  # binary. A never-dispatched workflow 404s on the dispatch API.
+  push:
+    paths:
+      - '.github/workflows/ffmpeg-build.yml'
 
 # This job COMMITS the rebuilt binary back to the branch, so it needs write access and the
 # checkout token persisted for the push (unlike the read-only provenance job).
@@ -74,7 +80,11 @@ jobs:
             --enable-protocol=file,udp,rtp,rtsp,tcp \
             --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
             --extra-cflags="-Os" --extra-ldflags="-static -s"
-          make -j"$(nproc)"
+          # -j1 (serial): FFmpeg's parallel build is NOT byte-reproducible across runs
+          # (object/archive ordering depends on parallel completion order), which would
+          # break the byte-for-byte provenance match. Serial build is deterministic. Keep
+          # this identical to ffmpeg-provenance.yml.
+          make -j1
 
       - name: Verify the rebuilt binary runs on armv7 + is LGPL
         run: |
