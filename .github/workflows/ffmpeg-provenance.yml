@@ -18,6 +18,11 @@ on:
       - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg'
       - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
       - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
+      # The other two version-bearing files check-doc-versions.sh guards, so a PR editing
+      # only one of them (introducing a stale FFmpeg tag / Zig version) still triggers the
+      # backstop (CodeRabbit).
+      - 'THIRD-PARTY-NOTICES.md'
+      - 'IntercomFirmwareTool.Core/IntercomFirmwareTool.Core.csproj'
       - '.github/workflows/ffmpeg-provenance.yml'
       # Also re-verify when the refresh recipe changes: a change to ffmpeg-build.yml (a pin
       # or configure flag) that drifts from this workflow's recipe must be caught against
@@ -31,6 +36,8 @@ on:
       - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg'
       - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
       - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
+      - 'THIRD-PARTY-NOTICES.md'
+      - 'IntercomFirmwareTool.Core/IntercomFirmwareTool.Core.csproj'
       - '.github/workflows/ffmpeg-provenance.yml'
       - '.github/workflows/ffmpeg-build.yml'
   workflow_dispatch:
