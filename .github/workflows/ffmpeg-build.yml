@@ -15,7 +15,7 @@ on:
       - '.github/workflows/ffmpeg-build.yml'
 
 permissions:
-  contents: read
+  contents: write   # the commit-binary step pushes the built ffmpeg to this branch
 
 env:
   ZIG_VERSION: 0.13.0
@@ -27,6 +27,9 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout (for the commit-binary step)
+        uses: actions/checkout@v4
+
       - name: Zig ${{ env.ZIG_VERSION }} (pinned cross-compiler)
         uses: mlugg/setup-zig@v1
         with:
@@ -101,3 +104,29 @@ jobs:
             ffmpeg-src/sha.txt
             ffmpeg-src/ver.txt
           if-no-files-found: error
+
+      # Commit the built binary into the repo so the dev container (which can't
+      # cross-build it) can embed + hash it locally. Only on branch pushes; the
+      # GITHUB_TOKEN commit does not re-trigger workflows. The vendor path is not a
+      # trigger path, so this cannot loop. ffmpeg-provenance.yml will later
+      # rebuild-and-byte-compare this committed binary, like btmqttd.
+      - name: Commit the built ffmpeg to the branch
+        if: github.event_name == 'push'
+        run: |
+          set -euxo pipefail
+          dest="IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg"
+          mkdir -p "$(dirname "$dest")"
+          cp ffmpeg-src/ffmpeg "$dest"
+          if git diff --quiet -- "$dest"; then
+            echo "vendored ffmpeg unchanged — nothing to commit"; exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$dest"
+          git commit -m "#120 Phase 1a: vendored minimal ffmpeg binary (CI build $(git rev-parse --short HEAD))
+
+Built by .github/workflows/ffmpeg-build.yml per native/ffmpeg/BUILD.md.
+$(cat ffmpeg-src/sha.txt)
+
+[skip ci]"
+          git push origin HEAD:${GITHUB_REF_NAME}
