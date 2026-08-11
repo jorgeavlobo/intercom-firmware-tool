@@ -77,7 +77,7 @@ CFLAGS="-Os -ffile-prefix-map=$(pwd)=. -fdebug-prefix-map=$(pwd)=."
   --disable-autodetect --disable-doc --disable-debug \
   --disable-shared --enable-static --enable-small \
   --disable-programs --enable-ffmpeg \
-  --disable-asm \
+  --disable-asm --disable-stripping \
   --enable-protocol=file,udp,rtp,rtsp,tcp \
   --enable-demuxer=sdp,rtsp,rtp \
   --enable-muxer=rtsp,rtp \
@@ -92,6 +92,9 @@ Notes:
 - **`--disable-asm`** — we only demux/copy/mux (no codec math), so ARM asm buys nothing
   and would add a nasm/asm-reproducibility variable. Disabling it keeps the build
   portable and deterministic across hosts.
+- **`--disable-stripping`** — FFmpeg's post-link `strip` uses the *host* `strip`, which
+  can't read the cross-built ARM ELF (`Unable to recognise the format`). We strip at link
+  time instead via `--extra-ldflags=-s`, which is deterministic and needs no target strip.
 - **No codec components at all** (no decoders, encoders, or parsers). `-c:v copy` never
   touches the pixels: the `sdp`/`rtp` demuxer + its H.264 RTP depayloader (libavformat)
   reconstruct the access units, and the `rtsp`/`rtp` muxer repackets them — no libavcodec

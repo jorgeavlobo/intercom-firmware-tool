@@ -58,7 +58,7 @@ jobs:
             --disable-autodetect --disable-doc --disable-debug \
             --disable-shared --enable-static --enable-small \
             --disable-programs --enable-ffmpeg \
-            --disable-asm \
+            --disable-asm --disable-stripping \
             --enable-protocol=file,udp,rtp,rtsp,tcp \
             --enable-demuxer=sdp,rtsp,rtp \
             --enable-muxer=rtsp,rtp \
