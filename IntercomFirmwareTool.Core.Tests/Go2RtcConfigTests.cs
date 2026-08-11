@@ -163,6 +163,26 @@ public class Go2RtcConfigTests
     }
 
     [Fact]
+    public void OnDeviceStreamName_is_stable_so_the_guide_url_matches_the_installed_stream()
+    {
+        // The installer always writes the on-device go2rtc stream under MqttInstaller.OnDeviceStreamName,
+        // so the App must build the Home Assistant URL from THAT exact name (not the HA node id, which
+        // would point at a nonexistent stream). Guard: the name is an already-sanitized stable token and
+        // the guide URL ends in it.
+        Assert.Equal(MqttInstaller.OnDeviceStreamName,
+            Go2RtcConfig.SanitizeStreamName(MqttInstaller.OnDeviceStreamName));
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, MqttInstaller.OnDeviceStreamName);
+        Assert.Contains(":8554/" + MqttInstaller.OnDeviceStreamName + "\n", guide);
+    }
+
+    [Fact]
     public void BuildSetupGuide_defaults_the_target_to_the_broker_host()
     {
         // Target null → EffectiveCameraTargetHost falls back to MqttHost.

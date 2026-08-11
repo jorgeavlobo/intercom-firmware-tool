@@ -381,7 +381,10 @@ namespace IntercomFirmwareTool.Core
 
         // On-device media server (issue #120), installed ONLY on the on-device camera path.
         private const string Go2RtcDir = EtcDir + "/go2rtc";                 // config dir
-        private const string OnDeviceStreamName = Go2RtcConfig.DefaultStreamName;   // "doorbell"
+        /// <summary>The go2rtc stream name (and SDP filename) the on-device install ALWAYS uses
+        /// (issue #120). Public so the App can show a Home Assistant RTSP URL that ends in the exact
+        /// installed stream — <c>rtsp://…:8554/<see cref="OnDeviceStreamName"/></c>.</summary>
+        public const string OnDeviceStreamName = Go2RtcConfig.DefaultStreamName;    // "doorbell"
         private const string Go2RtcYamlPath = Go2RtcDir + "/go2rtc.yaml";   // holds the RTSP password → 0600
         private const string Go2RtcSdpPath = Go2RtcDir + "/" + OnDeviceStreamName + ".sdp";
         private const string Go2RtcdInitPath = "/etc/init.d/go2rtcd";       // its own SysV init script
@@ -619,8 +622,9 @@ namespace IntercomFirmwareTool.Core
         /// cryptographic RNG. URL-safe so it drops cleanly into the <c>rtsp://user:pass@host</c> URL the
         /// Home Assistant camera uses, and free of quotes / backslashes / control characters so it is a
         /// valid double-quoted <c>go2rtc.yaml</c> scalar (passes <see cref="Validate"/>'s credential
-        /// rule). The App generates one per install and sets <see cref="MqttOptions.CameraRtspPass"/>; it
-        /// is never a fixed default (a hard-coded credential would expose every unit's stream).
+        /// rule). The App generates one, caches it for the session, and sets
+        /// <see cref="MqttOptions.CameraRtspPass"/>; it is never a fixed default (a hard-coded credential
+        /// would expose every unit's stream).
         /// </summary>
         public static string GenerateRtspPassword()
         {

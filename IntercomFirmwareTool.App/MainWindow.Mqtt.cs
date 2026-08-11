@@ -753,14 +753,14 @@ namespace IntercomFirmwareTool.App
                 CameraRtspUser = CameraRtspUsername,
                 CameraRtspPass = onDevice ? CameraRtspPassword() : null,
             };
-            // The stream name follows the HA node id (sanitized inside the generator), so the SDP
-            // filename, go2rtc key and camera entity agree; fall back to "doorbell".
-            string streamName = NullIfEmpty(TxtMqttHaNodeId.Text.Trim()) ?? "doorbell";
-            // On-device: nothing to paste — show the Home Assistant RTSP URL + credentials. Off-device:
-            // the classic copy-paste go2rtc config for the HA host.
+            // On-device: nothing to paste — show the Home Assistant RTSP URL + credentials, using the
+            // EXACT stream name the installer writes (MqttInstaller.OnDeviceStreamName), NOT the HA node
+            // id — the installed go2rtc stream is fixed, so a node-id URL would point at a nonexistent
+            // stream (Codex). Off-device: the classic copy-paste config, whose stream name follows the
+            // HA node id (the user pastes it, so any name is fine; fall back to "doorbell").
             string guide = onDevice
-                ? Go2RtcConfig.BuildOnDeviceSetupGuide(opts, streamName)
-                : Go2RtcConfig.BuildSetupGuide(opts, streamName);
+                ? Go2RtcConfig.BuildOnDeviceSetupGuide(opts, MqttInstaller.OnDeviceStreamName)
+                : Go2RtcConfig.BuildSetupGuide(opts, NullIfEmpty(TxtMqttHaNodeId.Text.Trim()) ?? "doorbell");
             try { Clipboard.SetText(guide); } catch { /* clipboard may be busy; still show the text */ }
             MessageBox.Show(this, guide, L("Cap_MqttGo2Rtc"),
                 MessageBoxButton.OK, MessageBoxImage.Information);

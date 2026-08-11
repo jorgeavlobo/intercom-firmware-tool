@@ -286,8 +286,10 @@ namespace IntercomFirmwareTool.Core
         {
             string name = SanitizeStreamName(streamName);
             string user = opts.CameraRtspUser;
+            // A space-free placeholder if no password was set yet (the App always sets one on-device):
+            // spaces in the RTSP URL userinfo would make it awkward to copy-paste (Copilot).
             string pass = string.IsNullOrEmpty(opts.CameraRtspPass)
-                ? "<generated at build>" : opts.CameraRtspPass!;
+                ? "<password>" : opts.CameraRtspPass!;
             var ci = CultureInfo.InvariantCulture;
 
             var sb = new StringBuilder();
