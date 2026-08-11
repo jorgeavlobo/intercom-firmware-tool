@@ -62,7 +62,6 @@ jobs:
             --enable-protocol=file,udp,rtp,rtsp,tcp \
             --enable-demuxer=sdp,rtsp,rtp \
             --enable-muxer=rtsp,rtp \
-            --enable-decoder=h264 \
             --extra-cflags="$CFLAGS" \
             --extra-ldflags="-static -s"
           make -j"$(nproc)"
