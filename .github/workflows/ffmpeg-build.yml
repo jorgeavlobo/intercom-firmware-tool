@@ -23,6 +23,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every run: step below relies on bash (the reproduction helper uses `local`; the scripts use
+# `set -o pipefail`), so declare it explicitly rather than depending on the runner's default
+# shell staying bash (Copilot).
+defaults:
+  run:
+    shell: bash
+
 env:
   # The Zig/FFmpeg version + SHA-256 pins and SOURCE_DATE_EPOCH live in the single-source
   # native/ffmpeg/pins.env (loaded in the first step below), shared with ffmpeg-provenance.yml

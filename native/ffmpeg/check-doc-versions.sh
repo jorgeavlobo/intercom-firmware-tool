@@ -59,7 +59,7 @@ done
 # `n7.1` in BUILD.md coexist with the three-component pin n7.1.1, while still catching a stale
 # `/tree/n7.1.0` — and, after a two-component pin like n8.0, a stale `/tree/n8.1` (Codex).
 for f in $FF_FILES; do
-  for tok in $(grep -oE 'n[0-9]+\.[0-9]+(\.[0-9]+)*' "$f" 2>/dev/null || true); do
+  for tok in $(grep -oE 'n[0-9]+\.[0-9]+(\.[0-9]+)?' "$f" 2>/dev/null || true); do
     case "$FFMPEG_TAG" in
       "$tok"|"$tok".*) : ;;   # exact tag, or tok is a shorter series-prefix of the pin
       *) echo "::error file=$f::stale FFmpeg tag '$tok' (pinned '$FFMPEG_TAG') — every FFmpeg-tag reference (incl. corresponding-source URLs) must be the pinned tag or its series prefix" >&2; fail=1 ;;
