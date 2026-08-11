@@ -98,18 +98,31 @@ namespace IntercomFirmwareTool.App
 
         // On-device media server (issue #120): the fixed RTSP username + a strong random password.
         // The password is generated on first use and cached, so the "Show go2rtc config" preview and the
-        // build that follows it install the SAME credential. It is a PER-INSTALL secret, so it is reset
-        // after each successful on-device build (see ResetCameraRtspPassword) — the next built image then
-        // gets a fresh, distinct password rather than sharing one across every unit built this session.
+        // build that follows it install the SAME credential. It is a PER-INSTALL secret: once written into
+        // an image the cached value is RETAINED (so a build-then-"Show go2rtc config" still shows the
+        // credential actually installed on that unit — the only way to recover it), and the NEXT build
+        // mints a fresh, distinct one so two units built this session never share a stream password.
         private const string CameraRtspUsername = "camera";
         private string? _cameraRtspPass;
+        private bool _cameraRtspPassInstalled;   // the cached password has been written into an image
         private string CameraRtspPassword() => _cameraRtspPass ??= MqttInstaller.GenerateRtspPassword();
 
-        /// <summary>Spend the cached on-device RTSP password: after an on-device image is written, clear
-        /// it so the next build generates a fresh, distinct credential (a per-install secret — two units
-        /// built in one session must not share a stream password). The just-built image already captured
-        /// the old value, and the preview that preceded it shared the same cached password.</summary>
-        private void ResetCameraRtspPassword() => _cameraRtspPass = null;
+        /// <summary>Record that the cached on-device RTSP password was written into a built image. It is
+        /// RETAINED (so a build-then-"Show go2rtc config" shows the installed credential), but the next
+        /// build snapshot mints a fresh one — see <see cref="StartCameraRtspSnapshot"/>.</summary>
+        private void MarkCameraRtspPasswordInstalled() => _cameraRtspPassInstalled = true;
+
+        /// <summary>Begin a new build's credential snapshot: if the cached password was already installed
+        /// in a previous image, discard it so THIS build generates a fresh, distinct per-install secret.
+        /// A preview shown before this build shares the same fresh value (it reads the same cache).</summary>
+        private void StartCameraRtspSnapshot()
+        {
+            if (_cameraRtspPassInstalled)
+            {
+                _cameraRtspPass = null;
+                _cameraRtspPassInstalled = false;
+            }
+        }
 
         // Active LAN broker discovery (#43, follow-up 2). mDNS runs in the background at
         // startup; the /24 scan is a heavier fallback run at most once, when the bridge is
@@ -617,6 +630,11 @@ namespace IntercomFirmwareTool.App
             LblMqttCameraTarget.Visibility = hostVis;
             TxtMqttCameraTarget.Visibility = hostVis;
             ChkMqttCameraHostOverride.Visibility = hostVis;
+            // The off-device guidance ("need a go2rtc host", "cleartext RTP over the LAN") contradicts
+            // on-device (authenticated RTSP served directly, RTP over loopback) — hide it on-device and
+            // show the on-device hint instead (Codex).
+            if (LblMqttCameraOffDeviceHint is not null) LblMqttCameraOffDeviceHint.Visibility = hostVis;
+            if (LblMqttCameraCleartextWarn is not null) LblMqttCameraCleartextWarn.Visibility = hostVis;
             if (LblMqttCameraOnDeviceHint is not null)
                 LblMqttCameraOnDeviceHint.Visibility = onDevice ? Visibility.Visible : Visibility.Collapsed;
 
@@ -1666,6 +1684,10 @@ namespace IntercomFirmwareTool.App
         {
             mqttOpts = null;
             if (!MqttEnabled) return true;
+
+            // Starting a new build: if the cached on-device RTSP password was already written into a
+            // previous image, mint a fresh one for this build so each unit gets a distinct credential.
+            StartCameraRtspSnapshot();
 
             string? caPem = null, certPem = null, keyPem = null;
             if (!TryReadPem(_mqttCaPath, out caPem)) return false;

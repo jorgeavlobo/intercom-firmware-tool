@@ -1405,11 +1405,15 @@
                         <RadioButton x:Name="RbMqttCameraHiRes" GroupName="MqttCameraQuality"
                                      Margin="0,2,0,0" Content="{loc:Loc Rb_MqttCameraHiRes}"
                                      ToolTip="{loc:Loc Tip_MqttCameraHiRes}"/>
-                        <TextBlock Text="{loc:Loc Hint_MqttCamera}" Foreground="Gray" FontSize="11"
-                                   TextWrapping="Wrap" Margin="0,6,0,0"/>
-                        <!-- Security disclosure: the fan-out is cleartext RTP over UDP (CodeRabbit). -->
-                        <TextBlock Text="{loc:Loc Warn_MqttCameraCleartext}" Foreground="#C0392B"
-                                   FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
+                        <!-- Off-device guidance: hidden in on-device mode (issue #120) — on-device serves
+                             authenticated RTSP directly with NO go2rtc on Home Assistant, and the RTP
+                             fan-out is over loopback, so "need a go2rtc host" + "cleartext over the LAN"
+                             do not apply. Toggled together with the on-device hint in ApplyCameraOnDeviceMode. -->
+                        <TextBlock x:Name="LblMqttCameraOffDeviceHint" Text="{loc:Loc Hint_MqttCamera}"
+                                   Foreground="Gray" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+                        <!-- Security disclosure: the OFF-device fan-out is cleartext RTP over UDP (CodeRabbit). -->
+                        <TextBlock x:Name="LblMqttCameraCleartextWarn" Text="{loc:Loc Warn_MqttCameraCleartext}"
+                                   Foreground="#C0392B" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
                         <!-- On-demand viewing (Phase 2, #104): also view the camera when NOT ringing,
                              via btmqttd's loopback SIP UA. Sub-option of the camera feature. -->
                         <CheckBox x:Name="ChkMqttCameraOnDemand" Margin="0,8,0,0"
