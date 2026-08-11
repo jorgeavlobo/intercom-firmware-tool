@@ -99,4 +99,38 @@ public class MqttCameraValidationTests
             CameraTargetHost = "x\nMQTT_HOST=bad",
         });
     }
+
+    [Fact]
+    public void On_device_mode_skips_the_off_device_target_checks()
+    {
+        // On-device (#120): the target is pinned to the loopback alias 127.0.0.2 (where the on-device
+        // go2rtc listens), so the off-device "must be routable / not loopback / device-resolvable"
+        // checks must NOT apply. EffectiveCameraTargetHost is 127.0.0.2 (loopback) yet Validate passes.
+        var opts = new MqttOptions("broker.lan") { CameraEnabled = true, CameraOnDevice = true };
+        Assert.Equal("127.0.0.2", opts.EffectiveCameraTargetHost);
+        MqttInstaller.Validate(opts); // must not throw despite the loopback target
+
+        // A stray CameraTargetHost is simply ignored on-device (not validated, not pinned).
+        var opts2 = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraTargetHost = "ha.local",   // would be rejected off-device; ignored here
+        };
+        MqttInstaller.Validate(opts2); // must not throw
+    }
+
+    [Fact]
+    public void On_device_mode_still_validates_the_fan_out_ports()
+    {
+        // The ports still feed the SDP/siphon in on-device mode, so equal/out-of-range ports are
+        // still rejected.
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraVideoPort = 5000,
+            CameraAudioPort = 5000,
+        }));
+    }
 }

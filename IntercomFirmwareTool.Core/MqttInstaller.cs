@@ -146,11 +146,27 @@ namespace IntercomFirmwareTool.Core
         /// default 30.</summary>
         public int CameraViewIdleSecs { get; init; } = 30;
 
-        /// <summary>The camera fan-out target actually used: the explicit
-        /// <see cref="CameraTargetHost"/>, or <see cref="MqttHost"/> when it is null/blank (go2rtc
-        /// usually lives with Home Assistant). Mirrors btmqttd's <c>CAMERA_TARGET_HOST</c> default.</summary>
+        /// <summary>On-device media server (Phase 1c, #120): run go2rtc + ffmpeg ON the panel and serve
+        /// the camera as RTSP to Home Assistant directly (no HA-side go2rtc). When true, the siphon
+        /// target is pinned to the loopback alias <see cref="OnDeviceCameraTarget"/> (<c>127.0.0.2</c>)
+        /// — where the on-device go2rtc listens — and <see cref="CameraTargetHost"/> is ignored. Emits
+        /// <c>CAMERA_ONDEVICE=1</c> and makes the installer write go2rtc + ffmpeg, the go2rtc service, and
+        /// its config. Requires <see cref="CameraEnabled"/>. Opt-in; off by default (the classic
+        /// off-device fan-out to a go2rtc/HA host).</summary>
+        public bool CameraOnDevice { get; init; }
+
+        /// <summary>The loopback alias the on-device go2rtc listens on for the siphoned RTP — matches
+        /// btmqttd's <c>CAMERA_ONDEVICE_TARGET</c> (see <c>native/btmqttd/src/config.rs</c>). Not
+        /// <c>127.0.0.1</c>: that collides with the panel's own media-start signal the monitor watches.</summary>
+        public const string OnDeviceCameraTarget = "127.0.0.2";
+
+        /// <summary>The camera fan-out target actually used: in on-device mode the loopback alias
+        /// <see cref="OnDeviceCameraTarget"/>; otherwise the explicit <see cref="CameraTargetHost"/>, or
+        /// <see cref="MqttHost"/> when it is null/blank (go2rtc usually lives with Home Assistant).
+        /// Mirrors btmqttd's <c>CAMERA_TARGET_HOST</c>/<c>CAMERA_ONDEVICE</c> resolution.</summary>
         public string EffectiveCameraTargetHost =>
-            string.IsNullOrWhiteSpace(CameraTargetHost) ? MqttHost : CameraTargetHost!;
+            CameraOnDevice ? OnDeviceCameraTarget
+            : string.IsNullOrWhiteSpace(CameraTargetHost) ? MqttHost : CameraTargetHost!;
 
         /// <summary>Home Assistant MQTT discovery topic prefix (HA default is "homeassistant").</summary>
         public string HaDiscoveryPrefix { get; init; } = "homeassistant";
@@ -621,41 +637,48 @@ namespace IntercomFirmwareTool.Core
             // port and break go2rtc's demux.
             if (opts.CameraEnabled)
             {
-                string camTarget = opts.EffectiveCameraTargetHost;
-                if (string.IsNullOrWhiteSpace(camTarget)
-                    || camTarget.IndexOfAny(new[] { '\r', '\n' }) >= 0)
-                    throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetRequired"), nameof(opts));
-                // The fan-out target must be a hostname or an IPv4 literal: btmqttd's av.rs sends the
-                // WHO=7 `*7*300#a#b#c#d#…` frame, whose address field is IPv4-only, and its resolver
-                // takes the first IPv4 a lookup yields. An IPv6 literal (or a URL / host:port string)
-                // would install but never arm — reject it here where the user sees why (CodeRabbit/Codex).
-                if (!IsHostnameOrIpv4(camTarget))
-                    throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidCameraTarget"), nameof(opts));
-                // Reject an unroutable target — go2rtc/Home Assistant runs OFF the intercom, so
-                // neither loopback (127/8) nor the unspecified 0.0.0.0 wildcard is a real fan-out
-                // destination. Loopback would also make our add-client frame collide with the panel's
-                // own `*7*300#127#0#0#1#…` media-start signal (Copilot), and 0.0.0.0 would arm the
-                // siphon against a bind wildcard no receiver reads (Codex). av.rs rejects both too,
-                // but fail here so a broken config never ships.
-                if (IPAddress.TryParse(camTarget, out var camIp)
-                    && (IPAddress.IsLoopback(camIp) || camIp.Equals(IPAddress.Any)))
-                    throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetLoopback"), nameof(opts));
-                // Also reject the stock "openserver" alias: the device pins it to 127.0.0.1, so a
-                // camera target equal to it (e.g. a blank target when MQTT_HOST is "openserver")
-                // resolves to loopback on-device and never arms — the IP-literal check above can't
-                // see that a HOSTNAME maps to loopback (Codex).
-                if (BtDaemonAppsHosts.IsStockLoopbackAlias(camTarget))
-                    throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetLoopback"), nameof(opts));
-                // Device resolvability: the installer pins ONLY MQTT_HOST in /etc/hosts, and the
-                // daemon's musl resolver consults /etc/hosts then public DNS — never the LAN/mDNS
-                // resolver (see Payload/mqtt/README.md). So a blank target (⇒ MQTT_HOST) or one equal
-                // to it resolves via that pin, and an IPv4 literal is trivially resolvable; but any
-                // OTHER explicit hostname would never resolve on the device and the camera could never
-                // arm. Require such a target to be an IPv4 literal (Codex).
-                if (!string.IsNullOrWhiteSpace(opts.CameraTargetHost)
-                    && !string.Equals(opts.CameraTargetHost, opts.MqttHost, StringComparison.OrdinalIgnoreCase)
-                    && !IPAddress.TryParse(opts.CameraTargetHost, out _))
-                    throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetUnresolvable"), nameof(opts));
+                // On-device mode (#120) pins the fan-out to the loopback alias 127.0.0.2 (where the
+                // on-device go2rtc listens), so the OFF-device target checks below — which reject
+                // loopback/0.0.0.0 as unroutable and require device-resolvability — do NOT apply. In
+                // on-device mode CameraTargetHost is ignored; only the fan-out ports still matter.
+                if (!opts.CameraOnDevice)
+                {
+                    string camTarget = opts.EffectiveCameraTargetHost;
+                    if (string.IsNullOrWhiteSpace(camTarget)
+                        || camTarget.IndexOfAny(new[] { '\r', '\n' }) >= 0)
+                        throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetRequired"), nameof(opts));
+                    // The fan-out target must be a hostname or an IPv4 literal: btmqttd's av.rs sends the
+                    // WHO=7 `*7*300#a#b#c#d#…` frame, whose address field is IPv4-only, and its resolver
+                    // takes the first IPv4 a lookup yields. An IPv6 literal (or a URL / host:port string)
+                    // would install but never arm — reject it here where the user sees why (CodeRabbit/Codex).
+                    if (!IsHostnameOrIpv4(camTarget))
+                        throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidCameraTarget"), nameof(opts));
+                    // Reject an unroutable target — go2rtc/Home Assistant runs OFF the intercom, so
+                    // neither loopback (127/8) nor the unspecified 0.0.0.0 wildcard is a real fan-out
+                    // destination. Loopback would also make our add-client frame collide with the panel's
+                    // own `*7*300#127#0#0#1#…` media-start signal (Copilot), and 0.0.0.0 would arm the
+                    // siphon against a bind wildcard no receiver reads (Codex). av.rs rejects both too,
+                    // but fail here so a broken config never ships.
+                    if (IPAddress.TryParse(camTarget, out var camIp)
+                        && (IPAddress.IsLoopback(camIp) || camIp.Equals(IPAddress.Any)))
+                        throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetLoopback"), nameof(opts));
+                    // Also reject the stock "openserver" alias: the device pins it to 127.0.0.1, so a
+                    // camera target equal to it (e.g. a blank target when MQTT_HOST is "openserver")
+                    // resolves to loopback on-device and never arms — the IP-literal check above can't
+                    // see that a HOSTNAME maps to loopback (Codex).
+                    if (BtDaemonAppsHosts.IsStockLoopbackAlias(camTarget))
+                        throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetLoopback"), nameof(opts));
+                    // Device resolvability: the installer pins ONLY MQTT_HOST in /etc/hosts, and the
+                    // daemon's musl resolver consults /etc/hosts then public DNS — never the LAN/mDNS
+                    // resolver (see Payload/mqtt/README.md). So a blank target (⇒ MQTT_HOST) or one equal
+                    // to it resolves via that pin, and an IPv4 literal is trivially resolvable; but any
+                    // OTHER explicit hostname would never resolve on the device and the camera could never
+                    // arm. Require such a target to be an IPv4 literal (Codex).
+                    if (!string.IsNullOrWhiteSpace(opts.CameraTargetHost)
+                        && !string.Equals(opts.CameraTargetHost, opts.MqttHost, StringComparison.OrdinalIgnoreCase)
+                        && !IPAddress.TryParse(opts.CameraTargetHost, out _))
+                        throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetUnresolvable"), nameof(opts));
+                }
                 if (opts.CameraVideoPort is < 1 or > 65535 || opts.CameraAudioPort is < 1 or > 65535)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_CameraPortRange"), nameof(opts));
                 if (opts.CameraVideoPort == opts.CameraAudioPort)
@@ -1137,12 +1160,19 @@ namespace IntercomFirmwareTool.Core
             // safe: config.rs treats a present-but-empty value as unset and falls back to MQTT_HOST.
             sb.Append(Conf("CAMERA_TARGET_HOST",
                 opts.CameraEnabled
+                && !opts.CameraOnDevice   // on-device pins the target to 127.0.0.2; config.rs ignores this
                 && !string.IsNullOrWhiteSpace(opts.CameraTargetHost)
                 && !string.Equals(opts.CameraTargetHost, opts.MqttHost, StringComparison.OrdinalIgnoreCase)
                     ? opts.CameraTargetHost! : ""));
             sb.Append("CAMERA_VIDEO_PORT=").Append(opts.CameraVideoPort).Append('\n');
             sb.Append("CAMERA_AUDIO_PORT=").Append(opts.CameraAudioPort).Append('\n');
             sb.Append("CAMERA_BRANCH=").Append(opts.CameraBranch).Append('\n');
+            // On-device media server (#120): run go2rtc + ffmpeg ON the panel; config.rs then pins the
+            // siphon target to 127.0.0.2 (ignoring CAMERA_TARGET_HOST). Gate on CameraEnabled — the
+            // media path — so a stray on-device flag on a camera-off conf never reads as active.
+            sb.Append("CAMERA_ONDEVICE=")
+                .Append(opts.CameraEnabled && opts.CameraOnDevice ? '1' : '0')
+                .Append('\n');
             // On-demand viewing (#104): sip.rs INVITEs the panel to bring the idle session up. Only
             // meaningful with the media path, so gate the ENABLED flag on CameraEnabled too — the
             // daemon does the same, but coercing here keeps a stray on-demand=1 from a camera-off
