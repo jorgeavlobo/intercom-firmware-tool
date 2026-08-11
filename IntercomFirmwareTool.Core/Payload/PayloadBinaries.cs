@@ -78,16 +78,17 @@ namespace IntercomFirmwareTool.Core
         /// on-device media server (issue #120): the on-device go2rtc runs it to read the panel's
         /// cleartext RTP via an SDP and <b>copy</b> the H.264 into RTSP — no decode/encode. Unlike
         /// the first-party <see cref="Btmqttd"/>, this is a <b>third-party</b> binary (FFmpeg n7.1.1,
-        /// <c>LGPL-2.1-or-later</c>), built per <c>native/ffmpeg/BUILD.md</c> and NOT byte-reproducible
-        /// (verified functionally by <c>ffmpeg-provenance.yml</c>). Declared + embedded here; the
-        /// installer wires it in Phase 1c, so it is deliberately NOT in <see cref="All"/> yet — the
-        /// vendored binary lands with no change to install behaviour.
+        /// <c>LGPL-2.1-or-later</c>), built per <c>native/ffmpeg/BUILD.md</c> and byte-reproducible
+        /// (every input pinned + SHA-verified; <c>ffmpeg-provenance.yml</c> enforces a byte-for-byte
+        /// rebuild match, like btmqttd). Declared + embedded here; the installer wires it in Phase 1c,
+        /// so it is deliberately NOT in <see cref="All"/> yet — the vendored binary lands with no
+        /// change to install behaviour.
         /// </summary>
         public static readonly ArmBinary Ffmpeg = new(
             Name: "ffmpeg",
             InstallPath: "/usr/sbin/ffmpeg",
-            Length: 2_025_024,
-            Sha256Hex: "99fd0b7e3af85103762f07ea9cc79c4ad85938c9cb610590f572648fdf5cdd9c",
+            Length: 2_024_464,
+            Sha256Hex: "e1c9ae0032fb583f0d2a9efcbe192096497eb6ccfcfc28297be8aaa863d75162",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.ffmpeg",
             LicenseResourceName:
                 "IntercomFirmwareTool.Core.Payload.vendor.licenses.ffmpeg-COPYING.LGPLv2.1.txt",

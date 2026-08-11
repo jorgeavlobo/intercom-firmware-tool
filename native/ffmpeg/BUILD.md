@@ -3,9 +3,12 @@
 This is the **minimal, LGPL, statically-linked armv7 `ffmpeg`** the on-device camera
 path (issue #120, Phase 1) feeds to `go2rtc`: it reads the panel's cleartext RTP via an
 SDP and **copies the H.264 through untouched** into `go2rtc`'s internal RTSP — no
-decode, no encode, no transcode. It is embedded into the firmware image by
-`MqttInstaller` via `PayloadBinaries` (length + SHA-256 verified on read), the same way
-as `btmqttd` (see [`../btmqttd/BUILD.md`](../btmqttd/BUILD.md)).
+decode, no encode, no transcode. In Phase 1a it is only **embedded into the
+`IntercomFirmwareTool.Core` assembly** as a resource via `PayloadBinaries` (length +
+SHA-256 verified on read), the same way as `btmqttd` (see
+[`../btmqttd/BUILD.md`](../btmqttd/BUILD.md)); it is deliberately **not** in
+`PayloadBinaries.All` yet, so `MqttInstaller` does not write it into the firmware image
+until the installer wiring lands in Phase 1c.
 
 Video-only in Phase 1. The speex→Opus audio path (and the #105 backchannel) come in
 Phase 3 and will add `libspeex`-decode + `libopus`-encode to this same recipe.
@@ -35,20 +38,19 @@ that runs on the C100X/C300X (i.MX, kernel 4.9.11) with no dependency on the dev
 ## Toolchain — `zig cc` (pinned)
 
 We cross-compile with **`zig cc`** as the C compiler/linker, pinned to a single Zig
-version. Rationale (pinning one self-contained compiler keeps object code stable across
-hosts, even though the final binary is not byte-identical — see the reproducibility note
-below):
+version:
 
 - Zig **bundles musl** headers + start files and links a fully static musl target from
   one self-contained download — no distro cross-toolchain whose package bumps silently
   change object code (the exact drift `btmqttd`'s provenance job guards against), and no
   reliance on `musl.cc` (blocked on some networks).
-- One pinned `zig` + one pinned FFmpeg tarball keeps the build inputs fixed. ⚠️ **The
-  binary is NOT byte-reproducible** — unlike Cargo's deterministic output for `btmqttd`,
-  an `ffmpeg` + `zig cc` + `make` build yields a same-size but not byte-identical binary
-  across runs (compiler/linker internal ordering). So the committed binary is produced
-  once and frozen, and `ffmpeg-provenance.yml` verifies it **functionally** (see below),
-  not byte-for-byte.
+- **Byte-reproducible.** With one pinned `zig` and one pinned FFmpeg source, and with **no
+  absolute build path leaking into the output** (we do *not* pass `-ffile-prefix-map`,
+  whose value would embed `$(pwd)` into FFmpeg's `configuration:` string; we strip (`-s`)
+  and `--disable-debug`, so no DWARF `comp_dir` survives, and FFmpeg compiles with relative
+  `__FILE__` paths), two independent builds are **byte-identical**. So the committed binary
+  is verified **byte-for-byte** by `ffmpeg-provenance.yml` — the same guarantee as the
+  first-party `btmqttd`, not a weaker functional check.
 
 Pinned versions (bump deliberately; CI enforces the SHA-256 against these):
 
@@ -57,31 +59,28 @@ Pinned versions (bump deliberately; CI enforces the SHA-256 against these):
 | Zig | `0.13.0` (`zig-linux-x86_64-0.13.0.tar.xz`) | `d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea` |
 | FFmpeg | `n7.1.1` (GitHub source archive `n7.1.1.tar.gz`) | `f117507dc501f2a6c11f9241d8d0c3213846cfad91764361af37befd6b6c523d` |
 
-`ffmpeg-provenance.yml` downloads each input and fails the job unless its SHA-256 matches
-the pin above (`ZIG_SHA256` / `FFMPEG_TARBALL_SHA256` in the workflow `env`), so a rotated
-or tampered download can never feed the rebuild.
+Both `ffmpeg-build.yml` and `ffmpeg-provenance.yml` download each input and fail the job
+unless its SHA-256 matches the pin above (`ZIG_SHA256` / `FFMPEG_TARBALL_SHA256` in the
+workflow `env`), so a rotated or tampered download can never feed the build.
 
 ## Build recipe
 
-> This mirrors the rebuild in `.github/workflows/ffmpeg-provenance.yml`, which is the source
-> of truth; keep the two in sync. FFmpeg's `configure` prunes unreachable components, so a
-> missing dependency surfaces as a configure error, not a silent feature. There is no
-> separate build workflow — the committed binary is frozen (not byte-reproducible), and a
-> refresh is a local build with this recipe (or a temporary dispatch of the provenance job).
+> This mirrors `.github/workflows/ffmpeg-build.yml` (which produces the committed binary)
+> and `.github/workflows/ffmpeg-provenance.yml` (which rebuilds and byte-compares). Keep all
+> three in sync — the provenance job requires the rebuild to be **byte-identical** to the
+> committed binary, so any recipe drift fails CI. FFmpeg's `configure` prunes unreachable
+> components, so a missing dependency surfaces as a configure error, not a silent feature.
 
 ```sh
 # Inputs (pinned)
 ZIG=0.13.0
 FFMPEG=n7.1.1
 
-# Best-effort determinism (fixed epoch + scrub the build path). Note: does NOT achieve a
-# byte-identical binary — see the reproducibility note above.
 export SOURCE_DATE_EPOCH=1700000000
-CFLAGS="-Os -ffile-prefix-map=$(pwd)=. -fdebug-prefix-map=$(pwd)=."
 
 ./configure \
   --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
-  --ar="zig ar" --ranlib="zig ranlib" --nm="zig nm" \
+  --ar="zig ar" --ranlib="zig ranlib" --nm="nm" \
   --host-cc=cc \
   --enable-cross-compile --arch=arm --target-os=linux \
   --pkg-config=false \
@@ -93,14 +92,23 @@ CFLAGS="-Os -ffile-prefix-map=$(pwd)=. -fdebug-prefix-map=$(pwd)=."
   --enable-protocol=file,udp,rtp,rtsp,tcp \
   --enable-demuxer=sdp,rtsp,rtp \
   --enable-muxer=rtsp,rtp \
-  --extra-cflags="$CFLAGS" \
+  --extra-cflags="-Os" \
   --extra-ldflags="-static -s"
 
 make -j"$(nproc)"
-# Output: ./ffmpeg  (statically linked, stripped)
+# Output: ./ffmpeg  (statically linked, stripped, byte-reproducible)
 ```
 
 Notes:
+- **`--extra-cflags="-Os"` only** — deliberately no `-ffile-prefix-map=$(pwd)=.`. That flag's
+  *value* is echoed verbatim into FFmpeg's `configuration:` string, which would embed the
+  absolute build path and make the binary differ by build directory (breaking
+  reproducibility and any path-length-sensitive check). Because we strip and disable debug
+  info, no DWARF `comp_dir` remains, and FFmpeg's sources compile with relative `__FILE__`
+  paths, so dropping the prefix-map costs nothing and buys byte-reproducibility.
+- **`--nm="nm"`** — the host binutils `nm` (architecture-agnostic symbol lister; reads the
+  cross ARM objects fine). Note **`zig` has no `nm` subcommand**, so `--nm="zig nm"` prints
+  `error: unknown command: nm` and silently defeats configure's nm-based probes.
 - **`--disable-asm`** — we only demux/copy/mux (no codec math), so ARM asm buys nothing
   and would add a nasm/asm-reproducibility variable. Disabling it keeps the build
   portable and deterministic across hosts.
@@ -119,13 +127,13 @@ Notes:
   > symbol by enabling a decoder that provides it (e.g. `--enable-decoder=av1`), then
   > re-measure size. Deferred until the C100X test proves it necessary.
 - **LGPL guard** — the absence of `--enable-gpl`/`--enable-nonfree` is deliberate and
-  load-bearing; do not add GPL libs. CI asserts `ffmpeg -L` / the config shows LGPL.
+  load-bearing; do not add GPL libs. CI asserts the config shows LGPL.
 
 ## Verify
 
 ```sh
 # Executes on the armv7 target (not just links): print version + confirm 'configuration'
-# has neither --enable-gpl nor --enable-nonfree, and the license is LGPL.
+# has neither --enable-gpl nor --enable-nonfree.
 qemu-arm-static ./ffmpeg -hide_banner -version | sed -n '1,4p'
 
 # Record for PayloadBinaries.cs + THIRD_PARTY.md
@@ -135,14 +143,22 @@ sha256sum ./ffmpeg; stat -c '%s bytes' ./ffmpeg
 The SHA-256 + byte size go into `IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs`
 and `IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md`, and the vendored binary
 lives at `IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg` — enforced on load (length
-+ SHA-256) and guarded by `ffmpeg-provenance.yml`, which enforces **functional** provenance
-(metadata integrity + a fresh build that runs under qemu, is LGPL, reports the same
-`configuration`, and matches the recorded size) rather than the byte-for-byte rebuild used
-for the first-party `btmqttd`.
++ SHA-256) and guarded by `ffmpeg-provenance.yml`, which enforces **byte-for-byte**
+provenance (metadata integrity + a fresh build whose SHA-256 must equal the committed
+binary's, runs under qemu, and is LGPL) — the same reproducible guarantee used for the
+first-party `btmqttd`.
+
+## Refreshing the binary
+
+To bump the pins or the recipe, edit them here + in the two workflows, then run the
+dispatch-only [`ffmpeg-build.yml`](../../.github/workflows/ffmpeg-build.yml): it rebuilds
+from the pinned source and commits the new binary + LGPL text, printing the new SHA-256 +
+size to record in `PayloadBinaries.cs` and `THIRD_PARTY.md`. `ffmpeg-provenance.yml` then
+proves, byte-for-byte, that the committed binary matches the pinned source.
 
 ## Cannot be built in the sandboxed dev container
 
 The agent dev container has no musl/armv7 cross-toolchain and the egress proxy blocks
-`ffmpeg.org` / `ziglang.org`, so the binary is produced by **CI** (GitHub Actions has
-network + installs the pinned Zig) or on a capable host with this recipe. The committed
-binary is then verified functionally by the provenance workflow.
+`ffmpeg.org` / `ziglang.org` / the GitHub source archive, so the binary is produced by
+**CI** (GitHub Actions has network + installs the pinned Zig). The committed binary is then
+verified byte-for-byte by the provenance workflow on every PR that touches it.

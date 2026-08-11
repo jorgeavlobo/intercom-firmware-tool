@@ -139,8 +139,8 @@ whole binary is LGPL. No decoders/encoders are built.
 | Field | `ffmpeg` |
 |---|---|
 | File | `armhf/ffmpeg` |
-| Size | 2,025,024 bytes |
-| SHA-256 | `99fd0b7e3af85103762f07ea9cc79c4ad85938c9cb610590f572648fdf5cdd9c` |
+| Size | 2,024,464 bytes |
+| SHA-256 | `e1c9ae0032fb583f0d2a9efcbe192096497eb6ccfcfc28297be8aaa863d75162` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
 | Upstream | FFmpeg `n7.1.1` (release tag) |
@@ -150,14 +150,16 @@ whole binary is LGPL. No decoders/encoders are built.
 | License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](licenses/ffmpeg-COPYING.LGPLv2.1.txt) |
 | SPDX expression | `LGPL-2.1-or-later` |
 
-The SHA-256 + size are enforced on read by `PayloadBinaries`. **Not byte-reproducible:**
-unlike Cargo's deterministic output for `btmqttd`, an `ffmpeg` + `zig cc` + `make` build
-yields a same-size but not byte-identical binary across runs (compiler/linker internal
-ordering). So [`ffmpeg-provenance.yml`](../../../.github/workflows/ffmpeg-provenance.yml)
-enforces **functional** provenance rather than a byte-for-byte rebuild: the metadata
-check (committed binary ↔ this table ↔ `PayloadBinaries`) plus a fresh build from the
-pinned recipe that must run under `qemu-arm`, report the same `configuration`, be LGPL
-(not GPL/nonfree), and match the recorded size.
+The SHA-256 + size are enforced on read by `PayloadBinaries`. **Byte-reproducible** — like
+`btmqttd`: with every build input pinned (Zig `0.13.0` and the FFmpeg `n7.1.1` source, both
+SHA-256-verified) and no absolute build path leaking into the output (see `BUILD.md`), the
+build is deterministic. So [`ffmpeg-provenance.yml`](../../../.github/workflows/ffmpeg-provenance.yml)
+enforces **byte-for-byte** provenance: the metadata check (committed binary ↔ this table ↔
+`PayloadBinaries`) **plus** a fresh rebuild from the pinned source whose SHA-256 must equal
+the committed binary's (and which runs under `qemu-arm` and is LGPL, not GPL/nonfree). A
+mismatch means the vendored binary is out of sync with the pinned source — the same
+guarantee `btmqttd` provides. Refreshed via
+[`ffmpeg-build.yml`](../../../.github/workflows/ffmpeg-build.yml) (dispatch-only).
 
 ### LGPL-2.1 obligations
 
