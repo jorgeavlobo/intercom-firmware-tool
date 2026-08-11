@@ -288,10 +288,15 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
 fn check_camera_target(ip: Ipv4Addr, camera_ondevice: bool) -> std::io::Result<()> {
     let ondevice_ok = camera_ondevice && ip == CAMERA_ONDEVICE_TARGET;
     if !ondevice_ok && (ip.is_loopback() || ip.is_unspecified()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "camera_target must be a routable address (not loopback or 0.0.0.0)",
-        ));
+        // Mode-specific message: on-device mode DOES permit one loopback address (127.0.0.2),
+        // so the generic "no loopback" wording would misdescribe why an on-device target was
+        // rejected (Copilot). Off-device, no loopback/unspecified address is ever valid.
+        let msg: &str = if camera_ondevice {
+            "camera_target in on-device mode must be 127.0.0.2 (the CAMERA_ONDEVICE_TARGET loopback alias)"
+        } else {
+            "camera_target must be a routable address (not loopback or 0.0.0.0)"
+        };
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg));
     }
     Ok(())
 }
@@ -620,6 +625,11 @@ mod tests {
         // A rejection surfaces as InvalidInput — the kind arm() propagates to its caller.
         let err = check_camera_target("127.0.0.1".parse().unwrap(), false).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        // The message is mode-specific: on-device rejections name the one permitted address
+        // (127.0.0.2) rather than the misleading blanket "no loopback" wording (Copilot).
+        let ondevice_err = check_camera_target("127.0.0.1".parse().unwrap(), true).unwrap_err();
+        assert!(ondevice_err.to_string().contains("127.0.0.2"));
+        assert!(!err.to_string().contains("127.0.0.2"));
     }
 
     #[test]
