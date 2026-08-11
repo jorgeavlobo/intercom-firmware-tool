@@ -113,8 +113,14 @@ jobs:
           if [ "$got" != "$FFMPEG_TARBALL_SHA256" ]; then
             echo "::error::FFmpeg source SHA-256 mismatch: got $got expected $FFMPEG_TARBALL_SHA256"; exit 1
           fi
-          mkdir ffmpeg-src && tar -xzf ffmpeg.tar.gz -C ffmpeg-src --strip-components=1
-          cd ffmpeg-src
+          # Build OUTSIDE the git worktree ($RUNNER_TEMP): FFmpeg's ffbuild/version.sh runs
+          # `git describe`, and inside our repo's worktree it would stamp THIS repo's commit
+          # hash as the ffmpeg version — different every commit, breaking the byte match. No
+          # surrounding .git → deterministic version. MUST match ffmpeg-build.yml.
+          rm -rf "$RUNNER_TEMP/ffmpeg-src"
+          mkdir "$RUNNER_TEMP/ffmpeg-src"
+          tar -xzf ffmpeg.tar.gz -C "$RUNNER_TEMP/ffmpeg-src" --strip-components=1
+          cd "$RUNNER_TEMP/ffmpeg-src"
           # CFLAGS is just -Os: no -ffile-prefix-map, whose value would embed the absolute
           # build path into the output (breaking byte-reproducibility). We strip (-s) +
           # --disable-debug, so no DWARF comp_dir survives, and FFmpeg uses relative
@@ -139,7 +145,7 @@ jobs:
       - name: Reproduction is byte-for-byte + LGPL
         run: |
           set -euxo pipefail
-          reb=ffmpeg-src/ffmpeg
+          reb="$RUNNER_TEMP/ffmpeg-src/ffmpeg"
           qemu-arm-static "$reb" -hide_banner -version | tee rebuilt.ver
           if grep -m1 'configuration:' rebuilt.ver | grep -Eq -- '--enable-(gpl|nonfree)'; then
             echo "::error::rebuilt ffmpeg is GPL/nonfree"; exit 1

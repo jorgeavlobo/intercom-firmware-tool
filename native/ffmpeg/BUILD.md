@@ -71,6 +71,12 @@ workflow `env`), so a rotated or tampered download can never feed the build.
 > committed binary, so any recipe drift fails CI. FFmpeg's `configure` prunes unreachable
 > components, so a missing dependency surfaces as a configure error, not a silent feature.
 
+> **Build outside any git repository.** FFmpeg's `ffbuild/version.sh` runs `git describe`;
+> if the source tree sits inside another repo's worktree, git walks up and stamps *that*
+> repo's commit hash as the ffmpeg version (`ffmpeg version <hash>`), which changes every
+> commit and destroys reproducibility. Extract + build in a scratch dir with no `.git`
+> ancestor (CI uses `$RUNNER_TEMP`); then the version is deterministic.
+
 ```sh
 # Inputs (pinned)
 ZIG=0.13.0
@@ -78,6 +84,7 @@ FFMPEG=n7.1.1
 
 export SOURCE_DATE_EPOCH=1700000000
 
+# In a scratch dir OUTSIDE any git worktree (see note above):
 ./configure \
   --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
   --ar="zig ar" --ranlib="zig ranlib" --nm="nm" \
