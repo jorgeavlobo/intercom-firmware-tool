@@ -95,7 +95,10 @@ export SOURCE_DATE_EPOCH=1700000000
   --extra-cflags="-Os" \
   --extra-ldflags="-static -s"
 
-make -j"$(nproc)"
+# -j1 (serial), NOT -j"$(nproc)": FFmpeg's parallel build is not byte-reproducible across
+# runs (object/archive ordering follows parallel completion order); the serial build is
+# deterministic, which the byte-for-byte provenance check requires.
+make -j1
 # Output: ./ffmpeg  (statically linked, stripped, byte-reproducible)
 ```
 

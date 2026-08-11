@@ -131,7 +131,10 @@ jobs:
             --enable-protocol=file,udp,rtp,rtsp,tcp \
             --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
             --extra-cflags="-Os" --extra-ldflags="-static -s"
-          make -j"$(nproc)"
+          # -j1 (serial): FFmpeg's parallel build is NOT byte-reproducible across runs, so
+          # the byte-for-byte match below requires the serial, deterministic build. Keep
+          # identical to ffmpeg-build.yml.
+          make -j1
 
       - name: Reproduction is byte-for-byte + LGPL
         run: |

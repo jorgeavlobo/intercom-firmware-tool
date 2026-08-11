@@ -88,7 +88,7 @@ namespace IntercomFirmwareTool.Core
             Name: "ffmpeg",
             InstallPath: "/usr/sbin/ffmpeg",
             Length: 2_024_464,
-            Sha256Hex: "e1c9ae0032fb583f0d2a9efcbe192096497eb6ccfcfc28297be8aaa863d75162",
+            Sha256Hex: "7d5c3481cf2dc0362b11f361c810bdf25ce06de46b6044577a630c50ed5ab142",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.ffmpeg",
             LicenseResourceName:
                 "IntercomFirmwareTool.Core.Payload.vendor.licenses.ffmpeg-COPYING.LGPLv2.1.txt",

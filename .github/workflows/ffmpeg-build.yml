@@ -10,12 +10,6 @@ name: ffmpeg binary refresh (#120)
 
 on:
   workflow_dispatch:
-  # TEMP bootstrap trigger (removed again once the -j1 binary is committed): fires this
-  # dispatch-only workflow on a self-path push so it regenerates the byte-reproducible
-  # binary. A never-dispatched workflow 404s on the dispatch API.
-  push:
-    paths:
-      - '.github/workflows/ffmpeg-build.yml'
 
 # This job COMMITS the rebuilt binary back to the branch, so it needs write access and the
 # checkout token persisted for the push (unlike the read-only provenance job).
