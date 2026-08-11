@@ -151,8 +151,11 @@ jobs:
           # reject the new binary against a stale hash, and tests would fail, until a manual
           # follow-up — Codex). sed is range-scoped to ONLY the ffmpeg entries, so btmqttd's
           # metadata is never touched: PayloadBinaries.cs's Ffmpeg record (Name:"ffmpeg" → the
-          # closing ');'), and THIRD_PARTY.md's ffmpeg table (armhf/ffmpeg → SPDX expression).
-          sed -i "/Name: \"ffmpeg\"/,/);/{
+          # closing '};' of its object-initializer, NOT ');' — the record ends with the
+          # AdditionalLicenseResourceNames initializer, so stop at '};' to keep the range from
+          # spilling past the record into whatever ');' comes next — Copilot), and THIRD_PARTY.md's
+          # ffmpeg table (armhf/ffmpeg → SPDX expression).
+          sed -i "/Name: \"ffmpeg\"/,/};/{
             s/Length: [0-9_]*,/Length: ${us},/
             s/Sha256Hex: \"[0-9a-f]*\",/Sha256Hex: \"${FF_SHA}\",/
           }" "$PB"
