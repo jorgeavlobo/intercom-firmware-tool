@@ -98,7 +98,12 @@ jobs:
           # build.sh that fails under Linux `sh` (`set -eu\r`) and pins.env values with trailing
           # \r. git archive emits git's stored bytes (LF); .gitattributes also pins
           # native/ffmpeg/** to eol=lf as belt-and-suspenders (Codex).
-          git archive --format=tar HEAD:native/ffmpeg build.sh pins.env BUILD.md | gzip -n > "$recipe"
+          # Keep the native/ffmpeg/ PREFIX (archive from HEAD with full paths, not HEAD:native/ffmpeg
+          # which would flatten to the archive root) so the extracted layout matches BUILD.md's own
+          # instruction `sh native/ffmpeg/build.sh "$SRC_DIR"` — a recipient can extract and follow
+          # the shipped recipe verbatim (Codex).
+          git archive --format=tar HEAD \
+            native/ffmpeg/build.sh native/ffmpeg/pins.env native/ffmpeg/BUILD.md | gzip -n > "$recipe"
           echo "FFMPEG_RECIPE=$recipe" >> "$GITHUB_ENV"
           echo "packaged FFmpeg build recipe: $recipe (build.sh + pins.env + BUILD.md)"
 
