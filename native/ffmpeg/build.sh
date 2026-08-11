@@ -39,9 +39,12 @@ cd "$src" || exit 1
   --disable-everything --disable-autodetect --disable-doc --disable-debug \
   --disable-shared --enable-static --enable-small \
   --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
-  --enable-protocol=file,udp,rtp,rtsp,tcp \
+  --enable-protocol=file,udp,rtp,tcp \
   --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
   --extra-cflags="-Os" --extra-ldflags="-static -s"
+# NB: `rtsp` is deliberately NOT in --enable-protocol — FFmpeg has no `rtsp` URL protocol
+# (RTSP is the demuxer/muxer enabled just above; it runs over tcp/udp/rtp, which ARE listed).
+# `--enable-protocol=rtsp` matched nothing and only added a configure warning (CodeRabbit).
 
 # -j1 (serial): FFmpeg's parallel build is not byte-reproducible across runs (object/archive
 # ordering follows parallel completion order); the serial build is deterministic.
