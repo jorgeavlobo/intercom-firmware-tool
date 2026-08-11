@@ -52,16 +52,12 @@ version:
   is verified **byte-for-byte** by `ffmpeg-provenance.yml` — the same guarantee as the
   first-party `btmqttd`, not a weaker functional check.
 
-Pinned versions (bump deliberately; CI enforces the SHA-256 against these):
-
-| Input | Pin | SHA-256 |
-|---|---|---|
-| Zig | `0.13.0` (`zig-linux-x86_64-0.13.0.tar.xz`) | `d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea` |
-| FFmpeg | `n7.1.1` (GitHub source archive `n7.1.1.tar.gz`) | `f117507dc501f2a6c11f9241d8d0c3213846cfad91764361af37befd6b6c523d` |
-
-Both `ffmpeg-build.yml` and `ffmpeg-provenance.yml` download each input and fail the job
-unless its SHA-256 matches the pin above (`ZIG_SHA256` / `FFMPEG_TARBALL_SHA256` in the
-workflow `env`), so a rotated or tampered download can never feed the build.
+The pinned inputs — **Zig `0.13.0`**, **FFmpeg `n7.1.1`**, and their SHA-256 digests
+(`zig-linux-x86_64-0.13.0.tar.xz` and the GitHub source archive `n7.1.1.tar.gz`) — are
+defined **once** in [`pins.env`](pins.env), which both `ffmpeg-build.yml` and
+`ffmpeg-provenance.yml` load, so a pin can never drift between the two workflows. Each
+workflow downloads the input and fails the job unless its SHA-256 matches, so a rotated or
+tampered download can never feed the build. Bump the pins there (and refresh the binary).
 
 ## Build recipe
 
@@ -148,9 +144,12 @@ Two kinds of change, edited in different places:
 
 - **Recipe** (`./configure`/`make` flags): edit **only** [`build.sh`](build.sh) — the single
   source of truth both workflows invoke. Do not touch the workflows for a recipe change.
-- **Input pins** (Zig / FFmpeg versions + their SHA-256s): update the `env:` blocks in
-  **both** `ffmpeg-build.yml` and `ffmpeg-provenance.yml`, and the pinned-versions table in
-  this document.
+- **Input pins** (Zig / FFmpeg versions + their SHA-256s): edit **only** [`pins.env`](pins.env)
+  — the single source both workflows load. Do not touch the workflows' `env:` blocks for a
+  pin change.
+
+Both `build.sh` and `pins.env` are under `native/ffmpeg/**`, which is in the provenance path
+filter, so either change re-runs the byte-for-byte check against the committed binary.
 
 Then run the dispatch-only
 [`ffmpeg-build.yml`](../../.github/workflows/ffmpeg-build.yml): it rebuilds from the pinned

@@ -43,17 +43,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ZIG_VERSION: 0.13.0
-  FFMPEG_TAG: n7.1.1
-  # Pin the two build inputs by SHA-256 so a tampered/rotated download fails the job
-  # (not a silent swap). ZIG_SHA256 is Zig's published, immutable release digest for
-  # zig-linux-x86_64-0.13.0.tar.xz. FFMPEG_TARBALL_SHA256 is the GitHub source archive
-  # for tag n7.1.1 (github.com/FFmpeg/FFmpeg/archive/refs/tags/n7.1.1.tar.gz); GitHub
-  # has kept archive checksums stable since 2023, and if one ever changes the job fails
-  # loudly rather than accepting new bytes. Bump both deliberately alongside the pins.
-  ZIG_SHA256: d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea
-  FFMPEG_TARBALL_SHA256: f117507dc501f2a6c11f9241d8d0c3213846cfad91764361af37befd6b6c523d
-  SOURCE_DATE_EPOCH: '1700000000'
+  # The Zig/FFmpeg version + SHA-256 pins and SOURCE_DATE_EPOCH live in the single-source
+  # native/ffmpeg/pins.env (loaded in the first step below), shared with ffmpeg-build.yml so
+  # they can't drift between the two workflows. Only workflow-specific paths live here.
   BIN: IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg
 
 jobs:
@@ -65,6 +57,9 @@ jobs:
           # This job only reads the repo (no push), so don't persist the token in
           # .git/config — avoids credential leakage (zizmor artipacked).
           persist-credentials: false
+
+      - name: Load pinned build inputs (native/ffmpeg/pins.env — shared with ffmpeg-build.yml)
+        run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' native/ffmpeg/pins.env >> "$GITHUB_ENV"
 
       - name: Metadata integrity (committed SHA-256 + size ↔ PayloadBinaries.cs ↔ THIRD_PARTY.md)
         run: |
@@ -96,7 +91,7 @@ jobs:
             echo "::error::committed ffmpeg is GPL/nonfree — must be LGPL"; exit 1
           fi
 
-      - name: Install Zig ${{ env.ZIG_VERSION }} (pinned + SHA-256 verified — no third-party action)
+      - name: Install the pinned Zig (SHA-256 verified — no third-party action)
         run: |
           set -euxo pipefail
           url="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
