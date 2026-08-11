@@ -3,13 +3,19 @@ name: ffmpeg binary refresh (#120)
 # Deliberate, dispatch-only refresh of the vendored minimal LGPL ffmpeg (issue #120).
 # It builds the binary reproducibly from the pinned, SHA-256-verified FFmpeg source with
 # the pinned, SHA-256-verified Zig, and commits the result (binary + LGPL text). The build
-# is byte-reproducible (no absolute build path leaks into the output — see BUILD.md), so
+# is byte-reproducible (built outside the git worktree so FFmpeg's version isn't stamped
+# with this repo's commit hash, and no absolute build path leaks in — see BUILD.md), so
 # ffmpeg-provenance.yml can then rebuild and require a byte-for-byte match, exactly like
 # btmqttd. Run this only when intentionally bumping the pins/recipe; after it commits,
 # update PayloadBinaries.cs + THIRD_PARTY.md with the printed sha256 + size.
 
 on:
   workflow_dispatch:
+  # TEMP bootstrap trigger (removed once the regenerated binary is committed): fires this
+  # dispatch-only workflow on a self-path push. A never-dispatched workflow 404s on the API.
+  push:
+    paths:
+      - '.github/workflows/ffmpeg-build.yml'
 
 # This job COMMITS the rebuilt binary back to the branch, so it needs write access and the
 # checkout token persisted for the push (unlike the read-only provenance job).
@@ -58,8 +64,15 @@ jobs:
           if [ "$got" != "$FFMPEG_TARBALL_SHA256" ]; then
             echo "::error::FFmpeg source SHA-256 mismatch: got $got expected $FFMPEG_TARBALL_SHA256"; exit 1
           fi
-          mkdir ffmpeg-src && tar -xzf ffmpeg.tar.gz -C ffmpeg-src --strip-components=1
-          cd ffmpeg-src
+          # Build OUTSIDE the git worktree ($RUNNER_TEMP, not the checked-out repo). FFmpeg's
+          # ffbuild/version.sh runs `git describe`, and if the source sits inside our repo's
+          # worktree git walks up and stamps THIS repo's commit hash as the "ffmpeg version"
+          # (the `ffmpeg version <hash>` banner) — which changes every commit and breaks the
+          # byte-for-byte match. With no surrounding .git, the version is deterministic.
+          rm -rf "$RUNNER_TEMP/ffmpeg-src"
+          mkdir "$RUNNER_TEMP/ffmpeg-src"
+          tar -xzf ffmpeg.tar.gz -C "$RUNNER_TEMP/ffmpeg-src" --strip-components=1
+          cd "$RUNNER_TEMP/ffmpeg-src"
           # CFLAGS is just -Os: no -ffile-prefix-map, whose value would embed the absolute
           # build path into FFmpeg's `configuration:` string and break byte-reproducibility.
           # We strip (-s) + --disable-debug, so no DWARF comp_dir survives, and FFmpeg
@@ -84,7 +97,7 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt-get update && sudo apt-get install -y qemu-user-static
-          qemu-arm-static ffmpeg-src/ffmpeg -hide_banner -version | tee built.ver
+          qemu-arm-static "$RUNNER_TEMP/ffmpeg-src/ffmpeg" -hide_banner -version | tee built.ver
           if grep -m1 'configuration:' built.ver | grep -Eq -- '--enable-(gpl|nonfree)'; then
             echo "::error::rebuilt ffmpeg is GPL/nonfree — must be LGPL"; exit 1
           fi
@@ -94,8 +107,8 @@ jobs:
           set -euxo pipefail
           # cp over the already-tracked files preserves their committed mode (no spurious
           # mode change in the diff); both destination paths already exist in the tree.
-          cp -f ffmpeg-src/ffmpeg "$BIN"
-          cp -f ffmpeg-src/COPYING.LGPLv2.1 "$LIC"
+          cp -f "$RUNNER_TEMP/ffmpeg-src/ffmpeg" "$BIN"
+          cp -f "$RUNNER_TEMP/ffmpeg-src/COPYING.LGPLv2.1" "$LIC"
           sha="$(sha256sum "$BIN" | awk '{print $1}')"
           size="$(stat -c '%s' "$BIN")"
           us="$(printf '%s' "$size" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"; us="${us//,/_}"
