@@ -319,7 +319,11 @@ jobs:
             'licenses/btmqttd-THIRD-PARTY-LICENSES.txt',
             'licenses/ffmpeg-COPYING.LGPLv2.1.txt',
             'licenses/musl-COPYRIGHT.txt',
-            'licenses/go2rtc-LICENSE.txt'
+            'licenses/go2rtc-LICENSE.txt',
+            # go2rtc is statically-linked Go, so its embedded binary also contains the Go runtime +
+            # ~35 modules; their audited aggregate notice must ship too. The Test-Path throw below is
+            # the hard release gate: publishing fails if this bundle is missing (issue #120).
+            'licenses/go2rtc-THIRD-PARTY-LICENSES.txt'
           )
           foreach ($n in $licenseTexts) {
             if (-not (Test-Path $n)) { throw "compliance file missing from checkout: $n" }
@@ -427,7 +431,7 @@ jobs:
           # release assets too, so a download of only the portable .exe still comes with them. These
           # are staged into dist/ by the packaging step; they carry no .sha256 sidecar (they are
           # documentation, not attested binaries).
-          for a in THIRD-PARTY-NOTICES.md LICENSE.txt SharpExt4-LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt btmqttd-THIRD-PARTY-LICENSES.txt ffmpeg-COPYING.LGPLv2.1.txt musl-COPYRIGHT.txt go2rtc-LICENSE.txt; do
+          for a in THIRD-PARTY-NOTICES.md LICENSE.txt SharpExt4-LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt btmqttd-THIRD-PARTY-LICENSES.txt ffmpeg-COPYING.LGPLv2.1.txt musl-COPYRIGHT.txt go2rtc-LICENSE.txt go2rtc-THIRD-PARTY-LICENSES.txt; do
             files+=("dist/$a")
           done
           # GPL-2.0 §3(a) corresponding source for SharpExt4.dll — uploaded straight from its repo

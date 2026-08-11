@@ -227,9 +227,9 @@ Home Assistant as a native Generic Camera — so no go2rtc runs on the Home Assi
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (no libc dependency), UPX-compressed |
 | Upstream | go2rtc `v1.9.14` — AlexxIT/go2rtc release asset `go2rtc_linux_arm` |
 | Build | upstream's own Go release build — **not** rebuilt from source here |
-| License | **MIT** (go2rtc). The static Go binary also bundles third-party Go modules + the Go runtime (BSD-3-Clause), all under permissive licenses per upstream. |
-| License text | [`licenses/go2rtc-LICENSE.txt`](../../../licenses/go2rtc-LICENSE.txt) |
-| SPDX expression | `MIT` |
+| License | **MIT** (go2rtc itself). The static Go binary also contains the **BSD-3-Clause Go runtime** and ~35 Go modules — all permissive (MIT / BSD-2 / BSD-3 / Apache-2.0); `paho.mqtt.golang` is EPL-2.0/EDL-1.0 dual-licensed, used here under the permissive **EDL-1.0 (BSD-3-Clause)** election, so no copyleft applies. |
+| License texts | [`licenses/go2rtc-LICENSE.txt`](../../../licenses/go2rtc-LICENSE.txt) (go2rtc MIT) + [`licenses/go2rtc-THIRD-PARTY-LICENSES.txt`](../../../licenses/go2rtc-THIRD-PARTY-LICENSES.txt) (audited Go runtime + module notices) |
+| SPDX expression | `Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND MIT AND (EPL-2.0 OR BSD-3-Clause)` |
 
 The SHA-256 + size are enforced on read by `PayloadBinaries`. Because go2rtc is a **prebuilt
 upstream release** (not reproducible-from-source in this repo), its provenance model is
@@ -240,17 +240,33 @@ SHA-256 are pinned in [`native/go2rtc/pins.env`](../../../native/go2rtc/pins.env
 addition to the metadata-consistency check (committed binary ↔ this table ↔ `PayloadBinaries`).
 A mismatch means the vendored binary drifted from the pinned upstream release.
 
-### MIT obligations
+### License obligations & the audited dependency-notice bundle
 
 Redistributing go2rtc requires shipping its **MIT license text** — done, in
-[`licenses/go2rtc-LICENSE.txt`](../../../licenses/go2rtc-LICENSE.txt) (© 2022 Alexey Khit), which
-travels with the assembly. MIT imposes no source-offer or copyleft obligation on go2rtc itself.
-However, the binary is **statically linked**, so it also contains a number of third-party Go modules
-and the **BSD-3-Clause Go runtime**, whose permissive notices (MIT / BSD / Apache-2.0) must **likewise**
-travel with any redistribution — this is required, not optional. A complete, audited per-module
-dependency-notice bundle for the pinned `v1.9.14` build (mirroring `btmqttd`'s aggregated crate
-notice, generated from the upstream module graph) is **tracked in #120** and lands before go2rtc is
-shipped in a release. As with the other binaries, the embedded resource is compiled into
-`IntercomFirmwareTool.Core` unconditionally; the **firmware image** carries `go2rtc` only when the
-user enables the on-device camera — it is embedded now but **not** yet in `PayloadBinaries.All`; the
-gated on-device camera install writes it in **Phase 1c-2**.
+[`licenses/go2rtc-LICENSE.txt`](../../../licenses/go2rtc-LICENSE.txt) (© 2022 Alexey Khit). But the
+binary is **statically linked**, so it also contains the **Go runtime (BSD-3-Clause)** and ~35 Go
+modules, whose notices must **likewise** travel with any redistribution. Those are reproduced in full
+in [`licenses/go2rtc-THIRD-PARTY-LICENSES.txt`](../../../licenses/go2rtc-THIRD-PARTY-LICENSES.txt) —
+an **audited aggregate generated with Google's [`go-licenses`](https://github.com/google/go-licenses)**
+against go2rtc `v1.9.14`'s module graph **for the exact shipped build** (`GOOS=linux GOARCH=arm
+CGO_ENABLED=0`), so build-tagged, non-linked packages (e.g. the `alsa`/`v4l2` cgo backends) are
+correctly excluded. It records each module, its detected license, its source URL, and the full
+license text, plus the Go runtime's BSD-3-Clause text.
+
+**No copyleft.** Every linked component is permissive — MIT, BSD-2-Clause, BSD-3-Clause, or
+Apache-2.0 — with one dual-licensed exception: `github.com/eclipse/paho.mqtt.golang` is
+**EPL-2.0 / EDL-1.0 dual-licensed**, and we elect the permissive **EDL-1.0 (a BSD-3-Clause-equivalent
+Eclipse Distribution License)**, so the EPL-2.0's reciprocal terms do not apply. Both texts still ship
+(the upstream LICENSE presents both) and its corresponding source remains publicly available. The
+audited SPDX expression is therefore
+`Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND MIT AND (EPL-2.0 OR BSD-3-Clause)`.
+
+> **Regenerating on a pin bump.** When `native/go2rtc/pins.env` bumps `GO2RTC_TAG`, regenerate this
+> bundle from the new tag's module graph (`go-licenses report`/`save` under `GOOS=linux GOARCH=arm
+> CGO_ENABLED=0`) and update the SPDX above + `PayloadBinaries.Go2Rtc.LicenseSpdx`.
+
+Both license files are compiled into `IntercomFirmwareTool.Core` unconditionally and shipped in every
+release (the `release.yml` packaging list throws if either is missing — a hard release gate). The
+**firmware image** carries `go2rtc` only when the user enables the on-device camera — it is embedded
+now but **not** yet in `PayloadBinaries.All`; the gated on-device camera install writes it in
+**Phase 1c-2**.

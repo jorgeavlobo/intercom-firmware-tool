@@ -136,9 +136,18 @@ namespace IntercomFirmwareTool.Core
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.go2rtc",
             LicenseResourceName:
                 "IntercomFirmwareTool.Core.licenses.go2rtc-LICENSE.txt",
-            // Statically-linked Go binary — no musl/libc objects linked in, so a single MIT
-            // notice suffices (no AdditionalLicenseResourceNames, unlike ffmpeg/btmqttd).
-            LicenseSpdx: "MIT");
+            // Statically linked Go: the binary contains the Go runtime (BSD-3-Clause) + ~35 Go
+            // modules, so their notices must travel too. go2rtc's own MIT text is the primary
+            // resource; the AUDITED aggregate (generated with `go-licenses` against the pinned
+            // v1.9.14 linux/arm build) is the additional resource. All permissive — paho.mqtt
+            // (EPL-2.0/EDL-1.0 dual) is used under the permissive EDL-1.0 election, no copyleft.
+            LicenseSpdx: "Apache-2.0 AND BSD-2-Clause AND BSD-3-Clause AND MIT AND (EPL-2.0 OR BSD-3-Clause)")
+        {
+            AdditionalLicenseResourceNames = new[]
+            {
+                "IntercomFirmwareTool.Core.licenses.go2rtc-THIRD-PARTY-LICENSES.txt",
+            },
+        };
 
         /// <summary>The complete third-party notice (Markdown).</summary>
         public const string ThirdPartyNoticeResourceName =

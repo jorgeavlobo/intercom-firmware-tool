@@ -18,7 +18,7 @@ every release and referenced from the
 > `lwext4-LICENSE.txt`, `lwext4-BSD-3-Clause-NOTICE.txt`,
 > `DiskPartitionInfo-LICENSE.txt`, `dotnet-runtime-LICENSE.txt`,
 > `btmqttd-THIRD-PARTY-LICENSES.txt`, `ffmpeg-COPYING.LGPLv2.1.txt`,
-> `musl-COPYRIGHT.txt`, `go2rtc-LICENSE.txt`) accompanying it on
+> `musl-COPYRIGHT.txt`, `go2rtc-LICENSE.txt`, `go2rtc-THIRD-PARTY-LICENSES.txt`) accompanying it on
 > the same release. Links to other repository documents (README, `CLEANROOM.md`)
 > are absolute GitHub URLs so they resolve from anywhere.
 
@@ -148,12 +148,13 @@ install in Phase 1c-2. All three ship inside this DLL, so their notices travel w
 - **`go2rtc`** — third-party, a **redistributed upstream prebuilt** (go2rtc **`v1.9.14`**,
   **MIT**, AlexxIT/go2rtc) — a statically-linked Go binary that serves the camera as RTSP to
   Home Assistant. Not rebuilt from source here; its exact release is pinned + byte-verified (see
-  `native/go2rtc/pins.env` and `go2rtc-provenance.yml`). MIT imposes no corresponding-source
-  obligation on go2rtc itself, but the static binary also contains third-party Go modules + the
-  **BSD-3-Clause Go runtime** whose permissive notices must travel too — a complete audited
-  dependency-notice bundle for `v1.9.14` is **required** and tracked in #120, to land before
-  go2rtc ships in a release. go2rtc's own MIT text:
-  [`licenses/go2rtc-LICENSE.txt`](licenses/go2rtc-LICENSE.txt).
+  `native/go2rtc/pins.env` and `go2rtc-provenance.yml`). Because it is statically linked, it also
+  contains the **BSD-3-Clause Go runtime** + ~35 Go modules; their notices travel in an **audited
+  bundle** ([`licenses/go2rtc-THIRD-PARTY-LICENSES.txt`](licenses/go2rtc-THIRD-PARTY-LICENSES.txt),
+  generated with `go-licenses` for the shipped `linux/arm` build) alongside go2rtc's own MIT text
+  ([`licenses/go2rtc-LICENSE.txt`](licenses/go2rtc-LICENSE.txt)). All permissive — MIT / BSD-2 /
+  BSD-3 / Apache-2.0; the EPL-2.0/EDL-1.0-dual `paho.mqtt.golang` is used under the permissive
+  EDL-1.0 election, so no copyleft applies. No corresponding-source obligation.
 - **musl libc** (**MIT**) — statically linked into the `btmqttd` and `ffmpeg` binaries (not
   `go2rtc`, which is pure static Go); its notice:
   [`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt).
