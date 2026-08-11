@@ -34,7 +34,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::config::{Config, OWN_PORT_AV};
+use crate::config::{Config, CAMERA_ONDEVICE_TARGET, OWN_PORT_AV};
 use crate::own::Framer;
 
 /// Monitor-session request, identical to `sender.rs` — the gateway streams every bus
@@ -42,8 +42,10 @@ use crate::own::Framer;
 const MONITOR_REQ: &[u8] = b"*99*1##";
 
 /// The panel's own media-start frames target loopback (`127.0.0.1` = `127#0#0#1`); this
-/// prefix marks "the encoder is now streaming" and is our arm signal. Our OWN added
-/// client targets `camera_target` (different octets), so it never matches this.
+/// prefix marks "the encoder is now streaming" and is our arm signal. Our OWN added client
+/// targets `camera_target` — an off-device host, or in on-device mode the loopback alias
+/// `127.0.0.2` (`127#0#0#2`) — which differs from `127#0#0#1`, so it never matches this
+/// prefix and we never re-arm off our own echo.
 const DEVICE_MEDIA_PREFIX: &str = "*7*300#127#0#0#1#";
 
 /// Whole-session teardown emitted by the panel when the A/V session ends.
@@ -249,13 +251,20 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
             format!("camera_target '{}' did not resolve to an IPv4", cfg.camera_target),
         )
     })?;
-    // Reject an unroutable target. The go2rtc/HA host is OFF-device, so:
+    // Reject an unroutable target. With an OFF-device go2rtc/HA host:
     //   * loopback (127/8) is never a real destination — and worse, our add-client frame would then
     //     be `*7*300#127#0#0#1#…`, identical to DEVICE_MEDIA_PREFIX, so our own frame echoing on the
     //     monitor could be misread as a media-start "arm" signal (Copilot);
     //   * the unspecified 0.0.0.0 is a local bind wildcard, not a routable host — the daemon would
     //     report the siphon armed while no receiver ever gets the RTP (Codex).
-    if ip.is_loopback() || ip.is_unspecified() {
+    // EXCEPTION — on-device mode (issue #120): go2rtc runs ON the panel and listens on loopback,
+    // so the siphon target IS loopback by design. Permit EXACTLY CAMERA_ONDEVICE_TARGET
+    // (`127.0.0.2`): it routes via `lo` to go2rtc, and its `*7*300#127#0#0#2#…` frame does NOT
+    // match DEVICE_MEDIA_PREFIX (`…#127#0#0#1#`), so it never re-arms us. `127.0.0.1` (the
+    // collision) and `0.0.0.0` (bind wildcard) stay rejected even in on-device mode — the carve-out
+    // is a single exact address, not a blanket loopback allow.
+    let ondevice_ok = cfg.camera_ondevice && ip == CAMERA_ONDEVICE_TARGET;
+    if !ondevice_ok && (ip.is_loopback() || ip.is_unspecified()) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "camera_target must be a routable address (not loopback or 0.0.0.0)",
@@ -382,6 +391,9 @@ mod tests {
         // …but our OWN fan-out frame (a non-loopback target) does not, so we never
         // re-arm off our own echo on the monitor.
         assert!(!"*7*300#192#168#1#50#40000#1*##".starts_with(DEVICE_MEDIA_PREFIX));
+        // The on-device loopback alias 127.0.0.2 (`127#0#0#2`) likewise does NOT match — its last
+        // octet differs from the panel's `127#0#0#1`, so the on-device feed never self-arms either.
+        assert!(!"*7*300#127#0#0#2#40000#1*##".starts_with(DEVICE_MEDIA_PREFIX));
         // The teardown is matched exactly.
         assert_eq!(TEARDOWN, "*7*0*##");
     }
@@ -557,16 +569,63 @@ mod tests {
         // A loopback target collides with DEVICE_MEDIA_PREFIX (`*7*300#127#0#0#1#…`), and 0.0.0.0
         // is a bind wildcard, not a routable host; arm() must reject both after resolution, before
         // connecting (default ports 40000/40002 are distinct and non-zero, so we reach the check).
+        // 127.0.0.2 is ALSO rejected here: the loopback carve-out applies only in on-device mode,
+        // and these configs leave CAMERA_ONDEVICE unset (off-device), so it stays unroutable.
         use std::collections::HashMap;
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         rt.block_on(async {
-            for target in ["127.0.0.1", "0.0.0.0"] {
+            for target in ["127.0.0.1", "0.0.0.0", "127.0.0.2"] {
                 let mut m = HashMap::new();
                 m.insert("MQTT_HOST".to_string(), "h".to_string());
                 m.insert("CAMERA_TARGET_HOST".to_string(), target.to_string());
                 let cfg = Arc::new(crate::config::Config::from_map(m));
+                assert!(!cfg.camera_ondevice, "target {target}");
                 let err = arm(&cfg).await.unwrap_err();
                 assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "target {target}");
+            }
+        });
+    }
+
+    #[test]
+    fn arm_allows_the_ondevice_loopback_target() {
+        // In on-device mode go2rtc listens on the loopback alias 127.0.0.2, so arm() must NOT
+        // reject it as unroutable: it passes the routability guard and proceeds to connect to
+        // :30007. Every pre-connect rejection (bad ports, unresolvable, unroutable) surfaces as
+        // InvalidInput, so an error kind OTHER than InvalidInput proves we got PAST the guard
+        // (nothing listens on :30007 in the test, so the connect itself fails — as expected).
+        use std::collections::HashMap;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let mut m = HashMap::new();
+            m.insert("MQTT_HOST".to_string(), "h".to_string());
+            m.insert("CAMERA_ONDEVICE".to_string(), "1".to_string());
+            let cfg = Arc::new(crate::config::Config::from_map(m));
+            assert!(cfg.camera_ondevice);
+            assert_eq!(cfg.camera_target, "127.0.0.2");
+            let err = arm(&cfg).await.unwrap_err();
+            assert_ne!(err.kind(), std::io::ErrorKind::InvalidInput);
+        });
+    }
+
+    #[test]
+    fn arm_ondevice_still_rejects_127_0_0_1_and_the_wildcard() {
+        // On-device mode carves out EXACTLY 127.0.0.2 — it must NOT become a blanket loopback
+        // allow: 127.0.0.1 (the DEVICE_MEDIA_PREFIX collision) and 0.0.0.0 (bind wildcard) stay
+        // rejected even with camera_ondevice=true. from_map pins the on-device target to 127.0.0.2,
+        // so override the pub field directly to exercise the guard's defense-in-depth.
+        use std::collections::HashMap;
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            for bad in ["127.0.0.1", "0.0.0.0"] {
+                let mut m = HashMap::new();
+                m.insert("MQTT_HOST".to_string(), "h".to_string());
+                m.insert("CAMERA_ONDEVICE".to_string(), "1".to_string());
+                let mut cfg = crate::config::Config::from_map(m);
+                assert!(cfg.camera_ondevice);
+                cfg.camera_target = bad.to_string();
+                let cfg = Arc::new(cfg);
+                let err = arm(&cfg).await.unwrap_err();
+                assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "target {bad}");
             }
         });
     }
