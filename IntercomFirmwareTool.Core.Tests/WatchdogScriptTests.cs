@@ -59,4 +59,16 @@ public class WatchdogScriptTests
         Assert.Contains(code, l => l.Contains("ensure_dropbear"));
         Assert.Contains(code, l => l.Contains("/etc/init.d/btmqttd respawn"));
     }
+
+    [Fact]
+    public void Watchdog_respawns_go2rtc_but_only_when_it_is_installed()
+    {
+        // The on-device media server (issue #120) is supervised like btmqttd — but it installs
+        // only on the on-device camera path, so its respawn line must be GUARDED on the init
+        // script's presence (a no-op on a non-camera image), not unconditional like btmqttd's.
+        string[] code = CodeLines(ReadWatchdog());
+        var line = Assert.Single(code, l =>
+            l.Contains("/etc/init.d/go2rtcd") && l.Contains("respawn"));
+        Assert.Contains("-x /etc/init.d/go2rtcd", line);
+    }
 }

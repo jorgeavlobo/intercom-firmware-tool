@@ -128,12 +128,16 @@ public class Go2RtcConfigTests
     }
 
     [Theory]
-    [InlineData("u\nx", "pass")]
-    [InlineData("user", "p\rq")]
-    [InlineData("user", "p\r\nq")]
-    public void BuildOnDeviceYaml_rejects_newline_in_credentials(string user, string pass)
+    [InlineData("u\nx", "pass")]    // LF
+    [InlineData("user", "p\rq")]    // CR
+    [InlineData("user", "p\r\nq")]  // CRLF
+    [InlineData("us\tr", "pass")]   // TAB
+    [InlineData("user", "p\0q")]    // NUL
+    [InlineData("user", "p\u001bq")] // ESC
+    public void BuildOnDeviceYaml_rejects_control_chars_in_credentials(string user, string pass)
     {
-        // A CR/LF would split the double-quoted YAML scalar and corrupt the file — reject it.
+        // YamlDoubleQuoted escapes only '\' and '"', so ANY control character would land raw in the
+        // double-quoted YAML scalar and corrupt the file — reject them all, not just CR/LF.
         Assert.Throws<ArgumentException>(() =>
             Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", "/x.sdp", user, pass));
     }

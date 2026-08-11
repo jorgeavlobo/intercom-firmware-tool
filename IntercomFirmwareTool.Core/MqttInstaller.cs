@@ -170,6 +170,22 @@ namespace IntercomFirmwareTool.Core
             CameraOnDevice ? OnDeviceCameraTarget
             : string.IsNullOrWhiteSpace(CameraTargetHost) ? MqttHost : CameraTargetHost!;
 
+        /// <summary>RTSP username the on-device go2rtc serves the LAN camera stream under (issue #120).
+        /// Used ONLY in <see cref="CameraOnDevice"/> mode; ignored otherwise. Auth is mandatory on the
+        /// LAN-facing RTSP port — go2rtc disables authentication when the username is blank — so this is
+        /// required on-device: non-empty and free of control characters (which would corrupt the
+        /// double-quoted YAML scalar). Default <c>"camera"</c>.</summary>
+        public string CameraRtspUser { get; init; } = "camera";
+
+        /// <summary>RTSP password paired with <see cref="CameraRtspUser"/> for the on-device go2rtc
+        /// stream (issue #120). Required in <see cref="CameraOnDevice"/> mode — non-empty and free of
+        /// control characters (CR/LF, NUL, ESC, ...) that would corrupt the go2rtc.yaml scalar;
+        /// ignored otherwise. The App generates a strong random value per install and surfaces it in the
+        /// Home Assistant camera URL (Phase 1c-2c); it is carried here so the generated <c>go2rtc.yaml</c>
+        /// is deterministic for the installer's read-back verification. NULL by default (a build with
+        /// on-device mode on must set it — <see cref="Validate"/> enforces this).</summary>
+        public string? CameraRtspPass { get; init; }
+
         /// <summary>Home Assistant MQTT discovery topic prefix (HA default is "homeassistant").</summary>
         public string HaDiscoveryPrefix { get; init; } = "homeassistant";
         /// <summary>
@@ -363,6 +379,15 @@ namespace IntercomFirmwareTool.Core
         private const string ResourcePrefix = "IntercomFirmwareTool.Core.Payload.mqtt.";
         private const long MaxEditFileBytes = 4L * 1024 * 1024; // init scripts are tiny
 
+        // On-device media server (issue #120), installed ONLY on the on-device camera path.
+        private const string Go2RtcDir = EtcDir + "/go2rtc";                 // config dir
+        private const string OnDeviceStreamName = Go2RtcConfig.DefaultStreamName;   // "doorbell"
+        private const string Go2RtcYamlPath = Go2RtcDir + "/go2rtc.yaml";   // holds the RTSP password → 0600
+        private const string Go2RtcSdpPath = Go2RtcDir + "/" + OnDeviceStreamName + ".sdp";
+        private const string Go2RtcdInitPath = "/etc/init.d/go2rtcd";       // its own SysV init script
+        private const string Go2RtcBootLink = "/etc/rc5.d/S99zGo2rtc";      // boot symlink (after factory S99)
+        private const string Go2RtcBootTarget = "../init.d/go2rtcd";
+
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
 
@@ -407,8 +432,9 @@ namespace IntercomFirmwareTool.Core
         /// <summary>
         /// Installs the bridge on an open, writable filesystem, in order:
         /// idempotency guard → payload scripts → ARM binaries → TLS material →
-        /// generated config → init-script patches → boot symlinks. Meant to run in
-        /// the SAME fs session as <see cref="Ext4Probe.EnableSsh"/>'s edits.
+        /// generated config → init-script patches → boot symlinks → on-device media
+        /// server (gated on the on-device camera option). Meant to run in the SAME fs
+        /// session as <see cref="Ext4Probe.EnableSsh"/>'s edits.
         /// </summary>
         public static void InstallMqtt(ExtFileSystem fs, MqttOptions opts)
         {
@@ -523,7 +549,69 @@ namespace IntercomFirmwareTool.Core
                 throw new InvalidOperationException(CoreStrings.Get("Mqtt_Rc5dMissing"));
             foreach (var (link, target) in Symlinks)
                 CreateSymLinkTolerant(fs, link, target);
+
+            // --- on-device media server (gated: on-device camera only) ----------
+            InstallOnDeviceMediaServer(fs, opts);
         }
+
+        /// <summary>
+        /// Installs the on-device go2rtc media server (issue #120): its init script, the vendored
+        /// ffmpeg + go2rtc binaries, the generated <c>go2rtc.yaml</c> + SDP, and the boot symlink —
+        /// but ONLY when the camera runs on-device (<see cref="MqttOptions.CameraEnabled"/> AND
+        /// <see cref="MqttOptions.CameraOnDevice"/>). A non-camera / off-device image never carries
+        /// the ~6.6 MB of ffmpeg + go2rtc or the service, matching the embed-only decision from 1c-1.
+        /// Deterministic: the yaml/SDP come from <see cref="MqttOptions"/>, so <see cref="ValidateMqtt"/>
+        /// re-generates and byte-compares them.
+        /// </summary>
+        private static void InstallOnDeviceMediaServer(ExtFileSystem fs, MqttOptions opts)
+        {
+            if (!(opts.CameraEnabled && opts.CameraOnDevice)) return;
+
+            // go2rtc's own init script (0755 root:root — like btmqttd/watchdog; only the daemon
+            // binary is group-writable 0775).
+            string go2rtcd = LoadScript(ResourcePrefix + "go2rtcd");
+            WriteTextFile(fs, Go2RtcdInitPath, go2rtcd);
+            fs.SetMode(Go2RtcdInitPath, ToMode(755));
+            fs.SetOwner(Go2RtcdInitPath, 0, 0);
+
+            // Vendored media binaries (byte-exact, SHA-256 verified on read), 0775 root:root — the
+            // same mode as the always-installed btmqttd. These are the two binaries 1c-1 embedded but
+            // deliberately left out of PayloadBinaries.All; the on-device path is where they install.
+            foreach (var bin in new[] { PayloadBinaries.Ffmpeg, PayloadBinaries.Go2Rtc })
+            {
+                byte[] bytes = PayloadBinaries.Read(bin);
+                WriteBytesFile(fs, bin.InstallPath, bytes);
+                fs.SetMode(bin.InstallPath, ToMode(775));
+                fs.SetOwner(bin.InstallPath, 0, 0);
+            }
+
+            // Config dir + generated files. go2rtc.yaml holds the RTSP password → 0600 root:root; the
+            // SDP carries no secret → 0644. Both are byte-exact re-checked by ValidateMqtt.
+            EnsureDir(fs, Go2RtcDir);
+            fs.SetMode(Go2RtcDir, ToMode(755));
+            fs.SetOwner(Go2RtcDir, 0, 0);
+            WriteConfigFile(fs, Go2RtcYamlPath, BuildOnDeviceGo2RtcYaml(opts), 600);
+            WriteConfigFile(fs, Go2RtcSdpPath, Go2RtcConfig.BuildOnDeviceSdp(opts), 644);
+
+            // Boot symlink — the S99z prefix sorts it AFTER the factory S99<Capital> services, like the
+            // btmqttd/watchdog links, so go2rtc starts once the network + apps are up.
+            CreateSymLinkTolerant(fs, Go2RtcBootLink, Go2RtcBootTarget);
+        }
+
+        /// <summary>
+        /// The on-device <c>go2rtc.yaml</c> for these options: a fixed <see cref="OnDeviceStreamName"/>
+        /// stream reading the loopback SDP through the vendored ffmpeg, with the RTSP credentials from
+        /// <see cref="MqttOptions.CameraRtspUser"/>/<see cref="MqttOptions.CameraRtspPass"/>. Single
+        /// source of truth for both the install write and the <see cref="ValidateMqtt"/> read-back.
+        /// (<see cref="Validate"/> has already guaranteed the credentials are non-empty on-device.)
+        /// </summary>
+        private static string BuildOnDeviceGo2RtcYaml(MqttOptions opts) =>
+            Go2RtcConfig.BuildOnDeviceYaml(
+                OnDeviceStreamName,
+                PayloadBinaries.Ffmpeg.InstallPath,
+                Go2RtcSdpPath,
+                opts.CameraRtspUser,
+                opts.CameraRtspPass!);
 
         /// <summary>
         /// Defensive validation of the options, independent of the UI: host is a
@@ -685,6 +773,21 @@ namespace IntercomFirmwareTool.Core
                     throw new ArgumentException(CoreStrings.Get("Mqtt_CameraPortRange"), nameof(opts));
                 if (opts.CameraVideoPort == opts.CameraAudioPort)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_CameraPortsMustDiffer"), nameof(opts));
+                // On-device mode (#120) serves RTSP on the LAN with MANDATORY auth (decision #3):
+                // go2rtc disables authentication when the username is blank, so empty credentials would
+                // expose the camera stream to any LAN client. Require both non-empty and free of control
+                // characters (any of which would corrupt the generated go2rtc.yaml scalar).
+                if (opts.CameraOnDevice)
+                {
+                    // Reject an empty credential OR any control character (CR/LF, NUL, ESC, TAB, ...):
+                    // go2rtc disables auth for a blank username, and YamlDoubleQuoted escapes only '\'
+                    // and '"', so any control char would land raw in the double-quoted scalar and break
+                    // go2rtc.yaml (CR/LF splits the line; the rest are forbidden in a YAML dq-scalar).
+                    if (string.IsNullOrEmpty(opts.CameraRtspUser) || string.IsNullOrEmpty(opts.CameraRtspPass)
+                        || opts.CameraRtspUser.Any(char.IsControl) || opts.CameraRtspPass!.Any(char.IsControl))
+                        throw new ArgumentException(
+                            CoreStrings.Get("Mqtt_CameraRtspCredsRequired"), nameof(opts));
+                }
             }
 
             // Topics must be non-empty and single-line (they are sourced into the
@@ -1025,8 +1128,82 @@ namespace IntercomFirmwareTool.Core
                     checks.Add(new($"runtime dep {name} present",
                         paths.Any(p => DependencyPresent(fs, p)),
                         string.Join(" | ", paths)));
+
+                // On-device media server (#120): installed ONLY when the camera runs on-device.
+                if (opts.CameraEnabled && opts.CameraOnDevice)
+                {
+                    // Init script + the two vendored binaries (presence, mode, owner + byte-exact SHA).
+                    CheckFile(fs, checks, Go2RtcdInitPath, 755);
+                    // Byte-exact content too — a truncated/replaced script with the same mode/owner would
+                    // pass the metadata checks yet fail the service at boot (like the .conf read-back).
+                    string go2rtcdScript = fs.FileExists(Go2RtcdInitPath) ? ReadAllText(fs, Go2RtcdInitPath) : "";
+                    checks.Add(new("go2rtcd matches the embedded init script",
+                        go2rtcdScript == LoadScript(ResourcePrefix + "go2rtcd"), ""));
+                    foreach (var bin in new[] { PayloadBinaries.Ffmpeg, PayloadBinaries.Go2Rtc })
+                    {
+                        CheckFile(fs, checks, bin.InstallPath, 775);
+                        CheckBinaryBytes(fs, checks, bin);
+                    }
+
+                    // go2rtc.yaml (0600 — holds the RTSP password) byte-for-byte equals what these
+                    // options generate — a true read-back, like the .conf check above.
+                    CheckFile(fs, checks, Go2RtcYamlPath, 600);
+                    string yaml = fs.FileExists(Go2RtcYamlPath) ? ReadAllText(fs, Go2RtcYamlPath) : "";
+                    checks.Add(new("go2rtc.yaml matches the generated on-device config",
+                        yaml == BuildOnDeviceGo2RtcYaml(opts), ""));
+                    // Explicit, named assertion of the security invariant (beyond the byte-exact match):
+                    // the control API + web UI bind LOOPBACK ONLY, never the LAN. Both the positive and
+                    // the negative match use the full `listen: "<host>:<port>"` shape so the wildcard
+                    // check can't false-fail on the port appearing in some other context.
+                    string apiLoopback = "listen: \"127.0.0.1:" + Go2RtcConfig.OnDeviceApiPort + "\"";
+                    string apiWildcard = "listen: \"0.0.0.0:" + Go2RtcConfig.OnDeviceApiPort + "\"";
+                    checks.Add(new("go2rtc control API bound to loopback only (never 0.0.0.0)",
+                        yaml.Contains(apiLoopback, StringComparison.Ordinal)
+                        && !yaml.Contains(apiWildcard, StringComparison.Ordinal), ""));
+
+                    // The SDP (0644 — no secret) byte-for-byte equals the generated on-device SDP.
+                    CheckFile(fs, checks, Go2RtcSdpPath, 644);
+                    string sdp = fs.FileExists(Go2RtcSdpPath) ? ReadAllText(fs, Go2RtcSdpPath) : "";
+                    checks.Add(new("doorbell.sdp matches the generated on-device SDP",
+                        sdp == Go2RtcConfig.BuildOnDeviceSdp(opts), ""));
+
+                    // Boot symlink.
+                    string got = "";
+                    bool ok = false;
+                    try { got = fs.ReadSymLink(Go2RtcBootLink); ok = got == Go2RtcBootTarget; } catch { }
+                    checks.Add(new($"{Go2RtcBootLink} -> {Go2RtcBootTarget}", ok, got));
+                }
+                else
+                {
+                    // Off-device (the default): NO on-device media artifact may be installed. Use
+                    // PathOccupied — FileExists is blind to symlinks (see the runtime-dep note above), so
+                    // a residual (even dangling) symlink at any path would slip past a FileExists check.
+                    // Cover EVERY artifact: both binaries, the init script, the config dir, and the link.
+                    foreach (var (label, path) in new[]
+                    {
+                        ("go2rtc binary", PayloadBinaries.Go2Rtc.InstallPath),
+                        ("ffmpeg binary", PayloadBinaries.Ffmpeg.InstallPath),
+                        ("go2rtcd init script", Go2RtcdInitPath),
+                        ("go2rtc config dir", Go2RtcDir),
+                        ("S99zGo2rtc boot link", Go2RtcBootLink),
+                    })
+                        checks.Add(new($"{label} absent (off-device build)",
+                            !PathOccupied(fs, path), path));
+                }
             }
             return checks;
+        }
+
+        /// <summary>
+        /// True if ANYTHING occupies <paramref name="path"/> — a regular file, a directory, or a
+        /// symlink (even a dangling one). Unlike <see cref="ExtFileSystem.FileExists"/> (which reports
+        /// false for a symlink), this is symmetric across all node types, so an "absent" assertion in
+        /// <see cref="ValidateMqtt"/> can't be fooled by a stray symlink left at a media-artifact path.
+        /// </summary>
+        private static bool PathOccupied(ExtFileSystem fs, string path)
+        {
+            if (fs.FileExists(path) || fs.DirectoryExists(path)) return true;
+            try { fs.ReadSymLink(path); return true; } catch { return false; }
         }
 
         /// <summary>

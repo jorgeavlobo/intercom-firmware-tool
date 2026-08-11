@@ -178,11 +178,13 @@ namespace IntercomFirmwareTool.Core
                 throw new ArgumentException(
                     "On-device RTSP requires a non-empty username and password: go2rtc skips " +
                     "authentication for a blank username, exposing the LAN stream unauthenticated.");
-            // A CR/LF in a credential would split the double-quoted scalar across lines and corrupt
-            // the YAML (YamlDoubleQuoted escapes '\\' and '\"' but not newlines) — reject it (Copilot).
-            if (rtspUser.IndexOfAny(NewlineChars) >= 0 || rtspPass.IndexOfAny(NewlineChars) >= 0)
+            // Reject ANY control character. YamlDoubleQuoted escapes only '\\' and '\"', so a control
+            // char in a credential would land raw in the double-quoted scalar: a CR/LF splits it across
+            // lines, and NUL/ESC/TAB/etc. are forbidden in a YAML double-quoted scalar — either way
+            // go2rtc fails to load the config (Copilot: CR/LF; Codex: the rest).
+            if (rtspUser.Any(char.IsControl) || rtspPass.Any(char.IsControl))
                 throw new ArgumentException(
-                    "RTSP credentials must be single-line: a CR/LF would corrupt go2rtc.yaml.");
+                    "RTSP credentials must not contain control characters (CR/LF, NUL, ESC, ...): they would corrupt go2rtc.yaml.");
             string name = SanitizeStreamName(streamName);
             var ci = CultureInfo.InvariantCulture;
             var sb = new StringBuilder();
@@ -214,9 +216,6 @@ namespace IntercomFirmwareTool.Core
         /// contain punctuation.</summary>
         private static string YamlDoubleQuoted(string s) =>
             "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
-
-        /// <summary>CR/LF — a credential containing either would break the single-line YAML scalar.</summary>
-        private static readonly char[] NewlineChars = { '\r', '\n' };
 
         /// <summary>
         /// Build a complete, copy-paste setup guide: where to put the SDP, the go2rtc <c>streams:</c>

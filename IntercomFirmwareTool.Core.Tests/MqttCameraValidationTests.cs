@@ -106,7 +106,14 @@ public class MqttCameraValidationTests
         // On-device (#120): the target is pinned to the loopback alias 127.0.0.2 (where the on-device
         // go2rtc listens), so the off-device "must be routable / not loopback / device-resolvable"
         // checks must NOT apply. EffectiveCameraTargetHost is 127.0.0.2 (loopback) yet Validate passes.
-        var opts = new MqttOptions("broker.lan") { CameraEnabled = true, CameraOnDevice = true };
+        // On-device RTSP auth is mandatory, so a valid on-device build supplies credentials.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+        };
         Assert.Equal("127.0.0.2", opts.EffectiveCameraTargetHost);
         MqttInstaller.Validate(opts); // must not throw despite the loopback target
 
@@ -116,6 +123,8 @@ public class MqttCameraValidationTests
             CameraEnabled = true,
             CameraOnDevice = true,
             CameraTargetHost = "ha.local",   // would be rejected off-device; ignored here
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
         };
         MqttInstaller.Validate(opts2); // must not throw
     }
@@ -123,14 +132,57 @@ public class MqttCameraValidationTests
     [Fact]
     public void On_device_mode_still_validates_the_fan_out_ports()
     {
-        // The ports still feed the SDP/siphon in on-device mode, so equal/out-of-range ports are
-        // still rejected.
-        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(new MqttOptions("broker.lan")
+        // Build from OnDevice() so the required RTSP credentials are present — otherwise Validate could
+        // throw for missing creds before it reaches the port checks, masking a port-validation regression.
+        Assert.Throws<ArgumentException>(() =>
+            MqttInstaller.Validate(OnDevice() with { CameraVideoPort = 5000, CameraAudioPort = 5000 }));
+    }
+
+    // A valid on-device build: RTSP auth is mandatory (#120), so both credentials must be set.
+    private static MqttOptions OnDevice() => new("broker.lan")
+    {
+        CameraEnabled = true,
+        CameraOnDevice = true,
+        CameraRtspUser = "camera",
+        CameraRtspPass = "s3cr3t",
+    };
+
+    [Fact]
+    public void On_device_mode_requires_non_empty_rtsp_credentials()
+    {
+        MqttInstaller.Validate(OnDevice()); // both set → must not throw
+        // go2rtc disables auth for a blank username, so an empty user OR pass is rejected.
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(OnDevice() with { CameraRtspPass = null }));
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(OnDevice() with { CameraRtspPass = "" }));
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(OnDevice() with { CameraRtspUser = "" }));
+    }
+
+    [Theory]
+    [InlineData("cam\nera", "s3cr3t")]      // LF
+    [InlineData("camera", "s3\r\ncr3t")]    // CRLF
+    [InlineData("camera", "s3\rcr3t")]      // CR
+    [InlineData("cam\tera", "s3cr3t")]      // TAB
+    [InlineData("camera", "s3\0cr3t")]      // NUL
+    [InlineData("camera", "s3\u001bcr3t")]  // ESC
+    public void On_device_mode_rejects_control_char_rtsp_credentials(string user, string pass)
+    {
+        // Any control char would land raw in the double-quoted YAML scalar (YamlDoubleQuoted escapes
+        // only '\' and '"'), corrupting go2rtc.yaml — reject them all, not just CR/LF.
+        Assert.Throws<ArgumentException>(() =>
+            MqttInstaller.Validate(OnDevice() with { CameraRtspUser = user, CameraRtspPass = pass }));
+    }
+
+    [Fact]
+    public void Off_device_mode_ignores_the_rtsp_credentials()
+    {
+        // The RTSP creds are used only on-device; an off-device camera build with blank creds is
+        // valid (they never reach a config).
+        MqttInstaller.Validate(new MqttOptions("192.168.1.9")
         {
             CameraEnabled = true,
-            CameraOnDevice = true,
-            CameraVideoPort = 5000,
-            CameraAudioPort = 5000,
-        }));
+            CameraTargetHost = "192.168.1.9",
+            CameraRtspUser = "",
+            CameraRtspPass = null,
+        });
     }
 }

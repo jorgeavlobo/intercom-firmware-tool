@@ -215,6 +215,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
     <value>O destino da câmara deve ser um endereço encaminhável — não um endereço de loopback (127.x.x.x) nem o endereço não especificado 0.0.0.0. O go2rtc / Home Assistant corre fora do intercomunicador.</value>
   </data>
+  <data name="Mqtt_CameraRtspCredsRequired" xml:space="preserve">
+    <value>A transmissão no dispositivo requer credenciais RTSP: defina um nome de utilizador e uma palavra-passe. O go2rtc desativa a autenticação quando o nome de utilizador está vazio, o que exporia a transmissão da câmara na rede local. As credenciais não podem conter caracteres de controlo (incluindo quebras de linha).</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} não existe na imagem; não é possível aplicar o patch da ponte MQTT.</value>
   </data>

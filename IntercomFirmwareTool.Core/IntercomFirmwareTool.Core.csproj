@@ -121,6 +121,13 @@
     <EmbeddedResource Include="Payload\mqtt\bt_service_watchdog">
       <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.bt_service_watchdog</LogicalName>
     </EmbeddedResource>
+    <!-- go2rtc's own SysV init script (issue #120): installed ONLY on the on-device
+         camera path (gated in MqttInstaller), it starts + respawns the vendored go2rtc
+         media server. Mirrors the btmqttd init script's supervision model. -->
+    <None Remove="Payload\mqtt\go2rtcd" />
+    <EmbeddedResource Include="Payload\mqtt\go2rtcd">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.go2rtcd</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>
