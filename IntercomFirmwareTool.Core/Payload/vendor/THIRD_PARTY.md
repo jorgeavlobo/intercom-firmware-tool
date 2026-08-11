@@ -263,7 +263,9 @@ audited SPDX expression is therefore
 
 > **Regenerating on a pin bump.** When `native/go2rtc/pins.env` bumps `GO2RTC_TAG`, regenerate this
 > bundle from the new tag's module graph (`go-licenses report`/`save` under `GOOS=linux GOARCH=arm
-> CGO_ENABLED=0`) and update the SPDX above + `PayloadBinaries.Go2Rtc.LicenseSpdx`.
+> CGO_ENABLED=0`) and update the SPDX above + `PayloadBinaries.Go2Rtc.LicenseSpdx`. Note: `go-licenses`
+> labels the main go2rtc module's own source URL as `HEAD` (it has no module version in-tree) — pin it
+> to the tag (`blob/<GO2RTC_TAG>/LICENSE`) by hand so every reference stays immutable.
 
 Both license files are compiled into `IntercomFirmwareTool.Core` unconditionally and shipped in every
 release (the `release.yml` packaging list throws if either is missing — a hard release gate). The

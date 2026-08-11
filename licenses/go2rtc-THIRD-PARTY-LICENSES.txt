@@ -39,7 +39,7 @@ Component inventory (module — license as detected — source):
   - golang.org/x/sys                                     BSD-3-Clause   https://cs.opensource.google/go/x/sys/+/v0.40.0:LICENSE
   - golang.org/x/time/rate                               BSD-3-Clause   https://cs.opensource.google/go/x/time/+/v0.14.0:LICENSE
   - github.com/eclipse/paho.mqtt.golang                  EPL-2.0        https://github.com/eclipse/paho.mqtt.golang/blob/v1.5.1/LICENSE
-  - github.com/AlexxIT/go2rtc                            MIT            https://github.com/AlexxIT/go2rtc/blob/HEAD/LICENSE
+  - github.com/AlexxIT/go2rtc                            MIT            https://github.com/AlexxIT/go2rtc/blob/v1.9.14/LICENSE
   - github.com/expr-lang/expr                            MIT            https://github.com/expr-lang/expr/blob/v1.17.7/LICENSE
   - github.com/mattn/go-colorable                        MIT            https://github.com/mattn/go-colorable/blob/v0.1.14/LICENSE
   - github.com/mattn/go-isatty                           MIT            https://github.com/mattn/go-isatty/blob/v0.0.20/LICENSE
@@ -101,7 +101,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
 github.com/AlexxIT/go2rtc — MIT
-Source: https://github.com/AlexxIT/go2rtc/blob/HEAD/LICENSE
+Source: https://github.com/AlexxIT/go2rtc/blob/v1.9.14/LICENSE
 ================================================================================
 
 MIT License
