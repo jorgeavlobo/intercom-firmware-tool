@@ -118,3 +118,54 @@ and carries no such obligation for the image. Because every bundled component is
 permissive, meeting these obligations is limited to **reproducing the notices** —
 there is no copyleft source-offer requirement, unlike the previous `jq`/`evtest`
 binaries this daemon replaces.
+
+---
+
+## `ffmpeg` — minimal LGPL build for the on-device media server (issue #120)
+
+Unlike `btmqttd` (our own program), **`ffmpeg` is genuinely third-party** — a minimal,
+**LGPL-2.1-or-later** build of [FFmpeg](https://ffmpeg.org/) `n7.1.1`, cross-compiled to
+a static-musl armv7 hard-float binary and embedded in `IntercomFirmwareTool.Core`. The
+on-device media server (#120) runs it so go2rtc can read the panel's cleartext RTP via an
+SDP and **copy** the H.264 into RTSP — no decode, no encode, no transcode. Built per
+[`../../../native/ffmpeg/BUILD.md`](../../../native/ffmpeg/BUILD.md).
+
+It is compiled `--disable-everything` plus only the RTP/SDP→RTSP H.264-copy path, **never**
+`--enable-gpl`/`--enable-nonfree` and with no GPL-only libraries (no x264/x265/…), so the
+whole binary is LGPL. No decoders/encoders are built.
+
+### Provenance & integrity
+
+| Field | `ffmpeg` |
+|---|---|
+| File | `armhf/ffmpeg` |
+| Size | 2,025,024 bytes |
+| SHA-256 | `99fd0b7e3af85103762f07ea9cc79c4ad85938c9cb610590f572648fdf5cdd9c` |
+| ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
+| ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
+| Upstream | FFmpeg `n7.1.1` (release tag) |
+| Build toolchain | `zig cc` 0.13.0 (bundled musl) per `BUILD.md` |
+| Configuration | `--disable-everything` + `protocol=file,udp,rtp,rtsp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp` · `--disable-asm` |
+| License | **LGPL-2.1-or-later** |
+| License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](licenses/ffmpeg-COPYING.LGPLv2.1.txt) |
+| SPDX expression | `LGPL-2.1-or-later` |
+
+The SHA-256 + size are enforced on read by `PayloadBinaries`. **Not byte-reproducible:**
+unlike Cargo's deterministic output for `btmqttd`, an `ffmpeg` + `zig cc` + `make` build
+yields a same-size but not byte-identical binary across runs (compiler/linker internal
+ordering). So [`ffmpeg-provenance.yml`](../../../.github/workflows/ffmpeg-provenance.yml)
+enforces **functional** provenance rather than a byte-for-byte rebuild: the metadata
+check (committed binary ↔ this table ↔ `PayloadBinaries`) plus a fresh build from the
+pinned recipe that must run under `qemu-arm`, report the same `configuration`, be LGPL
+(not GPL/nonfree), and match the recorded size.
+
+### LGPL-2.1 obligations
+
+The binary is a **standalone program** built from FFmpeg's own LGPL sources (statically
+linked), so distributing it requires (a) shipping the **LGPL-2.1 license text** — done, in
+`licenses/ffmpeg-COPYING.LGPLv2.1.txt`, which travels with the assembly — and (b) making
+the **corresponding source** available: it is the unmodified upstream **FFmpeg `n7.1.1`**
+tag (public), built exactly per `native/ffmpeg/BUILD.md`. No changes to FFmpeg source were
+made. As with `btmqttd`, the embedded resource is compiled into `IntercomFirmwareTool.Core`
+unconditionally; the **firmware image** only carries `ffmpeg` when the on-device camera
+feature (#120) writes it in.

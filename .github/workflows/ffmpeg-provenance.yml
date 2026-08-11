@@ -1,0 +1,116 @@
+name: ffmpeg binary provenance (#120)
+
+# Guards the vendored, third-party minimal ffmpeg (issue #120) in two tiers, both FATAL.
+# Unlike btmqttd (first-party, byte-reproducible via Cargo), an ffmpeg+zig+make build is
+# NOT byte-identical across runs, so this enforces FUNCTIONAL provenance, not a byte match:
+#   - metadata: the committed binary's SHA-256 must appear in PayloadBinaries.cs AND
+#     THIRD_PARTY.md (catches a binary or metadata changed without the other).
+#   - functional rebuild: rebuild from the pinned recipe (native/ffmpeg/BUILD.md) and require
+#     the rebuilt binary to run under qemu-arm, be LGPL (not GPL/nonfree), report the same
+#     `configuration`, and match the committed binary's size.
+
+on:
+  pull_request:
+    paths:
+      - 'native/ffmpeg/**'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg'
+      - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
+      - '.github/workflows/ffmpeg-provenance.yml'
+      - '.github/workflows/ffmpeg-build.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'native/ffmpeg/**'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg'
+      - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
+      - '.github/workflows/ffmpeg-provenance.yml'
+      - '.github/workflows/ffmpeg-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: 0.13.0
+  FFMPEG_TAG: n7.1.1
+  SOURCE_DATE_EPOCH: '1700000000'
+  BIN: IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg
+
+jobs:
+  provenance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Metadata integrity (committed SHA-256 ↔ PayloadBinaries.cs ↔ THIRD_PARTY.md)
+        run: |
+          set -euxo pipefail
+          sha="$(sha256sum "$BIN" | awk '{print $1}')"
+          size="$(stat -c '%s' "$BIN")"
+          echo "committed ffmpeg: sha256=$sha size=$size"
+          pb=IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
+          tp=IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md
+          grep -q "$sha" "$pb" || { echo "::error::SHA-256 not found in PayloadBinaries.cs"; exit 1; }
+          grep -q "$sha" "$tp" || { echo "::error::SHA-256 not found in THIRD_PARTY.md"; exit 1; }
+          # Record the committed configuration for the functional-equivalence check below.
+          echo "$size" > committed.size
+
+      - name: Committed binary runs on armv7 + is LGPL
+        run: |
+          set -euxo pipefail
+          sudo apt-get update && sudo apt-get install -y qemu-user-static
+          qemu-arm-static "$BIN" -hide_banner -version | tee committed.ver
+          grep -m1 'configuration:' committed.ver > committed.cfg
+          if grep -Eq -- '--enable-(gpl|nonfree)' committed.cfg; then
+            echo "::error::committed ffmpeg is GPL/nonfree — must be LGPL"; exit 1
+          fi
+
+      - name: Zig ${{ env.ZIG_VERSION }}
+        uses: mlugg/setup-zig@v1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Functional rebuild from the pinned recipe
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o ffmpeg.tar.gz \
+            "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
+          mkdir ffmpeg-src && tar -xzf ffmpeg.tar.gz -C ffmpeg-src --strip-components=1
+          cd ffmpeg-src
+          CFLAGS="-Os -ffile-prefix-map=$(pwd)=. -fdebug-prefix-map=$(pwd)=."
+          ./configure \
+            --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
+            --ar="zig ar" --ranlib="zig ranlib" --nm="zig nm" --host-cc=cc \
+            --enable-cross-compile --arch=arm --target-os=linux --pkg-config=false \
+            --disable-everything --disable-autodetect --disable-doc --disable-debug \
+            --disable-shared --enable-static --enable-small \
+            --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
+            --enable-protocol=file,udp,rtp,rtsp,tcp \
+            --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
+            --extra-cflags="$CFLAGS" --extra-ldflags="-static -s"
+          make -j"$(nproc)"
+
+      - name: Functional equivalence (LGPL · same configuration · same size)
+        run: |
+          set -euxo pipefail
+          reb=ffmpeg-src/ffmpeg
+          qemu-arm-static "$reb" -hide_banner -version | tee rebuilt.ver
+          grep -m1 'configuration:' rebuilt.ver > rebuilt.cfg
+          if grep -Eq -- '--enable-(gpl|nonfree)' rebuilt.cfg; then
+            echo "::error::rebuilt ffmpeg is GPL/nonfree"; exit 1
+          fi
+          if ! diff -u committed.cfg rebuilt.cfg; then
+            echo "::error::rebuilt 'configuration' differs from the committed binary — recipe drift"; exit 1
+          fi
+          csize="$(cat committed.size)"; rsize="$(stat -c '%s' "$reb")"
+          echo "committed size=$csize rebuilt size=$rsize"
+          if [ "$csize" != "$rsize" ]; then
+            echo "::error::rebuilt size ($rsize) != committed size ($csize)"; exit 1
+          fi
+          echo "Functional provenance OK (LGPL, same configuration, same size)."

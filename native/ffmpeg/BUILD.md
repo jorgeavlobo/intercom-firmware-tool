@@ -35,15 +35,20 @@ that runs on the C100X/C300X (i.MX, kernel 4.9.11) with no dependency on the dev
 ## Toolchain — `zig cc` (pinned)
 
 We cross-compile with **`zig cc`** as the C compiler/linker, pinned to a single Zig
-version. Rationale, mirroring the `btmqttd` philosophy of pinning one compiler for a
-host-independent SHA-256:
+version. Rationale (pinning one self-contained compiler keeps object code stable across
+hosts, even though the final binary is not byte-identical — see the reproducibility note
+below):
 
 - Zig **bundles musl** headers + start files and links a fully static musl target from
   one self-contained download — no distro cross-toolchain whose package bumps silently
   change object code (the exact drift `btmqttd`'s provenance job guards against), and no
   reliance on `musl.cc` (blocked on some networks).
-- One pinned `zig` + one pinned FFmpeg tarball + deterministic flags ⇒ a reproducible
-  binary, verified byte-for-byte by CI (`.github/workflows/ffmpeg-provenance.yml`).
+- One pinned `zig` + one pinned FFmpeg tarball keeps the build inputs fixed. ⚠️ **The
+  binary is NOT byte-reproducible** — unlike Cargo's deterministic output for `btmqttd`,
+  an `ffmpeg` + `zig cc` + `make` build yields a same-size but not byte-identical binary
+  across runs (compiler/linker internal ordering). So the committed binary is produced
+  once and frozen, and `ffmpeg-provenance.yml` verifies it **functionally** (see below),
+  not byte-for-byte.
 
 Pinned versions (bump deliberately; CI enforces the SHA against these):
 
@@ -52,19 +57,19 @@ Pinned versions (bump deliberately; CI enforces the SHA against these):
 | Zig | `0.13.0` |
 | FFmpeg | `n7.1.1` (release tarball) |
 
-## Reproducible build
+## Build recipe
 
-> The `configure` line below is the **intended** minimal recipe; the CI provenance job
-> is the source of truth and the flag set is refined there on the first green build
-> (FFmpeg's `configure` prunes unreachable components, so a missing dependency surfaces
-> as a configure error, not a silent feature). Keep this file in sync with the workflow.
+> This mirrors `.github/workflows/ffmpeg-build.yml`, which is the source of truth; keep the
+> two in sync. FFmpeg's `configure` prunes unreachable components, so a missing dependency
+> surfaces as a configure error, not a silent feature.
 
 ```sh
 # Inputs (pinned)
 ZIG=0.13.0
 FFMPEG=n7.1.1
 
-# Deterministic: fixed epoch + scrub the build path from any embedded strings.
+# Best-effort determinism (fixed epoch + scrub the build path). Note: does NOT achieve a
+# byte-identical binary — see the reproducibility note above.
 export SOURCE_DATE_EPOCH=1700000000
 CFLAGS="-Os -ffile-prefix-map=$(pwd)=. -fdebug-prefix-map=$(pwd)=."
 
@@ -122,13 +127,15 @@ sha256sum ./ffmpeg; stat -c '%s bytes' ./ffmpeg
 
 The SHA-256 + byte size go into `IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs`
 and `IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md`, and the vendored binary
-lives at `IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg` — enforced on load and
-guarded against drift by `ffmpeg-provenance.yml` (rebuild → byte-for-byte match), exactly
-like `btmqttd`.
+lives at `IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg` — enforced on load (length
++ SHA-256) and guarded by `ffmpeg-provenance.yml`, which enforces **functional** provenance
+(metadata integrity + a fresh build that runs under qemu, is LGPL, reports the same
+`configuration`, and matches the recorded size) rather than the byte-for-byte rebuild used
+for the first-party `btmqttd`.
 
 ## Cannot be built in the sandboxed dev container
 
 The agent dev container has no musl/armv7 cross-toolchain and the egress proxy blocks
 `ffmpeg.org` / `ziglang.org`, so the binary is produced by **CI** (GitHub Actions has
 network + installs the pinned Zig) or on a capable host with this recipe. The committed
-binary is then verified reproducibly by the provenance workflow.
+binary is then verified functionally by the provenance workflow.

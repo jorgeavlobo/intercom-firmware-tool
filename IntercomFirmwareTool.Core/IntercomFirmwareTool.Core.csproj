@@ -59,6 +59,18 @@
     <EmbeddedResource Include="Payload\vendor\licenses\btmqttd-THIRD-PARTY-LICENSES.txt">
       <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.licenses.btmqttd-THIRD-PARTY-LICENSES.txt</LogicalName>
     </EmbeddedResource>
+    <!-- Minimal LGPL static-musl armv7 ffmpeg for the on-device media server (#120,
+         Phase 1a) — a THIRD-PARTY binary (FFmpeg n7.1.1), built per native/ffmpeg/BUILD.md,
+         with its LGPL-2.1 text. Same Remove-then-EmbeddedResource + explicit LogicalName
+         pattern as btmqttd. Verified on read (length + SHA-256) by PayloadBinaries. -->
+    <None Remove="Payload\vendor\armhf\ffmpeg" />
+    <None Remove="Payload\vendor\licenses\ffmpeg-COPYING.LGPLv2.1.txt" />
+    <EmbeddedResource Include="Payload\vendor\armhf\ffmpeg">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.armhf.ffmpeg</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Payload\vendor\licenses\ffmpeg-COPYING.LGPLv2.1.txt">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.licenses.ffmpeg-COPYING.LGPLv2.1.txt</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>

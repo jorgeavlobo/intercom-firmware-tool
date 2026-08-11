@@ -73,6 +73,26 @@ namespace IntercomFirmwareTool.Core
             // Unicode-3.0 (unicode-ident). All texts are in the aggregated notice file.
             LicenseSpdx: "MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0");
 
+        /// <summary>
+        /// <c>ffmpeg</c> — a minimal, LGPL, statically-linked armv7 hard-float (musl) build for the
+        /// on-device media server (issue #120): the on-device go2rtc runs it to read the panel's
+        /// cleartext RTP via an SDP and <b>copy</b> the H.264 into RTSP — no decode/encode. Unlike
+        /// the first-party <see cref="Btmqttd"/>, this is a <b>third-party</b> binary (FFmpeg n7.1.1,
+        /// <c>LGPL-2.1-or-later</c>), built per <c>native/ffmpeg/BUILD.md</c> and NOT byte-reproducible
+        /// (verified functionally by <c>ffmpeg-provenance.yml</c>). Declared + embedded here; the
+        /// installer wires it in Phase 1c, so it is deliberately NOT in <see cref="All"/> yet — the
+        /// vendored binary lands with no change to install behaviour.
+        /// </summary>
+        public static readonly ArmBinary Ffmpeg = new(
+            Name: "ffmpeg",
+            InstallPath: "/usr/sbin/ffmpeg",
+            Length: 2_025_024,
+            Sha256Hex: "99fd0b7e3af85103762f07ea9cc79c4ad85938c9cb610590f572648fdf5cdd9c",
+            ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.ffmpeg",
+            LicenseResourceName:
+                "IntercomFirmwareTool.Core.Payload.vendor.licenses.ffmpeg-COPYING.LGPLv2.1.txt",
+            LicenseSpdx: "LGPL-2.1-or-later");
+
         /// <summary>The complete third-party notice (Markdown).</summary>
         public const string ThirdPartyNoticeResourceName =
             "IntercomFirmwareTool.Core.Payload.vendor.THIRD_PARTY.md";
