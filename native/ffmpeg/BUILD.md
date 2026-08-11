@@ -144,10 +144,18 @@ first-party `btmqttd`.
 
 ## Refreshing the binary
 
-To bump the pins or the recipe, edit them here + in the two workflows, then run the
-dispatch-only [`ffmpeg-build.yml`](../../.github/workflows/ffmpeg-build.yml): it rebuilds
-from the pinned source and commits the new binary + LGPL text, printing the new SHA-256 +
-size to record in `PayloadBinaries.cs` and `THIRD_PARTY.md`. `ffmpeg-provenance.yml` then
+Two kinds of change, edited in different places:
+
+- **Recipe** (`./configure`/`make` flags): edit **only** [`build.sh`](build.sh) — the single
+  source of truth both workflows invoke. Do not touch the workflows for a recipe change.
+- **Input pins** (Zig / FFmpeg versions + their SHA-256s): update the `env:` blocks in
+  **both** `ffmpeg-build.yml` and `ffmpeg-provenance.yml`, and the pinned-versions table in
+  this document.
+
+Then run the dispatch-only
+[`ffmpeg-build.yml`](../../.github/workflows/ffmpeg-build.yml): it rebuilds from the pinned
+source (via `build.sh`), commits the new binary + license texts, and updates the SHA-256 +
+size in `PayloadBinaries.cs` and `THIRD_PARTY.md` atomically. `ffmpeg-provenance.yml` then
 proves, byte-for-byte, that the committed binary matches the pinned source.
 
 ## Cannot be built in the sandboxed dev container
