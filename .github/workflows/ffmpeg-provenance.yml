@@ -19,6 +19,11 @@ on:
       - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
       - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
       - '.github/workflows/ffmpeg-provenance.yml'
+      # Also re-verify when the refresh recipe changes: a change to ffmpeg-build.yml (a pin
+      # or configure flag) that drifts from this workflow's recipe must be caught against
+      # the committed binary here, since a refresh push ([skip ci], GITHUB_TOKEN) won't
+      # start this workflow on its own (Codex).
+      - '.github/workflows/ffmpeg-build.yml'
   push:
     branches: [master]
     paths:
@@ -27,6 +32,7 @@ on:
       - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
       - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
       - '.github/workflows/ffmpeg-provenance.yml'
+      - '.github/workflows/ffmpeg-build.yml'
   workflow_dispatch:
 
 permissions:
