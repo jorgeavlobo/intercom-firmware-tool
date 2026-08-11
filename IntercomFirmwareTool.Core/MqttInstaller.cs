@@ -1191,15 +1191,6 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// True when <paramref name="path"/> resolves to an existing regular file,
-        /// following symlinks. The ext reader's <c>FileExists</c> reports false for a
-        /// symlink, but on the device runtime tools are commonly symlinks (busybox
-        /// applets; version links like <c>python -&gt; python2 -&gt; python2.7</c>), so a
-        /// bare <c>FileExists</c> would false-fail a tool that is actually present. A
-        /// dangling symlink still fails (its chain never lands on a real file). The
-        /// hop budget guards a symlink cycle.
-        /// </summary>
-        /// <summary>
         /// True if ANYTHING occupies <paramref name="path"/> — a regular file, a directory, or a
         /// symlink (even a dangling one). Unlike <see cref="ExtFileSystem.FileExists"/> (which reports
         /// false for a symlink), this is symmetric across all node types, so an "absent" assertion in
@@ -1211,6 +1202,15 @@ namespace IntercomFirmwareTool.Core
             try { fs.ReadSymLink(path); return true; } catch { return false; }
         }
 
+        /// <summary>
+        /// True when <paramref name="path"/> resolves to an existing regular file,
+        /// following symlinks. The ext reader's <c>FileExists</c> reports false for a
+        /// symlink, but on the device runtime tools are commonly symlinks (busybox
+        /// applets; version links like <c>python -&gt; python2 -&gt; python2.7</c>), so a
+        /// bare <c>FileExists</c> would false-fail a tool that is actually present. A
+        /// dangling symlink still fails (its chain never lands on a real file). The
+        /// hop budget guards a symlink cycle.
+        /// </summary>
         private static bool DependencyPresent(ExtFileSystem fs, string path)
         {
             string current = path;
