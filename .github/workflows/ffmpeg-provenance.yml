@@ -124,27 +124,11 @@ jobs:
           rm -rf "$RUNNER_TEMP/ffmpeg-src"
           mkdir "$RUNNER_TEMP/ffmpeg-src"
           tar -xzf ffmpeg.tar.gz -C "$RUNNER_TEMP/ffmpeg-src" --strip-components=1
-          cd "$RUNNER_TEMP/ffmpeg-src"
-          # CFLAGS is just -Os: no -ffile-prefix-map, whose value would embed the absolute
-          # build path into the output (breaking byte-reproducibility). We strip (-s) +
-          # --disable-debug, so no DWARF comp_dir survives, and FFmpeg uses relative
-          # __FILE__ paths — the binary is path-independent. Keep this recipe byte-for-byte
-          # identical to ffmpeg-build.yml, or the reproduction check below will (correctly)
-          # fail.
-          ./configure \
-            --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
-            --ar="zig ar" --ranlib="zig ranlib" --nm="nm" --host-cc=cc \
-            --enable-cross-compile --arch=arm --target-os=linux --pkg-config=false \
-            --disable-everything --disable-autodetect --disable-doc --disable-debug \
-            --disable-shared --enable-static --enable-small \
-            --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
-            --enable-protocol=file,udp,rtp,rtsp,tcp \
-            --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
-            --extra-cflags="-Os" --extra-ldflags="-static -s"
-          # -j1 (serial): FFmpeg's parallel build is NOT byte-reproducible across runs, so
-          # the byte-for-byte match below requires the serial, deterministic build. Keep
-          # identical to ffmpeg-build.yml.
-          make -j1
+          # Build via the SHARED recipe — the SAME native/ffmpeg/build.sh that ffmpeg-build.yml
+          # uses to produce the committed binary, so this independent rebuild can't drift from
+          # it. build.sh is under native/ffmpeg/**, which is in this workflow's path filter, so
+          # any recipe change re-runs this byte-for-byte check against the committed binary.
+          sh "$GITHUB_WORKSPACE/native/ffmpeg/build.sh" "$RUNNER_TEMP/ffmpeg-src"
 
       - name: Reproduction is byte-for-byte + LGPL
         run: |

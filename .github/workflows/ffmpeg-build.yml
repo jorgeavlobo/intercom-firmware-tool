@@ -76,18 +76,9 @@ jobs:
             local dir="$1"
             rm -rf "$dir"; mkdir "$dir"
             tar -xzf ffmpeg.tar.gz -C "$dir" --strip-components=1
-            ( cd "$dir"
-              ./configure \
-                --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
-                --ar="zig ar" --ranlib="zig ranlib" --nm="nm" --host-cc=cc \
-                --enable-cross-compile --arch=arm --target-os=linux --pkg-config=false \
-                --disable-everything --disable-autodetect --disable-doc --disable-debug \
-                --disable-shared --enable-static --enable-small \
-                --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
-                --enable-protocol=file,udp,rtp,rtsp,tcp \
-                --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
-                --extra-cflags="-Os" --extra-ldflags="-static -s" >/dev/null
-              make -j1 >/dev/null )
+            # SHARED recipe — the single source of truth also used by ffmpeg-provenance.yml,
+            # so the two workflows can never drift.
+            sh "$GITHUB_WORKSPACE/native/ffmpeg/build.sh" "$dir" >/dev/null
           }
           # Build TWICE in independent scratch dirs and require byte-identical output BEFORE
           # committing. A refresh commit is pushed with [skip ci] by GITHUB_TOKEN, which does

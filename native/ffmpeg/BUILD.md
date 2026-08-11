@@ -65,49 +65,33 @@ workflow `env`), so a rotated or tampered download can never feed the build.
 
 ## Build recipe
 
-> This mirrors `.github/workflows/ffmpeg-build.yml` (which produces the committed binary)
-> and `.github/workflows/ffmpeg-provenance.yml` (which rebuilds and byte-compares). Keep all
-> three in sync — the provenance job requires the rebuild to be **byte-identical** to the
-> committed binary, so any recipe drift fails CI. FFmpeg's `configure` prunes unreachable
-> components, so a missing dependency surfaces as a configure error, not a silent feature.
+> **The recipe is [`build.sh`](build.sh) — a single source of truth.** Both
+> `.github/workflows/ffmpeg-build.yml` (produces the committed binary) and
+> `.github/workflows/ffmpeg-provenance.yml` (independently rebuilds + byte-compares) invoke
+> the **same** `native/ffmpeg/build.sh`, so their recipes can never drift. Do not duplicate
+> the `./configure`/`make` flags elsewhere — edit `build.sh`. A change to it lives under
+> `native/ffmpeg/**`, which is in the provenance path filter, so provenance rebuilds and
+> byte-compares to the committed binary, failing if the change would alter the bytes.
 
 > **Build outside any git repository.** FFmpeg's `ffbuild/version.sh` runs `git describe`;
 > if the source tree sits inside another repo's worktree, git walks up and stamps *that*
 > repo's commit hash as the ffmpeg version (`ffmpeg version <hash>`), which changes every
-> commit and destroys reproducibility. Extract + build in a scratch dir with no `.git`
-> ancestor (CI uses `$RUNNER_TEMP`); then the version is deterministic.
+> commit and destroys reproducibility. `build.sh` therefore requires the source dir to have
+> no `.git` ancestor (CI extracts under `$RUNNER_TEMP`); then the version is deterministic.
 
 ```sh
-# Inputs (pinned)
-ZIG=0.13.0
-FFMPEG=n7.1.1
-
-export SOURCE_DATE_EPOCH=1700000000
-
-# In a scratch dir OUTSIDE any git worktree (see note above):
-./configure \
-  --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
-  --ar="zig ar" --ranlib="zig ranlib" --nm="nm" \
-  --host-cc=cc \
-  --enable-cross-compile --arch=arm --target-os=linux \
-  --pkg-config=false \
-  --disable-everything \
-  --disable-autodetect --disable-doc --disable-debug \
-  --disable-shared --enable-static --enable-small \
-  --disable-programs --enable-ffmpeg \
-  --disable-asm --disable-stripping \
-  --enable-protocol=file,udp,rtp,rtsp,tcp \
-  --enable-demuxer=sdp,rtsp,rtp \
-  --enable-muxer=rtsp,rtp \
-  --extra-cflags="-Os" \
-  --extra-ldflags="-static -s"
-
-# -j1 (serial), NOT -j"$(nproc)": FFmpeg's parallel build is not byte-reproducible across
-# runs (object/archive ordering follows parallel completion order); the serial build is
-# deterministic, which the byte-for-byte provenance check requires.
-make -j1
-# Output: ./ffmpeg  (statically linked, stripped, byte-reproducible)
+# Inputs (pinned): Zig 0.13.0, FFmpeg n7.1.1 (both SHA-256-verified by the workflows).
+# `zig` must be on PATH. Extract the pinned source into a scratch dir OUTSIDE any git
+# worktree, then run the shared recipe against it:
+sh native/ffmpeg/build.sh "$SRC_DIR"
+# Output: "$SRC_DIR/ffmpeg"  (static armv7 musl, stripped, byte-reproducible)
 ```
+
+`build.sh` runs FFmpeg's `./configure` with `--disable-everything` plus only the
+RTP/SDP→RTSP H.264-copy path, LGPL-only (never `--enable-gpl`/`--enable-nonfree`),
+`--disable-asm`, `--extra-cflags="-Os"` (no `-ffile-prefix-map`), `--extra-ldflags="-static -s"`,
+and `make -j1` (serial — parallel is not byte-reproducible). See the script for the exact,
+authoritative flags.
 
 Notes:
 - **`--extra-cflags="-Os"` only** — deliberately no `-ffile-prefix-map=$(pwd)=.`. That flag's
