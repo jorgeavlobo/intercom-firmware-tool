@@ -16,7 +16,9 @@ every release and referenced from the
 > same documents travel as flat standalone assets on the GitHub **Releases page**
 > (`THIRD-PARTY-NOTICES.md`, `LICENSE.txt`, `SharpExt4-LICENSE.txt`,
 > `lwext4-LICENSE.txt`, `lwext4-BSD-3-Clause-NOTICE.txt`,
-> `DiskPartitionInfo-LICENSE.txt`, `dotnet-runtime-LICENSE.txt`) accompanying it on
+> `DiskPartitionInfo-LICENSE.txt`, `dotnet-runtime-LICENSE.txt`,
+> `btmqttd-THIRD-PARTY-LICENSES.txt`, `ffmpeg-COPYING.LGPLv2.1.txt`,
+> `musl-COPYRIGHT.txt`) accompanying it on
 > the same release. Links to other repository documents (README, `CLEANROOM.md`)
 > are absolute GitHub URLs so they resolve from anywhere.
 
