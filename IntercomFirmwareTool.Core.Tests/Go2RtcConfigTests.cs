@@ -1,3 +1,4 @@
+using System;
 using IntercomFirmwareTool.Core;
 using Xunit;
 
@@ -59,6 +60,82 @@ public class Go2RtcConfigTests
         Assert.Contains("-i /config/go2rtc/frontdoor.sdp", yaml);
         Assert.Contains("-c:v copy", yaml);                 // H.264 passthrough
         Assert.Contains("{output}", yaml);                  // go2rtc RTSP sink placeholder
+    }
+
+    [Fact]
+    public void BuildOnDeviceSdp_is_video_only_and_binds_the_loopback_alias()
+    {
+        string sdp = Go2RtcConfig.BuildOnDeviceSdp(Opts(video: 40000, audio: 40002));
+        // Video only — the vendored on-device ffmpeg has no audio codecs until Phase 3 (#105).
+        Assert.Contains("m=video 40000 RTP/AVP 96", sdp);
+        Assert.DoesNotContain("m=audio", sdp);
+        Assert.Contains("a=rtpmap:96 H264/90000", sdp);
+        Assert.Contains("a=fmtp:96 packetization-mode=1;profile-level-id=42801f", sdp);
+        // Connection pinned to the loopback alias 127.0.0.2 — ingest binds loopback, never the LAN.
+        Assert.Contains("c=IN IP4 127.0.0.2", sdp);
+        Assert.DoesNotContain("0.0.0.0", sdp);
+        Assert.StartsWith("v=0\n", sdp);
+        Assert.EndsWith("\n", sdp);
+        Assert.DoesNotContain("\r", sdp);
+    }
+
+    [Fact]
+    public void BuildOnDeviceYaml_loopback_api_lan_rtsp_with_auth_and_video_only_stream()
+    {
+        string yaml = Go2RtcConfig.BuildOnDeviceYaml(
+            "Front Door", "/usr/sbin/ffmpeg", "/etc/btmqttd/go2rtc/frontdoor.sdp",
+            "camera", "s3cr3t");
+        // Control API + web UI: loopback ONLY, never the LAN.
+        Assert.Contains("api:", yaml);
+        Assert.Contains("listen: \"127.0.0.1:1984\"", yaml);
+        Assert.DoesNotContain("0.0.0.0:1984", yaml);
+        // RTSP: served on the LAN with mandatory auth.
+        Assert.Contains("rtsp:", yaml);
+        Assert.Contains("listen: \":8554\"", yaml);
+        Assert.Contains("username: \"camera\"", yaml);
+        Assert.Contains("password: \"s3cr3t\"", yaml);
+        // Stream: sanitized key, absolute ffmpeg + SDP paths, video-only H.264 copy.
+        Assert.Contains("  frontdoor:", yaml);
+        Assert.Contains("exec:/usr/sbin/ffmpeg", yaml);
+        Assert.Contains("-i /etc/btmqttd/go2rtc/frontdoor.sdp", yaml);
+        Assert.Contains("-an -c:v copy", yaml);
+        Assert.Contains("{output}", yaml);
+        Assert.DoesNotContain("\r", yaml);
+    }
+
+    [Fact]
+    public void BuildOnDeviceYaml_escapes_special_chars_in_credentials()
+    {
+        // A generated/typed credential may contain YAML-special punctuation; double-quoted scalars
+        // must escape a backslash and a double-quote so the file stays valid.
+        string yaml = Go2RtcConfig.BuildOnDeviceYaml(
+            "doorbell", "/usr/sbin/ffmpeg", "/x.sdp", "u\"x", "p\\y");
+        Assert.Contains("username: \"u\\\"x\"", yaml);
+        Assert.Contains("password: \"p\\\\y\"", yaml);
+    }
+
+    [Theory]
+    [InlineData(null, "pass")]
+    [InlineData("", "pass")]
+    [InlineData("user", null)]
+    [InlineData("user", "")]
+    public void BuildOnDeviceYaml_rejects_empty_credentials(string? user, string? pass)
+    {
+        // RTSP is LAN-facing and auth is mandatory (#120): go2rtc skips auth for a blank username, so
+        // an empty credential opens the stream unauthenticated. The builder must refuse it outright.
+        Assert.Throws<ArgumentException>(() =>
+            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", "/x.sdp", user!, pass!));
+    }
+
+    [Theory]
+    [InlineData("u\nx", "pass")]
+    [InlineData("user", "p\rq")]
+    [InlineData("user", "p\r\nq")]
+    public void BuildOnDeviceYaml_rejects_newline_in_credentials(string user, string pass)
+    {
+        // A CR/LF would split the double-quoted YAML scalar and corrupt the file — reject it.
+        Assert.Throws<ArgumentException>(() =>
+            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", "/x.sdp", user, pass));
     }
 
     [Fact]

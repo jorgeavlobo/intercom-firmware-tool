@@ -69,4 +69,34 @@ public class MqttCameraConfTests
         });
         Assert.Contains("CAMERA_TARGET_HOST=''\n", conf);
     }
+
+    [Fact]
+    public void On_device_mode_emits_the_flag_and_leaves_the_target_blank()
+    {
+        // On-device (#120): CAMERA_ONDEVICE=1, and CAMERA_TARGET_HOST stays blank — config.rs pins the
+        // siphon to 127.0.0.2 and ignores the target host in this mode, even if one was set.
+        var conf = MqttInstaller.GenerateConf(new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraTargetHost = "192.168.1.9",   // ignored on-device
+        });
+        Assert.Contains("CAMERA_ONDEVICE=1\n", conf);
+        Assert.Contains("CAMERA_TARGET_HOST=''\n", conf);
+    }
+
+    [Fact]
+    public void On_device_flag_is_gated_on_the_camera_being_enabled()
+    {
+        // Default off-device path emits CAMERA_ONDEVICE=0.
+        var off = MqttInstaller.GenerateConf(new MqttOptions("broker.lan") { CameraEnabled = true });
+        Assert.Contains("CAMERA_ONDEVICE=0\n", off);
+        // On-device requires the media path: a stray on-device flag with the camera OFF reads as 0.
+        var strayOff = MqttInstaller.GenerateConf(new MqttOptions("broker.lan")
+        {
+            CameraEnabled = false,
+            CameraOnDevice = true,
+        });
+        Assert.Contains("CAMERA_ONDEVICE=0\n", strayOff);
+    }
 }
