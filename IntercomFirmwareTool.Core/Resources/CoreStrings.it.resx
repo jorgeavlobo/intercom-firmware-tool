@@ -216,7 +216,7 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
     <value>La destinazione della telecamera deve essere un indirizzo instradabile — non un indirizzo di loopback (127.x.x.x) né l'indirizzo non specificato 0.0.0.0. go2rtc / Home Assistant gira fuori dal citofono.</value>
   </data>
   <data name="Mqtt_CameraRtspCredsRequired" xml:space="preserve">
-    <value>Lo streaming sul dispositivo richiede credenziali RTSP: imposta un nome utente e una password. go2rtc disabilita l'autenticazione quando il nome utente è vuoto, il che esporrebbe lo streaming della telecamera sulla rete locale. Le credenziali devono essere su una sola riga.</value>
+    <value>Lo streaming sul dispositivo richiede credenziali RTSP: imposta un nome utente e una password. go2rtc disabilita l'autenticazione quando il nome utente è vuoto, il che esporrebbe lo streaming della telecamera sulla rete locale. Le credenziali non devono contenere caratteri di controllo (incluse le interruzioni di riga).</value>
   </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} non esiste nell'immagine; impossibile applicare la patch del bridge MQTT.</value>

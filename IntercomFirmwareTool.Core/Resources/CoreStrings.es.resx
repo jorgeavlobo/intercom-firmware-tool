@@ -216,7 +216,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
     <value>El destino de la cámara debe ser una dirección enrutable — no una dirección de loopback (127.x.x.x) ni la dirección no especificada 0.0.0.0. go2rtc / Home Assistant se ejecuta fuera del portero automático.</value>
   </data>
   <data name="Mqtt_CameraRtspCredsRequired" xml:space="preserve">
-    <value>La transmisión en el dispositivo requiere credenciales RTSP: establece un nombre de usuario y una contraseña. go2rtc desactiva la autenticación cuando el nombre de usuario está vacío, lo que expondría la transmisión de la cámara en la red local. Las credenciales deben estar en una sola línea.</value>
+    <value>La transmisión en el dispositivo requiere credenciales RTSP: establece un nombre de usuario y una contraseña. go2rtc desactiva la autenticación cuando el nombre de usuario está vacío, lo que expondría la transmisión de la cámara en la red local. Las credenciales no deben contener caracteres de control (incluidos los saltos de línea).</value>
   </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} no existe en la imagen; no se puede aplicar el parche del puente MQTT.</value>
