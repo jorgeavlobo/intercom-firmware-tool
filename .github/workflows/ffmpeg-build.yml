@@ -1,0 +1,113 @@
+name: ffmpeg binary refresh (#120)
+
+# Deliberate, dispatch-only refresh of the vendored minimal LGPL ffmpeg (issue #120).
+# It builds the binary reproducibly from the pinned, SHA-256-verified FFmpeg source with
+# the pinned, SHA-256-verified Zig, and commits the result (binary + LGPL text). The build
+# is byte-reproducible (no absolute build path leaks into the output — see BUILD.md), so
+# ffmpeg-provenance.yml can then rebuild and require a byte-for-byte match, exactly like
+# btmqttd. Run this only when intentionally bumping the pins/recipe; after it commits,
+# update PayloadBinaries.cs + THIRD_PARTY.md with the printed sha256 + size.
+
+on:
+  workflow_dispatch:
+  # TEMP bootstrap trigger: a dispatch-only workflow that has never run isn't registered
+  # for the dispatch API (404), so this self-path push trigger fires it once to regenerate
+  # the byte-reproducible binary. Removed in the same change that flips provenance to the
+  # byte-for-byte match — this workflow is meant to be dispatch-only.
+  push:
+    paths:
+      - '.github/workflows/ffmpeg-build.yml'
+
+# This job COMMITS the rebuilt binary back to the branch, so it needs write access and the
+# checkout token persisted for the push (unlike the read-only provenance job).
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: 0.13.0
+  FFMPEG_TAG: n7.1.1
+  ZIG_SHA256: d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea
+  FFMPEG_TARBALL_SHA256: f117507dc501f2a6c11f9241d8d0c3213846cfad91764361af37befd6b6c523d
+  SOURCE_DATE_EPOCH: '1700000000'
+  BIN: IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg
+  LIC: IntercomFirmwareTool.Core/Payload/vendor/licenses/ffmpeg-COPYING.LGPLv2.1.txt
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # persist-credentials left at its default (true): this job pushes the rebuilt
+        # binary, so it needs the token in .git/config for `git push`.
+
+      - name: Install Zig ${{ env.ZIG_VERSION }} (pinned + SHA-256 verified — no third-party action)
+        run: |
+          set -euxo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o zig.tar.xz "$url"
+          got="$(sha256sum zig.tar.xz | awk '{print $1}')"
+          if [ "$got" != "$ZIG_SHA256" ]; then
+            echo "::error::zig tarball SHA-256 mismatch: got $got expected $ZIG_SHA256"; exit 1
+          fi
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Build the minimal LGPL ffmpeg from the pinned source
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o ffmpeg.tar.gz \
+            "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
+          got="$(sha256sum ffmpeg.tar.gz | awk '{print $1}')"
+          if [ "$got" != "$FFMPEG_TARBALL_SHA256" ]; then
+            echo "::error::FFmpeg source SHA-256 mismatch: got $got expected $FFMPEG_TARBALL_SHA256"; exit 1
+          fi
+          mkdir ffmpeg-src && tar -xzf ffmpeg.tar.gz -C ffmpeg-src --strip-components=1
+          cd ffmpeg-src
+          # CFLAGS is just -Os: no -ffile-prefix-map, whose value would embed the absolute
+          # build path into FFmpeg's `configuration:` string and break byte-reproducibility.
+          # We strip (-s) + --disable-debug, so no DWARF comp_dir survives, and FFmpeg
+          # compiles with relative __FILE__ paths — the output is path-independent.
+          ./configure \
+            --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
+            --ar="zig ar" --ranlib="zig ranlib" --nm="nm" --host-cc=cc \
+            --enable-cross-compile --arch=arm --target-os=linux --pkg-config=false \
+            --disable-everything --disable-autodetect --disable-doc --disable-debug \
+            --disable-shared --enable-static --enable-small \
+            --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
+            --enable-protocol=file,udp,rtp,rtsp,tcp \
+            --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
+            --extra-cflags="-Os" --extra-ldflags="-static -s"
+          make -j"$(nproc)"
+
+      - name: Verify the rebuilt binary runs on armv7 + is LGPL
+        run: |
+          set -euxo pipefail
+          sudo apt-get update && sudo apt-get install -y qemu-user-static
+          qemu-arm-static ffmpeg-src/ffmpeg -hide_banner -version | tee built.ver
+          if grep -m1 'configuration:' built.ver | grep -Eq -- '--enable-(gpl|nonfree)'; then
+            echo "::error::rebuilt ffmpeg is GPL/nonfree — must be LGPL"; exit 1
+          fi
+
+      - name: Vendor the binary + its LGPL text, then commit
+        run: |
+          set -euxo pipefail
+          # cp over the already-tracked files preserves their committed mode (no spurious
+          # mode change in the diff); both destination paths already exist in the tree.
+          cp -f ffmpeg-src/ffmpeg "$BIN"
+          cp -f ffmpeg-src/COPYING.LGPLv2.1 "$LIC"
+          sha="$(sha256sum "$BIN" | awk '{print $1}')"
+          size="$(stat -c '%s' "$BIN")"
+          us="$(printf '%s' "$size" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"; us="${us//,/_}"
+          echo "REFRESH ffmpeg: sha256=$sha size=$size (PayloadBinaries.cs Length: ${us})"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$BIN" "$LIC"
+          if git diff --cached --quiet; then
+            echo "no change to the vendored ffmpeg — nothing to commit"; exit 0
+          fi
+          git commit -m "#120 Phase 1a: refresh vendored ffmpeg (sha256=${sha}, ${size} bytes) [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
