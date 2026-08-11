@@ -94,9 +94,8 @@ namespace IntercomFirmwareTool.Core
         /// the first-party <see cref="Btmqttd"/>, this is a <b>third-party</b> binary (FFmpeg n7.1.1,
         /// <c>LGPL-2.1-or-later</c>), built per <c>native/ffmpeg/BUILD.md</c> and byte-reproducible
         /// (every input pinned + SHA-verified; <c>ffmpeg-provenance.yml</c> enforces a byte-for-byte
-        /// rebuild match, like btmqttd). Declared + embedded here; the installer wires it in Phase 1c,
-        /// so it is deliberately NOT in <see cref="All"/> yet — the vendored binary lands with no
-        /// change to install behaviour.
+        /// rebuild match, like btmqttd). Installed by the on-device media server (Phase 1c) — it is
+        /// in <see cref="All"/> alongside <see cref="Go2Rtc"/>.
         /// </summary>
         public static readonly ArmBinary Ffmpeg = new(
             Name: "ffmpeg",
@@ -113,6 +112,30 @@ namespace IntercomFirmwareTool.Core
             AdditionalLicenseResourceNames = new[] { MuslCopyrightResource },
         };
 
+        /// <summary>
+        /// <c>go2rtc</c> — the on-device streaming server (issue #120): it reads the panel's
+        /// cleartext RTP (fanned to <c>127.0.0.2</c> by <see cref="Btmqttd"/>) via a generated SDP,
+        /// runs <see cref="Ffmpeg"/> to <b>copy</b> the H.264 into RTSP, and serves it to Home
+        /// Assistant as a native Generic Camera — no go2rtc on the HA side. This is a
+        /// <b>third-party, redistributed upstream prebuilt</b> (go2rtc <c>v1.9.14</c>, <c>MIT</c>,
+        /// AlexxIT/go2rtc): a statically-linked Go binary with no libc dependency. Unlike the
+        /// byte-reproducible <see cref="Ffmpeg"/>/<see cref="Btmqttd"/>, it is <i>not</i> rebuilt
+        /// from source here — its exact upstream release is pinned (tag + asset + SHA-256 in
+        /// <c>native/go2rtc/pins.env</c>) and <c>go2rtc-provenance.yml</c> re-downloads that pinned
+        /// asset and byte-compares it to this committed copy.
+        /// </summary>
+        public static readonly ArmBinary Go2Rtc = new(
+            Name: "go2rtc",
+            InstallPath: "/usr/sbin/go2rtc",
+            Length: 4_588_084,
+            Sha256Hex: "4d7e1639af5a2722a28e864468fd8099b3c1682565446c798bf9e3b38fde12e4",
+            ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.go2rtc",
+            LicenseResourceName:
+                "IntercomFirmwareTool.Core.licenses.go2rtc-LICENSE.txt",
+            // Statically-linked Go binary — no musl/libc objects linked in, so a single MIT
+            // notice suffices (no AdditionalLicenseResourceNames, unlike ffmpeg/btmqttd).
+            LicenseSpdx: "MIT");
+
         /// <summary>The complete third-party notice (Markdown).</summary>
         public const string ThirdPartyNoticeResourceName =
             "IntercomFirmwareTool.Core.Payload.vendor.THIRD_PARTY.md";
@@ -121,7 +144,7 @@ namespace IntercomFirmwareTool.Core
         // Array.AsReadOnly so the exposed IReadOnlyList can't be cast back to
         // ArmBinary[] and mutated (matching FirmwareRegistry.Known's convention).
         public static readonly IReadOnlyList<ArmBinary> All =
-            Array.AsReadOnly(new[] { Btmqttd });
+            Array.AsReadOnly(new[] { Btmqttd, Ffmpeg, Go2Rtc });
 
         /// <summary>
         /// Return the exact bytes of <paramref name="binary"/>, after verifying

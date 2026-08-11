@@ -75,6 +75,19 @@
       <Link>licenses\ffmpeg-COPYING.LGPLv2.1.txt</Link>
       <LogicalName>IntercomFirmwareTool.Core.licenses.ffmpeg-COPYING.LGPLv2.1.txt</LogicalName>
     </EmbeddedResource>
+    <!-- go2rtc (v1.9.14) for the on-device media server (#120, Phase 1c) — a THIRD-PARTY,
+         redistributed upstream prebuilt (statically-linked Go, MIT; no musl/libc linked in),
+         pinned in native/go2rtc/pins.env and byte-verified by go2rtc-provenance.yml. Verified
+         on read (length + SHA-256) by PayloadBinaries; its MIT text is Link-ed from the repo-root
+         licenses/ dir (see above). -->
+    <None Remove="Payload\vendor\armhf\go2rtc" />
+    <EmbeddedResource Include="Payload\vendor\armhf\go2rtc">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.armhf.go2rtc</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\licenses\go2rtc-LICENSE.txt">
+      <Link>licenses\go2rtc-LICENSE.txt</Link>
+      <LogicalName>IntercomFirmwareTool.Core.licenses.go2rtc-LICENSE.txt</LogicalName>
+    </EmbeddedResource>
     <!-- musl's MIT license: BOTH the ffmpeg and btmqttd binaries statically link musl libc
          objects (via zig cc / the Rust musl target), whose MIT notice is required (musl's
          exception only waives headers/CRT). Sourced from the pinned zig distribution and

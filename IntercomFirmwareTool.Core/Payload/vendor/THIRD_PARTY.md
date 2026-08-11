@@ -1,12 +1,16 @@
-# Third-party binary shipped by the MQTT bridge installer
+# Third-party binaries shipped by the MQTT bridge installer
 
-The optional **MQTT bridge** feature (off by default) installs one prebuilt ARM
-binary into the firmware image, because it is **not** present in the factory
-BTicino C300X/C100X firmware:
+The optional **MQTT bridge** feature (off by default) installs prebuilt ARM
+binaries into the firmware image, because they are **not** present in the factory
+BTicino C300X/C100X firmware. The bridge itself installs **`btmqttd`**; enabling the
+**on-device camera** (issue #120, Phase 1c) additionally installs **`ffmpeg`** and
+**`go2rtc`**:
 
 | Tool | Installed as | Purpose |
 |---|---|---|
 | `btmqttd` | `/usr/sbin/btmqttd` (`0775 root:root`) | the single-connection MQTT bridge daemon (issue #32) — OpenWebNet bus monitor → MQTT, MQTT → gateway command dispatch, front-panel keypad → MQTT, Home Assistant discovery, TLS, atomic birth/will availability |
+| `ffmpeg` | `/usr/sbin/ffmpeg` (`0775 root:root`) | minimal **LGPL** FFmpeg `n7.1.1` — reads the panel's RTP via an SDP and **copies** the H.264 into RTSP for `go2rtc` (on-device camera, #120); no decode/encode |
+| `go2rtc` | `/usr/sbin/go2rtc` (`0775 root:root`) | on-device streaming server (`v1.9.14`, **MIT**) — serves the camera as RTSP to Home Assistant as a native Generic Camera, with no HA-side go2rtc (#120) |
 
 `btmqttd` is **our own program** (its source lives in this repository at
 [`native/btmqttd/`](../../../native/btmqttd), built per
@@ -19,10 +23,9 @@ userland tools those scripts required: **`jq`** (JSON, now done natively with
 `evdev` crate). Removing `jq`/`evtest` also removes their copyleft obligations
 (`evtest` was GPL-2.0-or-later; the static `jq` bundled LGPL-2.1 glibc): the
 **MQTT bridge** (`btmqttd` + its scripts) no longer carries any GPL/LGPL
-component. (Separately, this assembly does embed the **LGPL-2.1** `ffmpeg` for
-the on-device camera — see the `ffmpeg` section below. It is embedded now but is
-**not yet written to the device**; the on-device camera install lands in a later
-phase (1c). Its LGPL notice + source are documented there.)
+component. (Separately, this assembly also embeds the **LGPL-2.1** `ffmpeg` and the
+**MIT** `go2rtc` for the on-device camera — installed with it in Phase 1c (#120);
+their notices + provenance are documented in the `ffmpeg` and `go2rtc` sections below.)
 
 `btmqttd` is a **statically-linked musl** binary, so it needs no runtime
 interpreter, no shared libraries, and none of the device tools the shell bridge
@@ -185,10 +188,10 @@ corresponds to the shipped binary; and (2) the scripts that control its configur
 compilation as `ffmpeg-n7.1.1-build-recipe.tar.gz` (`build.sh` + `pins.env` + `BUILD.md`), so
 recipients have the exact recipe immutably, not via a mutable repo link. No changes to FFmpeg
 source were made. As with `btmqttd`, the embedded resource is compiled into `IntercomFirmwareTool.Core`
-unconditionally. In **Phase 1a** (this change) the firmware image does **not** contain
-`ffmpeg`: it is not in `PayloadBinaries.All`, so `MqttInstaller` never writes it to the
-device. The firmware image carries `ffmpeg` only once the on-device camera install lands
-in **Phase 1c** (#120).
+unconditionally. The **firmware image** carries `ffmpeg` only when the user enables the on-device
+camera: as of **Phase 1c** (#120) `ffmpeg` is in `PayloadBinaries.All`, so `MqttInstaller` writes it
+into the image alongside `go2rtc` when the camera is enabled (an image built without it carries no
+third-party binary).
 
 ### musl libc (MIT) — statically linked
 
@@ -199,3 +202,51 @@ must ship with the distribution. It does — [`licenses/musl-COPYRIGHT.txt`](../
 sourced from the pinned Zig distribution (which bundles musl) and embedded in the assembly.
 The same upstream musl license also covers `btmqttd`'s statically-linked musl, so both
 binaries share this one notice.
+
+---
+
+## `go2rtc` — on-device streaming server (issue #120)
+
+Like `ffmpeg`, **`go2rtc` is genuinely third-party** — but unlike the binaries we build
+ourselves, it is a **redistributed upstream prebuilt**: the official `go2rtc_linux_arm`
+release asset of [go2rtc](https://github.com/AlexxIT/go2rtc) **`v1.9.14`** (a statically-linked
+Go binary, **MIT**), embedded verbatim in `IntercomFirmwareTool.Core`. The on-device media
+server (#120) runs it to read the panel's cleartext RTP (fanned to `127.0.0.2` by `btmqttd`)
+via a generated SDP, invoke `ffmpeg` to **copy** the H.264 into RTSP, and serve that stream to
+Home Assistant as a native Generic Camera — so no go2rtc runs on the Home Assistant side.
+
+### Provenance & integrity
+
+| Field | `go2rtc` |
+|---|---|
+| File | `armhf/go2rtc` |
+| Size | 4,588,084 bytes |
+| SHA-256 | `4d7e1639af5a2722a28e864468fd8099b3c1682565446c798bf9e3b38fde12e4` |
+| ELF | 32-bit LSB, ARM EABI5, **statically linked** (no libc dependency), UPX-compressed |
+| Upstream | go2rtc `v1.9.14` — AlexxIT/go2rtc release asset `go2rtc_linux_arm` |
+| Build | upstream's own Go release build — **not** rebuilt from source here |
+| License | **MIT** (go2rtc). The static Go binary also bundles third-party Go modules + the Go runtime (BSD-3-Clause), all under permissive licenses per upstream. |
+| License text | [`licenses/go2rtc-LICENSE.txt`](../../../licenses/go2rtc-LICENSE.txt) |
+| SPDX expression | `MIT` |
+
+The SHA-256 + size are enforced on read by `PayloadBinaries`. Because go2rtc is a **prebuilt
+upstream release** (not reproducible-from-source in this repo), its provenance model is
+**pin-and-verify** rather than a byte-for-byte rebuild: the exact release tag, asset name and
+SHA-256 are pinned in [`native/go2rtc/pins.env`](../../../native/go2rtc/pins.env), and
+[`go2rtc-provenance.yml`](../../../.github/workflows/go2rtc-provenance.yml) on every PR
+**re-downloads the pinned release asset and byte-compares it** to this committed copy, in
+addition to the metadata-consistency check (committed binary ↔ this table ↔ `PayloadBinaries`).
+A mismatch means the vendored binary drifted from the pinned upstream release.
+
+### MIT obligations
+
+Redistributing go2rtc requires shipping its **MIT license text** — done, in
+[`licenses/go2rtc-LICENSE.txt`](../../../licenses/go2rtc-LICENSE.txt) (© 2022 Alexey Khit), which
+travels with the assembly. MIT imposes no source-offer or copyleft obligation. As a statically-linked
+Go binary, go2rtc bundles a number of third-party Go modules (permissive — MIT/BSD/Apache-2.0 — per
+upstream) and the BSD-3-Clause Go runtime; this change ships go2rtc's own project license, and an
+aggregated per-module dependency-notice bundle (as generated for `btmqttd`'s crates) can be added as a
+follow-up if a fuller notice set is desired. As with the other binaries, the embedded resource is
+compiled into `IntercomFirmwareTool.Core` unconditionally; the **firmware image** carries `go2rtc`
+only when the user enables the on-device camera (it is in `PayloadBinaries.All`, written by
+`MqttInstaller` in Phase 1c).

@@ -1,0 +1,109 @@
+name: go2rtc binary provenance (#120)
+
+# Guards the vendored, third-party go2rtc binary (issue #120) in two tiers, both FATAL.
+# Unlike ffmpeg/btmqttd, go2rtc is a PREBUILT upstream Go release binary (not reproducible
+# from source in this repo), so the model is PIN-AND-VERIFY rather than byte-for-byte rebuild:
+#   - metadata: the committed binary's SHA-256 + size must match PayloadBinaries.cs AND
+#     THIRD_PARTY.md (catches a binary or metadata changed without the other).
+#   - upstream equality: re-download the EXACT pinned release asset (tag + asset name from
+#     native/go2rtc/pins.env), assert its SHA-256 equals the pin, and require it to be
+#     byte-for-byte identical to the committed binary. A mismatch means the vendored binary
+#     drifted from the pinned upstream release.
+# Execution on the target is validated on real hardware (see issue #120); qemu-user is not a
+# reliable gate for a UPX-compressed Go binary, so no qemu run is asserted here.
+
+on:
+  pull_request:
+    paths:
+      - 'native/go2rtc/**'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/go2rtc'
+      - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
+      - 'IntercomFirmwareTool.Core/IntercomFirmwareTool.Core.csproj'
+      - '.github/workflows/go2rtc-provenance.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'native/go2rtc/**'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/go2rtc'
+      - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
+      - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
+      - 'IntercomFirmwareTool.Core/IntercomFirmwareTool.Core.csproj'
+      - '.github/workflows/go2rtc-provenance.yml'
+  workflow_dispatch:
+  # Reusable: release.yml calls this as a gating job so a RELEASE (a v* tag, not covered by the
+  # pull_request/push triggers) can't publish a drifted go2rtc alongside its notices.
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Queue, don't cancel — matches ffmpeg-provenance: when release.yml calls this as a required
+  # gate, two releases of different versions from the same branch share this group; cancelling
+  # would silently skip a release's publish gate.
+  cancel-in-progress: false
+
+# The verify step uses `set -o pipefail` (a bash builtin), so declare bash explicitly rather than
+# depending on the runner's default shell staying bash.
+defaults:
+  run:
+    shell: bash
+
+env:
+  BIN: IntercomFirmwareTool.Core/Payload/vendor/armhf/go2rtc
+
+jobs:
+  provenance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Read-only job (no push) — don't persist the token in .git/config (zizmor artipacked).
+          persist-credentials: false
+
+      - name: Load pinned upstream release (native/go2rtc/pins.env)
+        run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' native/go2rtc/pins.env >> "$GITHUB_ENV"
+
+      - name: Metadata integrity (committed SHA-256 + size ↔ PayloadBinaries.cs ↔ THIRD_PARTY.md)
+        run: |
+          set -euxo pipefail
+          sha="$(sha256sum "$BIN" | awk '{print $1}')"
+          size="$(stat -c '%s' "$BIN")"
+          echo "committed go2rtc: sha256=$sha size=$size"
+          # The committed bytes must match the pinned SHA-256 + size, so pins.env, the binary,
+          # and the docs can never silently disagree.
+          [ "$sha" = "$GO2RTC_SHA256" ] || { echo "::error::committed SHA-256 ($sha) != pinned GO2RTC_SHA256 ($GO2RTC_SHA256)"; exit 1; }
+          [ "$size" = "$GO2RTC_SIZE" ] || { echo "::error::committed size ($size) != pinned GO2RTC_SIZE ($GO2RTC_SIZE)"; exit 1; }
+          pb=IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
+          tp=IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md
+          grep -q "$sha" "$pb" || { echo "::error::SHA-256 not found in PayloadBinaries.cs"; exit 1; }
+          grep -q "$sha" "$tp" || { echo "::error::SHA-256 not found in THIRD_PARTY.md"; exit 1; }
+          # Verify the SIZE in both files (respective formats). Group into thousands with commas,
+          # then derive the underscore form by substitution — do NOT run the same sed with '_' as
+          # the separator ('_' is a word char, so the \B/\> boundary never stops re-matching and
+          # the ':a;…;ta' loop spins forever; GNU sed 4.9).
+          cs="$(printf '%s' "$size" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"   # commas (THIRD_PARTY.md)
+          us="${cs//,/_}"                                                  # underscores (C# literal)
+          grep -q "Length: ${us}," "$pb" || { echo "::error::size ${us} not recorded in PayloadBinaries.cs"; exit 1; }
+          grep -q "${cs} bytes" "$tp"    || { echo "::error::size ${cs} not recorded in THIRD_PARTY.md"; exit 1; }
+
+      - name: Upstream equality (re-download the pinned release asset + byte-for-byte compare)
+        run: |
+          set -euxo pipefail
+          url="https://github.com/AlexxIT/go2rtc/releases/download/${GO2RTC_TAG}/${GO2RTC_ASSET}"
+          echo "fetching pinned upstream asset: $url"
+          curl -fsSL --retry 3 --retry-delay 5 -o upstream.bin "$url"
+          got="$(sha256sum upstream.bin | awk '{print $1}')"
+          echo "downloaded sha256=$got"
+          # (1) the fetched asset must match the pinned digest — a rotated/tampered upstream asset fails.
+          if [ "$got" != "$GO2RTC_SHA256" ]; then
+            echo "::error::pinned upstream asset SHA-256 mismatch: got $got expected $GO2RTC_SHA256 (upstream release asset changed, or the pin is wrong)"; exit 1
+          fi
+          # (2) the committed binary must be byte-for-byte the pinned upstream asset (SHA logged above
+          # for diagnostics; the gate is a literal cmp).
+          if ! cmp -s "$BIN" upstream.bin; then
+            echo "::error::committed go2rtc is not byte-identical to the pinned upstream release ${GO2RTC_TAG}/${GO2RTC_ASSET} — the vendored binary drifted from the pin. Re-vendor from the pinned release."; exit 1
+          fi
+          echo "Pin-and-verify provenance OK (committed == pinned upstream release ${GO2RTC_TAG}, sha256 $got)."

@@ -53,8 +53,15 @@ jobs:
   verify-ffmpeg:
     uses: ./.github/workflows/ffmpeg-provenance.yml
 
+  # Same gate for the vendored go2rtc binary (#120), run on the release ref. go2rtc is a prebuilt
+  # upstream release (not rebuilt from source), so this is pin-and-verify: it re-downloads the
+  # pinned release asset and requires the committed binary to be byte-identical, so a release can
+  # never publish a go2rtc that drifted from its pinned upstream. Publishing `needs:` this too.
+  verify-go2rtc:
+    uses: ./.github/workflows/go2rtc-provenance.yml
+
   release:
-    needs: verify-ffmpeg
+    needs: [verify-ffmpeg, verify-go2rtc]
     runs-on: windows-latest
     permissions:
       contents: write # create the (draft) Release + upload assets
