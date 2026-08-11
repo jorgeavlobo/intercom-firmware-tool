@@ -96,32 +96,33 @@ namespace IntercomFirmwareTool.App
         // (issue #111 UX; null = none stashed yet).
         private string? _lastCameraHostOverride;
 
-        // On-device media server (issue #120): the fixed RTSP username + a strong random password.
-        // The password is generated on first use and cached, so the "Show go2rtc config" preview and the
-        // build that follows it install the SAME credential. It is a PER-INSTALL secret: once written into
-        // an image the cached value is RETAINED (so a build-then-"Show go2rtc config" still shows the
-        // credential actually installed on that unit — the only way to recover it), and the NEXT build
-        // mints a fresh, distinct one so two units built this session never share a stream password.
+        // On-device media server (issue #120): the fixed RTSP username + a strong random per-install
+        // password. Two slots keep the credential both RECOVERABLE and DISTINCT per unit:
+        //  - _cameraRtspInstalled: the credential of the last SUCCESSFULLY-built on-device image — what
+        //    "Show go2rtc config" displays so the user can recover the secret on that unit. Updated ONLY
+        //    after a build passes RoundTripAllPass, so a later FAILED build never destroys it.
+        //  - _cameraRtspCandidate: the credential the NEXT build will install (generated lazily; a preview
+        //    and the build that follows it share it). Promoted to _installed and cleared on a successful
+        //    build, so the next unit gets a fresh, distinct password.
         private const string CameraRtspUsername = "camera";
-        private string? _cameraRtspPass;
-        private bool _cameraRtspPassInstalled;   // the cached password has been written into an image
-        private string CameraRtspPassword() => _cameraRtspPass ??= MqttInstaller.GenerateRtspPassword();
+        private string? _cameraRtspInstalled;
+        private string? _cameraRtspCandidate;
 
-        /// <summary>Record that the cached on-device RTSP password was written into a built image. It is
-        /// RETAINED (so a build-then-"Show go2rtc config" shows the installed credential), but the next
-        /// build snapshot mints a fresh one — see <see cref="StartCameraRtspSnapshot"/>.</summary>
-        private void MarkCameraRtspPasswordInstalled() => _cameraRtspPassInstalled = true;
+        /// <summary>The candidate on-device RTSP password the NEXT build will install (generated once,
+        /// stable across a preview and the build that follows it).</summary>
+        private string CameraRtspCandidate() => _cameraRtspCandidate ??= MqttInstaller.GenerateRtspPassword();
 
-        /// <summary>Begin a new build's credential snapshot: if the cached password was already installed
-        /// in a previous image, discard it so THIS build generates a fresh, distinct per-install secret.
-        /// A preview shown before this build shares the same fresh value (it reads the same cache).</summary>
-        private void StartCameraRtspSnapshot()
+        /// <summary>The password "Show go2rtc config" should display: the last successfully-installed
+        /// credential if there is one (so it stays recoverable — even after an unrelated later build
+        /// fails), otherwise the pending candidate the first build will install.</summary>
+        private string CameraRtspPasswordForGuide() => _cameraRtspInstalled ?? CameraRtspCandidate();
+
+        /// <summary>After a successful on-device build: promote the built candidate to "installed" (what
+        /// the guide now shows) and clear the candidate so the NEXT build mints a fresh, distinct one.</summary>
+        private void OnCameraRtspPasswordInstalled()
         {
-            if (_cameraRtspPassInstalled)
-            {
-                _cameraRtspPass = null;
-                _cameraRtspPassInstalled = false;
-            }
+            _cameraRtspInstalled = _cameraRtspCandidate;
+            _cameraRtspCandidate = null;
         }
 
         // Active LAN broker discovery (#43, follow-up 2). mDNS runs in the background at
@@ -621,9 +622,11 @@ namespace IntercomFirmwareTool.App
         /// the RTSP password up front so the build and the shown Home Assistant URL use the same value.</summary>
         private void ApplyCameraOnDeviceMode()
         {
-            // Guard against calls before InitializeComponent has created the controls.
+            // Guard against calls before InitializeComponent has created the controls. Include every
+            // control dereferenced unconditionally below (LblMqttCameraTarget too) — a Checked/Unchecked
+            // handler can fire mid-XAML-parse, so a control declared later may still be null (Copilot).
             if (ChkMqttCameraOnDevice is null || TxtMqttCameraTarget is null
-                || ChkMqttCameraHostOverride is null) return;
+                || ChkMqttCameraHostOverride is null || LblMqttCameraTarget is null) return;
 
             bool onDevice = ChkMqttCameraOnDevice.IsChecked == true;
             var hostVis = onDevice ? Visibility.Collapsed : Visibility.Visible;
@@ -644,7 +647,7 @@ namespace IntercomFirmwareTool.App
 
             // Generate + cache the credential the moment on-device is chosen, so it is stable for both
             // the build (BuildMqttOptions) and the "Show go2rtc config" guide.
-            if (onDevice) _ = CameraRtspPassword();
+            if (onDevice) _ = CameraRtspCandidate();
         }
 
         /// <summary>"Use a different go2rtc host": unlock the target field for a manual (IPv4) entry.
@@ -775,10 +778,11 @@ namespace IntercomFirmwareTool.App
                     ? NullIfEmpty(TxtMqttCameraTarget.Text.Trim()) : null,
                 CameraVideoPort = vp,
                 CameraAudioPort = ap,
-                // On-device RTSP credentials: the same generated password the build will install, so the
-                // shown Home Assistant URL matches what is written to the panel.
+                // On-device RTSP credentials for the guide: the last-installed credential if a unit was
+                // already built (so the shown URL recovers that unit's secret), else the pending candidate
+                // the first build will install.
                 CameraRtspUser = CameraRtspUsername,
-                CameraRtspPass = onDevice ? CameraRtspPassword() : null,
+                CameraRtspPass = onDevice ? CameraRtspPasswordForGuide() : null,
             };
             // On-device: nothing to paste — show the Home Assistant RTSP URL + credentials, using the
             // EXACT stream name the installer writes (MqttInstaller.OnDeviceStreamName), NOT the HA node
@@ -1685,10 +1689,6 @@ namespace IntercomFirmwareTool.App
             mqttOpts = null;
             if (!MqttEnabled) return true;
 
-            // Starting a new build: if the cached on-device RTSP password was already written into a
-            // previous image, mint a fresh one for this build so each unit gets a distinct credential.
-            StartCameraRtspSnapshot();
-
             string? caPem = null, certPem = null, keyPem = null;
             if (!TryReadPem(_mqttCaPath, out caPem)) return false;
             if (!TryReadPem(_mqttCertPath, out certPem)) return false;
@@ -1798,12 +1798,12 @@ namespace IntercomFirmwareTool.App
                     ? NullIfEmpty(TxtMqttCameraTarget.Text.Trim()) : null,
                 CameraVideoPort = camVideoPort,
                 CameraAudioPort = camAudioPort,
-                // On-device RTSP credentials (#120): a fixed username + a strong random password
-                // generated once per session. Only meaningful on-device (Core ignores them otherwise),
-                // so the password is generated only when on-device is on.
+                // On-device RTSP credentials (#120): a fixed username + the candidate per-install password
+                // this build will install. Only meaningful on-device (Core ignores them otherwise). On a
+                // successful build it is promoted to "installed" so the next build mints a fresh one.
                 CameraRtspUser = CameraRtspUsername,
                 CameraRtspPass = (ChkMqttCamera.IsChecked == true && ChkMqttCameraOnDevice.IsChecked == true)
-                    ? CameraRtspPassword() : null,
+                    ? CameraRtspCandidate() : null,
                 // Never persist hi-res for a model that lacks the branch (the Classe 100X): even if the
                 // radio were somehow checked, force low-res so the build can't produce a black camera.
                 CameraHiRes = RbMqttCameraHiRes.IsChecked == true && CameraModelSupportsHiRes,

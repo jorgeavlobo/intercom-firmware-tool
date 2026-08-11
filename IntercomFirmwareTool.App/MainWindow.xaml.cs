@@ -1683,11 +1683,11 @@ namespace IntercomFirmwareTool.App
             }
             else if (built?.RoundTripAllPass == true)
             {
-                // A distinct RTSP credential per built image (#120): mark the cached password installed so
-                // the NEXT build mints a fresh one (two units built in one session must not share a stream
-                // password). It is RETAINED, not cleared, so a build-then-"Show go2rtc config" still shows
-                // the credential actually written to this unit (the only way to recover it).
-                if (mqttOpts?.CameraOnDevice == true) MarkCameraRtspPasswordInstalled();
+                // A distinct RTSP credential per built image (#120): promote this build's candidate to
+                // "installed" (what "Show go2rtc config" now shows, so the just-built unit's secret stays
+                // recoverable) and clear the candidate so the NEXT build mints a fresh one. Only on success,
+                // so a later failed build never destroys a previously-installed credential.
+                if (mqttOpts?.CameraOnDevice == true) OnCameraRtspPasswordInstalled();
                 MessageBox.Show(this,
                     LF("Fmt_Msg_BuildComplete", built.OutputPath),
                     L("Cap_BuildComplete"), MessageBoxButton.OK, MessageBoxImage.Information);
