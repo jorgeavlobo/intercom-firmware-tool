@@ -61,10 +61,11 @@ jobs:
         run: |
           set -euo pipefail
           # The shipped assembly embeds the LGPL FFmpeg binary, so every release must be
-          # ACCOMPANIED by its complete corresponding source (LGPL-2.1, via GPL §3/§6) — not merely
-          # a link to an upstream tag that can move or disappear. Download the SAME pinned,
-          # SHA-256-verified source the build uses (single source: native/ffmpeg/pins.env), so the
-          # shipped source provably matches the vendored binary, then ship it as a release asset +
+          # ACCOMPANIED by its complete corresponding source (LGPL-2.1's corresponding-source
+          # requirement) — not merely a link to an upstream tag that can move or disappear. Download
+          # the SAME pinned, SHA-256-verified source the build uses (single source:
+          # native/ffmpeg/pins.env), so the shipped source provably matches the vendored binary,
+          # then ship it as a release asset +
           # inside both ZIPs — exactly like SharpExt4's GPL corresponding source. (No modifications
           # were made to FFmpeg; the build recipe is native/ffmpeg/BUILD.md, also in the repo.)
           tag="$(grep -E '^FFMPEG_TAG=' native/ffmpeg/pins.env | cut -d= -f2)"
