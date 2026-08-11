@@ -149,8 +149,8 @@ whole binary is LGPL. No decoders/encoders are built.
 | Field | `ffmpeg` |
 |---|---|
 | File | `armhf/ffmpeg` |
-| Size | 2,024,448 bytes |
-| SHA-256 | `14b66d68d017853348dacad8474868503afef57a7022c97941c3ab017415c9f4` |
+| Size | 2,024,432 bytes |
+| SHA-256 | `03ceacf28bcd54de19c9f813cf558480834f981635659f359839aa6023ba4ecf` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
 | Upstream | FFmpeg `n7.1.1` (release tag) |
