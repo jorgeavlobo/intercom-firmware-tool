@@ -61,9 +61,13 @@ jobs:
           grep -q "$sha" "$pb" || { echo "::error::SHA-256 not found in PayloadBinaries.cs"; exit 1; }
           grep -q "$sha" "$tp" || { echo "::error::SHA-256 not found in THIRD_PARTY.md"; exit 1; }
           # Also verify the SIZE in both files (in their respective formats) matches the
-          # actual binary, so metadata size can't drift undetected.
-          us="$(printf '%s' "$size" | sed ':a;s/\B[0-9]\{3\}\>/_&/;ta')"   # 2_025_024
+          # actual binary, so metadata size can't drift undetected. Group into thousands
+          # with commas, then derive the underscore form by substitution — do NOT run the
+          # same sed with '_' as the separator: '_' is a word character, so it never forms
+          # the \B/\> boundary that stops the group from re-matching, and the ':a;…;ta'
+          # loop spins forever (GNU sed 4.9).
           cs="$(printf '%s' "$size" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"   # 2,025,024
+          us="${cs//,/_}"                                                  # 2_025_024
           grep -q "Length: ${us}," "$pb" || { echo "::error::size ${us} not recorded in PayloadBinaries.cs"; exit 1; }
           grep -q "${cs} bytes" "$tp"    || { echo "::error::size ${cs} not recorded in THIRD_PARTY.md"; exit 1; }
           # Record the committed size for the functional-equivalence check below.
