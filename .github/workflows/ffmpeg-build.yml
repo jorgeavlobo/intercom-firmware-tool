@@ -28,11 +28,14 @@ env:
   # native/ffmpeg/pins.env (loaded in the first step below), shared with ffmpeg-provenance.yml
   # so they can't drift between the two workflows. Only workflow-specific paths live here.
   BIN: IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg
-  LIC: IntercomFirmwareTool.Core/Payload/vendor/licenses/ffmpeg-COPYING.LGPLv2.1.txt
+  # The third-party license texts live in the repo-root licenses/ dir (their single canonical
+  # home, shared with THIRD-PARTY-NOTICES.md + the release bundle); the .csproj Link-embeds
+  # them from there. This refresh rewrites them in place.
+  LIC: licenses/ffmpeg-COPYING.LGPLv2.1.txt
   # musl's own license: zig cc statically links musl libc objects into the binary, and
   # musl's MIT exception covers only headers/CRT — the linked libc.a objects still require
   # the notice. Sourced from the pinned zig distribution (which bundles musl).
-  MUSL_LIC: IntercomFirmwareTool.Core/Payload/vendor/licenses/musl-COPYRIGHT.txt
+  MUSL_LIC: licenses/musl-COPYRIGHT.txt
 
 jobs:
   refresh:

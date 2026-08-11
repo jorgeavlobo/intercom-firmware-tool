@@ -46,7 +46,7 @@ namespace IntercomFirmwareTool.Core
     /// Rust daemon whose bundled crates are all permissive (MIT / Apache-2.0 / ISC /
     /// BSD-3-Clause / Unicode-3.0 — no copyleft). See
     /// <c>Payload/vendor/THIRD_PARTY.md</c> for provenance and integrity data, and
-    /// <c>Payload/vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt</c> for the
+    /// <c>licenses/btmqttd-THIRD-PARTY-LICENSES.txt</c> (repo-root licenses/ dir) for the
     /// aggregated dependency license texts.
     /// </summary>
     public static class PayloadBinaries
@@ -58,7 +58,7 @@ namespace IntercomFirmwareTool.Core
         /// libc.a objects require the notice. The same upstream license text covers both.
         /// </summary>
         private const string MuslCopyrightResource =
-            "IntercomFirmwareTool.Core.Payload.vendor.licenses.musl-COPYRIGHT.txt";
+            "IntercomFirmwareTool.Core.licenses.musl-COPYRIGHT.txt";
 
         /// <summary>
         /// <c>btmqttd</c> — the single-connection MQTT bridge daemon (issue #32),
@@ -76,7 +76,7 @@ namespace IntercomFirmwareTool.Core
             Sha256Hex: "4dfad4661fddc488ccb438217daca58d8b8afaa2725832eed8cfc9ef3bd75ed4",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.btmqttd",
             LicenseResourceName:
-                "IntercomFirmwareTool.Core.Payload.vendor.licenses.btmqttd-THIRD-PARTY-LICENSES.txt",
+                "IntercomFirmwareTool.Core.licenses.btmqttd-THIRD-PARTY-LICENSES.txt",
             // The static binary bundles ~65 Rust crates; the mandatory notices span
             // MIT, Apache-2.0, ISC (ring/webpki/untrusted), BSD-3-Clause (subtle) and
             // Unicode-3.0 (unicode-ident). All texts are in the aggregated notice file.
@@ -105,7 +105,7 @@ namespace IntercomFirmwareTool.Core
             Sha256Hex: "14b66d68d017853348dacad8474868503afef57a7022c97941c3ab017415c9f4",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.ffmpeg",
             LicenseResourceName:
-                "IntercomFirmwareTool.Core.Payload.vendor.licenses.ffmpeg-COPYING.LGPLv2.1.txt",
+                "IntercomFirmwareTool.Core.licenses.ffmpeg-COPYING.LGPLv2.1.txt",
             // FFmpeg core is LGPL-2.1; the static binary also links musl libc (MIT), hence
             // the compound expression and the extra musl notice below.
             LicenseSpdx: "LGPL-2.1-or-later AND MIT")

@@ -255,11 +255,12 @@ jobs:
             # Embedded ARM binaries: IntercomFirmwareTool.Core embeds btmqttd + ffmpeg as
             # resources, so the shipped DLL distributes them — their notices must travel with
             # every release. btmqttd's aggregated crate notice, ffmpeg's LGPL-2.1 text, and the
-            # shared musl-libc MIT COPYRIGHT (both binaries statically link musl). See
+            # shared musl-libc MIT COPYRIGHT (both binaries statically link musl) live in the
+            # same repo-root licenses/ dir as the others. See
             # IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md (issues #72, #120).
-            'IntercomFirmwareTool.Core/Payload/vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt',
-            'IntercomFirmwareTool.Core/Payload/vendor/licenses/ffmpeg-COPYING.LGPLv2.1.txt',
-            'IntercomFirmwareTool.Core/Payload/vendor/licenses/musl-COPYRIGHT.txt'
+            'licenses/btmqttd-THIRD-PARTY-LICENSES.txt',
+            'licenses/ffmpeg-COPYING.LGPLv2.1.txt',
+            'licenses/musl-COPYRIGHT.txt'
           )
           foreach ($n in $licenseTexts) {
             if (-not (Test-Path $n)) { throw "compliance file missing from checkout: $n" }

@@ -32,7 +32,7 @@ launch/respawn the daemon, not in `btmqttd` itself.) It bundles ~65
 Rust crates, **all under permissive licenses** — MIT, Apache-2.0, ISC,
 BSD-3-Clause and Unicode-3.0 — with **no copyleft**. The aggregated dependency
 license texts and per-crate copyright notices travel with the binary in
-[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
+[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](../../../licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
 
 ## Provenance & integrity
 
@@ -50,7 +50,7 @@ license texts and per-crate copyright notices travel with the binary in
 | Statically bundles | ~65 Rust crates (MIT / Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0 — all permissive) + musl libc (MIT) |
 | License | permissive only — see SPDX below |
 | SPDX expression | `MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0` |
-| License texts | [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt) |
+| License texts | [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](../../../licenses/btmqttd-THIRD-PARTY-LICENSES.txt) |
 
 The SHA-256 above is also enforced at load time by `PayloadBinaries` (the
 accessor throws if the embedded binary's bytes do not match), so a corrupted or
@@ -62,7 +62,7 @@ swapped binary cannot be silently installed.
 same license as the rest of this repository. The shipped binary is **statically
 linked**, so the notices of the components it *contains* must travel with it —
 that is the purpose of
-[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt),
+[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](../../../licenses/btmqttd-THIRD-PARTY-LICENSES.txt),
 which reproduces, once each, the full MIT, Apache License 2.0, ISC,
 BSD-3-Clause and Unicode-3.0 texts together with the real per-crate copyright
 lines. The load-bearing non-MIT/Apache components are:
@@ -83,7 +83,7 @@ copyleft.
 Beyond the Rust crates, the static binary links **musl libc** (MIT) via Rust's
 `*-musleabihf` target. musl is not a crate, so its notice is not in the aggregated
 crate file above; the MIT copyright + permission notice ships separately in
-[`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt) — the same shared musl
+[`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt) — the same shared musl
 notice used by `ffmpeg`.
 
 ## Build & reproducibility
@@ -157,7 +157,7 @@ whole binary is LGPL. No decoders/encoders are built.
 | Build toolchain | `zig cc` 0.13.0 (bundled musl) per `BUILD.md` |
 | Configuration | `--disable-everything` + `protocol=file,udp,rtp,rtsp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp` · `--disable-asm` |
 | License | **LGPL-2.1-or-later** (FFmpeg) **AND MIT** (statically-linked musl libc) |
-| License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](licenses/ffmpeg-COPYING.LGPLv2.1.txt) · [`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt) |
+| License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](../../../licenses/ffmpeg-COPYING.LGPLv2.1.txt) · [`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt) |
 | SPDX expression | `LGPL-2.1-or-later AND MIT` |
 
 The SHA-256 + size are enforced on read by `PayloadBinaries`. **Byte-reproducible** — like
@@ -189,7 +189,7 @@ in **Phase 1c** (#120).
 `zig cc` statically links **musl libc** into the binary. musl is MIT-licensed; its COPYRIGHT
 grants an exception for public headers and CRT files, but the general libc objects linked
 from `libc.a` are **not** covered by that exception, so the MIT copyright + permission notice
-must ship with the distribution. It does — [`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt),
+must ship with the distribution. It does — [`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt),
 sourced from the pinned Zig distribution (which bundles musl) and embedded in the assembly.
 The same upstream musl license also covers `btmqttd`'s statically-linked musl, so both
 binaries share this one notice.

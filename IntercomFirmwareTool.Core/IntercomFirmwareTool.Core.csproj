@@ -39,45 +39,49 @@
   <ItemGroup>
     <!-- MQTT bridge: the prebuilt ARM binary (btmqttd, a statically-linked Rust
          daemon built from this repo's native/btmqttd source — first-party, not
-         third-party) the installer writes into the firmware image, plus its
-         aggregated dependency-license notice and the THIRD_PARTY provenance,
-         embedded so the assembly is self-contained. Retrieved as byte[] / string via
-         PayloadBinaries (SHA-256 verified). These files are included as default
-         `None` items too, so Remove them first to avoid a duplicate-item (NETSDK1022)
-         error. LogicalName is set explicitly so the manifest resource name is stable
-         regardless of MSBuild's path-to-name munging. See Payload/vendor/THIRD_PARTY.md
-         for provenance/licensing. -->
+         third-party) the installer writes into the firmware image, plus the THIRD_PARTY
+         provenance, embedded so the assembly is self-contained. Retrieved as byte[] /
+         string via PayloadBinaries (SHA-256 verified). These in-cone files are also default
+         `None` items, so Remove them first to avoid a duplicate-item (NETSDK1022) error.
+         LogicalName is set explicitly so the manifest resource name is stable regardless of
+         MSBuild's path-to-name munging.
+
+         The three third-party LICENSE TEXTS (btmqttd's aggregated crate notice, ffmpeg's
+         LGPL-2.1, and the shared musl MIT COPYRIGHT) live in the repo-root licenses/ directory
+         — their single canonical home, shared with THIRD-PARTY-NOTICES.md and the release
+         bundle — so they are Link-ed in from `..\licenses\` (no duplicate copy under vendor/).
+         See Payload/vendor/THIRD_PARTY.md for provenance/licensing. -->
     <None Remove="Payload\vendor\armhf\btmqttd" />
     <None Remove="Payload\vendor\THIRD_PARTY.md" />
-    <None Remove="Payload\vendor\licenses\btmqttd-THIRD-PARTY-LICENSES.txt" />
     <EmbeddedResource Include="Payload\vendor\armhf\btmqttd">
       <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.armhf.btmqttd</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Include="Payload\vendor\THIRD_PARTY.md">
       <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.THIRD_PARTY.md</LogicalName>
     </EmbeddedResource>
-    <EmbeddedResource Include="Payload\vendor\licenses\btmqttd-THIRD-PARTY-LICENSES.txt">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.licenses.btmqttd-THIRD-PARTY-LICENSES.txt</LogicalName>
+    <EmbeddedResource Include="..\licenses\btmqttd-THIRD-PARTY-LICENSES.txt">
+      <Link>licenses\btmqttd-THIRD-PARTY-LICENSES.txt</Link>
+      <LogicalName>IntercomFirmwareTool.Core.licenses.btmqttd-THIRD-PARTY-LICENSES.txt</LogicalName>
     </EmbeddedResource>
     <!-- Minimal LGPL static-musl armv7 ffmpeg for the on-device media server (#120,
          Phase 1a) — a THIRD-PARTY binary (FFmpeg n7.1.1), built per native/ffmpeg/BUILD.md,
-         with its LGPL-2.1 text. Same Remove-then-EmbeddedResource + explicit LogicalName
-         pattern as btmqttd. Verified on read (length + SHA-256) by PayloadBinaries. -->
+         with its LGPL-2.1 text (Link-ed from the repo-root licenses/ dir; see above).
+         Verified on read (length + SHA-256) by PayloadBinaries. -->
     <None Remove="Payload\vendor\armhf\ffmpeg" />
-    <None Remove="Payload\vendor\licenses\ffmpeg-COPYING.LGPLv2.1.txt" />
     <EmbeddedResource Include="Payload\vendor\armhf\ffmpeg">
       <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.armhf.ffmpeg</LogicalName>
     </EmbeddedResource>
-    <EmbeddedResource Include="Payload\vendor\licenses\ffmpeg-COPYING.LGPLv2.1.txt">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.licenses.ffmpeg-COPYING.LGPLv2.1.txt</LogicalName>
+    <EmbeddedResource Include="..\licenses\ffmpeg-COPYING.LGPLv2.1.txt">
+      <Link>licenses\ffmpeg-COPYING.LGPLv2.1.txt</Link>
+      <LogicalName>IntercomFirmwareTool.Core.licenses.ffmpeg-COPYING.LGPLv2.1.txt</LogicalName>
     </EmbeddedResource>
     <!-- musl's MIT license: BOTH the ffmpeg and btmqttd binaries statically link musl libc
          objects (via zig cc / the Rust musl target), whose MIT notice is required (musl's
          exception only waives headers/CRT). Sourced from the pinned zig distribution and
-         shared by both binaries. Same Remove-then-EmbeddedResource + explicit LogicalName. -->
-    <None Remove="Payload\vendor\licenses\musl-COPYRIGHT.txt" />
-    <EmbeddedResource Include="Payload\vendor\licenses\musl-COPYRIGHT.txt">
-      <LogicalName>IntercomFirmwareTool.Core.Payload.vendor.licenses.musl-COPYRIGHT.txt</LogicalName>
+         shared by both binaries; Link-ed from the repo-root licenses/ dir (see above). -->
+    <EmbeddedResource Include="..\licenses\musl-COPYRIGHT.txt">
+      <Link>licenses\musl-COPYRIGHT.txt</Link>
+      <LogicalName>IntercomFirmwareTool.Core.licenses.musl-COPYRIGHT.txt</LogicalName>
     </EmbeddedResource>
   </ItemGroup>
 

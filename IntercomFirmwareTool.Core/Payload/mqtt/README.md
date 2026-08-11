@@ -137,7 +137,7 @@ Everything else is generated or embedded elsewhere:
 `btmqttd` is our own code. Its ~65 bundled Rust crates are all permissive (MIT /
 Apache-2.0 / ISC / BSD-3-Clause / Unicode-3.0 — **no copyleft**); the aggregated
 notices are in
-[`../vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](../vendor/licenses/btmqttd-THIRD-PARTY-LICENSES.txt),
+[`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](../../../licenses/btmqttd-THIRD-PARTY-LICENSES.txt),
 and provenance/integrity in [`../vendor/THIRD_PARTY.md`](../vendor/THIRD_PARTY.md).
 Removing `jq`/`evtest` also removed their copyleft obligations (`evtest` was
 GPL-2.0-or-later; static `jq` bundled LGPL-2.1 glibc).
