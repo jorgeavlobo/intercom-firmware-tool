@@ -60,7 +60,7 @@ done
 # exemption — a shorter series such as n7.1 identifies a DIFFERENT release (Codex). The docs carry
 # no bare `n7.1`-style series token: BUILD.md's minimal-build note says "FFmpeg 7.1" (no `n`).
 for f in $FF_FILES; do
-  for tok in $(grep -oP '(?<![0-9A-Za-z])n[0-9]+(\.[0-9]+)+(?![0-9])' "$f" 2>/dev/null || true); do
+  for tok in $(grep -oP '(?<![0-9A-Za-z])n[0-9]+(\.[0-9]+)+(?![0-9A-Za-z])' "$f" 2>/dev/null || true); do
     [ "$tok" = "$FFMPEG_TAG" ] || { echo "::error file=$f::stale FFmpeg tag '$tok' (pinned '$FFMPEG_TAG') — every FFmpeg-tag reference must be EXACTLY the pinned tag" >&2; fail=1; }
   done
 done
