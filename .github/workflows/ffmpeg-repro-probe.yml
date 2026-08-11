@@ -7,6 +7,12 @@ name: ffmpeg reproducibility probe (temp)
 
 on:
   workflow_dispatch:
+  # Also run on push that touches this file: a workflow_dispatch-only file that has never
+  # run isn't registered for the dispatch API (404), so this self-path push trigger fires
+  # the probe automatically. Temporary — the whole file is removed after the result.
+  push:
+    paths:
+      - '.github/workflows/ffmpeg-repro-probe.yml'
 
 permissions:
   contents: read
