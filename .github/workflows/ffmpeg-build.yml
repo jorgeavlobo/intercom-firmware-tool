@@ -144,8 +144,8 @@ jobs:
           cp -f "$musl_copyright" "$MUSL_LIC"
           FF_SHA="$(sha256sum "$BIN" | awk '{print $1}')"
           FF_SIZE="$(stat -c '%s' "$BIN")"
-          cs="$(printf '%s' "$FF_SIZE" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"   # 2,024,448
-          us="${cs//,/_}"                                                     # 2_024_448
+          cs="$(printf '%s' "$FF_SIZE" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"   # size grouped in thousands with commas
+          us="${cs//,/_}"                                                     # same, but '_' separators (C# int literal)
           # Rewrite the recorded SHA-256 + size in BOTH metadata files IN THE SAME COMMIT, so
           # a refresh never leaves an inconsistent tree (PayloadBinaries.Read would otherwise
           # reject the new binary against a stale hash, and tests would fail, until a manual
