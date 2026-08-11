@@ -173,11 +173,13 @@ namespace IntercomFirmwareTool.Core
         /// <summary>RTSP username the on-device go2rtc serves the LAN camera stream under (issue #120).
         /// Used ONLY in <see cref="CameraOnDevice"/> mode; ignored otherwise. Auth is mandatory on the
         /// LAN-facing RTSP port — go2rtc disables authentication when the username is blank — so this is
-        /// required (non-empty, single-line) on-device. Default <c>"camera"</c>.</summary>
+        /// required on-device: non-empty and free of control characters (which would corrupt the
+        /// double-quoted YAML scalar). Default <c>"camera"</c>.</summary>
         public string CameraRtspUser { get; init; } = "camera";
 
         /// <summary>RTSP password paired with <see cref="CameraRtspUser"/> for the on-device go2rtc
-        /// stream (issue #120). Required (non-empty, single-line) in <see cref="CameraOnDevice"/> mode;
+        /// stream (issue #120). Required in <see cref="CameraOnDevice"/> mode — non-empty and free of
+        /// control characters (CR/LF, NUL, ESC, ...) that would corrupt the go2rtc.yaml scalar;
         /// ignored otherwise. The App generates a strong random value per install and surfaces it in the
         /// Home Assistant camera URL (Phase 1c-2c); it is carried here so the generated <c>go2rtc.yaml</c>
         /// is deterministic for the installer's read-back verification. NULL by default (a build with
@@ -773,8 +775,8 @@ namespace IntercomFirmwareTool.Core
                     throw new ArgumentException(CoreStrings.Get("Mqtt_CameraPortsMustDiffer"), nameof(opts));
                 // On-device mode (#120) serves RTSP on the LAN with MANDATORY auth (decision #3):
                 // go2rtc disables authentication when the username is blank, so empty credentials would
-                // expose the camera stream to any LAN client. Require both non-empty AND single-line —
-                // a CR/LF would split the double-quoted scalar and corrupt the generated go2rtc.yaml.
+                // expose the camera stream to any LAN client. Require both non-empty and free of control
+                // characters (any of which would corrupt the generated go2rtc.yaml scalar).
                 if (opts.CameraOnDevice)
                 {
                     // Reject an empty credential OR any control character (CR/LF, NUL, ESC, TAB, ...):
