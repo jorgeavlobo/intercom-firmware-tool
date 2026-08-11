@@ -80,8 +80,6 @@ jobs:
           us="${cs//,/_}"                                                  # 2_024_448
           grep -q "Length: ${us}," "$pb" || { echo "::error::size ${us} not recorded in PayloadBinaries.cs"; exit 1; }
           grep -q "${cs} bytes" "$tp"    || { echo "::error::size ${cs} not recorded in THIRD_PARTY.md"; exit 1; }
-          # Record the committed SHA-256 for the byte-for-byte reproduction check below.
-          echo "$sha" > committed.sha256
 
       - name: Committed binary runs on armv7 + is LGPL
         run: |
@@ -150,11 +148,13 @@ jobs:
           if grep -m1 'configuration:' rebuilt.ver | grep -Eq -- '--enable-(gpl|nonfree)'; then
             echo "::error::rebuilt ffmpeg is GPL/nonfree"; exit 1
           fi
-          committed_sha="$(cat committed.sha256)"
-          rebuilt_sha="$(sha256sum "$reb" | awk '{print $1}')"
+          committed_sha="$(sha256sum "$BIN" | awk '{print $1}')"
+          rebuilt_sha="$(sha256sum "$reb"  | awk '{print $1}')"
           echo "committed sha256=$committed_sha"
           echo "rebuilt   sha256=$rebuilt_sha"
-          if [ "$committed_sha" != "$rebuilt_sha" ]; then
-            echo "::error::rebuilt ffmpeg SHA-256 != committed — the vendored binary is out of sync with the pinned source. Refresh it via ffmpeg-build.yml."; exit 1
+          # Gate on a LITERAL byte-for-byte comparison of the two files (the SHA-256 values
+          # above are logged for diagnostics only).
+          if ! cmp -s "$BIN" "$reb"; then
+            echo "::error::rebuilt ffmpeg is not byte-identical to the committed binary ($committed_sha vs $rebuilt_sha) — the vendored binary is out of sync with the pinned source. Refresh it via ffmpeg-build.yml."; exit 1
           fi
           echo "Byte-for-byte provenance OK (rebuilt == committed, LGPL)."

@@ -99,8 +99,10 @@ jobs:
           a="$(sha256sum "$RUNNER_TEMP/ffmpeg-src/ffmpeg"    | awk '{print $1}')"
           b="$(sha256sum "$RUNNER_TEMP/ffmpeg-verify/ffmpeg" | awk '{print $1}')"
           echo "reproduction: build#1=$a build#2=$b"
-          if [ "$a" != "$b" ]; then
-            echo "::error::ffmpeg build is NOT byte-reproducible ($a != $b) — refusing to commit"; exit 1
+          # Gate on a LITERAL byte-for-byte comparison of the two files (the SHA-256 values
+          # above are logged for diagnostics only).
+          if ! cmp -s "$RUNNER_TEMP/ffmpeg-src/ffmpeg" "$RUNNER_TEMP/ffmpeg-verify/ffmpeg"; then
+            echo "::error::ffmpeg build is NOT byte-identical across builds ($a vs $b) — refusing to commit"; exit 1
           fi
 
       - name: Verify the rebuilt binary runs on armv7 + is LGPL
