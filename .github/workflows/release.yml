@@ -77,6 +77,14 @@ jobs:
           fi
           echo "FFMPEG_SRC=$out" >> "$GITHUB_ENV"
           echo "fetched FFmpeg corresponding source: $out ($got)"
+          # "Corresponding source" also includes the scripts that control HOW this specific binary
+          # is configured/compiled — the exact ./configure flags + pinned inputs — not just the
+          # upstream library source. Pointing at the (mutable) repo isn't a durable accompaniment,
+          # so ship an immutable copy of our build recipe with the release too (CodeRabbit).
+          recipe="ffmpeg-${tag}-build-recipe.tar.gz"
+          tar -czf "$recipe" -C native/ffmpeg build.sh pins.env BUILD.md
+          echo "FFMPEG_RECIPE=$recipe" >> "$GITHUB_ENV"
+          echo "packaged FFmpeg build recipe: $recipe (build.sh + pins.env + BUILD.md)"
 
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
@@ -329,8 +337,10 @@ jobs:
           # is accompanied by the same archive as a sibling release asset.
           Copy-Item 'third_party/SharpExt4/SharpExt4-a9a41e1.zip' out/folder -Force
           # Same for the embedded LGPL FFmpeg binary: its complete corresponding source (the pinned,
-          # SHA-256-verified n7.1.1 tarball fetched above) accompanies the DLL inside the ZIP.
+          # SHA-256-verified n7.1.1 tarball + our build recipe archive) accompanies the DLL inside
+          # the ZIP.
           Copy-Item $env:FFMPEG_SRC out/folder -Force
+          Copy-Item $env:FFMPEG_RECIPE out/folder -Force
           # Portable .zip: it is the preferred download for many users, so it must ALSO carry the
           # compliance docs — not just sit beside them as sibling release assets (GitHub does not
           # auto-download siblings) (Codex). Stage the single-file .exe together with the notices in
@@ -344,6 +354,7 @@ jobs:
           # Bundle the corresponding source in the portable .zip too (see the loose-folder note above).
           Copy-Item 'third_party/SharpExt4/SharpExt4-a9a41e1.zip' $stage -Force
           Copy-Item $env:FFMPEG_SRC $stage -Force
+          Copy-Item $env:FFMPEG_RECIPE $stage -Force
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path dist "$base-portable.zip") -Force
           Remove-Item -Recurse -Force $stage
           # Loose-folder zip: out/folder/* puts the files at the archive root (no top-level folder).
@@ -395,10 +406,11 @@ jobs:
           # our build output (it is upstream source, pinned + mirrored) (#98).
           files+=("third_party/SharpExt4/SharpExt4-a9a41e1.zip")
           # LGPL-2.1 corresponding source for the embedded FFmpeg binary — the pinned,
-          # SHA-256-verified n7.1.1 tarball fetched at the start of this job. Uploaded as a
-          # standalone asset too, so a download of only the portable .exe (which can't embed it)
-          # is still accompanied by the source (#120).
-          files+=("$FFMPEG_SRC")
+          # SHA-256-verified n7.1.1 tarball + our immutable build recipe (build.sh + pins.env +
+          # BUILD.md), both packaged at the start of this job. Uploaded as standalone assets too, so
+          # a download of only the portable .exe (which can't embed them) is still accompanied by
+          # the complete corresponding source (#120).
+          files+=("$FFMPEG_SRC" "$FFMPEG_RECIPE")
           for f in "${files[@]}"; do
             if [ ! -f "$f" ]; then
               echo "::error::missing expected release asset: $f (packaging did not produce it)"; exit 1

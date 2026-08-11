@@ -176,12 +176,15 @@ guarantee `btmqttd` provides. Refreshed via
 The binary is a **standalone program** built from FFmpeg's own LGPL sources (statically
 linked), so distributing it requires (a) shipping the **LGPL-2.1 license text** — done, in
 `licenses/ffmpeg-COPYING.LGPLv2.1.txt`, which travels with the assembly — and (b) providing the
-**corresponding source**. Every release **accompanies** the binary with the complete, unmodified
-**FFmpeg `n7.1.1`** source: `.github/workflows/release.yml` ships it as the asset
-`ffmpeg-n7.1.1-source.tar.gz` and bundles it inside both `.zip` archives, downloaded from the
-pinned upstream tag and **SHA-256-verified against the same digest the binary is built from**
-(`native/ffmpeg/pins.env`), so the shipped source provably corresponds to the shipped binary.
-Built exactly per `native/ffmpeg/BUILD.md`; no changes to FFmpeg source were made. As with `btmqttd`, the embedded resource is compiled into `IntercomFirmwareTool.Core`
+**corresponding source**. Every release **accompanies** the binary with the complete corresponding
+source, in two parts, shipped by `.github/workflows/release.yml` as standalone assets **and**
+bundled inside both `.zip` archives: (1) the unmodified upstream **FFmpeg `n7.1.1`** source as
+`ffmpeg-n7.1.1-source.tar.gz`, downloaded from the pinned tag and **SHA-256-verified against the
+same digest the binary is built from** (`native/ffmpeg/pins.env`), so the shipped source provably
+corresponds to the shipped binary; and (2) the scripts that control its configuration and
+compilation as `ffmpeg-n7.1.1-build-recipe.tar.gz` (`build.sh` + `pins.env` + `BUILD.md`), so
+recipients have the exact recipe immutably, not via a mutable repo link. No changes to FFmpeg
+source were made. As with `btmqttd`, the embedded resource is compiled into `IntercomFirmwareTool.Core`
 unconditionally. In **Phase 1a** (this change) the firmware image does **not** contain
 `ffmpeg`: it is not in `PayloadBinaries.All`, so `MqttInstaller` never writes it to the
 device. The firmware image carries `ffmpeg` only once the on-device camera install lands

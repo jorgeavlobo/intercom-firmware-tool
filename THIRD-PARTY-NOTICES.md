@@ -137,11 +137,13 @@ their notices travel with the release:
   BSD-3-Clause / Unicode-3.0):
   [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
 - **`ffmpeg`** — third-party, a minimal **LGPL-2.1-or-later** build of **FFmpeg `n7.1.1`**
-  (unmodified upstream). **Corresponding source:** the complete, unmodified FFmpeg `n7.1.1`
-  source **accompanies this release** — shipped as the asset **`ffmpeg-n7.1.1-source.tar.gz`**
-  and bundled inside both `.zip` archives (the same pinned, SHA-256-verified tarball the binary
-  is built from, so it provably matches). No changes to FFmpeg source were made; the exact build
-  recipe is `native/ffmpeg/BUILD.md` in this project's repository. LGPL text:
+  (unmodified upstream). **Corresponding source** — the complete corresponding source
+  **accompanies this release**, in two parts: (1) the unmodified upstream FFmpeg `n7.1.1` source
+  as **`ffmpeg-n7.1.1-source.tar.gz`** (the same pinned, SHA-256-verified tarball the binary is
+  built from, so it provably matches), and (2) the scripts that control its configuration and
+  compilation as **`ffmpeg-n7.1.1-build-recipe.tar.gz`** (`build.sh` + `pins.env` + `BUILD.md`).
+  Both ship as standalone assets **and** bundled inside both `.zip` archives. No changes to FFmpeg
+  source were made. LGPL text:
   [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](licenses/ffmpeg-COPYING.LGPLv2.1.txt).
 - **musl libc** (**MIT**) — statically linked into *both* binaries; its notice:
   [`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt).
