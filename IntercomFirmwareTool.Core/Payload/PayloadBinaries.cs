@@ -94,8 +94,10 @@ namespace IntercomFirmwareTool.Core
         /// the first-party <see cref="Btmqttd"/>, this is a <b>third-party</b> binary (FFmpeg n7.1.1,
         /// <c>LGPL-2.1-or-later</c>), built per <c>native/ffmpeg/BUILD.md</c> and byte-reproducible
         /// (every input pinned + SHA-verified; <c>ffmpeg-provenance.yml</c> enforces a byte-for-byte
-        /// rebuild match, like btmqttd). Installed by the on-device media server (Phase 1c) — it is
-        /// in <see cref="All"/> alongside <see cref="Go2Rtc"/>.
+        /// rebuild match, like btmqttd). Embedded here; it is deliberately NOT in <see cref="All"/>
+        /// yet — the on-device camera install (which writes it + <see cref="Go2Rtc"/>, gated on the
+        /// camera option) lands in Phase 1c-2, so the vendored binary ships with no change to install
+        /// behaviour.
         /// </summary>
         public static readonly ArmBinary Ffmpeg = new(
             Name: "ffmpeg",
@@ -122,7 +124,9 @@ namespace IntercomFirmwareTool.Core
         /// byte-reproducible <see cref="Ffmpeg"/>/<see cref="Btmqttd"/>, it is <i>not</i> rebuilt
         /// from source here — its exact upstream release is pinned (tag + asset + SHA-256 in
         /// <c>native/go2rtc/pins.env</c>) and <c>go2rtc-provenance.yml</c> re-downloads that pinned
-        /// asset and byte-compares it to this committed copy.
+        /// asset and byte-compares it to this committed copy. Embedded here; like <see cref="Ffmpeg"/>
+        /// it is deliberately NOT in <see cref="All"/> yet — the gated on-device camera install lands
+        /// in Phase 1c-2.
         /// </summary>
         public static readonly ArmBinary Go2Rtc = new(
             Name: "go2rtc",
@@ -144,7 +148,7 @@ namespace IntercomFirmwareTool.Core
         // Array.AsReadOnly so the exposed IReadOnlyList can't be cast back to
         // ArmBinary[] and mutated (matching FirmwareRegistry.Known's convention).
         public static readonly IReadOnlyList<ArmBinary> All =
-            Array.AsReadOnly(new[] { Btmqttd, Ffmpeg, Go2Rtc });
+            Array.AsReadOnly(new[] { Btmqttd });
 
         /// <summary>
         /// Return the exact bytes of <paramref name="binary"/>, after verifying

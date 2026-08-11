@@ -2,9 +2,10 @@
 
 The optional **MQTT bridge** feature (off by default) installs prebuilt ARM
 binaries into the firmware image, because they are **not** present in the factory
-BTicino C300X/C100X firmware. The bridge itself installs **`btmqttd`**; enabling the
-**on-device camera** (issue #120, Phase 1c) additionally installs **`ffmpeg`** and
-**`go2rtc`**:
+BTicino C300X/C100X firmware. The bridge itself installs **`btmqttd`**; **`ffmpeg`** and
+**`go2rtc`** are embedded for the **on-device camera** (issue #120) and written to the image by
+that camera's install, which lands in **Phase 1c-2** (they are embedded now, in 1c-1, but not yet
+installed):
 
 | Tool | Installed as | Purpose |
 |---|---|---|
@@ -24,8 +25,9 @@ userland tools those scripts required: **`jq`** (JSON, now done natively with
 (`evtest` was GPL-2.0-or-later; the static `jq` bundled LGPL-2.1 glibc): the
 **MQTT bridge** (`btmqttd` + its scripts) no longer carries any GPL/LGPL
 component. (Separately, this assembly also embeds the **LGPL-2.1** `ffmpeg` and the
-**MIT** `go2rtc` for the on-device camera — installed with it in Phase 1c (#120);
-their notices + provenance are documented in the `ffmpeg` and `go2rtc` sections below.)
+**MIT** `go2rtc` for the on-device camera — embedded now, and written to the image by the
+gated on-device camera install in Phase 1c-2 (#120); their notices + provenance are
+documented in the `ffmpeg` and `go2rtc` sections below.)
 
 `btmqttd` is a **statically-linked musl** binary, so it needs no runtime
 interpreter, no shared libraries, and none of the device tools the shell bridge
@@ -189,9 +191,9 @@ compilation as `ffmpeg-n7.1.1-build-recipe.tar.gz` (`build.sh` + `pins.env` + `B
 recipients have the exact recipe immutably, not via a mutable repo link. No changes to FFmpeg
 source were made. As with `btmqttd`, the embedded resource is compiled into `IntercomFirmwareTool.Core`
 unconditionally. The **firmware image** carries `ffmpeg` only when the user enables the on-device
-camera: as of **Phase 1c** (#120) `ffmpeg` is in `PayloadBinaries.All`, so `MqttInstaller` writes it
-into the image alongside `go2rtc` when the camera is enabled (an image built without it carries no
-third-party binary).
+camera. As of **1c-1** (#120) `ffmpeg` is embedded but **not** in `PayloadBinaries.All`, so
+`MqttInstaller` does not yet write it to the device; the gated on-device camera install adds it
+(with `go2rtc`) in **Phase 1c-2**.
 
 ### musl libc (MIT) — statically linked
 
@@ -242,11 +244,13 @@ A mismatch means the vendored binary drifted from the pinned upstream release.
 
 Redistributing go2rtc requires shipping its **MIT license text** — done, in
 [`licenses/go2rtc-LICENSE.txt`](../../../licenses/go2rtc-LICENSE.txt) (© 2022 Alexey Khit), which
-travels with the assembly. MIT imposes no source-offer or copyleft obligation. As a statically-linked
-Go binary, go2rtc bundles a number of third-party Go modules (permissive — MIT/BSD/Apache-2.0 — per
-upstream) and the BSD-3-Clause Go runtime; this change ships go2rtc's own project license, and an
-aggregated per-module dependency-notice bundle (as generated for `btmqttd`'s crates) can be added as a
-follow-up if a fuller notice set is desired. As with the other binaries, the embedded resource is
-compiled into `IntercomFirmwareTool.Core` unconditionally; the **firmware image** carries `go2rtc`
-only when the user enables the on-device camera (it is in `PayloadBinaries.All`, written by
-`MqttInstaller` in Phase 1c).
+travels with the assembly. MIT imposes no source-offer or copyleft obligation on go2rtc itself.
+However, the binary is **statically linked**, so it also contains a number of third-party Go modules
+and the **BSD-3-Clause Go runtime**, whose permissive notices (MIT / BSD / Apache-2.0) must **likewise**
+travel with any redistribution — this is required, not optional. A complete, audited per-module
+dependency-notice bundle for the pinned `v1.9.14` build (mirroring `btmqttd`'s aggregated crate
+notice, generated from the upstream module graph) is **tracked in #120** and lands before go2rtc is
+shipped in a release. As with the other binaries, the embedded resource is compiled into
+`IntercomFirmwareTool.Core` unconditionally; the **firmware image** carries `go2rtc` only when the
+user enables the on-device camera — it is embedded now but **not** yet in `PayloadBinaries.All`; the
+gated on-device camera install writes it in **Phase 1c-2**.

@@ -5,11 +5,11 @@ using Xunit;
 namespace IntercomFirmwareTool.Core.Tests;
 
 /// <summary>
-/// The embedded go2rtc streaming server (issue #120, Phase 1c): the vendored third-party prebuilt
-/// is present, loads through the length + SHA-256 guard, is installed (in
-/// <see cref="PayloadBinaries.All"/>), and ships its MIT license. Unlike ffmpeg/btmqttd it is a
-/// statically-linked Go binary (no musl/libc), so it carries a single MIT notice and no additional
-/// license resources.
+/// The embedded go2rtc streaming server (issue #120): the vendored third-party prebuilt is present,
+/// loads through the length + SHA-256 guard, and ships its MIT license. Unlike ffmpeg/btmqttd it is
+/// a statically-linked Go binary (no musl/libc), so it carries a single MIT notice and no additional
+/// license resources. Declared but deliberately NOT in <see cref="PayloadBinaries.All"/> yet — the
+/// gated on-device camera install writes it (with ffmpeg) in Phase 1c-2.
 /// </summary>
 public class PayloadGo2RtcTests
 {
@@ -21,9 +21,10 @@ public class PayloadGo2RtcTests
         Assert.Equal("/usr/sbin/go2rtc", bin.InstallPath);
         Assert.Equal("MIT", bin.LicenseSpdx);
 
-        // Installed by the on-device media server (Phase 1c): MqttInstaller writes every entry in
-        // PayloadBinaries.All, and go2rtc is one of them.
-        Assert.Contains(bin, PayloadBinaries.All);
+        // 1c-1 embeds go2rtc but does NOT install it: MqttInstaller writes every entry in
+        // PayloadBinaries.All, so go2rtc must stay out of All until the gated on-device camera
+        // install lands in 1c-2. This negative assertion fails loudly if that changes silently.
+        Assert.DoesNotContain(bin, PayloadBinaries.All);
 
         // A statically-linked Go binary: a single MIT notice, no additional (musl/libc) licenses.
         Assert.Null(bin.AdditionalLicenseResourceNames);

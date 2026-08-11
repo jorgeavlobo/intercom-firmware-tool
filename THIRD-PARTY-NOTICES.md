@@ -128,9 +128,9 @@ for the full reasoning.
 
 `IntercomFirmwareTool.Core` embeds three statically-linked **armv7** binaries as assembly
 resources. The tool writes **`btmqttd`** onto the BTicino intercom's firmware for the optional
-MQTT bridge; **`ffmpeg`** (static musl) and **`go2rtc`** (static Go) are written for the
-**on-device camera** when it is enabled (Phase 1c, #120). All three ship inside this DLL, so
-their notices travel with the release:
+MQTT bridge; **`ffmpeg`** (static musl) and **`go2rtc`** (static Go) are embedded for the
+**on-device camera** (#120) and written to the firmware image by the gated on-device camera
+install in Phase 1c-2. All three ship inside this DLL, so their notices travel with the release:
 
 - **`btmqttd`** — first-party MQTT bridge daemon (built from this repo's
   `native/btmqttd/`). Its bundled Rust crates' notices (MIT / Apache-2.0 / ISC /
@@ -149,7 +149,10 @@ their notices travel with the release:
   **MIT**, AlexxIT/go2rtc) — a statically-linked Go binary that serves the camera as RTSP to
   Home Assistant. Not rebuilt from source here; its exact release is pinned + byte-verified (see
   `native/go2rtc/pins.env` and `go2rtc-provenance.yml`). MIT imposes no corresponding-source
-  obligation. License text:
+  obligation on go2rtc itself, but the static binary also contains third-party Go modules + the
+  **BSD-3-Clause Go runtime** whose permissive notices must travel too — a complete audited
+  dependency-notice bundle for `v1.9.14` is **required** and tracked in #120, to land before
+  go2rtc ships in a release. go2rtc's own MIT text:
   [`licenses/go2rtc-LICENSE.txt`](licenses/go2rtc-LICENSE.txt).
 - **musl libc** (**MIT**) — statically linked into the `btmqttd` and `ffmpeg` binaries (not
   `go2rtc`, which is pure static Go); its notice:
