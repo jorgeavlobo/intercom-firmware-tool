@@ -56,6 +56,28 @@ jobs:
           # gh authenticates via GH_TOKEN below (not git config), so no persisted creds.
           persist-credentials: false
 
+      - name: Fetch the pinned FFmpeg corresponding source (LGPL-2.1)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The shipped assembly embeds the LGPL FFmpeg binary, so every release must be
+          # ACCOMPANIED by its complete corresponding source (LGPL-2.1, via GPL §3/§6) — not merely
+          # a link to an upstream tag that can move or disappear. Download the SAME pinned,
+          # SHA-256-verified source the build uses (single source: native/ffmpeg/pins.env), so the
+          # shipped source provably matches the vendored binary, then ship it as a release asset +
+          # inside both ZIPs — exactly like SharpExt4's GPL corresponding source. (No modifications
+          # were made to FFmpeg; the build recipe is native/ffmpeg/BUILD.md, also in the repo.)
+          tag="$(grep -E '^FFMPEG_TAG=' native/ffmpeg/pins.env | cut -d= -f2)"
+          want="$(grep -E '^FFMPEG_TARBALL_SHA256=' native/ffmpeg/pins.env | cut -d= -f2)"
+          out="ffmpeg-${tag}-source.tar.gz"
+          curl -fsSL -o "$out" "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${tag}.tar.gz"
+          got="$(sha256sum "$out" | awk '{print $1}')"
+          if [ "$got" != "$want" ]; then
+            echo "::error::FFmpeg corresponding-source SHA-256 mismatch: got $got expected $want"; exit 1
+          fi
+          echo "FFMPEG_SRC=$out" >> "$GITHUB_ENV"
+          echo "fetched FFmpeg corresponding source: $out ($got)"
+
       - name: Set up .NET SDK
         uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
         with:
@@ -306,6 +328,9 @@ jobs:
           # them without needing the separate asset (Codex). The single-file .exe can't embed it and
           # is accompanied by the same archive as a sibling release asset.
           Copy-Item 'third_party/SharpExt4/SharpExt4-a9a41e1.zip' out/folder -Force
+          # Same for the embedded LGPL FFmpeg binary: its complete corresponding source (the pinned,
+          # SHA-256-verified n7.1.1 tarball fetched above) accompanies the DLL inside the ZIP.
+          Copy-Item $env:FFMPEG_SRC out/folder -Force
           # Portable .zip: it is the preferred download for many users, so it must ALSO carry the
           # compliance docs — not just sit beside them as sibling release assets (GitHub does not
           # auto-download siblings) (Codex). Stage the single-file .exe together with the notices in
@@ -318,6 +343,7 @@ jobs:
           foreach ($n in $licenseTexts) { Copy-Item $n (Join-Path $stage 'licenses') -Force }
           # Bundle the corresponding source in the portable .zip too (see the loose-folder note above).
           Copy-Item 'third_party/SharpExt4/SharpExt4-a9a41e1.zip' $stage -Force
+          Copy-Item $env:FFMPEG_SRC $stage -Force
           Compress-Archive -Path (Join-Path $stage '*') -DestinationPath (Join-Path dist "$base-portable.zip") -Force
           Remove-Item -Recurse -Force $stage
           # Loose-folder zip: out/folder/* puts the files at the archive root (no top-level folder).
@@ -368,6 +394,11 @@ jobs:
           # path (not staged into dist/), so it gets no .sha256 sidecar and is not SLSA-attested as
           # our build output (it is upstream source, pinned + mirrored) (#98).
           files+=("third_party/SharpExt4/SharpExt4-a9a41e1.zip")
+          # LGPL-2.1 corresponding source for the embedded FFmpeg binary — the pinned,
+          # SHA-256-verified n7.1.1 tarball fetched at the start of this job. Uploaded as a
+          # standalone asset too, so a download of only the portable .exe (which can't embed it)
+          # is still accompanied by the source (#120).
+          files+=("$FFMPEG_SRC")
           for f in "${files[@]}"; do
             if [ ! -f "$f" ]; then
               echo "::error::missing expected release asset: $f (packaging did not produce it)"; exit 1

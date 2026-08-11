@@ -160,9 +160,14 @@ jobs:
             s/| Size | [0-9,]* bytes |/| Size | ${cs} bytes |/
             s/| SHA-256 | \`[0-9a-f]*\` |/| SHA-256 | \`${FF_SHA}\` |/
           }" "$TP"
-          # Fail fast if the patch didn't land (e.g. the file layout changed).
+          # Fail fast if ANY of the four substitutions didn't land (e.g. a table/record layout
+          # change made a sed stop matching). Check the SIZE rewrites too, not just the SHAs: a
+          # stale Length pushed with [skip ci] would make PayloadBinaries.Read(Ffmpeg) reject the
+          # binary, and this bot push starts no build/provenance run to catch it (Codex).
           grep -q "Sha256Hex: \"${FF_SHA}\"" "$PB" || { echo "::error::PayloadBinaries.cs sha not updated"; exit 1; }
+          grep -q "Length: ${us},"           "$PB" || { echo "::error::PayloadBinaries.cs size (${us}) not updated"; exit 1; }
           grep -q "\`${FF_SHA}\`" "$TP"            || { echo "::error::THIRD_PARTY.md sha not updated"; exit 1; }
+          grep -q "${cs} bytes"   "$TP"            || { echo "::error::THIRD_PARTY.md size (${cs}) not updated"; exit 1; }
           echo "metadata updated: sha256=${FF_SHA} size=${FF_SIZE} (${us})"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
