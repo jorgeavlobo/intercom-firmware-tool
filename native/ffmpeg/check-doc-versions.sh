@@ -52,13 +52,18 @@ for f in $ZIG_FILES; do
 done
 
 # (2) No stale occurrence — every structured version token must equal the pin.
-# FFmpeg release tags are the distinctive `n<maj>.<min>.<patch>` shape; every such token in
-# these files IS the ffmpeg tag (incl. corresponding-source URLs like `/tree/n7.1.1`), so each
-# must equal the pin. The two-part release *series* `n7.1` mentioned in BUILD.md is not a tag
-# and is intentionally not matched (three numeric groups required).
+# FFmpeg release tags are the distinctive `n<maj>.<min>[.<patch>]` shape — TWO-component (e.g.
+# n8.0) OR THREE-component (e.g. n7.1.1). Match either form, and require each token (incl.
+# corresponding-source URLs like `/tree/n7.1.1`) to be the pinned tag OR a shorter release-
+# SERIES prefix of it. The prefix exemption is what lets the two-component series reference
+# `n7.1` in BUILD.md coexist with the three-component pin n7.1.1, while still catching a stale
+# `/tree/n7.1.0` — and, after a two-component pin like n8.0, a stale `/tree/n8.1` (Codex).
 for f in $FF_FILES; do
-  for tok in $(grep -oE 'n[0-9]+\.[0-9]+\.[0-9]+' "$f" 2>/dev/null || true); do
-    [ "$tok" = "$FFMPEG_TAG" ] || { echo "::error file=$f::stale FFmpeg tag '$tok' (pinned '$FFMPEG_TAG') — every n<x.y.z> reference, including corresponding-source URLs, must match the pin" >&2; fail=1; }
+  for tok in $(grep -oE 'n[0-9]+\.[0-9]+(\.[0-9]+)*' "$f" 2>/dev/null || true); do
+    case "$FFMPEG_TAG" in
+      "$tok"|"$tok".*) : ;;   # exact tag, or tok is a shorter series-prefix of the pin
+      *) echo "::error file=$f::stale FFmpeg tag '$tok' (pinned '$FFMPEG_TAG') — every FFmpeg-tag reference (incl. corresponding-source URLs) must be the pinned tag or its series prefix" >&2; fail=1 ;;
+    esac
   done
 done
 
