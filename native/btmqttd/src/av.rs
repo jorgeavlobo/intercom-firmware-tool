@@ -251,25 +251,9 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
             format!("camera_target '{}' did not resolve to an IPv4", cfg.camera_target),
         )
     })?;
-    // Reject an unroutable target. With an OFF-device go2rtc/HA host:
-    //   * loopback (127/8) is never a real destination — and worse, our add-client frame would then
-    //     be `*7*300#127#0#0#1#…`, identical to DEVICE_MEDIA_PREFIX, so our own frame echoing on the
-    //     monitor could be misread as a media-start "arm" signal (Copilot);
-    //   * the unspecified 0.0.0.0 is a local bind wildcard, not a routable host — the daemon would
-    //     report the siphon armed while no receiver ever gets the RTP (Codex).
-    // EXCEPTION — on-device mode (issue #120): go2rtc runs ON the panel and listens on loopback,
-    // so the siphon target IS loopback by design. Permit EXACTLY CAMERA_ONDEVICE_TARGET
-    // (`127.0.0.2`): it routes via `lo` to go2rtc, and its `*7*300#127#0#0#2#…` frame does NOT
-    // match DEVICE_MEDIA_PREFIX (`…#127#0#0#1#`), so it never re-arms us. `127.0.0.1` (the
-    // collision) and `0.0.0.0` (bind wildcard) stay rejected even in on-device mode — the carve-out
-    // is a single exact address, not a blanket loopback allow.
-    let ondevice_ok = cfg.camera_ondevice && ip == CAMERA_ONDEVICE_TARGET;
-    if !ondevice_ok && (ip.is_loopback() || ip.is_unspecified()) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "camera_target must be a routable address (not loopback or 0.0.0.0)",
-        ));
-    }
+    // Reject an unroutable target (pure + socket-free, so it is unit-testable without a
+    // connection to bt_av_media — see `check_camera_target` for the full rationale).
+    check_camera_target(ip, cfg.camera_ondevice)?;
     let o = ip.octets();
     let ipf = format!("{}#{}#{}#{}", o[0], o[1], o[2], o[3]);
     let video = format!("*7*300#{ipf}#{}#{}*##", cfg.camera_video_port, cfg.camera_branch);
@@ -282,6 +266,33 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
     add_client(&mut sock, &video).await?;
     add_client(&mut sock, &audio).await?;
     Ok(sock)
+}
+
+/// Validate the resolved siphon target, applying the on-device loopback carve-out. Pure (no
+/// I/O), so it is unit-testable without opening a socket to `bt_av_media`.
+///
+/// With an OFF-device go2rtc/HA host:
+///   * loopback (127/8) is never a real destination — and worse, our add-client frame would
+///     then be `*7*300#127#0#0#1#…`, identical to DEVICE_MEDIA_PREFIX, so our own frame echoing
+///     on the monitor could be misread as a media-start "arm" signal (Copilot);
+///   * the unspecified 0.0.0.0 is a local bind wildcard, not a routable host — the daemon would
+///     report the siphon armed while no receiver ever gets the RTP (Codex).
+///
+/// EXCEPTION — on-device mode (issue #120): go2rtc runs ON the panel and listens on loopback, so
+/// the siphon target IS loopback by design. Permit EXACTLY [`CAMERA_ONDEVICE_TARGET`]
+/// (`127.0.0.2`): it routes via `lo` to go2rtc, and its `*7*300#127#0#0#2#…` frame does NOT match
+/// DEVICE_MEDIA_PREFIX (`…#127#0#0#1#`), so it never re-arms us. `127.0.0.1` (the collision) and
+/// `0.0.0.0` (bind wildcard) stay rejected even in on-device mode — the carve-out is a single
+/// exact address, not a blanket loopback allow.
+fn check_camera_target(ip: Ipv4Addr, camera_ondevice: bool) -> std::io::Result<()> {
+    let ondevice_ok = camera_ondevice && ip == CAMERA_ONDEVICE_TARGET;
+    if !ondevice_ok && (ip.is_loopback() || ip.is_unspecified()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "camera_target must be a routable address (not loopback or 0.0.0.0)",
+        ));
+    }
+    Ok(())
 }
 
 /// Write one "add client" frame and wait for the daemon's ACK, resending on a NACK for up to
@@ -587,47 +598,27 @@ mod tests {
     }
 
     #[test]
-    fn arm_allows_the_ondevice_loopback_target() {
-        // In on-device mode go2rtc listens on the loopback alias 127.0.0.2, so arm() must NOT
-        // reject it as unroutable: it passes the routability guard and proceeds to connect to
-        // :30007. Every pre-connect rejection (bad ports, unresolvable, unroutable) surfaces as
-        // InvalidInput, so an error kind OTHER than InvalidInput proves we got PAST the guard
-        // (nothing listens on :30007 in the test, so the connect itself fails — as expected).
-        use std::collections::HashMap;
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            let mut m = HashMap::new();
-            m.insert("MQTT_HOST".to_string(), "h".to_string());
-            m.insert("CAMERA_ONDEVICE".to_string(), "1".to_string());
-            let cfg = Arc::new(crate::config::Config::from_map(m));
-            assert!(cfg.camera_ondevice);
-            assert_eq!(cfg.camera_target, "127.0.0.2");
-            let err = arm(&cfg).await.unwrap_err();
-            assert_ne!(err.kind(), std::io::ErrorKind::InvalidInput);
-        });
-    }
-
-    #[test]
-    fn arm_ondevice_still_rejects_127_0_0_1_and_the_wildcard() {
-        // On-device mode carves out EXACTLY 127.0.0.2 — it must NOT become a blanket loopback
-        // allow: 127.0.0.1 (the DEVICE_MEDIA_PREFIX collision) and 0.0.0.0 (bind wildcard) stay
-        // rejected even with camera_ondevice=true. from_map pins the on-device target to 127.0.0.2,
-        // so override the pub field directly to exercise the guard's defense-in-depth.
-        use std::collections::HashMap;
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-        rt.block_on(async {
-            for bad in ["127.0.0.1", "0.0.0.0"] {
-                let mut m = HashMap::new();
-                m.insert("MQTT_HOST".to_string(), "h".to_string());
-                m.insert("CAMERA_ONDEVICE".to_string(), "1".to_string());
-                let mut cfg = crate::config::Config::from_map(m);
-                assert!(cfg.camera_ondevice);
-                cfg.camera_target = bad.to_string();
-                let cfg = Arc::new(cfg);
-                let err = arm(&cfg).await.unwrap_err();
-                assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "target {bad}");
-            }
-        });
+    fn check_camera_target_carves_out_only_the_ondevice_alias() {
+        // Pure validation — no socket, so this is hermetic even if `bt_av_media` happens to be
+        // listening on :30007 (the flaw in an arm()-based acceptance test: it would connect, and
+        // could return Ok / mutate a running daemon). `arm()` calls this exact helper.
+        let ok = |ip: &str, ondevice| check_camera_target(ip.parse().unwrap(), ondevice).is_ok();
+        // On-device mode accepts EXACTLY the loopback alias 127.0.0.2 (go2rtc listens there)…
+        assert!(ok("127.0.0.2", true));
+        // …but the carve-out is a single address, NOT a blanket loopback allow: 127.0.0.1 (the
+        // DEVICE_MEDIA_PREFIX collision) and 0.0.0.0 (bind wildcard) stay rejected on-device.
+        assert!(!ok("127.0.0.1", true));
+        assert!(!ok("0.0.0.0", true));
+        // Off-device, even 127.0.0.2 is rejected — the carve-out applies only in on-device mode.
+        assert!(!ok("127.0.0.2", false));
+        assert!(!ok("127.0.0.1", false));
+        assert!(!ok("0.0.0.0", false));
+        // A routable host is accepted in either mode.
+        assert!(ok("192.168.1.50", false));
+        assert!(ok("192.168.1.50", true));
+        // A rejection surfaces as InvalidInput — the kind arm() propagates to its caller.
+        let err = check_camera_target("127.0.0.1".parse().unwrap(), false).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
