@@ -11,6 +11,11 @@ name: ffmpeg binary refresh (#120)
 
 on:
   workflow_dispatch:
+  # TEMP bootstrap trigger (removed once the musl COPYRIGHT is committed): fires this
+  # dispatch-only workflow on a self-path push. A never-dispatched workflow 404s on the API.
+  push:
+    paths:
+      - '.github/workflows/ffmpeg-build.yml'
 
 # This job COMMITS the rebuilt binary back to the branch, so it needs write access and the
 # checkout token persisted for the push (unlike the read-only provenance job).
@@ -29,6 +34,10 @@ env:
   SOURCE_DATE_EPOCH: '1700000000'
   BIN: IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg
   LIC: IntercomFirmwareTool.Core/Payload/vendor/licenses/ffmpeg-COPYING.LGPLv2.1.txt
+  # musl's own license: zig cc statically links musl libc objects into the binary, and
+  # musl's MIT exception covers only headers/CRT — the linked libc.a objects still require
+  # the notice. Sourced from the pinned zig distribution (which bundles musl).
+  MUSL_LIC: IntercomFirmwareTool.Core/Payload/vendor/licenses/musl-COPYRIGHT.txt
 
 jobs:
   refresh:
@@ -107,6 +116,13 @@ jobs:
           # mode change in the diff); both destination paths already exist in the tree.
           cp -f "$RUNNER_TEMP/ffmpeg-src/ffmpeg" "$BIN"
           cp -f "$RUNNER_TEMP/ffmpeg-src/COPYING.LGPLv2.1" "$LIC"
+          # Vendor musl's license from the pinned zig distribution (bundles musl). The static
+          # binary links musl libc objects, whose MIT notice is required (the musl exception
+          # only waives headers/CRT). The same upstream musl license also covers btmqttd's
+          # statically-linked musl, so this one notice is shared by both binaries.
+          musl_copyright="$(find "$PWD/zig-linux-x86_64-${ZIG_VERSION}" -path '*/musl/COPYRIGHT' -print -quit)"
+          [ -n "$musl_copyright" ] || { echo "::error::musl COPYRIGHT not found in the zig distribution"; exit 1; }
+          cp -f "$musl_copyright" "$MUSL_LIC"
           FF_SHA="$(sha256sum "$BIN" | awk '{print $1}')"
           FF_SIZE="$(stat -c '%s' "$BIN")"
           cs="$(printf '%s' "$FF_SIZE" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"   # 2,024,448
@@ -131,7 +147,7 @@ jobs:
           echo "metadata updated: sha256=${FF_SHA} size=${FF_SIZE} (${us})"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$BIN" "$LIC" "$PB" "$TP"
+          git add "$BIN" "$LIC" "$MUSL_LIC" "$PB" "$TP"
           if git diff --cached --quiet; then
             echo "no change to the vendored ffmpeg — nothing to commit"; exit 0
           fi
