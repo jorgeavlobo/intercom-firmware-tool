@@ -63,10 +63,14 @@ for f in $FF_FILES; do
 done
 
 # Zig's version is a bare semver whose shape collides with unrelated versions (rustc, cross-gcc,
-# kernel, NuGet packages), so only validate a semver that sits in a zig context: right after
-# "zig" (allowing a few separators like ` cc `) or after an "x86_64-" download-name prefix.
+# kernel, NuGet packages), so only validate a semver that sits in a zig context: the first
+# semver after "zig" (grep is line-scoped, and [^0-9] stops at that first digit run, so this
+# captures the version belonging to the zig mention) or after an "x86_64-" download-name prefix.
+# The separator allowance is generous (up to 24 non-digit chars) so documented phrasings like
+# "Zig version X.Y.Z" / "Zig toolchain version X.Y.Z" — not just "Zig X.Y.Z" / "zig cc X.Y.Z" —
+# are validated too (CodeRabbit).
 for f in $ZIG_FILES; do
-  for tok in $(grep -oiE '(zig[^0-9]{0,8}|x86_64-)[0-9]+\.[0-9]+\.[0-9]+' "$f" 2>/dev/null \
+  for tok in $(grep -oiE '(zig[^0-9]{0,24}|x86_64-)[0-9]+\.[0-9]+\.[0-9]+' "$f" 2>/dev/null \
                  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true); do
     [ "$tok" = "$ZIG_VERSION" ] || { echo "::error file=$f::stale Zig version '$tok' (pinned '$ZIG_VERSION')" >&2; fail=1; }
   done
