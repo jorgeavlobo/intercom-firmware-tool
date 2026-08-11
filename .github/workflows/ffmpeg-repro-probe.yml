@@ -1,0 +1,87 @@
+name: ffmpeg reproducibility diagnostic (temp)
+
+# TEMPORARY (issue #120): cross-run byte-reproducibility is failing even at -j1. Two
+# separate jobs each build zig's bundled compiler-rt/musl from a COLD cache; this probe
+# reproduces that in ONE job by giving each build its own isolated zig cache, then byte-
+# diffs the two outputs and maps the differing offsets to ELF sections. Delete after use.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/ffmpeg-repro-probe.yml'
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.13.0
+  FFMPEG_TAG: n7.1.1
+  ZIG_SHA256: d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea
+  FFMPEG_TARBALL_SHA256: f117507dc501f2a6c11f9241d8d0c3213846cfad91764361af37befd6b6c523d
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Zig (pinned + SHA-256 verified)
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o zig.tar.xz "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          [ "$(sha256sum zig.tar.xz | awk '{print $1}')" = "$ZIG_SHA256" ] || { echo "::error::zig sha"; exit 1; }
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Fetch + verify FFmpeg source
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o ffmpeg.tar.gz "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
+          [ "$(sha256sum ffmpeg.tar.gz | awk '{print $1}')" = "$FFMPEG_TARBALL_SHA256" ] || { echo "::error::ffmpeg sha"; exit 1; }
+
+      - name: Build twice with ISOLATED cold zig caches, then byte-diff
+        run: |
+          set -euxo pipefail
+          sudo apt-get update && sudo apt-get install -y binutils
+          build() {
+            d="$1"
+            mkdir "$d"
+            tar -xzf ffmpeg.tar.gz -C "$d" --strip-components=1
+            ( cd "$d"
+              # Isolated caches per build => each compiles zig's compiler-rt/musl from cold,
+              # exactly like two separate CI jobs.
+              export ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-global"
+              export ZIG_LOCAL_CACHE_DIR="$PWD/.zig-local"
+              export SOURCE_DATE_EPOCH=1700000000
+              ./configure \
+                --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
+                --ar="zig ar" --ranlib="zig ranlib" --nm="nm" --host-cc=cc \
+                --enable-cross-compile --arch=arm --target-os=linux --pkg-config=false \
+                --disable-everything --disable-autodetect --disable-doc --disable-debug \
+                --disable-shared --enable-static --enable-small \
+                --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
+                --enable-protocol=file,udp,rtp,rtsp,tcp \
+                --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
+                --extra-cflags="-Os" --extra-ldflags="-static -s" >/dev/null
+              make -j1 >/dev/null 2>&1 )
+          }
+          build a
+          build b
+          sa="$(sha256sum a/ffmpeg | awk '{print $1}')"
+          sb="$(sha256sum b/ffmpeg | awk '{print $1}')"
+          echo "PROBE A sha256=$sa size=$(stat -c %s a/ffmpeg)"
+          echo "PROBE B sha256=$sb size=$(stat -c %s b/ffmpeg)"
+          if [ "$sa" = "$sb" ]; then
+            echo "PROBE RESULT: REPRODUCIBLE across isolated cold caches (nondeterminism is elsewhere)"; exit 0
+          fi
+          echo "PROBE RESULT: NOT REPRODUCIBLE across isolated cold caches"
+          echo "=== differing byte count ==="
+          cmp -l a/ffmpeg b/ffmpeg | wc -l || true
+          echo "=== first 40 differing offsets (dec oct oct) ==="
+          cmp -l a/ffmpeg b/ffmpeg | head -40 || true
+          echo "=== ELF section headers (A) — map offsets to sections ==="
+          readelf -S a/ffmpeg || true
+          echo "=== .comment / build-id (A) ==="
+          readelf -p .comment a/ffmpeg 2>/dev/null || true
+          readelf -n a/ffmpeg 2>/dev/null || true
+          echo "=== strings that differ (first 30) ==="
+          diff <(strings a/ffmpeg | sort -u) <(strings b/ffmpeg | sort -u) | head -30 || true
