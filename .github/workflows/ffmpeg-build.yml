@@ -6,8 +6,10 @@ name: ffmpeg binary refresh (#120)
 # is byte-reproducible (built outside the git worktree so FFmpeg's version isn't stamped
 # with this repo's commit hash, and no absolute build path leaks in — see BUILD.md), so
 # ffmpeg-provenance.yml can then rebuild and require a byte-for-byte match, exactly like
-# btmqttd. Run this only when intentionally bumping the pins/recipe; after it commits,
-# update PayloadBinaries.cs + THIRD_PARTY.md with the printed sha256 + size.
+# btmqttd. Run this only when intentionally bumping the pins/recipe. The final step rewrites
+# the recorded sha256 + size in PayloadBinaries.cs and THIRD_PARTY.md in the SAME commit, so
+# no manual metadata follow-up is needed (a version bump still requires updating the prose
+# version strings — check-doc-versions.sh enforces that; see BUILD.md 'Refreshing the binary').
 
 on:
   workflow_dispatch:
