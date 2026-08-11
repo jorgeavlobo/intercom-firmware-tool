@@ -5,11 +5,11 @@ using Xunit;
 namespace IntercomFirmwareTool.Core.Tests;
 
 /// <summary>
-/// The embedded minimal ffmpeg (issue #120, Phase 1a): the vendored third-party binary is
-/// present, loads through the length + SHA-256 guard, and ships its license notices (LGPL
-/// for FFmpeg + the MIT musl notice for the statically-linked libc). Declared but
-/// deliberately NOT in <see cref="PayloadBinaries.All"/> yet — the installer wires it in
-/// Phase 1c — so this is the coverage that the embed is wired correctly.
+/// The embedded minimal ffmpeg (issue #120): the vendored third-party binary is present, loads
+/// through the length + SHA-256 guard, and ships its license notices (LGPL for FFmpeg + the MIT
+/// musl notice for the statically-linked libc). Declared but deliberately NOT in
+/// <see cref="PayloadBinaries.All"/> yet — the gated on-device camera install writes it in Phase
+/// 1c-2 — so this is the coverage that the embed is wired correctly.
 /// </summary>
 public class PayloadFfmpegTests
 {
@@ -21,9 +21,9 @@ public class PayloadFfmpegTests
         // FFmpeg core is LGPL-2.1; the static binary also links musl libc (MIT).
         Assert.Equal("LGPL-2.1-or-later AND MIT", bin.LicenseSpdx);
 
-        // Phase 1a embeds ffmpeg but does NOT install it: MqttInstaller writes every entry
-        // in PayloadBinaries.All, so ffmpeg must stay out of All until the installer wiring
-        // lands in Phase 1c. This negative assertion fails loudly if that changes silently.
+        // 1c-1 embeds ffmpeg but does NOT install it: MqttInstaller writes every entry in
+        // PayloadBinaries.All, so ffmpeg must stay out of All until the gated on-device camera
+        // install lands in 1c-2. This negative assertion fails loudly if that changes silently.
         Assert.DoesNotContain(bin, PayloadBinaries.All);
 
         // Read re-verifies length + SHA-256 and throws on any mismatch.

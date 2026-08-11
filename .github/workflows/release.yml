@@ -53,8 +53,15 @@ jobs:
   verify-ffmpeg:
     uses: ./.github/workflows/ffmpeg-provenance.yml
 
+  # Same gate for the vendored go2rtc binary (#120), run on the release ref. go2rtc is a prebuilt
+  # upstream release (not rebuilt from source), so this is pin-and-verify: it re-downloads the
+  # pinned release asset and requires the committed binary to be byte-identical, so a release can
+  # never publish a go2rtc that drifted from its pinned upstream. Publishing `needs:` this too.
+  verify-go2rtc:
+    uses: ./.github/workflows/go2rtc-provenance.yml
+
   release:
-    needs: verify-ffmpeg
+    needs: [verify-ffmpeg, verify-go2rtc]
     runs-on: windows-latest
     permissions:
       contents: write # create the (draft) Release + upload assets
@@ -303,15 +310,20 @@ jobs:
             'licenses/lwext4-BSD-3-Clause-NOTICE.txt',
             'licenses/DiskPartitionInfo-LICENSE.txt',
             'licenses/dotnet-runtime-LICENSE.txt',
-            # Embedded ARM binaries: IntercomFirmwareTool.Core embeds btmqttd + ffmpeg as
+            # Embedded ARM binaries: IntercomFirmwareTool.Core embeds btmqttd + ffmpeg + go2rtc as
             # resources, so the shipped DLL distributes them — their notices must travel with
-            # every release. btmqttd's aggregated crate notice, ffmpeg's LGPL-2.1 text, and the
-            # shared musl-libc MIT COPYRIGHT (both binaries statically link musl) live in the
-            # same repo-root licenses/ dir as the others. See
-            # IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md (issues #72, #120).
+            # every release. btmqttd's aggregated crate notice, ffmpeg's LGPL-2.1 text, go2rtc's
+            # MIT text, and the shared musl-libc MIT COPYRIGHT (btmqttd + ffmpeg statically link
+            # musl; go2rtc is pure static Go) live in the same repo-root licenses/ dir as the
+            # others. See IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md (issues #72, #120).
             'licenses/btmqttd-THIRD-PARTY-LICENSES.txt',
             'licenses/ffmpeg-COPYING.LGPLv2.1.txt',
-            'licenses/musl-COPYRIGHT.txt'
+            'licenses/musl-COPYRIGHT.txt',
+            'licenses/go2rtc-LICENSE.txt',
+            # go2rtc is statically-linked Go, so its embedded binary also contains the Go runtime +
+            # ~35 modules; their audited aggregate notice must ship too. The Test-Path throw below is
+            # the hard release gate: publishing fails if this bundle is missing (issue #120).
+            'licenses/go2rtc-THIRD-PARTY-LICENSES.txt'
           )
           foreach ($n in $licenseTexts) {
             if (-not (Test-Path $n)) { throw "compliance file missing from checkout: $n" }
@@ -419,7 +431,7 @@ jobs:
           # release assets too, so a download of only the portable .exe still comes with them. These
           # are staged into dist/ by the packaging step; they carry no .sha256 sidecar (they are
           # documentation, not attested binaries).
-          for a in THIRD-PARTY-NOTICES.md LICENSE.txt SharpExt4-LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt btmqttd-THIRD-PARTY-LICENSES.txt ffmpeg-COPYING.LGPLv2.1.txt musl-COPYRIGHT.txt; do
+          for a in THIRD-PARTY-NOTICES.md LICENSE.txt SharpExt4-LICENSE.txt lwext4-LICENSE.txt lwext4-BSD-3-Clause-NOTICE.txt DiskPartitionInfo-LICENSE.txt dotnet-runtime-LICENSE.txt btmqttd-THIRD-PARTY-LICENSES.txt ffmpeg-COPYING.LGPLv2.1.txt musl-COPYRIGHT.txt go2rtc-LICENSE.txt go2rtc-THIRD-PARTY-LICENSES.txt; do
             files+=("dist/$a")
           done
           # GPL-2.0 §3(a) corresponding source for SharpExt4.dll — uploaded straight from its repo

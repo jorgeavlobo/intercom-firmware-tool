@@ -75,6 +75,7 @@ IntercomFirmwareTool.Core/Payload/mqtt/** text eol=lf
 # not leak into the shipped archive (Codex). No binaries live here (the ELF is under
 # Payload/vendor/armhf/), so eol=lf is safe for the whole directory.
 native/ffmpeg/** text eol=lf
+native/go2rtc/** text eol=lf
 
 # MQTT bridge ARM binaries (Phase 1b) — verbatim third-party ELF executables.
 # Force binary handling so `* text=auto` never line-ending-normalizes them

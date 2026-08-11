@@ -18,7 +18,7 @@ every release and referenced from the
 > `lwext4-LICENSE.txt`, `lwext4-BSD-3-Clause-NOTICE.txt`,
 > `DiskPartitionInfo-LICENSE.txt`, `dotnet-runtime-LICENSE.txt`,
 > `btmqttd-THIRD-PARTY-LICENSES.txt`, `ffmpeg-COPYING.LGPLv2.1.txt`,
-> `musl-COPYRIGHT.txt`) accompanying it on
+> `musl-COPYRIGHT.txt`, `go2rtc-LICENSE.txt`, `go2rtc-THIRD-PARTY-LICENSES.txt`) accompanying it on
 > the same release. Links to other repository documents (README, `CLEANROOM.md`)
 > are absolute GitHub URLs so they resolve from anywhere.
 
@@ -124,13 +124,13 @@ for the full reasoning.
   <https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files>
   and <https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution>.
 
-### Embedded ARM binaries (`btmqttd`, `ffmpeg`)
+### Embedded ARM binaries (`btmqttd`, `ffmpeg`, `go2rtc`)
 
-`IntercomFirmwareTool.Core` embeds two statically-linked **armv7 (musl)** binaries as
-assembly resources. The tool writes **`btmqttd`** onto the BTicino intercom's firmware for
-the optional MQTT bridge; **`ffmpeg`** is embedded for the upcoming on-device camera but is
-**not yet written to the device** (a later phase installs it). Both ship inside this DLL, so
-their notices travel with the release:
+`IntercomFirmwareTool.Core` embeds three statically-linked **armv7** binaries as assembly
+resources. The tool writes **`btmqttd`** onto the BTicino intercom's firmware for the optional
+MQTT bridge; **`ffmpeg`** (static musl) and **`go2rtc`** (static Go) are embedded for the
+**on-device camera** (#120) and written to the firmware image by the gated on-device camera
+install in Phase 1c-2. All three ship inside this DLL, so their notices travel with the release:
 
 - **`btmqttd`** — first-party MQTT bridge daemon (built from this repo's
   `native/btmqttd/`). Its bundled Rust crates' notices (MIT / Apache-2.0 / ISC /
@@ -145,7 +145,18 @@ their notices travel with the release:
   Both ship as standalone assets **and** bundled inside both `.zip` archives. No changes to FFmpeg
   source were made. LGPL text:
   [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](licenses/ffmpeg-COPYING.LGPLv2.1.txt).
-- **musl libc** (**MIT**) — statically linked into *both* binaries; its notice:
+- **`go2rtc`** — third-party, a **redistributed upstream prebuilt** (go2rtc **`v1.9.14`**,
+  **MIT**, AlexxIT/go2rtc) — a statically-linked Go binary that serves the camera as RTSP to
+  Home Assistant. Not rebuilt from source here; its exact release is pinned + byte-verified (see
+  `native/go2rtc/pins.env` and `go2rtc-provenance.yml`). Because it is statically linked, it also
+  contains the **BSD-3-Clause Go runtime** + ~35 Go modules; their notices travel in an **audited
+  bundle** ([`licenses/go2rtc-THIRD-PARTY-LICENSES.txt`](licenses/go2rtc-THIRD-PARTY-LICENSES.txt),
+  generated with `go-licenses` for the shipped `linux/arm` build) alongside go2rtc's own MIT text
+  ([`licenses/go2rtc-LICENSE.txt`](licenses/go2rtc-LICENSE.txt)). All permissive — MIT / BSD-2 /
+  BSD-3 / Apache-2.0; the EPL-2.0/EDL-1.0-dual `paho.mqtt.golang` is used under the permissive
+  EDL-1.0 election, so no copyleft applies. No corresponding-source obligation.
+- **musl libc** (**MIT**) — statically linked into the `btmqttd` and `ffmpeg` binaries (not
+  `go2rtc`, which is pure static Go); its notice:
   [`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt).
 
 Full provenance for these binaries — exact SHA-256, size, build toolchain, and
