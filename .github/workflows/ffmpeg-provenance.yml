@@ -79,16 +79,29 @@ jobs:
             echo "::error::committed ffmpeg is GPL/nonfree — must be LGPL"; exit 1
           fi
 
-      - name: Zig ${{ env.ZIG_VERSION }}
-        uses: mlugg/setup-zig@v1
-        with:
-          version: ${{ env.ZIG_VERSION }}
+      - name: Install Zig ${{ env.ZIG_VERSION }} (pinned + SHA-256 verified — no third-party action)
+        run: |
+          set -euxo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o zig.tar.xz "$url"
+          got="$(sha256sum zig.tar.xz | awk '{print $1}')"
+          echo "zig tarball sha256: $got"
+          if [ -n "${ZIG_SHA256:-}" ] && [ "$got" != "$ZIG_SHA256" ]; then
+            echo "::error::zig tarball SHA-256 mismatch: got $got expected $ZIG_SHA256"; exit 1
+          fi
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
 
       - name: Functional rebuild from the pinned recipe
         run: |
           set -euxo pipefail
           curl -fsSL -o ffmpeg.tar.gz \
             "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
+          got="$(sha256sum ffmpeg.tar.gz | awk '{print $1}')"
+          echo "ffmpeg tarball sha256: $got"
+          if [ -n "${FFMPEG_TARBALL_SHA256:-}" ] && [ "$got" != "$FFMPEG_TARBALL_SHA256" ]; then
+            echo "::error::FFmpeg source SHA-256 mismatch: got $got expected $FFMPEG_TARBALL_SHA256"; exit 1
+          fi
           mkdir ffmpeg-src && tar -xzf ffmpeg.tar.gz -C ffmpeg-src --strip-components=1
           cd ffmpeg-src
           CFLAGS="-Os -ffile-prefix-map=$(pwd)=. -fdebug-prefix-map=$(pwd)=."
