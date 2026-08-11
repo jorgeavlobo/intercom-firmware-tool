@@ -8,6 +8,7 @@
 //! rootfs, so it is a trusted, machine-written file (see the header in the .conf).
 
 use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::path::Path;
 
 pub const DEFAULT_CFG_PATH: &str = "/etc/btmqttd/btmqttd.conf";
@@ -25,6 +26,15 @@ pub const OWN_PORT_AV: u16 = 30007;
 
 /// Directory holding the Home Assistant discovery manifest + payloads.
 pub const HA_DIR: &str = "/etc/btmqttd/ha";
+
+/// The loopback address the on-device media server (go2rtc) listens on. In on-device mode
+/// (`CAMERA_ONDEVICE=1`, issue #120) the siphon fans the panel's RTP here — to a socket on
+/// the SAME device — instead of to an off-device host. It is loopback (routes via `lo`,
+/// immutable, DHCP-proof) but deliberately **not** `127.0.0.1`: our add-client frame
+/// `*7*300#127#0#0#2#…` does not match the panel's own `*7*300#127#0#0#1#…` media-start
+/// signal that `av.rs` watches to arm, so the on-device feed never re-arms us off its own
+/// echo. `av.rs`'s loopback guard permits exactly this address in on-device mode.
+pub const CAMERA_ONDEVICE_TARGET: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 2);
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -100,8 +110,10 @@ pub struct Config {
     /// siphons the cleartext RTP off `bt_av_media` (:30007) by adding our own UDP client,
     /// fanning it out to `camera_target` for go2rtc/Home Assistant. Opt-in; off by default.
     pub camera_enabled: bool,
-    /// Where to fan the siphoned RTP (the go2rtc/HA host). Defaults to `MQTT_HOST`
-    /// (go2rtc typically runs alongside Home Assistant). Resolved to an IPv4 at runtime.
+    /// Where to fan the siphoned RTP. In off-device mode this is the go2rtc/HA host and
+    /// defaults to `MQTT_HOST` (go2rtc typically runs alongside Home Assistant). In on-device
+    /// mode (`camera_ondevice`) it is pinned to [`CAMERA_ONDEVICE_TARGET`] (`127.0.0.2`) and
+    /// `CAMERA_TARGET_HOST` is ignored. Resolved to an IPv4 at runtime.
     pub camera_target: String,
     /// UDP ports on `camera_target` for the video and audio RTP fan-out. Must match the
     /// generated go2rtc SDP. Defaults 40000 (video) / 40002 (audio).
@@ -111,6 +123,14 @@ pub struct Config {
     /// default — the only one siphonable on the C100X, and present on the C300X), `0` =
     /// hi-res (C300X only). Clamped to 0..=1; default 1.
     pub camera_branch: u8,
+    /// On-device media server mode (issue #120, Phase 1). When set (`CAMERA_ONDEVICE=1`),
+    /// go2rtc + ffmpeg run ON the panel and go2rtc listens on loopback, so the siphon fans
+    /// the RTP to the loopback alias [`CAMERA_ONDEVICE_TARGET`] (`127.0.0.2`) rather than an
+    /// off-device host — `camera_target` is pinned to that address and `CAMERA_TARGET_HOST`
+    /// is ignored. `127.0.0.2` (not `127.0.0.1`) is deliberate: it stays loopback yet does
+    /// not collide with the panel's own media-start arm signal `av.rs` watches. Opt-in; off
+    /// by default (the fan-out then targets the off-device go2rtc/HA host as before).
+    pub camera_ondevice: bool,
 
     // --- On-demand viewing (Phase 2, issue #104) -----------------------------------
     /// "View the entrance-panel camera on demand" (not only while ringing). When enabled,
@@ -169,6 +189,11 @@ impl Config {
         let get = |k: &str, d: &str| -> String { opt(k).unwrap_or_else(|| d.to_string()) };
         let flag = |k: &str| -> bool { opt(k).as_deref() == Some("1") };
 
+        // On-device media server (issue #120): go2rtc runs on the panel and listens on loopback,
+        // so the siphon target is pinned to the loopback alias 127.0.0.2 (CAMERA_ONDEVICE_TARGET)
+        // and CAMERA_TARGET_HOST is ignored. Computed once — it drives both the flag and the target.
+        let camera_ondevice = flag("CAMERA_ONDEVICE");
+
         Config {
             mqtt_host: get("MQTT_HOST", ""),
             mqtt_port: opt("MQTT_PORT").and_then(|s| s.parse().ok()).unwrap_or(1883),
@@ -217,7 +242,15 @@ impl Config {
             // Live doorbell camera (issue #103). Opt-in; the fan-out target defaults to the
             // broker host (go2rtc usually lives with HA). Branch clamped to lo/hi-res (1/0).
             camera_enabled: flag("CAMERA_ENABLED"),
-            camera_target: get("CAMERA_TARGET_HOST", &get("MQTT_HOST", "")),
+            camera_ondevice,
+            // On-device mode pins the fan-out to the loopback alias 127.0.0.2 (go2rtc listens
+            // there); otherwise it's CAMERA_TARGET_HOST, defaulting to the broker host (go2rtc
+            // usually lives with HA).
+            camera_target: if camera_ondevice {
+                CAMERA_ONDEVICE_TARGET.to_string()
+            } else {
+                get("CAMERA_TARGET_HOST", &get("MQTT_HOST", ""))
+            },
             // Reject port 0 (a hand-edited / corrupt conf) as well as an unparseable value: 0 would
             // build an invalid `*7*300#…#0#…*##` frame the siphon can never use. Fall back to the
             // default so a bad value degrades to a working port rather than a dead one (Copilot).
@@ -571,6 +604,28 @@ EMPTY=
         let bad = cfg("MQTT_HOST=h\nCAMERA_VIDEO_PORT=70000\nCAMERA_AUDIO_PORT=nope\n");
         assert_eq!(bad.camera_video_port, 40000);
         assert_eq!(bad.camera_audio_port, 40002);
+    }
+
+    #[test]
+    fn camera_ondevice_pins_the_target_to_the_loopback_alias() {
+        let cfg = |s: &str| Config::from_map(parse_env(s));
+        // Off by default: the flag is false and the target follows CAMERA_TARGET_HOST (falling
+        // back to the broker host) — the off-device go2rtc/HA path, unchanged.
+        let off = cfg("MQTT_HOST=192.168.1.10\nCAMERA_TARGET_HOST=192.168.1.99\n");
+        assert!(!off.camera_ondevice);
+        assert_eq!(off.camera_target, "192.168.1.99");
+        let broker = cfg("MQTT_HOST=192.168.1.10\n");
+        assert!(!broker.camera_ondevice);
+        assert_eq!(broker.camera_target, "192.168.1.10");
+        // On-device mode pins the siphon to the loopback alias 127.0.0.2 (NOT 127.0.0.1) and
+        // ignores CAMERA_TARGET_HOST — go2rtc runs on the panel and listens on loopback.
+        let on = cfg("MQTT_HOST=192.168.1.10\nCAMERA_ONDEVICE=1\nCAMERA_TARGET_HOST=192.168.1.99\n");
+        assert!(on.camera_ondevice);
+        assert_eq!(on.camera_target, "127.0.0.2");
+        assert_eq!(on.camera_target, CAMERA_ONDEVICE_TARGET.to_string());
+        // Only the exact "1" enables it (mirrors the other flags); anything else stays off-device.
+        assert!(!cfg("MQTT_HOST=h\nCAMERA_ONDEVICE=0\n").camera_ondevice);
+        assert!(!cfg("MQTT_HOST=h\nCAMERA_ONDEVICE=true\n").camera_ondevice);
     }
 
     #[test]
