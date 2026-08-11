@@ -68,12 +68,13 @@ tampered download can never feed the build. Bump the pins there (and refresh the
 > the `./configure`/`make` flags elsewhere — edit `build.sh`. A change to it lives under
 > `native/ffmpeg/**`, which is in the provenance path filter, so provenance rebuilds and
 > byte-compares to the committed binary, failing if the change would alter the bytes.
-
+>
 > **Build outside any git repository.** FFmpeg's `ffbuild/version.sh` runs `git describe`;
 > if the source tree sits inside another repo's worktree, git walks up and stamps *that*
 > repo's commit hash as the ffmpeg version (`ffmpeg version <hash>`), which changes every
-> commit and destroys reproducibility. `build.sh` therefore requires the source dir to have
-> no `.git` ancestor (CI extracts under `$RUNNER_TEMP`); then the version is deterministic.
+> commit and destroys reproducibility. `build.sh` **enforces** this — it refuses (non-zero
+> exit) to build a source dir that `git rev-parse` reports is inside a worktree — so CI
+> extracts under `$RUNNER_TEMP`, where the version is deterministic.
 
 ```sh
 # Inputs (pinned): Zig 0.13.0, FFmpeg n7.1.1 (both SHA-256-verified by the workflows).
@@ -146,7 +147,13 @@ Two kinds of change, edited in different places:
   source of truth both workflows invoke. Do not touch the workflows for a recipe change.
 - **Input pins** (Zig / FFmpeg versions + their SHA-256s): edit **only** [`pins.env`](pins.env)
   — the single source both workflows load. Do not touch the workflows' `env:` blocks for a
-  pin change.
+  pin change. When a bump changes the **version** (not just a SHA), also update the prose that
+  names it — this file, [`THIRD_PARTY.md`](../../IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md),
+  the root `THIRD-PARTY-NOTICES.md`, `PayloadBinaries.cs`, and the `.csproj` — because those
+  point LGPL recipients at the corresponding-source tag. [`check-doc-versions.sh`](check-doc-versions.sh)
+  **enforces** this: `ffmpeg-build.yml` runs it before committing a refresh and
+  `ffmpeg-provenance.yml` runs it on every PR, so a pin bump that leaves a stale version string
+  fails CI (the automated size/SHA rewrite alone is not enough).
 
 Both `build.sh` and `pins.env` are under `native/ffmpeg/**`, which is in the provenance path
 filter, so either change re-runs the byte-for-byte check against the committed binary.

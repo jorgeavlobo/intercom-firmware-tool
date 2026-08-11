@@ -43,6 +43,13 @@ jobs:
       - name: Load pinned build inputs (native/ffmpeg/pins.env — shared with provenance)
         run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' native/ffmpeg/pins.env >> "$GITHUB_ENV"
 
+      - name: Docs mention the pinned FFmpeg/Zig versions (fail the refresh if pins bumped, docs didn't)
+        # A pin bump in pins.env only re-derives the binary's size + SHA-256 below; the upstream
+        # VERSION is also written, in prose, into the notices + project metadata that direct LGPL
+        # recipients to the corresponding source. Refuse to build/commit a refresh until those
+        # match the loaded pins. Shared guard, so provenance runs the identical check on PRs.
+        run: sh native/ffmpeg/check-doc-versions.sh
+
       - name: Install the pinned Zig (SHA-256 verified — no third-party action)
         run: |
           set -euxo pipefail

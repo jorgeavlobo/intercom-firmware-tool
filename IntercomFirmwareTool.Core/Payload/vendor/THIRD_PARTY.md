@@ -20,9 +20,9 @@ userland tools those scripts required: **`jq`** (JSON, now done natively with
 (`evtest` was GPL-2.0-or-later; the static `jq` bundled LGPL-2.1 glibc): the
 **MQTT bridge** (`btmqttd` + its scripts) no longer carries any GPL/LGPL
 component. (Separately, this assembly does embed the **LGPL-2.1** `ffmpeg` for
-the on-device camera — see the `ffmpeg` section below — which the tool writes
-onto the device only when that feature is enabled; its LGPL notice + source are
-documented there.)
+the on-device camera — see the `ffmpeg` section below. It is embedded now but is
+**not yet written to the device**; the on-device camera install lands in a later
+phase (1c). Its LGPL notice + source are documented there.)
 
 `btmqttd` is a **statically-linked musl** binary, so it needs no runtime
 interpreter, no shared libraries, and none of the device tools the shell bridge
@@ -179,8 +179,10 @@ linked), so distributing it requires (a) shipping the **LGPL-2.1 license text** 
 the **corresponding source** available: it is the unmodified upstream **FFmpeg `n7.1.1`**
 tag (public), built exactly per `native/ffmpeg/BUILD.md`. No changes to FFmpeg source were
 made. As with `btmqttd`, the embedded resource is compiled into `IntercomFirmwareTool.Core`
-unconditionally; the **firmware image** only carries `ffmpeg` when the on-device camera
-feature (#120) writes it in.
+unconditionally. In **Phase 1a** (this change) the firmware image does **not** contain
+`ffmpeg`: it is not in `PayloadBinaries.All`, so `MqttInstaller` never writes it to the
+device. The firmware image carries `ffmpeg` only once the on-device camera install lands
+in **Phase 1c** (#120).
 
 ### musl libc (MIT) — statically linked
 

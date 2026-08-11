@@ -124,12 +124,13 @@ for the full reasoning.
   <https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files>
   and <https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution>.
 
-### Embedded ARM binaries (`btmqttd`, `ffmpeg`) — installed onto the intercom
+### Embedded ARM binaries (`btmqttd`, `ffmpeg`)
 
 `IntercomFirmwareTool.Core` embeds two statically-linked **armv7 (musl)** binaries as
-assembly resources; the tool writes them onto the BTicino intercom's firmware for the
-optional MQTT bridge / on-device camera. They ship inside this DLL, so their notices
-travel with the release:
+assembly resources. The tool writes **`btmqttd`** onto the BTicino intercom's firmware for
+the optional MQTT bridge; **`ffmpeg`** is embedded for the upcoming on-device camera but is
+**not yet written to the device** (a later phase installs it). Both ship inside this DLL, so
+their notices travel with the release:
 
 - **`btmqttd`** — first-party MQTT bridge daemon (built from this repo's
   `native/btmqttd/`). Its bundled Rust crates' notices (MIT / Apache-2.0 / ISC /

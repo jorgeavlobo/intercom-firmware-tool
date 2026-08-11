@@ -16,6 +16,15 @@
 set -eu
 
 src="${1:?usage: build.sh <extracted-ffmpeg-source-dir>}"
+
+# ENFORCE the no-git-ancestor precondition (not just document it): a source tree inside a
+# git worktree makes FFmpeg's ffbuild/version.sh stamp that repo's commit hash as the ffmpeg
+# version, silently breaking byte-reproducibility. Fail fast instead.
+if git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "build.sh: '$src' is inside a git worktree — extract the source to a scratch dir with no .git ancestor (CI uses \$RUNNER_TEMP)" >&2
+  exit 1
+fi
+
 cd "$src" || exit 1
 
 # --extra-cflags is just -Os: no -ffile-prefix-map, whose value would embed the absolute

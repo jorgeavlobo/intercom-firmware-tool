@@ -61,6 +61,13 @@ jobs:
       - name: Load pinned build inputs (native/ffmpeg/pins.env — shared with ffmpeg-build.yml)
         run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' native/ffmpeg/pins.env >> "$GITHUB_ENV"
 
+      - name: Docs mention the pinned FFmpeg/Zig versions (backstop for a pins-vs-notices drift)
+        # Same shared guard ffmpeg-build.yml runs before committing a refresh: assert every
+        # version-bearing notice + the project metadata names the pinned upstream version, so a
+        # PR that bumps native/ffmpeg/pins.env (in this path filter) without updating the prose
+        # that points LGPL recipients at the corresponding source fails here.
+        run: sh native/ffmpeg/check-doc-versions.sh
+
       - name: Metadata integrity (committed SHA-256 + size ↔ PayloadBinaries.cs ↔ THIRD_PARTY.md)
         run: |
           set -euxo pipefail
