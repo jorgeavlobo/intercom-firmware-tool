@@ -80,6 +80,13 @@ watchdog_loop() {
 		# honors a maintenance stop and heals any boot-time start race.
 		/etc/init.d/btmqttd respawn >> "$LOGFILE" 2>&1
 
+		# go2rtc is the on-device camera media server (issue #120), managed by its own
+		# init script. It is installed ONLY on the on-device camera path, so guard on the
+		# script's presence: on a non-camera image the file is absent and this is a no-op
+		# (no spurious "not found" every pass). Same respawn contract as btmqttd above —
+		# reconcile the process to the DISABLED marker each pass.
+		[ -x /etc/init.d/go2rtcd ] && /etc/init.d/go2rtcd respawn >> "$LOGFILE" 2>&1
+
 		# Keep the log from growing without bound: trim to 50 KB past 100 KB.
 		if [ -f "$LOGFILE" ]; then
 			size=$(wc -c < "$LOGFILE" 2>/dev/null || echo 0)

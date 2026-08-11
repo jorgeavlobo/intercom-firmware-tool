@@ -215,6 +215,9 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_CameraTargetLoopback" xml:space="preserve">
     <value>Das Kameraziel muss eine routbare Adresse sein — keine Loopback-Adresse (127.x.x.x) und nicht die unspezifizierte Adresse 0.0.0.0. go2rtc / Home Assistant läuft außerhalb der Türsprechanlage.</value>
   </data>
+  <data name="Mqtt_CameraRtspCredsRequired" xml:space="preserve">
+    <value>Das Streaming auf dem Gerät erfordert RTSP-Anmeldedaten: Legen Sie einen Benutzernamen und ein Passwort fest. go2rtc deaktiviert die Authentifizierung, wenn der Benutzername leer ist, wodurch der Kamerastream im lokalen Netzwerk offengelegt würde. Anmeldedaten müssen in einer einzigen Zeile stehen.</value>
+  </data>
   <data name="Mqtt_FileMissing" xml:space="preserve">
     <value>{0} existiert im Abbild nicht; der MQTT-Brücken-Patch kann nicht angewendet werden.</value>
   </data>
