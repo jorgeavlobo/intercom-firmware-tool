@@ -76,6 +76,12 @@ lines. The load-bearing non-MIT/Apache components are:
 Every other crate is MIT and/or Apache-2.0 (we elect MIT where offered). None is
 copyleft.
 
+Beyond the Rust crates, the static binary links **musl libc** (MIT) via Rust's
+`*-musleabihf` target. musl is not a crate, so its notice is not in the aggregated
+crate file above; the MIT copyright + permission notice ships separately in
+[`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt) — the same shared musl
+notice used by `ffmpeg`.
+
 ## Build & reproducibility
 
 The binary is cross-compiled to `armv7-unknown-linux-musleabihf` (static musl,
@@ -146,9 +152,9 @@ whole binary is LGPL. No decoders/encoders are built.
 | Upstream | FFmpeg `n7.1.1` (release tag) |
 | Build toolchain | `zig cc` 0.13.0 (bundled musl) per `BUILD.md` |
 | Configuration | `--disable-everything` + `protocol=file,udp,rtp,rtsp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp` · `--disable-asm` |
-| License | **LGPL-2.1-or-later** |
-| License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](licenses/ffmpeg-COPYING.LGPLv2.1.txt) |
-| SPDX expression | `LGPL-2.1-or-later` |
+| License | **LGPL-2.1-or-later** (FFmpeg) **AND MIT** (statically-linked musl libc) |
+| License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](licenses/ffmpeg-COPYING.LGPLv2.1.txt) · [`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt) |
+| SPDX expression | `LGPL-2.1-or-later AND MIT` |
 
 The SHA-256 + size are enforced on read by `PayloadBinaries`. **Byte-reproducible** — like
 `btmqttd`: with every build input pinned (Zig `0.13.0` and the FFmpeg `n7.1.1` source, both
@@ -171,3 +177,13 @@ tag (public), built exactly per `native/ffmpeg/BUILD.md`. No changes to FFmpeg s
 made. As with `btmqttd`, the embedded resource is compiled into `IntercomFirmwareTool.Core`
 unconditionally; the **firmware image** only carries `ffmpeg` when the on-device camera
 feature (#120) writes it in.
+
+### musl libc (MIT) — statically linked
+
+`zig cc` statically links **musl libc** into the binary. musl is MIT-licensed; its COPYRIGHT
+grants an exception for public headers and CRT files, but the general libc objects linked
+from `libc.a` are **not** covered by that exception, so the MIT copyright + permission notice
+must ship with the distribution. It does — [`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt),
+sourced from the pinned Zig distribution (which bundles musl) and embedded in the assembly.
+The same upstream musl license also covers `btmqttd`'s statically-linked musl, so both
+binaries share this one notice.

@@ -52,6 +52,15 @@ namespace IntercomFirmwareTool.Core
     public static class PayloadBinaries
     {
         /// <summary>
+        /// musl libc's MIT license notice. BOTH shipped binaries statically link musl libc
+        /// objects — <c>btmqttd</c> via the Rust <c>*-musleabihf</c> target, <c>ffmpeg</c>
+        /// via <c>zig cc</c> — and musl's exception waives only headers/CRT, so the linked
+        /// libc.a objects require the notice. The same upstream license text covers both.
+        /// </summary>
+        private const string MuslCopyrightResource =
+            "IntercomFirmwareTool.Core.Payload.vendor.licenses.musl-COPYRIGHT.txt";
+
+        /// <summary>
         /// <c>btmqttd</c> — the single-connection MQTT bridge daemon (issue #32),
         /// a statically-linked armv7 hard-float (musl) ELF that REPLACES the entire
         /// shell-orchestrated bridge (StartMqttSend/StartMqttReceive, keypress.sh,
@@ -71,7 +80,12 @@ namespace IntercomFirmwareTool.Core
             // The static binary bundles ~65 Rust crates; the mandatory notices span
             // MIT, Apache-2.0, ISC (ring/webpki/untrusted), BSD-3-Clause (subtle) and
             // Unicode-3.0 (unicode-ident). All texts are in the aggregated notice file.
-            LicenseSpdx: "MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0");
+            LicenseSpdx: "MIT AND Apache-2.0 AND ISC AND BSD-3-Clause AND Unicode-3.0")
+        {
+            // Also statically links musl libc (MIT) — its COPYRIGHT ships alongside the
+            // aggregated crate notices. (SPDX already lists MIT, from the crates.)
+            AdditionalLicenseResourceNames = new[] { MuslCopyrightResource },
+        };
 
         /// <summary>
         /// <c>ffmpeg</c> — a minimal, LGPL, statically-linked armv7 hard-float (musl) build for the
@@ -92,7 +106,12 @@ namespace IntercomFirmwareTool.Core
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.ffmpeg",
             LicenseResourceName:
                 "IntercomFirmwareTool.Core.Payload.vendor.licenses.ffmpeg-COPYING.LGPLv2.1.txt",
-            LicenseSpdx: "LGPL-2.1-or-later");
+            // FFmpeg core is LGPL-2.1; the static binary also links musl libc (MIT), hence
+            // the compound expression and the extra musl notice below.
+            LicenseSpdx: "LGPL-2.1-or-later AND MIT")
+        {
+            AdditionalLicenseResourceNames = new[] { MuslCopyrightResource },
+        };
 
         /// <summary>The complete third-party notice (Markdown).</summary>
         public const string ThirdPartyNoticeResourceName =

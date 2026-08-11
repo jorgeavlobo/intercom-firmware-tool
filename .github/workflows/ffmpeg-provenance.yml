@@ -76,8 +76,8 @@ jobs:
           # same sed with '_' as the separator: '_' is a word character, so it never forms
           # the \B/\> boundary that stops the group from re-matching, and the ':a;…;ta'
           # loop spins forever (GNU sed 4.9).
-          cs="$(printf '%s' "$size" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"   # 2,024,464
-          us="${cs//,/_}"                                                  # 2_024_464
+          cs="$(printf '%s' "$size" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"   # 2,024,448
+          us="${cs//,/_}"                                                  # 2_024_448
           grep -q "Length: ${us}," "$pb" || { echo "::error::size ${us} not recorded in PayloadBinaries.cs"; exit 1; }
           grep -q "${cs} bytes" "$tp"    || { echo "::error::size ${cs} not recorded in THIRD_PARTY.md"; exit 1; }
           # Record the committed SHA-256 for the byte-for-byte reproduction check below.
