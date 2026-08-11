@@ -1,5 +1,4 @@
 using System;
-using System.Linq;
 using IntercomFirmwareTool.Core;
 using Xunit;
 
@@ -50,7 +49,7 @@ public class PayloadFfmpegTests
         // Additional: the statically-linked musl libc (MIT) COPYRIGHT must travel with it.
         var names = PayloadBinaries.LicenseResourceNames(bin);
         string muslResource = Assert.Single(
-            names.Where(n => n.EndsWith("musl-COPYRIGHT.txt", StringComparison.Ordinal)));
+            names, n => n.EndsWith("musl-COPYRIGHT.txt", StringComparison.Ordinal));
         string musl = PayloadBinaries.LicenseTextByResource(muslResource);
         Assert.Contains("musl", musl);
         Assert.Contains("MIT license", musl);

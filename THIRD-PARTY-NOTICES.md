@@ -122,6 +122,28 @@ for the full reasoning.
   <https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files>
   and <https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution>.
 
+### Embedded ARM binaries (`btmqttd`, `ffmpeg`) — installed onto the intercom
+
+`IntercomFirmwareTool.Core` embeds two statically-linked **armv7 (musl)** binaries as
+assembly resources; the tool writes them onto the BTicino intercom's firmware for the
+optional MQTT bridge / on-device camera. They ship inside this DLL, so their notices
+travel with the release:
+
+- **`btmqttd`** — first-party MQTT bridge daemon (built from this repo's
+  `native/btmqttd/`). Its bundled Rust crates' notices (MIT / Apache-2.0 / ISC /
+  BSD-3-Clause / Unicode-3.0):
+  [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
+- **`ffmpeg`** — third-party, a minimal **LGPL-2.1-or-later** build of **FFmpeg `n7.1.1`**
+  (unmodified upstream tag; corresponding source is the public FFmpeg `n7.1.1` tag, built
+  per `native/ffmpeg/BUILD.md`). LGPL text:
+  [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](licenses/ffmpeg-COPYING.LGPLv2.1.txt).
+- **musl libc** (**MIT**) — statically linked into *both* binaries; its notice:
+  [`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt).
+
+Full provenance for these binaries — exact SHA-256, size, build toolchain, and
+reproducible-build recipe — is recorded in the repository at
+`IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md`.
+
 ---
 
 ## Written offer for corresponding source (GPL-2.0, for the whole `SharpExt4.dll`)
