@@ -51,18 +51,29 @@ for f in $ZIG_FILES; do
   grep -Fq "$ZIG_VERSION" "$f" || { echo "::error file=$f::does not mention pinned Zig version '$ZIG_VERSION'" >&2; fail=1; }
 done
 
-# (2) No stale occurrence — every structured version token must EXACTLY equal the pin.
-# FFmpeg release tags are the distinctive `n<maj>.<min>[.<patch>]` shape — TWO-component (e.g.
-# n8.0) OR THREE-component (e.g. n7.1.1); the regex matches either. Every such token — displayed
-# versions, corresponding-source URLs like `/tree/n7.1.1`, and asset names like
-# `ffmpeg-n7.1.1-source.tar.gz` — must be the pinned tag EXACTLY. No series-prefix exemption: a
-# reference to a shorter series (e.g. `/tree/n7.1` or `ffmpeg-n7.1-source.tar.gz`) identifies a
-# DIFFERENT release and would misdirect LGPL recipients, so it must fail (Codex). The docs
-# therefore carry no bare `n7.1`-style series token — BUILD.md's minimal-build note says
-# "FFmpeg 7.1" (no `n`), which is not tag-shaped and is intentionally not matched.
+# (2) No stale occurrence — every FFmpeg-tag reference must EXACTLY equal the pin.
+# (2a) Tag tokens: capture the MAXIMAL numeric version — greedy `n<maj>.<min>[.<patch>...]`, with
+# PCRE look-arounds (grep -oP, present on the ubuntu CI runners) so the token is neither a
+# substring of a larger alnum token nor a truncated prefix of a longer numeric tag. A four-part
+# n7.1.1.1 is thus captured whole (not as n7.1.1) and fails; the tag embedded in an asset name
+# like `ffmpeg-n7.1.1-source.tar.gz` is captured as n7.1.1 and validated. No series-prefix
+# exemption — a shorter series such as n7.1 identifies a DIFFERENT release (Codex). The docs carry
+# no bare `n7.1`-style series token: BUILD.md's minimal-build note says "FFmpeg 7.1" (no `n`).
 for f in $FF_FILES; do
-  for tok in $(grep -oE 'n[0-9]+\.[0-9]+(\.[0-9]+)?' "$f" 2>/dev/null || true); do
-    [ "$tok" = "$FFMPEG_TAG" ] || { echo "::error file=$f::stale FFmpeg tag '$tok' (pinned '$FFMPEG_TAG') — every FFmpeg-tag reference (displayed version, corresponding-source URL, asset name) must be EXACTLY the pinned tag" >&2; fail=1; }
+  for tok in $(grep -oP '(?<![0-9A-Za-z])n[0-9]+(\.[0-9]+)+(?![0-9])' "$f" 2>/dev/null || true); do
+    [ "$tok" = "$FFMPEG_TAG" ] || { echo "::error file=$f::stale FFmpeg tag '$tok' (pinned '$FFMPEG_TAG') — every FFmpeg-tag reference must be EXACTLY the pinned tag" >&2; fail=1; }
+  done
+done
+# (2b) Corresponding-source ASSET NAMES must be complete, exact values — so a hyphen-suffixed
+# variant like `ffmpeg-n7.1.1-old-source.tar.gz` (whose numeric token still reads n7.1.1 in 2a)
+# can't misidentify the shipped source. The only valid names are the source + build-recipe
+# archives release.yml ships for the pinned tag (Codex).
+for f in $FF_FILES; do
+  for asset in $(grep -oE 'ffmpeg-n[0-9A-Za-z.-]+\.tar\.gz' "$f" 2>/dev/null || true); do
+    case "$asset" in
+      "ffmpeg-${FFMPEG_TAG}-source.tar.gz"|"ffmpeg-${FFMPEG_TAG}-build-recipe.tar.gz") : ;;
+      *) echo "::error file=$f::stale FFmpeg source-asset name '$asset' (expected ffmpeg-${FFMPEG_TAG}-source.tar.gz or ffmpeg-${FFMPEG_TAG}-build-recipe.tar.gz)" >&2; fail=1 ;;
+    esac
   done
 done
 

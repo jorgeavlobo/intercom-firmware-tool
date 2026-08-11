@@ -52,7 +52,12 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Do NOT cancel-in-progress. When release.yml calls this as its `verify-ffmpeg` gate, two
+  # manual releases of DIFFERENT versions dispatched from the same branch would share this
+  # group (same github.ref); cancelling would fail one release's required gate and silently skip
+  # its publish. Queue instead of cancel — a short provenance run serializing is harmless, and a
+  # superseded PR run finishing wastes only a couple of CPU-minutes (Codex).
+  cancel-in-progress: false
 
 # Every run: step below uses `set -o pipefail` (a bash builtin), so declare bash explicitly
 # rather than depending on the runner's default shell staying bash (Copilot).
