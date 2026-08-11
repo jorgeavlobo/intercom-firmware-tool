@@ -1,0 +1,84 @@
+name: ffmpeg reproducibility probe (temp)
+
+# TEMPORARY investigation (issue #120): does the minimal ffmpeg build come out
+# byte-identical across two independent builds from the same pinned source with the
+# same pinned zig? Answers whether we can upgrade ffmpeg-provenance.yml from FUNCTIONAL
+# (size + configuration) to a btmqttd-style byte-for-byte rebuild match. Delete after use.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.13.0
+  FFMPEG_TAG: n7.1.1
+  ZIG_SHA256: d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea
+  FFMPEG_TARBALL_SHA256: f117507dc501f2a6c11f9241d8d0c3213846cfad91764361af37befd6b6c523d
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Zig (pinned + SHA-256 verified)
+        run: |
+          set -euxo pipefail
+          url="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+          curl -fsSL -o zig.tar.xz "$url"
+          got="$(sha256sum zig.tar.xz | awk '{print $1}')"
+          [ "$got" = "$ZIG_SHA256" ] || { echo "::error::zig sha mismatch $got"; exit 1; }
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Fetch + verify FFmpeg source
+        run: |
+          set -euxo pipefail
+          curl -fsSL -o ffmpeg.tar.gz \
+            "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
+          got="$(sha256sum ffmpeg.tar.gz | awk '{print $1}')"
+          [ "$got" = "$FFMPEG_TARBALL_SHA256" ] || { echo "::error::ffmpeg sha mismatch $got"; exit 1; }
+
+      - name: Build twice (-j1, SOURCE_DATE_EPOCH) and compare
+        run: |
+          set -euxo pipefail
+          build() {
+            d="$1"
+            mkdir "$d"
+            tar -xzf ffmpeg.tar.gz -C "$d" --strip-components=1
+            ( cd "$d"
+              export SOURCE_DATE_EPOCH=1700000000
+              # No -ffile-prefix-map: its value embeds the absolute build path into
+              # FFmpeg's `configuration:` string (P2). We strip (-s) + --disable-debug,
+              # so there is no DWARF comp_dir, and FFmpeg compiles with relative __FILE__
+              # paths already — so the binary is path-independent without it.
+              CFLAGS="-Os"
+              ./configure \
+                --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
+                --ar="zig ar" --ranlib="zig ranlib" --nm="zig nm" --host-cc=cc \
+                --enable-cross-compile --arch=arm --target-os=linux --pkg-config=false \
+                --disable-everything --disable-autodetect --disable-doc --disable-debug \
+                --disable-shared --enable-static --enable-small \
+                --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
+                --enable-protocol=file,udp,rtp,rtsp,tcp \
+                --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
+                --extra-cflags="$CFLAGS" --extra-ldflags="-static -s" >/dev/null
+              make -j1 >/dev/null 2>&1 )
+          }
+          build a
+          build b
+          sa="$(sha256sum a/ffmpeg | awk '{print $1}')"
+          sb="$(sha256sum b/ffmpeg | awk '{print $1}')"
+          za="$(stat -c '%s' a/ffmpeg)"
+          zb="$(stat -c '%s' b/ffmpeg)"
+          echo "PROBE build A: sha256=$sa size=$za"
+          echo "PROBE build B: sha256=$sb size=$zb"
+          if [ "$sa" = "$sb" ]; then
+            echo "PROBE RESULT: REPRODUCIBLE (byte-identical)"
+          else
+            echo "PROBE RESULT: NOT REPRODUCIBLE (same source, differing bytes)"
+            echo "first differing bytes (offset dec, A, B):"
+            cmp -l a/ffmpeg b/ffmpeg | head -30 || true
+            echo "differing byte count:"
+            cmp -l a/ffmpeg b/ffmpeg | wc -l || true
+          fi
