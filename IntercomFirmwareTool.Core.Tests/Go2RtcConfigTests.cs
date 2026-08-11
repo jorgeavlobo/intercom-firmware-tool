@@ -143,6 +143,26 @@ public class Go2RtcConfigTests
     }
 
     [Fact]
+    public void BuildOnDeviceSetupGuide_shows_the_rtsp_url_with_credentials()
+    {
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "Front Door");
+        // The HA Generic Camera URL: creds embedded, sanitized stream name, on-device RTSP port.
+        Assert.Contains("rtsp://camera:s3cr3t@<intercom-ip>:8554/frontdoor", guide);
+        Assert.Contains("username: camera", guide);
+        Assert.Contains("password: s3cr3t", guide);
+        // The loopback-only API is called out; no HA-side go2rtc.
+        Assert.Contains("127.0.0.1:1984", guide);
+        Assert.DoesNotContain("\r", guide);
+    }
+
+    [Fact]
     public void BuildSetupGuide_defaults_the_target_to_the_broker_host()
     {
         // Target null → EffectiveCameraTargetHost falls back to MqttHost.

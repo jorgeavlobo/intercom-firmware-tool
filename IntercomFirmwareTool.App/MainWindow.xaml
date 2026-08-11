@@ -1334,6 +1334,19 @@
                               Content="{loc:Loc Chk_MqttCamera}" ToolTip="{loc:Loc Tip_MqttCamera}"
                               Checked="ChkMqttCamera_Toggled" Unchecked="ChkMqttCamera_Toggled"/>
                     <StackPanel x:Name="CameraPanel" Margin="40,6,0,0" Visibility="Collapsed">
+                        <!-- On-device media server (issue #120): run go2rtc + ffmpeg ON the panel and
+                             serve RTSP to Home Assistant directly (no go2rtc on HA). When ticked the
+                             go2rtc/HA host is irrelevant (the target is pinned to the loopback alias
+                             127.0.0.2), so its field + override are hidden, and the tool generates the
+                             RTSP password the installer writes into the on-device go2rtc config. -->
+                        <CheckBox x:Name="ChkMqttCameraOnDevice" Margin="0,0,0,4"
+                                  Content="{loc:Loc Chk_MqttCameraOnDevice}"
+                                  ToolTip="{loc:Loc Tip_MqttCameraOnDevice}"
+                                  Checked="ChkMqttCameraOnDevice_Toggled"
+                                  Unchecked="ChkMqttCameraOnDevice_Toggled"/>
+                        <TextBlock x:Name="LblMqttCameraOnDeviceHint"
+                                   Text="{loc:Loc Hint_MqttCameraOnDevice}" Foreground="Gray" FontSize="11"
+                                   TextWrapping="Wrap" Margin="22,0,0,6" Visibility="Collapsed"/>
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto"/>

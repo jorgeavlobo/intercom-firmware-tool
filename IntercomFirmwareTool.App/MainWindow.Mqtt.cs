@@ -96,6 +96,14 @@ namespace IntercomFirmwareTool.App
         // (issue #111 UX; null = none stashed yet).
         private string? _lastCameraHostOverride;
 
+        // On-device media server (issue #120): the fixed RTSP username + a strong random password
+        // generated ONCE per app session (on first use) and cached, so the go2rtc.yaml the installer
+        // writes and the Home Assistant URL the user is shown carry the SAME credential. Regenerating
+        // per build would make the shown URL disagree with what was installed.
+        private const string CameraRtspUsername = "camera";
+        private string? _cameraRtspPass;
+        private string CameraRtspPassword() => _cameraRtspPass ??= MqttInstaller.GenerateRtspPassword();
+
         // Active LAN broker discovery (#43, follow-up 2). mDNS runs in the background at
         // startup; the /24 scan is a heavier fallback run at most once, when the bridge is
         // enabled and mDNS found nothing. The pre-fill happens at most once and never
@@ -574,7 +582,47 @@ namespace IntercomFirmwareTool.App
                 ? Visibility.Visible : Visibility.Collapsed;
             RefreshCameraModelGating();
             ApplyCameraTargetLock();
+            ApplyCameraOnDeviceMode();   // sync the host-field hiding for the current on-device state
             UpdateBuildEnabled();
+        }
+
+        /// <summary>"Serve the camera on the intercom" (issue #120): run go2rtc + ffmpeg ON the panel
+        /// and serve RTSP to Home Assistant directly. When on, the go2rtc/HA host is irrelevant (the
+        /// target is pinned to the loopback alias 127.0.0.2), so its field + override are hidden and the
+        /// RTSP credential is generated; when off, the classic off-device fan-out to a go2rtc/HA host.</summary>
+        private void ChkMqttCameraOnDevice_Toggled(object sender, RoutedEventArgs e)
+        {
+            ApplyCameraOnDeviceMode();
+            UpdateBuildEnabled();
+        }
+
+        /// <summary>Reflect the on-device choice in the camera panel: hide the go2rtc/HA host field +
+        /// override (the target is pinned to 127.0.0.2 on-device), show the on-device hint, and generate
+        /// the RTSP password up front so the build and the shown Home Assistant URL use the same value.</summary>
+        private void ApplyCameraOnDeviceMode()
+        {
+            // Guard against calls before InitializeComponent has created the controls.
+            if (ChkMqttCameraOnDevice is null || TxtMqttCameraTarget is null
+                || ChkMqttCameraHostOverride is null) return;
+
+            bool onDevice = ChkMqttCameraOnDevice.IsChecked == true;
+            var hostVis = onDevice ? Visibility.Collapsed : Visibility.Visible;
+            LblMqttCameraTarget.Visibility = hostVis;
+            TxtMqttCameraTarget.Visibility = hostVis;
+            ChkMqttCameraHostOverride.Visibility = hostVis;
+            if (LblMqttCameraOnDeviceHint is not null)
+                LblMqttCameraOnDeviceHint.Visibility = onDevice ? Visibility.Visible : Visibility.Collapsed;
+
+            // ApplyCameraTargetLock owns the target field's read-only state + the target hint's
+            // visibility (off-device). Re-run it, then on-device force the target hint hidden too, since
+            // the whole host row is collapsed.
+            ApplyCameraTargetLock();
+            if (onDevice && LblMqttCameraTargetHint is not null)
+                LblMqttCameraTargetHint.Visibility = Visibility.Collapsed;
+
+            // Generate + cache the credential the moment on-device is chosen, so it is stable for both
+            // the build (BuildMqttOptions) and the "Show go2rtc config" guide.
+            if (onDevice) _ = CameraRtspPassword();
         }
 
         /// <summary>"Use a different go2rtc host": unlock the target field for a manual (IPv4) entry.
@@ -689,19 +737,30 @@ namespace IntercomFirmwareTool.App
             // The generator only reads the camera target + ports; MqttHost seeds the target default
             // (go2rtc usually runs with HA). A blank host is stubbed so the guide still renders.
             string host = TxtMqttHost.Text.Trim();
+            bool onDevice = ChkMqttCameraOnDevice.IsChecked == true;
             var opts = new MqttOptions(host.Length == 0 ? "your-ha-host" : host)
             {
+                // On-device (#120): served on the panel; target pinned to 127.0.0.2 (host ignored).
+                CameraOnDevice = onDevice,
                 // Locked (default) ⇒ blank so the device defaults to the broker/HA host (and follows
                 // it on an IP change); overridden ⇒ the user's distinct go2rtc host (issue #111).
                 CameraTargetHost = ChkMqttCameraHostOverride.IsChecked == true
                     ? NullIfEmpty(TxtMqttCameraTarget.Text.Trim()) : null,
                 CameraVideoPort = vp,
                 CameraAudioPort = ap,
+                // On-device RTSP credentials: the same generated password the build will install, so the
+                // shown Home Assistant URL matches what is written to the panel.
+                CameraRtspUser = CameraRtspUsername,
+                CameraRtspPass = onDevice ? CameraRtspPassword() : null,
             };
             // The stream name follows the HA node id (sanitized inside the generator), so the SDP
             // filename, go2rtc key and camera entity agree; fall back to "doorbell".
             string streamName = NullIfEmpty(TxtMqttHaNodeId.Text.Trim()) ?? "doorbell";
-            string guide = Go2RtcConfig.BuildSetupGuide(opts, streamName);
+            // On-device: nothing to paste — show the Home Assistant RTSP URL + credentials. Off-device:
+            // the classic copy-paste go2rtc config for the HA host.
+            string guide = onDevice
+                ? Go2RtcConfig.BuildOnDeviceSetupGuide(opts, streamName)
+                : Go2RtcConfig.BuildSetupGuide(opts, streamName);
             try { Clipboard.SetText(guide); } catch { /* clipboard may be busy; still show the text */ }
             MessageBox.Show(this, guide, L("Cap_MqttGo2Rtc"),
                 MessageBoxButton.OK, MessageBoxImage.Information);
@@ -1548,10 +1607,14 @@ namespace IntercomFirmwareTool.App
             // target may be blank (it defaults to the broker host device-side), so it isn't gated here.
             if (ChkMqttCamera.IsChecked == true)
             {
+                // On-device (#120): the target is pinned to 127.0.0.2 and the host field is hidden, so
+                // the off-device target checks don't apply. The RTSP credential is generated by the tool
+                // (never user-entered), so there's nothing to validate there either — only the ports.
+                bool onDeviceCam = ChkMqttCameraOnDevice.IsChecked == true;
                 // The target is only user-entered when "use a different go2rtc host" is on; while
                 // locked it mirrors the broker host and the build blanks it (issue #111), so validate
                 // it only when overridden — otherwise there's nothing the user can get wrong here.
-                if (ChkMqttCameraHostOverride.IsChecked == true)
+                if (!onDeviceCam && ChkMqttCameraHostOverride.IsChecked == true)
                 {
                     // Reject a CR/LF in the target before Core is reached: the value is sourced into the
                     // shell-quoted .conf, so it must be single-line (mirrors the credential/topic checks).
@@ -1695,12 +1758,21 @@ namespace IntercomFirmwareTool.App
                 // go2rtc/HA host. A blank target defaults to the broker host device-side; low-res is
                 // the universal video branch (hi-res is 300X-only).
                 CameraEnabled = ChkMqttCamera.IsChecked == true,
+                // On-device media server (#120): run go2rtc + ffmpeg on the panel; the siphon target is
+                // pinned to 127.0.0.2 (CameraTargetHost ignored). Gated on the camera being enabled.
+                CameraOnDevice = ChkMqttCamera.IsChecked == true && ChkMqttCameraOnDevice.IsChecked == true,
                 // Locked (default) ⇒ blank so the device defaults to the broker/HA host and follows
                 // it on an IP change; overridden ⇒ the user's distinct IPv4 go2rtc host (issue #111).
                 CameraTargetHost = ChkMqttCameraHostOverride.IsChecked == true
                     ? NullIfEmpty(TxtMqttCameraTarget.Text.Trim()) : null,
                 CameraVideoPort = camVideoPort,
                 CameraAudioPort = camAudioPort,
+                // On-device RTSP credentials (#120): a fixed username + a strong random password
+                // generated once per session. Only meaningful on-device (Core ignores them otherwise),
+                // so the password is generated only when on-device is on.
+                CameraRtspUser = CameraRtspUsername,
+                CameraRtspPass = (ChkMqttCamera.IsChecked == true && ChkMqttCameraOnDevice.IsChecked == true)
+                    ? CameraRtspPassword() : null,
                 // Never persist hi-res for a model that lacks the branch (the Classe 100X): even if the
                 // radio were somehow checked, force low-res so the build can't produce a black camera.
                 CameraHiRes = RbMqttCameraHiRes.IsChecked == true && CameraModelSupportsHiRes,

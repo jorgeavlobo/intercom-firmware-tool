@@ -614,6 +614,24 @@ namespace IntercomFirmwareTool.Core
                 opts.CameraRtspPass!);
 
         /// <summary>
+        /// Generate a strong random RTSP password for the on-device go2rtc stream (issue #120): 24
+        /// characters of URL-safe base64 (<c>A–Z a–z 0–9 - _</c>), 144 bits of entropy from a
+        /// cryptographic RNG. URL-safe so it drops cleanly into the <c>rtsp://user:pass@host</c> URL the
+        /// Home Assistant camera uses, and free of quotes / backslashes / control characters so it is a
+        /// valid double-quoted <c>go2rtc.yaml</c> scalar (passes <see cref="Validate"/>'s credential
+        /// rule). The App generates one per install and sets <see cref="MqttOptions.CameraRtspPass"/>; it
+        /// is never a fixed default (a hard-coded credential would expose every unit's stream).
+        /// </summary>
+        public static string GenerateRtspPassword()
+        {
+            // 18 bytes → exactly 24 base64 chars, no '=' padding. base64url alphabet keeps it safe in
+            // both the RTSP URL and the YAML scalar.
+            Span<byte> bytes = stackalloc byte[18];
+            RandomNumberGenerator.Fill(bytes);
+            return Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_');
+        }
+
+        /// <summary>
         /// Defensive validation of the options, independent of the UI: host is a
         /// valid IP/hostname; port in range; user/pass both-or-neither; TLS
         /// cert+key both-or-neither and a CA present for mutual TLS; and the

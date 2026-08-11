@@ -274,5 +274,54 @@ namespace IntercomFirmwareTool.Core
                 $"  exposes). On a 300X you may switch to the hi-res branch in the tool.\n"));
             return sb.ToString();
         }
+
+        /// <summary>
+        /// Build the Home Assistant setup guide for the ON-DEVICE media server (issue #120). Unlike the
+        /// off-device <see cref="BuildSetupGuide"/>, there is nothing to paste: the installer writes and
+        /// supervises go2rtc + ffmpeg on the panel and serves the camera as authenticated RTSP directly
+        /// (no go2rtc on Home Assistant). This just gives the user the RTSP URL and the generated
+        /// credentials to add as a Home Assistant Generic Camera. Plain text, LF line endings.
+        /// </summary>
+        public static string BuildOnDeviceSetupGuide(MqttOptions opts, string streamName)
+        {
+            string name = SanitizeStreamName(streamName);
+            string user = opts.CameraRtspUser;
+            string pass = string.IsNullOrEmpty(opts.CameraRtspPass)
+                ? "<generated at build>" : opts.CameraRtspPass!;
+            var ci = CultureInfo.InvariantCulture;
+
+            var sb = new StringBuilder();
+            sb.Append("BTicino live doorbell camera — on-device go2rtc (Home Assistant)\n");
+            sb.Append("================================================================\n\n");
+            sb.Append("The intercom runs go2rtc + ffmpeg itself and serves the entrance\n");
+            sb.Append("camera as an authenticated RTSP stream — there is NO go2rtc on Home\n");
+            sb.Append("Assistant. The installer writes and starts everything on the panel;\n");
+            sb.Append("nothing here needs to be pasted into a go2rtc config.\n\n");
+
+            sb.Append("Add it to Home Assistant as a Generic Camera (Settings -> Devices &\n");
+            sb.Append("Services -> Add Integration -> Generic Camera) with this stream URL —\n");
+            sb.Append("replace <intercom-ip> with the panel's IP address on your network:\n\n");
+            sb.Append(string.Create(ci,
+                $"    rtsp://{user}:{pass}@<intercom-ip>:{OnDeviceRtspPort}/{name}\n\n"));
+
+            sb.Append("Credentials (generated for this build):\n");
+            sb.Append(string.Create(ci, $"    username: {user}\n"));
+            sb.Append(string.Create(ci, $"    password: {pass}\n\n"));
+
+            sb.Append("Notes\n-----\n");
+            sb.Append(string.Create(ci,
+                $"- RTSP is served on port {OnDeviceRtspPort}, on the LAN, with mandatory\n" +
+                $"  authentication. The go2rtc control API stays bound to loopback only\n" +
+                $"  (127.0.0.1:{OnDeviceApiPort}) and is never exposed on the network.\n"));
+            sb.Append("- Video only for now (H.264 copied through untouched, no re-encode);\n");
+            sb.Append("  audio + talkback are a later phase.\n");
+            sb.Append(string.Create(ci,
+                $"- The panel's firewall must allow port {OnDeviceRtspPort} from your LAN so\n" +
+                $"  Home Assistant can reach the stream.\n"));
+            sb.Append("- The picture appears while the panel has an active A/V session (a\n");
+            sb.Append("  ring, an answered call, or the self-view eye); between sessions the\n");
+            sb.Append("  stream is idle (the panel only encodes on demand).\n");
+            return sb.ToString();
+        }
     }
 }
