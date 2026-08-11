@@ -777,10 +777,12 @@ namespace IntercomFirmwareTool.Core
                 // a CR/LF would split the double-quoted scalar and corrupt the generated go2rtc.yaml.
                 if (opts.CameraOnDevice)
                 {
-                    var camNl = new[] { '\r', '\n' };
+                    // Reject an empty credential OR any control character (CR/LF, NUL, ESC, TAB, ...):
+                    // go2rtc disables auth for a blank username, and YamlDoubleQuoted escapes only '\'
+                    // and '"', so any control char would land raw in the double-quoted scalar and break
+                    // go2rtc.yaml (CR/LF splits the line; the rest are forbidden in a YAML dq-scalar).
                     if (string.IsNullOrEmpty(opts.CameraRtspUser) || string.IsNullOrEmpty(opts.CameraRtspPass)
-                        || opts.CameraRtspUser.IndexOfAny(camNl) >= 0
-                        || opts.CameraRtspPass!.IndexOfAny(camNl) >= 0)
+                        || opts.CameraRtspUser.Any(char.IsControl) || opts.CameraRtspPass!.Any(char.IsControl))
                         throw new ArgumentException(
                             CoreStrings.Get("Mqtt_CameraRtspCredsRequired"), nameof(opts));
                 }
@@ -1130,6 +1132,11 @@ namespace IntercomFirmwareTool.Core
                 {
                     // Init script + the two vendored binaries (presence, mode, owner + byte-exact SHA).
                     CheckFile(fs, checks, Go2RtcdInitPath, 755);
+                    // Byte-exact content too — a truncated/replaced script with the same mode/owner would
+                    // pass the metadata checks yet fail the service at boot (like the .conf read-back).
+                    string go2rtcdScript = fs.FileExists(Go2RtcdInitPath) ? ReadAllText(fs, Go2RtcdInitPath) : "";
+                    checks.Add(new("go2rtcd matches the embedded init script",
+                        go2rtcdScript == LoadScript(ResourcePrefix + "go2rtcd"), ""));
                     foreach (var bin in new[] { PayloadBinaries.Ffmpeg, PayloadBinaries.Go2Rtc })
                     {
                         CheckFile(fs, checks, bin.InstallPath, 775);
@@ -1164,13 +1171,20 @@ namespace IntercomFirmwareTool.Core
                 }
                 else
                 {
-                    // Off-device (the default): the media server must NOT be installed — a non-camera
-                    // image must not ship the go2rtc binary or its service (symmetric to the "host line
-                    // present iff hostname" check above).
-                    checks.Add(new("go2rtc binary absent (off-device build)",
-                        !fs.FileExists(PayloadBinaries.Go2Rtc.InstallPath), ""));
-                    checks.Add(new("go2rtcd init script absent (off-device build)",
-                        !fs.FileExists(Go2RtcdInitPath), ""));
+                    // Off-device (the default): NO on-device media artifact may be installed. Use
+                    // PathOccupied — FileExists is blind to symlinks (see the runtime-dep note above), so
+                    // a residual (even dangling) symlink at any path would slip past a FileExists check.
+                    // Cover EVERY artifact: both binaries, the init script, the config dir, and the link.
+                    foreach (var (label, path) in new[]
+                    {
+                        ("go2rtc binary", PayloadBinaries.Go2Rtc.InstallPath),
+                        ("ffmpeg binary", PayloadBinaries.Ffmpeg.InstallPath),
+                        ("go2rtcd init script", Go2RtcdInitPath),
+                        ("go2rtc config dir", Go2RtcDir),
+                        ("S99zGo2rtc boot link", Go2RtcBootLink),
+                    })
+                        checks.Add(new($"{label} absent (off-device build)",
+                            !PathOccupied(fs, path), path));
                 }
             }
             return checks;
@@ -1185,6 +1199,18 @@ namespace IntercomFirmwareTool.Core
         /// dangling symlink still fails (its chain never lands on a real file). The
         /// hop budget guards a symlink cycle.
         /// </summary>
+        /// <summary>
+        /// True if ANYTHING occupies <paramref name="path"/> — a regular file, a directory, or a
+        /// symlink (even a dangling one). Unlike <see cref="ExtFileSystem.FileExists"/> (which reports
+        /// false for a symlink), this is symmetric across all node types, so an "absent" assertion in
+        /// <see cref="ValidateMqtt"/> can't be fooled by a stray symlink left at a media-artifact path.
+        /// </summary>
+        private static bool PathOccupied(ExtFileSystem fs, string path)
+        {
+            if (fs.FileExists(path) || fs.DirectoryExists(path)) return true;
+            try { fs.ReadSymLink(path); return true; } catch { return false; }
+        }
+
         private static bool DependencyPresent(ExtFileSystem fs, string path)
         {
             string current = path;

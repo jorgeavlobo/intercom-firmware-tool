@@ -45,19 +45,21 @@ public class Go2RtcdScriptTests
     [Fact]
     public void Keeps_the_pgrep_exe_filter_so_it_never_matches_itself()
     {
-        // pgrep -x matches by comm; the readlink /proc/PID/exe = $DAEMON filter ensures only the
-        // real daemon is counted — never a same-named process or this init script's own shell.
-        string s = ReadScript();
-        Assert.Contains("pgrep -x \"$NAME\"", s);
-        Assert.Contains("readlink /proc/\"$p\"/exe", s);
+        // Assert on executable lines so a comment can't satisfy the check. pgrep -x matches by comm;
+        // the readlink /proc/PID/exe = $DAEMON filter ensures only the real daemon is counted — never
+        // a same-named process or this init script's own shell.
+        string[] code = CodeLines(ReadScript());
+        Assert.Contains(code, l => l.Contains("pgrep -x \"$NAME\""));
+        Assert.Contains(code, l => l.Contains("readlink /proc/\"$p\"/exe"));
     }
 
     [Fact]
     public void Provides_the_full_service_contract()
     {
-        string s = ReadScript();
+        // Match each lifecycle verb on an executable line (its case label), never inside a comment.
+        string[] code = CodeLines(ReadScript());
         foreach (var verb in new[] { "start)", "stop)", "status)", "restart)", "respawn)" })
-            Assert.Contains(verb, s);
+            Assert.Contains(code, l => l == verb);
     }
 
     [Fact]

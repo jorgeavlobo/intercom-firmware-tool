@@ -132,15 +132,10 @@ public class MqttCameraValidationTests
     [Fact]
     public void On_device_mode_still_validates_the_fan_out_ports()
     {
-        // The ports still feed the SDP/siphon in on-device mode, so equal/out-of-range ports are
-        // still rejected.
-        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(new MqttOptions("broker.lan")
-        {
-            CameraEnabled = true,
-            CameraOnDevice = true,
-            CameraVideoPort = 5000,
-            CameraAudioPort = 5000,
-        }));
+        // Build from OnDevice() so the required RTSP credentials are present — otherwise Validate could
+        // throw for missing creds before it reaches the port checks, masking a port-validation regression.
+        Assert.Throws<ArgumentException>(() =>
+            MqttInstaller.Validate(OnDevice() with { CameraVideoPort = 5000, CameraAudioPort = 5000 }));
     }
 
     // A valid on-device build: RTSP auth is mandatory (#120), so both credentials must be set.
@@ -163,12 +158,16 @@ public class MqttCameraValidationTests
     }
 
     [Theory]
-    [InlineData("cam\nera", "s3cr3t")]
-    [InlineData("camera", "s3\r\ncr3t")]
-    [InlineData("camera", "s3\rcr3t")]
-    public void On_device_mode_rejects_multiline_rtsp_credentials(string user, string pass)
+    [InlineData("cam\nera", "s3cr3t")]      // LF
+    [InlineData("camera", "s3\r\ncr3t")]    // CRLF
+    [InlineData("camera", "s3\rcr3t")]      // CR
+    [InlineData("cam\tera", "s3cr3t")]      // TAB
+    [InlineData("camera", "s3\0cr3t")]      // NUL
+    [InlineData("camera", "s3\u001bcr3t")]  // ESC
+    public void On_device_mode_rejects_control_char_rtsp_credentials(string user, string pass)
     {
-        // A CR/LF would split the double-quoted scalar and corrupt the generated go2rtc.yaml.
+        // Any control char would land raw in the double-quoted YAML scalar (YamlDoubleQuoted escapes
+        // only '\' and '"'), corrupting go2rtc.yaml — reject them all, not just CR/LF.
         Assert.Throws<ArgumentException>(() =>
             MqttInstaller.Validate(OnDevice() with { CameraRtspUser = user, CameraRtspPass = pass }));
     }
