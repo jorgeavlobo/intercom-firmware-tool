@@ -59,9 +59,11 @@ Pinned versions (bump deliberately; CI enforces the SHA against these):
 
 ## Build recipe
 
-> This mirrors `.github/workflows/ffmpeg-build.yml`, which is the source of truth; keep the
-> two in sync. FFmpeg's `configure` prunes unreachable components, so a missing dependency
-> surfaces as a configure error, not a silent feature.
+> This mirrors the rebuild in `.github/workflows/ffmpeg-provenance.yml`, which is the source
+> of truth; keep the two in sync. FFmpeg's `configure` prunes unreachable components, so a
+> missing dependency surfaces as a configure error, not a silent feature. There is no
+> separate build workflow — the committed binary is frozen (not byte-reproducible), and a
+> refresh is a local build with this recipe (or a temporary dispatch of the provenance job).
 
 ```sh
 # Inputs (pinned)
@@ -76,6 +78,7 @@ CFLAGS="-Os -ffile-prefix-map=$(pwd)=. -fdebug-prefix-map=$(pwd)=."
 ./configure \
   --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
   --ar="zig ar" --ranlib="zig ranlib" --nm="zig nm" \
+  --host-cc=cc \
   --enable-cross-compile --arch=arm --target-os=linux \
   --pkg-config=false \
   --disable-everything \

@@ -17,7 +17,6 @@ on:
       - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
       - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
       - '.github/workflows/ffmpeg-provenance.yml'
-      - '.github/workflows/ffmpeg-build.yml'
   push:
     branches: [master]
     paths:
@@ -26,7 +25,6 @@ on:
       - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
       - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
       - '.github/workflows/ffmpeg-provenance.yml'
-      - '.github/workflows/ffmpeg-build.yml'
   workflow_dispatch:
 
 permissions:
@@ -46,9 +44,13 @@ jobs:
   provenance:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # This job only reads the repo (no push), so don't persist the token in
+          # .git/config — avoids credential leakage (zizmor artipacked).
+          persist-credentials: false
 
-      - name: Metadata integrity (committed SHA-256 ↔ PayloadBinaries.cs ↔ THIRD_PARTY.md)
+      - name: Metadata integrity (committed SHA-256 + size ↔ PayloadBinaries.cs ↔ THIRD_PARTY.md)
         run: |
           set -euxo pipefail
           sha="$(sha256sum "$BIN" | awk '{print $1}')"
@@ -58,7 +60,13 @@ jobs:
           tp=IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md
           grep -q "$sha" "$pb" || { echo "::error::SHA-256 not found in PayloadBinaries.cs"; exit 1; }
           grep -q "$sha" "$tp" || { echo "::error::SHA-256 not found in THIRD_PARTY.md"; exit 1; }
-          # Record the committed configuration for the functional-equivalence check below.
+          # Also verify the SIZE in both files (in their respective formats) matches the
+          # actual binary, so metadata size can't drift undetected.
+          us="$(printf '%s' "$size" | sed ':a;s/\B[0-9]\{3\}\>/_&/;ta')"   # 2_025_024
+          cs="$(printf '%s' "$size" | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta')"   # 2,025,024
+          grep -q "Length: ${us}," "$pb" || { echo "::error::size ${us} not recorded in PayloadBinaries.cs"; exit 1; }
+          grep -q "${cs} bytes" "$tp"    || { echo "::error::size ${cs} not recorded in THIRD_PARTY.md"; exit 1; }
+          # Record the committed size for the functional-equivalence check below.
           echo "$size" > committed.size
 
       - name: Committed binary runs on armv7 + is LGPL
