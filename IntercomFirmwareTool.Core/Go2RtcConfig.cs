@@ -169,6 +169,20 @@ namespace IntercomFirmwareTool.Core
         public static string BuildOnDeviceYaml(
             string streamName, string ffmpegPath, string sdpPath, string rtspUser, string rtspPass)
         {
+            // RTSP is LAN-facing, so auth is MANDATORY (issue #120, decision #3). go2rtc treats an
+            // EMPTY username as "no auth" and serves the stream to any LAN client — so an empty
+            // credential doesn't weaken auth, it removes it. Refuse to emit a config that would do
+            // that (CodeRabbit). The installer generates a strong random credential in 1c-2b; this
+            // guard makes a blank one a hard error rather than a silent open stream.
+            if (string.IsNullOrEmpty(rtspUser) || string.IsNullOrEmpty(rtspPass))
+                throw new ArgumentException(
+                    "On-device RTSP requires a non-empty username and password: go2rtc skips " +
+                    "authentication for a blank username, exposing the LAN stream unauthenticated.");
+            // A CR/LF in a credential would split the double-quoted scalar across lines and corrupt
+            // the YAML (YamlDoubleQuoted escapes '\\' and '\"' but not newlines) — reject it (Copilot).
+            if (rtspUser.IndexOfAny(NewlineChars) >= 0 || rtspPass.IndexOfAny(NewlineChars) >= 0)
+                throw new ArgumentException(
+                    "RTSP credentials must be single-line: a CR/LF would corrupt go2rtc.yaml.");
             string name = SanitizeStreamName(streamName);
             var ci = CultureInfo.InvariantCulture;
             var sb = new StringBuilder();
@@ -200,6 +214,9 @@ namespace IntercomFirmwareTool.Core
         /// contain punctuation.</summary>
         private static string YamlDoubleQuoted(string s) =>
             "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+
+        /// <summary>CR/LF — a credential containing either would break the single-line YAML scalar.</summary>
+        private static readonly char[] NewlineChars = { '\r', '\n' };
 
         /// <summary>
         /// Build a complete, copy-paste setup guide: where to put the SDP, the go2rtc <c>streams:</c>

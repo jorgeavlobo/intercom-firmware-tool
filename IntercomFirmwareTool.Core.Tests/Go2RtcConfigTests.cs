@@ -1,3 +1,4 @@
+using System;
 using IntercomFirmwareTool.Core;
 using Xunit;
 
@@ -111,6 +112,30 @@ public class Go2RtcConfigTests
             "doorbell", "/usr/sbin/ffmpeg", "/x.sdp", "u\"x", "p\\y");
         Assert.Contains("username: \"u\\\"x\"", yaml);
         Assert.Contains("password: \"p\\\\y\"", yaml);
+    }
+
+    [Theory]
+    [InlineData(null, "pass")]
+    [InlineData("", "pass")]
+    [InlineData("user", null)]
+    [InlineData("user", "")]
+    public void BuildOnDeviceYaml_rejects_empty_credentials(string? user, string? pass)
+    {
+        // RTSP is LAN-facing and auth is mandatory (#120): go2rtc skips auth for a blank username, so
+        // an empty credential opens the stream unauthenticated. The builder must refuse it outright.
+        Assert.Throws<ArgumentException>(() =>
+            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", "/x.sdp", user!, pass!));
+    }
+
+    [Theory]
+    [InlineData("u\nx", "pass")]
+    [InlineData("user", "p\rq")]
+    [InlineData("user", "p\r\nq")]
+    public void BuildOnDeviceYaml_rejects_newline_in_credentials(string user, string pass)
+    {
+        // A CR/LF would split the double-quoted YAML scalar and corrupt the file — reject it.
+        Assert.Throws<ArgumentException>(() =>
+            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", "/x.sdp", user, pass));
     }
 
     [Fact]

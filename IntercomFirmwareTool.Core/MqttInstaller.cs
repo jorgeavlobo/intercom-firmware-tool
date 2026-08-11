@@ -149,10 +149,12 @@ namespace IntercomFirmwareTool.Core
         /// <summary>On-device media server (Phase 1c, #120): run go2rtc + ffmpeg ON the panel and serve
         /// the camera as RTSP to Home Assistant directly (no HA-side go2rtc). When true, the siphon
         /// target is pinned to the loopback alias <see cref="OnDeviceCameraTarget"/> (<c>127.0.0.2</c>)
-        /// — where the on-device go2rtc listens — and <see cref="CameraTargetHost"/> is ignored. Emits
-        /// <c>CAMERA_ONDEVICE=1</c> and makes the installer write go2rtc + ffmpeg, the go2rtc service, and
-        /// its config. Requires <see cref="CameraEnabled"/>. Opt-in; off by default (the classic
-        /// off-device fan-out to a go2rtc/HA host).</summary>
+        /// — where the on-device go2rtc listens — and <see cref="CameraTargetHost"/> is ignored, and
+        /// <c>CAMERA_ONDEVICE=1</c> is written to the device config. (Writing the go2rtc + ffmpeg
+        /// binaries, the go2rtc service, and its generated config is the on-device INSTALL wiring, added
+        /// in a later sub-phase — this flag is the option/config plumbing it keys off.) Requires
+        /// <see cref="CameraEnabled"/>. Opt-in; off by default (the classic off-device fan-out to a
+        /// go2rtc/HA host).</summary>
         public bool CameraOnDevice { get; init; }
 
         /// <summary>The loopback alias the on-device go2rtc listens on for the siphoned RTP — matches
