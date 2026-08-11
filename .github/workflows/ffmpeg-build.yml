@@ -115,15 +115,18 @@ jobs:
         run: |
           set -euxo pipefail
           dest="IntercomFirmwareTool.Core/Payload/vendor/armhf/ffmpeg"
-          mkdir -p "$(dirname "$dest")"
+          lic="IntercomFirmwareTool.Core/Payload/vendor/licenses/ffmpeg-COPYING.LGPLv2.1.txt"
+          mkdir -p "$(dirname "$dest")" "$(dirname "$lic")"
           cp ffmpeg-src/ffmpeg "$dest"
+          # Ship the exact LGPL text from the FFmpeg source we built (LGPL compliance).
+          cp ffmpeg-src/COPYING.LGPLv2.1 "$lic"
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$dest"
+          git add "$dest" "$lic"
           # --cached compares the index to HEAD, so a NEW (untracked) file counts as a
           # change (a plain `git diff` ignores untracked files and would skip forever).
-          if git diff --cached --quiet -- "$dest"; then
-            echo "vendored ffmpeg unchanged — nothing to commit"; exit 0
+          if git diff --cached --quiet; then
+            echo "vendored ffmpeg + license unchanged — nothing to commit"; exit 0
           fi
           sha="$(awk '{print $1}' ffmpeg-src/sha.txt | head -1)"
           size="$(stat -c '%s' "$dest")"
