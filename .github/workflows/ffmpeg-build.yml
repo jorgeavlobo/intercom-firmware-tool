@@ -54,7 +54,7 @@ jobs:
           tar -xf zig.tar.xz
           echo "$PWD/zig-linux-x86_64-${ZIG_VERSION}" >> "$GITHUB_PATH"
 
-      - name: Build the minimal LGPL ffmpeg from the pinned source
+      - name: Build the minimal LGPL ffmpeg from the pinned source (twice — reproduction check)
         run: |
           set -euxo pipefail
           curl -fsSL -o ffmpeg.tar.gz \
@@ -68,29 +68,40 @@ jobs:
           # worktree git walks up and stamps THIS repo's commit hash as the "ffmpeg version"
           # (the `ffmpeg version <hash>` banner) — which changes every commit and breaks the
           # byte-for-byte match. With no surrounding .git, the version is deterministic.
-          rm -rf "$RUNNER_TEMP/ffmpeg-src"
-          mkdir "$RUNNER_TEMP/ffmpeg-src"
-          tar -xzf ffmpeg.tar.gz -C "$RUNNER_TEMP/ffmpeg-src" --strip-components=1
-          cd "$RUNNER_TEMP/ffmpeg-src"
           # CFLAGS is just -Os: no -ffile-prefix-map, whose value would embed the absolute
-          # build path into FFmpeg's `configuration:` string and break byte-reproducibility.
-          # We strip (-s) + --disable-debug, so no DWARF comp_dir survives, and FFmpeg
-          # compiles with relative __FILE__ paths — the output is path-independent.
-          ./configure \
-            --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
-            --ar="zig ar" --ranlib="zig ranlib" --nm="nm" --host-cc=cc \
-            --enable-cross-compile --arch=arm --target-os=linux --pkg-config=false \
-            --disable-everything --disable-autodetect --disable-doc --disable-debug \
-            --disable-shared --enable-static --enable-small \
-            --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
-            --enable-protocol=file,udp,rtp,rtsp,tcp \
-            --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
-            --extra-cflags="-Os" --extra-ldflags="-static -s"
-          # -j1 (serial): FFmpeg's parallel build is NOT byte-reproducible across runs
-          # (object/archive ordering depends on parallel completion order), which would
-          # break the byte-for-byte provenance match. Serial build is deterministic. Keep
-          # this identical to ffmpeg-provenance.yml.
-          make -j1
+          # build path into FFmpeg's `configuration:` string. -j1 (serial): FFmpeg's parallel
+          # build is not byte-reproducible across runs. Keep this recipe identical to
+          # ffmpeg-provenance.yml.
+          build() {
+            local dir="$1"
+            rm -rf "$dir"; mkdir "$dir"
+            tar -xzf ffmpeg.tar.gz -C "$dir" --strip-components=1
+            ( cd "$dir"
+              ./configure \
+                --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
+                --ar="zig ar" --ranlib="zig ranlib" --nm="nm" --host-cc=cc \
+                --enable-cross-compile --arch=arm --target-os=linux --pkg-config=false \
+                --disable-everything --disable-autodetect --disable-doc --disable-debug \
+                --disable-shared --enable-static --enable-small \
+                --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
+                --enable-protocol=file,udp,rtp,rtsp,tcp \
+                --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
+                --extra-cflags="-Os" --extra-ldflags="-static -s" >/dev/null
+              make -j1 >/dev/null )
+          }
+          # Build TWICE in independent scratch dirs and require byte-identical output BEFORE
+          # committing. A refresh commit is pushed with [skip ci] by GITHUB_TOKEN, which does
+          # NOT start ffmpeg-provenance.yml — so without this, a refreshed binary would never
+          # get an independent byte-for-byte rebuild until a later human PR (Codex). This
+          # proves the committed bytes are reproducible from the pinned source at refresh time.
+          build "$RUNNER_TEMP/ffmpeg-src"
+          build "$RUNNER_TEMP/ffmpeg-verify"
+          a="$(sha256sum "$RUNNER_TEMP/ffmpeg-src/ffmpeg"    | awk '{print $1}')"
+          b="$(sha256sum "$RUNNER_TEMP/ffmpeg-verify/ffmpeg" | awk '{print $1}')"
+          echo "reproduction: build#1=$a build#2=$b"
+          if [ "$a" != "$b" ]; then
+            echo "::error::ffmpeg build is NOT byte-reproducible ($a != $b) — refusing to commit"; exit 1
+          fi
 
       - name: Verify the rebuilt binary runs on armv7 + is LGPL
         run: |

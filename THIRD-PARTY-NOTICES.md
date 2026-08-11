@@ -136,8 +136,10 @@ travel with the release:
   BSD-3-Clause / Unicode-3.0):
   [`licenses/btmqttd-THIRD-PARTY-LICENSES.txt`](licenses/btmqttd-THIRD-PARTY-LICENSES.txt).
 - **`ffmpeg`** — third-party, a minimal **LGPL-2.1-or-later** build of **FFmpeg `n7.1.1`**
-  (unmodified upstream tag; corresponding source is the public FFmpeg `n7.1.1` tag, built
-  per `native/ffmpeg/BUILD.md`). LGPL text:
+  (unmodified upstream). **Written offer / corresponding source:** the complete source is the
+  public, unmodified upstream tag at <https://github.com/FFmpeg/FFmpeg/tree/n7.1.1> (mirrored
+  at <https://ffmpeg.org/releases/>); the exact build recipe is `native/ffmpeg/BUILD.md` in
+  this project's repository. No changes to FFmpeg source were made. LGPL text:
   [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](licenses/ffmpeg-COPYING.LGPLv2.1.txt).
 - **musl libc** (**MIT**) — statically linked into *both* binaries; its notice:
   [`licenses/musl-COPYRIGHT.txt`](licenses/musl-COPYRIGHT.txt).

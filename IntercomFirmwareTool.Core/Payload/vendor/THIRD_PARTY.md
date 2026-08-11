@@ -18,7 +18,11 @@ userland tools those scripts required: **`jq`** (JSON, now done natively with
 `serde_json`) and **`evtest`** (keypad, now done natively with the pure-Rust
 `evdev` crate). Removing `jq`/`evtest` also removes their copyleft obligations
 (`evtest` was GPL-2.0-or-later; the static `jq` bundled LGPL-2.1 glibc): the
-firmware image and this assembly no longer carry any GPL/LGPL component.
+**MQTT bridge** (`btmqttd` + its scripts) no longer carries any GPL/LGPL
+component. (Separately, this assembly does embed the **LGPL-2.1** `ffmpeg` for
+the on-device camera — see the `ffmpeg` section below — which the tool writes
+onto the device only when that feature is enabled; its LGPL notice + source are
+documented there.)
 
 `btmqttd` is a **statically-linked musl** binary, so it needs no runtime
 interpreter, no shared libraries, and none of the device tools the shell bridge
