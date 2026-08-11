@@ -50,12 +50,16 @@ below):
   once and frozen, and `ffmpeg-provenance.yml` verifies it **functionally** (see below),
   not byte-for-byte.
 
-Pinned versions (bump deliberately; CI enforces the SHA against these):
+Pinned versions (bump deliberately; CI enforces the SHA-256 against these):
 
-| Input | Pin |
-|---|---|
-| Zig | `0.13.0` |
-| FFmpeg | `n7.1.1` (release tarball) |
+| Input | Pin | SHA-256 |
+|---|---|---|
+| Zig | `0.13.0` (`zig-linux-x86_64-0.13.0.tar.xz`) | `d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea` |
+| FFmpeg | `n7.1.1` (GitHub source archive `n7.1.1.tar.gz`) | `f117507dc501f2a6c11f9241d8d0c3213846cfad91764361af37befd6b6c523d` |
+
+`ffmpeg-provenance.yml` downloads each input and fails the job unless its SHA-256 matches
+the pin above (`ZIG_SHA256` / `FFMPEG_TARBALL_SHA256` in the workflow `env`), so a rotated
+or tampered download can never feed the rebuild.
 
 ## Build recipe
 
