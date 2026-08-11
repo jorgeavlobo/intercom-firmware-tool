@@ -81,8 +81,7 @@ CFLAGS="-Os -ffile-prefix-map=$(pwd)=. -fdebug-prefix-map=$(pwd)=."
   --enable-protocol=file,udp,rtp,rtsp,tcp \
   --enable-demuxer=sdp,rtsp,rtp \
   --enable-muxer=rtsp,rtp \
-  --enable-parser=h264 \
-  --enable-bsf=h264_mp4toannexb,extract_extradata \
+  --enable-decoder=h264 \
   --extra-cflags="$CFLAGS" \
   --extra-ldflags="-static -s"
 
@@ -94,8 +93,13 @@ Notes:
 - **`--disable-asm`** — we only demux/copy/mux (no codec math), so ARM asm buys nothing
   and would add a nasm/asm-reproducibility variable. Disabling it keeps the build
   portable and deterministic across hosts.
-- **No decoders/encoders** — `-c:v copy` never touches the pixels. The `sdp`/`rtp`
-  demuxer + `h264` parser + `rtsp` muxer are the whole pipeline.
+- **No encoders; the H.264 *decoder* is enabled** (LGPL — only the *x264 encoder* is
+  GPL). `-c:v copy` never decodes a frame, but the decoder is included for two reasons:
+  (1) it pulls the H.264 parser + SEI + the AOM film-grain object, resolving a link-time
+  `undefined symbol: ff_aom_uninit_film_grain_params` that a parser-only minimal build
+  hits on n7.1; (2) it guarantees the H.264 parameter sets (SPS/PPS) are available as
+  extradata for the RTSP output go2rtc consumes. The `sdp`/`rtp` demuxer + `rtsp` muxer
+  are the rest of the pipeline.
 - **LGPL guard** — the absence of `--enable-gpl`/`--enable-nonfree` is deliberate and
   load-bearing; do not add GPL libs. CI asserts `ffmpeg -L` / the config shows LGPL.
 
