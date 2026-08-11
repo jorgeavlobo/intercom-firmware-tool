@@ -123,10 +123,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add "$dest"
-          git commit -m "#120 Phase 1a: vendored minimal ffmpeg binary (CI build $(git rev-parse --short HEAD))
-
-Built by .github/workflows/ffmpeg-build.yml per native/ffmpeg/BUILD.md.
-$(cat ffmpeg-src/sha.txt)
-
-[skip ci]"
+          sha="$(awk '{print $1}' ffmpeg-src/sha.txt | head -1)"
+          size="$(stat -c '%s' "$dest")"
+          git commit -m "#120 Phase 1a: vendored minimal ffmpeg binary (CI-built, sha256=${sha}, ${size} bytes) [skip ci]"
           git push origin HEAD:${GITHUB_REF_NAME}
