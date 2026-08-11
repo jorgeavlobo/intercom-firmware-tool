@@ -51,19 +51,18 @@ for f in $ZIG_FILES; do
   grep -Fq "$ZIG_VERSION" "$f" || { echo "::error file=$f::does not mention pinned Zig version '$ZIG_VERSION'" >&2; fail=1; }
 done
 
-# (2) No stale occurrence — every structured version token must equal the pin.
+# (2) No stale occurrence — every structured version token must EXACTLY equal the pin.
 # FFmpeg release tags are the distinctive `n<maj>.<min>[.<patch>]` shape — TWO-component (e.g.
-# n8.0) OR THREE-component (e.g. n7.1.1). Match either form, and require each token (incl.
-# corresponding-source URLs like `/tree/n7.1.1`) to be the pinned tag OR a shorter release-
-# SERIES prefix of it. The prefix exemption is what lets the two-component series reference
-# `n7.1` in BUILD.md coexist with the three-component pin n7.1.1, while still catching a stale
-# `/tree/n7.1.0` — and, after a two-component pin like n8.0, a stale `/tree/n8.1` (Codex).
+# n8.0) OR THREE-component (e.g. n7.1.1); the regex matches either. Every such token — displayed
+# versions, corresponding-source URLs like `/tree/n7.1.1`, and asset names like
+# `ffmpeg-n7.1.1-source.tar.gz` — must be the pinned tag EXACTLY. No series-prefix exemption: a
+# reference to a shorter series (e.g. `/tree/n7.1` or `ffmpeg-n7.1-source.tar.gz`) identifies a
+# DIFFERENT release and would misdirect LGPL recipients, so it must fail (Codex). The docs
+# therefore carry no bare `n7.1`-style series token — BUILD.md's minimal-build note says
+# "FFmpeg 7.1" (no `n`), which is not tag-shaped and is intentionally not matched.
 for f in $FF_FILES; do
   for tok in $(grep -oE 'n[0-9]+\.[0-9]+(\.[0-9]+)?' "$f" 2>/dev/null || true); do
-    case "$FFMPEG_TAG" in
-      "$tok"|"$tok".*) : ;;   # exact tag, or tok is a shorter series-prefix of the pin
-      *) echo "::error file=$f::stale FFmpeg tag '$tok' (pinned '$FFMPEG_TAG') — every FFmpeg-tag reference (incl. corresponding-source URLs) must be the pinned tag or its series prefix" >&2; fail=1 ;;
-    esac
+    [ "$tok" = "$FFMPEG_TAG" ] || { echo "::error file=$f::stale FFmpeg tag '$tok' (pinned '$FFMPEG_TAG') — every FFmpeg-tag reference (displayed version, corresponding-source URL, asset name) must be EXACTLY the pinned tag" >&2; fail=1; }
   done
 done
 

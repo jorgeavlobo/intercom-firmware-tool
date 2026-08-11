@@ -109,7 +109,7 @@ Notes:
 - **No codec components at all** (no decoders, encoders, or parsers). `-c:v copy` never
   touches the pixels: the `sdp`/`rtp` demuxer + its H.264 RTP depayloader (libavformat)
   reconstruct the access units, and the `rtsp`/`rtp` muxer repackets them — no libavcodec
-  parser/decoder needed. This also **sidesteps a known n7.1 minimal-build link failure**:
+  parser/decoder needed. This also **sidesteps a known FFmpeg 7.1 minimal-build link failure**:
   enabling the H.264 parser (or decoder) pulls `h2645_sei.o`, whose `ff_h2645_sei_reset`
   references `ff_aom_uninit_film_grain_params` — a symbol only compiled with an AV1
   decoder — giving `ld.lld: undefined symbol` in an otherwise codec-free build.

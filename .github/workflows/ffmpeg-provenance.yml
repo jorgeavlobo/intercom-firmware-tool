@@ -41,6 +41,11 @@ on:
       - '.github/workflows/ffmpeg-provenance.yml'
       - '.github/workflows/ffmpeg-build.yml'
   workflow_dispatch:
+  # Reusable: release.yml calls this as a gating job so a RELEASE (a v* tag, which the
+  # pull_request/push triggers above don't cover) can't publish the vendored binary alongside
+  # "corresponding source" it wasn't built from — the same byte-for-byte rebuild runs on the
+  # release ref before publishing (Codex).
+  workflow_call:
 
 permissions:
   contents: read

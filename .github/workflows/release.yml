@@ -44,7 +44,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Gate the release on the SAME byte-for-byte FFmpeg provenance the PR/push path enforces, but
+  # run it HERE on the release ref (a v* tag / dispatch — which ffmpeg-provenance.yml's own
+  # pull_request/push triggers don't cover). This rebuilds the vendored binary from the pinned,
+  # SHA-256-verified source and requires an exact byte match, so a release can never publish the
+  # embedded binary alongside "corresponding source" it wasn't built from (Codex). The publish
+  # job below `needs:` this, so publishing is blocked unless the binary↔source binding holds.
+  verify-ffmpeg:
+    uses: ./.github/workflows/ffmpeg-provenance.yml
+
   release:
+    needs: verify-ffmpeg
     runs-on: windows-latest
     permissions:
       contents: write # create the (draft) Release + upload assets
