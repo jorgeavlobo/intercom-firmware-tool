@@ -96,13 +96,20 @@ namespace IntercomFirmwareTool.App
         // (issue #111 UX; null = none stashed yet).
         private string? _lastCameraHostOverride;
 
-        // On-device media server (issue #120): the fixed RTSP username + a strong random password
-        // generated ONCE per app session (on first use) and cached, so the go2rtc.yaml the installer
-        // writes and the Home Assistant URL the user is shown carry the SAME credential. Regenerating
-        // per build would make the shown URL disagree with what was installed.
+        // On-device media server (issue #120): the fixed RTSP username + a strong random password.
+        // The password is generated on first use and cached, so the "Show go2rtc config" preview and the
+        // build that follows it install the SAME credential. It is a PER-INSTALL secret, so it is reset
+        // after each successful on-device build (see ResetCameraRtspPassword) — the next built image then
+        // gets a fresh, distinct password rather than sharing one across every unit built this session.
         private const string CameraRtspUsername = "camera";
         private string? _cameraRtspPass;
         private string CameraRtspPassword() => _cameraRtspPass ??= MqttInstaller.GenerateRtspPassword();
+
+        /// <summary>Spend the cached on-device RTSP password: after an on-device image is written, clear
+        /// it so the next build generates a fresh, distinct credential (a per-install secret — two units
+        /// built in one session must not share a stream password). The just-built image already captured
+        /// the old value, and the preview that preceded it shared the same cached password.</summary>
+        private void ResetCameraRtspPassword() => _cameraRtspPass = null;
 
         // Active LAN broker discovery (#43, follow-up 2). mDNS runs in the background at
         // startup; the /24 scan is a heavier fallback run at most once, when the bridge is
@@ -614,11 +621,8 @@ namespace IntercomFirmwareTool.App
                 LblMqttCameraOnDeviceHint.Visibility = onDevice ? Visibility.Visible : Visibility.Collapsed;
 
             // ApplyCameraTargetLock owns the target field's read-only state + the target hint's
-            // visibility (off-device). Re-run it, then on-device force the target hint hidden too, since
-            // the whole host row is collapsed.
+            // visibility, and now accounts for on-device (keeps the hint hidden), so just re-run it.
             ApplyCameraTargetLock();
-            if (onDevice && LblMqttCameraTargetHint is not null)
-                LblMqttCameraTargetHint.Visibility = Visibility.Collapsed;
 
             // Generate + cache the credential the moment on-device is chosen, so it is stable for both
             // the build (BuildMqttOptions) and the "Show go2rtc config" guide.
@@ -672,9 +676,14 @@ namespace IntercomFirmwareTool.App
             if (TxtMqttCameraTarget is null || ChkMqttCameraHostOverride is null) return;
 
             bool overridden = ChkMqttCameraHostOverride.IsChecked == true;
+            bool onDevice = ChkMqttCameraOnDevice?.IsChecked == true;
             TxtMqttCameraTarget.IsReadOnly = !overridden;
+            // The target hint belongs to the OFF-device locked host field. Hide it when overridden AND
+            // when on-device — on-device the whole host row is collapsed, and this shared refresh path
+            // (broker-host edits, prefill) must not resurrect an orphaned hint under it (Codex).
             if (LblMqttCameraTargetHint is not null)
-                LblMqttCameraTargetHint.Visibility = overridden ? Visibility.Collapsed : Visibility.Visible;
+                LblMqttCameraTargetHint.Visibility =
+                    (overridden || onDevice) ? Visibility.Collapsed : Visibility.Visible;
 
             // Locked: mirror the broker/HA host into the read-only field (display only — the build
             // ignores it while locked). Only while the camera panel is on, and via the suppress guard

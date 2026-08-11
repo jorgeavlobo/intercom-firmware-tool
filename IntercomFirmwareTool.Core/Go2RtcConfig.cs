@@ -303,8 +303,14 @@ namespace IntercomFirmwareTool.Core
             sb.Append("Add it to Home Assistant as a Generic Camera (Settings -> Devices &\n");
             sb.Append("Services -> Add Integration -> Generic Camera) with this stream URL —\n");
             sb.Append("replace <intercom-ip> with the panel's IP address on your network:\n\n");
+            // URL-encode the credentials for the URL's userinfo: Validate rejects control chars but not
+            // RTSP-URL-reserved punctuation (@ : / #), so escape defensively (today's fixed "camera" +
+            // base64url password never need it, but a future caller might) — CodeRabbit. The labeled
+            // credentials below stay RAW so the user copies the real values into HA's separate fields.
+            string userEnc = Uri.EscapeDataString(user);
+            string passEnc = Uri.EscapeDataString(pass);
             sb.Append(string.Create(ci,
-                $"    rtsp://{user}:{pass}@<intercom-ip>:{OnDeviceRtspPort}/{name}\n\n"));
+                $"    rtsp://{userEnc}:{passEnc}@<intercom-ip>:{OnDeviceRtspPort}/{name}\n\n"));
 
             sb.Append("Credentials (generated for this build):\n");
             sb.Append(string.Create(ci, $"    username: {user}\n"));
