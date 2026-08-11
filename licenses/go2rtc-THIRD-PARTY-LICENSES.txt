@@ -62,7 +62,7 @@ Component inventory (module — license as detected — source):
   - github.com/rs/zerolog                                MIT            https://github.com/rs/zerolog/blob/v1.34.0/LICENSE
   - github.com/sigurn/crc16                              MIT            https://github.com/sigurn/crc16/blob/83fcde1e29d1/LICENSE
   - github.com/sigurn/crc8                               MIT            https://github.com/sigurn/crc8/blob/2243fe600f9f/LICENSE.md
-  - gopkg.in/yaml.v3                                     MIT            Unknown
+  - gopkg.in/yaml.v3                                     MIT            https://github.com/go-yaml/yaml/blob/v3.0.1/LICENSE
 
 In addition: the Go standard library / runtime — BSD-3-Clause (The Go Authors).
 
@@ -1157,7 +1157,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ================================================================================
 gopkg.in/yaml.v3 — MIT
-Source: Unknown
+Source: https://github.com/go-yaml/yaml/blob/v3.0.1/LICENSE
 ================================================================================
 
 
