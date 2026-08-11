@@ -1152,9 +1152,11 @@ namespace IntercomFirmwareTool.Core
                     checks.Add(new("go2rtc.yaml matches the generated on-device config",
                         yaml == BuildOnDeviceGo2RtcYaml(opts), ""));
                     // Explicit, named assertion of the security invariant (beyond the byte-exact match):
-                    // the control API + web UI bind LOOPBACK ONLY, never the LAN.
+                    // the control API + web UI bind LOOPBACK ONLY, never the LAN. Both the positive and
+                    // the negative match use the full `listen: "<host>:<port>"` shape so the wildcard
+                    // check can't false-fail on the port appearing in some other context.
                     string apiLoopback = "listen: \"127.0.0.1:" + Go2RtcConfig.OnDeviceApiPort + "\"";
-                    string apiWildcard = "0.0.0.0:" + Go2RtcConfig.OnDeviceApiPort;
+                    string apiWildcard = "listen: \"0.0.0.0:" + Go2RtcConfig.OnDeviceApiPort + "\"";
                     checks.Add(new("go2rtc control API bound to loopback only (never 0.0.0.0)",
                         yaml.Contains(apiLoopback, StringComparison.Ordinal)
                         && !yaml.Contains(apiWildcard, StringComparison.Ordinal), ""));
