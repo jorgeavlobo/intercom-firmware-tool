@@ -1,9 +1,9 @@
 name: ffmpeg reproducibility diagnostic (temp)
 
-# TEMPORARY (issue #120): cross-run byte-reproducibility is failing even at -j1. Two
-# separate jobs each build zig's bundled compiler-rt/musl from a COLD cache; this probe
-# reproduces that in ONE job by giving each build its own isolated zig cache, then byte-
-# diffs the two outputs and maps the differing offsets to ELF sections. Delete after use.
+# TEMPORARY (issue #120): pin down the cross-run nondeterminism. Build TWICE at the SAME
+# path (rm the tree between builds) with the zig cache CLEARED between builds — replicating
+# two separate CI jobs as closely as possible — then always dump the byte-diff, ELF section
+# map, and differing strings so we can see exactly what leaks in. Delete after use.
 
 on:
   workflow_dispatch:
@@ -38,19 +38,15 @@ jobs:
           curl -fsSL -o ffmpeg.tar.gz "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/${FFMPEG_TAG}.tar.gz"
           [ "$(sha256sum ffmpeg.tar.gz | awk '{print $1}')" = "$FFMPEG_TARBALL_SHA256" ] || { echo "::error::ffmpeg sha"; exit 1; }
 
-      - name: Build twice with ISOLATED cold zig caches, then byte-diff
+      - name: Build twice at the SAME path, zig cache cleared between; dump the diff
         run: |
           set -euxo pipefail
           sudo apt-get update && sudo apt-get install -y binutils
-          build() {
-            d="$1"
-            mkdir "$d"
-            tar -xzf ffmpeg.tar.gz -C "$d" --strip-components=1
-            ( cd "$d"
-              # Isolated caches per build => each compiles zig's compiler-rt/musl from cold,
-              # exactly like two separate CI jobs.
-              export ZIG_GLOBAL_CACHE_DIR="$PWD/.zig-global"
-              export ZIG_LOCAL_CACHE_DIR="$PWD/.zig-local"
+          build() {   # $1 = output copy name; always builds in ./ffmpeg-src (same path)
+            rm -rf ffmpeg-src ~/.cache/zig
+            mkdir ffmpeg-src
+            tar -xzf ffmpeg.tar.gz -C ffmpeg-src --strip-components=1
+            ( cd ffmpeg-src
               export SOURCE_DATE_EPOCH=1700000000
               ./configure \
                 --cc="zig cc -target arm-linux-musleabihf -mcpu=generic+v7a+vfp3d16" \
@@ -63,25 +59,27 @@ jobs:
                 --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
                 --extra-cflags="-Os" --extra-ldflags="-static -s" >/dev/null
               make -j1 >/dev/null 2>&1 )
+            cp ffmpeg-src/ffmpeg "$1"
           }
-          build a
-          build b
-          sa="$(sha256sum a/ffmpeg | awk '{print $1}')"
-          sb="$(sha256sum b/ffmpeg | awk '{print $1}')"
-          echo "PROBE A sha256=$sa size=$(stat -c %s a/ffmpeg)"
-          echo "PROBE B sha256=$sb size=$(stat -c %s b/ffmpeg)"
-          if [ "$sa" = "$sb" ]; then
-            echo "PROBE RESULT: REPRODUCIBLE across isolated cold caches (nondeterminism is elsewhere)"; exit 0
+          build x
+          build y
+          sx="$(sha256sum x | awk '{print $1}')"; sy="$(sha256sum y | awk '{print $1}')"
+          echo "PROBE X sha256=$sx size=$(stat -c %s x)"
+          echo "PROBE Y sha256=$sy size=$(stat -c %s y)"
+          if [ "$sx" = "$sy" ]; then
+            echo "PROBE RESULT: REPRODUCIBLE at same path with cleared cache"; exit 0
           fi
-          echo "PROBE RESULT: NOT REPRODUCIBLE across isolated cold caches"
-          echo "=== differing byte count ==="
-          cmp -l a/ffmpeg b/ffmpeg | wc -l || true
-          echo "=== first 40 differing offsets (dec oct oct) ==="
-          cmp -l a/ffmpeg b/ffmpeg | head -40 || true
-          echo "=== ELF section headers (A) — map offsets to sections ==="
-          readelf -S a/ffmpeg || true
-          echo "=== .comment / build-id (A) ==="
-          readelf -p .comment a/ffmpeg 2>/dev/null || true
-          readelf -n a/ffmpeg 2>/dev/null || true
-          echo "=== strings that differ (first 30) ==="
-          diff <(strings a/ffmpeg | sort -u) <(strings b/ffmpeg | sort -u) | head -30 || true
+          echo "PROBE RESULT: NOT REPRODUCIBLE — dumping diff"
+          echo "=== differing byte count ==="; cmp -l x y | wc -l || true
+          echo "=== first 60 differing offsets (dec, valA-oct, valB-oct) ==="; cmp -l x y | head -60 || true
+          echo "=== section headers (map file offsets to sections) ==="; readelf -S x || true
+          echo "=== notes / build-id ==="; readelf -n x || true
+          echo "=== .comment ==="; readelf -p .comment x 2>/dev/null || true
+          echo "=== string-set diff (first 40) ==="; diff <(strings x | sort) <(strings y | sort) | head -40 || true
+          # Show a hexdump window around the first differing offset for context.
+          off="$(cmp -l x y | head -1 | awk '{print $1}')"
+          if [ -n "${off:-}" ]; then
+            start=$(( off > 64 ? off - 64 : 0 ))
+            echo "=== hexdump X around first diff (offset ~$off) ==="; dd if=x bs=1 skip="$start" count=160 2>/dev/null | xxd || true
+            echo "=== hexdump Y around first diff ==="; dd if=y bs=1 skip="$start" count=160 2>/dev/null | xxd || true
+          fi
