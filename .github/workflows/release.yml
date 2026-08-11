@@ -82,7 +82,12 @@ jobs:
           # upstream library source. Pointing at the (mutable) repo isn't a durable accompaniment,
           # so ship an immutable copy of our build recipe with the release too (CodeRabbit).
           recipe="ffmpeg-${tag}-build-recipe.tar.gz"
-          tar -czf "$recipe" -C native/ffmpeg build.sh pins.env BUILD.md
+          # Archive from the COMMITTED blobs (LF), NOT the working tree: on the windows-latest
+          # runner core.autocrlf could otherwise materialize these text files as CRLF, shipping a
+          # build.sh that fails under Linux `sh` (`set -eu\r`) and pins.env values with trailing
+          # \r. git archive emits git's stored bytes (LF); .gitattributes also pins
+          # native/ffmpeg/** to eol=lf as belt-and-suspenders (Codex).
+          git archive --format=tar HEAD:native/ffmpeg build.sh pins.env BUILD.md | gzip -n > "$recipe"
           echo "FFMPEG_RECIPE=$recipe" >> "$GITHUB_ENV"
           echo "packaged FFmpeg build recipe: $recipe (build.sh + pins.env + BUILD.md)"
 

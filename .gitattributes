@@ -68,6 +68,14 @@
 # the Linux rootfs. (The ARM binaries in Phase 1b live outside this directory.)
 IntercomFirmwareTool.Core/Payload/mqtt/** text eol=lf
 
+# FFmpeg build recipe (issue #120) — build.sh + check-doc-versions.sh are POSIX shell scripts
+# and pins.env is sourced by shell; they MUST stay LF (a CRLF `set -eu\r` / shebang breaks under
+# Linux `sh`). This is load-bearing because release.yml ships these as the FFmpeg LGPL
+# corresponding-source recipe, extracted + run on Linux — so a Windows-runner CRLF checkout must
+# not leak into the shipped archive (Codex). No binaries live here (the ELF is under
+# Payload/vendor/armhf/), so eol=lf is safe for the whole directory.
+native/ffmpeg/** text eol=lf
+
 # MQTT bridge ARM binaries (Phase 1b) — verbatim third-party ELF executables.
 # Force binary handling so `* text=auto` never line-ending-normalizes them
 # (which would corrupt the bytes and break the SHA-256 verification).
