@@ -152,6 +152,33 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
+    public void Records_state_only_after_an_insert_actually_succeeds()
+    {
+        // CodeRabbit: in the untagged fallback, if the untagged insert ALSO fails we must NOT record
+        // "untagged <subnet>" — otherwise a later close/respawn would fw_del a look-alike foreign rule we
+        // never created. The untagged insert must be an ELIF whose success gates the state write, with a
+        // final else that clears state and returns without recording.
+        string s = ReadScript();
+        string joined = JoinedScript();
+        // The untagged fallback is an elif (its exit status decides whether we record), NOT an
+        // unconditional insert with `|| true`.
+        Assert.Contains(
+            "elif iptables -I INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
+            joined);
+        // firewall_open has TWO bail-outs that clear state (no-address, and both-inserts-failed), then a
+        // single state write reached only after a successful insert.
+        int open = s.Replace("\r\n", "\n").IndexOf("firewall_open()", System.StringComparison.Ordinal);
+        int close = s.Replace("\r\n", "\n").IndexOf("firewall_close()", System.StringComparison.Ordinal);
+        string body = s.Replace("\r\n", "\n").Substring(open, close - open);
+        int clears = 0, idx = 0;
+        while ((idx = body.IndexOf("rm -f \"$FW_STATE\"", idx, System.StringComparison.Ordinal)) >= 0)
+        { clears++; idx += 1; }
+        Assert.True(clears >= 2, "firewall_open must clear state on both the no-address and total-failure paths");
+        // The state write records the resolved mode + subnet (only reached after a successful insert).
+        Assert.Contains("printf '%s %s\\n' \"$mode\" \"$lan\"", body);
+    }
+
+    [Fact]
     public void Removes_any_prior_rule_before_opening_so_no_stale_rule_survives()
     {
         // Codex: if wlan0 changes subnet or loses its address, the previously-applied rule must be removed

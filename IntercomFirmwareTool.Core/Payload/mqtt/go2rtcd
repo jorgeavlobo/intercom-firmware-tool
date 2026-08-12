@@ -120,12 +120,18 @@ firewall_open() {
 	# Belt-and-suspenders: drain any stale TAGGED rule of ours for this subnet (safe — only our comment
 	# matches) so re-asserting can never accumulate duplicates.
 	fw_del tagged "$lan"
+	# Insert TAGGED first; fall back to an untagged rule only if the comment match is unavailable. Record
+	# state ONLY after an insert actually succeeds — if BOTH fail we added nothing, so recording
+	# "untagged <subnet>" would later make close/respawn fw_del a look-alike foreign rule we never created
+	# (CodeRabbit). On total failure, clear any prior state and leave the port closed.
 	if iptables -I INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
 		-m comment --comment "$FW_TAG" -j ACCEPT 2>/dev/null; then
 		mode=tagged
-	else
+	elif iptables -I INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null; then
 		mode=untagged
-		iptables -I INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null || true
+	else
+		rm -f "$FW_STATE" 2>/dev/null || true
+		return 0
 	fi
 	printf '%s %s\n' "$mode" "$lan" > "$FW_STATE" 2>/dev/null || true
 }
