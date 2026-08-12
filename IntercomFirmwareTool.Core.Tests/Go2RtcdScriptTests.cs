@@ -86,16 +86,16 @@ public class Go2RtcdScriptTests
         string[] code = CodeLines(s);
         Assert.Contains("CAM_PORT=8554", s);
         Assert.Contains("CAM_IFACE=wlan0", s);
-        // The ACCEPT lives in OUR chain (so cleanup never touches the panel's policy), matches a specific
-        // tcp/dport on the interface, and is SOURCE-RESTRICTED to the derived LAN subnet.
+        // The ACCEPT lives in OUR minted chain (so cleanup never touches the panel's policy), matches a
+        // specific tcp/dport on the interface, and is SOURCE-RESTRICTED to the derived LAN subnet.
         Assert.Contains(code, l =>
-            l.Contains("iptables -A \"$FW_CHAIN\"")
+            l.Contains("iptables -A \"$c\"")
             && l.Contains("-i \"$CAM_IFACE\"")
             && l.Contains("--dport \"$CAM_PORT\"")
             && l.Contains("-s \"$lan\"")
             && l.Contains("-j ACCEPT"));
         // INPUT jumps to our chain (inserted at the top, above the policy DROP).
-        Assert.Contains(code, l => l.Contains("iptables -I INPUT -j \"$FW_CHAIN\""));
+        Assert.Contains(code, l => l.Contains("iptables -I INPUT -j \"$1\""));
         // LAN source derived from the interface address at runtime; with no address yet the port is NOT
         // opened interface-wide (stays LAN-only) — skip until an address is present.
         Assert.Contains(code, l => l.Contains("ip -4 addr show \"$CAM_IFACE\""));
@@ -109,9 +109,10 @@ public class Go2RtcdScriptTests
     public void Firewall_uses_its_own_chain_tied_to_the_running_daemon()
     {
         string[] code = CodeLines(ReadScript());
-        // A dedicated chain owns our rules, so cleanup only flushes OUR chain — never unrelated INPUT rules.
-        Assert.Contains(code, l => l == "FW_CHAIN=GO2RTC");
-        Assert.Contains(code, l => l.Contains("iptables -F \"$FW_CHAIN\""));
+        // A dedicated (minted) chain owns our rules, so cleanup only flushes OUR chain — never unrelated
+        // INPUT rules.
+        Assert.Contains(code, l => l == "FW_BASE=GO2RTC");
+        Assert.Contains(code, l => l.Contains("iptables -F \"$c\""));
         // The exception is tied to the daemon actually running (a failed launch leaves no open port),
         // and it is closed on stop/disable.
         Assert.Contains(code, l => l.Contains("if is_running; then firewall_open"));
@@ -119,27 +120,30 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
-    public void Never_touches_a_chain_it_did_not_create()
+    public void Owns_its_chain_by_an_unguessable_per_boot_name()
     {
-        // CodeRabbit/Codex/Copilot: content cannot prove ownership — an admin's pre-existing empty chain,
-        // a foreign narrow tcp/:8554 rule, and our own DHCP-changing `-s` all defeat a shape check. So
-        // ownership is a CREATION TOKEN: the marker is written the instant we create the chain, and a
-        // chain that is present WITHOUT the marker is treated as foreign and never mutated.
-        string[] code = CodeLines(ReadScript());
-        Assert.Contains(code, l => l.Contains("firewall_chain_is_ours()"));
-        // A dedicated ownership marker distinct from the lock/disabled markers.
+        // CodeRabbit/Codex/Copilot converged: NOTHING about a chain's name or contents can prove we
+        // created it — a same-named chain can be pre-created empty, hold a look-alike rule, or be deleted
+        // and recreated. So ownership is made intrinsic to an UNGUESSABLE per-boot chain name
+        // (GO2RTC_<nonce>): no other component can collide with, recreate, or spoof it, so we manage
+        // exactly our own chain and never touch anyone else's.
+        string s = ReadScript();
+        string[] code = CodeLines(s);
+        // No fixed, guessable chain name is used anymore; the base is only a prefix.
+        Assert.DoesNotContain(code, l => l.StartsWith("FW_CHAIN="));
+        Assert.Contains(code, l => l == "FW_BASE=GO2RTC");
+        // The minted name is persisted in a tmpfs marker (cleared every boot with the ruleset).
         Assert.Contains(code, l => l.StartsWith("FW_OWN=") && l.Contains("/var/run/"));
-        // The probe: an EXISTING chain is ours only when the marker is present.
-        Assert.Contains(code, l => l == "[ -e \"$FW_OWN\" ]");
-        // The marker is written ONLY when we actually create the chain (guarded on `-N` success), so it
-        // can never be stamped onto a foreign pre-existing chain.
-        Assert.Contains(code, l =>
-            l.Contains("iptables -N \"$FW_CHAIN\"") && l.Contains(": > \"$FW_OWN\""));
-        // Ownership is NOT inferred from rule contents — no rule-shape grep decides ownership anymore.
-        Assert.DoesNotContain(code, l =>
-            l.Contains("iptables -S \"$FW_CHAIN\"") && l.Contains("grep"));
-        // Both open and close bail out early when the chain is not ours (guard runs before any mutation).
-        Assert.Equal(2, code.Count(l => l.Contains("firewall_chain_is_ours || return 0")));
+        // The nonce comes from the kernel RNG, and the minted name is written to / read back from FW_OWN.
+        Assert.Contains(code, l => l.Contains("fw_chain()"));
+        Assert.Contains(code, l => l.Contains("/dev/urandom"));
+        Assert.Contains(code, l => l.Contains("> \"$FW_OWN\""));
+        Assert.Contains(code, l => l.Contains("cat \"$FW_OWN\""));
+        // No content/shape ownership heuristic remains.
+        Assert.DoesNotContain(code, l => l.Contains("firewall_chain_is_ours"));
+        // The INPUT jump match is END-ANCHORED to the exact target, so a similarly-named chain (e.g.
+        // GO2RTC_BACKUP) cannot masquerade as ours and suppress the real jump (Codex).
+        Assert.Contains(code, l => l.Contains("grep -qE -- \"-j $1\\$\""));
     }
 
     [Fact]
@@ -153,7 +157,7 @@ public class Go2RtcdScriptTests
         int close = script.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         Assert.True(open >= 0 && close > open);
         string body = script.Substring(open, close - open);
-        int flush = body.IndexOf("iptables -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int flush = body.IndexOf("iptables -F \"$c\"", System.StringComparison.Ordinal);
         int noAddr = body.IndexOf("[ -n \"$lan\" ] || return 0", System.StringComparison.Ordinal);
         Assert.True(flush >= 0 && noAddr >= 0);
         Assert.True(flush < noAddr, "the chain flush must come before the no-address early return");
