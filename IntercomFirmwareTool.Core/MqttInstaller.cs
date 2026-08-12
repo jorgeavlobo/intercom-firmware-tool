@@ -628,11 +628,12 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         public static string GenerateRtspPassword()
         {
-            // 18 bytes → exactly 24 base64 chars, no '=' padding. base64url alphabet keeps it safe in
-            // both the RTSP URL and the YAML scalar.
+            // 18 bytes → exactly 24 base64 chars (18 is a multiple of 3, so no '=' padding today). Map to
+            // the base64url alphabet and TrimEnd('=') so the value stays URL-/YAML-safe even if the byte
+            // count is ever changed to a non-multiple of 3 (Copilot).
             Span<byte> bytes = stackalloc byte[18];
             RandomNumberGenerator.Fill(bytes);
-            return Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_');
+            return Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_').TrimEnd('=');
         }
 
         /// <summary>
