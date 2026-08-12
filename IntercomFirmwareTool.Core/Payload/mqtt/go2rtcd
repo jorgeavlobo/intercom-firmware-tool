@@ -70,7 +70,7 @@ fw_jump() {
 	# Capture the listing FIRST and change nothing if it fails — an inspection error (xtables lock,
 	# resource) must not read as "jump out of place" and trigger a destructive drain+re-append that a
 	# failing backend might then leave with no jump at all (CodeRabbit).
-	inp=$(iptables -S INPUT 2>/dev/null) || return 0
+	inp=$(iptables -w 5 -S INPUT 2>/dev/null) || return 0
 	n=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
 	last=$(printf '%s\n' "$inp" | tail -n 1)
 	# Invariant: EXACTLY ONE INPUT jump, and it is LAST (after the factory/admin filters, before the policy
@@ -87,7 +87,7 @@ fw_jump() {
 	# listing (a stale count would otherwise delete the freshly appended jump — Codex). `-D` removes the
 	# first match, so the last jump survives until exactly one remains. Stop on any failure and retry next
 	# pass (a listing failure yields count 0 and also stops, never over-deleting).
-	while [ "$(iptables -S INPUT 2>/dev/null | grep -c -- "^-A INPUT -j $FW_CHAIN\$")" -gt 1 ]; do
+	while [ "$(iptables -w 5 -S INPUT 2>/dev/null | grep -c -- "^-A INPUT -j $FW_CHAIN\$")" -gt 1 ]; do
 		iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null || break
 	done
 }
@@ -97,7 +97,7 @@ fw_jump() {
 # Prints nothing; returns: 0 = exists, 1 = confirmed absent ("No chain…"), 2 = could not determine. A
 # caller must never treat 2 as "absent" (that would relinquish ownership of a chain that may still be ours).
 fw_chain_exists() {
-	out=$(iptables -S "$FW_CHAIN" 2>&1) && return 0
+	out=$(iptables -w 5 -S "$FW_CHAIN" 2>&1) && return 0
 	case "$out" in *"No chain"*) return 1 ;; esac
 	return 2
 }
@@ -188,7 +188,7 @@ firewall_close() {
 	# retries the teardown — an inspection failure must never be read as "absent" (CodeRabbit). One `-S`
 	# lists the whole filter table (chain declarations `-N …` and rules `-A …`), so it covers both; capture
 	# it once and bail on failure rather than piping (a failed `-S` into grep would look empty = "gone").
-	rules=$(iptables -S 2>/dev/null) || return 0
+	rules=$(iptables -w 5 -S 2>/dev/null) || return 0
 	printf '%s\n' "$rules" | grep -q -- "^-A INPUT -j $FW_CHAIN\$" && return 0   # our INPUT jump still present
 	printf '%s\n' "$rules" | grep -q -- "^-N $FW_CHAIN\$" && return 0            # chain still declared
 	rm -f "$FW_OWN" 2>/dev/null || true

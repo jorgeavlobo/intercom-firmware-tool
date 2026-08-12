@@ -141,7 +141,7 @@ public class Go2RtcdScriptTests
         // left it out of place — so it can never sit ahead of the factory filters. The listing is captured
         // first and a failed `iptables -S INPUT` changes nothing (an inspection error must not trigger a
         // destructive drain+re-append).
-        Assert.Contains("inp=$(iptables -S INPUT 2>/dev/null) || return 0", s);
+        Assert.Contains("inp=$(iptables -w 5 -S INPUT 2>/dev/null) || return 0", s);
         // The early-return is COUNT-AWARE: only exactly-one-jump-and-last is "already correct", so a stale
         // duplicate is never early-returned and a failed cleanup self-heals on a later pass.
         Assert.Contains("[ \"$n\" -eq 1 ] && [ \"$last\" = \"-A INPUT -j $FW_CHAIN\" ] && return 0", s);
@@ -158,7 +158,7 @@ public class Go2RtcdScriptTests
         // flush after our listing can't make a stale count delete the freshly appended jump. It stops on
         // any failure (a failed `-D`, or a listing failure that yields count 0) and retries next pass.
         Assert.Contains(
-            "while [ \"$(iptables -S INPUT 2>/dev/null | grep -c -- \"^-A INPUT -j $FW_CHAIN\\$\")\" -gt 1 ]", fj);
+            "while [ \"$(iptables -w 5 -S INPUT 2>/dev/null | grep -c -- \"^-A INPUT -j $FW_CHAIN\\$\")\" -gt 1 ]", fj);
         Assert.Contains("iptables -w 5 -D INPUT -j \"$FW_CHAIN\" 2>/dev/null || break", fj);
         // The ONLY thing we ever add to INPUT is the jump to our chain — never a bare rule in INPUT.
         foreach (var l in System.Text.RegularExpressions.Regex.Split(joined, "\n"))
@@ -227,7 +227,7 @@ public class Go2RtcdScriptTests
         // (`|| { rm -f "$FW_OWN" … }`) so the next pass treats the newly appeared chain as foreign and never
         // flushes it — the create line above is the single (re)create path (no separate recreate branch).
         // (2) close captures ONE listing, bails on its failure, and confirms both objects gone before drop.
-        int listing = closeBody.IndexOf("rules=$(iptables -S 2>/dev/null) || return 0", System.StringComparison.Ordinal);
+        int listing = closeBody.IndexOf("rules=$(iptables -w 5 -S 2>/dev/null) || return 0", System.StringComparison.Ordinal);
         int jumpChk = closeBody.IndexOf("grep -q -- \"^-A INPUT -j $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);
         int chainChk = closeBody.IndexOf("grep -q -- \"^-N $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);
         int drop = closeBody.IndexOf("rm -f \"$FW_OWN\"", System.StringComparison.Ordinal);
