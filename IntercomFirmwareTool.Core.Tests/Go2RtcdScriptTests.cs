@@ -154,9 +154,12 @@ public class Go2RtcdScriptTests
             fj.IndexOf("iptables -w 5 -A INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal)
             < fj.IndexOf("iptables -w 5 -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal),
             "fw_jump must append the new jump before deleting older ones");
-        // A failed duplicate-delete stops the loop (`|| return 0`) so a later pass retries rather than
-        // decrementing past the remaining duplicate.
-        Assert.Contains("iptables -w 5 -D INPUT -j \"$FW_CHAIN\" 2>/dev/null || return 0", fj);
+        // Duplicate cleanup RE-COUNTS the LIVE ruleset each iteration, so a concurrent factory `-F INPUT`
+        // flush after our listing can't make a stale count delete the freshly appended jump. It stops on
+        // any failure (a failed `-D`, or a listing failure that yields count 0) and retries next pass.
+        Assert.Contains(
+            "while [ \"$(iptables -S INPUT 2>/dev/null | grep -c -- \"^-A INPUT -j $FW_CHAIN\\$\")\" -gt 1 ]", fj);
+        Assert.Contains("iptables -w 5 -D INPUT -j \"$FW_CHAIN\" 2>/dev/null || break", fj);
         // The ONLY thing we ever add to INPUT is the jump to our chain — never a bare rule in INPUT.
         foreach (var l in System.Text.RegularExpressions.Regex.Split(joined, "\n"))
             if (l.Contains(" -A INPUT ") || l.Contains(" -I INPUT "))

@@ -77,20 +77,18 @@ fw_jump() {
 	# DROP). Already satisfied → nothing to do. The count check matters: if a stale duplicate remains it is
 	# NOT early-returned, so a failed cleanup below self-heals on a later pass (CodeRabbit).
 	[ "$n" -eq 1 ] && [ "$last" = "-A INPUT -j $FW_CHAIN" ] && return 0
-	# Converge. If our jump is not already last, APPEND a fresh one at the end FIRST (so a jump always
-	# exists during the swap); if that append fails, keep what we have and retry next pass. Then drop every
-	# EARLIER instance so exactly one (the last) remains, stopping on a failed delete so a later pass retries
-	# (the invariant above won't early-return while a duplicate remains).
-	if [ "$last" = "-A INPUT -j $FW_CHAIN" ]; then
-		del=$((n - 1))
-	elif iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null; then
-		del=$n
-	else
-		return 0
+	# Ensure a jump exists at the END: if ours isn't already last, APPEND a fresh one FIRST so a jump always
+	# exists during the swap; if that append fails, keep what we have and retry next pass.
+	if [ "$last" != "-A INPUT -j $FW_CHAIN" ]; then
+		iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null || return 0
 	fi
-	while [ "$del" -gt 0 ]; do
-		iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null || return 0
-		del=$((del - 1))
+	# Drop EARLIER duplicate jumps one at a time, RE-COUNTING the LIVE ruleset each iteration so we can
+	# never delete below one — even if a concurrent factory `-F INPUT` flushed the old jumps after our
+	# listing (a stale count would otherwise delete the freshly appended jump — Codex). `-D` removes the
+	# first match, so the last jump survives until exactly one remains. Stop on any failure and retry next
+	# pass (a listing failure yields count 0 and also stops, never over-deleting).
+	while [ "$(iptables -S INPUT 2>/dev/null | grep -c -- "^-A INPUT -j $FW_CHAIN\$")" -gt 1 ]; do
+		iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null || break
 	done
 }
 
