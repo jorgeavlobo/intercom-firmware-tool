@@ -143,6 +143,15 @@ public class Go2RtcdScriptTests
         // destructive drain+re-append).
         Assert.Contains("inp=$(iptables -S INPUT 2>/dev/null) || return 0", s);
         Assert.Contains("tail -n 1)\" = \"-A INPUT -j $FW_CHAIN\"", s);
+        // On a reposition, the fresh jump is APPENDED before the older one(s) are deleted, so a jump to our
+        // chain always exists during the swap (no window with none, even if the re-append were to fail).
+        int fjStart = s.IndexOf("fw_jump()", System.StringComparison.Ordinal);
+        int fjEnd = s.IndexOf("\n}", fjStart, System.StringComparison.Ordinal);
+        string fj = s.Substring(fjStart, fjEnd - fjStart);
+        Assert.True(
+            fj.IndexOf("iptables -w 5 -A INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal)
+            < fj.IndexOf("iptables -w 5 -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal),
+            "fw_jump must append the new jump before deleting older ones");
         // The ONLY thing we ever add to INPUT is the jump to our chain — never a bare rule in INPUT.
         foreach (var l in System.Text.RegularExpressions.Regex.Split(joined, "\n"))
             if (l.Contains(" -A INPUT ") || l.Contains(" -I INPUT "))
