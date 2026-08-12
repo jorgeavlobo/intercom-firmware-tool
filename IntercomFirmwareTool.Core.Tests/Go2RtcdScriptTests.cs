@@ -96,8 +96,9 @@ public class Go2RtcdScriptTests
         // LAN source restriction is derived from the interface address at runtime (DHCP-proof).
         Assert.Contains(code, l => l.Contains("ip -4 addr show \"$CAM_IFACE\""));
         Assert.Contains(code, l => l.Contains("src=\"-s $lan\""));
-        // The control API port is loopback-only — never opened in the firewall.
-        Assert.DoesNotContain("1984", s);
+        // The control API port is loopback-only — no executable line references 1984 (a comment may
+        // mention it, so assert on code lines, not the whole script).
+        Assert.DoesNotContain(code, l => l.Contains("1984"));
     }
 
     [Fact]
