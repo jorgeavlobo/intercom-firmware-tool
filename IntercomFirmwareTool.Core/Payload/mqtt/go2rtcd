@@ -165,8 +165,8 @@ firewall_close() {
 	# lists the whole filter table (chain declarations `-N …` and rules `-A …`), so it covers both; capture
 	# it once and bail on failure rather than piping (a failed `-S` into grep would look empty = "gone").
 	rules=$(iptables -S 2>/dev/null) || return 0
-	printf '%s\n' "$rules" | grep -q -- "-j $FW_CHAIN\$" && return 0     # INPUT jump still present
-	printf '%s\n' "$rules" | grep -q -- "^-N $FW_CHAIN\$" && return 0    # chain still declared
+	printf '%s\n' "$rules" | grep -q -- "^-A INPUT -j $FW_CHAIN\$" && return 0   # our INPUT jump still present
+	printf '%s\n' "$rules" | grep -q -- "^-N $FW_CHAIN\$" && return 0            # chain still declared
 	rm -f "$FW_OWN" 2>/dev/null || true
 }
 

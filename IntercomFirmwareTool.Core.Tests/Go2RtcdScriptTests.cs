@@ -205,7 +205,7 @@ public class Go2RtcdScriptTests
         // flushes it — the create line above is the single (re)create path (no separate recreate branch).
         // (2) close captures ONE listing, bails on its failure, and confirms both objects gone before drop.
         int listing = closeBody.IndexOf("rules=$(iptables -S 2>/dev/null) || return 0", System.StringComparison.Ordinal);
-        int jumpChk = closeBody.IndexOf("grep -q -- \"-j $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);
+        int jumpChk = closeBody.IndexOf("grep -q -- \"^-A INPUT -j $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);
         int chainChk = closeBody.IndexOf("grep -q -- \"^-N $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);
         int drop = closeBody.IndexOf("rm -f \"$FW_OWN\"", System.StringComparison.Ordinal);
         Assert.True(listing >= 0 && jumpChk > listing && chainChk > listing && drop > jumpChk && drop > chainChk,
