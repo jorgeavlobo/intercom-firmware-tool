@@ -64,18 +64,18 @@ FW_OWN=/var/run/go2rtc.fwown
 # the factory rebuild does `-F INPUT` then many `-A INPUT`, so a watchdog pass that appended our jump
 # mid-rebuild would leave it AHEAD of the later-restored filters. So if the jump is missing OR not the
 # last INPUT rule, drain it and re-append at the end — the next pass self-corrects the position within one
-# watchdog interval (Codex). Steady state (already last) mutates nothing. Non-matching packets RETURN from
+# watchdog interval. Steady state (already last) mutates nothing. Non-matching packets RETURN from
 # our chain and continue INPUT, so the jump never disturbs other traffic.
 fw_jump() {
 	# Capture the listing FIRST and change nothing if it fails — an inspection error (xtables lock,
 	# resource) must not read as "jump out of place" and trigger a destructive drain+re-append that a
-	# failing backend might then leave with no jump at all (CodeRabbit).
+	# failing backend might then leave with no jump at all.
 	inp=$(iptables -w 5 -S INPUT 2>/dev/null) || return 0
 	n=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
 	last=$(printf '%s\n' "$inp" | tail -n 1)
 	# Invariant: EXACTLY ONE INPUT jump, and it is LAST (after the factory/admin filters, before the policy
 	# DROP). Already satisfied → nothing to do. The count check matters: if a stale duplicate remains it is
-	# NOT early-returned, so a failed cleanup below self-heals on a later pass (CodeRabbit).
+	# NOT early-returned, so a failed cleanup below self-heals on a later pass.
 	[ "$n" -eq 1 ] && [ "$last" = "-A INPUT -j $FW_CHAIN" ] && return 0
 	# Ensure a jump exists at the END: if ours isn't already last, APPEND a fresh one FIRST so a jump always
 	# exists during the swap; if that append fails, keep what we have and retry next pass.
@@ -84,7 +84,7 @@ fw_jump() {
 	fi
 	# Drop EARLIER duplicate jumps one at a time, RE-COUNTING the LIVE ruleset each iteration so we can
 	# never delete below one — even if a concurrent factory `-F INPUT` flushed the old jumps after our
-	# listing (a stale count would otherwise delete the freshly appended jump — Codex). `-D` removes the
+	# listing (a stale count would otherwise delete the freshly appended jump). `-D` removes the
 	# first match, so the last jump survives until exactly one remains. Stop on any failure and retry next
 	# pass (a listing failure yields count 0 and also stops, never over-deleting).
 	while [ "$(iptables -w 5 -S INPUT 2>/dev/null | grep -c -- "^-A INPUT -j $FW_CHAIN\$")" -gt 1 ]; do
@@ -157,7 +157,7 @@ firewall_open() {
 		# below therefore PROVES the marker file is writable). If -N then fails because a GO2RTC chain
 		# appeared in the race window between the probe and here, it is not one we created: RELINQUISH the
 		# marker (the rm cannot fail — same writable file, same pass) and bail, so the next pass treats the
-		# newly appeared chain as foreign and never flushes it (Codex/CodeRabbit).
+		# newly appeared chain as foreign and never flushes it.
 		: > "$FW_OWN" 2>/dev/null || return 0
 		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || { rm -f "$FW_OWN" 2>/dev/null || true; return 0; }
 	fi
@@ -185,7 +185,7 @@ firewall_close() {
 	iptables -w 5 -X "$FW_CHAIN" 2>/dev/null || true
 	# Drop ownership ONLY when a SUCCESSFUL listing confirms both the chain and its INPUT jump are gone. A
 	# failed listing (inspection error) or a still-present chain/jump keeps FW_OWN so a later close/respawn
-	# retries the teardown — an inspection failure must never be read as "absent" (CodeRabbit). One `-S`
+	# retries the teardown — an inspection failure must never be read as "absent". One `-S`
 	# lists the whole filter table (chain declarations `-N …` and rules `-A …`), so it covers both; capture
 	# it once and bail on failure rather than piping (a failed `-S` into grep would look empty = "gone").
 	rules=$(iptables -w 5 -S 2>/dev/null) || return 0
@@ -213,7 +213,7 @@ launch_if_enabled() {
 
 # Poll briefly for a just-backgrounded daemon to exec $DAEMON. Without this, the is_running check right
 # after a launch can race the child's exec and read "down", so a manual start/restart would close the
-# media port until the next watchdog pass ~60s later (Codex). Only ever called after launch_if_enabled
+# media port until the next watchdog pass ~60s later. Only ever called after launch_if_enabled
 # reports it launched, so steady-state respawns (already running) never sleep. Bounded to ~5s — well
 # under the ~10s lock-steal threshold — then returns is_running's verdict so a genuinely failed launch
 # still ends with the port closed.
@@ -243,7 +243,7 @@ case "$1" in
 		# down and (re)assert the firewall rule — running firewall_open EVERY pass is
 		# what re-opens :8554 after the panel rebuilds/flushes its chain. The rule is
 		# tied to the daemon actually running, so a persistently failed launch (missing
-		# binary/config) leaves no open port (Copilot). Never clears the marker, so it
+		# binary/config) leaves no open port. Never clears the marker, so it
 		# cannot undo an operator's `stop`.
 		acquire
 		if [ -e "$DISABLED" ]; then
@@ -274,7 +274,7 @@ case "$1" in
 		# Close the media port UNDER the lock so the state/rule cleanup can't interleave with a concurrent
 		# `start`'s firewall_open, and only if we are still the desired-stopped state — an operator `start`
 		# during this shutdown window clears DISABLED and reopens the port, so we must not tear its rule
-		# down (Codex). The kill loop above stays outside the lock (short hold, matching btmqttd).
+		# down. The kill loop above stays outside the lock (short hold, matching btmqttd).
 		acquire
 		[ -e "$DISABLED" ] && firewall_close
 		release
