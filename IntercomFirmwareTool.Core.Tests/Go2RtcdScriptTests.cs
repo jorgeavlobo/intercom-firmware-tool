@@ -101,7 +101,7 @@ public class Go2RtcdScriptTests
         // LAN source derived from the interface address at runtime; with no address yet the port is NOT
         // opened interface-wide (stays LAN-only) — bail before inserting when there is no address.
         Assert.Contains(code, l => l.Contains("ip -4 addr show \"$CAM_IFACE\""));
-        Assert.Contains(code, l => l.Contains("[ -n \"$lan\" ]") && l.Contains("return 0"));
+        Assert.Contains(code, l => l.Contains("[ -z \"$lan\" ]"));   // no-address bail (insert nothing)
         // The control API port is loopback-only — no executable line references 1984 (a comment may
         // mention it, so assert on code lines, not the whole script).
         Assert.DoesNotContain(code, l => l.Contains("1984"));
@@ -156,41 +156,34 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
-    public void Fails_closed_when_the_comment_match_is_unavailable()
-    {
-        // CodeRabbit: the untagged fallback can't own a rule (a bare `-D` deletes the first identical
-        // match, which may be an admin's). So the tag is REQUIRED: if the tagged insert fails (kernel
-        // lacks xt_comment) we add NO rule and clear state — never inserting an unowned rule.
-        string s = ReadScript().Replace("\r\n", "\n");
-        int open = s.IndexOf("firewall_open()", System.StringComparison.Ordinal);
-        int close = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
-        string body = s.Substring(open, close - open);
-        // State is written ONLY inside the tagged-insert `then`; the `else` clears it (fail closed).
-        Assert.Contains("-m comment --comment \"$FW_TAG\" -j ACCEPT 2>/dev/null; then", JoinedScript());
-        Assert.Contains("printf '%s' \"$lan\" > \"$FW_STATE\"", body);
-        // Two state-clearing bail-outs: no-address, and tagged-insert-failed. Neither inserts a rule.
-        int clears = 0, idx = 0;
-        while ((idx = body.IndexOf("rm -f \"$FW_STATE\"", idx, System.StringComparison.Ordinal)) >= 0)
-        { clears++; idx += 1; }
-        Assert.True(clears >= 2, "firewall_open must clear state on both the no-address and insert-failed paths");
-    }
-
-    [Fact]
     public void Keeps_state_and_the_installed_rule_consistent_under_failures()
     {
-        // Codex: (1) close must forget the rule only once it is confirmed gone — a transient `iptables -D`
-        // failure keeps FW_STATE so a later pass retries instead of stranding an open port; (2) open must
-        // roll the just-added rule back if persisting state fails, else close could never find/remove it.
+        // CodeRabbit/Codex: state and the installed rule must never diverge, under any single- or
+        // compound-failure sequence.
+        //  (1) open writes FW_STATE BEFORE inserting, so an installed tagged rule is ALWAYS covered by
+        //      cleanup state — no failure at/after the insert can strand the port open with no cleanup
+        //      target. A failed state write returns without inserting (fail closed), and because each open
+        //      first deletes the prior rule, a mid-pass failure leaves the rule deleted, never stranded.
+        //  (2) close forgets the rule ONLY once fw_installed confirms it is gone — a transient
+        //      `iptables -D` failure keeps FW_STATE so a later pass retries instead of stranding the port.
         string s = ReadScript().Replace("\r\n", "\n");
-        // A presence check confirms the tagged rule is actually gone before state is cleared.
-        Assert.Contains("fw_installed()", s);
-        int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
-        string closeBody = s.Substring(cOpen);
-        Assert.Contains("fw_installed || rm -f \"$FW_STATE\"", closeBody);
-        // open rolls the rule back when the state write fails.
         int oOpen = s.IndexOf("firewall_open()", System.StringComparison.Ordinal);
+        int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         string openBody = s.Substring(oOpen, cOpen - oOpen);
-        Assert.Contains("printf '%s' \"$lan\" > \"$FW_STATE\" 2>/dev/null || { fw_del \"$lan\";", openBody);
+        string closeBody = s.Substring(cOpen);
+        // (1) The state write precedes the insert, and a failed write returns without inserting.
+        int write = openBody.IndexOf("> \"$FW_STATE\"", System.StringComparison.Ordinal);
+        int insert = openBody.IndexOf("iptables -I INPUT", System.StringComparison.Ordinal);
+        Assert.True(write >= 0 && insert >= 0 && write < insert,
+            "FW_STATE must be persisted before the rule is inserted");
+        Assert.Contains("printf '%s' \"$lan\" > \"$FW_STATE\" 2>/dev/null || { rm -f \"$FW_STATE\"", openBody);
+        // (2) close/no-address clear state ONLY once fw_gone confirms the rule is absent via a SUCCESSFUL
+        //     listing — a failed `iptables -S` (inspection error) or a still-present rule keeps the state.
+        Assert.Contains("fw_gone()", s);
+        Assert.Contains("out=$(iptables -S INPUT 2>/dev/null) || return 1", s); // inspection error != absent
+        Assert.Contains("fw_gone && rm -f \"$FW_STATE\"", closeBody);
+        // The no-address branch also gates its state clear on fw_gone (prior rule confirmed removed).
+        Assert.Contains("fw_gone && rm -f \"$FW_STATE\"", openBody);
     }
 
     [Fact]
@@ -209,8 +202,9 @@ public class Go2RtcdScriptTests
         int insert = body.IndexOf("iptables -I INPUT", System.StringComparison.Ordinal);
         Assert.True(delPrev >= 0 && insert >= 0);
         Assert.True(delPrev < insert, "the prior rule must be deleted before a new one is inserted");
-        // With no address we bail WITHOUT inserting (and clear the state) so the port stays closed.
-        Assert.Contains(CodeLines(body), l => l.Contains("[ -n \"$lan\" ]") && l.Contains("return 0"));
+        // With no address we bail WITHOUT inserting so the port stays closed, and the bail precedes insert.
+        int noAddr = body.IndexOf("[ -z \"$lan\" ]", System.StringComparison.Ordinal);
+        Assert.True(noAddr >= 0 && noAddr < insert, "the no-address bail must precede the insert");
     }
 
     [Fact]

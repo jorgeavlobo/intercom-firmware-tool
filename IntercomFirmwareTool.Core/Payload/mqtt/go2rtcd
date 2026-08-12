@@ -64,11 +64,15 @@ fw_del() {
 		-m comment --comment "$FW_TAG" -j ACCEPT 2>/dev/null; do :; done
 }
 
-# True while a rule carrying OUR comment tag is still present in INPUT (the tag is a unique token). Used
-# to confirm a deletion actually took effect before we forget the rule, so a transient `iptables -D`
-# failure can't strand an open port with no state to retry against.
-fw_installed() {
-	iptables -S INPUT 2>/dev/null | grep -q -- "$FW_TAG"
+# 0 (true) ONLY when a SUCCESSFUL `iptables -S INPUT` listing shows NO rule carrying our tag — i.e. we
+# can positively confirm our rule is absent. If the listing itself fails (a transient backend error) OR a
+# tagged rule is still present, return non-zero so callers KEEP FW_STATE and retry later. An inspection
+# error must never be mistaken for "confirmed gone", and a failed `iptables -D` must not strand an open
+# port with no state to retry against (Codex). The tag is a unique token, so grep for it is sufficient.
+fw_gone() {
+	out=$(iptables -S INPUT 2>/dev/null) || return 1
+	printf '%s\n' "$out" | grep -q -- "$FW_TAG" && return 1
+	return 0
 }
 
 # PIDs of the actual daemon. `pgrep -x go2rtc` matches the daemon binary; the init
@@ -106,41 +110,47 @@ kill_all() {
 # and DHCP-proof. First delete the rule we previously applied (its subnet remembered in FW_STATE), so a
 # subnet change leaves nothing of OURS stranded. Then, with an address, insert one TAGGED rule at the TOP
 # so it sits above the policy DROP, source-restricted to CAM_IFACE's own subnet (derived at runtime;
-# iptables masks the address to its /prefix). Record the subnet ONLY after the insert succeeds. If the
-# insert fails (the kernel lacks the comment match) we FAIL CLOSED — forget state, leave the port shut —
-# rather than insert an unowned rule. With NO address yet (the boot race before DHCP, or a lease drop) we
-# insert NOTHING — the port stays closed, never opened interface-wide, and the prior rule was already
-# removed so nothing stale survives an address change (Codex). Re-running every watchdog pass re-adds the
-# rule after the panel flushes INPUT. No `-C` needed (busybox iptables may lack it).
+# iptables masks the address to its /prefix). The subnet is written to FW_STATE BEFORE the insert, so any
+# installed tagged rule is ALWAYS covered by cleanup state — a failure at/after the insert can never
+# strand the port open with no cleanup target (CodeRabbit). Because each open first deletes the prior rule,
+# a mid-pass failure leaves the rule DELETED (port closed), never stranded. If the state write itself
+# fails we never insert (fail closed). Deletion is comment-scoped, so a recorded subnet with no rule
+# (e.g. the insert fails on a kernel without xt_comment) is a harmless no-op at close and can never match
+# a foreign rule. With NO address yet (the boot race before DHCP, or a lease drop) we insert NOTHING — the
+# port stays closed, and the prior rule was already removed so nothing stale survives an address change
+# (Codex). Re-running every watchdog pass re-adds the rule after the panel flushes INPUT. No `-C` needed
+# (busybox iptables may lack it).
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
 	[ -s "$FW_STATE" ] && fw_del "$(cat "$FW_STATE")"
-	[ -n "$lan" ] || { rm -f "$FW_STATE" 2>/dev/null; return 0; }
+	if [ -z "$lan" ]; then
+		# No address: insert nothing (the port must stay LAN-only). Clear state only if the prior rule is
+		# CONFIRMED gone; a failed delete or a failed listing keeps it so a later pass can still remove the
+		# old rule instead of orphaning it (Codex).
+		fw_gone && rm -f "$FW_STATE" 2>/dev/null
+		return 0
+	fi
 	# Belt-and-suspenders: drain any stale rule of ours for this subnet (safe — only our comment matches)
 	# so re-asserting can never accumulate duplicates.
 	fw_del "$lan"
-	if iptables -I INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
-		-m comment --comment "$FW_TAG" -j ACCEPT 2>/dev/null; then
-		# Persist the subnet AFTER the insert. If the state write fails (e.g. /var/run full or read-only),
-		# roll the just-added rule back — an installed rule with no recorded state would leak the port open
-		# because close could never find it (Codex). The rule is tagged, so fw_del removes exactly ours.
-		printf '%s' "$lan" > "$FW_STATE" 2>/dev/null || { fw_del "$lan"; rm -f "$FW_STATE" 2>/dev/null || true; }
-	else
-		rm -f "$FW_STATE" 2>/dev/null || true
-	fi
+	# Record intent-to-install BEFORE inserting; if we can't persist state we don't insert (fail closed).
+	printf '%s' "$lan" > "$FW_STATE" 2>/dev/null || { rm -f "$FW_STATE" 2>/dev/null || true; return 0; }
+	iptables -I INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
+		-m comment --comment "$FW_TAG" -j ACCEPT 2>/dev/null || true
 }
 
 # Close the media port again (service stopped/disabled/not running): delete the rule we last inserted
 # (its subnet from FW_STATE). Comment-scoped, so it matches only rules with our tag — nothing we didn't
-# add is touched. Forget the rule ONLY once it is confirmed gone: a transient `iptables -D` failure keeps
-# FW_STATE so a later close/respawn retries the deletion instead of stranding an open port (Codex). If we
-# never inserted one this boot (no state) there is nothing to do.
+# add is touched. Forget the rule ONLY once fw_gone confirms it is absent via a successful listing: a
+# transient `iptables -D` or `iptables -S` failure keeps FW_STATE so a later close/respawn retries the
+# deletion instead of stranding an open port (Codex). If we never inserted one this boot (no state) there
+# is nothing to do.
 firewall_close() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	[ -s "$FW_STATE" ] || return 0
 	fw_del "$(cat "$FW_STATE")"
-	fw_installed || rm -f "$FW_STATE" 2>/dev/null || true
+	fw_gone && rm -f "$FW_STATE" 2>/dev/null || true
 }
 
 # Launch the daemon iff enabled (no marker) and not already running. Caller holds
