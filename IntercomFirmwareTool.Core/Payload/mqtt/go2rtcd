@@ -43,22 +43,29 @@ DISABLED=/var/run/go2rtc.disabled
 # kernel (Linux 4.9 on the C100X, verified against the firmware sample) ships NO xt_comment match — the
 # userspace parser exists but the kernel REJECTS a `-m comment` rule — so a comment tag would leave :8554
 # permanently closed on the real hardware. A named chain needs no match module and works on every kernel.
-# Ownership is the chain NAME (our namespace, like `DOCKER`); the one theoretical edge — a pre-existing
-# foreign chain of the same name — is exactly what Docker/kube-proxy accept, and the name is distinctive.
-# Reconciliation is STATELESS: every watchdog pass re-asserts the chain's contents from scratch (flush +
-# repopulate), so the chain itself is the state — there is no tmpfs state file to drift, and a DHCP subnet
-# change is handled for free. (A second CAP_NET_ADMIN manager could still rewrite the firewall wholesale,
-# but that actor already fully controls netfilter — the same boundary Docker/kube-proxy accept.)
+# Ownership is proven, not just named: we manage FW_CHAIN only when WE created it this boot, recorded by a
+# boot-scoped marker (FW_OWN, tmpfs — cleared every reboot together with the ruleset). A fixed chain name
+# is only a namespace convention; if a `GO2RTC` chain already exists when we first run (a foreign chain we
+# did not create), we leave it — and the port — entirely alone rather than flush someone else's chain. So
+# we never touch a rule we do not own. Reconciliation is otherwise STATELESS: every watchdog pass
+# re-asserts our chain's contents from scratch (flush + repopulate), so the chain itself is the state —
+# nothing to drift, and a DHCP subnet change is handled for free. (A second CAP_NET_ADMIN manager could
+# still rewrite the firewall wholesale, but that actor already fully controls netfilter — the same
+# boundary Docker/kube-proxy accept.)
 CAM_PORT=8554
 CAM_IFACE=wlan0
 FW_CHAIN=GO2RTC
+FW_OWN=/var/run/go2rtc.fwown
 
-# Ensure the INPUT jump to our chain exists (insert at the TOP, above the policy DROP, only if absent so
-# we never accumulate duplicates). Non-matching packets simply RETURN from our chain and continue INPUT
-# evaluation, so the jump never disturbs other traffic. Re-adds the jump after the panel flushes INPUT.
+# Ensure the INPUT jump to our chain exists (only if absent, so we never accumulate duplicates). APPEND it
+# (not insert-at-top) so it sits AFTER the panel's existing INPUT filters — e.g. the factory conntrack
+# `--ctstate INVALID -j DROP` guard installed by /etc/network/if-pre-up.d/iptables — while still preceding
+# the `-P INPUT DROP` policy (evaluated only after all rules). Our ACCEPT therefore never lets traffic
+# bypass a factory or admin filter (Codex). Non-matching packets RETURN from our chain and continue INPUT,
+# so the jump never disturbs other traffic; it is re-added after the panel flushes INPUT.
 fw_jump() {
 	iptables -S INPUT 2>/dev/null | grep -q -- "-j $FW_CHAIN\$" \
-		|| iptables -I INPUT 1 -j "$FW_CHAIN" 2>/dev/null || true
+		|| iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null || true
 }
 
 # PIDs of the actual daemon. `pgrep -x go2rtc` matches the daemon binary; the init
@@ -98,33 +105,47 @@ kill_all() {
 # return so a later pass can still remove the old rule — overwriting FW_STATE now would orphan it across a
 # DHCP subnet change (CodeRabbit). No re-insert is needed on that path: if our rule is still present it is
 # Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent,
-# stateless and DHCP-proof. Ensure OUR chain exists, then re-assert its contents from scratch: flush it
-# (we own it, so this touches nothing foreign) and, if CAM_IFACE currently has an address, add exactly one
-# ACCEPT for tcp/CAM_PORT from that interface's own subnet (derived at runtime; iptables masks the address
-# to its /prefix). With NO address yet (the boot race before DHCP, or a lease drop) the chain is left
-# EMPTY — the port stays closed, never opened interface-wide — and a later pass fills it once an address
-# appears. A DHCP subnet change is handled for free: the flush drops the old subnet's ACCEPT and the new
-# one is added. Finally ensure the INPUT jump exists (re-added after a panel INPUT flush). Running this
-# every watchdog pass keeps the chain converged with no state file to drift.
+# stateless and DHCP-proof. Ownership first: if FW_CHAIN already exists but we did NOT create it this boot
+# (no FW_OWN marker), it is a FOREIGN chain — return without touching it or the port. Otherwise ensure OUR
+# chain exists (creating it claims ownership for this boot; also recreates it if the panel destroyed it),
+# then re-assert its contents from scratch: flush it (we own it, so this touches nothing foreign) and, if
+# CAM_IFACE currently has an address, add exactly one ACCEPT for tcp/CAM_PORT from that interface's own
+# subnet (derived at runtime; iptables masks the address to its /prefix). With NO address yet (the boot
+# race before DHCP, or a lease drop) the chain is left EMPTY — the port stays closed, never opened
+# interface-wide — and a later pass fills it. A DHCP subnet change is handled for free: the flush drops the
+# old subnet's ACCEPT and the new one is added. Finally ensure the INPUT jump exists (re-added after a
+# panel INPUT flush).
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
-	iptables -N "$FW_CHAIN" 2>/dev/null || true
-	iptables -F "$FW_CHAIN" 2>/dev/null || true
+	if iptables -S "$FW_CHAIN" >/dev/null 2>&1; then
+		[ -e "$FW_OWN" ] || return 0            # chain exists but is foreign (not created by us) — leave it
+	else
+		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || return 0
+		: > "$FW_OWN" 2>/dev/null || true       # we created it — claim ownership for this boot
+	fi
+	# Require a SUCCESSFUL flush before repopulating: if the xtables lock is contended past the wait and -F
+	# fails, abort this pass rather than append a second ACCEPT on top of the stale one (a later pass
+	# retries). The `-w 5` on every mutating call waits up to 5s for the lock (supported on the target, and
+	# under the ~10s lock-steal threshold), so a spurious failure while the panel touches iptables is rare.
+	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || return 0
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
-	[ -n "$lan" ] && iptables -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
+	[ -n "$lan" ] && iptables -w 5 -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
 		-j ACCEPT 2>/dev/null || true
 	fw_jump
 }
 
 # Close the media port again (service stopped/disabled/not running): tear down everything WE created and
-# nothing else — remove the INPUT jump(s) to our chain, then flush and delete the chain. The jump must go
-# before `-X` (iptables refuses to delete a referenced chain); `-X` fails harmlessly if the chain is
-# absent, so a transient failure just leaves our own empty chain to be reaped on a later close/respawn.
+# nothing else. Only act if we own the chain (FW_OWN marker) — a foreign GO2RTC chain is never touched.
+# Remove the INPUT jump(s) to our chain, then flush and delete the chain (the jump must go before `-X`,
+# which refuses a referenced chain), and drop the ownership marker last. `-X` fails harmlessly if the
+# chain is absent, so a transient failure just leaves our own empty chain to be reaped on a later pass.
 firewall_close() {
 	command -v iptables >/dev/null 2>&1 || return 0
-	while iptables -D INPUT -j "$FW_CHAIN" 2>/dev/null; do :; done
-	iptables -F "$FW_CHAIN" 2>/dev/null || true
-	iptables -X "$FW_CHAIN" 2>/dev/null || true
+	[ -e "$FW_OWN" ] || return 0
+	while iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null; do :; done
+	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || true
+	iptables -w 5 -X "$FW_CHAIN" 2>/dev/null || true
+	rm -f "$FW_OWN" 2>/dev/null || true
 }
 
 # Launch the daemon iff enabled (no marker) and not already running. Caller holds

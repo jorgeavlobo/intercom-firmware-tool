@@ -95,12 +95,12 @@ public class Go2RtcdScriptTests
         // The single ACCEPT lives in OUR chain, matches tcp/CAM_PORT on the interface, SOURCE-RESTRICTED
         // to the derived LAN subnet.
         Assert.Contains(
-            "iptables -A \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
+            "iptables -w 5 -A \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
             joined);
         // LAN source derived at runtime; the ACCEPT is added ONLY when an address exists — with no address
         // the chain is left empty (port closed), never opened interface-wide.
         Assert.Contains(code, l => l.Contains("ip -4 addr show \"$CAM_IFACE\""));
-        Assert.Contains(code, l => l.Contains("[ -n \"$lan\" ] && iptables -A \"$FW_CHAIN\""));
+        Assert.Contains(code, l => l.Contains("[ -n \"$lan\" ] && iptables -w 5 -A \"$FW_CHAIN\""));
         // The control API port is loopback-only — no executable line references 1984 (a comment may
         // mention it, so assert on code lines, not the whole script).
         Assert.DoesNotContain(code, l => l.Contains("1984"));
@@ -130,12 +130,14 @@ public class Go2RtcdScriptTests
         // No comment match on any executable line — it does not work on the target kernel.
         Assert.DoesNotContain(code, l => l.Contains("-m comment"));
         // open manages OUR chain: create (idempotent), flush (we own it), the ACCEPT, then the INPUT jump.
-        Assert.Contains(code, l => l.Contains("iptables -N \"$FW_CHAIN\""));
-        Assert.Contains(code, l => l.Contains("iptables -F \"$FW_CHAIN\""));
-        Assert.Contains(code, l => l.Contains("iptables -I INPUT 1 -j \"$FW_CHAIN\""));
+        Assert.Contains(code, l => l.Contains("iptables -w 5 -N \"$FW_CHAIN\""));
+        Assert.Contains(code, l => l.Contains("iptables -w 5 -F \"$FW_CHAIN\""));
+        // The jump is APPENDED (after the panel's factory filters), never inserted at the top.
+        Assert.Contains(code, l => l.Contains("iptables -w 5 -A INPUT -j \"$FW_CHAIN\""));
+        Assert.DoesNotContain(code, l => l.Contains("-I INPUT 1"));
         // The ONLY thing we ever add to INPUT is the jump to our chain — never a bare rule in INPUT.
         foreach (var l in System.Text.RegularExpressions.Regex.Split(joined, "\n"))
-            if (l.Contains("iptables -I INPUT") || l.Contains("iptables -A INPUT"))
+            if (l.Contains(" -A INPUT ") || l.Contains(" -I INPUT "))
                 Assert.Contains("-j \"$FW_CHAIN\"", l);
         // close tears down only our own chain + jump, removing the jump BEFORE deleting the chain (-X
         // refuses a referenced chain).
@@ -144,6 +146,33 @@ public class Go2RtcdScriptTests
         int delJump = closeBody.IndexOf("iptables -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal);
         int delChain = closeBody.IndexOf("iptables -X \"$FW_CHAIN\"", System.StringComparison.Ordinal);
         Assert.True(delJump >= 0 && delChain > delJump, "the jump must be removed before the chain is deleted");
+    }
+
+    [Fact]
+    public void Never_touches_a_pre_existing_foreign_chain_it_did_not_create()
+    {
+        // CodeRabbit: a fixed chain name is a namespace convention, not proof of ownership. We manage the
+        // chain ONLY when we created it this boot, recorded by a boot-scoped marker (FW_OWN). A GO2RTC
+        // chain we did not create is left untouched by both open and close.
+        string s = ReadScript().Replace("\r\n", "\n");
+        string[] code = CodeLines(ReadScript());
+        Assert.Contains(code, l => l == "FW_OWN=/var/run/go2rtc.fwown");
+        int oOpen = s.IndexOf("firewall_open()", System.StringComparison.Ordinal);
+        int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
+        string openBody = s.Substring(oOpen, cOpen - oOpen);
+        string closeBody = s.Substring(cOpen);
+        // open: if the chain already exists but we hold no ownership marker, bail before any flush/populate.
+        int existsCheck = openBody.IndexOf("iptables -S \"$FW_CHAIN\" >/dev/null 2>&1", System.StringComparison.Ordinal);
+        int foreignBail = openBody.IndexOf("[ -e \"$FW_OWN\" ] || return 0", System.StringComparison.Ordinal);
+        int claim = openBody.IndexOf(": > \"$FW_OWN\"", System.StringComparison.Ordinal);
+        int flush = openBody.IndexOf("iptables -w 5 -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        Assert.True(existsCheck >= 0 && foreignBail > existsCheck && foreignBail < flush,
+            "open must bail on a foreign chain (ownership check before any flush)");
+        Assert.True(claim > existsCheck && claim < flush, "open claims ownership when it creates the chain");
+        // close: guarded by the ownership marker before any teardown of the chain/jump.
+        int closeGuard = closeBody.IndexOf("[ -e \"$FW_OWN\" ] || return 0", System.StringComparison.Ordinal);
+        int delJump = closeBody.IndexOf("iptables -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        Assert.True(closeGuard >= 0 && closeGuard < delJump, "close must check ownership before tearing down");
     }
 
     [Fact]
@@ -158,10 +187,13 @@ public class Go2RtcdScriptTests
         int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         string openBody = s.Substring(oOpen, cOpen - oOpen);
         // Flush precedes the (address-gated) append, so the chain always reflects only the current subnet.
-        int flush = openBody.IndexOf("iptables -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
-        int append = openBody.IndexOf("iptables -A \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int flush = openBody.IndexOf("iptables -w 5 -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int append = openBody.IndexOf("iptables -w 5 -A \"$FW_CHAIN\"", System.StringComparison.Ordinal);
         Assert.True(flush >= 0 && append > flush, "the chain must be flushed before it is repopulated");
-        Assert.Contains("[ -n \"$lan\" ] && iptables -A \"$FW_CHAIN\"", openBody);
+        Assert.Contains("[ -n \"$lan\" ] && iptables -w 5 -A \"$FW_CHAIN\"", openBody);
+        // The repopulation is GATED on a successful flush — a contended `-F` aborts the pass instead of
+        // stacking a new ACCEPT on the stale one; mutating calls use `-w 5` to wait for the xtables lock.
+        Assert.Contains("iptables -w 5 -F \"$FW_CHAIN\" 2>/dev/null || return 0", openBody);
         // No state file / state helpers anywhere (the whole FW_STATE/fw_gone/fw_del machinery is gone).
         string[] code = CodeLines(ReadScript());
         Assert.DoesNotContain(code, l =>
