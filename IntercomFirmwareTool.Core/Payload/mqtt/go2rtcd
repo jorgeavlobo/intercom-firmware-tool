@@ -36,46 +36,29 @@ DISABLED=/var/run/go2rtc.disabled
 # reaches go2rtc from Home Assistant without a rule. The go2rtc control API (:1984) stays loopback-
 # only and gets NO rule. Only this TCP port is opened, source-restricted to the LAN.
 #
-# We manage exactly ONE INPUT rule and nothing else: no sub-chain, no flush, no policy change. The rule
-# carries an ownership TAG via the iptables comment match (`-m comment --comment go2rtcd`), so the tag —
-# not the rest of the spec — is what makes the rule OURS. Cleanup deletes only rules bearing that comment,
-# so a rule an admin/panel may have added that is byte-for-byte identical EXCEPT for the comment is never
-# matched and never removed (CodeRabbit: a bare spec is a matcher, not an identity). This is the
-# industry-standard approach (Docker/firewalld tag their rules the same way). The tag is REQUIRED: if the
-# kernel lacks the comment match (xt_comment) we FAIL CLOSED — add no rule, leave :8554 shut — rather than
-# insert an untagged rule we couldn't distinguish from a foreign one and might delete on cleanup. That is
-# the safe, gold-standard choice; xt_comment is present on essentially all Linux kernels, so failing
-# closed only ever bites a stripped kernel, and never at the cost of touching someone else's rule. (A
-# second CAP_NET_ADMIN manager could still rewrite the firewall wholesale, but that actor already fully
-# controls netfilter — no userspace script can defend against it; the same boundary Docker/kube-proxy
-# accept.)
+# Ownership is a DEDICATED chain (FW_CHAIN), the industry-standard mechanism for a userspace program that
+# manages iptables: Docker owns a `DOCKER` chain, kube-proxy owns `KUBE-*` chains, fail2ban owns `f2b-*`
+# chains — all create/flush/populate/delete only THEIR OWN chain plus one jump from a built-in chain, and
+# never touch a foreign rule. We do the same. This is deliberately NOT a `-m comment` tag: the target
+# kernel (Linux 4.9 on the C100X, verified against the firmware sample) ships NO xt_comment match — the
+# userspace parser exists but the kernel REJECTS a `-m comment` rule — so a comment tag would leave :8554
+# permanently closed on the real hardware. A named chain needs no match module and works on every kernel.
+# Ownership is the chain NAME (our namespace, like `DOCKER`); the one theoretical edge — a pre-existing
+# foreign chain of the same name — is exactly what Docker/kube-proxy accept, and the name is distinctive.
+# Reconciliation is STATELESS: every watchdog pass re-asserts the chain's contents from scratch (flush +
+# repopulate), so the chain itself is the state — there is no tmpfs state file to drift, and a DHCP subnet
+# change is handled for free. (A second CAP_NET_ADMIN manager could still rewrite the firewall wholesale,
+# but that actor already fully controls netfilter — the same boundary Docker/kube-proxy accept.)
 CAM_PORT=8554
 CAM_IFACE=wlan0
-FW_TAG=go2rtcd
-# Remembers the exact source subnet of the (tagged) rule we last inserted (tmpfs, cleared every boot with
-# the ruleset), so a DHCP subnet change deletes the OLD rule precisely and close deletes what open added.
-FW_STATE=/var/run/go2rtc.fwrule
+FW_CHAIN=GO2RTC
 
-# Drain EVERY rule carrying OUR comment tag for source subnet $1. Comment-scoped, so it can only ever
-# match a rule WE added — an identical rule WITHOUT our comment (an admin's) is invisible here and is
-# never touched, no matter where it sits in INPUT.
-fw_del() {
-	while iptables -D INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$1" \
-		-m comment --comment "$FW_TAG" -j ACCEPT 2>/dev/null; do :; done
-}
-
-# 0 (true) ONLY when a SUCCESSFUL `iptables -S INPUT` listing shows NO rule carrying our tag — i.e. we
-# can positively confirm our rule is absent. If the listing itself fails (a transient backend error) OR a
-# tagged rule is still present, return non-zero so callers KEEP FW_STATE and retry later. An inspection
-# error must never be mistaken for "confirmed gone", and a failed `iptables -D` must not strand an open
-# port with no state to retry against (Codex). Match the EXACT `--comment <tag>` field (bounded by a
-# quote/space/end), never a bare substring — otherwise an unrelated rule whose text merely contains the
-# tag (e.g. a `not-go2rtcd` comment) would falsely report our rule present and we'd stop re-inserting it,
-# leaving RTSP permanently unreachable (Codex).
-fw_gone() {
-	out=$(iptables -S INPUT 2>/dev/null) || return 1
-	printf '%s\n' "$out" | grep -qE -- "--comment \"?${FW_TAG}\"?([[:space:]]|\$)" && return 1
-	return 0
+# Ensure the INPUT jump to our chain exists (insert at the TOP, above the policy DROP, only if absent so
+# we never accumulate duplicates). Non-matching packets simply RETURN from our chain and continue INPUT
+# evaluation, so the jump never disturbs other traffic. Re-adds the jump after the panel flushes INPUT.
+fw_jump() {
+	iptables -S INPUT 2>/dev/null | grep -q -- "-j $FW_CHAIN\$" \
+		|| iptables -I INPUT 1 -j "$FW_CHAIN" 2>/dev/null || true
 }
 
 # PIDs of the actual daemon. `pgrep -x go2rtc` matches the daemon binary; the init
@@ -114,48 +97,34 @@ kill_all() {
 # CONFIRM it is gone before touching FW_STATE: if the delete or the listing failed, keep the OLD state and
 # return so a later pass can still remove the old rule — overwriting FW_STATE now would orphan it across a
 # DHCP subnet change (CodeRabbit). No re-insert is needed on that path: if our rule is still present it is
-# already serving the port. Passing the confirm means NO tagged rule of ours remains, so the insert below
-# can never create a duplicate. Then, with an address, write the subnet to FW_STATE BEFORE inserting one
-# TAGGED rule at the TOP (above the policy DROP), source-restricted to CAM_IFACE's own subnet (derived at
-# runtime; iptables masks the address to its /prefix) — so any installed rule is ALWAYS covered by cleanup
-# state and a failure at/after the insert can never strand the port open (CodeRabbit). If the state write
-# itself fails we never insert (fail closed). Deletion is comment-scoped, so a recorded subnet with no rule
-# (e.g. the insert fails on a kernel without xt_comment) is a harmless no-op at close and can never match a
-# foreign rule. With NO address yet (the boot race before DHCP, or a lease drop) we insert NOTHING — the
-# port stays closed. Re-running every watchdog pass re-adds the rule after the panel flushes INPUT. No `-C`
-# needed (busybox iptables may lack it).
+# Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent,
+# stateless and DHCP-proof. Ensure OUR chain exists, then re-assert its contents from scratch: flush it
+# (we own it, so this touches nothing foreign) and, if CAM_IFACE currently has an address, add exactly one
+# ACCEPT for tcp/CAM_PORT from that interface's own subnet (derived at runtime; iptables masks the address
+# to its /prefix). With NO address yet (the boot race before DHCP, or a lease drop) the chain is left
+# EMPTY — the port stays closed, never opened interface-wide — and a later pass fills it once an address
+# appears. A DHCP subnet change is handled for free: the flush drops the old subnet's ACCEPT and the new
+# one is added. Finally ensure the INPUT jump exists (re-added after a panel INPUT flush). Running this
+# every watchdog pass keeps the chain converged with no state file to drift.
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
+	iptables -N "$FW_CHAIN" 2>/dev/null || true
+	iptables -F "$FW_CHAIN" 2>/dev/null || true
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
-	if [ -s "$FW_STATE" ]; then
-		fw_del "$(cat "$FW_STATE")"
-		# Keep the old state and bail unless the old rule is confirmed absent (a failed delete/listing must
-		# not lose the only cleanup target for the old subnet).
-		fw_gone || return 0
-	fi
-	if [ -z "$lan" ]; then
-		# No address (boot race before DHCP, or a lease drop): insert nothing so the port stays LAN-only.
-		# The prior rule was confirmed gone above, so clearing state here is safe.
-		rm -f "$FW_STATE" 2>/dev/null
-		return 0
-	fi
-	# Record intent-to-install BEFORE inserting; if we can't persist state we don't insert (fail closed).
-	printf '%s' "$lan" > "$FW_STATE" 2>/dev/null || { rm -f "$FW_STATE" 2>/dev/null || true; return 0; }
-	iptables -I INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
-		-m comment --comment "$FW_TAG" -j ACCEPT 2>/dev/null || true
+	[ -n "$lan" ] && iptables -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
+		-j ACCEPT 2>/dev/null || true
+	fw_jump
 }
 
-# Close the media port again (service stopped/disabled/not running): delete the rule we last inserted
-# (its subnet from FW_STATE). Comment-scoped, so it matches only rules with our tag — nothing we didn't
-# add is touched. Forget the rule ONLY once fw_gone confirms it is absent via a successful listing: a
-# transient `iptables -D` or `iptables -S` failure keeps FW_STATE so a later close/respawn retries the
-# deletion instead of stranding an open port (Codex). If we never inserted one this boot (no state) there
-# is nothing to do.
+# Close the media port again (service stopped/disabled/not running): tear down everything WE created and
+# nothing else — remove the INPUT jump(s) to our chain, then flush and delete the chain. The jump must go
+# before `-X` (iptables refuses to delete a referenced chain); `-X` fails harmlessly if the chain is
+# absent, so a transient failure just leaves our own empty chain to be reaped on a later close/respawn.
 firewall_close() {
 	command -v iptables >/dev/null 2>&1 || return 0
-	[ -s "$FW_STATE" ] || return 0
-	fw_del "$(cat "$FW_STATE")"
-	fw_gone && rm -f "$FW_STATE" 2>/dev/null || true
+	while iptables -D INPUT -j "$FW_CHAIN" 2>/dev/null; do :; done
+	iptables -F "$FW_CHAIN" 2>/dev/null || true
+	iptables -X "$FW_CHAIN" 2>/dev/null || true
 }
 
 # Launch the daemon iff enabled (no marker) and not already running. Caller holds

@@ -92,16 +92,15 @@ public class Go2RtcdScriptTests
         string[] code = CodeLines(s);
         Assert.Contains("CAM_PORT=8554", s);
         Assert.Contains("CAM_IFACE=wlan0", s);
-        // Our single INPUT rule is inserted at the TOP (above the policy DROP), matches a specific
-        // tcp/dport on the interface, SOURCE-RESTRICTED to the derived LAN subnet, and TAGGED with our
-        // ownership comment (see the ownership test below).
+        // The single ACCEPT lives in OUR chain, matches tcp/CAM_PORT on the interface, SOURCE-RESTRICTED
+        // to the derived LAN subnet.
         Assert.Contains(
-            "iptables -I INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" "
-            + "-m comment --comment \"$FW_TAG\" -j ACCEPT", joined);
-        // LAN source derived from the interface address at runtime; with no address yet the port is NOT
-        // opened interface-wide (stays LAN-only) — bail before inserting when there is no address.
+            "iptables -A \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
+            joined);
+        // LAN source derived at runtime; the ACCEPT is added ONLY when an address exists — with no address
+        // the chain is left empty (port closed), never opened interface-wide.
         Assert.Contains(code, l => l.Contains("ip -4 addr show \"$CAM_IFACE\""));
-        Assert.Contains(code, l => l.Contains("[ -z \"$lan\" ]"));   // no-address bail (insert nothing)
+        Assert.Contains(code, l => l.Contains("[ -n \"$lan\" ] && iptables -A \"$FW_CHAIN\""));
         // The control API port is loopback-only — no executable line references 1984 (a comment may
         // mention it, so assert on code lines, not the whole script).
         Assert.DoesNotContain(code, l => l.Contains("1984"));
@@ -118,100 +117,55 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
-    public void Owns_its_rule_by_a_required_comment_tag_so_a_foreign_rule_is_never_deleted()
+    public void Owns_its_rules_via_a_dedicated_chain_that_works_without_xt_comment()
     {
-        // CodeRabbit (final): a full rule spec is a matcher, not an identity — an admin's byte-identical
-        // :8554 LAN ACCEPT rule (even inserted ABOVE ours) would be caught by a bare `-D`. So the rule
-        // carries an ownership TAG via the iptables comment match, and BOTH insert and delete require that
-        // comment. Cleanup therefore matches only rules bearing our tag; an untagged look-alike is
-        // invisible to it. This is the industry-standard approach (Docker/firewalld tag their rules).
+        // The target kernel (C100X v1.5.8, Linux 4.9) ships NO xt_comment match — a `-m comment` rule is
+        // rejected by the kernel and would leave :8554 permanently closed. Ownership is instead a
+        // dedicated namespaced chain (the Docker/kube-proxy/fail2ban model): we create/flush/populate/
+        // delete only OUR chain plus one INPUT jump, and never touch a foreign rule.
         string s = ReadScript();
         string joined = JoinedScript();
         string[] code = CodeLines(s);
-        // No chain machinery at all (the earlier chain-ownership design is gone).
-        Assert.DoesNotContain(code, l => l.Contains("iptables -N") || l.Contains("iptables -F"));
-        Assert.DoesNotContain(code, l => l.Contains("GO2RTC")
-            || l.Contains("firewall_ensure_chain") || l.Contains("firewall_chain_is_ours"));
-        // The ownership tag is defined and applied to the inserted rule.
-        Assert.Contains(code, l => l == "FW_TAG=go2rtcd");
-        Assert.Contains(
-            "iptables -I INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" "
-            + "-m comment --comment \"$FW_TAG\" -j ACCEPT", joined);
-        // Deletion is COMMENT-SCOPED: it matches only rules carrying our tag, so an identical rule WITHOUT
-        // the tag (an admin's) is invisible to it and never removed.
-        Assert.Contains(
-            "iptables -D INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$1\" "
-            + "-m comment --comment \"$FW_TAG\" -j ACCEPT", joined);
-        // EVERY iptables INPUT mutation carries the comment tag — there is NO untagged insert or delete
-        // that could ever touch a foreign rule.
+        Assert.Contains(code, l => l == "FW_CHAIN=GO2RTC");
+        // No comment match on any executable line — it does not work on the target kernel.
+        Assert.DoesNotContain(code, l => l.Contains("-m comment"));
+        // open manages OUR chain: create (idempotent), flush (we own it), the ACCEPT, then the INPUT jump.
+        Assert.Contains(code, l => l.Contains("iptables -N \"$FW_CHAIN\""));
+        Assert.Contains(code, l => l.Contains("iptables -F \"$FW_CHAIN\""));
+        Assert.Contains(code, l => l.Contains("iptables -I INPUT 1 -j \"$FW_CHAIN\""));
+        // The ONLY thing we ever add to INPUT is the jump to our chain — never a bare rule in INPUT.
         foreach (var l in System.Text.RegularExpressions.Regex.Split(joined, "\n"))
-        {
-            if ((l.Contains("iptables -I INPUT") || l.Contains("iptables -D INPUT"))
-                && l.Contains("-j ACCEPT"))
-                Assert.Contains("-m comment --comment \"$FW_TAG\"", l);
-        }
-        // The applied subnet is remembered so close/DHCP-change delete exactly what open added.
-        Assert.Contains(code, l => l.Contains("printf '%s' \"$lan\""));
-        Assert.Contains(code, l => l.StartsWith("FW_STATE=") && l.Contains("/var/run/"));
+            if (l.Contains("iptables -I INPUT") || l.Contains("iptables -A INPUT"))
+                Assert.Contains("-j \"$FW_CHAIN\"", l);
+        // close tears down only our own chain + jump, removing the jump BEFORE deleting the chain (-X
+        // refuses a referenced chain).
+        string closeBody = s.Replace("\r\n", "\n")
+            .Substring(s.Replace("\r\n", "\n").IndexOf("firewall_close()", System.StringComparison.Ordinal));
+        int delJump = closeBody.IndexOf("iptables -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int delChain = closeBody.IndexOf("iptables -X \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        Assert.True(delJump >= 0 && delChain > delJump, "the jump must be removed before the chain is deleted");
     }
 
     [Fact]
-    public void Keeps_state_and_the_installed_rule_consistent_under_failures()
+    public void Reconciles_the_chain_statelessly_so_a_dhcp_change_needs_no_state_file()
     {
-        // CodeRabbit/Codex: state and the installed rule must never diverge, under any single- or
-        // compound-failure sequence.
-        //  (1) open writes FW_STATE BEFORE inserting, so an installed tagged rule is ALWAYS covered by
-        //      cleanup state — no failure at/after the insert can strand the port open with no cleanup
-        //      target. A failed state write returns without inserting (fail closed), and because each open
-        //      first deletes the prior rule, a mid-pass failure leaves the rule deleted, never stranded.
-        //  (2) close forgets the rule ONLY once fw_installed confirms it is gone — a transient
-        //      `iptables -D` failure keeps FW_STATE so a later pass retries instead of stranding the port.
+        // Reconciliation is stateless: each open flushes OUR chain and repopulates it from the CURRENT
+        // address, so a DHCP subnet change drops the old ACCEPT and adds the new one with no remembered
+        // state to drift. The chain itself is the state — there is no tmpfs state file or delete/confirm
+        // dance to strand a rule under a transient failure.
         string s = ReadScript().Replace("\r\n", "\n");
         int oOpen = s.IndexOf("firewall_open()", System.StringComparison.Ordinal);
         int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         string openBody = s.Substring(oOpen, cOpen - oOpen);
-        string closeBody = s.Substring(cOpen);
-        // (1) The state write precedes the insert, and a failed write returns without inserting.
-        int write = openBody.IndexOf("> \"$FW_STATE\"", System.StringComparison.Ordinal);
-        int insert = openBody.IndexOf("iptables -I INPUT", System.StringComparison.Ordinal);
-        Assert.True(write >= 0 && insert >= 0 && write < insert,
-            "FW_STATE must be persisted before the rule is inserted");
-        Assert.Contains("printf '%s' \"$lan\" > \"$FW_STATE\" 2>/dev/null || { rm -f \"$FW_STATE\"", openBody);
-        // (2) close clears state ONLY once fw_gone confirms the rule is absent via a SUCCESSFUL listing —
-        //     a failed `iptables -S` (inspection error) or a still-present rule keeps the state.
-        Assert.Contains("fw_gone()", s);
-        Assert.Contains("out=$(iptables -S INPUT 2>/dev/null) || return 1", s); // inspection error != absent
-        // Ownership is matched on the EXACT `--comment <tag>` field (bounded), never a bare substring, so
-        // an unrelated rule whose text merely contains the tag can't be mistaken for ours.
-        Assert.Contains("--comment \\\"?${FW_TAG}\\\"?", s);
-        Assert.Contains("fw_gone && rm -f \"$FW_STATE\"", closeBody);
-        // (3) open confirms the PRIOR rule is gone before overwriting FW_STATE — else a DHCP change whose
-        //     old-rule delete failed would orphan it. On failure it keeps the old state and returns.
-        int prevDel = openBody.IndexOf("fw_del \"$(cat \"$FW_STATE\")\"", System.StringComparison.Ordinal);
-        int confirm = openBody.IndexOf("fw_gone || return 0", System.StringComparison.Ordinal);
-        Assert.True(prevDel >= 0 && confirm > prevDel && confirm < write,
-            "open must confirm the prior rule gone (fw_gone || return 0) after deleting it and before rewriting state");
-    }
-
-    [Fact]
-    public void Removes_any_prior_rule_before_opening_so_no_stale_rule_survives()
-    {
-        // Codex: if wlan0 changes subnet or loses its address, the previously-applied rule must be removed
-        // (not left stranded to admit off-subnet sources on a new prefix). firewall_open deletes the prior
-        // rule (its remembered subnet) first, and with no address it inserts nothing and clears state.
-        string script = ReadScript().Replace("\r\n", "\n");
-        int open = script.IndexOf("firewall_open()", System.StringComparison.Ordinal);
-        int close = script.IndexOf("firewall_close()", System.StringComparison.Ordinal);
-        Assert.True(open >= 0 && close > open);
-        string body = script.Substring(open, close - open);
-        // The prior rule is dropped (fw_del of the remembered subnet) before anything is inserted.
-        int delPrev = body.IndexOf("fw_del \"$(cat \"$FW_STATE\")\"", System.StringComparison.Ordinal);
-        int insert = body.IndexOf("iptables -I INPUT", System.StringComparison.Ordinal);
-        Assert.True(delPrev >= 0 && insert >= 0);
-        Assert.True(delPrev < insert, "the prior rule must be deleted before a new one is inserted");
-        // With no address we bail WITHOUT inserting so the port stays closed, and the bail precedes insert.
-        int noAddr = body.IndexOf("[ -z \"$lan\" ]", System.StringComparison.Ordinal);
-        Assert.True(noAddr >= 0 && noAddr < insert, "the no-address bail must precede the insert");
+        // Flush precedes the (address-gated) append, so the chain always reflects only the current subnet.
+        int flush = openBody.IndexOf("iptables -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int append = openBody.IndexOf("iptables -A \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        Assert.True(flush >= 0 && append > flush, "the chain must be flushed before it is repopulated");
+        Assert.Contains("[ -n \"$lan\" ] && iptables -A \"$FW_CHAIN\"", openBody);
+        // No state file / state helpers anywhere (the whole FW_STATE/fw_gone/fw_del machinery is gone).
+        string[] code = CodeLines(ReadScript());
+        Assert.DoesNotContain(code, l =>
+            l.Contains("FW_STATE") || l.Contains("fw_gone") || l.Contains("fw_del") || l.Contains("fw_installed"));
     }
 
     [Fact]
