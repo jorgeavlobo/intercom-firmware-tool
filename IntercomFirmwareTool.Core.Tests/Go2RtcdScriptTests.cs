@@ -118,12 +118,13 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
-    public void Owns_its_rule_by_a_comment_tag_so_an_identical_foreign_rule_is_never_deleted()
+    public void Owns_its_rule_by_a_required_comment_tag_so_a_foreign_rule_is_never_deleted()
     {
         // CodeRabbit (final): a full rule spec is a matcher, not an identity — an admin's byte-identical
-        // :8554 LAN ACCEPT rule would be caught by a bare `-D`. So the rule carries an ownership TAG via
-        // the iptables comment match, and cleanup deletes only rules bearing THAT comment. This is the
-        // industry-standard approach (Docker/firewalld tag their rules the same way).
+        // :8554 LAN ACCEPT rule (even inserted ABOVE ours) would be caught by a bare `-D`. So the rule
+        // carries an ownership TAG via the iptables comment match, and BOTH insert and delete require that
+        // comment. Cleanup therefore matches only rules bearing our tag; an untagged look-alike is
+        // invisible to it. This is the industry-standard approach (Docker/firewalld tag their rules).
         string s = ReadScript();
         string joined = JoinedScript();
         string[] code = CodeLines(s);
@@ -136,46 +137,60 @@ public class Go2RtcdScriptTests
         Assert.Contains(
             "iptables -I INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" "
             + "-m comment --comment \"$FW_TAG\" -j ACCEPT", joined);
-        // Tagged deletion is COMMENT-SCOPED: it matches only rules carrying our tag, so an identical rule
-        // WITHOUT the tag (an admin's) is invisible to it and never removed.
+        // Deletion is COMMENT-SCOPED: it matches only rules carrying our tag, so an identical rule WITHOUT
+        // the tag (an admin's) is invisible to it and never removed.
         Assert.Contains(
-            "iptables -D INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$2\" "
+            "iptables -D INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$1\" "
             + "-m comment --comment \"$FW_TAG\" -j ACCEPT", joined);
-        // Graceful fallback: on a kernel without xt_comment we still open the port with an untagged rule,
-        // and manage it conservatively (untagged deletion removes a SINGLE instance — never a drain — so
-        // we never remove more than we added).
-        Assert.Contains(code, l => l.Trim() == "mode=tagged");
-        Assert.Contains(code, l => l.Trim() == "mode=untagged");
-        // State remembers "<mode> <subnet>" so close/DHCP-change delete exactly what open added.
-        Assert.Contains(code, l => l.Contains("printf '%s %s\\n' \"$mode\" \"$lan\""));
+        // EVERY iptables INPUT mutation carries the comment tag — there is NO untagged insert or delete
+        // that could ever touch a foreign rule.
+        foreach (var l in System.Text.RegularExpressions.Regex.Split(joined, "\n"))
+        {
+            if ((l.Contains("iptables -I INPUT") || l.Contains("iptables -D INPUT"))
+                && l.Contains("-j ACCEPT"))
+                Assert.Contains("-m comment --comment \"$FW_TAG\"", l);
+        }
+        // The applied subnet is remembered so close/DHCP-change delete exactly what open added.
+        Assert.Contains(code, l => l.Contains("printf '%s' \"$lan\""));
         Assert.Contains(code, l => l.StartsWith("FW_STATE=") && l.Contains("/var/run/"));
     }
 
     [Fact]
-    public void Records_state_only_after_an_insert_actually_succeeds()
+    public void Fails_closed_when_the_comment_match_is_unavailable()
     {
-        // CodeRabbit: in the untagged fallback, if the untagged insert ALSO fails we must NOT record
-        // "untagged <subnet>" — otherwise a later close/respawn would fw_del a look-alike foreign rule we
-        // never created. The untagged insert must be an ELIF whose success gates the state write, with a
-        // final else that clears state and returns without recording.
-        string s = ReadScript();
-        string joined = JoinedScript();
-        // The untagged fallback is an elif (its exit status decides whether we record), NOT an
-        // unconditional insert with `|| true`.
-        Assert.Contains(
-            "elif iptables -I INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
-            joined);
-        // firewall_open has TWO bail-outs that clear state (no-address, and both-inserts-failed), then a
-        // single state write reached only after a successful insert.
-        int open = s.Replace("\r\n", "\n").IndexOf("firewall_open()", System.StringComparison.Ordinal);
-        int close = s.Replace("\r\n", "\n").IndexOf("firewall_close()", System.StringComparison.Ordinal);
-        string body = s.Replace("\r\n", "\n").Substring(open, close - open);
+        // CodeRabbit: the untagged fallback can't own a rule (a bare `-D` deletes the first identical
+        // match, which may be an admin's). So the tag is REQUIRED: if the tagged insert fails (kernel
+        // lacks xt_comment) we add NO rule and clear state — never inserting an unowned rule.
+        string s = ReadScript().Replace("\r\n", "\n");
+        int open = s.IndexOf("firewall_open()", System.StringComparison.Ordinal);
+        int close = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
+        string body = s.Substring(open, close - open);
+        // State is written ONLY inside the tagged-insert `then`; the `else` clears it (fail closed).
+        Assert.Contains("-m comment --comment \"$FW_TAG\" -j ACCEPT 2>/dev/null; then", JoinedScript());
+        Assert.Contains("printf '%s' \"$lan\" > \"$FW_STATE\"", body);
+        // Two state-clearing bail-outs: no-address, and tagged-insert-failed. Neither inserts a rule.
         int clears = 0, idx = 0;
         while ((idx = body.IndexOf("rm -f \"$FW_STATE\"", idx, System.StringComparison.Ordinal)) >= 0)
         { clears++; idx += 1; }
-        Assert.True(clears >= 2, "firewall_open must clear state on both the no-address and total-failure paths");
-        // The state write records the resolved mode + subnet (only reached after a successful insert).
-        Assert.Contains("printf '%s %s\\n' \"$mode\" \"$lan\"", body);
+        Assert.True(clears >= 2, "firewall_open must clear state on both the no-address and insert-failed paths");
+    }
+
+    [Fact]
+    public void Keeps_state_and_the_installed_rule_consistent_under_failures()
+    {
+        // Codex: (1) close must forget the rule only once it is confirmed gone — a transient `iptables -D`
+        // failure keeps FW_STATE so a later pass retries instead of stranding an open port; (2) open must
+        // roll the just-added rule back if persisting state fails, else close could never find/remove it.
+        string s = ReadScript().Replace("\r\n", "\n");
+        // A presence check confirms the tagged rule is actually gone before state is cleared.
+        Assert.Contains("fw_installed()", s);
+        int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
+        string closeBody = s.Substring(cOpen);
+        Assert.Contains("fw_installed || rm -f \"$FW_STATE\"", closeBody);
+        // open rolls the rule back when the state write fails.
+        int oOpen = s.IndexOf("firewall_open()", System.StringComparison.Ordinal);
+        string openBody = s.Substring(oOpen, cOpen - oOpen);
+        Assert.Contains("printf '%s' \"$lan\" > \"$FW_STATE\" 2>/dev/null || { fw_del \"$lan\";", openBody);
     }
 
     [Fact]
@@ -183,14 +198,14 @@ public class Go2RtcdScriptTests
     {
         // Codex: if wlan0 changes subnet or loses its address, the previously-applied rule must be removed
         // (not left stranded to admit off-subnet sources on a new prefix). firewall_open deletes the prior
-        // rule (its remembered mode+subnet) first, and with no address it inserts nothing and clears state.
+        // rule (its remembered subnet) first, and with no address it inserts nothing and clears state.
         string script = ReadScript().Replace("\r\n", "\n");
         int open = script.IndexOf("firewall_open()", System.StringComparison.Ordinal);
         int close = script.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         Assert.True(open >= 0 && close > open);
         string body = script.Substring(open, close - open);
-        // The prior rule is dropped (fw_del of the remembered mode+subnet) before anything is inserted.
-        int delPrev = body.IndexOf("fw_del \"$pmode\" \"$psub\"", System.StringComparison.Ordinal);
+        // The prior rule is dropped (fw_del of the remembered subnet) before anything is inserted.
+        int delPrev = body.IndexOf("fw_del \"$(cat \"$FW_STATE\")\"", System.StringComparison.Ordinal);
         int insert = body.IndexOf("iptables -I INPUT", System.StringComparison.Ordinal);
         Assert.True(delPrev >= 0 && insert >= 0);
         Assert.True(delPrev < insert, "the prior rule must be deleted before a new one is inserted");
