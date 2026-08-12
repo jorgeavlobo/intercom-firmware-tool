@@ -177,13 +177,17 @@ public class Go2RtcdScriptTests
         Assert.True(write >= 0 && insert >= 0 && write < insert,
             "FW_STATE must be persisted before the rule is inserted");
         Assert.Contains("printf '%s' \"$lan\" > \"$FW_STATE\" 2>/dev/null || { rm -f \"$FW_STATE\"", openBody);
-        // (2) close/no-address clear state ONLY once fw_gone confirms the rule is absent via a SUCCESSFUL
-        //     listing — a failed `iptables -S` (inspection error) or a still-present rule keeps the state.
+        // (2) close clears state ONLY once fw_gone confirms the rule is absent via a SUCCESSFUL listing —
+        //     a failed `iptables -S` (inspection error) or a still-present rule keeps the state.
         Assert.Contains("fw_gone()", s);
         Assert.Contains("out=$(iptables -S INPUT 2>/dev/null) || return 1", s); // inspection error != absent
         Assert.Contains("fw_gone && rm -f \"$FW_STATE\"", closeBody);
-        // The no-address branch also gates its state clear on fw_gone (prior rule confirmed removed).
-        Assert.Contains("fw_gone && rm -f \"$FW_STATE\"", openBody);
+        // (3) open confirms the PRIOR rule is gone before overwriting FW_STATE — else a DHCP change whose
+        //     old-rule delete failed would orphan it. On failure it keeps the old state and returns.
+        int prevDel = openBody.IndexOf("fw_del \"$(cat \"$FW_STATE\")\"", System.StringComparison.Ordinal);
+        int confirm = openBody.IndexOf("fw_gone || return 0", System.StringComparison.Ordinal);
+        Assert.True(prevDel >= 0 && confirm > prevDel && confirm < write,
+            "open must confirm the prior rule gone (fw_gone || return 0) after deleting it and before rewriting state");
     }
 
     [Fact]

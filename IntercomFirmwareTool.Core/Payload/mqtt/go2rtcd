@@ -107,33 +107,35 @@ kill_all() {
 }
 
 # Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent
-# and DHCP-proof. First delete the rule we previously applied (its subnet remembered in FW_STATE), so a
-# subnet change leaves nothing of OURS stranded. Then, with an address, insert one TAGGED rule at the TOP
-# so it sits above the policy DROP, source-restricted to CAM_IFACE's own subnet (derived at runtime;
-# iptables masks the address to its /prefix). The subnet is written to FW_STATE BEFORE the insert, so any
-# installed tagged rule is ALWAYS covered by cleanup state — a failure at/after the insert can never
-# strand the port open with no cleanup target (CodeRabbit). Because each open first deletes the prior rule,
-# a mid-pass failure leaves the rule DELETED (port closed), never stranded. If the state write itself
-# fails we never insert (fail closed). Deletion is comment-scoped, so a recorded subnet with no rule
-# (e.g. the insert fails on a kernel without xt_comment) is a harmless no-op at close and can never match
-# a foreign rule. With NO address yet (the boot race before DHCP, or a lease drop) we insert NOTHING — the
-# port stays closed, and the prior rule was already removed so nothing stale survives an address change
-# (Codex). Re-running every watchdog pass re-adds the rule after the panel flushes INPUT. No `-C` needed
-# (busybox iptables may lack it).
+# and DHCP-proof. First delete the rule we previously applied (its subnet remembered in FW_STATE) and
+# CONFIRM it is gone before touching FW_STATE: if the delete or the listing failed, keep the OLD state and
+# return so a later pass can still remove the old rule — overwriting FW_STATE now would orphan it across a
+# DHCP subnet change (CodeRabbit). No re-insert is needed on that path: if our rule is still present it is
+# already serving the port. Passing the confirm means NO tagged rule of ours remains, so the insert below
+# can never create a duplicate. Then, with an address, write the subnet to FW_STATE BEFORE inserting one
+# TAGGED rule at the TOP (above the policy DROP), source-restricted to CAM_IFACE's own subnet (derived at
+# runtime; iptables masks the address to its /prefix) — so any installed rule is ALWAYS covered by cleanup
+# state and a failure at/after the insert can never strand the port open (CodeRabbit). If the state write
+# itself fails we never insert (fail closed). Deletion is comment-scoped, so a recorded subnet with no rule
+# (e.g. the insert fails on a kernel without xt_comment) is a harmless no-op at close and can never match a
+# foreign rule. With NO address yet (the boot race before DHCP, or a lease drop) we insert NOTHING — the
+# port stays closed. Re-running every watchdog pass re-adds the rule after the panel flushes INPUT. No `-C`
+# needed (busybox iptables may lack it).
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
-	[ -s "$FW_STATE" ] && fw_del "$(cat "$FW_STATE")"
+	if [ -s "$FW_STATE" ]; then
+		fw_del "$(cat "$FW_STATE")"
+		# Keep the old state and bail unless the old rule is confirmed absent (a failed delete/listing must
+		# not lose the only cleanup target for the old subnet).
+		fw_gone || return 0
+	fi
 	if [ -z "$lan" ]; then
-		# No address: insert nothing (the port must stay LAN-only). Clear state only if the prior rule is
-		# CONFIRMED gone; a failed delete or a failed listing keeps it so a later pass can still remove the
-		# old rule instead of orphaning it (Codex).
-		fw_gone && rm -f "$FW_STATE" 2>/dev/null
+		# No address (boot race before DHCP, or a lease drop): insert nothing so the port stays LAN-only.
+		# The prior rule was confirmed gone above, so clearing state here is safe.
+		rm -f "$FW_STATE" 2>/dev/null
 		return 0
 	fi
-	# Belt-and-suspenders: drain any stale rule of ours for this subnet (safe — only our comment matches)
-	# so re-asserting can never accumulate duplicates.
-	fw_del "$lan"
 	# Record intent-to-install BEFORE inserting; if we can't persist state we don't insert (fail closed).
 	printf '%s' "$lan" > "$FW_STATE" 2>/dev/null || { rm -f "$FW_STATE" 2>/dev/null || true; return 0; }
 	iptables -I INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
