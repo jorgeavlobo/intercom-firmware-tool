@@ -185,4 +185,19 @@ public class MqttCameraValidationTests
             CameraRtspPass = null,
         });
     }
+
+    [Fact]
+    public void GenerateRtspPassword_is_strong_url_and_yaml_safe_and_unique()
+    {
+        string p1 = MqttInstaller.GenerateRtspPassword();
+        string p2 = MqttInstaller.GenerateRtspPassword();
+        Assert.Equal(24, p1.Length);            // 18 random bytes → 24 base64url chars, no padding
+        Assert.NotEqual(p1, p2);                // cryptographically random
+        Assert.DoesNotContain('=', p1);         // no base64 padding
+        // URL-safe base64 alphabet only — safe in the rtsp:// URL and the YAML scalar (and, since none
+        // of these are control characters, it satisfies the on-device credential rule).
+        Assert.All(p1, c => Assert.True(char.IsAsciiLetterOrDigit(c) || c == '-' || c == '_'));
+        // A generated password must satisfy the on-device credential rule it feeds.
+        MqttInstaller.Validate(OnDevice() with { CameraRtspPass = p1 });
+    }
 }

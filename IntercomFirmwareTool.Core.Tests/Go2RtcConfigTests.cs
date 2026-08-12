@@ -143,6 +143,65 @@ public class Go2RtcConfigTests
     }
 
     [Fact]
+    public void BuildOnDeviceSetupGuide_shows_the_rtsp_url_with_credentials()
+    {
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "Front Door");
+        // The HA Generic Camera URL: creds embedded, sanitized stream name, on-device RTSP port.
+        Assert.Contains("rtsp://camera:s3cr3t@<intercom-ip>:8554/frontdoor", guide);
+        Assert.Contains("username: camera", guide);
+        Assert.Contains("password: s3cr3t", guide);
+        // The loopback-only API is called out; no HA-side go2rtc.
+        Assert.Contains("127.0.0.1:1984", guide);
+        Assert.DoesNotContain("\r", guide);
+    }
+
+    [Fact]
+    public void BuildOnDeviceSetupGuide_keeps_the_password_placeholder_readable_when_unset()
+    {
+        // With no password set (a bare/library caller — the App always sets one on-device), the URL must
+        // keep the <password> placeholder LITERAL (not %3Cpassword%3E from URL-encoding) and the
+        // instructions must tell the user to replace it.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = null,
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "doorbell");
+        Assert.Contains("rtsp://camera:<password>@<intercom-ip>:8554/doorbell", guide);
+        Assert.DoesNotContain("%3C", guide);   // placeholder not URL-encoded
+        Assert.Contains("<password> with the RTSP password", guide);
+    }
+
+    [Fact]
+    public void OnDeviceStreamName_is_stable_so_the_guide_url_matches_the_installed_stream()
+    {
+        // The installer always writes the on-device go2rtc stream under MqttInstaller.OnDeviceStreamName,
+        // so the App must build the Home Assistant URL from THAT exact name (not the HA node id, which
+        // would point at a nonexistent stream). Guard: the name is an already-sanitized stable token and
+        // the guide URL ends in it.
+        Assert.Equal(MqttInstaller.OnDeviceStreamName,
+            Go2RtcConfig.SanitizeStreamName(MqttInstaller.OnDeviceStreamName));
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, MqttInstaller.OnDeviceStreamName);
+        Assert.Contains(":8554/" + MqttInstaller.OnDeviceStreamName + "\n", guide);
+    }
+
+    [Fact]
     public void BuildSetupGuide_defaults_the_target_to_the_broker_host()
     {
         // Target null → EffectiveCameraTargetHost falls back to MqttHost.

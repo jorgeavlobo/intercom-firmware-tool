@@ -1686,6 +1686,20 @@ namespace IntercomFirmwareTool.App
                 MessageBox.Show(this,
                     LF("Fmt_Msg_BuildComplete", built.OutputPath),
                     L("Cap_BuildComplete"), MessageBoxButton.OK, MessageBoxImage.Information);
+                // On-device camera (#120): the per-install RTSP credential is auto-generated and lives
+                // only in the image just written — surface it NOW (guide + clipboard) so the user can set
+                // up Home Assistant for THIS unit, then rotate so the next build mints a fresh, distinct
+                // one. Recovering it later isn't possible, so build time is the moment to show it.
+                if (mqttOpts is { CameraOnDevice: true })
+                {
+                    string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(mqttOpts, MqttInstaller.OnDeviceStreamName);
+                    // The guide carries the RTSP password — copy via SecureClipboard so it is excluded
+                    // from Windows Clipboard History / cloud sync (like the root-password copy) — CodeRabbit.
+                    try { SecureClipboard.SetText(guide); } catch { /* clipboard may be busy; still show it */ }
+                    MessageBox.Show(this, guide, L("Cap_MqttGo2Rtc"),
+                        MessageBoxButton.OK, MessageBoxImage.Information);
+                    RotateCameraRtspPassword();
+                }
             }
             else
             {

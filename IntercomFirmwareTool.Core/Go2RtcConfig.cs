@@ -274,5 +274,66 @@ namespace IntercomFirmwareTool.Core
                 $"  exposes). On a 300X you may switch to the hi-res branch in the tool.\n"));
             return sb.ToString();
         }
+
+        /// <summary>
+        /// Build the Home Assistant setup guide for the ON-DEVICE media server (issue #120). Unlike the
+        /// off-device <see cref="BuildSetupGuide"/>, there is nothing to paste: the installer writes and
+        /// supervises go2rtc + ffmpeg on the panel and serves the camera as authenticated RTSP directly
+        /// (no go2rtc on Home Assistant). This just gives the user the RTSP URL and the generated
+        /// credentials to add as a Home Assistant Generic Camera. Plain text, LF line endings.
+        /// </summary>
+        public static string BuildOnDeviceSetupGuide(MqttOptions opts, string streamName)
+        {
+            string name = SanitizeStreamName(streamName);
+            string user = opts.CameraRtspUser;
+            // The App always sets a password on-device; only a bare/library caller hits the placeholder.
+            bool hasPass = !string.IsNullOrEmpty(opts.CameraRtspPass);
+            // A space-free placeholder if no password was set yet: spaces in the RTSP URL userinfo would
+            // make it awkward to copy-paste (Copilot).
+            string pass = hasPass ? opts.CameraRtspPass! : "<password>";
+            var ci = CultureInfo.InvariantCulture;
+
+            var sb = new StringBuilder();
+            sb.Append("BTicino live doorbell camera — on-device go2rtc (Home Assistant)\n");
+            sb.Append("================================================================\n\n");
+            sb.Append("The intercom runs go2rtc + ffmpeg itself and serves the entrance\n");
+            sb.Append("camera as an authenticated RTSP stream — there is NO go2rtc on Home\n");
+            sb.Append("Assistant. The installer writes and starts everything on the panel;\n");
+            sb.Append("nothing here needs to be pasted into a go2rtc config.\n\n");
+
+            sb.Append("Add it to Home Assistant as a Generic Camera (Settings -> Devices &\n");
+            sb.Append("Services -> Add Integration -> Generic Camera) with this stream URL —\n");
+            sb.Append(hasPass
+                ? "replace <intercom-ip> with the panel's IP address on your network:\n\n"
+                : "replace <intercom-ip> with the panel's IP and <password> with the RTSP password:\n\n");
+            // URL-encode the credentials for the URL's userinfo: Validate rejects control chars but not
+            // RTSP-URL-reserved punctuation (@ : / #), so escape defensively (today's fixed "camera" +
+            // base64url password never need it, but a future caller might) — CodeRabbit. The labeled
+            // credentials below stay RAW so the user copies the real values into HA's separate fields. The
+            // <password> placeholder is left literal (not %3C…%3E) so it reads as a placeholder (Copilot).
+            string userEnc = Uri.EscapeDataString(user);
+            string passInUrl = hasPass ? Uri.EscapeDataString(pass) : pass;
+            sb.Append(string.Create(ci,
+                $"    rtsp://{userEnc}:{passInUrl}@<intercom-ip>:{OnDeviceRtspPort}/{name}\n\n"));
+
+            sb.Append("Credentials (generated for this build):\n");
+            sb.Append(string.Create(ci, $"    username: {user}\n"));
+            sb.Append(string.Create(ci, $"    password: {pass}\n\n"));
+
+            sb.Append("Notes\n-----\n");
+            sb.Append(string.Create(ci,
+                $"- RTSP is served on port {OnDeviceRtspPort}, on the LAN, with mandatory\n" +
+                $"  authentication. The go2rtc control API stays bound to loopback only\n" +
+                $"  (127.0.0.1:{OnDeviceApiPort}) and is never exposed on the network.\n"));
+            sb.Append("- Video only for now (H.264 copied through untouched, no re-encode);\n");
+            sb.Append("  audio + talkback are a later phase.\n");
+            sb.Append(string.Create(ci,
+                $"- The panel's firewall must allow port {OnDeviceRtspPort} from your LAN so\n" +
+                $"  Home Assistant can reach the stream.\n"));
+            sb.Append("- The picture appears while the panel has an active A/V session (a\n");
+            sb.Append("  ring, an answered call, or the self-view eye); between sessions the\n");
+            sb.Append("  stream is idle (the panel only encodes on demand).\n");
+            return sb.ToString();
+        }
     }
 }
