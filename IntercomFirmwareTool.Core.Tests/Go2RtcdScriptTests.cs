@@ -143,8 +143,8 @@ public class Go2RtcdScriptTests
         // refuses a referenced chain).
         string closeBody = s.Replace("\r\n", "\n")
             .Substring(s.Replace("\r\n", "\n").IndexOf("firewall_close()", System.StringComparison.Ordinal));
-        int delJump = closeBody.IndexOf("iptables -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal);
-        int delChain = closeBody.IndexOf("iptables -X \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int delJump = closeBody.IndexOf("iptables -w 5 -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int delChain = closeBody.IndexOf("iptables -w 5 -X \"$FW_CHAIN\"", System.StringComparison.Ordinal);
         Assert.True(delJump >= 0 && delChain > delJump, "the jump must be removed before the chain is deleted");
     }
 
@@ -171,7 +171,7 @@ public class Go2RtcdScriptTests
         Assert.True(claim > existsCheck && claim < flush, "open claims ownership when it creates the chain");
         // close: guarded by the ownership marker before any teardown of the chain/jump.
         int closeGuard = closeBody.IndexOf("[ -e \"$FW_OWN\" ] || return 0", System.StringComparison.Ordinal);
-        int delJump = closeBody.IndexOf("iptables -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int delJump = closeBody.IndexOf("iptables -w 5 -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal);
         Assert.True(closeGuard >= 0 && closeGuard < delJump, "close must check ownership before tearing down");
     }
 
