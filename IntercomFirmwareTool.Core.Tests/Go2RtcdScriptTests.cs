@@ -80,7 +80,8 @@ public class Go2RtcdScriptTests
     // Script with backslash line-continuations collapsed to single logical lines, so assertions on a
     // multi-line iptables command (split for readability) match the whole command.
     private static string JoinedScript() =>
-        System.Text.RegularExpressions.Regex.Replace(ReadScript(), @"\s*\\\s*\n\s*", " ");
+        System.Text.RegularExpressions.Regex.Replace(
+            ReadScript().Replace("\r\n", "\n"), @"\s*\\\s*\n\s*", " ");
 
     [Fact]
     public void Opens_only_the_rtsp_media_port_least_privilege_lan_restricted()
