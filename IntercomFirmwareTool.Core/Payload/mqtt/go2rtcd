@@ -99,11 +99,6 @@ kill_all() {
 	for p in $(daemon_pids); do kill "$sig" "$p" 2>/dev/null; done
 }
 
-# Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent
-# and DHCP-proof. First delete the rule we previously applied (its subnet remembered in FW_STATE) and
-# CONFIRM it is gone before touching FW_STATE: if the delete or the listing failed, keep the OLD state and
-# return so a later pass can still remove the old rule — overwriting FW_STATE now would orphan it across a
-# DHCP subnet change (CodeRabbit). No re-insert is needed on that path: if our rule is still present it is
 # Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent,
 # stateless and DHCP-proof. Ownership first: if FW_CHAIN already exists but we did NOT create it this boot
 # (no FW_OWN marker), it is a FOREIGN chain — return without touching it or the port. Otherwise ensure OUR
@@ -119,12 +114,13 @@ firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	if iptables -S "$FW_CHAIN" >/dev/null 2>&1; then
 		[ -e "$FW_OWN" ] || return 0            # chain exists but is foreign (not created by us) — leave it
+	elif [ -e "$FW_OWN" ]; then
+		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || true   # our chain vanished (panel flush) — recreate it
 	else
-		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || return 0
-		# Claim ownership. If the marker can't be persisted (/var/run full or read-only) we could never
-		# later prove the chain is ours — close would skip it and open would treat it as foreign — so roll
-		# the just-created (empty) chain back rather than orphan it (Codex).
-		: > "$FW_OWN" 2>/dev/null || { iptables -w 5 -X "$FW_CHAIN" 2>/dev/null || true; return 0; }
+		# Fresh: claim ownership BEFORE creating the chain, so a failed marker write (/var/run full or
+		# read-only) leaves nothing to orphan — we simply do not manage the port this pass (Codex/CodeRabbit).
+		: > "$FW_OWN" 2>/dev/null || return 0
+		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || { rm -f "$FW_OWN" 2>/dev/null || true; return 0; }
 	fi
 	# Require a SUCCESSFUL flush before repopulating: if the xtables lock is contended past the wait and -F
 	# fails, abort this pass rather than append a second ACCEPT on top of the stale one (a later pass
@@ -148,11 +144,14 @@ firewall_close() {
 	while iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null; do :; done
 	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || true
 	iptables -w 5 -X "$FW_CHAIN" 2>/dev/null || true
-	# Drop ownership ONLY once both the chain and its INPUT jump are CONFIRMED gone. If a -D/-F/-X failed
-	# (e.g. the xtables lock stayed contended past the wait) they may remain; keep FW_OWN so a later
-	# close/respawn retries the teardown instead of abandoning our leftover as "foreign" (Codex).
-	iptables -S "$FW_CHAIN" >/dev/null 2>&1 && return 0
-	iptables -S INPUT 2>/dev/null | grep -q -- "-j $FW_CHAIN\$" && return 0
+	# Drop ownership ONLY when a SUCCESSFUL listing confirms both the chain and its INPUT jump are gone. A
+	# failed listing (inspection error) or a still-present chain/jump keeps FW_OWN so a later close/respawn
+	# retries the teardown — an inspection failure must never be read as "absent" (CodeRabbit). One `-S`
+	# lists the whole filter table (chain declarations `-N …` and rules `-A …`), so it covers both; capture
+	# it once and bail on failure rather than piping (a failed `-S` into grep would look empty = "gone").
+	rules=$(iptables -S 2>/dev/null) || return 0
+	printf '%s\n' "$rules" | grep -q -- "-j $FW_CHAIN\$" && return 0     # INPUT jump still present
+	printf '%s\n' "$rules" | grep -q -- "^-N $FW_CHAIN\$" && return 0    # chain still declared
 	rm -f "$FW_OWN" 2>/dev/null || true
 }
 

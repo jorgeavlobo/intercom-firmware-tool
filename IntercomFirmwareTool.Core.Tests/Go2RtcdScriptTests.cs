@@ -178,24 +178,28 @@ public class Go2RtcdScriptTests
     [Fact]
     public void Keeps_chain_ownership_consistent_under_marker_and_teardown_failures()
     {
-        // Codex: the ownership marker and the chain must never diverge.
-        //  (1) if the marker write fails after we create the chain, roll the chain back (else it is
-        //      orphaned — close would skip it and open would treat it as foreign).
-        //  (2) close drops ownership ONLY once the chain AND its jump are confirmed gone; a failed -D/-F/-X
-        //      keeps FW_OWN so a later pass retries instead of abandoning the leftover as "foreign".
+        // Codex/CodeRabbit: the ownership marker and the chain must never diverge.
+        //  (1) claim ownership BEFORE creating the chain, so a failed marker write leaves nothing to
+        //      orphan; if the create then fails, drop the marker again.
+        //  (2) close drops ownership ONLY when a SUCCESSFUL listing confirms the chain AND its jump are
+        //      gone — a failed listing (inspection error) or a still-present object keeps FW_OWN for retry
+        //      (a failed `-S` piped into grep would look empty and be misread as "gone").
         string s = ReadScript().Replace("\r\n", "\n");
         int oOpen = s.IndexOf("firewall_open()", System.StringComparison.Ordinal);
         int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         string openBody = s.Substring(oOpen, cOpen - oOpen);
         string closeBody = s.Substring(cOpen);
-        // (1) marker-write failure rolls the just-created chain back.
-        Assert.Contains(": > \"$FW_OWN\" 2>/dev/null || { iptables -w 5 -X \"$FW_CHAIN\"", openBody);
-        // (2) close confirms both chain and jump are gone before removing the marker.
-        int chk1 = closeBody.IndexOf("iptables -S \"$FW_CHAIN\" >/dev/null 2>&1 && return 0", System.StringComparison.Ordinal);
-        int chk2 = closeBody.IndexOf("grep -q -- \"-j $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);
+        // (1) marker-first: claim before create, and un-claim if the create fails.
+        int claim = openBody.IndexOf(": > \"$FW_OWN\" 2>/dev/null || return 0", System.StringComparison.Ordinal);
+        int create = openBody.IndexOf("iptables -w 5 -N \"$FW_CHAIN\" 2>/dev/null || { rm -f \"$FW_OWN\"", System.StringComparison.Ordinal);
+        Assert.True(claim >= 0 && create > claim, "ownership must be claimed before the chain is created");
+        // (2) close captures ONE listing, bails on its failure, and confirms both objects gone before drop.
+        int listing = closeBody.IndexOf("rules=$(iptables -S 2>/dev/null) || return 0", System.StringComparison.Ordinal);
+        int jumpChk = closeBody.IndexOf("grep -q -- \"-j $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);
+        int chainChk = closeBody.IndexOf("grep -q -- \"^-N $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);
         int drop = closeBody.IndexOf("rm -f \"$FW_OWN\"", System.StringComparison.Ordinal);
-        Assert.True(chk1 >= 0 && chk2 > chk1 && drop > chk2,
-            "close must confirm the chain and jump are gone before dropping the ownership marker");
+        Assert.True(listing >= 0 && jumpChk > listing && chainChk > listing && drop > jumpChk && drop > chainChk,
+            "close must capture a successful listing and confirm chain+jump gone before dropping the marker");
     }
 
     [Fact]
