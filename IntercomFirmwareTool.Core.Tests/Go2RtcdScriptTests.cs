@@ -119,15 +119,25 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
-    public void Never_touches_a_foreign_chain_of_the_same_name()
+    public void Never_touches_a_chain_it_did_not_create()
     {
-        // CodeRabbit: if a chain named GO2RTC already exists but wasn't created by us (it holds any rule
-        // other than our tcp/:CAM_PORT ACCEPT), we must not flush it, add to it, or jump to it. Both
-        // firewall_open and firewall_close gate on an ownership probe before touching the chain.
+        // CodeRabbit/Codex/Copilot: content cannot prove ownership — an admin's pre-existing empty chain,
+        // a foreign narrow tcp/:8554 rule, and our own DHCP-changing `-s` all defeat a shape check. So
+        // ownership is a CREATION TOKEN: the marker is written the instant we create the chain, and a
+        // chain that is present WITHOUT the marker is treated as foreign and never mutated.
         string[] code = CodeLines(ReadScript());
-        // An ownership probe exists and inspects the chain's rules for anything that isn't our ACCEPT.
         Assert.Contains(code, l => l.Contains("firewall_chain_is_ours()"));
-        Assert.Contains(code, l => l.Contains("iptables -S \"$FW_CHAIN\""));
+        // A dedicated ownership marker distinct from the lock/disabled markers.
+        Assert.Contains(code, l => l.StartsWith("FW_OWN=") && l.Contains("/var/run/"));
+        // The probe: an EXISTING chain is ours only when the marker is present.
+        Assert.Contains(code, l => l == "[ -e \"$FW_OWN\" ]");
+        // The marker is written ONLY when we actually create the chain (guarded on `-N` success), so it
+        // can never be stamped onto a foreign pre-existing chain.
+        Assert.Contains(code, l =>
+            l.Contains("iptables -N \"$FW_CHAIN\"") && l.Contains(": > \"$FW_OWN\""));
+        // Ownership is NOT inferred from rule contents — no rule-shape grep decides ownership anymore.
+        Assert.DoesNotContain(code, l =>
+            l.Contains("iptables -S \"$FW_CHAIN\"") && l.Contains("grep"));
         // Both open and close bail out early when the chain is not ours (guard runs before any mutation).
         Assert.Equal(2, code.Count(l => l.Contains("firewall_chain_is_ours || return 0")));
     }

@@ -39,6 +39,14 @@ DISABLED=/var/run/go2rtc.disabled
 CAM_PORT=8554
 CAM_IFACE=wlan0
 FW_CHAIN=GO2RTC
+# Chain-ownership token (tmpfs, cleared every boot exactly like LOCKDIR/DISABLED). iptables chains carry
+# no owner metadata, and CONTENT cannot prove ownership — an admin could pre-create an EMPTY GO2RTC
+# chain, or a foreign narrow rule (`-s 10.0.0.5/32 --dport 8554 ACCEPT`) would match a shape check, and
+# our OWN rule's `-s` subnet changes with DHCP so a strict content match would misfire on our own rule.
+# So ownership is established by CREATION: we write this marker the instant WE create the chain, and a
+# chain that exists WITHOUT the marker was created by someone else and is left completely untouched —
+# never flushed, added to, or jumped to (CodeRabbit/Codex/Copilot).
+FW_OWN=/var/run/go2rtc.fwown
 
 # PIDs of the actual daemon. `pgrep -x go2rtc` matches the daemon binary; the init
 # script's own shell process has comm "go2rtcd" (the script name), so it is not
@@ -72,24 +80,29 @@ kill_all() {
 }
 
 # Ensure our OWN INPUT sub-chain exists and INPUT jumps to it (idempotent; busybox iptables may lack
-# `-C`, so probe with `iptables -S`). Every rule we add lives in this chain, so re-assert and cleanup
-# only ever touch rules WE created — never the panel's own INPUT policy (deleting rules we don't own
-# would be wrong: CodeRabbit/Codex/Copilot). A non-:8554 packet falls through the chain and RETURNs to
-# INPUT, so the jump is a no-op for all other traffic.
+# `-C`, so probe existence with `iptables -nL` and the jump with `iptables -S`). We stamp the ownership
+# marker the instant WE create the chain
+# (guarded on `-N` success) — that token, not the chain's contents, is what lets cleanup safely flush
+# only rules WE created and never the panel's own INPUT policy (CodeRabbit/Codex/Copilot). A non-:8554
+# packet falls through the chain and RETURNs to INPUT, so the jump is a no-op for all other traffic.
+# Only called after firewall_chain_is_ours has confirmed the chain is absent or already ours.
 firewall_ensure_chain() {
-	iptables -nL "$FW_CHAIN" >/dev/null 2>&1 || iptables -N "$FW_CHAIN" 2>/dev/null || true
+	if ! iptables -nL "$FW_CHAIN" >/dev/null 2>&1; then
+		iptables -N "$FW_CHAIN" 2>/dev/null && : > "$FW_OWN" 2>/dev/null || true
+	fi
 	iptables -S INPUT 2>/dev/null | grep -q -- "-j $FW_CHAIN" ||
 		iptables -I INPUT -j "$FW_CHAIN" 2>/dev/null || true
 }
 
-# True when the chain is SAFE for us to manage: absent, empty, or holding ONLY our own tcp/:CAM_PORT
-# ACCEPT rule shape. A chain of the same name that some other tool/admin created (holding any other
-# rule) is treated as NOT ours and left completely untouched — we never flush it, add a rule to it, or
-# jump to it. (The tmpfs ruleset is empty at every boot, so in practice the chain is only ever ours;
-# this just refuses to touch an unexpected pre-existing chain — CodeRabbit.)
+# True when the chain is SAFE for us to manage. ABSENT → free to create (ours by creation). PRESENT →
+# ours ONLY if our creation marker exists, i.e. WE made it this boot; a chain that is present but has no
+# marker was created by someone else (an admin's empty chain, or a foreign tcp/:8554 rule) and must be
+# left completely untouched — never flushed, added to, or jumped to. Ownership is proven by the token,
+# never by rule shape, so a DHCP subnet change to our own `-s` can't be mistaken for a foreign chain,
+# and an admin's look-alike rule can't be mistaken for ours (CodeRabbit/Codex/Copilot).
 firewall_chain_is_ours() {
-	! iptables -S "$FW_CHAIN" 2>/dev/null | grep '^-A ' |
-		grep -qv -- "-p tcp .*--dport $CAM_PORT .*-j ACCEPT"
+	iptables -nL "$FW_CHAIN" >/dev/null 2>&1 || return 0
+	[ -e "$FW_OWN" ]
 }
 
 # Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent:
@@ -100,8 +113,8 @@ firewall_chain_is_ours() {
 # race before DHCP, or a lease drop) we leave the chain EMPTY (port closed) instead of stranding a stale
 # ACCEPT for an old subnet that could still admit off-subnet sources after the address returns on a
 # different prefix — the port must stay LAN-only (Codex). The next watchdog pass re-opens it once an
-# address is present. If a chain of this name already exists but is not ours, do nothing (never jump to
-# or flush a foreign chain — CodeRabbit).
+# address is present. If a chain of this name already exists but lacks our creation marker, do nothing
+# (never jump to or flush a chain we didn't create — CodeRabbit/Codex/Copilot).
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	firewall_chain_is_ours || return 0
@@ -114,7 +127,8 @@ firewall_open() {
 
 # Close the media port again (service stopped/disabled/not running): empty OUR chain. The empty chain +
 # its INPUT jump remain (harmless — packets fall through to the panel's policy DROP); no unrelated rule
-# is ever touched, and a foreign same-named chain is left completely alone (CodeRabbit).
+# is ever touched, and a same-named chain we did not create (no marker) is left completely alone
+# (CodeRabbit/Codex/Copilot).
 firewall_close() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	firewall_chain_is_ours || return 0
