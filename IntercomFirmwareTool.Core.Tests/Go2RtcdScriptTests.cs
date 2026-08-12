@@ -76,4 +76,40 @@ public class Go2RtcdScriptTests
         Assert.DoesNotContain(code, l =>
             l.Contains("scsserver") || l.Contains("mosquitto") || l.Contains("bt_daemon"));
     }
+
+    [Fact]
+    public void Opens_only_the_rtsp_media_port_least_privilege_lan_restricted()
+    {
+        // Phase 1c-3: open :8554 on the LAN interface, at the TOP of INPUT (above the panel's policy
+        // DROP), source-restricted to the interface's own subnet. The control API (:1984) must NOT be
+        // opened, and no other port is touched.
+        string s = ReadScript();
+        string[] code = CodeLines(s);
+        Assert.Contains("CAM_PORT=8554", s);
+        Assert.Contains("CAM_IFACE=wlan0", s);
+        // Insert (not append) so it sits above the DROP; a specific tcp/dport ACCEPT on the interface.
+        Assert.Contains(code, l =>
+            l.Contains("iptables -I INPUT")
+            && l.Contains("-i \"$CAM_IFACE\"")
+            && l.Contains("--dport \"$CAM_PORT\"")
+            && l.Contains("-j ACCEPT"));
+        // LAN source restriction is derived from the interface address at runtime (DHCP-proof).
+        Assert.Contains(code, l => l.Contains("ip -4 addr show \"$CAM_IFACE\""));
+        Assert.Contains(code, l => l.Contains("src=\"-s $lan\""));
+        // The control API port is loopback-only — never opened in the firewall.
+        Assert.DoesNotContain("1984", s);
+    }
+
+    [Fact]
+    public void Firewall_is_reasserted_when_enabled_and_removed_when_stopped()
+    {
+        // respawn (every watchdog pass) re-opens the port when enabled and closes it when disabled;
+        // start opens it; stop closes it. Asserted on executable lines so a comment can't satisfy them.
+        string[] code = CodeLines(ReadScript());
+        Assert.Contains(code, l => l == "firewall_open");
+        Assert.Contains(code, l => l == "firewall_close");
+        // The flush deletes existing :8554 rules so re-assert/subnet-change stays idempotent.
+        Assert.Contains(code, l => l.Contains("iptables -S INPUT") && l.Contains("--dport $CAM_PORT"));
+        Assert.Contains(code, l => l.Contains("sed 's/^-A /-D /'"));
+    }
 }
