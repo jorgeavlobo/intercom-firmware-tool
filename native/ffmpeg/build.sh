@@ -41,7 +41,24 @@ cd "$src" || exit 1
   --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
   --enable-protocol=file,udp,rtp,tcp \
   --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
+  --enable-parser=h264 --enable-parser=hevc \
   --extra-cflags="-Os" --extra-ldflags="-static -s"
+# --enable-parser=h264: the C100X hardware test (issue #120) proved `-c:v copy` DOES need
+# in-stream parameter-set extraction after all. The panel's SDP carries no sprop-parameter-sets,
+# so without the H.264 parser ffmpeg never extracts the SPS: it logs `parser not found for codec
+# h264`, the stream's dimensions stay unset, and the rtsp/rtp muxer aborts with `dimensions not
+# set` / `Could not write header` — go2rtc then serves nothing (RTSP 404). The parser fixes it
+# (and the invalid-timestamp `dropping old packet received too late` flood it also caused). This
+# is exactly the contingency BUILD.md documented as "deferred until the C100X test proves it
+# necessary" — the test proved it.
+# --enable-parser=hevc: a LINK-ONLY dependency, never invoked (we only ever feed H.264). Enabling
+# the H.264 parser pulls h2645_sei.o (via CONFIG_H264_SEI), whose ff_h2645_sei_reset references
+# ff_aom_uninit_film_grain_params. That symbol lives in aom_film_grain.o, which n7.1.1's
+# libavcodec/Makefile compiles ONLY under CONFIG_HEVC_SEI / CONFIG_HEVC_DECODER — NOT under any
+# AV1 target (so `--enable-decoder=av1` does NOT resolve it; the build still fails `ld.lld:
+# undefined symbol`). The lightest lever that pulls CONFIG_HEVC_SEI is the HEVC *parser*
+# (hevc_parser_select="hevcparse hevc_sei"; hevc_sei_select="atsc_a53 golomb" — no decoder, no
+# dovi). All are LGPL FFmpeg components (no --enable-gpl/-nonfree).
 # NB: `rtsp` is deliberately NOT in --enable-protocol — FFmpeg has no `rtsp` URL protocol
 # (RTSP is the demuxer/muxer enabled just above; it runs over tcp/udp/rtp, which ARE listed).
 # `--enable-protocol=rtsp` matched nothing and only added a configure warning (CodeRabbit).
