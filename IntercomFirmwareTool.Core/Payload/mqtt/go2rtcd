@@ -10,9 +10,11 @@
 #                    It reads the panel's cleartext RTP (fanned to 127.0.0.2 by
 #                    btmqttd) via a generated SDP, runs the vendored ffmpeg to copy
 #                    the H.264 into RTSP, and serves it to Home Assistant as a native
-#                    Generic Camera. Reads /etc/btmqttd/go2rtc/go2rtc.yaml. The
-#                    desired state is a marker file (DISABLED); bt_service_watchdog
-#                    reconciles the running process to it each pass via `respawn`.
+#                    Generic Camera. Reads /etc/btmqttd/go2rtc/go2rtc.yaml. Also opens
+#                    the RTSP media port (:8554) in the panel firewall, LAN-source-
+#                    restricted (phase 1c-3). The desired state is a marker file
+#                    (DISABLED); bt_service_watchdog reconciles the running process AND
+#                    re-asserts the firewall rule each pass via `respawn`.
 ### END INIT INFO
 #
 # MIT-licensed, part of IntercomFirmwareTool. A byte-for-byte copy of the btmqttd
@@ -28,6 +30,77 @@ LOGDIR=/var/log/go2rtc
 LOGFILE=$LOGDIR/go2rtc.log
 LOCKDIR=/var/run/go2rtc.lock
 DISABLED=/var/run/go2rtc.disabled
+
+# Firewall (issue #120, phase 1c-3): the RTSP media port + the LAN interface it is served on. The
+# panel enforces a default-deny INPUT chain (`-P INPUT DROP`) and does NOT open :8554, so nothing
+# reaches go2rtc from Home Assistant without a rule. The go2rtc control API (:1984) stays loopback-
+# only and gets NO rule. Only this TCP port is opened, source-restricted to the LAN.
+#
+# Ownership is a DEDICATED chain (FW_CHAIN), the industry-standard mechanism for a userspace program that
+# manages iptables: Docker owns a `DOCKER` chain, kube-proxy owns `KUBE-*` chains, fail2ban owns `f2b-*`
+# chains — all create/flush/populate/delete only THEIR OWN chain plus one jump from a built-in chain, and
+# never touch a foreign rule. We do the same. This is deliberately NOT a `-m comment` tag: the target
+# kernel (Linux 4.9 on the C100X, verified against the firmware sample) ships NO xt_comment match — the
+# userspace parser exists but the kernel REJECTS a `-m comment` rule — so a comment tag would leave :8554
+# permanently closed on the real hardware. A named chain needs no match module and works on every kernel.
+# Ownership is proven, not just named: we manage FW_CHAIN only when WE created it this boot, recorded by a
+# boot-scoped marker (FW_OWN, tmpfs — cleared every reboot together with the ruleset). A fixed chain name
+# is only a namespace convention; if a `GO2RTC` chain already exists when we first run (a foreign chain we
+# did not create), we leave it — and the port — entirely alone rather than flush someone else's chain. So
+# we never touch a rule we do not own. Reconciliation is otherwise STATELESS: every watchdog pass
+# re-asserts our chain's contents from scratch (flush + repopulate), so the chain itself is the state —
+# nothing to drift, and a DHCP subnet change is handled for free. (A second CAP_NET_ADMIN manager could
+# still rewrite the firewall wholesale, but that actor already fully controls netfilter — the same
+# boundary Docker/kube-proxy accept.)
+CAM_PORT=8554
+CAM_IFACE=wlan0
+FW_CHAIN=GO2RTC
+FW_OWN=/var/run/go2rtc.fwown
+
+# Ensure the INPUT jump to our chain exists AND sits LAST — appended AFTER the panel's factory/admin INPUT
+# filters (e.g. the conntrack `--ctstate INVALID -j DROP` guard installed by /etc/network/if-pre-up.d/
+# iptables) but still before the `-P INPUT DROP` policy (evaluated only after all rules). Our ACCEPT
+# therefore never lets traffic bypass a factory or admin filter. Merely checking existence is not enough:
+# the factory rebuild does `-F INPUT` then many `-A INPUT`, so a watchdog pass that appended our jump
+# mid-rebuild would leave it AHEAD of the later-restored filters. So if the jump is missing OR not the
+# last INPUT rule, drain it and re-append at the end — the next pass self-corrects the position within one
+# watchdog interval. Steady state (already last) mutates nothing. Non-matching packets RETURN from
+# our chain and continue INPUT, so the jump never disturbs other traffic.
+fw_jump() {
+	# Capture the listing FIRST and change nothing if it fails — an inspection error (xtables lock,
+	# resource) must not read as "jump out of place" and trigger a destructive drain+re-append that a
+	# failing backend might then leave with no jump at all.
+	inp=$(iptables -w 5 -S INPUT 2>/dev/null) || return 0
+	n=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
+	last=$(printf '%s\n' "$inp" | tail -n 1)
+	# Invariant: EXACTLY ONE INPUT jump, and it is LAST (after the factory/admin filters, before the policy
+	# DROP). Already satisfied → nothing to do. The count check matters: if a stale duplicate remains it is
+	# NOT early-returned, so a failed cleanup below self-heals on a later pass.
+	[ "$n" -eq 1 ] && [ "$last" = "-A INPUT -j $FW_CHAIN" ] && return 0
+	# Ensure a jump exists at the END: if ours isn't already last, APPEND a fresh one FIRST so a jump always
+	# exists during the swap; if that append fails, keep what we have and retry next pass.
+	if [ "$last" != "-A INPUT -j $FW_CHAIN" ]; then
+		iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null || return 0
+	fi
+	# Drop EARLIER duplicate jumps one at a time, RE-COUNTING the LIVE ruleset each iteration so we can
+	# never delete below one — even if a concurrent factory `-F INPUT` flushed the old jumps after our
+	# listing (a stale count would otherwise delete the freshly appended jump). `-D` removes the
+	# first match, so the last jump survives until exactly one remains. Stop on any failure and retry next
+	# pass (a listing failure yields count 0 and also stops, never over-deleting).
+	while [ "$(iptables -w 5 -S INPUT 2>/dev/null | grep -c -- "^-A INPUT -j $FW_CHAIN\$")" -gt 1 ]; do
+		iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null || break
+	done
+}
+
+# Probe whether OUR chain exists, distinguishing a CONFIRMED-absent chain from an inspection error — per
+# iptables(8) DIAGNOSTICS a nonzero exit can also mean a resource/lock error, not just a missing chain.
+# Prints nothing; returns: 0 = exists, 1 = confirmed absent ("No chain…"), 2 = could not determine. A
+# caller must never treat 2 as "absent" (that would relinquish ownership of a chain that may still be ours).
+fw_chain_exists() {
+	out=$(iptables -w 5 -S "$FW_CHAIN" 2>&1) && return 0
+	case "$out" in *"No chain"*) return 1 ;; esac
+	return 2
+}
 
 # PIDs of the actual daemon. `pgrep -x go2rtc` matches the daemon binary; the init
 # script's own shell process has comm "go2rtcd" (the script name), so it is not
@@ -60,11 +133,74 @@ kill_all() {
 	for p in $(daemon_pids); do kill "$sig" "$p" 2>/dev/null; done
 }
 
+# Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent,
+# stateless and DHCP-proof. Ownership first: if FW_CHAIN already exists but we did NOT create it this boot
+# (no FW_OWN marker), it is a FOREIGN chain — return without touching it or the port. Otherwise ensure OUR
+# chain exists (creating it claims ownership for this boot; also recreates it if the panel destroyed it),
+# then re-assert its contents from scratch: flush it (we own it, so this touches nothing foreign) and, if
+# CAM_IFACE currently has an address, add exactly one ACCEPT for tcp/CAM_PORT from that interface's own
+# subnet (derived at runtime; iptables masks the address to its /prefix). With NO address yet (the boot
+# race before DHCP, or a lease drop) the chain is left EMPTY — the port stays closed, never opened
+# interface-wide — and a later pass fills it. A DHCP subnet change is handled for free: the flush drops the
+# old subnet's ACCEPT and the new one is added. Finally ensure the INPUT jump exists (re-added after a
+# panel INPUT flush).
+firewall_open() {
+	command -v iptables >/dev/null 2>&1 || return 0
+	fw_chain_exists; fw_rc=$?
+	if [ "$fw_rc" -eq 2 ]; then
+		return 0                                # inspection error — chain state unknown; change nothing, retry
+	elif [ "$fw_rc" -eq 0 ]; then
+		[ -e "$FW_OWN" ] || return 0            # chain exists but is foreign (not created by us) — leave it
+	else
+		# Chain CONFIRMED absent (fresh boot, or the panel destroyed the chain we owned). Claim ownership
+		# BEFORE (re)creating it — marker-first — so a failed marker write bails here (reaching the lines
+		# below therefore PROVES the marker file is writable). If -N then fails because a GO2RTC chain
+		# appeared in the race window between the probe and here, it is not one we created: RELINQUISH the
+		# marker (the rm cannot fail — same writable file, same pass) and bail, so the next pass treats the
+		# newly appeared chain as foreign and never flushes it.
+		: > "$FW_OWN" 2>/dev/null || return 0
+		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || { rm -f "$FW_OWN" 2>/dev/null || true; return 0; }
+	fi
+	# Require a SUCCESSFUL flush before repopulating: if the xtables lock is contended past the wait and -F
+	# fails, abort this pass rather than append a second ACCEPT on top of the stale one (a later pass
+	# retries). The `-w 5` on every mutating call waits up to 5s for the lock (supported on the target, and
+	# under the ~10s lock-steal threshold), so a spurious failure while the panel touches iptables is rare.
+	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || return 0
+	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
+	[ -n "$lan" ] && iptables -w 5 -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
+		-j ACCEPT 2>/dev/null || true
+	fw_jump
+}
+
+# Close the media port again (service stopped/disabled/not running): tear down everything WE created and
+# nothing else. Only act if we own the chain (FW_OWN marker) — a foreign GO2RTC chain is never touched.
+# Remove the INPUT jump(s) to our chain, then flush and delete the chain (the jump must go before `-X`,
+# which refuses a referenced chain), and drop the ownership marker last. `-X` fails harmlessly if the
+# chain is absent, so a transient failure just leaves our own empty chain to be reaped on a later pass.
+firewall_close() {
+	command -v iptables >/dev/null 2>&1 || return 0
+	[ -e "$FW_OWN" ] || return 0
+	while iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null; do :; done
+	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || true
+	iptables -w 5 -X "$FW_CHAIN" 2>/dev/null || true
+	# Drop ownership ONLY when a SUCCESSFUL listing confirms both the chain and its INPUT jump are gone. A
+	# failed listing (inspection error) or a still-present chain/jump keeps FW_OWN so a later close/respawn
+	# retries the teardown — an inspection failure must never be read as "absent". One `-S`
+	# lists the whole filter table (chain declarations `-N …` and rules `-A …`), so it covers both; capture
+	# it once and bail on failure rather than piping (a failed `-S` into grep would look empty = "gone").
+	rules=$(iptables -w 5 -S 2>/dev/null) || return 0
+	printf '%s\n' "$rules" | grep -q -- "^-A INPUT -j $FW_CHAIN\$" && return 0   # our INPUT jump still present
+	printf '%s\n' "$rules" | grep -q -- "^-N $FW_CHAIN\$" && return 0            # chain still declared
+	rm -f "$FW_OWN" 2>/dev/null || true
+}
+
 # Launch the daemon iff enabled (no marker) and not already running. Caller holds
-# the lock, so this cannot race a concurrent start/stop/respawn.
+# the lock, so this cannot race a concurrent start/stop/respawn. Returns 0 ONLY when
+# it actually backgrounded a new instance (disabled / already-running return 1), so
+# the caller can `wait_running` for a just-launched child before deciding the firewall.
 launch_if_enabled() {
-	[ -e "$DISABLED" ] && return 0
-	is_running && return 0
+	[ -e "$DISABLED" ] && return 1
+	is_running && return 1
 	if [ -L "$LOGDIR" ] || { [ -e "$LOGDIR" ] && [ ! -d "$LOGDIR" ]; }; then
 		rm -f "$LOGDIR"
 	fi
@@ -72,27 +208,50 @@ launch_if_enabled() {
 	chmod 700 "$LOGDIR" 2>/dev/null
 	[ -L "$LOGFILE" ] && rm -f "$LOGFILE"
 	"$DAEMON" -config "$CONFIG" >> "$LOGFILE" 2>&1 &
+	return 0
+}
+
+# Poll briefly for a just-backgrounded daemon to exec $DAEMON. Without this, the is_running check right
+# after a launch can race the child's exec and read "down", so a manual start/restart would close the
+# media port until the next watchdog pass ~60s later. Only ever called after launch_if_enabled
+# reports it launched, so steady-state respawns (already running) never sleep. Bounded to ~5s — well
+# under the ~10s lock-steal threshold — then returns is_running's verdict so a genuinely failed launch
+# still ends with the port closed.
+wait_running() {
+	i=0
+	while ! is_running && [ "$i" -lt 5 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	is_running
 }
 
 case "$1" in
 	start)
-		# Operator/boot intent: enable the service, then launch.
+		# Operator/boot intent: enable the service, launch, then open the media port iff it came up.
 		acquire
 		rm -f "$DISABLED" 2>/dev/null
-		launch_if_enabled
+		launch_if_enabled && wait_running
+		if is_running; then firewall_open; else firewall_close; fi
 		release
 		echo "$NAME started"
 		;;
 	respawn)
 		# Supervisor-only reconcile (bt_service_watchdog). Under the lock: enforce
 		# the desired state - if stopped (marker present) kill any lingering or
-		# racily-started instance; otherwise (re)launch if it is down. Never clears
-		# the marker, so it cannot undo an operator's `stop`.
+		# racily-started instance and close the port; otherwise (re)launch if it is
+		# down and (re)assert the firewall rule — running firewall_open EVERY pass is
+		# what re-opens :8554 after the panel rebuilds/flushes its chain. The rule is
+		# tied to the daemon actually running, so a persistently failed launch (missing
+		# binary/config) leaves no open port. Never clears the marker, so it
+		# cannot undo an operator's `stop`.
 		acquire
 		if [ -e "$DISABLED" ]; then
 			kill_all
+			firewall_close
 		else
-			launch_if_enabled
+			launch_if_enabled && wait_running
+			if is_running; then firewall_open; else firewall_close; fi
 		fi
 		release
 		;;
@@ -112,6 +271,13 @@ case "$1" in
 			i=$((i + 1))
 		done
 		is_running && kill_all -9
+		# Close the media port UNDER the lock so the state/rule cleanup can't interleave with a concurrent
+		# `start`'s firewall_open, and only if we are still the desired-stopped state — an operator `start`
+		# during this shutdown window clears DISABLED and reopens the port, so we must not tear its rule
+		# down. The kill loop above stays outside the lock (short hold, matching btmqttd).
+		acquire
+		[ -e "$DISABLED" ] && firewall_close
+		release
 		echo "done"
 		;;
 	status)
