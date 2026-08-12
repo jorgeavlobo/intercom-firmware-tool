@@ -80,37 +80,41 @@ public class Go2RtcdScriptTests
     [Fact]
     public void Opens_only_the_rtsp_media_port_least_privilege_lan_restricted()
     {
-        // Phase 1c-3: open :8554 on the LAN interface, at the TOP of INPUT (above the panel's policy
-        // DROP), source-restricted to the interface's own subnet. The control API (:1984) must NOT be
-        // opened, and no other port is touched.
+        // Phase 1c-3: open :8554 on the LAN interface, source-restricted to the interface's own subnet.
+        // The control API (:1984) must NOT be opened, and no other port is touched.
         string s = ReadScript();
         string[] code = CodeLines(s);
         Assert.Contains("CAM_PORT=8554", s);
         Assert.Contains("CAM_IFACE=wlan0", s);
-        // Insert (not append) so it sits above the DROP; a specific tcp/dport ACCEPT on the interface.
+        // The ACCEPT lives in OUR chain (so cleanup never touches the panel's policy), matches a specific
+        // tcp/dport on the interface, and is SOURCE-RESTRICTED to the derived LAN subnet.
         Assert.Contains(code, l =>
-            l.Contains("iptables -I INPUT")
+            l.Contains("iptables -A \"$FW_CHAIN\"")
             && l.Contains("-i \"$CAM_IFACE\"")
             && l.Contains("--dport \"$CAM_PORT\"")
+            && l.Contains("-s \"$lan\"")
             && l.Contains("-j ACCEPT"));
-        // LAN source restriction is derived from the interface address at runtime (DHCP-proof).
+        // INPUT jumps to our chain (inserted at the top, above the policy DROP).
+        Assert.Contains(code, l => l.Contains("iptables -I INPUT -j \"$FW_CHAIN\""));
+        // LAN source derived from the interface address at runtime; with no address yet the port is NOT
+        // opened interface-wide (stays LAN-only) — skip until an address is present.
         Assert.Contains(code, l => l.Contains("ip -4 addr show \"$CAM_IFACE\""));
-        Assert.Contains(code, l => l.Contains("src=\"-s $lan\""));
+        Assert.Contains(code, l => l.Contains("[ -n \"$lan\" ] || return 0"));
         // The control API port is loopback-only — no executable line references 1984 (a comment may
         // mention it, so assert on code lines, not the whole script).
         Assert.DoesNotContain(code, l => l.Contains("1984"));
     }
 
     [Fact]
-    public void Firewall_is_reasserted_when_enabled_and_removed_when_stopped()
+    public void Firewall_uses_its_own_chain_tied_to_the_running_daemon()
     {
-        // respawn (every watchdog pass) re-opens the port when enabled and closes it when disabled;
-        // start opens it; stop closes it. Asserted on executable lines so a comment can't satisfy them.
         string[] code = CodeLines(ReadScript());
-        Assert.Contains(code, l => l == "firewall_open");
-        Assert.Contains(code, l => l == "firewall_close");
-        // The flush deletes existing :8554 rules so re-assert/subnet-change stays idempotent.
-        Assert.Contains(code, l => l.Contains("iptables -S INPUT") && l.Contains("--dport $CAM_PORT"));
-        Assert.Contains(code, l => l.Contains("sed 's/^-A /-D /'"));
+        // A dedicated chain owns our rules, so cleanup only flushes OUR chain — never unrelated INPUT rules.
+        Assert.Contains(code, l => l == "FW_CHAIN=GO2RTC");
+        Assert.Contains(code, l => l.Contains("iptables -F \"$FW_CHAIN\""));
+        // The exception is tied to the daemon actually running (a failed launch leaves no open port),
+        // and it is closed on stop/disable.
+        Assert.Contains(code, l => l.Contains("if is_running; then firewall_open"));
+        Assert.Contains(code, l => l.Contains("firewall_close"));
     }
 }

@@ -34,9 +34,11 @@ DISABLED=/var/run/go2rtc.disabled
 # Firewall (issue #120, phase 1c-3): the RTSP media port + the LAN interface it is served on. The
 # panel enforces a default-deny INPUT chain (`-P INPUT DROP`) and does NOT open :8554, so nothing
 # reaches go2rtc from Home Assistant without a rule. The go2rtc control API (:1984) stays loopback-
-# only and gets NO rule. Only this TCP port is opened, source-restricted to the LAN.
+# only and gets NO rule. Only this TCP port is opened, source-restricted to the LAN. Our rule lives in
+# our OWN chain (FW_CHAIN) so cleanup only ever touches rules we created — never the panel's policy.
 CAM_PORT=8554
 CAM_IFACE=wlan0
+FW_CHAIN=GO2RTC
 
 # PIDs of the actual daemon. `pgrep -x go2rtc` matches the daemon binary; the init
 # script's own shell process has comm "go2rtcd" (the script name), so it is not
@@ -69,35 +71,39 @@ kill_all() {
 	for p in $(daemon_pids); do kill "$sig" "$p" 2>/dev/null; done
 }
 
-# Delete every :CAM_PORT ACCEPT rule for CAM_IFACE from the live INPUT chain — a same-subnet
-# re-assert, a DHCP subnet change, or a stale rule. Parses the ruleset (busybox iptables may lack
-# `-C`) and turns each matching `-A INPUT …` into a `-D INPUT …` delete.
-firewall_flush() {
-	iptables -S INPUT 2>/dev/null | grep -- "--dport $CAM_PORT" | grep -- "-i $CAM_IFACE" |
-		while IFS= read -r r; do
-			# Word-splitting on the rule spec is intentional (turn it into iptables args).
-			iptables $(printf '%s' "$r" | sed 's/^-A /-D /') 2>/dev/null || true
-		done
+# Ensure our OWN INPUT sub-chain exists and INPUT jumps to it (idempotent; busybox iptables may lack
+# `-C`, so probe with `iptables -S`). Every rule we add lives in this chain, so re-assert and cleanup
+# only ever touch rules WE created — never the panel's own INPUT policy (deleting rules we don't own
+# would be wrong: CodeRabbit/Codex/Copilot). A non-:8554 packet falls through the chain and RETURNs to
+# INPUT, so the jump is a no-op for all other traffic.
+firewall_ensure_chain() {
+	iptables -nL "$FW_CHAIN" >/dev/null 2>&1 || iptables -N "$FW_CHAIN" 2>/dev/null || true
+	iptables -S INPUT 2>/dev/null | grep -q -- "-j $FW_CHAIN" ||
+		iptables -I INPUT -j "$FW_CHAIN" 2>/dev/null || true
 }
 
-# Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent
-# (flush-then-insert), so it can be re-asserted every watchdog pass to survive the panel rebuilding or
-# flushing its own chain, and it tracks a DHCP subnet change. Inserted at the TOP of INPUT, above the
-# policy DROP. Source-restricted to CAM_IFACE's own subnet (iptables masks the address to its /prefix);
-# falls back to interface-only if the interface has no address yet (the boot race before DHCP).
+# Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent:
+# (re)create our chain + jump, flush OUR chain, then add the single source-restricted ACCEPT — so
+# re-asserting it every watchdog pass tracks a DHCP subnet change and survives the panel flushing INPUT
+# (the jump is re-added). The source is CAM_IFACE's own subnet (iptables masks the address to its
+# /prefix). If the interface has no address yet (the boot race before DHCP) we SKIP rather than open an
+# interface-wide rule that would accept routed off-subnet sources — the port must stay LAN-only, and the
+# next watchdog pass opens it once an address is present (Codex).
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
-	if [ -n "$lan" ]; then src="-s $lan"; else src=""; fi
-	firewall_flush
-	# shellcheck disable=SC2086 # $src is a deliberate, controlled multi-word expansion (or empty).
-	iptables -I INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" $src -j ACCEPT 2>/dev/null || true
+	[ -n "$lan" ] || return 0
+	firewall_ensure_chain
+	iptables -F "$FW_CHAIN" 2>/dev/null || true
+	iptables -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null || true
 }
 
-# Close the media port again (the service is stopped/disabled): remove every ACCEPT we added.
+# Close the media port again (service stopped/disabled/not running): empty OUR chain. The empty chain +
+# its INPUT jump remain (harmless — packets fall through to the panel's policy DROP); no unrelated rule
+# is ever touched.
 firewall_close() {
 	command -v iptables >/dev/null 2>&1 || return 0
-	firewall_flush
+	iptables -F "$FW_CHAIN" 2>/dev/null || true
 }
 
 # Launch the daemon iff enabled (no marker) and not already running. Caller holds
@@ -116,11 +122,11 @@ launch_if_enabled() {
 
 case "$1" in
 	start)
-		# Operator/boot intent: enable the service, then launch + open the media port.
+		# Operator/boot intent: enable the service, launch, then open the media port iff it came up.
 		acquire
 		rm -f "$DISABLED" 2>/dev/null
 		launch_if_enabled
-		firewall_open
+		if is_running; then firewall_open; else firewall_close; fi
 		release
 		echo "$NAME started"
 		;;
@@ -129,15 +135,17 @@ case "$1" in
 		# the desired state - if stopped (marker present) kill any lingering or
 		# racily-started instance and close the port; otherwise (re)launch if it is
 		# down and (re)assert the firewall rule — running firewall_open EVERY pass is
-		# what re-opens :8554 after the panel rebuilds/flushes its chain. Never clears
-		# the marker, so it cannot undo an operator's `stop`.
+		# what re-opens :8554 after the panel rebuilds/flushes its chain. The rule is
+		# tied to the daemon actually running, so a persistently failed launch (missing
+		# binary/config) leaves no open port (Copilot). Never clears the marker, so it
+		# cannot undo an operator's `stop`.
 		acquire
 		if [ -e "$DISABLED" ]; then
 			kill_all
 			firewall_close
 		else
 			launch_if_enabled
-			firewall_open
+			if is_running; then firewall_open; else firewall_close; fi
 		fi
 		release
 		;;
