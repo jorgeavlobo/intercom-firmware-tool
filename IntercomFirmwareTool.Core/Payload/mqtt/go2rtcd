@@ -68,6 +68,16 @@ fw_jump() {
 		|| iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null || true
 }
 
+# Probe whether OUR chain exists, distinguishing a CONFIRMED-absent chain from an inspection error — per
+# iptables(8) DIAGNOSTICS a nonzero exit can also mean a resource/lock error, not just a missing chain.
+# Prints nothing; returns: 0 = exists, 1 = confirmed absent ("No chain…"), 2 = could not determine. A
+# caller must never treat 2 as "absent" (that would relinquish ownership of a chain that may still be ours).
+fw_chain_exists() {
+	out=$(iptables -S "$FW_CHAIN" 2>&1) && return 0
+	case "$out" in *"No chain"*) return 1 ;; esac
+	return 2
+}
+
 # PIDs of the actual daemon. `pgrep -x go2rtc` matches the daemon binary; the init
 # script's own shell process has comm "go2rtcd" (the script name), so it is not
 # matched here. Keep btmqttd's readlink filter anyway — belt-and-suspenders against
@@ -112,14 +122,18 @@ kill_all() {
 # panel INPUT flush).
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
-	if iptables -S "$FW_CHAIN" >/dev/null 2>&1; then
+	fw_chain_exists; fw_rc=$?
+	if [ "$fw_rc" -eq 2 ]; then
+		return 0                                # inspection error — chain state unknown; change nothing, retry
+	elif [ "$fw_rc" -eq 0 ]; then
 		[ -e "$FW_OWN" ] || return 0            # chain exists but is foreign (not created by us) — leave it
 	else
-		# Chain absent (fresh boot, or the panel destroyed the chain we owned). Claim ownership BEFORE
-		# (re)creating it — marker-first — so a failed marker write leaves nothing to orphan. If -N then
-		# fails because a GO2RTC chain appeared in the race window between the probe above and here, it is
-		# not one we created: RELINQUISH the marker and bail, so the next pass treats the newly appeared
-		# chain as foreign and never flushes it (Codex).
+		# Chain CONFIRMED absent (fresh boot, or the panel destroyed the chain we owned). Claim ownership
+		# BEFORE (re)creating it — marker-first — so a failed marker write bails here (reaching the lines
+		# below therefore PROVES the marker file is writable). If -N then fails because a GO2RTC chain
+		# appeared in the race window between the probe and here, it is not one we created: RELINQUISH the
+		# marker (the rm cannot fail — same writable file, same pass) and bail, so the next pass treats the
+		# newly appeared chain as foreign and never flushes it (Codex/CodeRabbit).
 		: > "$FW_OWN" 2>/dev/null || return 0
 		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || { rm -f "$FW_OWN" 2>/dev/null || true; return 0; }
 	fi

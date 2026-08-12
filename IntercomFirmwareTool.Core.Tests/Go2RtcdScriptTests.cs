@@ -111,9 +111,10 @@ public class Go2RtcdScriptTests
     {
         string[] code = CodeLines(ReadScript());
         // The rule is opened only when the daemon is actually running (a failed launch leaves no open
-        // port) and closed on stop/disable/not-running.
+        // port) and closed on stop/disable/not-running. Assert the CALL SITES, not the definition line.
         Assert.Contains(code, l => l.Contains("if is_running; then firewall_open"));
-        Assert.Contains(code, l => l.Contains("firewall_close"));
+        Assert.Contains(code, l => l.Contains("else firewall_close"));   // not-running / disabled respawn
+        Assert.Contains(code, l => l == "firewall_close");               // disabled branch (bare call)
     }
 
     [Fact]
@@ -132,9 +133,10 @@ public class Go2RtcdScriptTests
         // open manages OUR chain: create (idempotent), flush (we own it), the ACCEPT, then the INPUT jump.
         Assert.Contains(code, l => l.Contains("iptables -w 5 -N \"$FW_CHAIN\""));
         Assert.Contains(code, l => l.Contains("iptables -w 5 -F \"$FW_CHAIN\""));
-        // The jump is APPENDED (after the panel's factory filters), never inserted at the top.
+        // The jump is APPENDED (after the panel's factory filters), never inserted — any `-I INPUT` form
+        // (with or without an explicit position) inserts at the top and would bypass a factory filter.
         Assert.Contains(code, l => l.Contains("iptables -w 5 -A INPUT -j \"$FW_CHAIN\""));
-        Assert.DoesNotContain(code, l => l.Contains("-I INPUT 1"));
+        Assert.DoesNotContain(code, l => l.Contains("-I INPUT"));
         // The ONLY thing we ever add to INPUT is the jump to our chain — never a bare rule in INPUT.
         foreach (var l in System.Text.RegularExpressions.Regex.Split(joined, "\n"))
             if (l.Contains(" -A INPUT ") || l.Contains(" -I INPUT "))
@@ -161,14 +163,19 @@ public class Go2RtcdScriptTests
         int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         string openBody = s.Substring(oOpen, cOpen - oOpen);
         string closeBody = s.Substring(cOpen);
+        // A three-state existence probe distinguishes a CONFIRMED-absent chain from an inspection error,
+        // so a transient `iptables -S` failure never sends us into the create/relinquish path.
+        Assert.Contains("fw_chain_exists()", s);
+        Assert.Contains("case \"$out\" in *\"No chain\"*) return 1 ;; esac", s);
+        Assert.Contains("[ \"$fw_rc\" -eq 2 ]", openBody);  // inspection error → change nothing
         // open: if the chain already exists but we hold no ownership marker, bail before any flush/populate.
-        int existsCheck = openBody.IndexOf("iptables -S \"$FW_CHAIN\" >/dev/null 2>&1", System.StringComparison.Ordinal);
+        int probe = openBody.IndexOf("fw_chain_exists; fw_rc=$?", System.StringComparison.Ordinal);
         int foreignBail = openBody.IndexOf("[ -e \"$FW_OWN\" ] || return 0", System.StringComparison.Ordinal);
         int claim = openBody.IndexOf(": > \"$FW_OWN\"", System.StringComparison.Ordinal);
         int flush = openBody.IndexOf("iptables -w 5 -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
-        Assert.True(existsCheck >= 0 && foreignBail > existsCheck && foreignBail < flush,
+        Assert.True(probe >= 0 && foreignBail > probe && foreignBail < flush,
             "open must bail on a foreign chain (ownership check before any flush)");
-        Assert.True(claim > existsCheck && claim < flush, "open claims ownership when it creates the chain");
+        Assert.True(claim > probe && claim < flush, "open claims ownership when it creates the chain");
         // close: guarded by the ownership marker before any teardown of the chain/jump.
         int closeGuard = closeBody.IndexOf("[ -e \"$FW_OWN\" ] || return 0", System.StringComparison.Ordinal);
         int delJump = closeBody.IndexOf("iptables -w 5 -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal);
