@@ -193,6 +193,10 @@ public class Go2RtcdScriptTests
         int claim = openBody.IndexOf(": > \"$FW_OWN\" 2>/dev/null || return 0", System.StringComparison.Ordinal);
         int create = openBody.IndexOf("iptables -w 5 -N \"$FW_CHAIN\" 2>/dev/null || { rm -f \"$FW_OWN\"", System.StringComparison.Ordinal);
         Assert.True(claim >= 0 && create > claim, "ownership must be claimed before the chain is created");
+        // The "recreate our vanished chain" branch requires -N to SUCCEED — it must not flush a chain that
+        // appeared between the existence probe and the create (TOCTOU on the chain name).
+        Assert.Contains("elif [ -e \"$FW_OWN\" ]; then", openBody);
+        Assert.Contains("iptables -w 5 -N \"$FW_CHAIN\" 2>/dev/null || return 0", openBody);
         // (2) close captures ONE listing, bails on its failure, and confirms both objects gone before drop.
         int listing = closeBody.IndexOf("rules=$(iptables -S 2>/dev/null) || return 0", System.StringComparison.Ordinal);
         int jumpChk = closeBody.IndexOf("grep -q -- \"-j $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);

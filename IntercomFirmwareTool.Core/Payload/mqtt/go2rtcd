@@ -115,7 +115,10 @@ firewall_open() {
 	if iptables -S "$FW_CHAIN" >/dev/null 2>&1; then
 		[ -e "$FW_OWN" ] || return 0            # chain exists but is foreign (not created by us) — leave it
 	elif [ -e "$FW_OWN" ]; then
-		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || true   # our chain vanished (panel flush) — recreate it
+		# We own a chain this boot but it is gone (panel flush) — recreate it. Require -N to SUCCEED: if a
+		# chain named GO2RTC appeared between the probe above and here, it may be foreign, so bail rather
+		# than flush a chain we did not just create (Codex). The next pass re-probes and handles it.
+		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || return 0
 	else
 		# Fresh: claim ownership BEFORE creating the chain, so a failed marker write (/var/run full or
 		# read-only) leaves nothing to orphan — we simply do not manage the port this pass (Codex/CodeRabbit).
