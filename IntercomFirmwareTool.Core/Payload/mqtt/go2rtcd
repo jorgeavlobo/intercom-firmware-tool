@@ -57,15 +57,19 @@ CAM_IFACE=wlan0
 FW_CHAIN=GO2RTC
 FW_OWN=/var/run/go2rtc.fwown
 
-# Ensure the INPUT jump to our chain exists (only if absent, so we never accumulate duplicates). APPEND it
-# (not insert-at-top) so it sits AFTER the panel's existing INPUT filters — e.g. the factory conntrack
-# `--ctstate INVALID -j DROP` guard installed by /etc/network/if-pre-up.d/iptables — while still preceding
-# the `-P INPUT DROP` policy (evaluated only after all rules). Our ACCEPT therefore never lets traffic
-# bypass a factory or admin filter (Codex). Non-matching packets RETURN from our chain and continue INPUT,
-# so the jump never disturbs other traffic; it is re-added after the panel flushes INPUT.
+# Ensure the INPUT jump to our chain exists AND sits LAST — appended AFTER the panel's factory/admin INPUT
+# filters (e.g. the conntrack `--ctstate INVALID -j DROP` guard installed by /etc/network/if-pre-up.d/
+# iptables) but still before the `-P INPUT DROP` policy (evaluated only after all rules). Our ACCEPT
+# therefore never lets traffic bypass a factory or admin filter. Merely checking existence is not enough:
+# the factory rebuild does `-F INPUT` then many `-A INPUT`, so a watchdog pass that appended our jump
+# mid-rebuild would leave it AHEAD of the later-restored filters. So if the jump is missing OR not the
+# last INPUT rule, drain it and re-append at the end — the next pass self-corrects the position within one
+# watchdog interval (Codex). Steady state (already last) mutates nothing. Non-matching packets RETURN from
+# our chain and continue INPUT, so the jump never disturbs other traffic.
 fw_jump() {
-	iptables -S INPUT 2>/dev/null | grep -q -- "-j $FW_CHAIN\$" \
-		|| iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null || true
+	[ "$(iptables -S INPUT 2>/dev/null | tail -n 1)" = "-A INPUT -j $FW_CHAIN" ] && return 0
+	while iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null; do :; done
+	iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null || true
 }
 
 # Probe whether OUR chain exists, distinguishing a CONFIRMED-absent chain from an inspection error — per
