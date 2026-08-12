@@ -779,7 +779,14 @@ namespace IntercomFirmwareTool.App
             string guide = onDevice
                 ? Go2RtcConfig.BuildOnDeviceSetupGuide(opts, MqttInstaller.OnDeviceStreamName)
                 : Go2RtcConfig.BuildSetupGuide(opts, NullIfEmpty(TxtMqttHaNodeId.Text.Trim()) ?? "doorbell");
-            try { Clipboard.SetText(guide); } catch { /* clipboard may be busy; still show the text */ }
+            // The on-device guide carries the RTSP password → copy via SecureClipboard (excluded from
+            // Clipboard History / cloud sync); the off-device guide is plain config with no secret.
+            try
+            {
+                if (onDevice) SecureClipboard.SetText(guide);
+                else Clipboard.SetText(guide);
+            }
+            catch { /* clipboard may be busy; still show the text */ }
             MessageBox.Show(this, guide, L("Cap_MqttGo2Rtc"),
                 MessageBoxButton.OK, MessageBoxImage.Information);
         }
