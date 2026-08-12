@@ -142,7 +142,9 @@ public class Go2RtcdScriptTests
         // first and a failed `iptables -S INPUT` changes nothing (an inspection error must not trigger a
         // destructive drain+re-append).
         Assert.Contains("inp=$(iptables -S INPUT 2>/dev/null) || return 0", s);
-        Assert.Contains("tail -n 1)\" = \"-A INPUT -j $FW_CHAIN\"", s);
+        // The early-return is COUNT-AWARE: only exactly-one-jump-and-last is "already correct", so a stale
+        // duplicate is never early-returned and a failed cleanup self-heals on a later pass.
+        Assert.Contains("[ \"$n\" -eq 1 ] && [ \"$last\" = \"-A INPUT -j $FW_CHAIN\" ] && return 0", s);
         // On a reposition, the fresh jump is APPENDED before the older one(s) are deleted, so a jump to our
         // chain always exists during the swap (no window with none, even if the re-append were to fail).
         int fjStart = s.IndexOf("fw_jump()", System.StringComparison.Ordinal);
@@ -152,6 +154,9 @@ public class Go2RtcdScriptTests
             fj.IndexOf("iptables -w 5 -A INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal)
             < fj.IndexOf("iptables -w 5 -D INPUT -j \"$FW_CHAIN\"", System.StringComparison.Ordinal),
             "fw_jump must append the new jump before deleting older ones");
+        // A failed duplicate-delete stops the loop (`|| return 0`) so a later pass retries rather than
+        // decrementing past the remaining duplicate.
+        Assert.Contains("iptables -w 5 -D INPUT -j \"$FW_CHAIN\" 2>/dev/null || return 0", fj);
         // The ONLY thing we ever add to INPUT is the jump to our chain — never a bare rule in INPUT.
         foreach (var l in System.Text.RegularExpressions.Regex.Split(joined, "\n"))
             if (l.Contains(" -A INPUT ") || l.Contains(" -I INPUT "))

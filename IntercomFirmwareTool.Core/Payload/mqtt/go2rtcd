@@ -71,15 +71,26 @@ fw_jump() {
 	# resource) must not read as "jump out of place" and trigger a destructive drain+re-append that a
 	# failing backend might then leave with no jump at all (CodeRabbit).
 	inp=$(iptables -S INPUT 2>/dev/null) || return 0
-	[ "$(printf '%s\n' "$inp" | tail -n 1)" = "-A INPUT -j $FW_CHAIN" ] && return 0
-	# Jump missing or not last. APPEND a fresh jump at the end FIRST, so a jump to our chain always exists
-	# during the swap (never a window with none), THEN drop the earlier instance(s) so exactly one remains.
-	# If the append fails we delete nothing — any pre-existing jump stays and the next pass retries (Copilot).
-	old=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
-	iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null || return 0
-	while [ "$old" -gt 0 ]; do
-		iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null || true
-		old=$((old - 1))
+	n=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
+	last=$(printf '%s\n' "$inp" | tail -n 1)
+	# Invariant: EXACTLY ONE INPUT jump, and it is LAST (after the factory/admin filters, before the policy
+	# DROP). Already satisfied → nothing to do. The count check matters: if a stale duplicate remains it is
+	# NOT early-returned, so a failed cleanup below self-heals on a later pass (CodeRabbit).
+	[ "$n" -eq 1 ] && [ "$last" = "-A INPUT -j $FW_CHAIN" ] && return 0
+	# Converge. If our jump is not already last, APPEND a fresh one at the end FIRST (so a jump always
+	# exists during the swap); if that append fails, keep what we have and retry next pass. Then drop every
+	# EARLIER instance so exactly one (the last) remains, stopping on a failed delete so a later pass retries
+	# (the invariant above won't early-return while a duplicate remains).
+	if [ "$last" = "-A INPUT -j $FW_CHAIN" ]; then
+		del=$((n - 1))
+	elif iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null; then
+		del=$n
+	else
+		return 0
+	fi
+	while [ "$del" -gt 0 ]; do
+		iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null || return 0
+		del=$((del - 1))
 	done
 }
 
