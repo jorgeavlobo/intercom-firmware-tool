@@ -86,81 +86,77 @@ public class Go2RtcdScriptTests
         string[] code = CodeLines(s);
         Assert.Contains("CAM_PORT=8554", s);
         Assert.Contains("CAM_IFACE=wlan0", s);
-        // The ACCEPT lives in OUR minted chain (so cleanup never touches the panel's policy), matches a
-        // specific tcp/dport on the interface, and is SOURCE-RESTRICTED to the derived LAN subnet.
+        // Our single INPUT rule is inserted at the TOP (above the policy DROP), matches a specific
+        // tcp/dport on the interface, and is SOURCE-RESTRICTED to the derived LAN subnet.
         Assert.Contains(code, l =>
-            l.Contains("iptables -A \"$c\"")
+            l.Contains("iptables -I INPUT")
             && l.Contains("-i \"$CAM_IFACE\"")
             && l.Contains("--dport \"$CAM_PORT\"")
             && l.Contains("-s \"$lan\"")
             && l.Contains("-j ACCEPT"));
-        // INPUT jumps to our chain (inserted at the top, above the policy DROP).
-        Assert.Contains(code, l => l.Contains("iptables -I INPUT -j \"$1\""));
         // LAN source derived from the interface address at runtime; with no address yet the port is NOT
-        // opened interface-wide (stays LAN-only) — skip until an address is present.
+        // opened interface-wide (stays LAN-only) — bail before inserting when there is no address.
         Assert.Contains(code, l => l.Contains("ip -4 addr show \"$CAM_IFACE\""));
-        Assert.Contains(code, l => l.Contains("[ -n \"$lan\" ] || return 0"));
+        Assert.Contains(code, l => l.Contains("[ -n \"$lan\" ]") && l.Contains("return 0"));
         // The control API port is loopback-only — no executable line references 1984 (a comment may
         // mention it, so assert on code lines, not the whole script).
         Assert.DoesNotContain(code, l => l.Contains("1984"));
     }
 
     [Fact]
-    public void Firewall_uses_its_own_chain_tied_to_the_running_daemon()
+    public void Firewall_is_tied_to_the_running_daemon()
     {
         string[] code = CodeLines(ReadScript());
-        // A dedicated (minted) chain owns our rules, so cleanup only flushes OUR chain — never unrelated
-        // INPUT rules.
-        Assert.Contains(code, l => l == "FW_BASE=GO2RTC");
-        Assert.Contains(code, l => l.Contains("iptables -F \"$c\""));
-        // The exception is tied to the daemon actually running (a failed launch leaves no open port),
-        // and it is closed on stop/disable.
+        // The rule is opened only when the daemon is actually running (a failed launch leaves no open
+        // port) and closed on stop/disable/not-running.
         Assert.Contains(code, l => l.Contains("if is_running; then firewall_open"));
         Assert.Contains(code, l => l.Contains("firewall_close"));
     }
 
     [Fact]
-    public void Owns_its_chain_by_an_unguessable_per_boot_name()
+    public void Manages_only_its_own_exact_rule_never_a_chain()
     {
-        // CodeRabbit/Codex/Copilot converged: NOTHING about a chain's name or contents can prove we
-        // created it — a same-named chain can be pre-created empty, hold a look-alike rule, or be deleted
-        // and recreated. So ownership is made intrinsic to an UNGUESSABLE per-boot chain name
-        // (GO2RTC_<nonce>): no other component can collide with, recreate, or spoof it, so we manage
-        // exactly our own chain and never touch anyone else's.
-        string s = ReadScript();
-        string[] code = CodeLines(s);
-        // No fixed, guessable chain name is used anymore; the base is only a prefix.
-        Assert.DoesNotContain(code, l => l.StartsWith("FW_CHAIN="));
-        Assert.Contains(code, l => l == "FW_BASE=GO2RTC");
-        // The minted name is persisted in a tmpfs marker (cleared every boot with the ruleset).
-        Assert.Contains(code, l => l.StartsWith("FW_OWN=") && l.Contains("/var/run/"));
-        // The nonce comes from the kernel RNG, and the minted name is written to / read back from FW_OWN.
-        Assert.Contains(code, l => l.Contains("fw_chain()"));
-        Assert.Contains(code, l => l.Contains("/dev/urandom"));
-        Assert.Contains(code, l => l.Contains("> \"$FW_OWN\""));
-        Assert.Contains(code, l => l.Contains("cat \"$FW_OWN\""));
-        // No content/shape ownership heuristic remains.
-        Assert.DoesNotContain(code, l => l.Contains("firewall_chain_is_ours"));
-        // The INPUT jump match is END-ANCHORED to the exact target, so a similarly-named chain (e.g.
-        // GO2RTC_BACKUP) cannot masquerade as ours and suppress the real jump (Codex).
-        Assert.Contains(code, l => l.Contains("grep -qE -- \"-j $1\\$\""));
+        // CodeRabbit/Codex/Copilot converged: iptables exposes no stable chain identity, so any design
+        // that created/flushed/reused a named chain could never prove a same-named chain (observed,
+        // deleted, recreated by another component) was still ours. We sidestep it: manage exactly ONE
+        // fully-specified INPUT rule — add/delete only our complete spec — so no chain ownership is ever
+        // in question and no rule we didn't create is ever touched.
+        string[] code = CodeLines(ReadScript());
+        // No sub-chain machinery at all: no create, no flush, no jump, no named GO2RTC chain.
+        Assert.DoesNotContain(code, l => l.Contains("iptables -N"));
+        Assert.DoesNotContain(code, l => l.Contains("iptables -F"));
+        Assert.DoesNotContain(code, l => l.Contains("-j GO2RTC") || l.Contains("GO2RTC"));
+        Assert.DoesNotContain(code, l => l.Contains("firewall_ensure_chain") || l.Contains("firewall_chain_is_ours"));
+        // Deletion names the FULL spec (interface + proto + dport + source + ACCEPT), so it can only ever
+        // match a rule we inserted — never a differently-specified rule someone else added.
+        Assert.Contains(code, l =>
+            l.Contains("iptables -D INPUT")
+            && l.Contains("-i \"$CAM_IFACE\"")
+            && l.Contains("--dport \"$CAM_PORT\"")
+            && l.Contains("-s \"$1\"")
+            && l.Contains("-j ACCEPT"));
+        // The applied source subnet is remembered in tmpfs so a DHCP change deletes the OLD rule exactly.
+        Assert.Contains(code, l => l.StartsWith("FW_STATE=") && l.Contains("/var/run/"));
     }
 
     [Fact]
-    public void Flushes_the_chain_before_the_no_address_bailout_so_no_stale_rule_survives()
+    public void Removes_any_prior_rule_before_opening_so_no_stale_rule_survives()
     {
-        // Codex: if wlan0 loses its address after a rule was installed, returning early WITHOUT flushing
-        // would leave a stale ACCEPT for the old subnet — which could admit off-subnet sources once the
-        // address returns on a different prefix. The flush must precede the no-address return.
+        // Codex: if wlan0 changes subnet or loses its address, the previously-applied rule must be removed
+        // (not left stranded to admit off-subnet sources on a new prefix). firewall_open deletes the prior
+        // rule first, and with no address it inserts nothing and clears the remembered state.
         string script = ReadScript().Replace("\r\n", "\n");
         int open = script.IndexOf("firewall_open()", System.StringComparison.Ordinal);
         int close = script.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         Assert.True(open >= 0 && close > open);
         string body = script.Substring(open, close - open);
-        int flush = body.IndexOf("iptables -F \"$c\"", System.StringComparison.Ordinal);
-        int noAddr = body.IndexOf("[ -n \"$lan\" ] || return 0", System.StringComparison.Ordinal);
-        Assert.True(flush >= 0 && noAddr >= 0);
-        Assert.True(flush < noAddr, "the chain flush must come before the no-address early return");
+        // The prior rule is dropped (fw_del of the remembered subnet) before we decide anything else.
+        int delPrev = body.IndexOf("fw_del \"$prev\"", System.StringComparison.Ordinal);
+        int insert = body.IndexOf("iptables -I INPUT", System.StringComparison.Ordinal);
+        Assert.True(delPrev >= 0 && insert >= 0);
+        Assert.True(delPrev < insert, "the prior rule must be deleted before a new one is inserted");
+        // With no address we bail WITHOUT inserting (and clear the state) so the port stays closed.
+        Assert.Contains(CodeLines(body), l => l.Contains("[ -n \"$lan\" ]") && l.Contains("return 0"));
     }
 
     [Fact]

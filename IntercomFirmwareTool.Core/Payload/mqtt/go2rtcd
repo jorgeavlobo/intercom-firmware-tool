@@ -35,30 +35,27 @@ DISABLED=/var/run/go2rtc.disabled
 # panel enforces a default-deny INPUT chain (`-P INPUT DROP`) and does NOT open :8554, so nothing
 # reaches go2rtc from Home Assistant without a rule. The go2rtc control API (:1984) stays loopback-
 # only and gets NO rule. Only this TCP port is opened, source-restricted to the LAN.
+#
+# We manage exactly ONE fully-specified INPUT rule and nothing else: no sub-chain, no flush, no policy
+# change. Every mutation names the COMPLETE rule (interface + proto + dport + source subnet + ACCEPT),
+# so we can only ever add or delete OUR OWN rule — never a rule belonging to the panel or anyone else.
+# This sidesteps chain "ownership" entirely: iptables exposes no stable chain identity, so any design
+# that flushed or reused a named chain could never prove a same-named chain was still ours after it was
+# observed, deleted, and recreated (CodeRabbit/Codex/Copilot). Managing our own exact rule needs no such
+# proof. (A second CAP_NET_ADMIN manager could still rewrite the firewall wholesale, but that actor
+# already fully controls netfilter — no userspace script can defend a rule against it; this is the same
+# boundary Docker/kube-proxy accept.)
 CAM_PORT=8554
 CAM_IFACE=wlan0
-# Ownership by UNGUESSABLE NAME. iptables chains carry no owner metadata, and NOTHING about a chain's
-# name or contents can prove we created it: a same-named chain can be pre-created empty, hold a
-# look-alike rule, or be deleted and recreated by another component (CodeRabbit/Codex/Copilot). So we
-# do not reuse a fixed, guessable name. Each boot we mint a random chain name `GO2RTC_<nonce>` and keep
-# the nonce in a tmpfs marker (cleared every boot with the ruleset, like LOCKDIR/DISABLED). The name
-# itself is the ownership capability: no other component can collide with, recreate, or spoof a chain
-# whose random suffix lives only in this root-only file — so we manage exactly our own chain and never
-# touch anyone else's. FW_BASE is only a human-readable prefix; FW_OWN holds the full minted name.
-FW_BASE=GO2RTC
-FW_OWN=/var/run/go2rtc.fwown
+# Remembers the exact source subnet of the rule we last inserted (tmpfs, cleared every boot with the
+# ruleset), so a DHCP subnet change deletes the OLD rule precisely instead of leaving it stranded.
+FW_STATE=/var/run/go2rtc.fwrule
 
-# Echo our per-boot chain name, minting it (and persisting it in FW_OWN) on first use. The suffix comes
-# from the kernel RNG; the fallbacks keep the service working even if a source is missing (a non-random
-# fallback is still per-boot-unique and only weakens the paranoid same-name-collision case, never
-# functionality). Called only from the open path — i.e. only when WE intend to own a chain this boot.
-fw_chain() {
-	if [ -s "$FW_OWN" ]; then cat "$FW_OWN"; return 0; fi
-	n=$(od -An -N4 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
-	[ -n "$n" ] || n=$(tr -d '-' < /proc/sys/kernel/random/uuid 2>/dev/null | cut -c1-8)
-	[ -n "$n" ] || n=$$
-	printf '%s_%s' "$FW_BASE" "$n" > "$FW_OWN" 2>/dev/null || true
-	cat "$FW_OWN" 2>/dev/null
+# Delete every instance of our exact rule for source $1 (`-D` removes one match per call, so loop to
+# drain duplicates). The full spec below can only ever match a rule we inserted — never a
+# differently-specified rule someone else added.
+fw_del() {
+	while iptables -D INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$1" -j ACCEPT 2>/dev/null; do :; done
 }
 
 # PIDs of the actual daemon. `pgrep -x go2rtc` matches the daemon binary; the init
@@ -92,47 +89,35 @@ kill_all() {
 	for p in $(daemon_pids); do kill "$sig" "$p" 2>/dev/null; done
 }
 
-# Ensure our own sub-chain ($1 = its minted name) exists and INPUT jumps to it exactly once. Idempotent;
-# busybox iptables may lack `-C`, so probe existence with `iptables -nL` and the jump with `iptables -S`.
-# The jump match is END-ANCHORED to the exact target (`-j <chain>$`) so a similarly-named chain can never
-# masquerade as ours and suppress the real jump (Codex). A non-:8554 packet falls through the chain and
-# RETURNs to INPUT, so the jump is a no-op for all other traffic. If another component deleted our chain,
-# the `-N` here recreates it under the SAME minted name (self-heal) — still ours, since only we hold the
-# nonce.
-firewall_ensure_chain() {
-	iptables -nL "$1" >/dev/null 2>&1 || iptables -N "$1" 2>/dev/null || true
-	iptables -S INPUT 2>/dev/null | grep -qE -- "-j $1\$" ||
-		iptables -I INPUT -j "$1" 2>/dev/null || true
-}
-
-# Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent:
-# resolve OUR minted chain, (re)create it + its jump, flush it, then add the single source-restricted
-# ACCEPT — so re-asserting it every watchdog pass tracks a DHCP subnet change and survives the panel
-# flushing INPUT (the jump is re-added) or deleting our chain (it is recreated under the same name). The
-# source is CAM_IFACE's own subnet (iptables masks the address to its /prefix). The FLUSH happens BEFORE
-# the no-address check: if the interface has no address yet (the boot race before DHCP, or a lease drop)
-# we leave the chain EMPTY (port closed) instead of stranding a stale ACCEPT for an old subnet that could
-# still admit off-subnet sources after the address returns on a different prefix — the port must stay
-# LAN-only (Codex). The next watchdog pass re-opens it once an address is present.
+# Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent
+# and DHCP-proof: drop the previously-applied rule if its subnet changed, then ensure exactly one current
+# rule exists (drain any duplicates, then insert one at the TOP so it sits above the policy DROP). The
+# source is CAM_IFACE's own subnet, derived at runtime (iptables masks the address to its /prefix). With
+# no address yet (the boot race before DHCP, or a lease drop) we add NO rule — the port stays closed,
+# never opened interface-wide, and any prior rule is removed so nothing stale survives an address change
+# (Codex) — the next watchdog pass opens it once an address is present. Re-running every pass also re-adds
+# the rule after the panel flushes INPUT. No `-C` (busybox iptables may lack it): drain-then-insert gives
+# idempotency without it.
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
-	c=$(fw_chain)
-	[ -n "$c" ] || return 0
-	firewall_ensure_chain "$c"
-	iptables -F "$c" 2>/dev/null || true
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
-	[ -n "$lan" ] || return 0
-	iptables -A "$c" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null || true
+	prev=""
+	[ -s "$FW_STATE" ] && prev=$(cat "$FW_STATE")
+	[ -n "$prev" ] && [ "$prev" != "$lan" ] && fw_del "$prev"
+	[ -n "$lan" ] || { rm -f "$FW_STATE" 2>/dev/null; return 0; }
+	fw_del "$lan"
+	iptables -I INPUT -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null || true
+	printf '%s' "$lan" > "$FW_STATE" 2>/dev/null || true
 }
 
-# Close the media port again (service stopped/disabled/not running): empty OUR chain. Only ever touches
-# the chain whose minted name is in FW_OWN — a name no other component can hold — so no unrelated rule is
-# ever affected. If we never minted one this boot (no marker) there is nothing to do. The empty chain +
-# its INPUT jump remain (harmless — packets fall through to the panel's policy DROP).
+# Close the media port again (service stopped/disabled/not running): delete the exact rule we last
+# inserted, then forget it. Only ever matches our own full spec, so nothing else is touched. If we never
+# inserted one this boot (no state) there is nothing to do.
 firewall_close() {
 	command -v iptables >/dev/null 2>&1 || return 0
-	[ -s "$FW_OWN" ] || return 0
-	iptables -F "$(cat "$FW_OWN")" 2>/dev/null || true
+	[ -s "$FW_STATE" ] || return 0
+	fw_del "$(cat "$FW_STATE")"
+	rm -f "$FW_STATE" 2>/dev/null || true
 }
 
 # Launch the daemon iff enabled (no marker) and not already running. Caller holds
