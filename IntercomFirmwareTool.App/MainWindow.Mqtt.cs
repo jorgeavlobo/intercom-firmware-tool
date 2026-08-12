@@ -97,33 +97,21 @@ namespace IntercomFirmwareTool.App
         private string? _lastCameraHostOverride;
 
         // On-device media server (issue #120): the fixed RTSP username + a strong random per-install
-        // password. Two slots keep the credential both RECOVERABLE and DISTINCT per unit:
-        //  - _cameraRtspInstalled: the credential of the last SUCCESSFULLY-built on-device image — what
-        //    "Show go2rtc config" displays so the user can recover the secret on that unit. Updated ONLY
-        //    after a build passes RoundTripAllPass, so a later FAILED build never destroys it.
-        //  - _cameraRtspCandidate: the credential the NEXT build will install (generated lazily; a preview
-        //    and the build that follows it share it). Promoted to _installed and cleared on a successful
-        //    build, so the next unit gets a fresh, distinct password.
+        // password. ONE candidate is generated lazily and used by BOTH the "Show go2rtc config" preview
+        // and the build that follows it, so the preview ALWAYS matches what the next build installs. On a
+        // successful on-device build the credential is surfaced in the build result (the guide dialog +
+        // clipboard) — the recoverable copy — and then rotated, so the next unit gets a fresh, distinct
+        // password. A failed or off-device build never rotates, so nothing is lost.
         private const string CameraRtspUsername = "camera";
-        private string? _cameraRtspInstalled;
-        private string? _cameraRtspCandidate;
+        private string? _cameraRtspPass;
 
-        /// <summary>The candidate on-device RTSP password the NEXT build will install (generated once,
-        /// stable across a preview and the build that follows it).</summary>
-        private string CameraRtspCandidate() => _cameraRtspCandidate ??= MqttInstaller.GenerateRtspPassword();
+        /// <summary>The candidate on-device RTSP password — shown by the preview and installed by the next
+        /// build (one value, so they always agree). Generated once and cached until a build rotates it.</summary>
+        private string CameraRtspPassword() => _cameraRtspPass ??= MqttInstaller.GenerateRtspPassword();
 
-        /// <summary>The password "Show go2rtc config" should display: the last successfully-installed
-        /// credential if there is one (so it stays recoverable — even after an unrelated later build
-        /// fails), otherwise the pending candidate the first build will install.</summary>
-        private string CameraRtspPasswordForGuide() => _cameraRtspInstalled ?? CameraRtspCandidate();
-
-        /// <summary>After a successful on-device build: promote the built candidate to "installed" (what
-        /// the guide now shows) and clear the candidate so the NEXT build mints a fresh, distinct one.</summary>
-        private void OnCameraRtspPasswordInstalled()
-        {
-            _cameraRtspInstalled = _cameraRtspCandidate;
-            _cameraRtspCandidate = null;
-        }
+        /// <summary>After a successful on-device build (whose credential was just surfaced in the build
+        /// result), discard the candidate so the NEXT build mints a fresh, distinct per-install secret.</summary>
+        private void RotateCameraRtspPassword() => _cameraRtspPass = null;
 
         // Active LAN broker discovery (#43, follow-up 2). mDNS runs in the background at
         // startup; the /24 scan is a heavier fallback run at most once, when the bridge is
@@ -647,7 +635,7 @@ namespace IntercomFirmwareTool.App
 
             // Generate + cache the credential the moment on-device is chosen, so it is stable for both
             // the build (BuildMqttOptions) and the "Show go2rtc config" guide.
-            if (onDevice) _ = CameraRtspCandidate();
+            if (onDevice) _ = CameraRtspPassword();
         }
 
         /// <summary>"Use a different go2rtc host": unlock the target field for a manual (IPv4) entry.
@@ -778,11 +766,10 @@ namespace IntercomFirmwareTool.App
                     ? NullIfEmpty(TxtMqttCameraTarget.Text.Trim()) : null,
                 CameraVideoPort = vp,
                 CameraAudioPort = ap,
-                // On-device RTSP credentials for the guide: the last-installed credential if a unit was
-                // already built (so the shown URL recovers that unit's secret), else the pending candidate
-                // the first build will install.
+                // On-device RTSP credentials for the guide: the candidate the NEXT build will install, so
+                // the previewed URL matches the credential that build writes to the panel.
                 CameraRtspUser = CameraRtspUsername,
-                CameraRtspPass = onDevice ? CameraRtspPasswordForGuide() : null,
+                CameraRtspPass = onDevice ? CameraRtspPassword() : null,
             };
             // On-device: nothing to paste — show the Home Assistant RTSP URL + credentials, using the
             // EXACT stream name the installer writes (MqttInstaller.OnDeviceStreamName), NOT the HA node
@@ -1799,11 +1786,11 @@ namespace IntercomFirmwareTool.App
                 CameraVideoPort = camVideoPort,
                 CameraAudioPort = camAudioPort,
                 // On-device RTSP credentials (#120): a fixed username + the candidate per-install password
-                // this build will install. Only meaningful on-device (Core ignores them otherwise). On a
-                // successful build it is promoted to "installed" so the next build mints a fresh one.
+                // this build installs. Only meaningful on-device (Core ignores them otherwise). On a
+                // successful build the credential is surfaced in the build result and then rotated.
                 CameraRtspUser = CameraRtspUsername,
                 CameraRtspPass = (ChkMqttCamera.IsChecked == true && ChkMqttCameraOnDevice.IsChecked == true)
-                    ? CameraRtspCandidate() : null,
+                    ? CameraRtspPassword() : null,
                 // Never persist hi-res for a model that lacks the branch (the Classe 100X): even if the
                 // radio were somehow checked, force low-res so the build can't produce a black camera.
                 CameraHiRes = RbMqttCameraHiRes.IsChecked == true && CameraModelSupportsHiRes,
