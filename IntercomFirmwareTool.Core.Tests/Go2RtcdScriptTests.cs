@@ -181,6 +181,9 @@ public class Go2RtcdScriptTests
         //     a failed `iptables -S` (inspection error) or a still-present rule keeps the state.
         Assert.Contains("fw_gone()", s);
         Assert.Contains("out=$(iptables -S INPUT 2>/dev/null) || return 1", s); // inspection error != absent
+        // Ownership is matched on the EXACT `--comment <tag>` field (bounded), never a bare substring, so
+        // an unrelated rule whose text merely contains the tag can't be mistaken for ours.
+        Assert.Contains("--comment \\\"?${FW_TAG}\\\"?", s);
         Assert.Contains("fw_gone && rm -f \"$FW_STATE\"", closeBody);
         // (3) open confirms the PRIOR rule is gone before overwriting FW_STATE — else a DHCP change whose
         //     old-rule delete failed would orphan it. On failure it keeps the old state and returns.
@@ -209,6 +212,25 @@ public class Go2RtcdScriptTests
         // With no address we bail WITHOUT inserting so the port stays closed, and the bail precedes insert.
         int noAddr = body.IndexOf("[ -z \"$lan\" ]", System.StringComparison.Ordinal);
         Assert.True(noAddr >= 0 && noAddr < insert, "the no-address bail must precede the insert");
+    }
+
+    [Fact]
+    public void Stop_closes_the_firewall_under_the_lock_and_only_if_still_disabled()
+    {
+        // Codex: the stop-time firewall cleanup must not race a concurrent `start`'s firewall_open. Guard
+        // it under the mutex and skip it if a `start` re-enabled the service during the shutdown window.
+        string s = ReadScript().Replace("\r\n", "\n");
+        int stop = s.IndexOf("\tstop)", System.StringComparison.Ordinal);
+        int status = s.IndexOf("\tstatus)", stop, System.StringComparison.Ordinal);
+        Assert.True(stop >= 0 && status > stop);
+        string stopBody = s.Substring(stop, status - stop);
+        // Close only when still the desired-stopped state (DISABLED present).
+        int guard = stopBody.IndexOf("[ -e \"$DISABLED\" ] && firewall_close", System.StringComparison.Ordinal);
+        Assert.True(guard >= 0, "stop must gate firewall_close on the DISABLED marker");
+        // …and inside a lock: an acquire precedes the guard and a release follows it.
+        int acq = stopBody.LastIndexOf("acquire", guard, System.StringComparison.Ordinal);
+        int rel = stopBody.IndexOf("release", guard, System.StringComparison.Ordinal);
+        Assert.True(acq >= 0 && rel > guard, "the stop firewall_close must run between acquire and release");
     }
 
     [Fact]

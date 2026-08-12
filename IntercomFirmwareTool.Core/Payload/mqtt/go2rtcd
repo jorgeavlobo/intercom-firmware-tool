@@ -68,10 +68,13 @@ fw_del() {
 # can positively confirm our rule is absent. If the listing itself fails (a transient backend error) OR a
 # tagged rule is still present, return non-zero so callers KEEP FW_STATE and retry later. An inspection
 # error must never be mistaken for "confirmed gone", and a failed `iptables -D` must not strand an open
-# port with no state to retry against (Codex). The tag is a unique token, so grep for it is sufficient.
+# port with no state to retry against (Codex). Match the EXACT `--comment <tag>` field (bounded by a
+# quote/space/end), never a bare substring — otherwise an unrelated rule whose text merely contains the
+# tag (e.g. a `not-go2rtcd` comment) would falsely report our rule present and we'd stop re-inserting it,
+# leaving RTSP permanently unreachable (Codex).
 fw_gone() {
 	out=$(iptables -S INPUT 2>/dev/null) || return 1
-	printf '%s\n' "$out" | grep -q -- "$FW_TAG" && return 1
+	printf '%s\n' "$out" | grep -qE -- "--comment \"?${FW_TAG}\"?([[:space:]]|\$)" && return 1
 	return 0
 }
 
@@ -220,8 +223,7 @@ case "$1" in
 		# Operator intent: disable, then terminate. Set the marker FIRST (under the
 		# lock) so no concurrent respawn relaunches, then kill every instance and
 		# wait for graceful shutdown, escalating to SIGKILL. Killing outside the lock
-		# keeps the lock hold short; the marker already suppresses respawn. Close the
-		# media port once the daemon is down.
+		# keeps the lock hold short; the marker already suppresses respawn.
 		acquire
 		touch "$DISABLED" 2>/dev/null
 		release
@@ -233,7 +235,13 @@ case "$1" in
 			i=$((i + 1))
 		done
 		is_running && kill_all -9
-		firewall_close
+		# Close the media port UNDER the lock so the state/rule cleanup can't interleave with a concurrent
+		# `start`'s firewall_open, and only if we are still the desired-stopped state — an operator `start`
+		# during this shutdown window clears DISABLED and reopens the port, so we must not tear its rule
+		# down (Codex). The kill loop above stays outside the lock (short hold, matching btmqttd).
+		acquire
+		[ -e "$DISABLED" ] && firewall_close
+		release
 		echo "done"
 		;;
 	status)
