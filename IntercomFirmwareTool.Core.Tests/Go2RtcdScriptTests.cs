@@ -77,23 +77,27 @@ public class Go2RtcdScriptTests
             l.Contains("scsserver") || l.Contains("mosquitto") || l.Contains("bt_daemon"));
     }
 
+    // Script with backslash line-continuations collapsed to single logical lines, so assertions on a
+    // multi-line iptables command (split for readability) match the whole command.
+    private static string JoinedScript() =>
+        System.Text.RegularExpressions.Regex.Replace(ReadScript(), @"\s*\\\s*\n\s*", " ");
+
     [Fact]
     public void Opens_only_the_rtsp_media_port_least_privilege_lan_restricted()
     {
         // Phase 1c-3: open :8554 on the LAN interface, source-restricted to the interface's own subnet.
         // The control API (:1984) must NOT be opened, and no other port is touched.
         string s = ReadScript();
+        string joined = JoinedScript();
         string[] code = CodeLines(s);
         Assert.Contains("CAM_PORT=8554", s);
         Assert.Contains("CAM_IFACE=wlan0", s);
         // Our single INPUT rule is inserted at the TOP (above the policy DROP), matches a specific
-        // tcp/dport on the interface, and is SOURCE-RESTRICTED to the derived LAN subnet.
-        Assert.Contains(code, l =>
-            l.Contains("iptables -I INPUT")
-            && l.Contains("-i \"$CAM_IFACE\"")
-            && l.Contains("--dport \"$CAM_PORT\"")
-            && l.Contains("-s \"$lan\"")
-            && l.Contains("-j ACCEPT"));
+        // tcp/dport on the interface, SOURCE-RESTRICTED to the derived LAN subnet, and TAGGED with our
+        // ownership comment (see the ownership test below).
+        Assert.Contains(
+            "iptables -I INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" "
+            + "-m comment --comment \"$FW_TAG\" -j ACCEPT", joined);
         // LAN source derived from the interface address at runtime; with no address yet the port is NOT
         // opened interface-wide (stays LAN-only) — bail before inserting when there is no address.
         Assert.Contains(code, l => l.Contains("ip -4 addr show \"$CAM_IFACE\""));
@@ -114,28 +118,36 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
-    public void Manages_only_its_own_exact_rule_never_a_chain()
+    public void Owns_its_rule_by_a_comment_tag_so_an_identical_foreign_rule_is_never_deleted()
     {
-        // CodeRabbit/Codex/Copilot converged: iptables exposes no stable chain identity, so any design
-        // that created/flushed/reused a named chain could never prove a same-named chain (observed,
-        // deleted, recreated by another component) was still ours. We sidestep it: manage exactly ONE
-        // fully-specified INPUT rule — add/delete only our complete spec — so no chain ownership is ever
-        // in question and no rule we didn't create is ever touched.
-        string[] code = CodeLines(ReadScript());
-        // No sub-chain machinery at all: no create, no flush, no jump, no named GO2RTC chain.
-        Assert.DoesNotContain(code, l => l.Contains("iptables -N"));
-        Assert.DoesNotContain(code, l => l.Contains("iptables -F"));
-        Assert.DoesNotContain(code, l => l.Contains("-j GO2RTC") || l.Contains("GO2RTC"));
-        Assert.DoesNotContain(code, l => l.Contains("firewall_ensure_chain") || l.Contains("firewall_chain_is_ours"));
-        // Deletion names the FULL spec (interface + proto + dport + source + ACCEPT), so it can only ever
-        // match a rule we inserted — never a differently-specified rule someone else added.
-        Assert.Contains(code, l =>
-            l.Contains("iptables -D INPUT")
-            && l.Contains("-i \"$CAM_IFACE\"")
-            && l.Contains("--dport \"$CAM_PORT\"")
-            && l.Contains("-s \"$1\"")
-            && l.Contains("-j ACCEPT"));
-        // The applied source subnet is remembered in tmpfs so a DHCP change deletes the OLD rule exactly.
+        // CodeRabbit (final): a full rule spec is a matcher, not an identity — an admin's byte-identical
+        // :8554 LAN ACCEPT rule would be caught by a bare `-D`. So the rule carries an ownership TAG via
+        // the iptables comment match, and cleanup deletes only rules bearing THAT comment. This is the
+        // industry-standard approach (Docker/firewalld tag their rules the same way).
+        string s = ReadScript();
+        string joined = JoinedScript();
+        string[] code = CodeLines(s);
+        // No chain machinery at all (the earlier chain-ownership design is gone).
+        Assert.DoesNotContain(code, l => l.Contains("iptables -N") || l.Contains("iptables -F"));
+        Assert.DoesNotContain(code, l => l.Contains("GO2RTC")
+            || l.Contains("firewall_ensure_chain") || l.Contains("firewall_chain_is_ours"));
+        // The ownership tag is defined and applied to the inserted rule.
+        Assert.Contains(code, l => l == "FW_TAG=go2rtcd");
+        Assert.Contains(
+            "iptables -I INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" "
+            + "-m comment --comment \"$FW_TAG\" -j ACCEPT", joined);
+        // Tagged deletion is COMMENT-SCOPED: it matches only rules carrying our tag, so an identical rule
+        // WITHOUT the tag (an admin's) is invisible to it and never removed.
+        Assert.Contains(
+            "iptables -D INPUT -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$2\" "
+            + "-m comment --comment \"$FW_TAG\" -j ACCEPT", joined);
+        // Graceful fallback: on a kernel without xt_comment we still open the port with an untagged rule,
+        // and manage it conservatively (untagged deletion removes a SINGLE instance — never a drain — so
+        // we never remove more than we added).
+        Assert.Contains(code, l => l.Trim() == "mode=tagged");
+        Assert.Contains(code, l => l.Trim() == "mode=untagged");
+        // State remembers "<mode> <subnet>" so close/DHCP-change delete exactly what open added.
+        Assert.Contains(code, l => l.Contains("printf '%s %s\\n' \"$mode\" \"$lan\""));
         Assert.Contains(code, l => l.StartsWith("FW_STATE=") && l.Contains("/var/run/"));
     }
 
@@ -144,14 +156,14 @@ public class Go2RtcdScriptTests
     {
         // Codex: if wlan0 changes subnet or loses its address, the previously-applied rule must be removed
         // (not left stranded to admit off-subnet sources on a new prefix). firewall_open deletes the prior
-        // rule first, and with no address it inserts nothing and clears the remembered state.
+        // rule (its remembered mode+subnet) first, and with no address it inserts nothing and clears state.
         string script = ReadScript().Replace("\r\n", "\n");
         int open = script.IndexOf("firewall_open()", System.StringComparison.Ordinal);
         int close = script.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         Assert.True(open >= 0 && close > open);
         string body = script.Substring(open, close - open);
-        // The prior rule is dropped (fw_del of the remembered subnet) before we decide anything else.
-        int delPrev = body.IndexOf("fw_del \"$prev\"", System.StringComparison.Ordinal);
+        // The prior rule is dropped (fw_del of the remembered mode+subnet) before anything is inserted.
+        int delPrev = body.IndexOf("fw_del \"$pmode\" \"$psub\"", System.StringComparison.Ordinal);
         int insert = body.IndexOf("iptables -I INPUT", System.StringComparison.Ordinal);
         Assert.True(delPrev >= 0 && insert >= 0);
         Assert.True(delPrev < insert, "the prior rule must be deleted before a new one is inserted");
