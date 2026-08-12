@@ -138,7 +138,10 @@ public class Go2RtcdScriptTests
         Assert.Contains(code, l => l.Contains("iptables -w 5 -A INPUT -j \"$FW_CHAIN\""));
         Assert.DoesNotContain(code, l => l.Contains("-I INPUT"));
         // The jump is kept LAST in INPUT — repositioned if a concurrent factory `-F INPUT; -A …` rebuild
-        // left it out of place — so it can never sit ahead of the factory filters.
+        // left it out of place — so it can never sit ahead of the factory filters. The listing is captured
+        // first and a failed `iptables -S INPUT` changes nothing (an inspection error must not trigger a
+        // destructive drain+re-append).
+        Assert.Contains("inp=$(iptables -S INPUT 2>/dev/null) || return 0", s);
         Assert.Contains("tail -n 1)\" = \"-A INPUT -j $FW_CHAIN\"", s);
         // The ONLY thing we ever add to INPUT is the jump to our chain — never a bare rule in INPUT.
         foreach (var l in System.Text.RegularExpressions.Regex.Split(joined, "\n"))

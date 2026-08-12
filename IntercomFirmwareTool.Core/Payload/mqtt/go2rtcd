@@ -67,7 +67,11 @@ FW_OWN=/var/run/go2rtc.fwown
 # watchdog interval (Codex). Steady state (already last) mutates nothing. Non-matching packets RETURN from
 # our chain and continue INPUT, so the jump never disturbs other traffic.
 fw_jump() {
-	[ "$(iptables -S INPUT 2>/dev/null | tail -n 1)" = "-A INPUT -j $FW_CHAIN" ] && return 0
+	# Capture the listing FIRST and change nothing if it fails — an inspection error (xtables lock,
+	# resource) must not read as "jump out of place" and trigger a destructive drain+re-append that a
+	# failing backend might then leave with no jump at all (CodeRabbit).
+	inp=$(iptables -S INPUT 2>/dev/null) || return 0
+	[ "$(printf '%s\n' "$inp" | tail -n 1)" = "-A INPUT -j $FW_CHAIN" ] && return 0
 	while iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null; do :; done
 	iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null || true
 }
