@@ -82,35 +82,52 @@ firewall_ensure_chain() {
 		iptables -I INPUT -j "$FW_CHAIN" 2>/dev/null || true
 }
 
+# True when the chain is SAFE for us to manage: absent, empty, or holding ONLY our own tcp/:CAM_PORT
+# ACCEPT rule shape. A chain of the same name that some other tool/admin created (holding any other
+# rule) is treated as NOT ours and left completely untouched — we never flush it, add a rule to it, or
+# jump to it. (The tmpfs ruleset is empty at every boot, so in practice the chain is only ever ours;
+# this just refuses to touch an unexpected pre-existing chain — CodeRabbit.)
+firewall_chain_is_ours() {
+	! iptables -S "$FW_CHAIN" 2>/dev/null | grep '^-A ' |
+		grep -qv -- "-p tcp .*--dport $CAM_PORT .*-j ACCEPT"
+}
+
 # Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent:
 # (re)create our chain + jump, flush OUR chain, then add the single source-restricted ACCEPT — so
 # re-asserting it every watchdog pass tracks a DHCP subnet change and survives the panel flushing INPUT
 # (the jump is re-added). The source is CAM_IFACE's own subnet (iptables masks the address to its
-# /prefix). If the interface has no address yet (the boot race before DHCP) we SKIP rather than open an
-# interface-wide rule that would accept routed off-subnet sources — the port must stay LAN-only, and the
-# next watchdog pass opens it once an address is present (Codex).
+# /prefix). The FLUSH happens BEFORE the no-address check: if the interface has no address yet (the boot
+# race before DHCP, or a lease drop) we leave the chain EMPTY (port closed) instead of stranding a stale
+# ACCEPT for an old subnet that could still admit off-subnet sources after the address returns on a
+# different prefix — the port must stay LAN-only (Codex). The next watchdog pass re-opens it once an
+# address is present. If a chain of this name already exists but is not ours, do nothing (never jump to
+# or flush a foreign chain — CodeRabbit).
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
-	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
-	[ -n "$lan" ] || return 0
+	firewall_chain_is_ours || return 0
 	firewall_ensure_chain
 	iptables -F "$FW_CHAIN" 2>/dev/null || true
+	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
+	[ -n "$lan" ] || return 0
 	iptables -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null || true
 }
 
 # Close the media port again (service stopped/disabled/not running): empty OUR chain. The empty chain +
 # its INPUT jump remain (harmless — packets fall through to the panel's policy DROP); no unrelated rule
-# is ever touched.
+# is ever touched, and a foreign same-named chain is left completely alone (CodeRabbit).
 firewall_close() {
 	command -v iptables >/dev/null 2>&1 || return 0
+	firewall_chain_is_ours || return 0
 	iptables -F "$FW_CHAIN" 2>/dev/null || true
 }
 
 # Launch the daemon iff enabled (no marker) and not already running. Caller holds
-# the lock, so this cannot race a concurrent start/stop/respawn.
+# the lock, so this cannot race a concurrent start/stop/respawn. Returns 0 ONLY when
+# it actually backgrounded a new instance (disabled / already-running return 1), so
+# the caller can `wait_running` for a just-launched child before deciding the firewall.
 launch_if_enabled() {
-	[ -e "$DISABLED" ] && return 0
-	is_running && return 0
+	[ -e "$DISABLED" ] && return 1
+	is_running && return 1
 	if [ -L "$LOGDIR" ] || { [ -e "$LOGDIR" ] && [ ! -d "$LOGDIR" ]; }; then
 		rm -f "$LOGDIR"
 	fi
@@ -118,6 +135,22 @@ launch_if_enabled() {
 	chmod 700 "$LOGDIR" 2>/dev/null
 	[ -L "$LOGFILE" ] && rm -f "$LOGFILE"
 	"$DAEMON" -config "$CONFIG" >> "$LOGFILE" 2>&1 &
+	return 0
+}
+
+# Poll briefly for a just-backgrounded daemon to exec $DAEMON. Without this, the is_running check right
+# after a launch can race the child's exec and read "down", so a manual start/restart would close the
+# media port until the next watchdog pass ~60s later (Codex). Only ever called after launch_if_enabled
+# reports it launched, so steady-state respawns (already running) never sleep. Bounded to ~5s — well
+# under the ~10s lock-steal threshold — then returns is_running's verdict so a genuinely failed launch
+# still ends with the port closed.
+wait_running() {
+	i=0
+	while ! is_running && [ "$i" -lt 5 ]; do
+		sleep 1
+		i=$((i + 1))
+	done
+	is_running
 }
 
 case "$1" in
@@ -125,7 +158,7 @@ case "$1" in
 		# Operator/boot intent: enable the service, launch, then open the media port iff it came up.
 		acquire
 		rm -f "$DISABLED" 2>/dev/null
-		launch_if_enabled
+		launch_if_enabled && wait_running
 		if is_running; then firewall_open; else firewall_close; fi
 		release
 		echo "$NAME started"
@@ -144,7 +177,7 @@ case "$1" in
 			kill_all
 			firewall_close
 		else
-			launch_if_enabled
+			launch_if_enabled && wait_running
 			if is_running; then firewall_open; else firewall_close; fi
 		fi
 		release

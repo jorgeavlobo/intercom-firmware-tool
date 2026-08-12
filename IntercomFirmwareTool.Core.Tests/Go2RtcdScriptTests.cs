@@ -117,4 +117,49 @@ public class Go2RtcdScriptTests
         Assert.Contains(code, l => l.Contains("if is_running; then firewall_open"));
         Assert.Contains(code, l => l.Contains("firewall_close"));
     }
+
+    [Fact]
+    public void Never_touches_a_foreign_chain_of_the_same_name()
+    {
+        // CodeRabbit: if a chain named GO2RTC already exists but wasn't created by us (it holds any rule
+        // other than our tcp/:CAM_PORT ACCEPT), we must not flush it, add to it, or jump to it. Both
+        // firewall_open and firewall_close gate on an ownership probe before touching the chain.
+        string[] code = CodeLines(ReadScript());
+        // An ownership probe exists and inspects the chain's rules for anything that isn't our ACCEPT.
+        Assert.Contains(code, l => l.Contains("firewall_chain_is_ours()"));
+        Assert.Contains(code, l => l.Contains("iptables -S \"$FW_CHAIN\""));
+        // Both open and close bail out early when the chain is not ours (guard runs before any mutation).
+        Assert.Equal(2, code.Count(l => l.Contains("firewall_chain_is_ours || return 0")));
+    }
+
+    [Fact]
+    public void Flushes_the_chain_before_the_no_address_bailout_so_no_stale_rule_survives()
+    {
+        // Codex: if wlan0 loses its address after a rule was installed, returning early WITHOUT flushing
+        // would leave a stale ACCEPT for the old subnet — which could admit off-subnet sources once the
+        // address returns on a different prefix. The flush must precede the no-address return.
+        string script = ReadScript().Replace("\r\n", "\n");
+        int open = script.IndexOf("firewall_open()", System.StringComparison.Ordinal);
+        int close = script.IndexOf("firewall_close()", System.StringComparison.Ordinal);
+        Assert.True(open >= 0 && close > open);
+        string body = script.Substring(open, close - open);
+        int flush = body.IndexOf("iptables -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int noAddr = body.IndexOf("[ -n \"$lan\" ] || return 0", System.StringComparison.Ordinal);
+        Assert.True(flush >= 0 && noAddr >= 0);
+        Assert.True(flush < noAddr, "the chain flush must come before the no-address early return");
+    }
+
+    [Fact]
+    public void Waits_for_a_just_launched_daemon_before_deciding_the_firewall()
+    {
+        // Codex: the is_running check right after backgrounding go2rtc can race the child's exec, so a
+        // manual start/restart could close the port until the next watchdog pass. launch_if_enabled must
+        // report whether it launched, and start/respawn must wait for it to come up before the decision.
+        string[] code = CodeLines(ReadScript());
+        Assert.Contains(code, l => l.Contains("wait_running()"));
+        // The wait only follows an actual launch (steady-state respawns never sleep).
+        Assert.Contains(code, l => l.Contains("launch_if_enabled && wait_running"));
+        // launch_if_enabled distinguishes "launched" (0) from "already up / disabled" (1) via return 1.
+        Assert.Contains(code, l => l.Contains("is_running && return 1"));
+    }
 }
