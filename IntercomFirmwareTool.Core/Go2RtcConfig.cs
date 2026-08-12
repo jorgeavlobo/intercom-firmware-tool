@@ -286,10 +286,11 @@ namespace IntercomFirmwareTool.Core
         {
             string name = SanitizeStreamName(streamName);
             string user = opts.CameraRtspUser;
-            // A space-free placeholder if no password was set yet (the App always sets one on-device):
-            // spaces in the RTSP URL userinfo would make it awkward to copy-paste (Copilot).
-            string pass = string.IsNullOrEmpty(opts.CameraRtspPass)
-                ? "<password>" : opts.CameraRtspPass!;
+            // The App always sets a password on-device; only a bare/library caller hits the placeholder.
+            bool hasPass = !string.IsNullOrEmpty(opts.CameraRtspPass);
+            // A space-free placeholder if no password was set yet: spaces in the RTSP URL userinfo would
+            // make it awkward to copy-paste (Copilot).
+            string pass = hasPass ? opts.CameraRtspPass! : "<password>";
             var ci = CultureInfo.InvariantCulture;
 
             var sb = new StringBuilder();
@@ -302,15 +303,18 @@ namespace IntercomFirmwareTool.Core
 
             sb.Append("Add it to Home Assistant as a Generic Camera (Settings -> Devices &\n");
             sb.Append("Services -> Add Integration -> Generic Camera) with this stream URL —\n");
-            sb.Append("replace <intercom-ip> with the panel's IP address on your network:\n\n");
+            sb.Append(hasPass
+                ? "replace <intercom-ip> with the panel's IP address on your network:\n\n"
+                : "replace <intercom-ip> with the panel's IP and <password> with the RTSP password:\n\n");
             // URL-encode the credentials for the URL's userinfo: Validate rejects control chars but not
             // RTSP-URL-reserved punctuation (@ : / #), so escape defensively (today's fixed "camera" +
             // base64url password never need it, but a future caller might) — CodeRabbit. The labeled
-            // credentials below stay RAW so the user copies the real values into HA's separate fields.
+            // credentials below stay RAW so the user copies the real values into HA's separate fields. The
+            // <password> placeholder is left literal (not %3C…%3E) so it reads as a placeholder (Copilot).
             string userEnc = Uri.EscapeDataString(user);
-            string passEnc = Uri.EscapeDataString(pass);
+            string passInUrl = hasPass ? Uri.EscapeDataString(pass) : pass;
             sb.Append(string.Create(ci,
-                $"    rtsp://{userEnc}:{passEnc}@<intercom-ip>:{OnDeviceRtspPort}/{name}\n\n"));
+                $"    rtsp://{userEnc}:{passInUrl}@<intercom-ip>:{OnDeviceRtspPort}/{name}\n\n"));
 
             sb.Append("Credentials (generated for this build):\n");
             sb.Append(string.Create(ci, $"    username: {user}\n"));
