@@ -106,7 +106,7 @@ Notes:
 - **`--disable-stripping`** — FFmpeg's post-link `strip` uses the *host* `strip`, which
   can't read the cross-built ARM ELF (`Unable to recognise the format`). We strip at link
   time instead via `--extra-ldflags=-s`, which is deterministic and needs no target strip.
-- **H.264 parser + AV1 decoder — required for `-c:v copy` on the C100X.** `-c:v copy` never
+- **H.264 parser (+ a link-only HEVC parser) — required for `-c:v copy` on the C100X.** `-c:v copy` never
   touches the pixels, but it *does* need the video **dimensions** to write the `rtsp`/`rtp`
   output header. The panel's SDP carries **no `sprop-parameter-sets`**, so the parameter set
   (SPS) arrives only **in-stream** — and extracting it requires the **H.264 parser**. Without
