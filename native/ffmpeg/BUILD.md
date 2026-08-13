@@ -106,17 +106,28 @@ Notes:
 - **`--disable-stripping`** — FFmpeg's post-link `strip` uses the *host* `strip`, which
   can't read the cross-built ARM ELF (`Unable to recognise the format`). We strip at link
   time instead via `--extra-ldflags=-s`, which is deterministic and needs no target strip.
-- **No codec components at all** (no decoders, encoders, or parsers). `-c:v copy` never
-  touches the pixels: the `sdp`/`rtp` demuxer + its H.264 RTP depayloader (libavformat)
-  reconstruct the access units, and the `rtsp`/`rtp` muxer repackets them — no libavcodec
-  parser/decoder needed. This also **sidesteps a known FFmpeg 7.1 minimal-build link failure**:
-  enabling the H.264 parser (or decoder) pulls `h2645_sei.o`, whose `ff_h2645_sei_reset`
-  references `ff_aom_uninit_film_grain_params` — a symbol only compiled with an AV1
-  decoder — giving `ld.lld: undefined symbol` in an otherwise codec-free build.
-  > If the on-device hardware test shows `-c:v copy` needs in-stream parameter-set
-  > extraction (extradata), add `--enable-parser=h264` **and** resolve the film-grain
-  > symbol by enabling a decoder that provides it (e.g. `--enable-decoder=av1`), then
-  > re-measure size. Deferred until the C100X test proves it necessary.
+- **H.264 parser (+ a link-only HEVC parser) — required for `-c:v copy` on the C100X.** `-c:v copy` never
+  touches the pixels, but it *does* need the video **dimensions** to write the `rtsp`/`rtp`
+  output header. The panel's SDP carries **no `sprop-parameter-sets`**, so the parameter set
+  (SPS) arrives only **in-stream** — and extracting it requires the **H.264 parser**. Without
+  it (the original codec-free build) the C100X hardware test (issue #120) showed ffmpeg log
+  `parser not found for codec h264`, leave the dimensions unset, and abort the muxer with
+  `dimensions not set` / `Could not write header` — so go2rtc served nothing (RTSP `404`). The
+  missing parser also invalidated the RTP timestamps, flooding the log with `dropping old packet
+  received too late`. `--enable-parser=h264` fixes all of it.
+  - **`--enable-parser=hevc` is a link-only dependency, not a decode path.** Enabling the H.264
+    parser pulls `h2645_sei.o` (via `CONFIG_H264_SEI`), whose `ff_h2645_sei_reset` references
+    `ff_aom_uninit_film_grain_params` — so an otherwise codec-free build fails with `ld.lld:
+    undefined symbol`. That symbol lives in `aom_film_grain.o`, which n7.1.1's
+    `libavcodec/Makefile` compiles **only** under `CONFIG_HEVC_SEI` / `CONFIG_HEVC_DECODER` — **not**
+    under any AV1 target (so `--enable-decoder=av1`, which the earlier note guessed, does **not**
+    resolve it). The lightest lever that pulls `CONFIG_HEVC_SEI` is the HEVC **parser**
+    (`hevc_parser_select="hevcparse hevc_sei"`, whose selects are only `atsc_a53 golomb` — no
+    decoder, no dovi). The HEVC parser is never invoked (we only ever feed H.264); it is present
+    solely to satisfy the link. All are LGPL FFmpeg components (no `--enable-gpl`/`--enable-nonfree`).
+  - This realises the contingency previously deferred here: the C100X test proved in-stream
+    parameter-set extraction is necessary. The binary grows accordingly (see the refreshed size
+    in `PayloadBinaries.cs`).
 - **LGPL guard** — the absence of `--enable-gpl`/`--enable-nonfree` is deliberate and
   load-bearing; do not add GPL libs. CI asserts the config shows LGPL.
 
