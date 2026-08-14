@@ -70,13 +70,35 @@ public class Go2RtcConfigTests
         Assert.Contains("m=video 40000 RTP/AVP 96", sdp);
         Assert.DoesNotContain("m=audio", sdp);
         Assert.Contains("a=rtpmap:96 H264/90000", sdp);
+        // No CameraSprop set → the fmtp carries no sprop-parameter-sets (the ~20 s-first-frame fallback).
         Assert.Contains("a=fmtp:96 packetization-mode=1;profile-level-id=42801f", sdp);
+        Assert.DoesNotContain("sprop-parameter-sets", sdp);
         // Connection pinned to the loopback alias 127.0.0.2 — ingest binds loopback, never the LAN.
         Assert.Contains("c=IN IP4 127.0.0.2", sdp);
         Assert.DoesNotContain("0.0.0.0", sdp);
         Assert.StartsWith("v=0\n", sdp);
         Assert.EndsWith("\n", sdp);
         Assert.DoesNotContain("\r", sdp);
+    }
+
+    [Fact]
+    public void BuildOnDeviceSdp_embeds_sprop_parameter_sets_when_configured()
+    {
+        // With CameraSprop set (issue #120), the panel's SPS/PPS go into the fmtp line between
+        // packetization-mode and profile-level-id, so go2rtc's `-c:v copy` ffmpeg resolves 640x480
+        // in <1 s instead of waiting ~20 s for the panel's next in-stream keyframe.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraVideoPort = 40000,
+            CameraAudioPort = 40002,
+            CameraSprop = "Z0JAHqaAoD2Q,aM48gAA=",
+        };
+        string sdp = Go2RtcConfig.BuildOnDeviceSdp(opts);
+        Assert.Contains(
+            "a=fmtp:96 packetization-mode=1;sprop-parameter-sets=Z0JAHqaAoD2Q,aM48gAA=;profile-level-id=42801f",
+            sdp);
     }
 
     [Fact]

@@ -157,6 +157,29 @@ public class MqttCameraValidationTests
         Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(OnDevice() with { CameraRtspUser = "" }));
     }
 
+    [Fact]
+    public void On_device_mode_accepts_a_valid_or_empty_sprop()
+    {
+        // sprop is optional (empty ⇒ omitted, the ~20 s-first-frame fallback) and, when set, must be
+        // the RFC 6184 base64+comma alphabet. Two comma-separated base64 sets pass.
+        MqttInstaller.Validate(OnDevice() with { CameraSprop = null });                 // omitted
+        MqttInstaller.Validate(OnDevice() with { CameraSprop = "" });                    // omitted
+        MqttInstaller.Validate(OnDevice() with { CameraSprop = "Z0JAHqaAoD2Q,aM48gAA=" }); // valid
+    }
+
+    [Theory]
+    [InlineData("Z0JAHqaAoD2Q aM48gAA=")]   // space (would split the SDP attribute)
+    [InlineData("Z0JAHqaAoD2Q,aM48gAA=;x")] // ';' (would inject an fmtp parameter)
+    [InlineData("Z0JA\nHqaAoD2Q")]          // LF (would split the SDP line)
+    [InlineData("Z0JA<b>")]                 // '<' '>' — not base64
+    public void On_device_mode_rejects_a_malformed_sprop(string sprop)
+    {
+        // Embedded verbatim into the SDP fmtp line, so any non-base64/comma char is rejected to
+        // prevent a broken line or an injected attribute.
+        Assert.Throws<ArgumentException>(() =>
+            MqttInstaller.Validate(OnDevice() with { CameraSprop = sprop }));
+    }
+
     [Theory]
     [InlineData("cam\nera", "s3cr3t")]      // LF
     [InlineData("camera", "s3\r\ncr3t")]    // CRLF

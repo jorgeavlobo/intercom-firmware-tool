@@ -147,8 +147,18 @@ namespace IntercomFirmwareTool.Core
             sb.Append("t=0 0\n");
             sb.Append(string.Create(ci, $"m=video {opts.CameraVideoPort} RTP/AVP {VideoPayloadType}\n"));
             sb.Append(string.Create(ci, $"a=rtpmap:{VideoPayloadType} H264/{VideoClockRate}\n"));
+            // sprop-parameter-sets (issue #120, on-device, hardware-diagnosed on the C100X): the panel's
+            // encoder emits an in-stream SPS/PPS only ~every 20 s, so with a bare fmtp go2rtc's `-c:v copy`
+            // ffmpeg blocks ~20 s waiting for that keyframe before it can resolve 640x480 and publish —
+            // a black wait on every cold open. Embedding the panel's parameter sets here lets ffmpeg
+            // resolve in <1 s. The value is per-panel (MqttOptions.CameraSprop, base64+comma validated);
+            // when unset we omit it and accept the ~20 s-first-frame fallback. It goes between
+            // packetization-mode and profile-level-id, matching the order ffmpeg's own rtp muxer emits.
+            string sprop = string.IsNullOrWhiteSpace(opts.CameraSprop)
+                ? ""
+                : $"sprop-parameter-sets={opts.CameraSprop};";
             sb.Append(string.Create(ci,
-                $"a=fmtp:{VideoPayloadType} packetization-mode=1;profile-level-id={VideoProfileLevelId}\n"));
+                $"a=fmtp:{VideoPayloadType} packetization-mode=1;{sprop}profile-level-id={VideoProfileLevelId}\n"));
             sb.Append("a=recvonly\n");
             return sb.ToString();
         }

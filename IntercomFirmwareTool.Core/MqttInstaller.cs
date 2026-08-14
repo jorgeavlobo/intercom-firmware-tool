@@ -186,6 +186,25 @@ namespace IntercomFirmwareTool.Core
         /// on-device mode on must set it — <see cref="Validate"/> enforces this).</summary>
         public string? CameraRtspPass { get; init; }
 
+        /// <summary>
+        /// The panel's H.264 parameter sets (SPS,PPS) as the RFC 6184 <c>sprop-parameter-sets</c>
+        /// value — two base64 tokens separated by a comma, e.g. <c>Z0JAHqaAoD2Q,aM48gAA=</c> — embedded
+        /// into the on-device go2rtc SDP's <c>a=fmtp</c> line (issue #120, <see cref="CameraOnDevice"/>
+        /// mode only).
+        /// <para>WHY: the panel's own SDP carries NO sprop, and its encoder emits an in-stream SPS/PPS
+        /// only about every 20 s (a very long keyframe interval). Without sprop, go2rtc's <c>-c:v copy</c>
+        /// ffmpeg must wait for that keyframe before it can resolve the video and publish — a ~20 s black
+        /// wait on every cold open (hardware-measured on the C100X). Handing ffmpeg the parameter sets up
+        /// front via the SDP makes it resolve in well under a second.</para>
+        /// <para>PER-DEVICE: the value is fixed for a given panel model/firmware but differs across them,
+        /// so it is NOT hardcoded — an operator supplies their panel's value (capture once with
+        /// <c>ffmpeg -i doorbell.sdp -c:v copy -sdp_file out.sdp -f rtp rtp://127.0.0.1:0</c> and read the
+        /// <c>sprop-parameter-sets=</c> it prints). Empty/NULL = omit it (the ~20 s-first-frame fallback,
+        /// still functional). A WRONG value corrupts decoding, so <see cref="Validate"/> restricts it to
+        /// the base64+comma alphabet.</para>
+        /// </summary>
+        public string? CameraSprop { get; init; }
+
         /// <summary>Home Assistant MQTT discovery topic prefix (HA default is "homeassistant").</summary>
         public string HaDiscoveryPrefix { get; init; } = "homeassistant";
         /// <summary>
@@ -810,6 +829,18 @@ namespace IntercomFirmwareTool.Core
                         || opts.CameraRtspUser.Any(char.IsControl) || opts.CameraRtspPass!.Any(char.IsControl))
                         throw new ArgumentException(
                             CoreStrings.Get("Mqtt_CameraRtspCredsRequired"), nameof(opts));
+                    // CameraSprop is embedded VERBATIM into the SDP fmtp line, so restrict it to the RFC
+                    // 6184 sprop-parameter-sets alphabet — base64 tokens (A–Z a–z 0–9 + / =) separated by
+                    // a comma. Any other character (whitespace, ';', CR/LF) would break the SDP line or
+                    // inject an attribute. Empty/null is allowed: sprop is simply omitted (the
+                    // ~20 s-first-frame fallback). This is not a decode check — a syntactically valid but
+                    // wrong value is the operator's responsibility (see MqttOptions.CameraSprop).
+                    if (!string.IsNullOrEmpty(opts.CameraSprop)
+                        && !opts.CameraSprop.All(c =>
+                            c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9')
+                              or '+' or '/' or '=' or ','))
+                        throw new ArgumentException(
+                            CoreStrings.Get("Mqtt_CameraSpropInvalid"), nameof(opts));
                 }
             }
 
