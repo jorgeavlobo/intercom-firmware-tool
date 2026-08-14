@@ -189,7 +189,7 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
     <value>Der Fernbefehlskanal erfordert eine Client-Authentifizierung: Benutzername und Passwort oder gegenseitiges TLS (Client-Zertifikat und -Schlüssel). Einseitiges TLS (nur CA) reicht nicht aus.</value>
   </data>
   <data name="Mqtt_CameraSpropInvalid" xml:space="preserve">
-    <value>Die Kamera-Parametersätze (sprop) müssen aus einem oder mehreren durch Kommas getrennten Base64-Parametersätzen bestehen (nur die Zeichen A–Z, a–z, 0–9, +, /, =). Entfernen Sie Leerzeichen oder andere Satzzeichen.</value>
+    <value>Die Kamera-Parametersätze (sprop) müssen ein oder mehrere durch Kommas verbundene Base64-Sätze sein — jeder Satz nur mit A–Z, a–z, 0–9, +, / und =. Entfernen Sie Leerzeichen oder andere Satzzeichen.</value>
   </data>
   <data name="Mqtt_CredentialNewline" xml:space="preserve">
     <value>Der MQTT-Benutzername oder das -Passwort enthält einen Zeilenumbruch; Anmeldedaten müssen einzeilig sein.</value>
