@@ -170,7 +170,18 @@ async fn capture_sprop() -> std::io::Result<String> {
         .spawn()?;
     match tokio::time::timeout(CAPTURE_TIMEOUT, child.wait()).await {
         Ok(status) => {
-            status?;
+            // Propagate a wait() I/O error, but do NOT fail on a non-zero exit CODE: `-sdp_file` is
+            // written when the muxer opens its header — after find_stream_info has read the sprop — so a
+            // valid sprop can already be on disk even when ffmpeg later exits non-zero (e.g. the discard
+            // RTP sink erroring at teardown). Fall through to the parse below, which is the real success
+            // test; just log a non-zero exit so a genuine probe failure is diagnosable rather than
+            // surfacing only as the downstream "derived no sprop" (Copilot).
+            let status = status?;
+            if !status.success() {
+                eprintln!(
+                    "btmqttd: sprop provisioning: ffmpeg probe exited non-zero ({status}); checking the derived SDP anyway"
+                );
+            }
         }
         Err(_) => {
             let _ = child.start_kill();

@@ -189,7 +189,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
     <value>El canal de comandos remoto requiere autenticación de cliente: usuario y contraseña, o TLS mutuo (certificado y clave de cliente). El TLS unidireccional (solo CA) no es suficiente.</value>
   </data>
   <data name="Mqtt_CameraSpropInvalid" xml:space="preserve">
-    <value>Los conjuntos de parámetros de la cámara (sprop) solo pueden contener caracteres base64 (A–Z, a–z, 0–9, +, /, =) y una coma entre los dos conjuntos. Elimine espacios u otra puntuación.</value>
+    <value>Los conjuntos de parámetros de la cámara (sprop) deben ser uno o más conjuntos de parámetros base64 separados por comas (solo los caracteres A–Z, a–z, 0–9, +, /, =). Elimine espacios u otra puntuación.</value>
   </data>
   <data name="Mqtt_CredentialNewline" xml:space="preserve">
     <value>El usuario o la contraseña MQTT contiene un salto de línea; las credenciales deben ser de una sola línea.</value>

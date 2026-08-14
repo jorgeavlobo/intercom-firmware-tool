@@ -189,7 +189,7 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
     <value>Il canale dei comandi remoti richiede l'autenticazione del client: nome utente e password, oppure TLS reciproco (certificato e chiave client). Il TLS unidirezionale (solo CA) non è sufficiente.</value>
   </data>
   <data name="Mqtt_CameraSpropInvalid" xml:space="preserve">
-    <value>I set di parametri della telecamera (sprop) possono contenere solo caratteri base64 (A–Z, a–z, 0–9, +, /, =) e una virgola tra i due set. Rimuovi spazi o altra punteggiatura.</value>
+    <value>I set di parametri della telecamera (sprop) devono essere uno o più set di parametri base64 separati da virgole (solo i caratteri A–Z, a–z, 0–9, +, /, =). Rimuovi spazi o altra punteggiatura.</value>
   </data>
   <data name="Mqtt_CredentialNewline" xml:space="preserve">
     <value>Il nome utente o la password MQTT contiene un'interruzione di riga; le credenziali devono essere su una sola riga.</value>
