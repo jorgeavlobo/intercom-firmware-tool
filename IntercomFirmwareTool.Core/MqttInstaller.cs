@@ -196,12 +196,16 @@ namespace IntercomFirmwareTool.Core
         /// ffmpeg must wait for that keyframe before it can resolve the video and publish — a ~20 s black
         /// wait on every cold open (hardware-measured on the C100X). Handing ffmpeg the parameter sets up
         /// front via the SDP makes it resolve in well under a second.</para>
-        /// <para>PER-DEVICE: the value is fixed for a given panel model/firmware but differs across them,
-        /// so it is NOT hardcoded — an operator supplies their panel's value (capture once with
-        /// <c>ffmpeg -i doorbell.sdp -c:v copy -sdp_file out.sdp -f rtp rtp://127.0.0.1:0</c> and read the
-        /// <c>sprop-parameter-sets=</c> it prints). Empty/NULL = omit it (the ~20 s-first-frame fallback,
-        /// still functional). A WRONG value corrupts decoding, so <see cref="Validate"/> restricts it to
-        /// the base64+comma alphabet.</para>
+        /// <para>PER-DEVICE and NORMALLY AUTO-LEARNED: the value is fixed for a given panel but differs
+        /// across them, so it is NOT hardcoded. You usually leave this EMPTY: with on-demand viewing
+        /// enabled, btmqttd learns the panel's parameter sets on-device on first boot and persists them on
+        /// the writable <c>cfg/extra</c> partition (see <c>native/btmqttd/src/sprop.rs</c>), so the runtime
+        /// SDP is reassembled with them at every boot — transparent, zero-config. This field is an OPTIONAL
+        /// pre-seed for a build where on-device learning can't run or you already know the value (capture
+        /// once with <c>ffmpeg -i doorbell.sdp -c:v copy -sdp_file out.sdp -f rtp rtp://127.0.0.1:0</c> and
+        /// read the <c>sprop-parameter-sets=</c> it prints). Empty/NULL = omit it (learned on-device, or
+        /// the ~20 s-first-frame fallback until it is). A WRONG value corrupts decoding, so
+        /// <see cref="Validate"/> requires one or more comma-separated, strictly base64-decodable sets.</para>
         /// </summary>
         public string? CameraSprop { get; init; }
 
@@ -609,6 +613,13 @@ namespace IntercomFirmwareTool.Core
 
             // Config dir + generated files. go2rtc.yaml holds the RTSP password → 0600 root:root; the
             // SDP carries no secret → 0644. Both are byte-exact re-checked by ValidateMqtt.
+            //
+            // The SDP written here (Go2RtcSdpPath, /etc/.../doorbell.sdp) is the read-only TEMPLATE/seed:
+            // the rootfs is mounted read-only, so go2rtc does NOT read this at runtime. Instead the
+            // go2rtcd init script copies it into a tmpfs RUNTIME SDP (Go2RtcConfig.OnDeviceRuntimeSdpPath)
+            // at every boot, splicing in the persisted learned sprop if any; the go2rtc.yaml's exec -i
+            // points at that runtime path. Nothing here creates /var/run/btmqttd — it is tmpfs, made at
+            // boot by go2rtcd.
             EnsureDir(fs, Go2RtcDir);
             fs.SetMode(Go2RtcDir, ToMode(755));
             fs.SetOwner(Go2RtcDir, 0, 0);
@@ -631,7 +642,8 @@ namespace IntercomFirmwareTool.Core
             Go2RtcConfig.BuildOnDeviceYaml(
                 OnDeviceStreamName,
                 PayloadBinaries.Ffmpeg.InstallPath,
-                Go2RtcSdpPath,
+                // The yaml's exec -i is fixed to the tmpfs runtime SDP (Go2RtcConfig.OnDeviceRuntimeSdpPath);
+                // the installer still writes the TEMPLATE to Go2RtcSdpPath (/etc/.../doorbell.sdp) below.
                 opts.CameraRtspUser,
                 opts.CameraRtspPass!);
 

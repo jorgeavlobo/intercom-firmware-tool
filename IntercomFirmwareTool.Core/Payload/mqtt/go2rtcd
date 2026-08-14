@@ -31,6 +31,19 @@ LOGFILE=$LOGDIR/go2rtc.log
 LOCKDIR=/var/run/go2rtc.lock
 DISABLED=/var/run/go2rtc.disabled
 
+# Runtime SDP assembly (issue #120). The rootfs (incl. /etc) is mounted READ-ONLY, so go2rtc cannot read
+# a runtime-patched SDP under /etc. The installer writes a read-only TEMPLATE SDP; we (re)assemble the
+# RUNTIME SDP on tmpfs at each (re)launch — copy the template, then splice in the learned
+# sprop-parameter-sets that btmqttd (sprop.rs) persisted on the writable cfg/extra partition, if present.
+# go2rtc.yaml's exec -i points at RUNTIME_SDP; btmqttd patches the same tmpfs path after a fresh learn.
+TEMPLATE_SDP=/etc/btmqttd/go2rtc/doorbell.sdp
+RUNTIME_SDP_DIR=/var/run/btmqttd
+RUNTIME_SDP=$RUNTIME_SDP_DIR/doorbell.sdp
+# The persisted learned sprop value (single line). STATE_DIR mirrors persist.rs's DEFAULT_STATE_DIR and
+# its $BTMQTTD_STATE_DIR override (tests/dev); on the device the env var is unset and the default is used.
+STATE_DIR=${BTMQTTD_STATE_DIR:-/home/bticino/cfg/extra/btmqttd}
+SPROP_FILE=$STATE_DIR/camera-sprop
+
 # Firewall (issue #120, phase 1c-3): the RTSP media port + the LAN interface it is served on. The
 # panel enforces a default-deny INPUT chain (`-P INPUT DROP`) and does NOT open :8554, so nothing
 # reaches go2rtc from Home Assistant without a rule. The go2rtc control API (:1984) stays loopback-
@@ -194,6 +207,30 @@ firewall_close() {
 	rm -f "$FW_OWN" 2>/dev/null || true
 }
 
+# (Re)assemble the tmpfs RUNTIME SDP go2rtc reads. Recreate the tmpfs dir (mkdir -p — /var/run is
+# cleared every boot), then either copy the read-only template verbatim or, when a learned sprop value
+# is persisted (non-empty file) AND the template does not already carry one, splice
+# `sprop-parameter-sets=<value>;` into the fmtp line immediately after `packetization-mode=1;` — the
+# exact order Go2RtcConfig.BuildOnDeviceSdp / sprop.rs use. Written via a temp file + atomic mv so go2rtc
+# never reads a half-written SDP. Best-effort: a missing template (a non-camera image) is a no-op, and
+# any failure leaves whatever runtime SDP already existed rather than truncating it.
+assemble_sdp() {
+	[ -f "$TEMPLATE_SDP" ] || return 0
+	mkdir -p "$RUNTIME_SDP_DIR" 2>/dev/null || return 0
+	tmp="$RUNTIME_SDP.tmp.$$"
+	sprop=""
+	[ -s "$SPROP_FILE" ] && sprop=$(head -n 1 "$SPROP_FILE" 2>/dev/null | sed 's/[[:space:]]*$//')
+	if [ -n "$sprop" ] && ! grep -q 'sprop-parameter-sets=' "$TEMPLATE_SDP"; then
+		# Escape sed replacement metacharacters (\ & /) — a base64 sprop value can contain '/' and '+'.
+		esc=$(printf '%s' "$sprop" | sed 's/[\\&/]/\\&/g')
+		sed "s/packetization-mode=1;/packetization-mode=1;sprop-parameter-sets=${esc};/" \
+			"$TEMPLATE_SDP" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+	else
+		cp "$TEMPLATE_SDP" "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+	fi
+	mv "$tmp" "$RUNTIME_SDP" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+}
+
 # Launch the daemon iff enabled (no marker) and not already running. Caller holds
 # the lock, so this cannot race a concurrent start/stop/respawn. Returns 0 ONLY when
 # it actually backgrounded a new instance (disabled / already-running return 1), so
@@ -207,6 +244,9 @@ launch_if_enabled() {
 	mkdir -p "$LOGDIR" 2>/dev/null
 	chmod 700 "$LOGDIR" 2>/dev/null
 	[ -L "$LOGFILE" ] && rm -f "$LOGFILE"
+	# Assemble the tmpfs runtime SDP right before launch, so go2rtc reads a fresh copy each time it
+	# (re)starts — reflecting any sprop learned+persisted since the last launch.
+	assemble_sdp
 	"$DAEMON" -config "$CONFIG" >> "$LOGFILE" 2>&1 &
 	return 0
 }

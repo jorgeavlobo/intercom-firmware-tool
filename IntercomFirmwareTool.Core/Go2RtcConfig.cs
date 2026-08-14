@@ -59,6 +59,17 @@ namespace IntercomFirmwareTool.Core
         public const string OnDeviceFfmpegPath = "/usr/sbin/ffmpeg";
 
         /// <summary>
+        /// The RUNTIME SDP go2rtc's <c>exec -i</c> reads on the device — on <b>tmpfs</b>, because the
+        /// rootfs (including <c>/etc</c>) is mounted read-only. The installer writes the read-only
+        /// TEMPLATE SDP under <c>/etc/btmqttd/go2rtc/</c>; the <c>go2rtcd</c> init script (re)assembles
+        /// this runtime copy at every boot (copy the template into tmpfs, then splice in the persisted
+        /// learned <c>sprop-parameter-sets</c>, if any). btmqttd's <c>sprop.rs</c> patches THIS path
+        /// after a fresh learn, so it must equal <c>sprop.rs</c>'s <c>SDP_PATH</c>. Fixed (the on-device
+        /// stream is always <see cref="DefaultStreamName"/>).
+        /// </summary>
+        public const string OnDeviceRuntimeSdpPath = "/var/run/btmqttd/doorbell.sdp";
+
+        /// <summary>
         /// Normalise a go2rtc stream name to the safe subset go2rtc keys and Home Assistant entity ids
         /// tolerate: lower-case ASCII letters, digits, <c>_</c> and <c>-</c>. Everything else is dropped;
         /// an empty or all-invalid input becomes <see cref="DefaultStreamName"/>. Deterministic so the
@@ -173,11 +184,13 @@ namespace IntercomFirmwareTool.Core
         /// <b>mandatory</b> username/password auth;</item>
         /// <item>the stream is <b>video-only</b> (Phase 1) — the ffmpeg <c>exec</c> uses <c>-an -c:v copy</c>.</item>
         /// </list>
-        /// <paramref name="ffmpegPath"/> and <paramref name="sdpPath"/> are absolute on-device paths.
-        /// LF line endings, trailing newline.
+        /// <paramref name="ffmpegPath"/> is an absolute on-device path. The <c>exec -i</c> input is fixed
+        /// to the tmpfs <see cref="OnDeviceRuntimeSdpPath"/> (NOT the read-only <c>/etc</c> template):
+        /// go2rtc reads the runtime SDP that <c>go2rtcd</c> reassembles at boot and that <c>sprop.rs</c>
+        /// patches. LF line endings, trailing newline.
         /// </summary>
         public static string BuildOnDeviceYaml(
-            string streamName, string ffmpegPath, string sdpPath, string rtspUser, string rtspPass)
+            string streamName, string ffmpegPath, string rtspUser, string rtspPass)
         {
             // RTSP is LAN-facing, so auth is MANDATORY (issue #120, decision #3). go2rtc treats an
             // EMPTY username as "no auth" and serves the stream to any LAN client — so an empty
@@ -236,7 +249,7 @@ namespace IntercomFirmwareTool.Core
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {sdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}}\"\n"));
+                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {OnDeviceRuntimeSdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}}\"\n"));
             return sb.ToString();
         }
 

@@ -357,6 +357,13 @@ async fn run() -> Result<bool, String> {
             _ => (None, stopping),
         }
     };
+    // On-device camera OFF ⇒ forget any learned sprop, so a later re-enable (or a panel swap) re-learns
+    // instead of reassembling the runtime SDP with a stale value. Mirrors the light-where disable reset.
+    // (Only when the on-device feature itself is off; an on-device unit with on-demand viewing off keeps
+    // its learned value — the operator may have supplied it, and the probe just can't run right now.)
+    if !cfg.camera_ondevice {
+        clear_persisted_camera_sprop("on-device camera disabled").await;
+    }
 
     // Commands from TOPIC_RX go through a BOUNDED channel to a SINGLE ordered worker,
     // not a task-per-message. This does two things at once:
@@ -987,6 +994,21 @@ async fn clear_persisted_light_where(reason: &str) {
     eprintln!(
         "btmqttd: could not clear persisted learned LIGHT_WHERE ({reason}); re-enabling in learn \
          mode later may restore the old learned address"
+    );
+}
+
+/// Best-effort clear of the persisted LEARNED camera sprop (bounded retries, log on ultimate failure).
+/// Used when the on-device camera is DISABLED, so disabling is a clean reset: re-enabling re-learns from
+/// the panel rather than reassembling the runtime SDP with a value from a past life (issue #120).
+async fn clear_persisted_camera_sprop(reason: &str) {
+    for _ in 0..3 {
+        if tokio::task::spawn_blocking(persist::clear_camera_sprop).await.unwrap_or(false) {
+            return;
+        }
+    }
+    eprintln!(
+        "btmqttd: could not clear persisted camera sprop ({reason}); re-enabling the on-device \
+         camera later may reassemble the SDP with a stale learned value"
     );
 }
 

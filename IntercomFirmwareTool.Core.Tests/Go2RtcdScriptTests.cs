@@ -43,6 +43,37 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
+    public void Assembles_the_tmpfs_runtime_sdp_from_the_readonly_template_before_launch()
+    {
+        // Issue #120: the rootfs (incl. /etc) is read-only, so go2rtc reads a tmpfs RUNTIME SDP the init
+        // script reassembles at each launch — copy the read-only template, then splice the persisted
+        // learned sprop into the fmtp line. The paths must match Go2RtcConfig.OnDeviceRuntimeSdpPath and
+        // persist.rs (STATE_DIR + camera-sprop), and the assembly must run before the daemon starts.
+        string s = ReadScript();
+        string[] code = CodeLines(s);
+        Assert.Contains("TEMPLATE_SDP=/etc/btmqttd/go2rtc/doorbell.sdp", s);
+        Assert.Contains("RUNTIME_SDP=$RUNTIME_SDP_DIR/doorbell.sdp", s);
+        Assert.Contains("RUNTIME_SDP_DIR=/var/run/btmqttd", s);
+        // The runtime SDP path go2rtc reads must equal the C# const and sprop.rs's SDP_PATH.
+        Assert.Equal("/var/run/btmqttd/doorbell.sdp", Go2RtcConfig.OnDeviceRuntimeSdpPath);
+        // The persisted sprop file mirrors persist.rs: DEFAULT_STATE_DIR with the $BTMQTTD_STATE_DIR
+        // override, and the camera-sprop filename.
+        Assert.Contains("STATE_DIR=${BTMQTTD_STATE_DIR:-/home/bticino/cfg/extra/btmqttd}", s);
+        Assert.Contains("SPROP_FILE=$STATE_DIR/camera-sprop", s);
+        // tmpfs dir is (re)created (mkdir -p) and the splice inserts after packetization-mode=1; in the
+        // exact BuildOnDeviceSdp order.
+        Assert.Contains(code, l => l.Contains("mkdir -p \"$RUNTIME_SDP_DIR\""));
+        Assert.Contains(code, l =>
+            l.Contains("s/packetization-mode=1;/packetization-mode=1;sprop-parameter-sets="));
+        // The assembly is atomic (temp + mv) and runs from launch_if_enabled before the daemon starts.
+        Assert.Contains(code, l => l.Contains("mv \"$tmp\" \"$RUNTIME_SDP\""));
+        string launch = s.Substring(s.IndexOf("launch_if_enabled()", System.StringComparison.Ordinal));
+        int asm = launch.IndexOf("assemble_sdp", System.StringComparison.Ordinal);
+        int run = launch.IndexOf("\"$DAEMON\" -config \"$CONFIG\"", System.StringComparison.Ordinal);
+        Assert.True(asm >= 0 && run > asm, "assemble_sdp must run before the daemon is launched");
+    }
+
+    [Fact]
     public void Keeps_the_pgrep_exe_filter_so_it_never_matches_itself()
     {
         // Assert on executable lines so a comment can't satisfy the check. pgrep -x matches by comm;

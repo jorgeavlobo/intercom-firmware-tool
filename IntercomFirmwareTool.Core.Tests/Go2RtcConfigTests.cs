@@ -105,8 +105,7 @@ public class Go2RtcConfigTests
     public void BuildOnDeviceYaml_loopback_api_lan_rtsp_with_auth_and_video_only_stream()
     {
         string yaml = Go2RtcConfig.BuildOnDeviceYaml(
-            "Front Door", "/usr/sbin/ffmpeg", "/etc/btmqttd/go2rtc/frontdoor.sdp",
-            "camera", "s3cr3t");
+            "Front Door", "/usr/sbin/ffmpeg", "camera", "s3cr3t");
         // Control API + web UI: loopback ONLY, never the LAN.
         Assert.Contains("api:", yaml);
         Assert.Contains("listen: \"127.0.0.1:1984\"", yaml);
@@ -116,10 +115,13 @@ public class Go2RtcConfigTests
         Assert.Contains("listen: \":8554\"", yaml);
         Assert.Contains("username: \"camera\"", yaml);
         Assert.Contains("password: \"s3cr3t\"", yaml);
-        // Stream: sanitized key, absolute ffmpeg + SDP paths, video-only H.264 copy.
+        // Stream: sanitized key, absolute ffmpeg path, video-only H.264 copy. The exec -i reads the
+        // tmpfs RUNTIME SDP (go2rtcd reassembles it at boot), NOT the read-only /etc template — the
+        // rootfs is read-only, so go2rtc + sprop.rs both use /var/run/btmqttd/doorbell.sdp.
         Assert.Contains("  frontdoor:", yaml);
         Assert.Contains("exec:/usr/sbin/ffmpeg", yaml);
-        Assert.Contains("-i /etc/btmqttd/go2rtc/frontdoor.sdp", yaml);
+        Assert.Contains("-i /var/run/btmqttd/doorbell.sdp", yaml);
+        Assert.DoesNotContain("-i /etc/btmqttd/go2rtc/", yaml);
         // Plain `-c:v copy` with default input options (issue #120, hardware-diagnosed on the C100X). The
         // vendored ffmpeg's H.264 parser recovers the SPS/PPS from the in-stream data, so the copy gets
         // its dimensions and publishes without any jitter-buffer tuning. An earlier revision widened
@@ -127,7 +129,7 @@ public class Go2RtcConfigTests
         // never reorders, so that oversized queue made ffmpeg drop every packet as "received too late" and
         // 404 — reverting to defaults locks on in under a second. Guard that the harmful tuning and the
         // (now-removed) extract_extradata/dump_extra bitstream filters stay OUT of the generated exec.
-        Assert.Contains("-i /etc/btmqttd/go2rtc/frontdoor.sdp -an -c:v copy -rtsp_transport tcp -f rtsp", yaml);
+        Assert.Contains("-i /var/run/btmqttd/doorbell.sdp -an -c:v copy -rtsp_transport tcp -f rtsp", yaml);
         Assert.DoesNotContain("-reorder_queue_size", yaml);
         Assert.DoesNotContain("-max_delay", yaml);
         Assert.DoesNotContain("-analyzeduration", yaml);
@@ -142,7 +144,7 @@ public class Go2RtcConfigTests
         // A generated/typed credential may contain YAML-special punctuation; double-quoted scalars
         // must escape a backslash and a double-quote so the file stays valid.
         string yaml = Go2RtcConfig.BuildOnDeviceYaml(
-            "doorbell", "/usr/sbin/ffmpeg", "/x.sdp", "u\"x", "p\\y");
+            "doorbell", "/usr/sbin/ffmpeg", "u\"x", "p\\y");
         Assert.Contains("username: \"u\\\"x\"", yaml);
         Assert.Contains("password: \"p\\\\y\"", yaml);
     }
@@ -157,7 +159,7 @@ public class Go2RtcConfigTests
         // RTSP is LAN-facing and auth is mandatory (#120): go2rtc skips auth for a blank username, so
         // an empty credential opens the stream unauthenticated. The builder must refuse it outright.
         Assert.Throws<ArgumentException>(() =>
-            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", "/x.sdp", user!, pass!));
+            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", user!, pass!));
     }
 
     [Theory]
@@ -172,7 +174,7 @@ public class Go2RtcConfigTests
         // YamlDoubleQuoted escapes only '\' and '"', so ANY control character would land raw in the
         // double-quoted YAML scalar and corrupt the file — reject them all, not just CR/LF.
         Assert.Throws<ArgumentException>(() =>
-            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", "/x.sdp", user, pass));
+            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", user, pass));
     }
 
     [Fact]

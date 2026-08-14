@@ -59,6 +59,13 @@ const LIGHT_FILE: &str = "light-state";
 /// (LIGHT_ENABLED with an empty WHERE) keeps the WHERE it learned across reboots.
 const LIGHT_WHERE_FILE: &str = "light-where";
 
+/// The LEARNED camera `sprop-parameter-sets` (issue #120), a single-line base64+comma string.
+/// Persisted so the runtime tmpfs SDP (`/var/run/btmqttd/doorbell.sdp`) can be reassembled at
+/// every boot: go2rtcd copies the read-only template SDP into tmpfs and, when this value exists,
+/// splices it into the fmtp line. `sprop.rs` learns it once per install and stores it here — the
+/// durable source of truth for "provisioned", surviving reboots on the same cfg/extra partition.
+const CAMERA_SPROP_FILE: &str = "camera-sprop";
+
 /// The state directory, honouring `$BTMQTTD_STATE_DIR` (tests/dev) like `config.rs`
 /// honours `$BTMQTTD_CONF`.
 fn state_dir() -> PathBuf {
@@ -181,6 +188,44 @@ fn read_light_where_in(dir: &Path) -> Option<String> {
     let s = std::fs::read_to_string(light_where_file_in(dir)).ok()?;
     let t = s.trim();
     (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit())).then(|| t.to_string())
+}
+
+/// Persist the LEARNED camera `sprop-parameter-sets` so the runtime SDP can be reassembled at
+/// boot from the read-only template + this value. Atomic write + dir fsync like the other
+/// records. Returns `true` on success. Blocking; call via `spawn_blocking`.
+#[must_use]
+pub fn store_camera_sprop(value: &str) -> bool {
+    let dir = state_dir();
+    atomic_write_in(&dir, &camera_sprop_file_in(&dir), value.as_bytes())
+}
+
+/// Forget any persisted camera sprop — a reflash re-learns from scratch, and clearing it is a
+/// clean reset. Returns `true` when the file is gone (removed, or already absent). Blocking;
+/// call via `spawn_blocking`.
+#[must_use]
+pub fn clear_camera_sprop() -> bool {
+    clear_camera_sprop_in(&state_dir())
+}
+
+/// Read the persisted LEARNED camera sprop (a single base64+comma line). Returns `None` when
+/// absent, unreadable, or empty — a caller then treats the panel as not-yet-provisioned. The
+/// trailing newline (if any) is trimmed.
+pub fn read_camera_sprop() -> Option<String> {
+    read_camera_sprop_in(&state_dir())
+}
+
+fn camera_sprop_file_in(dir: &Path) -> PathBuf {
+    dir.join(CAMERA_SPROP_FILE)
+}
+
+fn read_camera_sprop_in(dir: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(camera_sprop_file_in(dir)).ok()?;
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+fn clear_camera_sprop_in(dir: &Path) -> bool {
+    remove_or_absent(&camera_sprop_file_in(dir))
 }
 
 // ---------------------------------------------------------------------------
@@ -515,6 +560,36 @@ mod tests {
         assert!(clear_light_where_in(&dir)); // disabled-mode reset forgets it
         assert!(read_light_where_in(&dir).is_none());
         assert!(clear_light_where_in(&dir)); // already absent → still success
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn camera_sprop_store_read_clear_roundtrip() {
+        // Directory-injected cores — no env mutation, so this is parallel-safe. The learned camera
+        // sprop is a single base64+comma line; store writes it, read trims a trailing newline, and
+        // clear forgets it (a reflash re-learns).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(6000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("btmqttd-sprop-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = camera_sprop_file_in(&dir);
+
+        assert!(read_camera_sprop_in(&dir).is_none()); // no file yet
+        assert!(atomic_write_in(&dir, &file, b"Z0JAHqaAoD2Q,aM48gAA="));
+        assert_eq!(read_camera_sprop_in(&dir).as_deref(), Some("Z0JAHqaAoD2Q,aM48gAA="));
+        // A trailing newline is trimmed on read.
+        assert!(atomic_write_in(&dir, &file, b"AAA,BBB=\n"));
+        assert_eq!(read_camera_sprop_in(&dir).as_deref(), Some("AAA,BBB="));
+        // An empty/whitespace file reads back as None (treated as not-yet-provisioned).
+        assert!(atomic_write_in(&dir, &file, b"\n"));
+        assert!(read_camera_sprop_in(&dir).is_none());
+        // Clear forgets it; clearing again is still success (missing file is success).
+        assert!(clear_camera_sprop_in(&dir));
+        assert!(read_camera_sprop_in(&dir).is_none());
+        assert!(clear_camera_sprop_in(&dir));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
