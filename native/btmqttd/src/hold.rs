@@ -36,8 +36,11 @@ const GO2RTC_API: &str = "127.0.0.1:1984";
 /// Cap one API request so a wedged socket can't stall the poll loop (the port is loopback, so this is
 /// generous). Covers connect + request + read.
 const REQ_TIMEOUT: Duration = Duration::from_secs(4);
-/// Floor for the poll cadence, so a tiny configured window can't spin the loop.
-const MIN_POLL: Duration = Duration::from_secs(3);
+/// Target poll cadence. Short for RESPONSIVENESS: when Home Assistant opens the camera, go2rtc starts
+/// the producer and this task must bring the panel session up within a couple seconds (not a third of
+/// the viewing window). The effective period is still capped under the window (see `run`) so a held
+/// view never lapses between pokes.
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// Ceiling on the response we will buffer from the loopback API (its /api/streams JSON is tiny; this
 /// just bounds a hostile/broken peer).
 const MAX_RESP_BYTES: usize = 64 * 1024;
@@ -45,9 +48,13 @@ const MAX_RESP_BYTES: usize = 64 * 1024;
 /// Poll go2rtc and renew the on-demand window while a viewer is connected. Returns when `stopping` is
 /// set. `main` also aborts this task at shutdown, so the poll-interval sleep is a bounded wait.
 pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
-    // Poll several times per viewing window so a held view never lapses between pokes: a third of the
-    // window (floored at MIN_POLL) leaves margin for a slow request and the panel's re-INVITE latency.
-    let period = Duration::from_secs(cfg.camera_view_idle_secs / 3).max(MIN_POLL);
+    // Poll every POLL_INTERVAL for a prompt panel start when a viewer connects, but never longer than
+    // half the viewing window so a held view can't lapse between pokes (floored so a pathological tiny
+    // window can't spin the loop). On the 30 s default this is a flat 2 s.
+    let window = Duration::from_secs(cfg.camera_view_idle_secs.max(1));
+    let period = POLL_INTERVAL
+        .min(window / 2)
+        .max(Duration::from_millis(500));
     // Debounce the "API unreachable" log: a stopped/starting go2rtc must not spam the log every poll.
     let mut warned = false;
     while !stopping.load(Ordering::Relaxed) {
