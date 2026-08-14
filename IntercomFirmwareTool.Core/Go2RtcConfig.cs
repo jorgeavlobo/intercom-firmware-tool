@@ -70,6 +70,17 @@ namespace IntercomFirmwareTool.Core
         public const string OnDeviceRuntimeSdpPath = "/var/run/btmqttd/doorbell.sdp";
 
         /// <summary>
+        /// The DERIVED SDP go2rtc's own <c>exec:</c> ffmpeg writes (via a second <c>-sdp_file</c> output)
+        /// while a client is watching — its <c>sprop-parameter-sets</c> is computed from the panel's
+        /// in-stream SPS/PPS once ffmpeg resolves the H.264. On <b>tmpfs</b> (the rootfs is read-only).
+        /// btmqttd's <c>sprop.rs</c> passively watches THIS file and persists the learned value, so it
+        /// must equal <c>sprop.rs</c>'s <c>DERIVED_SDP_PATH</c>. The panel only feeds a REAL consumed
+        /// view (a silent probe times out — hardware-confirmed on the C100X), so learning the parameter
+        /// sets from go2rtc's live-view ffmpeg is the only mechanism that works.
+        /// </summary>
+        public const string OnDeviceDerivedSdpPath = "/var/run/btmqttd/derived.sdp";
+
+        /// <summary>
         /// Normalise a go2rtc stream name to the safe subset go2rtc keys and Home Assistant entity ids
         /// tolerate: lower-case ASCII letters, digits, <c>_</c> and <c>-</c>. Everything else is dropped;
         /// an empty or all-invalid input becomes <see cref="DefaultStreamName"/>. Deterministic so the
@@ -246,10 +257,21 @@ namespace IntercomFirmwareTool.Core
             // under a second (hardware-verified: 94 frames in 8 s). The extract_extradata/dump_extra
             // bitstream filters were likewise dropped — the parser already carries the parameter sets into
             // the announce SDP, so they bought nothing.
+            //
+            // sprop LEARNING (issue #120, hardware-diagnosed on the C100X): the panel only sustains/feeds
+            // the video call for a REAL consumed view — a silent probe that brings the panel up just to run
+            // ffmpeg TIMES OUT and never learns. So this SAME ffmpeg (which runs only while a client is
+            // watching) is given a SECOND output that writes the parameter sets it resolves:
+            //   -c:v copy -sdp_file {OnDeviceDerivedSdpPath} -f rtp rtp://127.0.0.1:9
+            // -sdp_file writes an SDP whose sprop-parameter-sets ffmpeg computed from the in-stream SPS/PPS
+            // once find_stream_info resolves the H.264 — the same mechanism already proven to derive sprop.
+            // The paired -f rtp rtp://127.0.0.1:9 is fire-and-forget UDP to a dead port: non-blocking, so
+            // it can't stall the primary {output} RTSP sink. btmqttd's sprop.rs passively watches
+            // OnDeviceDerivedSdpPath and persists the value — it never brings the panel up itself.
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {OnDeviceRuntimeSdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}}\"\n"));
+                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {OnDeviceRuntimeSdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}} -c:v copy -sdp_file {OnDeviceDerivedSdpPath} -f rtp rtp://127.0.0.1:9\"\n"));
             return sb.ToString();
         }
 

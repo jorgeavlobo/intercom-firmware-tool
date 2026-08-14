@@ -1,4 +1,5 @@
-//! Automatic, transparent sprop-parameter-sets provisioning for the on-device camera (issue #120).
+//! Automatic, transparent sprop-parameter-sets provisioning for the on-device camera (issue #120) —
+//! a PASSIVE watcher.
 //!
 //! The panel's SDP carries no `sprop-parameter-sets`, and — hardware-confirmed on the C100X — its SIP
 //! answer doesn't advertise them either (only `profile-level-id`). Its encoder emits an in-stream
@@ -7,219 +8,132 @@
 //! parameter sets, btmqttd LEARNS them itself and reassembles the go2rtc SDP with them, so every open
 //! (including the first) resolves in under a second and nothing is configured.
 //!
-//! ## Lifecycle (renew-only; learns once; persists the VALUE, not a patched file)
-//!   * On startup, if no sprop has been learned yet (no persisted value), this task brings the panel up
-//!     ON ITS OWN — a silent on-demand INVITE via the SIP UA (no ring, no on-screen view) — so the
-//!     stream is live, then runs the vendored ffmpeg once to DERIVE the parameter sets from the live RTP
-//!     (ffmpeg's `-sdp_file` writes an SDP whose `sprop-parameter-sets` is computed from the in-stream
-//!     SPS/PPS). The probe reads the READ-ONLY TEMPLATE SDP the installer wrote under `/etc`
-//!     ([`TEMPLATE_SDP_PATH`]) — always present, never mutated.
-//!   * On a successful learn it PERSISTS the sprop VALUE on the writable `cfg/extra` partition via
-//!     `persist::store_camera_sprop` (the durable source of truth), then best-effort patches the RUNTIME
-//!     tmpfs SDP ([`SDP_PATH`]) so THIS boot's next view is fast without waiting for a reboot.
-//!   * It is renew-only, like the auto-hold task: it only ever pokes `Start` and never sends `Stop`, so
-//!     it can't cut a concurrent viewer — a provisioning-only session simply lapses on its own after
-//!     `camera_view_idle_secs`.
+//! ## Lifecycle (passive watch; learns once; persists the VALUE, not a patched file)
+//! An earlier revision brought the panel up ITSELF (a silent on-demand INVITE) to run a one-shot ffmpeg
+//! probe. Hardware testing proved that CAN'T WORK: the panel only sustains/feeds the video call for a
+//! REAL consumed view, not a silent probe — so proactive probing just cycles the panel and never learns.
+//! This task is therefore purely passive:
+//!   * go2rtc's OWN `exec:` ffmpeg — which runs only while a client is actually watching — is asked
+//!     (in `Go2RtcConfig.BuildOnDeviceYaml`) to write the parameter sets it resolves to a DERIVED SDP
+//!     via `-sdp_file` ([`DERIVED_SDP_PATH`], = `Go2RtcConfig.OnDeviceDerivedSdpPath`). That is the same
+//!     `-sdp_file` mechanism already proven to derive sprop, but driven by the live view instead of a
+//!     probe. This task NEVER brings the panel up itself, so it can never cycle it.
+//!   * This task just WATCHES that derived file every [`WATCH_INTERVAL`]. When a live view has produced
+//!     an sprop in it, it PERSISTS the VALUE on the writable `cfg/extra` partition via
+//!     `persist::store_camera_sprop` (the durable source of truth — `go2rtcd` reassembles the runtime
+//!     SDP from template + persisted value at boot), best-effort patches THIS boot's runtime tmpfs SDP
+//!     ([`SDP_PATH`]) so the current session speeds up without waiting for a reboot, and returns.
+//!   * The first view is the ~20 s parser resolve (unchanged); every later view is fast. If the derived
+//!     file is absent or has no sprop yet (no view has produced one), it just keeps polling.
 //!
 //! ## Why a tmpfs runtime SDP (the rootfs is read-only)
 //! The device rootfs — including `/etc` — is mounted READ-ONLY (see `persist.rs`), so a runtime write to
 //! the `/etc` SDP fails with `EROFS`. The design therefore SPLITS the SDP:
-//!   * the installer's `/etc/.../doorbell.sdp` is the read-only TEMPLATE/seed (the probe input);
+//!   * the installer's `/etc/.../doorbell.sdp` is the read-only TEMPLATE/seed;
 //!   * go2rtc reads a RUNTIME copy on tmpfs (`/var/run/btmqttd/doorbell.sdp`), which the `go2rtcd` init
 //!     script (re)assembles at EVERY boot: it copies the template into tmpfs and, if a learned value is
 //!     persisted, splices `sprop-parameter-sets=<value>;` into the fmtp line. This task patches THAT
 //!     runtime copy (writable) after a fresh learn. Reflash-safe by composition: `cfg/extra` survives a
 //!     reflash, so a re-flashed unit that already learned keeps its value; a genuinely fresh unit has no
-//!     persisted value and re-learns.
-//!
-//! ## Port coordination (the provisioning probe vs. go2rtc's own ffmpeg)
-//! Both the probe and go2rtc's `exec:` ffmpeg bind the same `127.0.0.2:<CameraVideoPort>` UDP input, so
-//! only one can hold it. go2rtc's ffmpeg is a PRODUCER, and it starts during the RTSP DESCRIBE — before
-//! a client attaches as a consumer — so this task keys off go2rtc's ACTIVITY (`hold::stream_has_activity`
-//! = a non-empty producers OR consumers array), NOT consumers alone: a consumers-only check would miss
-//! the bootstrap producer and still collide on the port. It SKIPS a round when activity is already
-//! present, and a `select!` branch YIELDS the probe (dropping it releases the port via `kill_on_drop`)
-//! if activity appears mid-probe — so go2rtc's own ffmpeg always wins the port within ~a poll interval.
-//!
-//! Best-effort and self-healing: if the panel isn't reachable yet at boot, it retries with backoff. If
-//! on-demand viewing is off (no SIP UA to originate a session), the task simply isn't started — the
-//! operator can still supply CAMERA_SPROP at install time, or the ~20 s-first-frame fallback applies.
+//!     persisted value and re-learns from the next live view.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
 
 use crate::config::Config;
-use crate::sip::ViewCmd;
-use crate::{hold, persist};
+use crate::persist;
 
 /// The RUNTIME go2rtc SDP on tmpfs — what go2rtc's `exec -i` reads and what this task patches after a
 /// fresh learn. `go2rtcd` (re)assembles it at every boot from [`TEMPLATE_SDP_PATH`] + the persisted
 /// value. tmpfs is writable, so patching it (temp + rename below) works despite the read-only rootfs.
 const SDP_PATH: &str = "/var/run/btmqttd/doorbell.sdp";
 /// The READ-ONLY TEMPLATE SDP the installer wrote under `/etc` (Go2RtcDir + stream name), 0644 (it
-/// carries no secret). Always present and never mutated — the ffmpeg probe reads THIS to describe the
-/// panel's RTP, so provisioning never depends on the runtime tmpfs copy having been assembled yet.
+/// carries no secret). Always present and never mutated — checked by `template_has_sprop` so a
+/// pre-seeded image never runs a redundant watch.
 const TEMPLATE_SDP_PATH: &str = "/etc/btmqttd/go2rtc/doorbell.sdp";
-/// The vendored ffmpeg, installed here by `PayloadBinaries` (same InstallPath as the go2rtc exec uses).
-const FFMPEG_PATH: &str = "/usr/sbin/ffmpeg";
-/// Scratch path for ffmpeg's derived SDP (tmpfs).
-const CAP_SDP_PATH: &str = "/tmp/btmqttd-sprop-cap.sdp";
+/// The DERIVED SDP that go2rtc's own `exec:` ffmpeg writes via `-sdp_file` while a client is watching
+/// (its `sprop-parameter-sets` is computed from the panel's in-stream SPS/PPS once find_stream_info
+/// resolves the H.264). Must match `Go2RtcConfig.OnDeviceDerivedSdpPath`. This task's only input.
+const DERIVED_SDP_PATH: &str = "/var/run/btmqttd/derived.sdp";
 /// The `a=fmtp` fragment we splice sprop in AFTER — matches Go2RtcConfig.BuildOnDeviceSdp's order so a
 /// patched SDP equals what the installer would have written with CameraSprop set.
 const FMTP_ANCHOR: &str = "packetization-mode=1;";
 
-/// Bound the ffmpeg probe. The panel's SPS interval is ~20 s and we widen analyzeduration to wait for
-/// it, so give the probe headroom past that before killing it.
-const CAPTURE_TIMEOUT: Duration = Duration::from_secs(45);
-/// Let the INVITE complete and `av.rs` arm the `:30007` siphon before the probe starts reading RTP.
-/// (The probe's own analyzeduration tolerates a late start, so this only needs to be small.)
-const SIPHON_SETTLE: Duration = Duration::from_secs(3);
-const INIT_BACKOFF: Duration = Duration::from_secs(10);
-const MAX_BACKOFF: Duration = Duration::from_secs(300);
-/// How often the yield-watch polls go2rtc for activity that started mid-probe. Short so the probe
-/// releases the shared UDP input port to go2rtc's own ffmpeg within ~a second of a real view starting.
-const ACTIVITY_POLL: Duration = Duration::from_secs(1);
-/// Fixed, short retry cadence for the pre-probe activity SKIP. Skipping because go2rtc is already active
-/// (a viewer is watching) is normal steady state, NOT a probe failure — so it must NOT grow the
-/// exponential `backoff`, which is reserved for genuine failures. A short fixed wait means provisioning
-/// resumes promptly after the viewer disconnects (e.g. HA opened right after first boot).
-const SKIP_RETRY: Duration = Duration::from_secs(5);
+/// How often to re-check the derived SDP for a freshly-resolved sprop. A live view resolves it within
+/// ~20 s of first frame; a ~10 s watch picks that up promptly without busy-polling.
+const WATCH_INTERVAL: Duration = Duration::from_secs(10);
 
-/// Provision sprop once, then return. Spawned only when on-demand + on-device are enabled (so a SIP UA
-/// exists to originate the session and the go2rtc SDP is local). Holds a `view_tx` clone, so `main`
-/// stops this task BEFORE draining the SIP UA at shutdown.
-pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
-    // Already learned on a prior boot (the VALUE persisted on cfg/extra) ⇒ nothing to do. The persist
-    // file — not the runtime SDP — is the source of truth: go2rtcd already spliced the value into the
-    // runtime tmpfs SDP at boot. Idempotent guard so the steady state after the first learn is a single
-    // cheap file read at startup. (cfg supplies the viewing-window length so the probe can keep the SIP
-    // session alive for its full duration; the SDP/ffmpeg paths are fixed installer locations.)
+/// Watch the derived SDP and persist the panel's sprop once a live view has produced it, then return.
+/// Spawned when the on-device camera is enabled. It holds no `view_tx` and publishes nothing — it only
+/// reads a file and writes the persisted value / runtime SDP — so `main` aborts it at shutdown like
+/// `av.rs`. `cfg` is unused (the paths are fixed installer locations); kept for a uniform task signature.
+pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
+    // Already learned on a prior boot (the VALUE persisted on cfg/extra), or an operator pre-seeded the
+    // template ⇒ nothing to do. The persist file — not the runtime SDP — is the source of truth:
+    // go2rtcd already spliced the value into the runtime tmpfs SDP at boot. Idempotent guard so the
+    // steady state after the first learn is a single cheap file read at startup.
     if already_learned().await {
         return;
     }
-    let mut backoff = INIT_BACKOFF;
     let mut warned = false;
     while !stopping.load(Ordering::Relaxed) {
         if already_learned().await {
             return;
         }
-        // Port coordination (#3): if go2rtc is already active (a producer running for the DESCRIBE, or a
-        // viewer attached), its own `exec:` ffmpeg owns the shared 127.0.0.2:<CameraVideoPort> UDP input —
-        // our probe would fail to bind it. SKIP this round entirely (don't even bring the panel up) so the
-        // live path keeps the port. This is normal STEADY STATE, not a probe failure, so retry at a short
-        // FIXED cadence and DO NOT advance `backoff` (that stays reserved for genuine failures) — otherwise
-        // a view right after boot would push the next attempt out to minutes past the disconnect. A poll
-        // error (API down) reads as "no activity" and we proceed.
-        if matches!(hold::stream_has_activity().await, Ok(true)) {
-            if stopping.load(Ordering::Relaxed) {
-                break;
-            }
-            tokio::time::sleep(SKIP_RETRY).await;
-            continue;
-        }
-        // Bring the panel up silently so its stream is live for the probe. A closed channel means the
-        // SIP UA is gone — we cannot originate a session, so there is nothing more to do.
-        if view_tx.send(ViewCmd::Start).await.is_err() {
-            return;
-        }
-        // Keep the SIP viewing window alive for the WHOLE probe. A single Start renews the window for
-        // only `camera_view_idle_secs`, but the settle + capture can run longer (capture waits up to
-        // ~30 s for the panel's sparse SPS/PPS). If the window were shorter than that, sip.rs would BYE
-        // mid-capture, the siphon would dry, ffmpeg would derive no parameter sets, and provisioning
-        // would retry forever without ever succeeding (Codex). So re-poke Start on an interval well under
-        // the window while the settle + capture run. `renew_window` never returns unless the channel
-        // closes, so the select resolves when the capture completes.
-        let window = Duration::from_secs(cfg.camera_view_idle_secs.max(1));
-        let renew_period = renew_period_for(window);
-        let learned = tokio::select! {
-            r = async {
-                tokio::time::sleep(SIPHON_SETTLE).await;
-                capture_sprop().await
-            } => r,
-            _ = renew_window(&view_tx, renew_period) => Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "SIP view channel closed during sprop capture",
-            )),
-            // Port coordination (#3): go2rtc activity appearing mid-probe means its own `exec:` ffmpeg is
-            // (about to be) running on the same UDP input. YIELD — resolving this branch drops the capture
-            // future, and the probe child's kill_on_drop(true) frees the port within ~a poll interval so
-            // go2rtc owns it. Return an Err so the loop retries later (once the activity clears).
-            _ = wait_for_activity() => Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "yielded the sprop probe's UDP port to go2rtc activity",
-            )),
-        };
-        // Do NOT send Stop here — let the viewing window lapse on its own after `camera_view_idle_secs`.
-        // Provisioning shares the single SIP window with the auto-hold task and the manual
-        // view_camera/stop_camera actions, and it cannot reliably tell whether it is the SOLE reason the
-        // session is up: a go2rtc consumer reveals an RTSP viewer (Home Assistant), but a manual
-        // `view_camera` brings the panel up over SIP with NO go2rtc consumer, so no consumer signal
-        // exists to detect it (Codex). Rather than track cross-source ownership, provisioning is
-        // renew-only like the auto-hold task — it only ever pokes Start — so it never cuts a session
-        // another source may want. The cost is that a provisioning-only run leaves the panel up for at
-        // most one idle window; negligible, since this whole task is a one-shot that runs only until the
-        // first learn persists.
-        match learned {
-            Ok(sprop) => {
-                // Durability first: PERSIST the value on cfg/extra. This is what makes the learn
-                // durable (go2rtcd reassembles the runtime SDP from it at every boot), so success
-                // REQUIRES the persist write to land. persist is blocking → spawn_blocking.
-                let value = sprop.clone();
-                let stored =
-                    tokio::task::spawn_blocking(move || persist::store_camera_sprop(&value))
+        // Read the derived SDP go2rtc's own exec ffmpeg writes while a client is watching. Absent (no
+        // view has produced it yet) or present-but-no-sprop-yet ⇒ keep polling; this is normal until
+        // the first live view resolves the H.264.
+        if let Ok(derived) = tokio::fs::read_to_string(DERIVED_SDP_PATH).await {
+            if let Some(value) = parse_sprop(&derived) {
+                // Durability first: PERSIST the value on cfg/extra. This is what makes the learn durable
+                // (go2rtcd reassembles the runtime SDP from it at every boot), so success REQUIRES the
+                // persist write to land. persist is blocking → spawn_blocking.
+                let stored = {
+                    let v = value.clone();
+                    tokio::task::spawn_blocking(move || persist::store_camera_sprop(&v))
                         .await
-                        .unwrap_or(false);
+                        .unwrap_or(false)
+                };
                 if stored {
                     // Best-effort: patch the RUNTIME tmpfs SDP so THIS boot's next view is fast without
                     // waiting for a reboot. A failure here is NON-fatal — the value is already persisted,
                     // so the next boot's go2rtcd splices it in regardless; just log and still succeed.
-                    if let Err(e) = patch_sdp(&sprop).await {
+                    if let Err(e) = patch_sdp(&value).await {
                         eprintln!(
-                            "btmqttd: sprop provisioning: persisted the value but could not patch the runtime SDP ({e}); it takes effect on the next boot"
+                            "btmqttd: sprop watcher: persisted the value but could not patch the runtime SDP ({e}); it takes effect on the next boot"
                         );
                     }
                     eprintln!(
-                        "btmqttd: learned camera parameter sets — the on-device camera now resolves instantly"
+                        "btmqttd: learned camera parameter sets (from a live view) — the on-device camera now resolves instantly"
                     );
                     return;
                 }
-                // The persist write failed (cfg/extra briefly unavailable). Log and retry — the SPS is
-                // stable, so the next attempt derives the same value.
-                eprintln!(
-                    "btmqttd: sprop provisioning: failed to persist the learned parameter sets; will retry"
-                );
-            }
-            // A yield-to-viewer (Interrupted) is expected and benign — the probe stood aside so a real
-            // view could own the port; retry silently after the backoff. Any other error means the probe
-            // genuinely could not learn yet; log it once.
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(e) => {
+                // The persist write failed (cfg/extra briefly unavailable). Log once and keep watching —
+                // the derived value is stable, so the next poll persists the same value.
                 if !warned {
                     eprintln!(
-                        "btmqttd: sprop provisioning: could not learn the parameter sets yet ({e}); will retry"
+                        "btmqttd: sprop watcher: failed to persist the learned parameter sets; will retry"
                     );
                     warned = true;
                 }
             }
         }
+        // Re-check `stopping` before sleeping so a shutdown observed mid-poll exits promptly.
         if stopping.load(Ordering::Relaxed) {
             break;
         }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX_BACKOFF);
+        tokio::time::sleep(WATCH_INTERVAL).await;
     }
 }
 
 /// True iff there is nothing to provision: EITHER a value was already LEARNED and persisted on a prior
 /// boot (the durable source of truth on cfg/extra), OR the installer PRE-SEEDED a `CameraSprop` into the
-/// read-only `/etc` template SDP (an operator-supplied value — nothing to learn). Checking the template
-/// too means a correctly pre-seeded image never runs a redundant first-boot probe, which would also grab
-/// the shared RTP input port before a viewer connects (CodeRabbit). A missing/unreadable persist file
-/// AND template reads as "not provisioned" so the loop retries. Both reads are blocking → spawn_blocking.
+/// read-only `/etc` template SDP (an operator-supplied value — nothing to learn). A missing/unreadable
+/// persist file AND template reads as "not provisioned" so the watch continues. Both reads are blocking
+/// → spawn_blocking.
 async fn already_learned() -> bool {
     let persisted = tokio::task::spawn_blocking(|| persist::read_camera_sprop().is_some())
         .await
@@ -229,7 +143,7 @@ async fn already_learned() -> bool {
 
 /// True iff the read-only `/etc` template SDP already carries an operator-supplied
 /// `sprop-parameter-sets` (an install-time `CameraSprop`) — then there is nothing to learn. A
-/// missing/unreadable template reads as "no sprop" so provisioning proceeds normally.
+/// missing/unreadable template reads as "no sprop" so the watch proceeds normally.
 async fn template_has_sprop() -> bool {
     matches!(tokio::fs::read_to_string(TEMPLATE_SDP_PATH).await, Ok(s) if has_sprop(&s))
 }
@@ -238,119 +152,6 @@ async fn template_has_sprop() -> bool {
 /// without touching the fixed `/etc` template path).
 fn has_sprop(sdp: &str) -> bool {
     sdp.contains("sprop-parameter-sets=")
-}
-
-/// Resolve as soon as go2rtc reports any activity — the yield signal for the port-coordination
-/// `select!` branch. Polls the loopback control API every [`ACTIVITY_POLL`]; a poll error (API down)
-/// is treated as "no activity yet" and polling continues, so a transient API hiccup can't spuriously
-/// abandon a probe. Never resolves while go2rtc is idle, so it only ever fires to yield the port to
-/// go2rtc's own `exec:` ffmpeg (which starts during the DESCRIBE, before a consumer attaches).
-async fn wait_for_activity() {
-    loop {
-        tokio::time::sleep(ACTIVITY_POLL).await;
-        if matches!(hold::stream_has_activity().await, Ok(true)) {
-            return;
-        }
-    }
-}
-
-/// The interval at which `renew_window` re-pokes `Start`, derived from the viewing `window`. It must be
-/// STRICTLY LESS than the window so every poke lands before the SIP deadline (a positive margin), and
-/// floored so a pathological tiny window can't spin the loop. Half the window gives a full window/2
-/// margin; the 500 ms floor stays below even the 1 s minimum window (`camera_view_idle_secs.max(1)`),
-/// so the margin is always positive. Mirrors the period derivation in `hold.rs`.
-fn renew_period_for(window: Duration) -> Duration {
-    (window / 2).max(Duration::from_millis(500))
-}
-
-/// Re-poke `ViewCmd::Start` every `period` to keep the SIP viewing window alive while a long operation
-/// runs alongside it. Returns only if the channel closes (the SIP UA is gone). `Start` is idempotent —
-/// each poke just renews the full window — so this can outlast a single `camera_view_idle_secs` window
-/// (the sprop capture can wait ~30 s for the panel's sparse SPS/PPS).
-async fn renew_window(view_tx: &mpsc::Sender<ViewCmd>, period: Duration) {
-    loop {
-        tokio::time::sleep(period).await;
-        if view_tx.send(ViewCmd::Start).await.is_err() {
-            return;
-        }
-    }
-}
-
-/// Run the vendored ffmpeg to derive the panel's sprop from the live RTP described by the TEMPLATE SDP.
-/// It reads [`TEMPLATE_SDP_PATH`] — the read-only `/etc` seed the installer wrote — which is always
-/// present and never depends on the runtime tmpfs copy having been assembled. `-sdp_file` writes an SDP
-/// whose `sprop-parameter-sets` ffmpeg computed from the in-stream SPS/PPS; the widened analyzeduration
-/// makes find_stream_info WAIT for the panel's sparse keyframe (without the reorder-buffer tuning that
-/// broke the live path — this is a one-shot probe, latency is irrelevant).
-async fn capture_sprop() -> std::io::Result<String> {
-    let _ = tokio::fs::remove_file(CAP_SDP_PATH).await; // clear any stale file from a prior attempt
-    let mut child = tokio::process::Command::new(FFMPEG_PATH)
-        .args([
-            "-hide_banner",
-            "-protocol_whitelist",
-            "file,udp,rtp",
-            // Wait up to ~30 s for the panel's next in-stream SPS/PPS so the extradata (and thus the
-            // sprop in -sdp_file) is populated before the muxer writes its header.
-            "-analyzeduration",
-            "30000000",
-            "-probesize",
-            "50000000",
-            "-i",
-            TEMPLATE_SDP_PATH,
-            "-an",
-            "-c:v",
-            "copy",
-            "-t",
-            "1",
-            "-sdp_file",
-            CAP_SDP_PATH,
-            "-f",
-            "rtp",
-            // Discard the muxed RTP — we only want the SDP the muxer derives.
-            "rtp://127.0.0.1:9",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        // kill_on_drop so a shutdown that ABORTS this task (main aborts sprop_task before draining the
-        // SIP UA) doesn't orphan the probe: dropping the aborted future drops this `Child`, and without
-        // kill_on_drop the ffmpeg keeps running, holding the SDP's RTP input port until it times out —
-        // a later boot's probe or go2rtc could then fail to bind. The explicit timeout path below still
-        // start_kill()s + reaps; this only covers the cancellation (drop) path.
-        .kill_on_drop(true)
-        .spawn()?;
-    match tokio::time::timeout(CAPTURE_TIMEOUT, child.wait()).await {
-        Ok(status) => {
-            // Propagate a wait() I/O error, but do NOT fail on a non-zero exit CODE: `-sdp_file` is
-            // written when the muxer opens its header — after find_stream_info has read the sprop — so a
-            // valid sprop can already be on disk even when ffmpeg later exits non-zero (e.g. the discard
-            // RTP sink erroring at teardown). Fall through to the parse below, which is the real success
-            // test; just log a non-zero exit so a genuine probe failure is diagnosable rather than
-            // surfacing only as the downstream "derived no sprop" (Copilot).
-            let status = status?;
-            if !status.success() {
-                eprintln!(
-                    "btmqttd: sprop provisioning: ffmpeg probe exited non-zero ({status}); checking the derived SDP anyway"
-                );
-            }
-        }
-        Err(_) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "ffmpeg sprop probe timed out (no keyframe within the window)",
-            ));
-        }
-    }
-    let derived = tokio::fs::read_to_string(CAP_SDP_PATH).await?;
-    let _ = tokio::fs::remove_file(CAP_SDP_PATH).await;
-    parse_sprop(&derived).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "ffmpeg derived no sprop-parameter-sets",
-        )
-    })
 }
 
 /// Extract the `sprop-parameter-sets` value from an SDP fmtp line (base64 sets, comma-separated; ends
@@ -422,8 +223,8 @@ mod tests {
     #[test]
     fn seeded_template_counts_as_provisioned() {
         // An installer-supplied CameraSprop lands in the template's fmtp line; has_sprop must detect it
-        // so a pre-seeded image skips the boot probe (already_learned via template_has_sprop). A bare
-        // template (no sprop) must NOT — provisioning still runs to learn it (CodeRabbit).
+        // so a pre-seeded image skips the watch (already_learned via template_has_sprop). A bare
+        // template (no sprop) must NOT — the watch still runs to learn it (CodeRabbit).
         let seeded = "a=fmtp:96 packetization-mode=1;sprop-parameter-sets=Z0JAHqaAoD2Q,aM48gAA=;profile-level-id=42801f\n";
         assert!(has_sprop(seeded));
         let bare = "a=fmtp:96 packetization-mode=1;profile-level-id=42801f\n";
@@ -437,25 +238,6 @@ mod tests {
             None
         );
         assert_eq!(parse_sprop(""), None);
-    }
-
-    #[test]
-    fn renew_period_stays_strictly_below_the_window() {
-        // The renewal poke must land before the SIP deadline for EVERY accepted window, including the
-        // 1 s minimum (camera_view_idle_secs.max(1)) — otherwise sip.rs could BYE mid-capture. Assert a
-        // positive margin (period < window) and the 500 ms floor across the range.
-        for secs in [1u64, 2, 3, 5, 30, 300] {
-            let window = Duration::from_secs(secs);
-            let period = renew_period_for(window);
-            assert!(
-                period < window,
-                "window={secs}s: renew_period {period:?} must be strictly less than the window {window:?}"
-            );
-            assert!(
-                period >= Duration::from_millis(500),
-                "window={secs}s: renew_period {period:?} must not spin below the 500 ms floor"
-            );
-        }
     }
 
     #[test]

@@ -4,66 +4,69 @@
 //! `sip.rs` holds the on-demand panel session for a FIXED window per `view_camera` press because there
 //! was no continuous "someone is watching" signal — so a single press bounds the session to one window
 //! and it auto-hangs-up when the window elapses. This task supplies that missing signal for the
-//! on-device media path: it polls the loopback go2rtc control API and, while the camera stream shows
-//! any ACTIVITY (a producer OR a consumer), pokes `ViewCmd::Start` to renew the window.
+//! on-device media path: while a client holds an ESTABLISHED TCP connection to go2rtc's RTSP port
+//! (`:8554`, = `Go2RtcConfig.OnDeviceRtspPort`) it pokes `ViewCmd::Start` to renew the window, so Home
+//! Assistant "just opens the camera" and the panel session follows the live viewer.
 //!
-//! ## Why "activity" (producer OR consumer), and why this is PROVISIONAL
-//! go2rtc's `/api/streams` reports two arrays per stream: **producers** (its lazy `exec:` ffmpeg, which
-//! reads the panel RTP) and **consumers** (attached RTSP clients, e.g. Home Assistant). We poke on
-//! EITHER being non-empty, deliberately, so the camera can BOOTSTRAP from idle: go2rtc starts its lazy
-//! producer DURING the RTSP DESCRIBE — before a client registers as an attached consumer — and that
-//! producer needs live RTP, which needs the panel session up, which only this task brings up. A
-//! consumers-ONLY check would deadlock that first open (no consumer yet ⇒ no Start ⇒ no RTP ⇒ DESCRIBE
-//! never completes ⇒ consumer never attaches): a DOA camera. Poking on producer-or-consumer activity
-//! cannot cause that.
+//! ## Why the client TCP session, and NOT go2rtc's `/api/streams` (both hardware-confirmed on a C100X)
+//! An earlier revision keyed auto-hold off go2rtc's control API. Real-hardware testing proved BOTH of
+//! its arrays unusable as the trigger:
+//!   * **producers** is ALWAYS populated — go2rtc lists the configured `exec:` source even with no
+//!     ffmpeg running and no viewer — so keying auto-hold on producers held the panel up FOREVER
+//!     ("always on"): the window never lapsed.
+//!   * **consumers** stays `null` until go2rtc actually SERVES video. But go2rtc's `exec:` is a LAZY
+//!     source: it can't answer a viewer's RTSP DESCRIBE (start its ffmpeg, get RTP) unless the panel is
+//!     already up — which only this task brings up. So a consumers-based trigger DEADLOCKS the very
+//!     first open: no consumer ⇒ no Start ⇒ no RTP ⇒ DESCRIBE never completes ⇒ no consumer.
 //!
-//! The TRADEOFF, and why this is not yet final: if go2rtc leaves a stream's producers array populated
-//! (e.g. a stopped `exec:` entry) after the last viewer leaves, activity stays "true" and the window may
-//! not lapse promptly. The two review positions here CONFLICT — "consumers is empty during bootstrap"
-//! (Codex) vs "producers stays populated when idle" (CodeRabbit) — and which holds depends on go2rtc's
-//! real `/api/streams` timing across the idle → describing → viewing → after-leave transitions. That can
-//! only be settled from ON-DEVICE observation, not asserted here. The interim rule is chosen to be
-//! bootstrap-SAFE (it can never strand the camera); the exact steady-state lapse signal is TO BE
-//! FINALIZED once the on-device `/api/streams` behaviour is captured. Do not treat this as verified.
+//! A raw TCP connection to `:8554`, by contrast, is present the instant the client CONNECTS — before any
+//! video, before go2rtc answers DESCRIBE — so it BOOTSTRAPS the first open; and it clears the instant the
+//! client DISCONNECTS, so the window lapses on its own once the last viewer leaves. (Confirmed on device:
+//! a client connected to `rtsp://…:8554` shows `consumers:null` and no producer ffmpeg, yet an
+//! ESTABLISHED socket on local port 8554 IS present.) go2rtc's ~30 s `exec:` idle-timeout is irrelevant
+//! now — we key off the client's TCP session, not go2rtc's producer.
 //!
-//! The intended net effect: Home Assistant "just opens the camera", activity appears, this task
-//! brings/holds the panel session up, and the session auto-hangs-up after activity clears once the last
-//! viewer leaves (the pokes stop → the window lapses on its own).
+//! ## How the count is exact (no double-count, never the LISTEN socket)
+//! We count ESTABLISHED (TCP state hex `01`) sockets whose LOCAL port is 8554, across BOTH
+//! `/proc/net/tcp` and `/proc/net/tcp6`, and sum. go2rtc listens on IPv6, so:
+//!   * a LAN viewer's accepted socket (go2rtc side) is the only local-port-8554 socket and lives in
+//!     `tcp6`;
+//!   * a loopback viewer's accepted socket (local 8554) is in `tcp6` while the client's own socket
+//!     (local ephemeral, REMOTE 8554) is in `tcp4` — counting only LOCAL-port-8554 skips it.
 //!
-//! Loopback-only and best-effort: any API hiccup (go2rtc restarting, not yet up) just skips a poll and
-//! is logged once. The manual `view_camera`/`stop_camera` MQTT actions are unaffected — every source
-//! drives the same `view_rx`, and `ViewCmd::Start` is idempotent (a fresh full window each time).
+//! So summing LOCAL-port-8554 ESTABLISHED across both files = exactly the viewer count, and the LISTEN
+//! socket (state `0A`) is never counted.
+//!
+//! Best-effort: reading `/proc` doesn't fail meaningfully — a read error reads as "no viewer" (logged
+//! once). The manual `view_camera`/`stop_camera` MQTT actions are unaffected — every source drives the
+//! same `view_rx`, and `ViewCmd::Start` is idempotent (a fresh full window each time).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::Value;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::sip::ViewCmd;
 
-/// The on-device go2rtc control API. `Go2RtcConfig.BuildOnDeviceYaml` pins it to loopback `:1984`
-/// (never the LAN), so this is fixed — the same way `av.rs`/`receiver.rs` hardcode the on-device
-/// `bt_av_media`/gateway loopback ports.
-const GO2RTC_API: &str = "127.0.0.1:1984";
-/// Cap one API request so a wedged socket can't stall the poll loop (the port is loopback, so this is
-/// generous). Covers connect + request + read.
-const REQ_TIMEOUT: Duration = Duration::from_secs(4);
-/// Target poll cadence. Short for RESPONSIVENESS: when Home Assistant opens the camera, go2rtc starts
-/// the producer and this task must bring the panel session up within a couple seconds (not a third of
-/// the viewing window). The effective period is still capped under the window (see `run`) so a held
-/// view never lapses between pokes.
+/// go2rtc's on-device RTSP port (`Go2RtcConfig.OnDeviceRtspPort` = 8554) as the uppercase hex the
+/// `/proc/net/tcp` port field uses: 8554 = 0x216A. A client holding an ESTABLISHED connection to this
+/// LOCAL port is a live viewer.
+const RTSP_PORT_HEX: &str = "216A";
+/// Target poll cadence. Short for RESPONSIVENESS: when Home Assistant opens the camera, the client
+/// connects to `:8554` and this task must bring the panel session up within a couple seconds (not a
+/// third of the viewing window). The effective period is still capped under the window (see `run`) so a
+/// held view never lapses between pokes.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
-/// Ceiling on the response we will buffer from the loopback API (its /api/streams JSON is tiny; this
-/// just bounds a hostile/broken peer).
-const MAX_RESP_BYTES: usize = 64 * 1024;
 
-/// Poll go2rtc and renew the on-demand window while a viewer is connected. Returns when `stopping` is
-/// set. `main` also aborts this task at shutdown, so the poll-interval sleep is a bounded wait.
+/// Debounce for the (essentially never taken) `/proc` read-error log, so a broken procfs can't spam the
+/// log every poll — the same one-shot-warn role the old API-unreachable `warned` flag served.
+static READ_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// Poke `Start` while a viewer holds an ESTABLISHED TCP connection to go2rtc's RTSP port. Returns when
+/// `stopping` is set. `main` also aborts this task at shutdown, so the poll-interval sleep is a bounded
+/// wait.
 pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
     // Poll every POLL_INTERVAL for a prompt panel start when a viewer connects, but never longer than
     // half the viewing window so a held view can't lapse between pokes (floored so a pathological tiny
@@ -72,37 +75,23 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
     let period = POLL_INTERVAL
         .min(window / 2)
         .max(Duration::from_millis(500));
-    // Debounce the "API unreachable" log: a stopped/starting go2rtc must not spam the log every poll.
-    let mut warned = false;
     while !stopping.load(Ordering::Relaxed) {
-        match stream_has_activity().await {
-            Ok(active) => {
-                warned = false;
-                if active {
-                    // Renew the on-demand window. try_send never blocks the poll loop: a full queue
-                    // means sip.rs isn't draining (reconnect backoff) and a dropped poke is harmless —
-                    // the next poll pokes again; Closed means the SIP task is gone, nothing to hold.
-                    //
-                    // DELIBERATE: auto-hold is AUTHORITATIVE while a viewer is connected. If an operator
-                    // issues `stop_camera` (ViewCmd::Stop) while Home Assistant still has the feed open,
-                    // this poll re-Starts within one interval — so a Stop only interrupts an active view
-                    // briefly rather than ending it. This is by design: the session follows the live
-                    // viewer, which is exactly what makes the feature "transparent" (HA just opens the
-                    // camera). To end a view, close it (activity clears → these pokes stop → the
-                    // window lapses); `stop_camera` remains effective when no viewer is connected (e.g.
-                    // after a ring). Honoring the Stop over an active viewer was considered and rejected:
-                    // tearing the session down drops the consumer, HA auto-reconnects, the consumer
-                    // reappears, and a suppression flag would fight HA's reconnect for no real benefit
-                    // (product decision on #129; Codex review).
-                    let _ = view_tx.try_send(ViewCmd::Start);
-                }
-            }
-            Err(e) => {
-                if !warned {
-                    eprintln!("btmqttd: camera auto-hold: go2rtc API poll failed: {e}");
-                    warned = true;
-                }
-            }
+        if viewer_connected() {
+            // Renew the on-demand window. try_send never blocks the poll loop: a full queue means
+            // sip.rs isn't draining (reconnect backoff) and a dropped poke is harmless — the next poll
+            // pokes again; Closed means the SIP task is gone, nothing to hold.
+            //
+            // DELIBERATE: auto-hold is AUTHORITATIVE while a viewer's TCP session is up. If an operator
+            // issues `stop_camera` (ViewCmd::Stop) while Home Assistant still has the feed open, this
+            // poll re-Starts within one interval — so a Stop only interrupts an active view briefly
+            // rather than ending it. This is by design: the session follows the live viewer, which is
+            // exactly what makes the feature "transparent" (HA just opens the camera). To end a view,
+            // close it (the TCP connection clears → these pokes stop → the window lapses); `stop_camera`
+            // remains effective when no viewer is connected (e.g. after a ring). Honoring the Stop over
+            // an active viewer was considered and rejected: tearing the session down drops the client,
+            // HA auto-reconnects, the connection reappears, and a suppression flag would fight HA's
+            // reconnect for no real benefit (product decision on #129; Codex review).
+            let _ = view_tx.try_send(ViewCmd::Start);
         }
         // Re-check `stopping` before sleeping so a shutdown observed mid-poll exits promptly.
         if stopping.load(Ordering::Relaxed) {
@@ -112,133 +101,131 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
     }
 }
 
-/// True iff go2rtc reports any ACTIVITY on the camera stream — a non-empty `producers` OR a non-empty
-/// `consumers` array. GET /api/streams over loopback HTTP/1.0. `pub(crate)` so `sprop.rs` can reuse it
-/// to coordinate the shared UDP input port: go2rtc's own `exec:` ffmpeg (a PRODUCER) owns
-/// `127.0.0.2:<CameraVideoPort>` while running, and it starts during the RTSP DESCRIBE — before a
-/// consumer attaches — so the provisioning probe must stand aside on producer activity, not wait for a
-/// consumer. Keying off producer-OR-consumer is also what lets the camera bootstrap from idle (see the
-/// module doc): a consumers-only check would miss the bootstrap producer entirely. PROVISIONAL — if
-/// go2rtc leaves producers populated when idle, activity may stay true after a view ends; the exact
-/// steady-state signal is to be finalized from on-device `/api/streams` observation.
-pub(crate) async fn stream_has_activity() -> std::io::Result<bool> {
-    let body = tokio::time::timeout(REQ_TIMEOUT, http_get_streams())
-        .await
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "go2rtc API timed out"))??;
-    let json: Value = serde_json::from_str(&body)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    // Response shape: { "<stream>": { "producers": [...], "consumers": [...] }, ... }. The on-device
-    // go2rtc serves exactly the one camera stream, so ANY stream carrying a non-empty producers OR
-    // consumers array means the camera is active — this task needs no knowledge of the stream name.
-    if let Value::Object(streams) = json {
-        for (_, s) in &streams {
-            for key in ["producers", "consumers"] {
-                if let Some(Value::Array(a)) = s.get(key) {
-                    if !a.is_empty() {
-                        return Ok(true);
-                    }
-                }
-            }
+/// True iff at least one client holds an ESTABLISHED TCP connection to go2rtc's RTSP port (LOCAL port
+/// 8554). Sums LOCAL-port-8554 ESTABLISHED sockets across `/proc/net/tcp` and `/proc/net/tcp6` (see the
+/// module doc for why that count is exactly the viewer count with no double-count). Reading `/proc`
+/// doesn't fail meaningfully: a file that can't be read contributes 0 (treated as "no viewer"), and if
+/// NEITHER file could be read that's logged once via [`READ_WARNED`].
+fn viewer_connected() -> bool {
+    let mut count = 0usize;
+    let mut any_read = false;
+    for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            any_read = true;
+            count += established_local_port_count(&text, RTSP_PORT_HEX);
         }
     }
-    Ok(false)
+    if any_read {
+        // Procfs is readable again — re-arm the one-shot warning for a future outage.
+        READ_WARNED.store(false, Ordering::Relaxed);
+    } else if !READ_WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "btmqttd: camera auto-hold: could not read /proc/net/tcp{{,6}}; assuming no viewer"
+        );
+    }
+    count > 0
 }
 
-/// Minimal HTTP/1.0 GET of `/api/streams` over loopback; returns the JSON body. `Connection: close`
-/// lets us read to EOF without parsing a Content-Length.
-async fn http_get_streams() -> std::io::Result<String> {
-    let mut sock = TcpStream::connect(GO2RTC_API).await?;
-    sock.write_all(b"GET /api/streams HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-        .await?;
-    sock.flush().await?;
-    let mut raw = Vec::new();
-    // Bounded read: the loopback API's body is tiny; MAX_RESP_BYTES only guards a broken/hostile peer.
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = sock.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        if raw.len() + n > MAX_RESP_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "go2rtc API response too large",
-            ));
-        }
-        raw.extend_from_slice(&buf[..n]);
-    }
-    let text = String::from_utf8_lossy(&raw);
-    // The JSON body follows the blank line after the HTTP headers.
-    match text.split_once("\r\n\r\n") {
-        Some((_, body)) => Ok(body.to_string()),
-        None => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "malformed HTTP response from go2rtc API",
-        )),
-    }
+/// Count ESTABLISHED sockets whose LOCAL port equals `port_hex`, parsing `/proc/net/tcp`-format text.
+/// Skips the header line; for each remaining line, whitespace-splits it, takes field[1]
+/// (`HEXIP:HEXPORT`, the LOCAL address — port is the substring after the LAST `:`) and field[3] (the
+/// connection state), and counts the line when the local port matches `port_hex` (case-insensitive) AND
+/// the state is `01` (TCP_ESTABLISHED). Pure and testable — no `/proc` I/O.
+fn established_local_port_count(proc_tcp: &str, port_hex: &str) -> usize {
+    proc_tcp
+        .lines()
+        .skip(1) // header row
+        .filter(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 4 {
+                return false;
+            }
+            // field[1] is the LOCAL `HEXIP:HEXPORT`; the port is after the LAST ':' (IPv6 addresses in
+            // /proc are a single colon-free hex blob, so there's exactly one ':' here, but rsplit is
+            // robust regardless). field[3] is the state; "01" is TCP_ESTABLISHED.
+            let local_port = match fields[1].rsplit(':').next() {
+                Some(p) => p,
+                None => return false,
+            };
+            local_port.eq_ignore_ascii_case(port_hex) && fields[3] == "01"
+        })
+        .count()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // The activity-detection logic, factored so it can be unit-tested without a go2rtc socket. Mirrors
-    // stream_has_activity: a non-empty producers OR consumers array on any stream.
-    fn any_activity(json: &Value) -> bool {
-        if let Value::Object(streams) = json {
-            for (_, s) in streams {
-                for key in ["producers", "consumers"] {
-                    if let Some(Value::Array(a)) = s.get(key) {
-                        if !a.is_empty() {
-                            return true;
-                        }
-                    }
-                }
-            }
-        }
-        false
+    // A realistic /proc/net/tcp header line (the parser skips it).
+    const HEADER: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
+
+    #[test]
+    fn listen_socket_is_not_a_viewer() {
+        // go2rtc's LISTEN socket: local port 8554 (216A) but state 0A (TCP_LISTEN), not 01 — must not
+        // count as a viewer, else the panel would be held up forever.
+        let proc = format!(
+            "{HEADER}\n\
+               0: 00000000000000000000000000000000:216A 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 10001 1 0000000000000000 100 0 0 10 0"
+        );
+        assert_eq!(established_local_port_count(&proc, "216A"), 0);
     }
 
     #[test]
-    fn bootstrap_producer_without_a_consumer_is_activity() {
-        // BOOTSTRAP: go2rtc starts its lazy exec producer DURING the RTSP DESCRIBE, before an RTSP client
-        // registers as an attached consumer. Activity must be true here (non-empty producers, empty
-        // consumers) so the panel session comes up and the first open can complete — a consumers-only
-        // check would deadlock this into a DOA camera.
-        let j: Value = serde_json::from_str(
-            r#"{"doorbell":{"producers":[{"url":"exec:ffmpeg ..."}],"consumers":[]}}"#,
-        )
-        .unwrap();
-        assert!(any_activity(&j));
+    fn established_local_8554_is_one_viewer() {
+        // A viewer's accepted socket: local port 8554 (216A), state 01 (ESTABLISHED) ⇒ counts.
+        let proc = format!(
+            "{HEADER}\n\
+              44: 0100007F:216A 0100007F:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 20 0 0 10 -1"
+        );
+        assert_eq!(established_local_port_count(&proc, "216A"), 1);
+        // The LISTEN socket alongside it still doesn't add to the count.
+        let with_listen = format!(
+            "{proc}\n\
+               0: 00000000000000000000000000000000:216A 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 10001 1 0000000000000000 100 0 0 10 0"
+        );
+        assert_eq!(established_local_port_count(&with_listen, "216A"), 1);
     }
 
     #[test]
-    fn a_connected_consumer_is_activity() {
-        // VIEWING: a viewer attached → non-empty consumers ⇒ hold the session.
-        let j: Value = serde_json::from_str(
-            r#"{"doorbell":{"producers":[{"url":"exec:ffmpeg ..."}],"consumers":[{"type":"RTSP client"}]}}"#,
-        )
-        .unwrap();
-        assert!(any_activity(&j));
-        // A consumer even without any producer entry still counts.
-        assert!(any_activity(
-            &serde_json::from_str(r#"{"doorbell":{"consumers":[{"type":"RTSP client"}]}}"#)
-                .unwrap()
-        ));
+    fn eight554_as_the_remote_port_is_not_counted() {
+        // The loopback CLIENT's own socket: local ephemeral (AA70), REMOTE port 8554 (216A), state 01.
+        // We key off the LOCAL port only, so this must NOT count — otherwise a loopback viewer would be
+        // double-counted (its client socket in tcp4 + go2rtc's accepted socket in tcp6).
+        let proc = format!(
+            "{HEADER}\n\
+              45: 0100007F:AA70 0100007F:216A 01 00000000:00000000 00:00000000 00000000  1000        0 12346 1 0000000000000000 20 0 0 10 -1"
+        );
+        assert_eq!(established_local_port_count(&proc, "216A"), 0);
     }
 
     #[test]
-    fn idle_stream_has_no_activity() {
-        // IDLE: both arrays empty/absent ⇒ no activity ⇒ don't hold the session.
-        assert!(!any_activity(
-            &serde_json::from_str(r#"{"doorbell":{"producers":[],"consumers":[]}}"#).unwrap()
-        ));
-        assert!(!any_activity(
-            &serde_json::from_str(r#"{"doorbell":{"consumers":null}}"#).unwrap()
-        ));
-        assert!(!any_activity(
-            &serde_json::from_str(r#"{"doorbell":{}}"#).unwrap()
-        ));
-        assert!(!any_activity(&serde_json::from_str(r#"{}"#).unwrap()));
+    fn multiple_viewers_are_summed() {
+        // Two ESTABLISHED accepted sockets on local 8554 (two HA clients) ⇒ 2. A third line with 8554 as
+        // the REMOTE port (a client socket) is ignored.
+        let proc = format!(
+            "{HEADER}\n\
+              44: 0100007F:216A 0100007F:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 20 0 0 10 -1\n\
+              46: 0100007F:216A 0200A8C0:C1AB 01 00000000:00000000 00:00000000 00000000  1000        0 12347 1 0000000000000000 20 0 0 10 -1\n\
+              45: 0100007F:AA70 0100007F:216A 01 00000000:00000000 00:00000000 00000000  1000        0 12346 1 0000000000000000 20 0 0 10 -1"
+        );
+        assert_eq!(established_local_port_count(&proc, "216A"), 2);
+    }
+
+    #[test]
+    fn port_hex_match_is_case_insensitive() {
+        // The /proc port field is uppercase hex, but match case-insensitively so a lowercase port_hex
+        // (or a kernel that emitted lowercase) still counts.
+        let proc = format!(
+            "{HEADER}\n\
+              44: 0100007F:216a 0100007F:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 20 0 0 10 -1"
+        );
+        assert_eq!(established_local_port_count(&proc, "216A"), 1);
+        assert_eq!(established_local_port_count(&proc, "216a"), 1);
+    }
+
+    #[test]
+    fn empty_and_header_only_are_zero() {
+        assert_eq!(established_local_port_count("", "216A"), 0);
+        assert_eq!(established_local_port_count(HEADER, "216A"), 0);
     }
 }

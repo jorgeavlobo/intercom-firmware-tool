@@ -341,20 +341,19 @@ async fn run() -> Result<bool, String> {
     };
 
     // Transparent sprop provisioning (issue #120, sprop.rs): the panel advertises no sprop-parameter-sets
-    // (nor in its SIP answer — hardware-confirmed), so on-device only, and when the go2rtc SDP has none
-    // yet, btmqttd learns them from the panel's own stream ONCE at boot (a silent INVITE via the SIP UA
-    // + a one-shot ffmpeg probe) and patches the SDP — so the very first HA open is instant with nothing
-    // for the operator to configure. Same gate as the auto-hold (needs the SIP UA + on-device SDP), and
-    // it too holds a `view_tx` clone (stopped before the SIP drain at shutdown). It returns on its own
-    // once provisioned; the handle is kept only to stop a still-retrying probe cleanly.
+    // (nor in its SIP answer — hardware-confirmed), so on-device only. It is a PASSIVE file-watcher: the
+    // panel only feeds a REAL consumed view (a silent probe times out — hardware-confirmed), so go2rtc's
+    // own `exec:` ffmpeg (which runs while a client is watching) writes the resolved parameter sets to a
+    // derived SDP via `-sdp_file`, and this task just watches that file and persists the value — it never
+    // brings the panel up itself. Because it no longer originates SIP, it needs only the on-device gate
+    // (not the SIP UA): spawn it whenever `camera_ondevice` is set. It returns on its own once it learns;
+    // the handle is kept only to abort a still-watching task cleanly at shutdown (like av.rs).
     let (sprop_task, sprop_stopping): (Option<tokio::task::JoinHandle<()>>, Arc<std::sync::atomic::AtomicBool>) = {
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        match (&view_tx, cfg.camera_ondevice) {
-            (Some(tx), true) => (
-                Some(tokio::spawn(sprop::run(cfg.clone(), stopping.clone(), tx.clone()))),
-                stopping,
-            ),
-            _ => (None, stopping),
+        if cfg.camera_ondevice {
+            (Some(tokio::spawn(sprop::run(cfg.clone(), stopping.clone()))), stopping)
+        } else {
+            (None, stopping)
         }
     };
     // On-device camera OFF ⇒ forget any learned sprop, so a later re-enable (or a panel swap) re-learns
@@ -936,15 +935,17 @@ async fn run() -> Result<bool, String> {
         av_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
     }
-    // Viewer-activity auto-hold (hold.rs) and sprop provisioning (sprop.rs): stop BOTH first. Each
-    // holds a `view_tx` clone, so they must be gone before the SIP block below drops the LAST sender to
-    // close `view_rx` — otherwise a surviving clone keeps the channel open and the SIP task never sees
-    // the shutdown. Neither publishes to the broker nor holds half-actuated bus state (they only poll /
-    // probe and poke Start/Stop), so a plain abort is clean and drops their `view_tx` clones.
+    // Viewer-activity auto-hold (hold.rs): stop it FIRST. It holds a `view_tx` clone, so it must be gone
+    // before the SIP block below drops the LAST sender to close `view_rx` — otherwise a surviving clone
+    // keeps the channel open and the SIP task never sees the shutdown. It neither publishes to the broker
+    // nor holds half-actuated bus state (it only reads /proc and pokes Start), so a plain abort is clean
+    // and drops its `view_tx` clone.
     if let Some(h) = hold_task {
         hold_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
     }
+    // Passive sprop watcher (sprop.rs): a plain file-watcher that holds NO `view_tx` and publishes
+    // nothing, so abort it like av.rs — its ordering vs. the SIP drain below is irrelevant.
     if let Some(h) = sprop_task {
         sprop_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
