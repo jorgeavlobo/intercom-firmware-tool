@@ -99,6 +99,10 @@ public class Go2RtcConfigTests
         Assert.Contains("exec:/usr/sbin/ffmpeg", yaml);
         Assert.Contains("-i /etc/btmqttd/go2rtc/frontdoor.sdp", yaml);
         Assert.Contains("-an -c:v copy", yaml);
+        // Widened RTP reorder buffer (issue #120, hardware-diagnosed): the default jitter buffer drops
+        // the panel's periodic in-stream SPS/PPS as "received too late" before ffmpeg can lock on, so
+        // go2rtc never gets a track and answers DESCRIBE with 404. These are input options — before -i.
+        Assert.Contains("-reorder_queue_size 3000 -max_delay 5000000 -i", yaml);
         Assert.Contains("{output}", yaml);
         Assert.DoesNotContain("\r", yaml);
     }

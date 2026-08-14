@@ -204,10 +204,20 @@ namespace IntercomFirmwareTool.Core
             // The stream: ffmpeg reads the loopback SDP and copies H.264 into go2rtc's internal RTSP
             // ({output}). Video only — the minimal on-device ffmpeg has no audio codecs until Phase 3
             // (#105), so -an drops the SDP's (absent) audio outright.
+            //
+            // -reorder_queue_size / -max_delay: the panel emits the H.264 parameter sets (SPS/PPS) only
+            // periodically, in-stream, and go2rtc starts this ffmpeg lazily (on the first RTSP consumer),
+            // so it joins mid-stream and must wait for the next SPS/PPS. With ffmpeg's default RTP jitter
+            // buffer the panel's SPS/PPS packets are dropped as "RTP: dropping old packet received too
+            // late" before ffmpeg can lock on — it then loops `non-existing PPS 0 referenced`, never sets
+            // the video dimensions, produces no track, and go2rtc answers DESCRIBE with 404. Widening the
+            // reorder queue (packets) and max reorder delay (µs) keeps the SPS/PPS long enough to lock on.
+            // Hardware-diagnosed on the C100X (issue #120): default buffers → 404; these values → the
+            // stream resolves to 640x480 and publishes. Input options, so they precede -i.
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {sdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}}\"\n"));
+                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -reorder_queue_size 3000 -max_delay 5000000 -i {sdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}}\"\n"));
             return sb.ToString();
         }
 
