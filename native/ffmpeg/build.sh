@@ -42,7 +42,20 @@ cd "$src" || exit 1
   --enable-protocol=file,udp,rtp,tcp \
   --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
   --enable-parser=h264 --enable-parser=hevc \
+  --enable-decoder=h264 \
   --extra-cflags="-Os" --extra-ldflags="-static -s"
+# --enable-decoder=h264: needed so `-c:v copy` resolves the video dimensions FAST. The C100X test
+# (issue #120) proved the panel emits an in-stream SPS/PPS only ~every 20 s, so with the parser
+# ALONE ffmpeg blocks ~20-30 s per cold open before it catches one ("Could not find codec
+# parameters"). btmqttd learns the panel's parameter sets and puts them in the SDP's
+# sprop-parameter-sets (extradata), but ffmpeg's find_stream_info reads the SPS out of extradata
+# only by OPENING THE DECODER (the parser reads in-stream data only). So with the parser but no
+# decoder the sprop is ignored and it still waits ~20-30 s; WITH the decoder, find_stream_info parses
+# the sprop SPS at open and resolves 640x480 in <1 s. `-c:v copy` still never decodes a frame at
+# runtime — the decoder is used only for that one-time parameter-set read — so the resident CPU cost
+# is unchanged. The H.264 DECODER is LGPL (only the x264 ENCODER is GPL; not enabled). It pulls
+# h264_sei.o (film-grain SEI) exactly as the parser did, so the HEVC-parser link dependency below
+# still applies.
 # --enable-parser=h264: the C100X hardware test (issue #120) proved `-c:v copy` DOES need
 # in-stream parameter-set extraction after all. The panel's SDP carries no sprop-parameter-sets,
 # so without the H.264 parser ffmpeg never extracts the SPS: it logs `parser not found for codec
