@@ -98,20 +98,18 @@ public class Go2RtcConfigTests
         Assert.Contains("  frontdoor:", yaml);
         Assert.Contains("exec:/usr/sbin/ffmpeg", yaml);
         Assert.Contains("-i /etc/btmqttd/go2rtc/frontdoor.sdp", yaml);
-        Assert.Contains("-an -c:v copy", yaml);
-        // Stream-analysis + reorder widening (issue #120, hardware-diagnosed): the panel's SDP carries no
-        // sprop-parameter-sets, so the SPS/PPS (resolution) arrive only periodically in-stream. go2rtc's
-        // lazy exec otherwise gives up before they arrive ("Could not find codec parameters") and/or drops
-        // them as "received too late", so it never gets a track and answers DESCRIBE with 404. These are
-        // input options — before -i.
-        Assert.Contains(
-            "-analyzeduration 10000000 -probesize 10000000 -reorder_queue_size 3000 -max_delay 5000000 -i",
-            yaml);
-        // H.264 parameter-set delivery to go2rtc (issue #120, hardware-diagnosed): `-c:v copy` publishes
-        // an SDP with no sprop-parameter-sets and can send a slice with no SPS/PPS ahead of it, so go2rtc
-        // drops the track (Broken pipe → 404). extract_extradata + dump_extra re-insert the SPS/PPS before
-        // every keyframe in-band. Output bitstream filter, so it follows -c:v copy.
-        Assert.Contains("-c:v copy -bsf:v extract_extradata,dump_extra", yaml);
+        // Plain `-c:v copy` with default input options (issue #120, hardware-diagnosed on the C100X). The
+        // vendored ffmpeg's H.264 parser recovers the SPS/PPS from the in-stream data, so the copy gets
+        // its dimensions and publishes without any jitter-buffer tuning. An earlier revision widened
+        // -reorder_queue_size/-max_delay to catch the sparse in-stream SPS/PPS, but the loopback ingest
+        // never reorders, so that oversized queue made ffmpeg drop every packet as "received too late" and
+        // 404 — reverting to defaults locks on in under a second. Guard that the harmful tuning and the
+        // (now-removed) extract_extradata/dump_extra bitstream filters stay OUT of the generated exec.
+        Assert.Contains("-i /etc/btmqttd/go2rtc/frontdoor.sdp -an -c:v copy -rtsp_transport tcp -f rtsp", yaml);
+        Assert.DoesNotContain("-reorder_queue_size", yaml);
+        Assert.DoesNotContain("-max_delay", yaml);
+        Assert.DoesNotContain("-analyzeduration", yaml);
+        Assert.DoesNotContain("-bsf", yaml);
         Assert.Contains("{output}", yaml);
         Assert.DoesNotContain("\r", yaml);
     }

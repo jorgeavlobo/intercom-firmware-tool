@@ -205,32 +205,24 @@ namespace IntercomFirmwareTool.Core
             // ({output}). Video only — the minimal on-device ffmpeg has no audio codecs until Phase 3
             // (#105), so -an drops the SDP's (absent) audio outright.
             //
-            // The panel carries NO sprop-parameter-sets in the SDP, so the H.264 parameter sets (SPS/PPS
-            // — they carry the resolution) arrive only periodically, in-stream. go2rtc starts this ffmpeg
-            // lazily (on the first RTSP consumer), so it joins mid-stream and must wait for the next
-            // SPS/PPS. Two ffmpeg defaults defeat that and make go2rtc answer DESCRIBE with 404 (all
-            // hardware-diagnosed on the C100X, issue #120 — with them the stream resolves to 640x480 and
-            // publishes; without them, 404):
-            //   -analyzeduration / -probesize: go2rtc's exec runs find_stream_info with a near-zero
-            //     analyzeduration, so ffmpeg gives up ("Could not find codec parameters ... unspecified
-            //     size") before the first SPS/PPS arrives. Widen it so it waits for them.
-            //   -reorder_queue_size / -max_delay: with the default RTP jitter buffer the SPS/PPS packets
-            //     are dropped as "RTP: dropping old packet received too late" before ffmpeg can lock on
-            //     (it then loops `non-existing PPS 0 referenced`). Widen the reorder queue (packets) and
-            //     the max reorder delay (µs) to keep them.
-            // Those four are input options, so they precede -i.
+            // Deliberately PLAIN defaults on the input — no -analyzeduration/-probesize/-reorder_queue_size/
+            // -max_delay tuning. The panel's SDP carries no sprop-parameter-sets, but the vendored ffmpeg's
+            // H.264 parser (native/ffmpeg/build.sh) recovers the SPS/PPS from the in-stream data, so
+            // `-c:v copy` gets the 640x480 dimensions and publishes to go2rtc on its own.
             //
-            // -bsf:v extract_extradata,dump_extra (OUTPUT option, after -c:v copy): even once ffmpeg
-            // resolves 640x480, `-c:v copy` publishes go2rtc an SDP with NO sprop-parameter-sets and can
-            // send a video slice with no SPS/PPS ahead of it — go2rtc then can't build the H.264 track and
-            // drops the connection (`Broken pipe` → 404). extract_extradata lifts the in-stream SPS/PPS
-            // into the codec extradata; dump_extra re-inserts them before every keyframe (in-band), so
-            // go2rtc always sees the parameter sets before a slice. Requires the ffmpeg build to enable
-            // those two bitstream filters (native/ffmpeg/build.sh).
+            // HARDWARE-DIAGNOSED (issue #120, C100X): an earlier revision widened the RTP jitter buffer
+            // (-reorder_queue_size 3000 -max_delay 5000000) to catch the sparse in-stream SPS/PPS. That
+            // was ACTIVELY HARMFUL here: the ingest is loopback (127.0.0.2), which never reorders, so the
+            // oversized reorder queue made ffmpeg stall waiting for sequence numbers that never arrive and
+            // drop every packet as "RTP: dropping old packet received too late" — the producer never
+            // locked on and go2rtc answered DESCRIBE with 404. Reverting to plain defaults locks on in well
+            // under a second (hardware-verified: 94 frames in 8 s). The extract_extradata/dump_extra
+            // bitstream filters were likewise dropped — the parser already carries the parameter sets into
+            // the announce SDP, so they bought nothing.
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -analyzeduration 10000000 -probesize 10000000 -reorder_queue_size 3000 -max_delay 5000000 -i {sdpPath} -an -c:v copy -bsf:v extract_extradata,dump_extra -rtsp_transport tcp -f rtsp {{output}}\"\n"));
+                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {sdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}}\"\n"));
             return sb.ToString();
         }
 
