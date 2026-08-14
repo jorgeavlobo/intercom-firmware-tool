@@ -205,13 +205,30 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
     }
 }
 
-/// True iff a sprop value was already LEARNED and persisted on a prior boot (the durable source of
-/// truth on cfg/extra). A missing/unreadable persist file reads as "not provisioned" so the loop
-/// retries. `persist::read_camera_sprop` is blocking → run it off the async runtime via spawn_blocking.
+/// True iff there is nothing to provision: EITHER a value was already LEARNED and persisted on a prior
+/// boot (the durable source of truth on cfg/extra), OR the installer PRE-SEEDED a `CameraSprop` into the
+/// read-only `/etc` template SDP (an operator-supplied value — nothing to learn). Checking the template
+/// too means a correctly pre-seeded image never runs a redundant first-boot probe, which would also grab
+/// the shared RTP input port before a viewer connects (CodeRabbit). A missing/unreadable persist file
+/// AND template reads as "not provisioned" so the loop retries. Both reads are blocking → spawn_blocking.
 async fn already_learned() -> bool {
-    tokio::task::spawn_blocking(|| persist::read_camera_sprop().is_some())
+    let persisted = tokio::task::spawn_blocking(|| persist::read_camera_sprop().is_some())
         .await
-        .unwrap_or(false)
+        .unwrap_or(false);
+    persisted || template_has_sprop().await
+}
+
+/// True iff the read-only `/etc` template SDP already carries an operator-supplied
+/// `sprop-parameter-sets` (an install-time `CameraSprop`) — then there is nothing to learn. A
+/// missing/unreadable template reads as "no sprop" so provisioning proceeds normally.
+async fn template_has_sprop() -> bool {
+    matches!(tokio::fs::read_to_string(TEMPLATE_SDP_PATH).await, Ok(s) if has_sprop(&s))
+}
+
+/// Pure `sprop-parameter-sets=` presence check (factored so the provisioned-detection is unit-testable
+/// without touching the fixed `/etc` template path).
+fn has_sprop(sdp: &str) -> bool {
+    sdp.contains("sprop-parameter-sets=")
 }
 
 /// Resolve as soon as go2rtc reports a connected consumer — the yield signal for the port-coordination
@@ -390,6 +407,17 @@ mod tests {
         let sdp = "v=0\r\nm=video 9 RTP/AVP 96\r\n\
                    a=fmtp:96 packetization-mode=1; sprop-parameter-sets=Z0JAHqaAoD2Q,aM48gAA=; profile-level-id=42401E\r\n";
         assert_eq!(parse_sprop(sdp).as_deref(), Some("Z0JAHqaAoD2Q,aM48gAA="));
+    }
+
+    #[test]
+    fn seeded_template_counts_as_provisioned() {
+        // An installer-supplied CameraSprop lands in the template's fmtp line; has_sprop must detect it
+        // so a pre-seeded image skips the boot probe (already_learned via template_has_sprop). A bare
+        // template (no sprop) must NOT — provisioning still runs to learn it (CodeRabbit).
+        let seeded = "a=fmtp:96 packetization-mode=1;sprop-parameter-sets=Z0JAHqaAoD2Q,aM48gAA=;profile-level-id=42801f\n";
+        assert!(has_sprop(seeded));
+        let bare = "a=fmtp:96 packetization-mode=1;profile-level-id=42801f\n";
+        assert!(!has_sprop(bare));
     }
 
     #[test]
