@@ -829,16 +829,18 @@ namespace IntercomFirmwareTool.Core
                         || opts.CameraRtspUser.Any(char.IsControl) || opts.CameraRtspPass!.Any(char.IsControl))
                         throw new ArgumentException(
                             CoreStrings.Get("Mqtt_CameraRtspCredsRequired"), nameof(opts));
-                    // CameraSprop is embedded VERBATIM into the SDP fmtp line, so restrict it to the RFC
-                    // 6184 sprop-parameter-sets alphabet — base64 tokens (A–Z a–z 0–9 + / =) separated by
-                    // a comma. Any other character (whitespace, ';', CR/LF) would break the SDP line or
-                    // inject an attribute. Empty/null is allowed: sprop is simply omitted (the
-                    // ~20 s-first-frame fallback). This is not a decode check — a syntactically valid but
-                    // wrong value is the operator's responsibility (see MqttOptions.CameraSprop).
-                    if (!string.IsNullOrEmpty(opts.CameraSprop)
-                        && !opts.CameraSprop.All(c =>
-                            c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9')
-                              or '+' or '/' or '=' or ','))
+                    // CameraSprop is embedded VERBATIM into the SDP fmtp line, so validate STRUCTURE, not
+                    // just the alphabet. RFC 6184 sprop-parameter-sets is a comma-separated list of base64
+                    // parameter sets (SPS/PPS); each token must be a NON-EMPTY, well-formed base64 string.
+                    // An alphabet-only check would wave through ",", "AA,,BB", "AA=BB", or a lone "A" —
+                    // values ffmpeg cannot decode as parameter sets, so an install accepted here would
+                    // still yield a broken/delayed stream. We (a) reject any character outside the base64
+                    // alphabet + ',' separator (whitespace/';'/CR-LF would break the SDP line or inject an
+                    // attribute), then (b) require every comma-token to decode as base64. Empty/null is
+                    // allowed: sprop is simply omitted (the ~20 s-first-frame fallback). This is still not
+                    // a semantic check — a well-formed but WRONG value is the operator's responsibility
+                    // (see MqttOptions.CameraSprop); it only rejects values that cannot be parameter sets.
+                    if (!string.IsNullOrEmpty(opts.CameraSprop) && !IsValidSprop(opts.CameraSprop))
                         throw new ArgumentException(
                             CoreStrings.Get("Mqtt_CameraSpropInvalid"), nameof(opts));
                 }
@@ -1021,6 +1023,41 @@ namespace IntercomFirmwareTool.Core
                 if (lvl.IndexOf('#') >= 0 && (lvl != "#" || i != levels.Length - 1))
                     return false;
                 if (lvl.IndexOf('+') >= 0 && lvl != "+")
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// True iff <paramref name="sprop"/> is a well-formed RFC 6184 <c>sprop-parameter-sets</c>
+        /// value: a comma-separated list of one or more NON-EMPTY, strictly-base64-decodable parameter
+        /// sets. Callers pass only a non-empty value (empty/null means "omit sprop"). This is structural,
+        /// not semantic — it rejects values that cannot be parameter sets (","; "AA,,BB"; "AA=BB"; a lone
+        /// "A"), but a well-formed yet wrong value is the operator's responsibility.
+        /// </summary>
+        private static bool IsValidSprop(string sprop)
+        {
+            // (a) Alphabet guard — only base64 chars, '=' padding, and ',' separators. This is NOT
+            // redundant with the base64 decode in (b): Convert.TryFromBase64String *ignores* whitespace,
+            // so on its own it would accept "AA BB" or "AA\nBB". Whitespace, ';', and CR/LF must be
+            // rejected because the value is spliced VERBATIM into the SDP fmtp line — a space or newline
+            // breaks the line, ';' injects another fmtp parameter.
+            foreach (var c in sprop)
+                if (c is not ((>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9')
+                              or '+' or '/' or '=' or ','))
+                    return false;
+            // (b) Structure guard — each comma-token must be a NON-EMPTY, well-formed base64 string.
+            foreach (var token in sprop.Split(','))
+            {
+                // Empty token = a leading/trailing/double comma ("," , "AA,,BB", "AA,"): reject. (Guard
+                // this explicitly — TryFromBase64String treats "" as a valid zero-byte decode.)
+                if (token.Length == 0)
+                    return false;
+                // Token is already whitespace-free (guard a), so TryFromBase64String now only accepts a
+                // correctly-padded, multiple-of-4 base64 string: "AA=BB" (mid-string '=') and a lone "A"
+                // (bad length) both fail. Decoded bytes never exceed the input length, so an input-sized
+                // scratch buffer always suffices.
+                if (!Convert.TryFromBase64String(token, new byte[token.Length], out _))
                     return false;
             }
             return true;

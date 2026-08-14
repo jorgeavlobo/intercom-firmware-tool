@@ -44,8 +44,8 @@ license texts and per-crate copyright notices travel with the binary in
 | Field | `btmqttd` |
 |---|---|
 | File | `armhf/btmqttd` |
-| Size | 1,499,352 bytes |
-| SHA-256 | `9bea1d2010cf3348534a1295dbc7e9cda169be3ee44b3b6bab7f9a99e55c47d5` |
+| Size | 1,499,736 bytes |
+| SHA-256 | `305481c2aaf6f7090850723b4df587b591a6e50706359eac1e0ea51f81605de2` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7 (`Tag_CPU_arch: v7`), **hard-float** (`Tag_FP_arch: VFPv3-D16`, `Tag_ABI_VFP_args: VFP registers`; ELF flags `0x5000400`) |
 | Build ID | none (stripped; `rust-lld` emits no GNU build-id note) |
@@ -142,12 +142,17 @@ Unlike `btmqttd` (our own program), **`ffmpeg` is genuinely third-party** — a 
 **LGPL-2.1-or-later** build of [FFmpeg](https://ffmpeg.org/) `n7.1.1`, cross-compiled to
 a static-musl armv7 hard-float binary and embedded in `IntercomFirmwareTool.Core`. The
 on-device media server (#120) runs it so go2rtc can read the panel's cleartext RTP via an
-SDP and **copy** the H.264 into RTSP — no decode, no encode, no transcode. Built per
+SDP and **copy** the H.264 into RTSP — no frame is ever encoded or transcoded. The build
+does include the **H.264 decoder**, but only so `find_stream_info` can read the stream's
+parameter sets (SPS/PPS) from the SDP's `sprop-parameter-sets` at open, resolving the video
+dimensions in under a second; `-c:v copy` never decodes a frame at runtime. Built per
 [`../../../native/ffmpeg/BUILD.md`](../../../native/ffmpeg/BUILD.md).
 
-It is compiled `--disable-everything` plus only the RTP/SDP→RTSP H.264-copy path, **never**
-`--enable-gpl`/`--enable-nonfree` and with no GPL-only libraries (no x264/x265/…), so the
-whole binary is LGPL. No decoders/encoders are built.
+It is compiled `--disable-everything` plus only the RTP/SDP→RTSP H.264-copy path (the H.264
+parser + decoder for parameter-set discovery, and the HEVC parser as a link-only dependency),
+**never** `--enable-gpl`/`--enable-nonfree` and with no GPL-only libraries (no x264/x265/…),
+so the whole binary is LGPL. **No encoders are built** — the one decoder is the LGPL H.264
+decoder, used solely to read parameter sets at open (the GPL x264 *encoder* is never enabled).
 
 ### Provenance & integrity
 
@@ -160,7 +165,7 @@ whole binary is LGPL. No decoders/encoders are built.
 | ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
 | Upstream | FFmpeg `n7.1.1` (release tag) |
 | Build toolchain | `zig cc` 0.13.0 (bundled musl) per `BUILD.md` |
-| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp` · `--disable-asm` |
+| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp` · `parser=h264,hevc` · `decoder=h264` · `--disable-asm` |
 | License | **LGPL-2.1-or-later** (FFmpeg) **AND MIT** (statically-linked musl libc) |
 | License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](../../../licenses/ffmpeg-COPYING.LGPLv2.1.txt) · [`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt) |
 | SPDX expression | `LGPL-2.1-or-later AND MIT` |

@@ -76,8 +76,20 @@ pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Se
         }
         tokio::time::sleep(SIPHON_SETTLE).await;
         let learned = capture_sprop().await;
-        // Release the panel promptly regardless of outcome — don't pin it for the full idle window.
-        let _ = view_tx.send(ViewCmd::Stop).await;
+        // Release the panel promptly — but ONLY if this one-shot probe is the sole reason it is up.
+        // Start/Stop drive a single shared SIP window, so an unconditional Stop here would cut off a
+        // real viewer who connected during the probe (Home Assistant, or a manual `view_camera`). The
+        // probe reads the siphon directly, NOT through go2rtc, so a go2rtc producer means someone else
+        // is consuming the stream — in that case leave the session to the auto-hold task (it renews the
+        // window while a producer exists) / the idle timeout. We Stop only when go2rtc POSITIVELY
+        // reports no producer; on a producer OR an API hiccup we conservatively skip the Stop (the
+        // window simply lapses after `camera_view_idle_secs`). This is the ownership coordination
+        // CodeRabbit/Codex flagged, done via the existing producer signal rather than a lease registry:
+        // provisioning is a one-shot (first boot only) and auto-hold never Stops (renew-only), so the
+        // only cross-source early-Stop is this one, and gating it on "no viewer" is sufficient.
+        if matches!(crate::hold::stream_has_producer().await, Ok(false)) {
+            let _ = view_tx.send(ViewCmd::Stop).await;
+        }
         match learned {
             Ok(sprop) => match patch_sdp(&sprop).await {
                 Ok(()) => {
@@ -149,6 +161,12 @@ async fn capture_sprop() -> std::io::Result<String> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        // kill_on_drop so a shutdown that ABORTS this task (main aborts sprop_task before draining the
+        // SIP UA) doesn't orphan the probe: dropping the aborted future drops this `Child`, and without
+        // kill_on_drop the ffmpeg keeps running, holding the SDP's RTP input port until it times out —
+        // a later boot's probe or go2rtc could then fail to bind. The explicit timeout path below still
+        // start_kill()s + reaps; this only covers the cancellation (drop) path.
+        .kill_on_drop(true)
         .spawn()?;
     match tokio::time::timeout(CAPTURE_TIMEOUT, child.wait()).await {
         Ok(status) => {

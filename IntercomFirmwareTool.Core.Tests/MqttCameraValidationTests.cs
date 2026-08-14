@@ -160,11 +160,12 @@ public class MqttCameraValidationTests
     [Fact]
     public void On_device_mode_accepts_a_valid_or_empty_sprop()
     {
-        // sprop is optional (empty ⇒ omitted, the ~20 s-first-frame fallback) and, when set, must be
-        // the RFC 6184 base64+comma alphabet. Two comma-separated base64 sets pass.
+        // sprop is optional (empty ⇒ omitted, the ~20 s-first-frame fallback) and, when set, must be a
+        // comma-separated list of well-formed base64 parameter sets (RFC 6184).
         MqttInstaller.Validate(OnDevice() with { CameraSprop = null });                 // omitted
         MqttInstaller.Validate(OnDevice() with { CameraSprop = "" });                    // omitted
-        MqttInstaller.Validate(OnDevice() with { CameraSprop = "Z0JAHqaAoD2Q,aM48gAA=" }); // valid
+        MqttInstaller.Validate(OnDevice() with { CameraSprop = "Z0JAHqaAoD2Q,aM48gAA=" }); // SPS,PPS
+        MqttInstaller.Validate(OnDevice() with { CameraSprop = "Z0JAHqaAoD2Q" });        // single set
     }
 
     [Theory]
@@ -172,10 +173,16 @@ public class MqttCameraValidationTests
     [InlineData("Z0JAHqaAoD2Q,aM48gAA=;x")] // ';' (would inject an fmtp parameter)
     [InlineData("Z0JA\nHqaAoD2Q")]          // LF (would split the SDP line)
     [InlineData("Z0JA<b>")]                 // '<' '>' — not base64
+    [InlineData(",")]                       // comma-only ⇒ two empty tokens
+    [InlineData("AA,,BB")]                   // double comma ⇒ empty middle token
+    [InlineData("Z0JAHqaAoD2Q,")]           // trailing comma ⇒ empty token
+    [InlineData("Z0J=AHqaAoD2Q,aM48gAA=")]  // '=' padding mid-token ⇒ not decodable
+    [InlineData("A")]                        // length not a multiple of 4 ⇒ not decodable
     public void On_device_mode_rejects_a_malformed_sprop(string sprop)
     {
-        // Embedded verbatim into the SDP fmtp line, so any non-base64/comma char is rejected to
-        // prevent a broken line or an injected attribute.
+        // Embedded verbatim into the SDP fmtp line. Reject anything that is not a comma-separated list
+        // of non-empty, strictly-base64-decodable tokens — both alphabet violations (broken line /
+        // injected attribute) and structural ones (empty or non-decodable tokens ffmpeg can't use).
         Assert.Throws<ArgumentException>(() =>
             MqttInstaller.Validate(OnDevice() with { CameraSprop = sprop }));
     }
