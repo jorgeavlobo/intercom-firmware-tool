@@ -42,6 +42,7 @@ cd "$src" || exit 1
   --enable-protocol=file,udp,rtp,tcp \
   --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
   --enable-parser=h264 --enable-parser=hevc \
+  --enable-bsf=extract_extradata,dump_extra \
   --extra-cflags="-Os" --extra-ldflags="-static -s"
 # --enable-parser=h264: the C100X hardware test (issue #120) proved `-c:v copy` DOES need
 # in-stream parameter-set extraction after all. The panel's SDP carries no sprop-parameter-sets,
@@ -59,6 +60,14 @@ cd "$src" || exit 1
 # undefined symbol`). The lightest lever that pulls CONFIG_HEVC_SEI is the HEVC *parser*
 # (hevc_parser_select="hevcparse hevc_sei"; hevc_sei_select="atsc_a53 golomb" — no decoder, no
 # dovi). All are LGPL FFmpeg components (no --enable-gpl/-nonfree).
+# --enable-bsf=extract_extradata,dump_extra: the C100X test proved a SECOND gap — `-c:v copy`
+# to `-f rtsp` publishes go2rtc an SDP with NO sprop-parameter-sets and sends a video slice with
+# no SPS/PPS in front of it, so go2rtc can't build the H.264 track and drops the connection
+# (`Broken pipe` → RTSP 404). `extract_extradata` lifts the panel's in-stream SPS/PPS into the
+# stream's extradata; `dump_extra` re-inserts them ahead of every keyframe (in-band), so go2rtc
+# always receives the parameter sets before a slice. extract_extradata pulls only av1_parse.o +
+# h2645_parse.o (the latter already present via the parsers); dump_extra is self-contained. Both
+# LGPL. Used at runtime via `-bsf:v extract_extradata,dump_extra` in Go2RtcConfig's exec line.
 # NB: `rtsp` is deliberately NOT in --enable-protocol — FFmpeg has no `rtsp` URL protocol
 # (RTSP is the demuxer/muxer enabled just above; it runs over tcp/udp/rtp, which ARE listed).
 # `--enable-protocol=rtsp` matched nothing and only added a configure warning (CodeRabbit).

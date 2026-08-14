@@ -218,11 +218,19 @@ namespace IntercomFirmwareTool.Core
             //     are dropped as "RTP: dropping old packet received too late" before ffmpeg can lock on
             //     (it then loops `non-existing PPS 0 referenced`). Widen the reorder queue (packets) and
             //     the max reorder delay (µs) to keep them.
-            // All four are input options, so they precede -i.
+            // Those four are input options, so they precede -i.
+            //
+            // -bsf:v extract_extradata,dump_extra (OUTPUT option, after -c:v copy): even once ffmpeg
+            // resolves 640x480, `-c:v copy` publishes go2rtc an SDP with NO sprop-parameter-sets and can
+            // send a video slice with no SPS/PPS ahead of it — go2rtc then can't build the H.264 track and
+            // drops the connection (`Broken pipe` → 404). extract_extradata lifts the in-stream SPS/PPS
+            // into the codec extradata; dump_extra re-inserts them before every keyframe (in-band), so
+            // go2rtc always sees the parameter sets before a slice. Requires the ffmpeg build to enable
+            // those two bitstream filters (native/ffmpeg/build.sh).
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -analyzeduration 10000000 -probesize 10000000 -reorder_queue_size 3000 -max_delay 5000000 -i {sdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}}\"\n"));
+                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -analyzeduration 10000000 -probesize 10000000 -reorder_queue_size 3000 -max_delay 5000000 -i {sdpPath} -an -c:v copy -bsf:v extract_extradata,dump_extra -rtsp_transport tcp -f rtsp {{output}}\"\n"));
             return sb.ToString();
         }
 

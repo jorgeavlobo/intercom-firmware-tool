@@ -107,6 +107,11 @@ public class Go2RtcConfigTests
         Assert.Contains(
             "-analyzeduration 10000000 -probesize 10000000 -reorder_queue_size 3000 -max_delay 5000000 -i",
             yaml);
+        // H.264 parameter-set delivery to go2rtc (issue #120, hardware-diagnosed): `-c:v copy` publishes
+        // an SDP with no sprop-parameter-sets and can send a slice with no SPS/PPS ahead of it, so go2rtc
+        // drops the track (Broken pipe → 404). extract_extradata + dump_extra re-insert the SPS/PPS before
+        // every keyframe in-band. Output bitstream filter, so it follows -c:v copy.
+        Assert.Contains("-c:v copy -bsf:v extract_extradata,dump_extra", yaml);
         Assert.Contains("{output}", yaml);
         Assert.DoesNotContain("\r", yaml);
     }
