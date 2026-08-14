@@ -11,8 +11,10 @@
 //!   * On startup, if the go2rtc SDP has no sprop yet, this task brings the panel up ON ITS OWN — a
 //!     silent on-demand INVITE via the SIP UA (no ring, no on-screen view) — so the stream is live.
 //!   * It runs the vendored ffmpeg once to DERIVE the parameter sets from the live RTP (ffmpeg's
-//!     `-sdp_file` writes an SDP whose `sprop-parameter-sets` is computed from the in-stream SPS/PPS),
-//!     patches them into the go2rtc SDP, and releases the panel.
+//!     `-sdp_file` writes an SDP whose `sprop-parameter-sets` is computed from the in-stream SPS/PPS)
+//!     and patches them into the go2rtc SDP. It is renew-only, like the auto-hold task: it only ever
+//!     pokes `Start` and never sends `Stop`, so it can't cut a concurrent viewer — a provisioning-only
+//!     session simply lapses on its own after `camera_view_idle_secs`.
 //!   * The patched SDP persists (it lives under /etc), so this runs EXACTLY ONCE per install: a reflash
 //!     regenerates the SDP without sprop and it re-learns; otherwise the value (fixed per panel) never
 //!     needs refreshing.
