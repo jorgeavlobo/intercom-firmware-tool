@@ -216,9 +216,13 @@ namespace IntercomFirmwareTool.Core
             // (#105), so -an drops the SDP's (absent) audio outright.
             //
             // Deliberately PLAIN defaults on the input — no -analyzeduration/-probesize/-reorder_queue_size/
-            // -max_delay tuning. The panel's SDP carries no sprop-parameter-sets, but the vendored ffmpeg's
-            // H.264 parser (native/ffmpeg/build.sh) recovers the SPS/PPS from the in-stream data, so
-            // `-c:v copy` gets the 640x480 dimensions and publishes to go2rtc on its own.
+            // -max_delay tuning. Two paths get `-c:v copy` its 640x480 dimensions. The FAST path is the
+            // sprop-parameter-sets in this SDP: btmqttd auto-provisions them into doorbell.sdp on first
+            // boot (native/btmqttd/src/sprop.rs), and the decoder-enabled ffmpeg (native/ffmpeg/build.sh)
+            // reads them at open to resolve in ~2.5 s. The FALLBACK — before that provisioning completes,
+            // or if on-demand is off — is the H.264 PARSER recovering the SPS/PPS from the in-stream data;
+            // correct but slow, since the panel emits an in-stream SPS only ~every 20 s. Either way
+            // `-c:v copy` publishes to go2rtc with no input tuning.
             //
             // HARDWARE-DIAGNOSED (issue #120, C100X): an earlier revision widened the RTP jitter buffer
             // (-reorder_queue_size 3000 -max_delay 5000000) to catch the sparse in-stream SPS/PPS. That

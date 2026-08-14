@@ -82,7 +82,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
         // the window while the settle + capture run. `renew_window` never returns unless the channel
         // closes, so the select resolves when the capture completes.
         let window = Duration::from_secs(cfg.camera_view_idle_secs.max(1));
-        let renew_period = (window / 2).max(Duration::from_secs(1));
+        let renew_period = renew_period_for(window);
         let learned = tokio::select! {
             r = async {
                 tokio::time::sleep(SIPHON_SETTLE).await;
@@ -142,6 +142,15 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
 /// CAMERA_SPROP at install). A missing/unreadable file reads as "not provisioned" so the loop retries.
 async fn sdp_has_sprop() -> bool {
     matches!(tokio::fs::read_to_string(SDP_PATH).await, Ok(s) if s.contains("sprop-parameter-sets="))
+}
+
+/// The interval at which `renew_window` re-pokes `Start`, derived from the viewing `window`. It must be
+/// STRICTLY LESS than the window so every poke lands before the SIP deadline (a positive margin), and
+/// floored so a pathological tiny window can't spin the loop. Half the window gives a full window/2
+/// margin; the 500 ms floor stays below even the 1 s minimum window (`camera_view_idle_secs.max(1)`),
+/// so the margin is always positive. Mirrors the period derivation in `hold.rs`.
+fn renew_period_for(window: Duration) -> Duration {
+    (window / 2).max(Duration::from_millis(500))
 }
 
 /// Re-poke `ViewCmd::Start` every `period` to keep the SIP viewing window alive while a long operation
@@ -302,6 +311,25 @@ mod tests {
             None
         );
         assert_eq!(parse_sprop(""), None);
+    }
+
+    #[test]
+    fn renew_period_stays_strictly_below_the_window() {
+        // The renewal poke must land before the SIP deadline for EVERY accepted window, including the
+        // 1 s minimum (camera_view_idle_secs.max(1)) — otherwise sip.rs could BYE mid-capture. Assert a
+        // positive margin (period < window) and the 500 ms floor across the range.
+        for secs in [1u64, 2, 3, 5, 30, 300] {
+            let window = Duration::from_secs(secs);
+            let period = renew_period_for(window);
+            assert!(
+                period < window,
+                "window={secs}s: renew_period {period:?} must be strictly less than the window {window:?}"
+            );
+            assert!(
+                period >= Duration::from_millis(500),
+                "window={secs}s: renew_period {period:?} must not spin below the 500 ms floor"
+            );
+        }
     }
 
     #[test]
