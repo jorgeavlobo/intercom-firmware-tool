@@ -65,6 +65,18 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
                     // Renew the on-demand window. try_send never blocks the poll loop: a full queue
                     // means sip.rs isn't draining (reconnect backoff) and a dropped poke is harmless —
                     // the next poll pokes again; Closed means the SIP task is gone, nothing to hold.
+                    //
+                    // DELIBERATE: auto-hold is AUTHORITATIVE while a viewer is connected. If an operator
+                    // issues `stop_camera` (ViewCmd::Stop) while Home Assistant still has the feed open,
+                    // this poll re-Starts within one interval — so a Stop only interrupts an active view
+                    // briefly rather than ending it. This is by design: the session follows the live
+                    // viewer, which is exactly what makes the feature "transparent" (HA just opens the
+                    // camera). To end a view, close it (the producer drops → these pokes stop → the
+                    // window lapses); `stop_camera` remains effective when no viewer is connected (e.g.
+                    // after a ring). Honoring the Stop over an active viewer was considered and rejected:
+                    // tearing the session down dries the producer, HA auto-reconnects, the producer
+                    // reappears, and a suppression flag would fight HA's reconnect for no real benefit
+                    // (product decision on #129; Codex review).
                     let _ = view_tx.try_send(ViewCmd::Start);
                 }
             }
