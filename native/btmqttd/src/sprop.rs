@@ -1,0 +1,263 @@
+//! Automatic, transparent sprop-parameter-sets provisioning for the on-device camera (issue #120).
+//!
+//! The panel's SDP carries no `sprop-parameter-sets`, and — hardware-confirmed on the C100X — its SIP
+//! answer doesn't advertise them either (only `profile-level-id`). Its encoder emits an in-stream
+//! SPS/PPS only about every 20 s, so go2rtc's `-c:v copy` ffmpeg blocks ~20 s on a cold open before it
+//! can resolve the video and serve it. Rather than make the operator find and paste their panel's
+//! parameter sets, btmqttd LEARNS them itself and writes them into the go2rtc SDP, so every open
+//! (including the first) resolves in under a second and nothing is configured.
+//!
+//! Proactive, one-shot, persistent — the behaviour the operator asked for:
+//!   * On startup, if the go2rtc SDP has no sprop yet, this task brings the panel up ON ITS OWN — a
+//!     silent on-demand INVITE via the SIP UA (no ring, no on-screen view) — so the stream is live.
+//!   * It runs the vendored ffmpeg once to DERIVE the parameter sets from the live RTP (ffmpeg's
+//!     `-sdp_file` writes an SDP whose `sprop-parameter-sets` is computed from the in-stream SPS/PPS),
+//!     patches them into the go2rtc SDP, and releases the panel.
+//!   * The patched SDP persists (it lives under /etc), so this runs EXACTLY ONCE per install: a reflash
+//!     regenerates the SDP without sprop and it re-learns; otherwise the value (fixed per panel) never
+//!     needs refreshing.
+//!
+//! Best-effort and self-healing: if the panel isn't reachable yet at boot, it retries with backoff. If
+//! on-demand viewing is off (no SIP UA to originate a session), the task simply isn't started — the
+//! operator can still supply CAMERA_SPROP at install time, or the ~20 s-first-frame fallback applies.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
+
+use crate::config::Config;
+use crate::sip::ViewCmd;
+
+/// The go2rtc SDP the on-device stream reads. `MqttInstaller` writes it here (Go2RtcDir + stream name),
+/// 0644 (it carries no secret), so this is fixed — the same way `av.rs`/`receiver.rs` hardcode the
+/// on-device loopback ports.
+const SDP_PATH: &str = "/etc/btmqttd/go2rtc/doorbell.sdp";
+/// The vendored ffmpeg, installed here by `PayloadBinaries` (same InstallPath as the go2rtc exec uses).
+const FFMPEG_PATH: &str = "/usr/sbin/ffmpeg";
+/// Scratch path for ffmpeg's derived SDP (tmpfs).
+const CAP_SDP_PATH: &str = "/tmp/btmqttd-sprop-cap.sdp";
+/// The `a=fmtp` fragment we splice sprop in AFTER — matches Go2RtcConfig.BuildOnDeviceSdp's order so a
+/// patched SDP equals what the installer would have written with CameraSprop set.
+const FMTP_ANCHOR: &str = "packetization-mode=1;";
+
+/// Bound the ffmpeg probe. The panel's SPS interval is ~20 s and we widen analyzeduration to wait for
+/// it, so give the probe headroom past that before killing it.
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Let the INVITE complete and `av.rs` arm the `:30007` siphon before the probe starts reading RTP.
+/// (The probe's own analyzeduration tolerates a late start, so this only needs to be small.)
+const SIPHON_SETTLE: Duration = Duration::from_secs(3);
+const INIT_BACKOFF: Duration = Duration::from_secs(10);
+const MAX_BACKOFF: Duration = Duration::from_secs(300);
+
+/// Provision sprop once, then return. Spawned only when on-demand + on-device are enabled (so a SIP UA
+/// exists to originate the session and the go2rtc SDP is local). Holds a `view_tx` clone, so `main`
+/// stops this task BEFORE draining the SIP UA at shutdown.
+pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
+    // Already provisioned on a prior boot (the SDP persisted) ⇒ nothing to do. Idempotent guard so the
+    // steady state after the first learn is a single cheap file read at startup. (_cfg is taken for a
+    // uniform task signature and possible future tuning; the SDP/ffmpeg paths are fixed installer
+    // locations, so nothing is read from it today.)
+    if sdp_has_sprop().await {
+        return;
+    }
+    let mut backoff = INIT_BACKOFF;
+    let mut warned = false;
+    while !stopping.load(Ordering::Relaxed) {
+        if sdp_has_sprop().await {
+            return;
+        }
+        // Bring the panel up silently so its stream is live for the probe. A closed channel means the
+        // SIP UA is gone — we cannot originate a session, so there is nothing more to do.
+        if view_tx.send(ViewCmd::Start).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(SIPHON_SETTLE).await;
+        let learned = capture_sprop().await;
+        // Release the panel promptly regardless of outcome — don't pin it for the full idle window.
+        let _ = view_tx.send(ViewCmd::Stop).await;
+        match learned {
+            Ok(sprop) => match patch_sdp(&sprop).await {
+                Ok(()) => {
+                    eprintln!(
+                        "btmqttd: learned camera parameter sets — the on-device camera now resolves instantly"
+                    );
+                    return;
+                }
+                // A patch failure is unusual (the installer wrote the SDP); log and retry — the SPS is
+                // stable, so the next attempt derives the same value.
+                Err(e) => {
+                    eprintln!("btmqttd: sprop provisioning: failed to patch the go2rtc SDP: {e}")
+                }
+            },
+            Err(e) => {
+                if !warned {
+                    eprintln!(
+                        "btmqttd: sprop provisioning: could not learn the parameter sets yet ({e}); will retry"
+                    );
+                    warned = true;
+                }
+            }
+        }
+        if stopping.load(Ordering::Relaxed) {
+            break;
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
+
+/// True iff the go2rtc SDP already carries sprop (learned on a prior boot, or an operator-supplied
+/// CAMERA_SPROP at install). A missing/unreadable file reads as "not provisioned" so the loop retries.
+async fn sdp_has_sprop() -> bool {
+    matches!(tokio::fs::read_to_string(SDP_PATH).await, Ok(s) if s.contains("sprop-parameter-sets="))
+}
+
+/// Run the vendored ffmpeg to derive the panel's sprop from the live RTP described by the go2rtc SDP.
+/// `-sdp_file` writes an SDP whose `sprop-parameter-sets` ffmpeg computed from the in-stream SPS/PPS;
+/// the widened analyzeduration makes find_stream_info WAIT for the panel's sparse keyframe (without the
+/// reorder-buffer tuning that broke the live path — this is a one-shot probe, latency is irrelevant).
+async fn capture_sprop() -> std::io::Result<String> {
+    let _ = tokio::fs::remove_file(CAP_SDP_PATH).await; // clear any stale file from a prior attempt
+    let mut child = tokio::process::Command::new(FFMPEG_PATH)
+        .args([
+            "-hide_banner",
+            "-protocol_whitelist",
+            "file,udp,rtp",
+            // Wait up to ~30 s for the panel's next in-stream SPS/PPS so the extradata (and thus the
+            // sprop in -sdp_file) is populated before the muxer writes its header.
+            "-analyzeduration",
+            "30000000",
+            "-probesize",
+            "50000000",
+            "-i",
+            SDP_PATH,
+            "-an",
+            "-c:v",
+            "copy",
+            "-t",
+            "1",
+            "-sdp_file",
+            CAP_SDP_PATH,
+            "-f",
+            "rtp",
+            // Discard the muxed RTP — we only want the SDP the muxer derives.
+            "rtp://127.0.0.1:9",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    match tokio::time::timeout(CAPTURE_TIMEOUT, child.wait()).await {
+        Ok(status) => {
+            status?;
+        }
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "ffmpeg sprop probe timed out (no keyframe within the window)",
+            ));
+        }
+    }
+    let derived = tokio::fs::read_to_string(CAP_SDP_PATH).await?;
+    let _ = tokio::fs::remove_file(CAP_SDP_PATH).await;
+    parse_sprop(&derived).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "ffmpeg derived no sprop-parameter-sets",
+        )
+    })
+}
+
+/// Extract the `sprop-parameter-sets` value from an SDP fmtp line (base64 sets, comma-separated; ends
+/// at the next `;` or whitespace).
+fn parse_sprop(sdp: &str) -> Option<String> {
+    const KEY: &str = "sprop-parameter-sets=";
+    for line in sdp.lines() {
+        if let Some(i) = line.find(KEY) {
+            let val: String = line[i + KEY.len()..]
+                .chars()
+                .take_while(|&c| c != ';' && !c.is_whitespace())
+                .collect();
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+/// Splice a learned sprop into the go2rtc SDP's fmtp line and write it back atomically (temp + rename,
+/// 0644 — the SDP carries no secret). Idempotent: a no-op if sprop is already present.
+async fn patch_sdp(sprop: &str) -> std::io::Result<()> {
+    let sdp = tokio::fs::read_to_string(SDP_PATH).await?;
+    if sdp.contains("sprop-parameter-sets=") {
+        return Ok(());
+    }
+    if !sdp.contains(FMTP_ANCHOR) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "go2rtc SDP has no packetization-mode fmtp to patch",
+        ));
+    }
+    let patched = sdp.replacen(
+        FMTP_ANCHOR,
+        &format!("{FMTP_ANCHOR}sprop-parameter-sets={sprop};"),
+        1,
+    );
+    // Write a temp file in the same directory, fsync, then rename over the target so a crash never
+    // leaves go2rtc a half-written SDP.
+    let tmp = format!("{SDP_PATH}.tmp");
+    {
+        let mut f = tokio::fs::File::create(&tmp).await?;
+        f.write_all(patched.as_bytes()).await?;
+        f.flush().await?;
+        f.sync_all().await?;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).await?;
+    tokio::fs::rename(&tmp, SDP_PATH).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_sprop_from_a_derived_sdp() {
+        // The shape ffmpeg's -sdp_file emits (spaces after ';', trailing profile-level-id).
+        let sdp = "v=0\r\nm=video 9 RTP/AVP 96\r\n\
+                   a=fmtp:96 packetization-mode=1; sprop-parameter-sets=Z0JAHqaAoD2Q,aM48gAA=; profile-level-id=42401E\r\n";
+        assert_eq!(parse_sprop(sdp).as_deref(), Some("Z0JAHqaAoD2Q,aM48gAA="));
+    }
+
+    #[test]
+    fn no_sprop_returns_none() {
+        assert_eq!(
+            parse_sprop("a=fmtp:96 packetization-mode=1;profile-level-id=42801f"),
+            None
+        );
+        assert_eq!(parse_sprop(""), None);
+    }
+
+    #[test]
+    fn patch_inserts_sprop_in_installer_order() {
+        // Verify the in-memory splice matches BuildOnDeviceSdp's fmtp order:
+        // packetization-mode=1;sprop-parameter-sets=...;profile-level-id=...
+        let base = "a=fmtp:96 packetization-mode=1;profile-level-id=42801f\n";
+        let patched = base.replacen(
+            FMTP_ANCHOR,
+            &format!("{FMTP_ANCHOR}sprop-parameter-sets=AAA,BBB=;"),
+            1,
+        );
+        assert_eq!(
+            patched,
+            "a=fmtp:96 packetization-mode=1;sprop-parameter-sets=AAA,BBB=;profile-level-id=42801f\n"
+        );
+    }
+}

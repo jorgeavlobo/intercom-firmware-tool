@@ -38,6 +38,7 @@ mod receiver;
 mod rediscovery;
 mod sender;
 mod sip;
+mod sprop;
 mod volume;
 
 use std::sync::Arc;
@@ -333,6 +334,24 @@ async fn run() -> Result<bool, String> {
         match (&view_tx, cfg.camera_ondevice) {
             (Some(tx), true) => (
                 Some(tokio::spawn(hold::run(cfg.clone(), stopping.clone(), tx.clone()))),
+                stopping,
+            ),
+            _ => (None, stopping),
+        }
+    };
+
+    // Transparent sprop provisioning (issue #120, sprop.rs): the panel advertises no sprop-parameter-sets
+    // (nor in its SIP answer — hardware-confirmed), so on-device only, and when the go2rtc SDP has none
+    // yet, btmqttd learns them from the panel's own stream ONCE at boot (a silent INVITE via the SIP UA
+    // + a one-shot ffmpeg probe) and patches the SDP — so the very first HA open is instant with nothing
+    // for the operator to configure. Same gate as the auto-hold (needs the SIP UA + on-device SDP), and
+    // it too holds a `view_tx` clone (stopped before the SIP drain at shutdown). It returns on its own
+    // once provisioned; the handle is kept only to stop a still-retrying probe cleanly.
+    let (sprop_task, sprop_stopping): (Option<tokio::task::JoinHandle<()>>, Arc<std::sync::atomic::AtomicBool>) = {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        match (&view_tx, cfg.camera_ondevice) {
+            (Some(tx), true) => (
+                Some(tokio::spawn(sprop::run(cfg.clone(), stopping.clone(), tx.clone()))),
                 stopping,
             ),
             _ => (None, stopping),
@@ -910,13 +929,17 @@ async fn run() -> Result<bool, String> {
         av_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
     }
-    // Viewer-activity auto-hold (issue #120, hold.rs): stop it FIRST. It holds a `view_tx` clone, so
-    // it must be gone before the SIP block below drops the LAST sender to close `view_rx` — otherwise
-    // the surviving clone keeps the channel open and the SIP task never sees the shutdown. It only
-    // polls the go2rtc API and pokes `Start`; it publishes nothing and holds no half-actuated state,
-    // so a plain abort is clean (and drops its `view_tx` clone).
+    // Viewer-activity auto-hold (hold.rs) and sprop provisioning (sprop.rs): stop BOTH first. Each
+    // holds a `view_tx` clone, so they must be gone before the SIP block below drops the LAST sender to
+    // close `view_rx` — otherwise a surviving clone keeps the channel open and the SIP task never sees
+    // the shutdown. Neither publishes to the broker nor holds half-actuated bus state (they only poll /
+    // probe and poke Start/Stop), so a plain abort is clean and drops their `view_tx` clones.
     if let Some(h) = hold_task {
         hold_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+        stop(h).await;
+    }
+    if let Some(h) = sprop_task {
+        sprop_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
     }
     // On-demand SIP UA (issue #104): drain it gracefully. `stop(cmd_worker)` above already dropped
