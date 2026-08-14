@@ -55,11 +55,11 @@ const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// Provision sprop once, then return. Spawned only when on-demand + on-device are enabled (so a SIP UA
 /// exists to originate the session and the go2rtc SDP is local). Holds a `view_tx` clone, so `main`
 /// stops this task BEFORE draining the SIP UA at shutdown.
-pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
+pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
     // Already provisioned on a prior boot (the SDP persisted) ⇒ nothing to do. Idempotent guard so the
-    // steady state after the first learn is a single cheap file read at startup. (_cfg is taken for a
-    // uniform task signature and possible future tuning; the SDP/ffmpeg paths are fixed installer
-    // locations, so nothing is read from it today.)
+    // steady state after the first learn is a single cheap file read at startup. (cfg supplies the
+    // viewing-window length so the probe can keep the SIP session alive for its full duration; the
+    // SDP/ffmpeg paths are fixed installer locations.)
     if sdp_has_sprop().await {
         return;
     }
@@ -74,8 +74,25 @@ pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Se
         if view_tx.send(ViewCmd::Start).await.is_err() {
             return;
         }
-        tokio::time::sleep(SIPHON_SETTLE).await;
-        let learned = capture_sprop().await;
+        // Keep the SIP viewing window alive for the WHOLE probe. A single Start renews the window for
+        // only `camera_view_idle_secs`, but the settle + capture can run longer (capture waits up to
+        // ~30 s for the panel's sparse SPS/PPS). If the window were shorter than that, sip.rs would BYE
+        // mid-capture, the siphon would dry, ffmpeg would derive no parameter sets, and provisioning
+        // would retry forever without ever succeeding (Codex). So re-poke Start on an interval well under
+        // the window while the settle + capture run. `renew_window` never returns unless the channel
+        // closes, so the select resolves when the capture completes.
+        let window = Duration::from_secs(cfg.camera_view_idle_secs.max(1));
+        let renew_period = (window / 2).max(Duration::from_secs(1));
+        let learned = tokio::select! {
+            r = async {
+                tokio::time::sleep(SIPHON_SETTLE).await;
+                capture_sprop().await
+            } => r,
+            _ = renew_window(&view_tx, renew_period) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "SIP view channel closed during sprop capture",
+            )),
+        };
         // Release the panel promptly — but ONLY if this one-shot probe is the sole reason it is up.
         // Start/Stop drive a single shared SIP window, so an unconditional Stop here would cut off a
         // real viewer who connected during the probe (Home Assistant, or a manual `view_camera`). The
@@ -125,6 +142,19 @@ pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Se
 /// CAMERA_SPROP at install). A missing/unreadable file reads as "not provisioned" so the loop retries.
 async fn sdp_has_sprop() -> bool {
     matches!(tokio::fs::read_to_string(SDP_PATH).await, Ok(s) if s.contains("sprop-parameter-sets="))
+}
+
+/// Re-poke `ViewCmd::Start` every `period` to keep the SIP viewing window alive while a long operation
+/// runs alongside it. Returns only if the channel closes (the SIP UA is gone). `Start` is idempotent —
+/// each poke just renews the full window — so this can outlast a single `camera_view_idle_secs` window
+/// (the sprop capture can wait ~30 s for the panel's sparse SPS/PPS).
+async fn renew_window(view_tx: &mpsc::Sender<ViewCmd>, period: Duration) {
+    loop {
+        tokio::time::sleep(period).await;
+        if view_tx.send(ViewCmd::Start).await.is_err() {
+            return;
+        }
+    }
 }
 
 /// Run the vendored ffmpeg to derive the panel's sprop from the live RTP described by the go2rtc SDP.
