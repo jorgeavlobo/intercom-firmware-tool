@@ -1049,6 +1049,12 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         private static bool IsValidSprop(string sprop)
         {
+            // (0) Length cap — a real sprop-parameter-sets value is only a few dozen chars (SPS,PPS).
+            // Bound the whole string BEFORE the per-token base64 work so a hostile/accidental huge
+            // CameraSprop can't force large scratch allocations here or an oversized SDP fmtp line
+            // downstream (Copilot). 512 is far above any legitimate value; it also caps each token.
+            if (sprop.Length > 512)
+                return false;
             // (a) Alphabet guard — only base64 chars, '=' padding, and ',' separators. This is NOT
             // redundant with the base64 decode in (b): Convert.TryFromBase64String *ignores* whitespace,
             // so on its own it would accept "AA BB" or "AA\nBB". Whitespace, ';', and CR/LF must be

@@ -187,6 +187,16 @@ public class MqttCameraValidationTests
             MqttInstaller.Validate(OnDevice() with { CameraSprop = sprop }));
     }
 
+    [Fact]
+    public void On_device_mode_rejects_an_over_length_sprop()
+    {
+        // A real sprop is a few dozen chars; a huge value is rejected before the per-token base64 work
+        // (bounds allocations + the SDP fmtp line). 600 valid base64 chars (a multiple of 4) exceeds the
+        // 512 cap, so the length guard — not the token check — rejects it.
+        Assert.Throws<ArgumentException>(() =>
+            MqttInstaller.Validate(OnDevice() with { CameraSprop = new string('A', 600) }));
+    }
+
     [Theory]
     [InlineData("cam\nera", "s3cr3t")]      // LF
     [InlineData("camera", "s3\r\ncr3t")]    // CRLF
