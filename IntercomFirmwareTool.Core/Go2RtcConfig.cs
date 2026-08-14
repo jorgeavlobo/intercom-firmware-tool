@@ -205,19 +205,24 @@ namespace IntercomFirmwareTool.Core
             // ({output}). Video only — the minimal on-device ffmpeg has no audio codecs until Phase 3
             // (#105), so -an drops the SDP's (absent) audio outright.
             //
-            // -reorder_queue_size / -max_delay: the panel emits the H.264 parameter sets (SPS/PPS) only
-            // periodically, in-stream, and go2rtc starts this ffmpeg lazily (on the first RTSP consumer),
-            // so it joins mid-stream and must wait for the next SPS/PPS. With ffmpeg's default RTP jitter
-            // buffer the panel's SPS/PPS packets are dropped as "RTP: dropping old packet received too
-            // late" before ffmpeg can lock on — it then loops `non-existing PPS 0 referenced`, never sets
-            // the video dimensions, produces no track, and go2rtc answers DESCRIBE with 404. Widening the
-            // reorder queue (packets) and max reorder delay (µs) keeps the SPS/PPS long enough to lock on.
-            // Hardware-diagnosed on the C100X (issue #120): default buffers → 404; these values → the
-            // stream resolves to 640x480 and publishes. Input options, so they precede -i.
+            // The panel carries NO sprop-parameter-sets in the SDP, so the H.264 parameter sets (SPS/PPS
+            // — they carry the resolution) arrive only periodically, in-stream. go2rtc starts this ffmpeg
+            // lazily (on the first RTSP consumer), so it joins mid-stream and must wait for the next
+            // SPS/PPS. Two ffmpeg defaults defeat that and make go2rtc answer DESCRIBE with 404 (all
+            // hardware-diagnosed on the C100X, issue #120 — with them the stream resolves to 640x480 and
+            // publishes; without them, 404):
+            //   -analyzeduration / -probesize: go2rtc's exec runs find_stream_info with a near-zero
+            //     analyzeduration, so ffmpeg gives up ("Could not find codec parameters ... unspecified
+            //     size") before the first SPS/PPS arrives. Widen it so it waits for them.
+            //   -reorder_queue_size / -max_delay: with the default RTP jitter buffer the SPS/PPS packets
+            //     are dropped as "RTP: dropping old packet received too late" before ffmpeg can lock on
+            //     (it then loops `non-existing PPS 0 referenced`). Widen the reorder queue (packets) and
+            //     the max reorder delay (µs) to keep them.
+            // All four are input options, so they precede -i.
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -reorder_queue_size 3000 -max_delay 5000000 -i {sdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}}\"\n"));
+                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -analyzeduration 10000000 -probesize 10000000 -reorder_queue_size 3000 -max_delay 5000000 -i {sdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}}\"\n"));
             return sb.ToString();
         }
 
