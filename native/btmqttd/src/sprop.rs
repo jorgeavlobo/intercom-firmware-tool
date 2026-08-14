@@ -34,10 +34,12 @@
 //!
 //! ## Port coordination (the provisioning probe vs. go2rtc's own ffmpeg)
 //! Both the probe and go2rtc's `exec:` ffmpeg bind the same `127.0.0.2:<CameraVideoPort>` UDP input, so
-//! only one can hold it. A viewer connecting starts go2rtc's producer, which must own the port. This task
-//! keys off go2rtc's CONSUMERS (`hold::stream_has_consumer`): it SKIPS a round when a consumer is already
-//! connected, and a `select!` branch YIELDS the probe (dropping it releases the port via `kill_on_drop`)
-//! if a consumer appears mid-probe — so a real view always wins the port within ~a poll interval.
+//! only one can hold it. go2rtc's ffmpeg is a PRODUCER, and it starts during the RTSP DESCRIBE — before
+//! a client attaches as a consumer — so this task keys off go2rtc's ACTIVITY (`hold::stream_has_activity`
+//! = a non-empty producers OR consumers array), NOT consumers alone: a consumers-only check would miss
+//! the bootstrap producer and still collide on the port. It SKIPS a round when activity is already
+//! present, and a `select!` branch YIELDS the probe (dropping it releases the port via `kill_on_drop`)
+//! if activity appears mid-probe — so go2rtc's own ffmpeg always wins the port within ~a poll interval.
 //!
 //! Best-effort and self-healing: if the panel isn't reachable yet at boot, it retries with backoff. If
 //! on-demand viewing is off (no SIP UA to originate a session), the task simply isn't started — the
@@ -78,9 +80,14 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(45);
 const SIPHON_SETTLE: Duration = Duration::from_secs(3);
 const INIT_BACKOFF: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
-/// How often the yield-watch polls go2rtc for a consumer that connected mid-probe. Short so the probe
+/// How often the yield-watch polls go2rtc for activity that started mid-probe. Short so the probe
 /// releases the shared UDP input port to go2rtc's own ffmpeg within ~a second of a real view starting.
-const CONSUMER_POLL: Duration = Duration::from_secs(1);
+const ACTIVITY_POLL: Duration = Duration::from_secs(1);
+/// Fixed, short retry cadence for the pre-probe activity SKIP. Skipping because go2rtc is already active
+/// (a viewer is watching) is normal steady state, NOT a probe failure — so it must NOT grow the
+/// exponential `backoff`, which is reserved for genuine failures. A short fixed wait means provisioning
+/// resumes promptly after the viewer disconnects (e.g. HA opened right after first boot).
+const SKIP_RETRY: Duration = Duration::from_secs(5);
 
 /// Provision sprop once, then return. Spawned only when on-demand + on-device are enabled (so a SIP UA
 /// exists to originate the session and the go2rtc SDP is local). Holds a `view_tx` clone, so `main`
@@ -100,16 +107,18 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
         if already_learned().await {
             return;
         }
-        // Port coordination (#3): if a viewer's consumer is already connected, go2rtc's own `exec:`
-        // ffmpeg owns the shared 127.0.0.2:<CameraVideoPort> UDP input — our probe would fail to bind
-        // it. SKIP this round entirely (don't even bring the panel up) and retry after the backoff, so
-        // the live view keeps the port. A poll error (API down) reads as "no consumer" and we proceed.
-        if matches!(hold::stream_has_consumer().await, Ok(true)) {
+        // Port coordination (#3): if go2rtc is already active (a producer running for the DESCRIBE, or a
+        // viewer attached), its own `exec:` ffmpeg owns the shared 127.0.0.2:<CameraVideoPort> UDP input —
+        // our probe would fail to bind it. SKIP this round entirely (don't even bring the panel up) so the
+        // live path keeps the port. This is normal STEADY STATE, not a probe failure, so retry at a short
+        // FIXED cadence and DO NOT advance `backoff` (that stays reserved for genuine failures) — otherwise
+        // a view right after boot would push the next attempt out to minutes past the disconnect. A poll
+        // error (API down) reads as "no activity" and we proceed.
+        if matches!(hold::stream_has_activity().await, Ok(true)) {
             if stopping.load(Ordering::Relaxed) {
                 break;
             }
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(MAX_BACKOFF);
+            tokio::time::sleep(SKIP_RETRY).await;
             continue;
         }
         // Bring the panel up silently so its stream is live for the probe. A closed channel means the
@@ -135,13 +144,13 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
                 std::io::ErrorKind::BrokenPipe,
                 "SIP view channel closed during sprop capture",
             )),
-            // Port coordination (#3): a consumer connecting mid-probe means go2rtc is about to start its
-            // own ffmpeg on the same UDP input. YIELD — resolving this branch drops the capture future,
-            // and the probe child's kill_on_drop(true) frees the port within ~a poll interval so go2rtc
-            // owns it. Return an Err so the loop retries later (once the view ends).
-            _ = wait_for_consumer() => Err(std::io::Error::new(
+            // Port coordination (#3): go2rtc activity appearing mid-probe means its own `exec:` ffmpeg is
+            // (about to be) running on the same UDP input. YIELD — resolving this branch drops the capture
+            // future, and the probe child's kill_on_drop(true) frees the port within ~a poll interval so
+            // go2rtc owns it. Return an Err so the loop retries later (once the activity clears).
+            _ = wait_for_activity() => Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
-                "yielded the sprop probe's UDP port to a go2rtc consumer",
+                "yielded the sprop probe's UDP port to go2rtc activity",
             )),
         };
         // Do NOT send Stop here — let the viewing window lapse on its own after `camera_view_idle_secs`.
@@ -231,14 +240,15 @@ fn has_sprop(sdp: &str) -> bool {
     sdp.contains("sprop-parameter-sets=")
 }
 
-/// Resolve as soon as go2rtc reports a connected consumer — the yield signal for the port-coordination
-/// `select!` branch. Polls the loopback control API every [`CONSUMER_POLL`]; a poll error (API down)
-/// is treated as "no consumer yet" and polling continues, so a transient API hiccup can't spuriously
-/// abandon a probe. Never resolves while no viewer is connected, so it only ever fires to yield the port.
-async fn wait_for_consumer() {
+/// Resolve as soon as go2rtc reports any activity — the yield signal for the port-coordination
+/// `select!` branch. Polls the loopback control API every [`ACTIVITY_POLL`]; a poll error (API down)
+/// is treated as "no activity yet" and polling continues, so a transient API hiccup can't spuriously
+/// abandon a probe. Never resolves while go2rtc is idle, so it only ever fires to yield the port to
+/// go2rtc's own `exec:` ffmpeg (which starts during the DESCRIBE, before a consumer attaches).
+async fn wait_for_activity() {
     loop {
-        tokio::time::sleep(CONSUMER_POLL).await;
-        if matches!(hold::stream_has_consumer().await, Ok(true)) {
+        tokio::time::sleep(ACTIVITY_POLL).await;
+        if matches!(hold::stream_has_activity().await, Ok(true)) {
             return;
         }
     }

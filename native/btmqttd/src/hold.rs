@@ -4,17 +4,31 @@
 //! `sip.rs` holds the on-demand panel session for a FIXED window per `view_camera` press because there
 //! was no continuous "someone is watching" signal — so a single press bounds the session to one window
 //! and it auto-hangs-up when the window elapses. This task supplies that missing signal for the
-//! on-device media path: it polls the loopback go2rtc control API and, while go2rtc has an active
-//! CONSUMER on the camera stream, pokes `ViewCmd::Start` to renew the window.
+//! on-device media path: it polls the loopback go2rtc control API and, while the camera stream shows
+//! any ACTIVITY (a producer OR a consumer), pokes `ViewCmd::Start` to renew the window.
 //!
-//! A **consumer** is a viewer (Home Assistant) connected to the RTSP stream; go2rtc starts its lazy
-//! ffmpeg **producer** only once a consumer connects. We key off consumers, NOT producers: for an
-//! `exec:` stream go2rtc leaves the producers array populated (and keeps STOPPED entries) even after
-//! the last viewer leaves, so a producer being present does not prove anyone is watching — the window
-//! could then never lapse. A non-empty consumers array, by contrast, means a real RTSP client is
-//! connected right now. The net effect: Home Assistant "just opens the camera", a consumer appears,
-//! this task sees it and brings/holds the panel session up, and the session auto-hangs-up shortly after
-//! the last viewer leaves (the consumer drops → the pokes stop → the window lapses on its own).
+//! ## Why "activity" (producer OR consumer), and why this is PROVISIONAL
+//! go2rtc's `/api/streams` reports two arrays per stream: **producers** (its lazy `exec:` ffmpeg, which
+//! reads the panel RTP) and **consumers** (attached RTSP clients, e.g. Home Assistant). We poke on
+//! EITHER being non-empty, deliberately, so the camera can BOOTSTRAP from idle: go2rtc starts its lazy
+//! producer DURING the RTSP DESCRIBE — before a client registers as an attached consumer — and that
+//! producer needs live RTP, which needs the panel session up, which only this task brings up. A
+//! consumers-ONLY check would deadlock that first open (no consumer yet ⇒ no Start ⇒ no RTP ⇒ DESCRIBE
+//! never completes ⇒ consumer never attaches): a DOA camera. Poking on producer-or-consumer activity
+//! cannot cause that.
+//!
+//! The TRADEOFF, and why this is not yet final: if go2rtc leaves a stream's producers array populated
+//! (e.g. a stopped `exec:` entry) after the last viewer leaves, activity stays "true" and the window may
+//! not lapse promptly. The two review positions here CONFLICT — "consumers is empty during bootstrap"
+//! (Codex) vs "producers stays populated when idle" (CodeRabbit) — and which holds depends on go2rtc's
+//! real `/api/streams` timing across the idle → describing → viewing → after-leave transitions. That can
+//! only be settled from ON-DEVICE observation, not asserted here. The interim rule is chosen to be
+//! bootstrap-SAFE (it can never strand the camera); the exact steady-state lapse signal is TO BE
+//! FINALIZED once the on-device `/api/streams` behaviour is captured. Do not treat this as verified.
+//!
+//! The intended net effect: Home Assistant "just opens the camera", activity appears, this task
+//! brings/holds the panel session up, and the session auto-hangs-up after activity clears once the last
+//! viewer leaves (the pokes stop → the window lapses on its own).
 //!
 //! Loopback-only and best-effort: any API hiccup (go2rtc restarting, not yet up) just skips a poll and
 //! is logged once. The manual `view_camera`/`stop_camera` MQTT actions are unaffected — every source
@@ -61,7 +75,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
     // Debounce the "API unreachable" log: a stopped/starting go2rtc must not spam the log every poll.
     let mut warned = false;
     while !stopping.load(Ordering::Relaxed) {
-        match stream_has_consumer().await {
+        match stream_has_activity().await {
             Ok(active) => {
                 warned = false;
                 if active {
@@ -74,7 +88,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
                     // this poll re-Starts within one interval — so a Stop only interrupts an active view
                     // briefly rather than ending it. This is by design: the session follows the live
                     // viewer, which is exactly what makes the feature "transparent" (HA just opens the
-                    // camera). To end a view, close it (the consumer drops → these pokes stop → the
+                    // camera). To end a view, close it (activity clears → these pokes stop → the
                     // window lapses); `stop_camera` remains effective when no viewer is connected (e.g.
                     // after a ring). Honoring the Stop over an active viewer was considered and rejected:
                     // tearing the session down drops the consumer, HA auto-reconnects, the consumer
@@ -98,26 +112,31 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
     }
 }
 
-/// True iff go2rtc reports at least one active CONSUMER (a connected RTSP viewer). GET /api/streams
-/// over loopback HTTP/1.0. `pub(crate)` so `sprop.rs` can reuse it to coordinate the shared UDP input
-/// port (a viewer's consumer means go2rtc's own ffmpeg owns the port, so the provisioning probe must
-/// stand aside). We key off consumers, not producers: an `exec:` stream keeps its producers array
-/// populated (with stopped entries) even when idle, so only a non-empty consumers array proves a real
-/// viewer is connected right now.
-pub(crate) async fn stream_has_consumer() -> std::io::Result<bool> {
+/// True iff go2rtc reports any ACTIVITY on the camera stream — a non-empty `producers` OR a non-empty
+/// `consumers` array. GET /api/streams over loopback HTTP/1.0. `pub(crate)` so `sprop.rs` can reuse it
+/// to coordinate the shared UDP input port: go2rtc's own `exec:` ffmpeg (a PRODUCER) owns
+/// `127.0.0.2:<CameraVideoPort>` while running, and it starts during the RTSP DESCRIBE — before a
+/// consumer attaches — so the provisioning probe must stand aside on producer activity, not wait for a
+/// consumer. Keying off producer-OR-consumer is also what lets the camera bootstrap from idle (see the
+/// module doc): a consumers-only check would miss the bootstrap producer entirely. PROVISIONAL — if
+/// go2rtc leaves producers populated when idle, activity may stay true after a view ends; the exact
+/// steady-state signal is to be finalized from on-device `/api/streams` observation.
+pub(crate) async fn stream_has_activity() -> std::io::Result<bool> {
     let body = tokio::time::timeout(REQ_TIMEOUT, http_get_streams())
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "go2rtc API timed out"))??;
     let json: Value = serde_json::from_str(&body)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     // Response shape: { "<stream>": { "producers": [...], "consumers": [...] }, ... }. The on-device
-    // go2rtc serves exactly the one camera stream, so ANY stream carrying a non-empty consumers array
-    // means a viewer is connected — this task needs no knowledge of the sanitized stream name.
+    // go2rtc serves exactly the one camera stream, so ANY stream carrying a non-empty producers OR
+    // consumers array means the camera is active — this task needs no knowledge of the stream name.
     if let Value::Object(streams) = json {
         for (_, s) in &streams {
-            if let Some(Value::Array(c)) = s.get("consumers") {
-                if !c.is_empty() {
-                    return Ok(true);
+            for key in ["producers", "consumers"] {
+                if let Some(Value::Array(a)) = s.get(key) {
+                    if !a.is_empty() {
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -163,13 +182,16 @@ async fn http_get_streams() -> std::io::Result<String> {
 mod tests {
     use super::*;
 
-    // The consumer-detection logic, factored so it can be unit-tested without a go2rtc socket.
-    fn any_consumer(json: &Value) -> bool {
+    // The activity-detection logic, factored so it can be unit-tested without a go2rtc socket. Mirrors
+    // stream_has_activity: a non-empty producers OR consumers array on any stream.
+    fn any_activity(json: &Value) -> bool {
         if let Value::Object(streams) = json {
             for (_, s) in streams {
-                if let Some(Value::Array(c)) = s.get("consumers") {
-                    if !c.is_empty() {
-                        return true;
+                for key in ["producers", "consumers"] {
+                    if let Some(Value::Array(a)) = s.get(key) {
+                        if !a.is_empty() {
+                            return true;
+                        }
                     }
                 }
             }
@@ -178,33 +200,45 @@ mod tests {
     }
 
     #[test]
-    fn detects_a_live_consumer() {
-        // A viewer connected → non-empty consumers ⇒ hold the session. The producers array may be
-        // populated with a stopped exec entry at the same time, but only the consumer proves a viewer.
+    fn bootstrap_producer_without_a_consumer_is_activity() {
+        // BOOTSTRAP: go2rtc starts its lazy exec producer DURING the RTSP DESCRIBE, before an RTSP client
+        // registers as an attached consumer. Activity must be true here (non-empty producers, empty
+        // consumers) so the panel session comes up and the first open can complete — a consumers-only
+        // check would deadlock this into a DOA camera.
+        let j: Value = serde_json::from_str(
+            r#"{"doorbell":{"producers":[{"url":"exec:ffmpeg ..."}],"consumers":[]}}"#,
+        )
+        .unwrap();
+        assert!(any_activity(&j));
+    }
+
+    #[test]
+    fn a_connected_consumer_is_activity() {
+        // VIEWING: a viewer attached → non-empty consumers ⇒ hold the session.
         let j: Value = serde_json::from_str(
             r#"{"doorbell":{"producers":[{"url":"exec:ffmpeg ..."}],"consumers":[{"type":"RTSP client"}]}}"#,
         )
         .unwrap();
-        assert!(any_consumer(&j));
+        assert!(any_activity(&j));
+        // A consumer even without any producer entry still counts.
+        assert!(any_activity(
+            &serde_json::from_str(r#"{"doorbell":{"consumers":[{"type":"RTSP client"}]}}"#)
+                .unwrap()
+        ));
     }
 
     #[test]
-    fn idle_stream_has_no_consumer() {
-        // No viewer → empty/absent consumers ⇒ don't hold the session — even when the exec:'s
-        // producers array is still populated (go2rtc leaves stopped producer entries in place).
-        assert!(!any_consumer(
-            &serde_json::from_str(
-                r#"{"doorbell":{"producers":[{"url":"exec:ffmpeg ..."}],"consumers":[]}}"#
-            )
-            .unwrap()
+    fn idle_stream_has_no_activity() {
+        // IDLE: both arrays empty/absent ⇒ no activity ⇒ don't hold the session.
+        assert!(!any_activity(
+            &serde_json::from_str(r#"{"doorbell":{"producers":[],"consumers":[]}}"#).unwrap()
         ));
-        assert!(!any_consumer(
-            &serde_json::from_str(r#"{"doorbell":{"producers":[{"url":"exec:ffmpeg ..."}]}}"#)
-                .unwrap()
-        ));
-        assert!(!any_consumer(
+        assert!(!any_activity(
             &serde_json::from_str(r#"{"doorbell":{"consumers":null}}"#).unwrap()
         ));
-        assert!(!any_consumer(&serde_json::from_str(r#"{}"#).unwrap()));
+        assert!(!any_activity(
+            &serde_json::from_str(r#"{"doorbell":{}}"#).unwrap()
+        ));
+        assert!(!any_activity(&serde_json::from_str(r#"{}"#).unwrap()));
     }
 }
