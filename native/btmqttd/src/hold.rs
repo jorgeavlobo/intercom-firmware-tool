@@ -96,10 +96,8 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
 }
 
 /// True iff go2rtc reports at least one active producer. The lazy exec starts only on a consumer, so a
-/// producer present ⇒ someone is viewing. GET /api/streams over loopback HTTP/1.0. `pub(crate)` so the
-/// sprop provisioning task can reuse this exact signal to tell "a real viewer is watching" from "only
-/// my one-shot probe brought the panel up" before it releases the session (see `sprop::run`).
-pub(crate) async fn stream_has_producer() -> std::io::Result<bool> {
+/// producer present ⇒ someone is viewing. GET /api/streams over loopback HTTP/1.0.
+async fn stream_has_producer() -> std::io::Result<bool> {
     let body = tokio::time::timeout(REQ_TIMEOUT, http_get_streams())
         .await
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "go2rtc API timed out"))??;

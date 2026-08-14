@@ -93,20 +93,16 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
                 "SIP view channel closed during sprop capture",
             )),
         };
-        // Release the panel promptly — but ONLY if this one-shot probe is the sole reason it is up.
-        // Start/Stop drive a single shared SIP window, so an unconditional Stop here would cut off a
-        // real viewer who connected during the probe (Home Assistant, or a manual `view_camera`). The
-        // probe reads the siphon directly, NOT through go2rtc, so a go2rtc producer means someone else
-        // is consuming the stream — in that case leave the session to the auto-hold task (it renews the
-        // window while a producer exists) / the idle timeout. We Stop only when go2rtc POSITIVELY
-        // reports no producer; on a producer OR an API hiccup we conservatively skip the Stop (the
-        // window simply lapses after `camera_view_idle_secs`). This is the ownership coordination
-        // CodeRabbit/Codex flagged, done via the existing producer signal rather than a lease registry:
-        // provisioning is a one-shot (first boot only) and auto-hold never Stops (renew-only), so the
-        // only cross-source early-Stop is this one, and gating it on "no viewer" is sufficient.
-        if matches!(crate::hold::stream_has_producer().await, Ok(false)) {
-            let _ = view_tx.send(ViewCmd::Stop).await;
-        }
+        // Do NOT send Stop here — let the viewing window lapse on its own after `camera_view_idle_secs`.
+        // Provisioning shares the single SIP window with the auto-hold task and the manual
+        // view_camera/stop_camera actions, and it cannot reliably tell whether it is the SOLE reason the
+        // session is up: a go2rtc producer reveals an RTSP viewer (Home Assistant), but a manual
+        // `view_camera` brings the panel up over SIP with NO go2rtc consumer, so no producer signal
+        // exists to detect it (Codex). Rather than track cross-source ownership, provisioning is
+        // renew-only like the auto-hold task — it only ever pokes Start — so it never cuts a session
+        // another source may want. The cost is that a provisioning-only run leaves the panel up for at
+        // most one idle window; negligible, since this whole task is a one-shot that runs only until the
+        // first learn persists.
         match learned {
             Ok(sprop) => match patch_sdp(&sprop).await {
                 Ok(()) => {
