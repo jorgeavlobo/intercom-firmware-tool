@@ -130,12 +130,15 @@ public class Go2RtcConfigTests
         // 404 — reverting to defaults locks on in under a second. Guard that the harmful tuning and the
         // (now-removed) extract_extradata/dump_extra bitstream filters stay OUT of the generated exec.
         Assert.Contains("-i /var/run/btmqttd/doorbell.sdp -an -c:v copy -rtsp_transport tcp -f rtsp", yaml);
-        // A SECOND output on the SAME live-view ffmpeg writes the resolved parameter sets to the derived
-        // SDP (sprop learning, #120): sprop.rs watches this file and persists the value. The rtp output is
-        // fire-and-forget to a dead port so it can't stall the primary {output} sink.
+        // A SECOND output on the SAME live-view ffmpeg ships a raw H.264 RTP copy to btmqttd (sprop
+        // learning, #120 / PR #129): sprop.rs binds this loopback port and parses the panel's in-band
+        // SPS/PPS from the RTP payload — ffmpeg's -sdp_file can't emit sprop on a copy path (hardware-
+        // confirmed), so there is NO derived.sdp any more.
         Assert.Contains(
-            "-f rtsp {output} -c:v copy -sdp_file /var/run/btmqttd/derived.sdp -f rtp rtp://127.0.0.1:9",
+            "-f rtsp {output} -c:v copy -f rtp rtp://127.0.0.1:40100",
             yaml);
+        Assert.DoesNotContain("-sdp_file", yaml);
+        Assert.DoesNotContain("derived.sdp", yaml);
         Assert.DoesNotContain("-reorder_queue_size", yaml);
         Assert.DoesNotContain("-max_delay", yaml);
         Assert.DoesNotContain("-analyzeduration", yaml);

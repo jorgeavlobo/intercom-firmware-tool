@@ -341,13 +341,15 @@ async fn run() -> Result<bool, String> {
     };
 
     // Transparent sprop provisioning (issue #120, sprop.rs): the panel advertises no sprop-parameter-sets
-    // (nor in its SIP answer — hardware-confirmed), so on-device only. It is a PASSIVE file-watcher: the
-    // panel only feeds a REAL consumed view (a silent probe times out — hardware-confirmed), so go2rtc's
-    // own `exec:` ffmpeg (which runs while a client is watching) writes the resolved parameter sets to a
-    // derived SDP via `-sdp_file`, and this task just watches that file and persists the value — it never
-    // brings the panel up itself. Because it no longer originates SIP, it needs only the on-device gate
-    // (not the SIP UA): spawn it whenever `camera_ondevice` is set. It returns on its own once it learns;
-    // the handle is kept only to abort a still-watching task cleanly at shutdown (like av.rs).
+    // (nor in its SIP answer — hardware-confirmed), so on-device only. It is a PASSIVE loopback RTP
+    // listener: the panel only feeds a REAL consumed view (a silent probe times out — hardware-confirmed),
+    // and ffmpeg's `-sdp_file` can't emit sprop on a copy path either (also hardware-confirmed, PR #129).
+    // So go2rtc's own `exec:` ffmpeg (which runs while a client is watching) ships a raw H.264 RTP copy to
+    // a loopback UDP port (127.0.0.1:40100), and this task binds that port and parses the SPS/PPS itself,
+    // then persists the value — it never brings the panel up itself. Because it holds no SIP, it needs only
+    // the on-device gate (not the SIP UA): spawn it whenever `camera_ondevice` is set. It returns on its
+    // own once it learns; the handle is kept only to abort a still-listening task cleanly at shutdown (like
+    // av.rs).
     let (sprop_task, sprop_stopping): (Option<tokio::task::JoinHandle<()>>, Arc<std::sync::atomic::AtomicBool>) = {
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if cfg.camera_ondevice {
@@ -944,8 +946,8 @@ async fn run() -> Result<bool, String> {
         hold_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
     }
-    // Passive sprop watcher (sprop.rs): a plain file-watcher that holds NO `view_tx` and publishes
-    // nothing, so abort it like av.rs — its ordering vs. the SIP drain below is irrelevant.
+    // Passive sprop listener (sprop.rs): a loopback UDP RTP listener that holds NO `view_tx` and
+    // publishes nothing, so abort it like av.rs — its ordering vs. the SIP drain below is irrelevant.
     if let Some(h) = sprop_task {
         sprop_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
