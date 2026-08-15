@@ -84,10 +84,14 @@ public class Go2RtcdScriptTests
         // Reads the current branch from the installed conf (default 1 when absent, matching config.rs).
         Assert.Contains("CONF_FILE=/etc/btmqttd/btmqttd.conf", s);
         Assert.Contains(code, l => l.Contains("CAMERA_BRANCH=") && l.Contains("sed -n") && l.Contains("$CONF_FILE"));
-        // The current branch is normalized EXACTLY like config.rs (parse the WHOLE value as an integer,
-        // then clamp to 0/1, default 1) so both consumers of the record agree on the branch. A value
-        // that is not a pure integer (e.g. `0garbage`) is rejected to the default 1 — not read as 0.
-        Assert.Contains(code, l => l.Contains("*[!0-9]*") && l.Contains("cur_branch=1"));
+        // Splice ONLY when the branch unambiguously matches the installer's canonical value; anything
+        // else (quoted, export-only, non-integer, absent) resolves to the sentinel `none` so nothing is
+        // spliced (btmqttd re-learns) — a stale-branch splice is then structurally impossible.
+        Assert.Contains(code, l => l.Contains("*[!0-9]*") && l.Contains("cur_branch=none"));
+        // Mirror the two parse_env behaviours that could flip a real match: the LAST assignment wins,
+        // and an optional `export ` prefix is ignored.
+        Assert.Contains(code, l => l.Contains("CAMERA_BRANCH=") && l.Contains("tail -n 1"));
+        Assert.Contains(code, l => l.Contains("s/^export"));
         // Leading zeros are stripped so 00 -> 0 and 01 -> 1 compare numerically; all-zero digits -> 0.
         Assert.Contains(code, l => l.Contains("sed 's/^0*//'"));
         Assert.Contains(code, l => l.Contains("cur_branch=0"));

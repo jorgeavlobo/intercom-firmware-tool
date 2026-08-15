@@ -267,20 +267,26 @@ assemble_sdp() {
 		rec=$(head -n 1 "$SPROP_FILE" 2>/dev/null)
 		rec_branch=$(printf '%s' "$rec" | cut -f1)
 		rec_value=$(printf '%s' "$rec" | cut -f2- | sed 's/[[:space:]]*$//')
-		# Read the current branch the SAME way config.rs does, so both consumers of the record agree
-		# even for a hand-edited/corrupt conf. config.rs (parse_env + Config): take the value after the
-		# first '=', trim it, strip an inline comment (a '#' preceded by space/tab), then
-		# parse::<u8>().filter(|b| *b <= 1).unwrap_or(1). Extract the WHOLE value (grabbing only leading
-		# digits would read `0garbage` as 0, but Rust's parse rejects the whole token → 1), require it
-		# to be a PURE integer, then strip leading zeros so 00 -> 0 / 01 -> 1 compare numerically.
-		cur_branch=$(sed -n 's/^[[:space:]]*CAMERA_BRANCH=[[:space:]]*\(.*\)$/\1/p' "$CONF_FILE" 2>/dev/null | head -n 1)
-		cur_branch=$(printf '%s' "$cur_branch" | sed 's/[[:blank:]]#.*$//; s/[[:blank:]]*$//')
+		# Resolve the CURRENT branch and splice ONLY when it unambiguously matches the installer's
+		# canonical value, ERRING TOWARD NOT SPLICING otherwise. Rather than reimplement config.rs's
+		# full shell-quoting parser in sh (a losing game), we adopt a provably-safe rule: this yields a
+		# concrete 0/1 ONLY for a pure-integer assignment — the exact form the installer writes
+		# (`CAMERA_BRANCH=0`/`=1`) — and anything else (quoted, `export`-prefixed, non-numeric, absent)
+		# yields the sentinel `none`, which matches no record so nothing is spliced and btmqttd re-learns.
+		# We DO mirror the two parse_env behaviours that could otherwise flip a real match: the LAST
+		# assignment wins (parse_env builds a map), and an optional `export ` prefix / surrounding
+		# whitespace / inline `#` comment are ignored. Leading zeros are stripped so 00 -> 0 and 01 -> 1
+		# compare as numbers, and > 1 clamps to 1 — matching parse::<u8>().filter(|b| *b <= 1). Safety
+		# invariant: whenever this yields 0 or 1, config.rs provably yields the SAME value, so go2rtcd
+		# can never splice a value for a branch btmqttd is not actually running.
+		cur_branch=$(sed -n 's/^[[:space:]]*//; s/^export[[:space:]][[:space:]]*//; s/^CAMERA_BRANCH=\(.*\)$/\1/p' "$CONF_FILE" 2>/dev/null | tail -n 1)
+		cur_branch=$(printf '%s' "$cur_branch" | sed 's/^[[:blank:]]*//; s/[[:blank:]]#.*$//; s/[[:blank:]]*$//')
 		case "$cur_branch" in
-			'' | *[!0-9]*) cur_branch=1 ;;   # absent or not a pure integer => config.rs default (1)
+			'' | *[!0-9]*) cur_branch=none ;;   # absent / quoted / export-only / non-integer => never match
 			*)
 				case "$(printf '%s' "$cur_branch" | sed 's/^0*//')" in
-					'') cur_branch=0 ;;      # all-zero digits (0, 00, 000, …) => numeric 0
-					*) cur_branch=1 ;;       # 1/01/… or any value > 1 => 1 (config.rs clamps > 1 to 1)
+					'') cur_branch=0 ;;         # all-zero digits (0, 00, 000, …) => numeric 0
+					*) cur_branch=1 ;;          # 1/01/… or any value > 1 => 1 (config.rs clamps > 1 to 1)
 				esac
 				;;
 		esac
