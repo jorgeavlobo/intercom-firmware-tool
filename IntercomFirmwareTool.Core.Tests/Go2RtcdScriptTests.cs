@@ -16,13 +16,28 @@ public class Go2RtcdScriptTests
     private const string ResourceName =
         "IntercomFirmwareTool.Core.Payload.mqtt.go2rtcd";
 
-    private static string ReadScript()
+    private static string ReadScript() => ReadResource(ResourceName);
+
+    private static string ReadResource(string logicalName)
     {
         var asm = typeof(MqttOptions).Assembly; // any public Core type → the Core assembly
-        using Stream? stream = asm.GetManifestResourceStream(ResourceName);
+        using Stream? stream = asm.GetManifestResourceStream(logicalName);
         Assert.NotNull(stream);
         using var reader = new StreamReader(stream!);
         return reader.ReadToEnd();
+    }
+
+    // Extract the shared lock protocol — from `acquire() {` through the end of the `release()` line — so
+    // the two init scripts can be compared for the "shared verbatim" invariant.
+    private static string LockProtocol(string script)
+    {
+        string s = script.Replace("\r\n", "\n");
+        int a = s.IndexOf("acquire() {", System.StringComparison.Ordinal);
+        Assert.True(a >= 0, "acquire() must exist");
+        int r = s.IndexOf("release()", a, System.StringComparison.Ordinal);
+        Assert.True(r > a, "release() must follow acquire()");
+        int end = s.IndexOf('\n', r);
+        return s.Substring(a, (end < 0 ? s.Length : end) - a);
     }
 
     private static string[] CodeLines(string script) =>
@@ -136,6 +151,41 @@ public class Go2RtcdScriptTests
         string[] code = CodeLines(s);
         Assert.DoesNotContain(code, l =>
             l.Contains("scsserver") || l.Contains("mosquitto") || l.Contains("bt_daemon"));
+    }
+
+    [Fact]
+    public void Lock_staleness_is_liveness_based_not_a_fixed_time_steal()
+    {
+        // Gold-standard fix (Codex): a slow-but-alive holder — e.g. firewall_close running several
+        // `iptables -w 5` calls under xtables contention — must NEVER have its mutex stolen, or its
+        // critical section could be interleaved by a concurrent start/stop/respawn. So acquire() records
+        // the holder PID and reclaims the lock only when that PID is no longer alive (kill -0), with a time
+        // BACKSTOP solely for PID reuse — not the old unconditional fixed-time steal. release() drops the
+        // PID it wrote.
+        string s = ReadScript().Replace("\r\n", "\n");
+        int aStart = s.IndexOf("acquire() {", System.StringComparison.Ordinal);
+        Assert.True(aStart >= 0, "acquire() must exist");
+        string acq = s.Substring(aStart, s.IndexOf("\n}\n", aStart, System.StringComparison.Ordinal) - aStart);
+        Assert.Contains("printf '%s\\n' \"$$\" > \"$LOCK_PID\"", acq); // records the holder PID
+        Assert.Contains("kill -0 \"$holder\"", acq);                   // liveness-based staleness
+        Assert.Contains("[ \"$waited\" -ge \"$LOCK_STEAL_BACKSTOP\" ]", acq); // PID-reuse backstop only
+        // The old unconditional fixed-time steal must be gone — no `-ge 10 ] ... rmdir` preemption of a
+        // live holder.
+        Assert.DoesNotContain("-ge 10 ]", acq);
+        // release removes the PID file it wrote (so a fresh acquire doesn't read a stale PID).
+        Assert.Contains("release() { rm -f \"$LOCK_PID\"", s);
+    }
+
+    [Fact]
+    public void Lock_protocol_is_shared_verbatim_with_the_btmqttd_init_script()
+    {
+        // The repo rule: the supervision lock model must change in BOTH init scripts together, never
+        // diverge one. So the acquire()/release() protocol must be byte-identical in go2rtcd and btmqttd —
+        // this guards that a future edit to one is mirrored in the other (a divergence here is the exact
+        // failure the rule prevents).
+        string go2 = LockProtocol(ReadResource("IntercomFirmwareTool.Core.Payload.mqtt.go2rtcd"));
+        string bt = LockProtocol(ReadResource("IntercomFirmwareTool.Core.Payload.mqtt.btmqttd"));
+        Assert.Equal(bt, go2);
     }
 
     // Script with backslash line-continuations collapsed to single logical lines, so assertions on a

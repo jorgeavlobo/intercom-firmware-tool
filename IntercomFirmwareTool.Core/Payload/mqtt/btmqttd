@@ -42,17 +42,40 @@ daemon_pids() {
 }
 is_running() { [ -n "$(daemon_pids)" ]; }
 
-# Acquire the mutex (mkdir is atomic). Critical sections are short (never a
-# kill+wait), so retry briefly; steal a stale lock after ~10s so a process killed
-# mid-operation cannot wedge the service forever.
+# Acquire the mutex. `mkdir` is atomic, so exactly one caller wins LOCKDIR and the rest wait. A holder that
+# CRASHED mid-operation must not wedge the service forever — but a holder that is merely SLOW must NEVER be
+# preempted, or its critical section could be interleaved by a stolen lock. So staleness is LIVENESS-based,
+# not time-based (an earlier fixed ~10 s steal could preempt a live-but-slow holder): the winner records
+# its PID in the lock, and a waiter reclaims it only when that PID is no longer alive (`kill -0`), with a
+# generous TIME BACKSTOP purely to cover PID reuse. This is the standard fix for "the lease expired while
+# the holder was still alive". This lock protocol is shared VERBATIM with the go2rtcd init script.
+LOCK_PID="$LOCKDIR/pid"
+# Backstop (seconds) for PID reuse ONLY: comfortably longer than the worst legitimate critical section, so
+# it never preempts a live holder; a genuinely dead holder is reclaimed at once via the liveness check.
+LOCK_STEAL_BACKSTOP=60
 acquire() {
-	i=0
-	while ! mkdir "$LOCKDIR" 2>/dev/null; do
-		i=$((i + 1))
-		if [ "$i" -ge 10 ]; then rmdir "$LOCKDIR" 2>/dev/null; else sleep 1; fi
+	waited=0
+	while :; do
+		if mkdir "$LOCKDIR" 2>/dev/null; then
+			printf '%s\n' "$$" > "$LOCK_PID" 2>/dev/null || true  # tmpfs write; a failure is outside the model
+			return
+		fi
+		# Contended. Reclaim ONLY if the recorded holder is genuinely gone (dead PID). A fresh holder that
+		# has not yet written its PID reads empty and is left alone — never stolen mid-acquire.
+		holder=$(cat "$LOCK_PID" 2>/dev/null)
+		if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+			rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; waited=0; continue
+		fi
+		waited=$((waited + 1))
+		if [ "$waited" -ge "$LOCK_STEAL_BACKSTOP" ]; then
+			# Holder looks alive but has held far past any legitimate critical section — most likely PID
+			# reuse of a dead holder. Reclaim as a backstop.
+			rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; waited=0; continue
+		fi
+		sleep 1
 	done
 }
-release() { rmdir "$LOCKDIR" 2>/dev/null; }
+release() { rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; }
 
 # Signal every daemon instance. Defaults to SIGTERM; pass "-9" to force. (Without
 # a default an argument-less call would run `kill "" <pid>` — an invalid signal

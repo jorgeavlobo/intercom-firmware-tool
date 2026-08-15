@@ -142,17 +142,43 @@ daemon_pids() {
 }
 is_running() { [ -n "$(daemon_pids)" ]; }
 
-# Acquire the mutex (mkdir is atomic). Critical sections are short (never a
-# kill+wait), so retry briefly; steal a stale lock after ~10s so a process killed
-# mid-operation cannot wedge the service forever.
+# Acquire the mutex. `mkdir` is atomic, so exactly one caller wins LOCKDIR and the rest wait. A holder that
+# CRASHED mid-operation must not wedge the service forever — but a holder that is merely SLOW (e.g. running
+# several `iptables -w 5` calls under xtables contention) must NEVER be preempted, or its critical section
+# could be interleaved by a stolen lock. So staleness is LIVENESS-based, not time-based (an earlier fixed
+# ~10 s steal could preempt a live-but-slow holder): the winner records its PID in the lock, and a waiter
+# reclaims it only when that PID is no longer alive (`kill -0`), with a generous TIME BACKSTOP purely to
+# cover PID reuse. This is the standard fix for "the lease expired while the holder was still alive" and
+# bounds every critical section (firewall_open, firewall_close, launch/kill) regardless of how long its
+# iptables calls block (Codex). This lock protocol is shared VERBATIM with the btmqttd init script.
+LOCK_PID="$LOCKDIR/pid"
+# Backstop (seconds) for PID reuse ONLY: comfortably longer than the worst legitimate critical section (a
+# single firewall open/close is a handful of `-w 5` waits, ~25 s worst case), so it never preempts a live
+# holder; a genuinely dead holder is reclaimed at once via the liveness check, not this.
+LOCK_STEAL_BACKSTOP=60
 acquire() {
-	i=0
-	while ! mkdir "$LOCKDIR" 2>/dev/null; do
-		i=$((i + 1))
-		if [ "$i" -ge 10 ]; then rmdir "$LOCKDIR" 2>/dev/null; else sleep 1; fi
+	waited=0
+	while :; do
+		if mkdir "$LOCKDIR" 2>/dev/null; then
+			printf '%s\n' "$$" > "$LOCK_PID" 2>/dev/null || true  # tmpfs write; a failure is outside the model
+			return
+		fi
+		# Contended. Reclaim ONLY if the recorded holder is genuinely gone (dead PID). A fresh holder that
+		# has not yet written its PID reads empty and is left alone — never stolen mid-acquire.
+		holder=$(cat "$LOCK_PID" 2>/dev/null)
+		if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+			rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; waited=0; continue
+		fi
+		waited=$((waited + 1))
+		if [ "$waited" -ge "$LOCK_STEAL_BACKSTOP" ]; then
+			# Holder looks alive but has held far past any legitimate critical section — most likely PID
+			# reuse of a dead holder. Reclaim as a backstop.
+			rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; waited=0; continue
+		fi
+		sleep 1
 	done
 }
-release() { rmdir "$LOCKDIR" 2>/dev/null; }
+release() { rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; }
 
 # Signal every daemon instance. Defaults to SIGTERM; pass "-9" to force. (Without
 # a default an argument-less call would run `kill "" <pid>` — an invalid signal
@@ -237,9 +263,9 @@ firewall_open() {
 	# State DIFFERS (chain empty-but-needs-a-rule, wrong/changed subnet, extra rules, or a rule that should
 	# be gone): re-assert from scratch. Require a SUCCESSFUL flush before repopulating: if the xtables lock
 	# is contended past the wait and `-F` fails, abort this pass rather than append a second ACCEPT on top
-	# of the stale one (a later pass retries). The `-w 5` on every mutating call waits up to 5s for the lock
-	# (supported on the target, and under the ~10s lock-steal threshold), so a spurious failure while the
-	# panel touches iptables is rare.
+	# of the stale one (a later pass retries). The `-w 5` on every mutating call waits up to 5s for the
+	# xtables lock (supported on the target), so a spurious failure while the panel touches iptables is rare;
+	# a slow run under contention is safe now that the LOCKDIR mutex is never stolen from a live holder.
 	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || return 0
 	# shellcheck disable=SC2015  # `[ -n "$lan" ] && add || true`: with no address we intentionally leave
 	# the chain empty (port closed) and still reach fw_jump — `|| true` only neutralizes the guard's exit.
@@ -288,14 +314,15 @@ firewall_is_open() {
 # no-address boot race settles immediately without sleeping).
 #
 # LOCK DISCIPLINE (CodeRabbit / Codex): this function TAKES THE MUTEX ITSELF, once PER ATTEMPT, around a
-# single firewall_open + verify, and the inter-attempt sleep runs LOCK-FREE. So every critical section is
-# exactly ONE firewall_open — the same bound the non-retry path already had — and the retry can NEVER hold
-# LOCKDIR past acquire's ~10 s stale-lock steal threshold no matter how many `-w 5` waits a contended
-# attempt incurs (a whole-loop-under-one-lock version could reach ~lease and be stolen mid-loop, letting a
-# concurrent start/stop/respawn interleave). Because it self-locks, the CALLER MUST NOT hold the mutex.
-# Each attempt re-reads the DISABLED marker UNDER the lock, so a concurrent `stop` that disables us mid-
-# retry wins and we never re-open a port it just closed. Bounded at 3 attempts; a persistent failure
-# defers to the next fw-reassert, which the if-up.d hook fires right after every interface event.
+# single firewall_open + verify, and the inter-attempt sleep runs LOCK-FREE. Correctness against a stolen
+# lock now rests on acquire's LIVENESS-based staleness — a live holder is never preempted, so no critical
+# section here can be interleaved regardless of how long its `-w 5` waits block. The per-attempt structure
+# is kept for RESPONSIVENESS: releasing between attempts lets a concurrent start/stop/respawn proceed
+# during the sleeps instead of blocking behind the whole retry loop. Because it self-locks, the CALLER MUST
+# NOT hold the mutex. Each attempt re-reads the DISABLED marker UNDER the lock, so a concurrent `stop` that
+# disables us mid-retry wins and we never re-open a port it just closed. Bounded at 3 attempts; a
+# persistent failure defers to the next fw-reassert, which the if-up.d hook fires right after every
+# interface event.
 firewall_open_confirmed() {
 	fw_try=0
 	while :; do
@@ -425,8 +452,9 @@ launch_if_enabled() {
 # Poll briefly for a just-backgrounded daemon to exec $DAEMON, so a manual `start`/`restart` returns only
 # once the daemon is actually up rather than racing the child's exec. Only ever called after
 # launch_if_enabled reports it launched, so steady-state respawns (already running) never sleep. Bounded
-# to ~5s — well under the ~10s lock-steal threshold. The firewall no longer depends on this verdict (the
-# port follows the enabled/disabled intent, not the run state), so the return value is informational.
+# to ~5s; the LOCKDIR mutex is never stolen from this live holder, so the short hold is safe. The firewall
+# no longer depends on this verdict (the port follows the enabled/disabled intent, not the run state), so
+# the return value is informational.
 wait_running() {
 	i=0
 	while ! is_running && [ "$i" -lt 5 ]; do
