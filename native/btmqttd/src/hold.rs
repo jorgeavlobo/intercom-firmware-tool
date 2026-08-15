@@ -215,17 +215,19 @@ fn bootstrap_decision(
     grace: Duration,
     cooldown: Duration,
 ) -> (Option<Instant>, Instant, bool) {
-    if serving {
-        // Authenticated media is flowing: renew, and let the NEXT allowance arm immediately — a real view
-        // proved the path works, so a later reopen isn't cooldown-gated. Drop the socket-alone allowance;
-        // serving is the authority while it holds.
-        return (None, now, true);
-    }
     if !viewer {
-        // No external socket: nothing to hold, and the loopback publisher alone is never a viewer. Crucially
-        // we PRESERVE `next_arm` — a mere connection gap must not grant the next raw connection a fresh
-        // allowance (Codex), so an unauthenticated cycler stays gated across the gap.
+        // No external socket: nothing to hold. Checked BEFORE `serving` because the loopback publisher can
+        // linger for a moment after the external RTSP client disconnects — and it alone must NEVER renew the
+        // SIP window (CodeRabbit), so a `(viewer=false, serving=true)` poll must not poke. We also PRESERVE
+        // `next_arm` — a mere connection gap must not grant the next raw connection a fresh allowance
+        // (Codex), so an unauthenticated cycler stays gated across the gap.
         return (until, next_arm, false);
+    }
+    if serving {
+        // A viewer socket is present AND authenticated media is flowing: renew, and let the NEXT allowance
+        // arm immediately — a real view proved the path works, so a later reopen isn't cooldown-gated. Drop
+        // the socket-alone allowance; serving is the authority while it (with the viewer) holds.
+        return (None, now, true);
     }
     match until {
         // Within the active allowance: keep poking.
@@ -572,6 +574,22 @@ mod tests {
         let until = Some(at(t, 15));
         let next_arm = at(t, 75);
         let (u, n, poke) = bootstrap_decision(until, next_arm, false, false, at(t, 50), GRACE, COOL);
+        assert!(!poke);
+        assert_eq!(u, until);
+        assert_eq!(n, next_arm);
+    }
+
+    #[test]
+    fn lingering_publisher_without_a_viewer_does_not_renew() {
+        // CodeRabbit: go2rtc's loopback publisher can linger briefly AFTER the external RTSP client
+        // disconnects. In that `(viewer=false, serving=true)` window the publisher alone must NOT renew the
+        // SIP window — the `!viewer` guard is checked before `serving`, so no poke — and the gate is
+        // preserved (an active allowance and a future next_arm both survive) so a later reconnect can't
+        // jump it.
+        let t = Instant::now();
+        let until = Some(at(t, 15));
+        let next_arm = at(t, 75);
+        let (u, n, poke) = bootstrap_decision(until, next_arm, false, true, at(t, 50), GRACE, COOL);
         assert!(!poke);
         assert_eq!(u, until);
         assert_eq!(n, next_arm);
