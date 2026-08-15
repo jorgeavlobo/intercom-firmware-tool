@@ -123,7 +123,10 @@ pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
             Ok(Ok((n, _from))) => {
                 let pkt = &buf[..n];
                 if let Some(off) = rtp_payload_offset(pkt) {
-                    collect_sps_pps(&pkt[off..], &mut sps, &mut pps);
+                    // Trim any RTP padding first, so trailing pad bytes can't corrupt a STAP-A size
+                    // walk or append garbage to a single NAL.
+                    let end = rtp_payload_end(pkt, off);
+                    collect_sps_pps(&pkt[off..end], &mut sps, &mut pps);
                 }
                 // Both parameter sets in hand ⇒ assemble the sprop value (SPS first, then PPS,
                 // comma-separated, standard base64 with padding) and persist it.
@@ -232,6 +235,23 @@ fn rtp_payload_offset(pkt: &[u8]) -> Option<usize> {
     }
 }
 
+/// The END index of the H.264 payload within an RTP packet, trimming any RTP PADDING. When the RTP
+/// Padding bit (`pkt[0] & 0x20`) is set, the LAST byte is the padding length P and the final P bytes
+/// (that length byte included) are padding to ignore. `off` is the payload start from
+/// [`rtp_payload_offset`]. A malformed pad count (0, or larger than the available payload) is treated as
+/// "no valid padding" and the full length is returned, so a bad packet yields no NAL rather than a bad
+/// parse. Pure — no I/O.
+fn rtp_payload_end(pkt: &[u8], off: usize) -> usize {
+    let len = pkt.len();
+    if len > off && pkt[0] & 0x20 != 0 {
+        let pad = pkt[len - 1] as usize;
+        if pad >= 1 && pad <= len - off {
+            return len - pad;
+        }
+    }
+    len
+}
+
 /// Extract H.264 SPS (NAL type 7) and PPS (NAL type 8) from an RTP payload (the bytes AFTER the RTP
 /// header). Accumulates first-wins into `sps`/`pps` — a second SPS/PPS never overwrites a set one.
 /// Handles a single NAL unit (types 1..=23) and a STAP-A aggregation (type 24); FU-A and other packet
@@ -323,7 +343,7 @@ async fn patch_sdp(sprop: &str) -> std::io::Result<()> {
     );
     // Write a temp file in the same directory, fsync, then rename over the target so a crash never
     // leaves go2rtc a half-written SDP.
-    let tmp = format!("{SDP_PATH}.tmp");
+    let tmp = format!("{SDP_PATH}.tmp.{}", std::process::id());
     {
         let mut f = tokio::fs::File::create(&tmp).await?;
         f.write_all(patched.as_bytes()).await?;
@@ -403,6 +423,23 @@ mod tests {
         let mut pkt = [0u8; 20];
         pkt[0] = 0x40; // version 1 (top two bits 01) ⇒ rejected
         assert_eq!(rtp_payload_offset(&pkt), None);
+    }
+
+    #[test]
+    fn rtp_payload_end_trims_rtp_padding() {
+        // 12-byte header with V=2, P=1 (byte0 = 0xA0), 4 payload bytes of which the last 2 are padding
+        // (the final byte is the pad count = 2). The payload end must trim to the 2 real bytes.
+        let mut padded = vec![0xA0u8, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        padded.extend_from_slice(&[0x67, 0x42, 0x00, 0x02]);
+        assert_eq!(rtp_payload_end(&padded, 12), 14);
+        // P=0 (byte0 = 0x80): no padding ⇒ full length.
+        let mut plain = vec![0x80u8, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        plain.extend_from_slice(&[0x67, 0x42]);
+        assert_eq!(rtp_payload_end(&plain, 12), plain.len());
+        // Malformed pad count (larger than the available payload) ⇒ treated as no padding, full length.
+        let mut bad = vec![0xA0u8, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        bad.extend_from_slice(&[0x67, 0xFF]);
+        assert_eq!(rtp_payload_end(&bad, 12), bad.len());
     }
 
     // --- NAL collection ---
