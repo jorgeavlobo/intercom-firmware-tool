@@ -51,7 +51,11 @@ public class PayloadGo2RtcNetHookTests
         // the periodic watchdog no longer re-asserts (task #42 / Codex). So the hook must NOT gate on
         // $IFACE; fw-reassert re-opens the wlan0 rule regardless of which interface's event fired it.
         string[] code = CodeLines(ReadHook());
-        Assert.DoesNotContain(code, l => l.Contains("\"${IFACE:-}\" = wlan0"));
+        // Any form of an interface gate must fail this test, not just one exact spelling — a reintroduced
+        // `[ "$IFACE" = wlan0 ]`, `case "$IFACE" in wlan0)`, etc. would still leave :8554 unreachable after
+        // a non-wlan0 bring-up. So reject any executable line that references IFACE or a specific interface.
+        Assert.DoesNotContain(code, l => l.Contains("IFACE"));
+        Assert.DoesNotContain(code, l => l.Contains("wlan0"));
     }
 
     [Fact]

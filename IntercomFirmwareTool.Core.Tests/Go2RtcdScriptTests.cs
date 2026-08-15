@@ -163,7 +163,7 @@ public class Go2RtcdScriptTests
         string s = ReadScript().Replace("\r\n", "\n");
         // Open fd 9 and block for the lock; acquire EXITS (never returns) if it can't get the lock, so no
         // caller can run its critical section unlocked (CodeRabbit).
-        Assert.Contains("acquire() { exec 9>>\"$LOCKFILE\" || exit 1; flock 9 || exit 1; }", s);
+        Assert.Contains("acquire() { exec 9>>\"$LOCKFILE\" || exit 1; flock -w 30 9 || exit 1; }", s);
         Assert.Contains("release() { exec 9>&-; }", s);                       // close fd 9 → kernel releases
         // None of the fragile hand-rolled locking survives (each was a source of a review finding).
         foreach (var banned in new[]
@@ -283,7 +283,7 @@ public class Go2RtcdScriptTests
         // firewall_open) so each critical section is bounded to a single firewall_open — never the whole
         // loop — and it re-reads DISABLED under the lock so a concurrent stop wins. The inter-attempt sleep
         // must run LOCK-FREE: the last release precedes the sleep, so the mutex is never held across the
-        // pause (which is what would let the hold exceed acquire's ~10s stale-lock steal threshold).
+        // pause, which would otherwise block a concurrent start/stop/respawn for the whole retry loop.
         Assert.Contains("acquire", body);
         Assert.Contains("if [ -e \"$DISABLED\" ]; then release; return 0; fi", body);
         Assert.True(
