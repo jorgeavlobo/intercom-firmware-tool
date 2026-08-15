@@ -482,12 +482,17 @@ case "$1" in
 		# must stay open whenever the service is enabled (a brief crash/relaunch window with :8554 open but
 		# nothing listening just yields a TCP reset — harmless, and LAN-source-restricted).
 		# firewall_open_confirmed SELF-LOCKS per attempt (re-reading DISABLED under the lock each time), so it
-		# is called WITHOUT this arm's mutex; the close path still runs under an explicit acquire/release.
+		# is called WITHOUT this arm's mutex; the close path still runs under an explicit acquire/release. The
+		# outer test is only a fast-path dispatch (a racy read) — BOTH branches re-check DISABLED UNDER the
+		# lock so a concurrent start/stop that flips the marker after this test still wins: the open branch
+		# via firewall_open_confirmed's per-attempt check, and the close branch here re-checks before closing
+		# (matching the stop path), so a `start` that clears DISABLED can't be undone by a stale close that
+		# would otherwise leave the enabled service with :8554 closed (CodeRabbit).
 		if [ ! -e "$DISABLED" ]; then
 			firewall_open_confirmed
 		else
 			acquire
-			firewall_close
+			[ -e "$DISABLED" ] && firewall_close
 			release
 		fi
 		;;

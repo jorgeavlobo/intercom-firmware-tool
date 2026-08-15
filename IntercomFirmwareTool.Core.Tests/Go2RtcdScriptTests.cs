@@ -198,6 +198,14 @@ public class Go2RtcdScriptTests
         int fwStart = s.IndexOf("\tfw-reassert)", System.StringComparison.Ordinal);
         string fwBody = s.Substring(fwStart, s.IndexOf("\tstop)", fwStart, System.StringComparison.Ordinal) - fwStart);
         Assert.Contains("firewall_open_confirmed", fwBody);
+        // The close path re-checks DISABLED UNDER the lock (after acquire) before firewall_close, so a
+        // concurrent start that clears DISABLED can't be undone by a stale close (CodeRabbit); the acquire
+        // must precede that guarded close.
+        Assert.Contains("[ -e \"$DISABLED\" ] && firewall_close", fwBody);
+        Assert.True(
+            fwBody.IndexOf("acquire", System.StringComparison.Ordinal)
+            < fwBody.IndexOf("[ -e \"$DISABLED\" ] && firewall_close", System.StringComparison.Ordinal),
+            "the fw-reassert close path must re-check DISABLED after acquiring the mutex");
     }
 
     [Fact]
