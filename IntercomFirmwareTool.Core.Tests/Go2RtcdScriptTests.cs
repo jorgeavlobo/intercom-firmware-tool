@@ -169,14 +169,25 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
-    public void Firewall_is_tied_to_the_running_daemon()
+    public void Firewall_follows_enabled_intent_and_the_watchdog_never_touches_iptables()
     {
-        string[] code = CodeLines(ReadScript());
-        // The rule is opened only when the daemon is actually running (a failed launch leaves no open
-        // port) and closed on stop/disable/not-running. Assert the CALL SITES, not the definition line.
-        Assert.Contains(code, l => l.Contains("if is_running; then firewall_open"));
-        Assert.Contains(code, l => l.Contains("else firewall_close"));   // not-running / disabled respawn
-        Assert.Contains(code, l => l == "firewall_close");               // disabled branch (bare call)
+        // Task #42 / Codex P1: the periodic watchdog (`respawn`) MUST NOT invoke iptables — every
+        // invocation acquires the xtables lock at launch and could fail a concurrent factory `-A INPUT`,
+        // dropping a rule (USB-reflash FTP, SSH, security DROPs). So the firewall is (re)asserted ONLY by
+        // discrete, sequenceable events: `start` (open), `stop` (close), and the if-up.d hook
+        // `fw-reassert` (open/close per the enabled/disabled marker) — following the ENABLED intent, not
+        // the daemon's momentary run state.
+        string s = ReadScript().Replace("\r\n", "\n");
+        // respawn body: manages the daemon only, NO firewall calls.
+        int rStart = s.IndexOf("\trespawn)", System.StringComparison.Ordinal);
+        string respawnBody = s.Substring(rStart, s.IndexOf("\tfw-reassert)", rStart, System.StringComparison.Ordinal) - rStart);
+        Assert.DoesNotContain("firewall_open", respawnBody);
+        Assert.DoesNotContain("firewall_close", respawnBody);
+        // start opens the port when enabled (after launching), decoupled from is_running.
+        int stStart = s.IndexOf("\tstart)", System.StringComparison.Ordinal);
+        string startBody = s.Substring(stStart, s.IndexOf("\trespawn)", stStart, System.StringComparison.Ordinal) - stStart);
+        Assert.Contains("firewall_open", startBody);
+        Assert.DoesNotContain("if is_running; then firewall_open", startBody);
     }
 
     [Fact]
@@ -369,9 +380,12 @@ public class Go2RtcdScriptTests
         Assert.Contains(
             "iptables -C \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
             joined);
-        // The fast path exits (fw_jump + return) for BOTH the already-correct (n==1 + -C match) and the
-        // already-empty (no address, n==0) cases.
-        Assert.Contains("[ \"$n\" -eq 1 ] && iptables -C \"$FW_CHAIN\"", joined);
+        // The `-C` STATUS is captured (`if cerr=$(...)`) so a genuine rule MISMATCH (reconcile) is
+        // distinguished from a LOCK/inspection error: on the "xtables lock" message it BAILS rather than
+        // falling through to the mutating `-F` (CodeRabbit). The fast path exits (fw_jump + return) for
+        // BOTH the already-correct (n==1 + -C match) and the already-empty (no address, n==0) cases.
+        Assert.Contains("if cerr=$(iptables -C \"$FW_CHAIN\"", joined);
+        Assert.Contains("*\"xtables lock\"*) return 0 ;;", openBody);
         Assert.Contains("[ \"$n\" -eq 0 ] && { fw_jump; return 0; }", openBody);
         // ZERO-WRITE PROOF: the first fast-path `{ fw_jump; return 0; }` must appear BEFORE the flush, so a
         // matching chain never reaches any `-F`/`-A` write.
@@ -393,7 +407,8 @@ public class Go2RtcdScriptTests
     {
         // Task #42: the if-up.d hook calls `go2rtcd fw-reassert` right after the factory firewall rebuild.
         // It must be a firewall-ONLY reconcile under the lock — no daemon launch/kill — reusing the same
-        // firewall_open/firewall_close single source of truth, coupled to the running+enabled state.
+        // firewall_open/firewall_close single source of truth, following the ENABLED/DISABLED intent (NOT
+        // the daemon's run state — the watchdog no longer re-opens the port, so it stays open while enabled).
         string s = ReadScript().Replace("\r\n", "\n");
         string[] code = CodeLines(s);
         Assert.Contains(code, l => l == "fw-reassert)");
@@ -404,8 +419,10 @@ public class Go2RtcdScriptTests
         int next = s.IndexOf("\tstop)", arm, System.StringComparison.Ordinal);
         Assert.True(arm >= 0 && next > arm);
         string armBody = s.Substring(arm, next - arm);
-        // Enabled (no marker) AND running → open; otherwise close. Under the lock.
-        Assert.Contains("if [ ! -e \"$DISABLED\" ] && is_running; then", armBody);
+        // Enabled (no marker) → open; disabled → close. Follows the marker alone (decoupled from
+        // is_running), under the lock.
+        Assert.Contains("if [ ! -e \"$DISABLED\" ]; then", armBody);
+        Assert.DoesNotContain("is_running", armBody);
         Assert.Contains("firewall_open", armBody);
         Assert.Contains("firewall_close", armBody);
         int acq = armBody.IndexOf("acquire", System.StringComparison.Ordinal);
@@ -417,11 +434,12 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
-    public void Waits_for_a_just_launched_daemon_before_deciding_the_firewall()
+    public void Waits_for_a_just_launched_daemon_before_returning()
     {
-        // Codex: the is_running check right after backgrounding go2rtc can race the child's exec, so a
-        // manual start/restart could close the port until the next watchdog pass. launch_if_enabled must
-        // report whether it launched, and start/respawn must wait for it to come up before the decision.
+        // The is_running check right after backgrounding go2rtc can race the child's exec, so a manual
+        // start/restart should not return before the daemon is actually up. launch_if_enabled reports
+        // whether it launched, and start/respawn wait for it to come up. (The firewall no longer depends
+        // on this — it follows the enabled/disabled intent — so this is purely about return timing.)
         string[] code = CodeLines(ReadScript());
         Assert.Contains(code, l => l.Contains("wait_running()"));
         // The wait only follows an actual launch (steady-state respawns never sleep).

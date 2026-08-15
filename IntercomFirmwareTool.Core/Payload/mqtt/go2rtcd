@@ -210,8 +210,22 @@ firewall_open() {
 	# masking, so it matches the rule iptables actually stored, not just its textual form. Desired state is
 	# either exactly our one ACCEPT for the current subnet (address present) or an empty chain (no address).
 	if [ -n "$lan" ]; then
-		[ "$n" -eq 1 ] && iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" \
-			-s "$lan" -j ACCEPT 2>/dev/null && { fw_jump; return 0; }
+		if [ "$n" -eq 1 ]; then
+			# Non-blocking membership check for the ONE desired rule. Capture its output so we can tell a
+			# genuine MISMATCH (subnet changed / wrong rule → reconcile below) from a LOCK/inspection error:
+			# a `-C` that fails because the lock is contended must NOT fall through to the mutating `-F`
+			# (that would re-introduce a lock wait during the factory rebuild) — bail and let the if-up.d
+			# hook / next pass retry. `-C` exits 0 on an exact match; a non-zero exit is either "no such
+			# rule" or the xtables-lock error, which prints the "xtables lock" message.
+			if cerr=$(iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" \
+				-s "$lan" -j ACCEPT 2>&1); then
+				fw_jump; return 0                   # already exactly our desired rule → zero-write
+			fi
+			case "$cerr" in
+				*"xtables lock"*) return 0 ;;       # lock contention → bail (never write under the rebuild)
+			esac
+			# else: genuine mismatch (changed subnet, wrong rule) → fall through to flush + repopulate
+		fi
 	else
 		[ "$n" -eq 0 ] && { fw_jump; return 0; }
 	fi
@@ -341,12 +355,11 @@ launch_if_enabled() {
 	return 0
 }
 
-# Poll briefly for a just-backgrounded daemon to exec $DAEMON. Without this, the is_running check right
-# after a launch can race the child's exec and read "down", so a manual start/restart would close the
-# media port until the next watchdog pass ~60s later. Only ever called after launch_if_enabled
-# reports it launched, so steady-state respawns (already running) never sleep. Bounded to ~5s — well
-# under the ~10s lock-steal threshold — then returns is_running's verdict so a genuinely failed launch
-# still ends with the port closed.
+# Poll briefly for a just-backgrounded daemon to exec $DAEMON, so a manual `start`/`restart` returns only
+# once the daemon is actually up rather than racing the child's exec. Only ever called after
+# launch_if_enabled reports it launched, so steady-state respawns (already running) never sleep. Bounded
+# to ~5s — well under the ~10s lock-steal threshold. The firewall no longer depends on this verdict (the
+# port follows the enabled/disabled intent, not the run state), so the return value is informational.
 wait_running() {
 	i=0
 	while ! is_running && [ "$i" -lt 5 ]; do
@@ -358,45 +371,48 @@ wait_running() {
 
 case "$1" in
 	start)
-		# Operator/boot intent: enable the service, launch, then open the media port iff it came up.
+		# Operator/boot intent: enable the service, launch the daemon, and open the media port. The port
+		# follows the ENABLED intent, NOT the daemon's momentary run state — because the periodic watchdog
+		# no longer (re)opens the firewall (see `respawn`), the port must be open whenever the service is
+		# enabled so a slow/failed first launch (then a later respawn success) still ends up reachable.
+		# firewall_open is idempotent, zero-write when already correct, and BAILS on lock contention, so a
+		# boot-time overlap with the factory rebuild just gets retried by the if-up.d hook.
 		acquire
 		rm -f "$DISABLED" 2>/dev/null
 		launch_if_enabled && wait_running
-		if is_running; then firewall_open; else firewall_close; fi
+		firewall_open
 		release
 		echo "$NAME started"
 		;;
 	respawn)
-		# Supervisor-only reconcile (bt_service_watchdog). Under the lock: enforce
-		# the desired state - if stopped (marker present) kill any lingering or
-		# racily-started instance and close the port; otherwise (re)launch if it is
-		# down and (re)assert the firewall rule. firewall_open runs EVERY pass but is
-		# now ZERO-WRITE when :8554 is already correct (task #42) — it only writes to
-		# re-open the port after the panel rebuilt/flushed its chain, so it is the
-		# safety net that catches any trigger the if-up.d hook did not. The rule is
-		# tied to the daemon actually running, so a persistently failed launch (missing
-		# binary/config) leaves no open port. Never clears the marker, so it
-		# cannot undo an operator's `stop`.
+		# Supervisor-only reconcile (bt_service_watchdog). This periodic pass MUST NOT touch iptables
+		# (task #42 / Codex P1): EVERY iptables invocation — even a read-only `-S` — acquires the xtables
+		# lock at launch, and if that overlaps the factory firewall's LOCK-LESS `-A INPUT` rebuild the
+		# factory call fails and a rule is dropped (FTP-over-USB reflash, SSH, security DROPs). The watchdog
+		# fires on an INDEPENDENT timer that cannot be sequenced against that rebuild, so it manages ONLY
+		# the daemon process here. The firewall is (re)asserted EXCLUSIVELY by discrete, sequenceable events
+		# — `start`, `stop`, and the if-up.d hook (`fw-reassert`), which runs RIGHT AFTER each factory
+		# rebuild — so our GO2RTC rule is restored after every flush without the watchdog ever racing the
+		# lock. Never clears the marker, so it cannot undo an operator's `stop`.
 		acquire
 		if [ -e "$DISABLED" ]; then
 			kill_all
-			firewall_close
 		else
 			launch_if_enabled && wait_running
-			if is_running; then firewall_open; else firewall_close; fi
 		fi
 		release
 		;;
 	fw-reassert)
-		# Firewall-ONLY reconcile (task #42), the single source of truth the if-up.d hook
-		# (go2rtc-net-hook) calls right after the factory firewall rebuild on a wlan0 bring-up.
-		# It re-asserts our GO2RTC rule sequentially — no daemon racing the factory's lock-less
-		# INPUT writes — and is idempotent + zero-write in steady state (see firewall_open). It
-		# must NEVER launch or kill the daemon: only the firewall is touched. Under the lock, if
-		# the service is ENABLED (no marker) AND actually running, (re)assert the rule; otherwise
-		# tear it down (matches the running-state coupling used by start/respawn).
+		# Firewall-ONLY reconcile (task #42) — the SINGLE source of truth for our GO2RTC rule, called by
+		# the if-up.d hook (go2rtc-net-hook) RIGHT AFTER the factory firewall rebuild on a wlan0 bring-up,
+		# and (with start/stop) the only place that touches iptables. It re-asserts sequentially — no daemon
+		# racing the factory's lock-less INPUT writes — and is idempotent + zero-write in steady state (see
+		# firewall_open). It must NEVER launch or kill the daemon. The firewall follows the ENABLED/DISABLED
+		# intent, NOT the daemon's momentary run state: since the watchdog no longer re-opens the port, it
+		# must stay open whenever the service is enabled (a brief crash/relaunch window with :8554 open but
+		# nothing listening just yields a TCP reset — harmless, and LAN-source-restricted).
 		acquire
-		if [ ! -e "$DISABLED" ] && is_running; then
+		if [ ! -e "$DISABLED" ]; then
 			firewall_open
 		else
 			firewall_close
