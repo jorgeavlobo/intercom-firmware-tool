@@ -267,13 +267,22 @@ assemble_sdp() {
 		rec=$(head -n 1 "$SPROP_FILE" 2>/dev/null)
 		rec_branch=$(printf '%s' "$rec" | cut -f1)
 		rec_value=$(printf '%s' "$rec" | cut -f2- | sed 's/[[:space:]]*$//')
-		cur_branch=$(sed -n 's/^CAMERA_BRANCH=\([0-9][0-9]*\).*$/\1/p' "$CONF_FILE" 2>/dev/null | head -n 1)
-		# Normalize EXACTLY as config.rs does — clamp to 0/1, default 1 for absent/out-of-range/garbage
-		# — so both consumers of the record agree on the branch even for a hand-edited/corrupt conf
-		# (config.rs: opt("CAMERA_BRANCH").and_then(parse).filter(|b| *b <= 1).unwrap_or(1)).
+		# Read the current branch the SAME way config.rs does, so both consumers of the record agree
+		# even for a hand-edited/corrupt conf. config.rs (parse_env + Config): take the value after the
+		# first '=', trim it, strip an inline comment (a '#' preceded by space/tab), then
+		# parse::<u8>().filter(|b| *b <= 1).unwrap_or(1). Extract the WHOLE value (grabbing only leading
+		# digits would read `0garbage` as 0, but Rust's parse rejects the whole token → 1), require it
+		# to be a PURE integer, then strip leading zeros so 00 -> 0 / 01 -> 1 compare numerically.
+		cur_branch=$(sed -n 's/^[[:space:]]*CAMERA_BRANCH=[[:space:]]*\(.*\)$/\1/p' "$CONF_FILE" 2>/dev/null | head -n 1)
+		cur_branch=$(printf '%s' "$cur_branch" | sed 's/[[:blank:]]#.*$//; s/[[:blank:]]*$//')
 		case "$cur_branch" in
-			0 | 1) ;;
-			*) cur_branch=1 ;;
+			'' | *[!0-9]*) cur_branch=1 ;;   # absent or not a pure integer => config.rs default (1)
+			*)
+				case "$(printf '%s' "$cur_branch" | sed 's/^0*//')" in
+					'') cur_branch=0 ;;      # all-zero digits (0, 00, 000, …) => numeric 0
+					*) cur_branch=1 ;;       # 1/01/… or any value > 1 => 1 (config.rs clamps > 1 to 1)
+				esac
+				;;
 		esac
 		[ "$rec_branch" = "$cur_branch" ] && sprop="$rec_value"
 	fi
