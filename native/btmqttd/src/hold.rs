@@ -37,16 +37,28 @@
 //! So summing LOCAL-port-8554 ESTABLISHED across both files = exactly the viewer count, and the LISTEN
 //! socket (state `0A`) is never counted.
 //!
-//! ## Excluding go2rtc's OWN loopback publisher (not a viewer)
+//! ## Two signals: the external viewer, and go2rtc's OWN loopback publisher
 //! During a REAL view go2rtc's `exec:` ffmpeg copies the panel's H.264 back into go2rtc's own RTSP
 //! server — it publishes `{output}` to `127.0.0.1:8554`. That publisher socket is ESTABLISHED and its
-//! LOCAL port is ALSO 8554, so a naive local-port-8554 count would see it as a second "viewer" and keep
-//! the panel held for ~go2rtc's idle timeout AFTER the real viewer already left. What distinguishes it:
-//! a real external viewer's accepted socket carries the LAN IP as its LOCAL address (e.g.
-//! `::ffff:192.168.50.251:8554`), whereas the publisher's LOCAL address is loopback
-//! (`::ffff:127.0.0.1:8554` / `127.0.0.1:8554` / `::1`). So we count a local-port-8554 ESTABLISHED
-//! socket only when its LOCAL IP is NOT loopback ([`is_loopback_hex`], matched against the exact /proc
-//! loopback encodings — never by range, so a parse slip can't drop a real viewer and break auto-hold).
+//! LOCAL port is ALSO 8554, so a naive local-port-8554 count would see it as a second "viewer". What
+//! distinguishes it: a real external viewer's accepted socket carries the LAN IP as its LOCAL address
+//! (e.g. `::ffff:192.168.50.251:8554`), whereas the publisher's LOCAL address is loopback
+//! (`::ffff:127.0.0.1:8554` / `127.0.0.1:8554` / `::1`). So we split the local-port-8554 ESTABLISHED
+//! count by whether the LOCAL IP is loopback ([`is_loopback_hex`], matched against the exact /proc
+//! loopback encodings — never by range, so a parse slip can't drop a real viewer and break auto-hold):
+//!   * a NON-loopback match is a real EXTERNAL viewer — the "someone connected" BOOTSTRAP signal;
+//!   * a loopback match is the publisher — present ONLY while go2rtc is actually SERVING an authenticated
+//!     consumer (its `exec:` is lazy and RTSP-auth-gated), so it is the "media actually flowing" signal.
+//!
+//! ## Why both signals: bootstrap vs sustain (the AUTHENTICATED-ACTIVITY GATE)
+//! The external socket alone must BOOTSTRAP the first open — go2rtc's exec can't serve until this task
+//! brings the panel up — but it must not PIN the panel indefinitely: an unauthenticated LAN host (a
+//! scanner, a health-check, a malicious hold) could otherwise hold the session up without ever knowing
+//! the RTSP credentials. So `run` renews on the external socket only within a BOOTSTRAP GRACE; past it,
+//! renewal additionally requires the SERVING signal, which only a genuinely authenticated view produces.
+//! The grace is sized to the unit's provisioning state (see [`BOOTSTRAP_GRACE`] / [`PROVISIONING_GRACE`]):
+//! an UNPROVISIONED unit needs longer because go2rtc can't open the publisher until the first cold
+//! lock-on (~a keyframe interval), and this gate is the only thing holding the panel up through it.
 //!
 //! Best-effort: reading `/proc` doesn't fail meaningfully — a read error reads as "no viewer" (logged
 //! once). The manual `view_camera`/`stop_camera` MQTT actions are unaffected — every source drives the
@@ -60,6 +72,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Config;
 use crate::sip::ViewCmd;
+use crate::sprop;
 
 /// go2rtc's on-device RTSP port (`Go2RtcConfig.OnDeviceRtspPort` = 8554) as the uppercase hex the
 /// `/proc/net/tcp` port field uses: 8554 = 0x216A. A client holding an ESTABLISHED connection to this
@@ -71,11 +84,24 @@ const RTSP_PORT_HEX: &str = "216A";
 /// held view never lapses between pokes.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// How long a freshly-connected viewer socket may renew the window on the SOCKET ALONE before renewal
-/// additionally requires go2rtc to be ACTUALLY serving (see `run`). Long enough for the client to finish
-/// the RTSP handshake so go2rtc spawns its lazy, auth-gated exec ffmpeg after our bootstrap `Start`;
-/// short enough that a raw unauthenticated socket cannot pin the panel for long (Codex). Generous — the
-/// panel-up + first republish can take a few seconds — and validated on hardware.
+/// additionally requires go2rtc to be ACTUALLY serving (see `run`), on a unit that is ALREADY provisioned
+/// (its `sprop-parameter-sets` are learned or pre-seeded). With the parameter sets already in the runtime
+/// SDP, go2rtc's copy ffmpeg resolves the video and opens its loopback publisher within about a second of
+/// the panel coming up, so this only has to outlast the RTSP handshake + panel-up + first republish.
+/// Short so a raw unauthenticated socket cannot pin the panel for long (Codex). Validated on hardware.
 const BOOTSTRAP_GRACE: Duration = Duration::from_secs(15);
+/// The bootstrap grace on an UNPROVISIONED unit (no sprop learned yet, nothing pre-seeded). There the
+/// runtime SDP carries no parameter sets, so go2rtc's `-c:v copy` ffmpeg cannot resolve the video — and
+/// therefore cannot open the loopback publisher `serving` keys off — until the panel emits its next
+/// in-band SPS/PPS, up to a full ~20 s keyframe interval after the panel comes up (see `sprop.rs`). The
+/// passive learner is renew-less, so THIS grace is the only thing holding the panel up through that first
+/// cold lock-on; it must outlast one keyframe interval + SIP settle regardless of how short
+/// `camera_view_idle_secs` is, or the session BYEs before `serving` can ever go true and the unit never
+/// learns (Codex). Generous margin over the ~20 s interval for settle/jitter and a just-missed keyframe.
+/// Applies only until the first successful learn (then serving sustains the view and later opens fall
+/// back to `BOOTSTRAP_GRACE`) — a one-time, install-window exposure, so the longer socket-only pin is
+/// acceptable.
+const PROVISIONING_GRACE: Duration = Duration::from_secs(45);
 
 /// Debounce for the (essentially never taken) `/proc` read-error log, so a broken procfs can't spam the
 /// log every poll — the same one-shot-warn role the old API-unreachable `warned` flag served.
@@ -93,8 +119,9 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
         .min(window / 2)
         .max(Duration::from_millis(500));
     // Start of the current viewer socket's BOOTSTRAP GRACE. A freshly-connected socket may renew on its
-    // own for [`BOOTSTRAP_GRACE`]; past that, renewal ALSO requires go2rtc to be actually serving. Reset
-    // whenever no viewer socket is present, so each new connection gets a fresh grace.
+    // own until this deadline; past that, renewal ALSO requires go2rtc to be actually serving. Reset
+    // whenever no viewer socket is present, so each new connection gets a fresh grace, sized on connect
+    // to the unit's provisioning state (see below).
     let mut grace_deadline: Option<tokio::time::Instant> = None;
     while !stopping.load(Ordering::Relaxed) {
         let (viewer, serving) = viewer_signals().await;
@@ -109,7 +136,28 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
             // an authenticated consumer. A socket that never authenticates therefore lapses when the
             // grace expires and cannot sustain the hold.
             let now = tokio::time::Instant::now();
-            let deadline = *grace_deadline.get_or_insert(now + BOOTSTRAP_GRACE);
+            let deadline = match grace_deadline {
+                Some(d) => d,
+                None => {
+                    // First poll of a fresh viewer connection: size the grace to the unit's provisioning
+                    // state. An UNPROVISIONED unit (no sprop learned/pre-seeded) can't produce the
+                    // `serving` signal until its first cold lock-on completes ~a keyframe interval after
+                    // the panel comes up, and this gate is the only renewal source through that window, so
+                    // it needs [`PROVISIONING_GRACE`]; once provisioned, serving appears within ~a second,
+                    // so the tight [`BOOTSTRAP_GRACE`] applies (see the const docs). `already_learned` is a
+                    // single cheap read run once per connection (not per poll), off the hot path. By the
+                    // time the first learn flips this to provisioned mid-view, serving is already true and
+                    // sustains the view regardless of the grace tier.
+                    let grace = if sprop::already_learned(cfg.camera_branch).await {
+                        BOOTSTRAP_GRACE
+                    } else {
+                        PROVISIONING_GRACE
+                    };
+                    let d = now + grace;
+                    grace_deadline = Some(d);
+                    d
+                }
+            };
             if now < deadline || serving {
                 // Renew the on-demand window. try_send never blocks the poll loop: a full queue means
                 // sip.rs isn't draining (reconnect backoff) and a dropped poke is harmless — the next poll

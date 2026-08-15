@@ -214,7 +214,13 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
 /// stale record on the next learn; go2rtcd independently refuses to splice a mismatched-branch value
 /// (task #41). A missing/unreadable persist file AND template also reads as "not provisioned" so the
 /// listen continues. Delegates to the two readers below (persist via spawn_blocking; template async).
-async fn already_learned(branch: u8) -> bool {
+///
+/// `pub(crate)` because `hold.rs` reuses this exact "is the unit provisioned?" predicate to size its
+/// bootstrap grace: an unprovisioned unit needs a longer grace to survive the first cold lock-on (the
+/// runtime SDP has no parameter sets yet, so go2rtc can't open its loopback publisher until the panel's
+/// next in-band SPS/PPS). Keeping the definition in one place ties the two subsystems to the same notion
+/// of "provisioned".
+pub(crate) async fn already_learned(branch: u8) -> bool {
     persisted_for_branch(branch).await || template_has_sprop().await
 }
 
