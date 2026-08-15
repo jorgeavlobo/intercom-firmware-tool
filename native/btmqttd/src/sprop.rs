@@ -75,7 +75,7 @@ const SPROP_RTP_ADDR: &str = "127.0.0.1:40100";
 /// patched SDP equals what the installer would have written with CameraSprop set.
 const FMTP_ANCHOR: &str = "packetization-mode=1;";
 
-/// How long a single `recv_from` waits before we loop back to re-check `stopping` / `already_learned`.
+/// How long a single `recv_from` waits before we loop back to re-check `stopping` / the persisted state.
 /// Short enough that a shutdown (or an operator pre-seed) is observed promptly while a view is idle.
 const RECV_TIMEOUT: Duration = Duration::from_secs(1);
 /// Backoff between retries when binding [`SPROP_RTP_ADDR`] fails (e.g. the port is briefly in use). A
@@ -96,13 +96,17 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     // The video branch the panel is currently siphoned on. The learned SPS/PPS are branch-specific, so
     // this keys the persisted record and the "already learned" gate.
     let branch = cfg.camera_branch;
-    // Already learned on a prior boot FOR THIS BRANCH (the VALUE persisted on cfg/extra), or an
-    // operator pre-seeded the template ⇒ nothing to do. The persist file — not the runtime SDP — is the
-    // source of truth: go2rtcd already spliced a matching-branch value into the runtime tmpfs SDP at
-    // boot. Idempotent guard so the steady state after the first learn is a single cheap file read at
-    // startup.
-    if already_learned(branch).await {
-        return;
+    // Decide from the two provisioning facts (see `provision_action`): a single cheap read of each at
+    // startup; the steady state after the first learn is `Done`.
+    match provision_action(template_has_sprop().await, persisted_for_branch(branch).await) {
+        // A seeded template supersedes any learned record: CLEAR the stale record so a later bare reflash
+        // re-learns instead of resurrecting the old value (Codex), then there is nothing to learn.
+        Provision::ClearThenDone => {
+            let _ = tokio::task::spawn_blocking(persist::clear_camera_sprop).await;
+            return;
+        }
+        Provision::Done => return,
+        Provision::Listen => {}
     }
 
     // Bind the loopback RTP port. A transient failure (the port is briefly in use, tmpfs not ready)
@@ -206,22 +210,37 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     }
 }
 
-/// True iff there is nothing to provision FOR THE CURRENT `branch`: EITHER a value learned on this same
-/// branch was persisted on a prior boot (the durable source of truth on cfg/extra), OR the installer
-/// PRE-SEEDED a `CameraSprop` into the read-only `/etc` template SDP (an operator-supplied value —
-/// nothing to learn). A value persisted for a DIFFERENT branch (a reflash that flipped `CAMERA_BRANCH`)
-/// reads as "not provisioned", so the listen re-learns the correct parameter sets and OVERWRITES the
-/// stale record on the next learn; go2rtcd independently refuses to splice a mismatched-branch value
-/// (task #41). A missing/unreadable persist file AND template also reads as "not provisioned" so the
-/// listen continues. Delegates to the two readers below (persist via spawn_blocking; template async).
-async fn already_learned(branch: u8) -> bool {
-    persisted_for_branch(branch).await || template_has_sprop().await
+/// What sprop provisioning should do at startup, from two facts: whether the installer PRE-SEEDED a
+/// `CameraSprop` into the read-only `/etc` template (`template_seeded`), and whether a value learned on
+/// the CURRENT branch is already persisted (`learned_this_branch`). Pure, so the precedence is unit-tested.
+///
+/// A seeded template is AUTHORITATIVE for this image — go2rtcd uses the template's own sprop and ignores
+/// the persisted record — so it SUPERSEDES any learned value, and we must CLEAR that record rather than
+/// merely skip: a LATER reflash shipping a bare template would otherwise make go2rtcd splice the stale
+/// value back in (it splices the persisted value ONLY when the template has none), and this gate would
+/// then treat it as learned forever, corrupting video (Codex). So a seed always yields `ClearThenDone`,
+/// EVEN when a same-branch value is learned. Otherwise a same-branch learned record means `Done` (go2rtcd
+/// already spliced it into the runtime SDP at boot); anything else — nothing learned, or only a record for
+/// a DIFFERENT branch after a `CAMERA_BRANCH` flip (task #41) — means `Listen` to learn the right sets.
+enum Provision {
+    ClearThenDone,
+    Done,
+    Listen,
+}
+fn provision_action(template_seeded: bool, learned_this_branch: bool) -> Provision {
+    if template_seeded {
+        Provision::ClearThenDone
+    } else if learned_this_branch {
+        Provision::Done
+    } else {
+        Provision::Listen
+    }
 }
 
 /// True iff a value learned on THIS `branch` is already persisted on cfg/extra (the durable source of
-/// truth). Split out from [`already_learned`] so the idle re-check can poll JUST this — the read-only
-/// `/etc` template is immutable at runtime (a set template makes `run` return before the loop), so the
-/// per-second idle path skips that flash read. Blocking read → spawn_blocking.
+/// truth). Split out so the idle re-check can poll JUST this — the read-only `/etc` template is immutable
+/// at runtime (a seeded template makes `run` return before the loop), so the per-second idle path skips
+/// that flash read. Blocking read → spawn_blocking.
 async fn persisted_for_branch(branch: u8) -> bool {
     tokio::task::spawn_blocking(move || {
         matches!(persist::read_camera_sprop(), Some((b, _)) if b == branch)
@@ -244,7 +263,7 @@ fn has_sprop(sdp: &str) -> bool {
 }
 
 /// True iff the RUNTIME tmpfs SDP go2rtc actually reads ([`SDP_PATH`]) currently carries
-/// `sprop-parameter-sets`. This — NOT [`already_learned`] — is what tells `hold.rs` whether go2rtc's
+/// `sprop-parameter-sets`. This — NOT the persisted record — is what tells `hold.rs` whether go2rtc's
 /// `-c:v copy` ffmpeg will resolve the video FAST (parameter sets already in the SDP ⇒ loopback publisher
 /// within ~a second) or must wait for the panel's next in-band SPS/PPS (a cold lock-on, up to ~a keyframe
 /// interval). It deliberately reads the runtime file rather than the persist record because the two can
@@ -324,7 +343,11 @@ fn collect_sps_pps(payload: &[u8], sps: &mut Option<Vec<u8>>, pps: &mut Option<V
             while i + 2 <= len {
                 let size = u16::from_be_bytes([payload[i], payload[i + 1]]) as usize;
                 i += 2;
-                if i + size > len {
+                // A zero-size record can't hold even a NAL header, and `i += size` would not advance — a
+                // malformed STAP-A (size 0) would spin this loop forever. Stop the walk on a zero-size or
+                // out-of-bounds record (Copilot). The listener is loopback-fed, but must not hang on a bad
+                // packet.
+                if size == 0 || i + size > len {
                     break;
                 }
                 set_param(&payload[i..i + size], sps, pps);
@@ -421,6 +444,20 @@ mod tests {
         assert!(has_sprop(seeded));
         let bare = "a=fmtp:96 packetization-mode=1;profile-level-id=42801f\n";
         assert!(!has_sprop(bare));
+    }
+
+    #[test]
+    fn provision_action_seed_supersedes_learned() {
+        use Provision::*;
+        // A seeded template always wins and CLEARS any stale learned record — even when a same-branch
+        // value is already learned. That is the case that would otherwise corrupt video after a
+        // seed-then-bare reflash (go2rtcd re-splices the old value once the template is bare again; Codex).
+        assert!(matches!(provision_action(true, true), ClearThenDone));
+        assert!(matches!(provision_action(true, false), ClearThenDone));
+        // No seed: a same-branch learned record is Done (go2rtcd already spliced it); nothing learned or a
+        // different-branch record ⇒ Listen to learn the right sets.
+        assert!(matches!(provision_action(false, true), Done));
+        assert!(matches!(provision_action(false, false), Listen));
     }
 
     #[test]
@@ -522,6 +559,30 @@ mod tests {
         collect_sps_pps(&payload, &mut sps, &mut pps);
         assert_eq!(sps.as_deref(), Some(&[0x67, 0x11, 0x22][..]));
         assert_eq!(pps.as_deref(), Some(&[0x68, 0xAB][..]));
+    }
+
+    #[test]
+    fn collect_stap_a_zero_size_record_terminates() {
+        // A malformed STAP-A whose record size is 0 must not spin forever: `i += size` would never advance.
+        // The walk must terminate (this test would hang without the size==0 guard), extracting nothing.
+        let mut sps = None;
+        let mut pps = None;
+        let payload = [0x78, 0x00, 0x00]; // STAP-A header, then a single (size=0) record
+        collect_sps_pps(&payload, &mut sps, &mut pps);
+        assert!(sps.is_none());
+        assert!(pps.is_none());
+        // A zero-size record part-way through also stops the walk cleanly (no hang, no panic).
+        let mut sps2 = None;
+        let mut pps2 = None;
+        let payload2 = [
+            0x78, // STAP-A header
+            0x00, 0x03, 0x67, 0x11, 0x22, // valid SPS record
+            0x00, 0x00, // zero-size record ⇒ stop
+            0x00, 0x02, 0x68, 0xAB, // never reached
+        ];
+        collect_sps_pps(&payload2, &mut sps2, &mut pps2);
+        assert_eq!(sps2.as_deref(), Some(&[0x67, 0x11, 0x22][..]));
+        assert!(pps2.is_none());
     }
 
     #[test]
