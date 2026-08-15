@@ -161,7 +161,9 @@ public class Go2RtcdScriptTests
         // there is no stale-lock detection, PID tracking, or steal logic to get wrong (the whole class the
         // earlier mkdir-mutex kept re-introducing). util-linux flock is present on the target.
         string s = ReadScript().Replace("\r\n", "\n");
-        Assert.Contains("acquire() { exec 9>>\"$LOCKFILE\"; flock 9; }", s); // open fd 9, block for the lock
+        // Open fd 9 and block for the lock; acquire EXITS (never returns) if it can't get the lock, so no
+        // caller can run its critical section unlocked (CodeRabbit).
+        Assert.Contains("acquire() { exec 9>>\"$LOCKFILE\" || exit 1; flock 9 || exit 1; }", s);
         Assert.Contains("release() { exec 9>&-; }", s);                       // close fd 9 → kernel releases
         // None of the fragile hand-rolled locking survives (each was a source of a review finding).
         foreach (var banned in new[]

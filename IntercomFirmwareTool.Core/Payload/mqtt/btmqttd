@@ -50,7 +50,10 @@ is_running() { [ -n "$(daemon_pids)" ]; }
 # ours; closing fd 9 (or process death) releases it. Critical sections stay short. The backgrounded daemon
 # MUST NOT inherit fd 9 — it would hold the lock for its whole lifetime — so every daemon launch closes it
 # with `9>&-`. This protocol is shared VERBATIM with the go2rtcd init script.
-acquire() { exec 9>>"$LOCKFILE"; flock 9; }
+# acquire never returns WITHOUT the lock: if the lock file can't be opened or flock fails/is interrupted it
+# EXITS non-zero rather than letting the caller run its critical section unlocked (CodeRabbit). A watchdog
+# `respawn` that exits just retries next pass; an operator start/stop surfaces the failure.
+acquire() { exec 9>>"$LOCKFILE" || exit 1; flock 9 || exit 1; }
 release() { exec 9>&-; }
 
 # Signal every daemon instance. Defaults to SIGTERM; pass "-9" to force. (Without
