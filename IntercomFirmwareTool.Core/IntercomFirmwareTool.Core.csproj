@@ -128,6 +128,15 @@
     <EmbeddedResource Include="Payload\mqtt\go2rtcd">
       <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.go2rtcd</LogicalName>
     </EmbeddedResource>
+    <!-- go2rtc's ifupdown if-up.d hook (issue #120, task #42): installed ONLY on the
+         on-device camera path (gated in MqttInstaller). It runs after the factory
+         if-pre-up.d/iptables rebuild on a wlan0 bring-up and re-asserts the GO2RTC :8554
+         rule via `go2rtcd fw-reassert`, so boot/WiFi-reconnect restore the port without
+         the watchdog racing the factory's lock-less INPUT writes. -->
+    <None Remove="Payload\mqtt\go2rtc-net-hook" />
+    <EmbeddedResource Include="Payload\mqtt\go2rtc-net-hook">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.go2rtc-net-hook</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>

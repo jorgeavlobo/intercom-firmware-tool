@@ -312,6 +312,73 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
+    public void Firewall_open_is_zero_write_when_the_chain_already_matches()
+    {
+        // Task #42: the per-pass `-F` + `-A` write churn is what raced the factory firewall's lock-less
+        // INPUT rebuild (making its own `-A INPUT` calls fail silently and dropping factory rules). So
+        // firewall_open must be ZERO-WRITE in steady state: when OUR chain already holds exactly the one
+        // desired ACCEPT for the current subnet (address present) or is already empty (no address), it
+        // performs NO iptables writes — it only re-asserts the (already zero-write when last) INPUT jump
+        // and returns, BEFORE ever reaching the destructive `-F`.
+        string s = ReadScript().Replace("\r\n", "\n");
+        string joined = JoinedScript();
+        int oOpen = s.IndexOf("firewall_open()", System.StringComparison.Ordinal);
+        int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
+        string openBody = s.Substring(oOpen, cOpen - oOpen);
+        // The decision reads the LIVE chain: a rule-count (`grep -c "^-A "`) plus a `-C` membership check
+        // (which canonicalizes arg order / `-m tcp` / subnet masking) for the CURRENT subnet.
+        Assert.Contains("n=$(iptables -w 5 -S \"$FW_CHAIN\" 2>/dev/null | grep -c -- \"^-A \")", openBody);
+        Assert.Contains(
+            "iptables -w 5 -C \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
+            joined);
+        // The fast path exits (fw_jump + return) for BOTH the already-correct (n==1 + -C match) and the
+        // already-empty (no address, n==0) cases.
+        Assert.Contains("[ \"$n\" -eq 1 ] && iptables -w 5 -C \"$FW_CHAIN\"", joined);
+        Assert.Contains("[ \"$n\" -eq 0 ] && { fw_jump; return 0; }", openBody);
+        // ZERO-WRITE PROOF: the first fast-path `{ fw_jump; return 0; }` must appear BEFORE the flush, so a
+        // matching chain never reaches any `-F`/`-A` write.
+        int fastReturn = openBody.IndexOf("{ fw_jump; return 0; }", System.StringComparison.Ordinal);
+        int flush = openBody.IndexOf("iptables -w 5 -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int count = openBody.IndexOf("n=$(iptables -w 5 -S \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        Assert.True(fastReturn >= 0 && flush > fastReturn,
+            "the zero-write fast path must return before the destructive flush");
+        Assert.True(count >= 0 && count < fastReturn && count < flush,
+            "the rule count must be taken before the fast-path decision and the flush");
+        // The full flush+repopulate path is still there for when the state DIFFERS (missing/extra rule,
+        // changed subnet, freshly created chain), gated on a successful flush.
+        Assert.Contains("iptables -w 5 -F \"$FW_CHAIN\" 2>/dev/null || return 0", openBody);
+        Assert.Contains("[ -n \"$lan\" ] && iptables -w 5 -A \"$FW_CHAIN\"", openBody);
+    }
+
+    [Fact]
+    public void Provides_a_firewall_only_fw_reassert_subcommand()
+    {
+        // Task #42: the if-up.d hook calls `go2rtcd fw-reassert` right after the factory firewall rebuild.
+        // It must be a firewall-ONLY reconcile under the lock — no daemon launch/kill — reusing the same
+        // firewall_open/firewall_close single source of truth, coupled to the running+enabled state.
+        string s = ReadScript().Replace("\r\n", "\n");
+        string[] code = CodeLines(s);
+        Assert.Contains(code, l => l == "fw-reassert)");
+        // Advertised in usage.
+        Assert.Contains(code, l => l.Contains("{start|stop|status|restart|respawn|fw-reassert}"));
+        // Isolate the arm (from its label to the next case label `stop)`).
+        int arm = s.IndexOf("\tfw-reassert)", System.StringComparison.Ordinal);
+        int next = s.IndexOf("\tstop)", arm, System.StringComparison.Ordinal);
+        Assert.True(arm >= 0 && next > arm);
+        string armBody = s.Substring(arm, next - arm);
+        // Enabled (no marker) AND running → open; otherwise close. Under the lock.
+        Assert.Contains("if [ ! -e \"$DISABLED\" ] && is_running; then", armBody);
+        Assert.Contains("firewall_open", armBody);
+        Assert.Contains("firewall_close", armBody);
+        int acq = armBody.IndexOf("acquire", System.StringComparison.Ordinal);
+        int rel = armBody.IndexOf("release", System.StringComparison.Ordinal);
+        Assert.True(acq >= 0 && rel > acq, "fw-reassert must run its firewall reconcile under the lock");
+        // Firewall ONLY: it must NEVER launch or kill the daemon.
+        Assert.DoesNotContain("launch_if_enabled", armBody);
+        Assert.DoesNotContain("kill_all", armBody);
+    }
+
+    [Fact]
     public void Waits_for_a_just_launched_daemon_before_deciding_the_firewall()
     {
         // Codex: the is_running check right after backgrounding go2rtc can race the child's exec, so a

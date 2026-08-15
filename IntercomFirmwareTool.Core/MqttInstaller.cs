@@ -413,6 +413,11 @@ namespace IntercomFirmwareTool.Core
         private const string Go2RtcdInitPath = "/etc/init.d/go2rtcd";       // its own SysV init script
         private const string Go2RtcBootLink = "/etc/rc5.d/S99zGo2rtc";      // boot symlink (after factory S99)
         private const string Go2RtcBootTarget = "../init.d/go2rtcd";
+        // ifupdown if-up.d hook (task #42): runs AFTER the factory if-pre-up.d/iptables rebuild on a
+        // wlan0 bring-up and re-asserts the GO2RTC :8554 rule via `go2rtcd fw-reassert`, so boot/WiFi-
+        // reconnect restore the port sequentially instead of the watchdog racing the factory's lock-less
+        // INPUT writes. Installed 0755 root:root on the on-device camera path only (same gate as go2rtcd).
+        private const string Go2RtcNetHookPath = "/etc/network/if-up.d/go2rtc";
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
@@ -599,6 +604,17 @@ namespace IntercomFirmwareTool.Core
             WriteTextFile(fs, Go2RtcdInitPath, go2rtcd);
             fs.SetMode(Go2RtcdInitPath, ToMode(755));
             fs.SetOwner(Go2RtcdInitPath, 0, 0);
+
+            // ifupdown if-up.d hook (task #42), 0755 root:root — same gate/mode as go2rtcd. ifupdown runs
+            // if-up.d scripts AFTER the interface is up, right after the factory if-pre-up.d/iptables
+            // rebuild, so this re-asserts our GO2RTC :8554 rule sequentially (via `go2rtcd fw-reassert`)
+            // instead of the watchdog racing the factory's lock-less INPUT writes. The factory ships an
+            // EXISTING, EMPTY /etc/network/if-up.d (verified on the C100X v1.5.8 sample), so we only drop
+            // our own file in it.
+            string go2rtcNetHook = LoadScript(ResourcePrefix + "go2rtc-net-hook");
+            WriteTextFile(fs, Go2RtcNetHookPath, go2rtcNetHook);
+            fs.SetMode(Go2RtcNetHookPath, ToMode(755));
+            fs.SetOwner(Go2RtcNetHookPath, 0, 0);
 
             // Vendored media binaries (byte-exact, SHA-256 verified on read), 0775 root:root — the
             // same mode as the always-installed btmqttd. These are the two binaries 1c-1 embedded but
@@ -1248,6 +1264,13 @@ namespace IntercomFirmwareTool.Core
                     string go2rtcdScript = fs.FileExists(Go2RtcdInitPath) ? ReadAllText(fs, Go2RtcdInitPath) : "";
                     checks.Add(new("go2rtcd matches the embedded init script",
                         go2rtcdScript == LoadScript(ResourcePrefix + "go2rtcd"), ""));
+
+                    // if-up.d hook (task #42): presence/mode/owner + byte-exact content, like go2rtcd. It
+                    // re-asserts the GO2RTC :8554 rule after the factory firewall rebuild on a wlan0 bring-up.
+                    CheckFile(fs, checks, Go2RtcNetHookPath, 755);
+                    string go2rtcNetHook = fs.FileExists(Go2RtcNetHookPath) ? ReadAllText(fs, Go2RtcNetHookPath) : "";
+                    checks.Add(new("go2rtc if-up.d hook matches the embedded script",
+                        go2rtcNetHook == LoadScript(ResourcePrefix + "go2rtc-net-hook"), ""));
                     foreach (var bin in new[] { PayloadBinaries.Ffmpeg, PayloadBinaries.Go2Rtc })
                     {
                         CheckFile(fs, checks, bin.InstallPath, 775);
@@ -1293,6 +1316,7 @@ namespace IntercomFirmwareTool.Core
                         ("go2rtc binary", PayloadBinaries.Go2Rtc.InstallPath),
                         ("ffmpeg binary", PayloadBinaries.Ffmpeg.InstallPath),
                         ("go2rtcd init script", Go2RtcdInitPath),
+                        ("go2rtc if-up.d hook", Go2RtcNetHookPath),
                         ("go2rtc config dir", Go2RtcDir),
                         ("S99zGo2rtc boot link", Go2RtcBootLink),
                     })

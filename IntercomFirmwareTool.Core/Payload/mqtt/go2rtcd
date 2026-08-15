@@ -150,13 +150,22 @@ kill_all() {
 # stateless and DHCP-proof. Ownership first: if FW_CHAIN already exists but we did NOT create it this boot
 # (no FW_OWN marker), it is a FOREIGN chain — return without touching it or the port. Otherwise ensure OUR
 # chain exists (creating it claims ownership for this boot; also recreates it if the panel destroyed it),
-# then re-assert its contents from scratch: flush it (we own it, so this touches nothing foreign) and, if
-# CAM_IFACE currently has an address, add exactly one ACCEPT for tcp/CAM_PORT from that interface's own
-# subnet (derived at runtime; iptables masks the address to its /prefix). With NO address yet (the boot
-# race before DHCP, or a lease drop) the chain is left EMPTY — the port stays closed, never opened
-# interface-wide — and a later pass fills it. A DHCP subnet change is handled for free: the flush drops the
-# old subnet's ACCEPT and the new one is added. Finally ensure the INPUT jump exists (re-added after a
-# panel INPUT flush).
+# then reconcile its contents to exactly one ACCEPT for tcp/CAM_PORT from CAM_IFACE's own subnet (derived
+# at runtime; iptables masks the address to its /prefix). With NO address yet (the boot race before DHCP,
+# or a lease drop) the desired state is an EMPTY chain — the port stays closed, never opened interface-
+# wide — and a later pass fills it once an address appears.
+#
+# ZERO-WRITE IN STEADY STATE (task #42). Earlier this ALWAYS did `-F` + `-A` every watchdog pass (~60s).
+# That per-pass write churn is the collision source: our `-w 5` mutating calls could HOLD the xtables lock
+# across the factory firewall's LOCK-LESS `-F INPUT; -A INPUT …` rebuild (in /etc/network/if-pre-up.d/
+# iptables, no `-w`), making the factory's own `-A INPUT` calls FAIL SILENTLY — dropping factory rules
+# (FTP-over-USB reflash, security DROPs, even SSH). So we now WRITE ONLY WHEN THE STATE DIFFERS: if OUR
+# chain already holds exactly the one desired ACCEPT for the current subnet (address present) OR is already
+# empty (no address), we make NO iptables writes at all — just re-assert the (itself zero-write when
+# already-last) INPUT jump and return. A DHCP subnet change, a missing/extra rule, or a chain we just
+# created still triggers the flush+repopulate path. The if-up.d hook (go2rtc-net-hook → `fw-reassert`)
+# re-asserts sequentially right AFTER the factory rebuild for boot/WiFi-reconnect; this zero-write
+# reconciliation is the watchdog-driven safety net for every other trigger.
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	fw_chain_exists; fw_rc=$?
@@ -174,12 +183,30 @@ firewall_open() {
 		: > "$FW_OWN" 2>/dev/null || return 0
 		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || { rm -f "$FW_OWN" 2>/dev/null || true; return 0; }
 	fi
-	# Require a SUCCESSFUL flush before repopulating: if the xtables lock is contended past the wait and -F
-	# fails, abort this pass rather than append a second ACCEPT on top of the stale one (a later pass
-	# retries). The `-w 5` on every mutating call waits up to 5s for the lock (supported on the target, and
-	# under the ~10s lock-steal threshold), so a spurious failure while the panel touches iptables is rare.
-	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || return 0
+	# The desired LAN source for CAM_IFACE's CURRENT address (empty when there is no address yet).
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
+	# Count OUR chain's current rules once. A failed listing yields 0 here and simply falls through to the
+	# flush path below (which itself bails on a contended `-F`), never a wrong early return.
+	n=$(iptables -w 5 -S "$FW_CHAIN" 2>/dev/null | grep -c -- "^-A ")
+	# ZERO-WRITE FAST PATH: if the chain is ALREADY in the desired state, perform NO iptables writes — only
+	# re-assert the jump and return. `-C` canonicalizes arg order / `-m tcp` / subnet masking, so it matches
+	# the rule iptables actually stored, not just its textual form. Desired state is either exactly our one
+	# ACCEPT for the current subnet (address present) or an empty chain (no address yet).
+	if [ -n "$lan" ]; then
+		[ "$n" -eq 1 ] && iptables -w 5 -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" \
+			-s "$lan" -j ACCEPT 2>/dev/null && { fw_jump; return 0; }
+	else
+		[ "$n" -eq 0 ] && { fw_jump; return 0; }
+	fi
+	# State DIFFERS (chain empty-but-needs-a-rule, wrong/changed subnet, extra rules, or a rule that should
+	# be gone): re-assert from scratch. Require a SUCCESSFUL flush before repopulating: if the xtables lock
+	# is contended past the wait and `-F` fails, abort this pass rather than append a second ACCEPT on top
+	# of the stale one (a later pass retries). The `-w 5` on every mutating call waits up to 5s for the lock
+	# (supported on the target, and under the ~10s lock-steal threshold), so a spurious failure while the
+	# panel touches iptables is rare.
+	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || return 0
+	# shellcheck disable=SC2015  # `[ -n "$lan" ] && add || true`: with no address we intentionally leave
+	# the chain empty (port closed) and still reach fw_jump — `|| true` only neutralizes the guard's exit.
 	[ -n "$lan" ] && iptables -w 5 -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
 		-j ACCEPT 2>/dev/null || true
 	fw_jump
@@ -280,8 +307,10 @@ case "$1" in
 		# Supervisor-only reconcile (bt_service_watchdog). Under the lock: enforce
 		# the desired state - if stopped (marker present) kill any lingering or
 		# racily-started instance and close the port; otherwise (re)launch if it is
-		# down and (re)assert the firewall rule — running firewall_open EVERY pass is
-		# what re-opens :8554 after the panel rebuilds/flushes its chain. The rule is
+		# down and (re)assert the firewall rule. firewall_open runs EVERY pass but is
+		# now ZERO-WRITE when :8554 is already correct (task #42) — it only writes to
+		# re-open the port after the panel rebuilt/flushed its chain, so it is the
+		# safety net that catches any trigger the if-up.d hook did not. The rule is
 		# tied to the daemon actually running, so a persistently failed launch (missing
 		# binary/config) leaves no open port. Never clears the marker, so it
 		# cannot undo an operator's `stop`.
@@ -292,6 +321,22 @@ case "$1" in
 		else
 			launch_if_enabled && wait_running
 			if is_running; then firewall_open; else firewall_close; fi
+		fi
+		release
+		;;
+	fw-reassert)
+		# Firewall-ONLY reconcile (task #42), the single source of truth the if-up.d hook
+		# (go2rtc-net-hook) calls right after the factory firewall rebuild on a wlan0 bring-up.
+		# It re-asserts our GO2RTC rule sequentially — no daemon racing the factory's lock-less
+		# INPUT writes — and is idempotent + zero-write in steady state (see firewall_open). It
+		# must NEVER launch or kill the daemon: only the firewall is touched. Under the lock, if
+		# the service is ENABLED (no marker) AND actually running, (re)assert the rule; otherwise
+		# tear it down (matches the running-state coupling used by start/respawn).
+		acquire
+		if [ ! -e "$DISABLED" ] && is_running; then
+			firewall_open
+		else
+			firewall_close
 		fi
 		release
 		;;
@@ -337,7 +382,7 @@ case "$1" in
 		"$0" start
 		;;
 	*)
-		echo "Usage: $0 {start|stop|status|restart|respawn}"
+		echo "Usage: $0 {start|stop|status|restart|respawn|fw-reassert}"
 		exit 1
 		;;
 esac
