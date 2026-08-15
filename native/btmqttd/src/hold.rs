@@ -54,11 +54,16 @@
 //! The external socket alone must BOOTSTRAP the first open — go2rtc's exec can't serve until this task
 //! brings the panel up — but it must not PIN the panel indefinitely: an unauthenticated LAN host (a
 //! scanner, a health-check, a malicious hold) could otherwise hold the session up without ever knowing
-//! the RTSP credentials. So `run` renews on the external socket only within a BOOTSTRAP GRACE; past it,
-//! renewal additionally requires the SERVING signal, which only a genuinely authenticated view produces.
-//! The grace is sized to the unit's provisioning state (see [`BOOTSTRAP_GRACE`] / [`PROVISIONING_GRACE`]):
-//! an UNPROVISIONED unit needs longer because go2rtc can't open the publisher until the first cold
-//! lock-on (~a keyframe interval), and this gate is the only thing holding the panel up through it.
+//! the RTSP credentials. So a socket earns exactly ONE bootstrap ALLOWANCE ([`bootstrap_decision`]): while
+//! it is live the socket renews on its own; once it lapses, renewal — and arming any FURTHER allowance —
+//! requires either the SERVING signal (which only a genuinely authenticated view produces) or that a
+//! cooldown gate has elapsed. Merely disconnecting and reconnecting does NOT mint a fresh allowance
+//! ([`BOOTSTRAP_COOLDOWN`]), so a raw socket can't pin the panel by cycling faster than the SIP window
+//! lapses; an observed serving clears the gate at once, so a working unit stays instantly responsive.
+//! The allowance length is sized to whether the RUNTIME SDP already carries the parameter sets (see
+//! [`BOOTSTRAP_GRACE`] / [`PROVISIONING_GRACE`] and [`sprop::runtime_sdp_has_sprop`]): a unit whose SDP
+//! lacks them needs longer because go2rtc can't open the publisher until the first cold lock-on (~a
+//! keyframe interval), and this gate is the only thing holding the panel up through it.
 //!
 //! Best-effort: reading `/proc` doesn't fail meaningfully — a read error reads as "no viewer" (logged
 //! once). The manual `view_camera`/`stop_camera` MQTT actions are unaffected — every source drives the
@@ -66,7 +71,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -83,25 +88,37 @@ const RTSP_PORT_HEX: &str = "216A";
 /// third of the viewing window). The effective period is still capped under the window (see `run`) so a
 /// held view never lapses between pokes.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// How long a freshly-connected viewer socket may renew the window on the SOCKET ALONE before renewal
-/// additionally requires go2rtc to be ACTUALLY serving (see `run`), on a unit that is ALREADY provisioned
-/// (its `sprop-parameter-sets` are learned or pre-seeded). With the parameter sets already in the runtime
-/// SDP, go2rtc's copy ffmpeg resolves the video and opens its loopback publisher within about a second of
-/// the panel coming up, so this only has to outlast the RTSP handshake + panel-up + first republish.
-/// Short so a raw unauthenticated socket cannot pin the panel for long (Codex). Validated on hardware.
+/// How long one bootstrap allowance lets a viewer socket renew the window on the SOCKET ALONE before
+/// renewal additionally requires go2rtc to be ACTUALLY serving (see `run`), on a unit whose RUNTIME SDP
+/// ALREADY carries `sprop-parameter-sets` (learned, pre-seeded, or spliced at boot — see
+/// [`sprop::runtime_sdp_has_sprop`]). With the parameter sets already in the SDP, go2rtc's copy ffmpeg
+/// resolves the video and opens its loopback publisher within about a second of the panel coming up, so
+/// this only has to outlast the RTSP handshake + panel-up + first republish. Short so an unauthenticated
+/// socket's single allowance is brief (Codex). Validated on hardware.
 const BOOTSTRAP_GRACE: Duration = Duration::from_secs(15);
-/// The bootstrap grace on an UNPROVISIONED unit (no sprop learned yet, nothing pre-seeded). There the
-/// runtime SDP carries no parameter sets, so go2rtc's `-c:v copy` ffmpeg cannot resolve the video — and
-/// therefore cannot open the loopback publisher `serving` keys off — until the panel emits its next
-/// in-band SPS/PPS, up to a full ~20 s keyframe interval after the panel comes up (see `sprop.rs`). The
-/// passive learner is renew-less, so THIS grace is the only thing holding the panel up through that first
-/// cold lock-on; it must outlast one keyframe interval + SIP settle regardless of how short
-/// `camera_view_idle_secs` is, or the session BYEs before `serving` can ever go true and the unit never
-/// learns (Codex). Generous margin over the ~20 s interval for settle/jitter and a just-missed keyframe.
-/// Applies only until the first successful learn (then serving sustains the view and later opens fall
-/// back to `BOOTSTRAP_GRACE`) — a one-time, install-window exposure, so the longer socket-only pin is
-/// acceptable.
+/// The bootstrap allowance when the RUNTIME SDP has NO parameter sets yet (a genuinely fresh unit, or a
+/// learn that persisted but whose best-effort runtime patch failed — see [`sprop::runtime_sdp_has_sprop`],
+/// which is why grace is sized on the runtime SDP, not the persist record). There go2rtc's `-c:v copy`
+/// ffmpeg cannot resolve the video — and therefore cannot open the loopback publisher `serving` keys off —
+/// until the panel emits its next in-band SPS/PPS, up to a full ~20 s keyframe interval after the panel
+/// comes up (see `sprop.rs`). The passive learner is renew-less, so THIS allowance is the only thing
+/// holding the panel up through that first cold lock-on; it must outlast one keyframe interval + SIP settle
+/// regardless of how short `camera_view_idle_secs` is, or the session BYEs before `serving` can ever go
+/// true and the unit never learns (Codex). Generous margin over the ~20 s interval for settle/jitter and a
+/// just-missed keyframe. Applies only until the runtime SDP gains its parameter sets (then serving
+/// sustains the view and later opens fall back to `BOOTSTRAP_GRACE`).
 const PROVISIONING_GRACE: Duration = Duration::from_secs(45);
+/// Forced idle gap after a bootstrap allowance is SPENT WITHOUT reaching `serving`, before another
+/// socket-alone allowance may arm. A raw socket earns exactly one `grace` allowance, then — crucially —
+/// merely disconnecting and reconnecting must NOT mint a fresh one (that would let an unauthenticated
+/// client pin the panel indefinitely by cycling the socket faster than the SIP window lapses; Codex). So
+/// `run` gates the NEXT allowance behind `camera_view_idle_secs + BOOTSTRAP_COOLDOWN` measured from the
+/// last arm: the `+ window` guarantees the panel actually comes down (a poke holds it up for the whole
+/// window) and this margin is the true idle gap. An observed `serving` (a real authenticated view) clears
+/// the gate immediately, so a working unit is always instantly responsive; the gate only bites an
+/// unauthenticated cycler, bounding it to one `grace + window` up-period per `grace + window + cooldown`.
+/// A benign socket that lingered through a genuine viewer's first attempt likewise recovers within it.
+const BOOTSTRAP_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// Debounce for the (essentially never taken) `/proc` read-error log, so a broken procfs can't spam the
 /// log every poll — the same one-shot-warn role the old API-unreachable `warned` flag served.
@@ -118,71 +135,110 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
     let period = POLL_INTERVAL
         .min(window / 2)
         .max(Duration::from_millis(500));
-    // Start of the current viewer socket's BOOTSTRAP GRACE. A freshly-connected socket may renew on its
-    // own until this deadline; past that, renewal ALSO requires go2rtc to be actually serving. Reset
-    // whenever no viewer socket is present, so each new connection gets a fresh grace, sized on connect
-    // to the unit's provisioning state (see below).
-    let mut grace_deadline: Option<tokio::time::Instant> = None;
+    // The next allowance is gated behind window + BOOTSTRAP_COOLDOWN from the last arm, so a spent
+    // allowance can't be refreshed by cycling the socket faster than the SIP window lapses (see
+    // [`bootstrap_decision`] / [`BOOTSTRAP_COOLDOWN`]).
+    let cooldown = window + BOOTSTRAP_COOLDOWN;
+    // Bootstrap-allowance state (see [`bootstrap_decision`]): `boot_until` is the end of the current
+    // socket-alone allowance (None if none is armed); `next_arm` is the earliest instant a NEW allowance
+    // may arm (the cooldown gate). Starting `next_arm` in the past lets the first viewer arm immediately.
+    let mut boot_until: Option<Instant> = None;
+    let mut next_arm = Instant::now();
+    // Sticky: has the RUNTIME SDP gained its `sprop-parameter-sets` (so go2rtc resolves fast and `serving`
+    // appears within ~a second)? It only ever goes false→true within a boot (a learn splices it; a reboot
+    // re-splices from persist), so once true we stop re-reading. While false we re-check each poll — cheap,
+    // and only during the transient unprovisioned window — so the grace tier follows a mid-view first learn.
+    let mut resolves_fast = false;
     while !stopping.load(Ordering::Relaxed) {
         let (viewer, serving) = viewer_signals().await;
-        if viewer {
-            // AUTHENTICATED-ACTIVITY GATE (Codex): a raw TCP socket to :8554 is enough to BOOTSTRAP the
-            // first open — it has to be, because go2rtc's exec is lazy and can't serve (spawn ffmpeg, get
-            // RTP) until this task brings the panel up. But a raw socket alone must not PIN the panel
-            // forever: an unauthenticated LAN host (a scanner, a health-check, or a malicious hold) could
-            // otherwise keep the session up without ever knowing the RTSP credentials. So we renew on the
-            // socket only within the bootstrap grace; past it, renewal requires `serving` — go2rtc's own
-            // exec ffmpeg republishing on loopback :8554, which exists ONLY while it is actually serving
-            // an authenticated consumer. A socket that never authenticates therefore lapses when the
-            // grace expires and cannot sustain the hold.
-            let now = tokio::time::Instant::now();
-            let deadline = match grace_deadline {
-                Some(d) => d,
-                None => {
-                    // First poll of a fresh viewer connection: size the grace to the unit's provisioning
-                    // state. An UNPROVISIONED unit (no sprop learned/pre-seeded) can't produce the
-                    // `serving` signal until its first cold lock-on completes ~a keyframe interval after
-                    // the panel comes up, and this gate is the only renewal source through that window, so
-                    // it needs [`PROVISIONING_GRACE`]; once provisioned, serving appears within ~a second,
-                    // so the tight [`BOOTSTRAP_GRACE`] applies (see the const docs). `already_learned` is a
-                    // single cheap read run once per connection (not per poll), off the hot path. By the
-                    // time the first learn flips this to provisioned mid-view, serving is already true and
-                    // sustains the view regardless of the grace tier.
-                    let grace = if sprop::already_learned(cfg.camera_branch).await {
-                        BOOTSTRAP_GRACE
-                    } else {
-                        PROVISIONING_GRACE
-                    };
-                    let d = now + grace;
-                    grace_deadline = Some(d);
-                    d
-                }
-            };
-            if now < deadline || serving {
-                // Renew the on-demand window. try_send never blocks the poll loop: a full queue means
-                // sip.rs isn't draining (reconnect backoff) and a dropped poke is harmless — the next poll
-                // pokes again; Closed means the SIP task is gone, nothing to hold.
-                //
-                // DELIBERATE: auto-hold is AUTHORITATIVE while a viewer is genuinely watching. If an
-                // operator issues `stop_camera` (ViewCmd::Stop) while Home Assistant still has the feed
-                // open, this poll re-Starts within one interval — so a Stop only interrupts an active view
-                // briefly rather than ending it. This is by design: the session follows the live viewer,
-                // which is exactly what makes the feature "transparent" (HA just opens the camera). To end
-                // a view, close it (the TCP connection clears → these pokes stop → the window lapses);
-                // `stop_camera` remains effective when no viewer is connected (e.g. after a ring).
-                // Honoring the Stop over an active viewer was considered and rejected: tearing the session
-                // down drops the client, HA auto-reconnects, the connection reappears, and a suppression
-                // flag would fight HA's reconnect for no real benefit (product decision on #129; Codex).
-                let _ = view_tx.try_send(ViewCmd::Start);
-            }
+        if !resolves_fast {
+            resolves_fast = sprop::runtime_sdp_has_sprop().await;
+        }
+        let grace = if resolves_fast {
+            BOOTSTRAP_GRACE
         } else {
-            grace_deadline = None; // no viewer socket → reset the grace for the next connection
+            PROVISIONING_GRACE
+        };
+        let now = Instant::now();
+        let (new_until, new_next_arm, poke) =
+            bootstrap_decision(boot_until, next_arm, viewer, serving, now, grace, cooldown);
+        boot_until = new_until;
+        next_arm = new_next_arm;
+        if poke {
+            // Renew the on-demand window. try_send never blocks the poll loop: a full queue means sip.rs
+            // isn't draining (reconnect backoff) and a dropped poke is harmless — the next poll pokes
+            // again; Closed means the SIP task is gone, nothing to hold.
+            //
+            // DELIBERATE: auto-hold is AUTHORITATIVE while a viewer is genuinely watching. If an operator
+            // issues `stop_camera` (ViewCmd::Stop) while Home Assistant still has the feed open, this poll
+            // re-Starts within one interval — so a Stop only interrupts an active view briefly rather than
+            // ending it. This is by design: the session follows the live viewer, which is exactly what makes
+            // the feature "transparent" (HA just opens the camera). To end a view, close it (the TCP
+            // connection clears → these pokes stop → the window lapses); `stop_camera` remains effective
+            // when no viewer is connected (e.g. after a ring). Honoring the Stop over an active viewer was
+            // considered and rejected: tearing the session down drops the client, HA auto-reconnects, the
+            // connection reappears, and a suppression flag would fight HA's reconnect for no real benefit
+            // (product decision on #129; Codex).
+            let _ = view_tx.try_send(ViewCmd::Start);
         }
         // Re-check `stopping` before sleeping so a shutdown observed mid-poll exits promptly.
         if stopping.load(Ordering::Relaxed) {
             break;
         }
         tokio::time::sleep(period).await;
+    }
+}
+
+/// Decide, for one poll, whether to poke `Start` and how the bootstrap-allowance state advances. Pure (no
+/// I/O, no wall clock) so the bootstrap / serving / cooldown state machine is unit-testable; `run` owns the
+/// clock and the async `/proc` + SDP reads.
+///
+/// The AUTHENTICATED-ACTIVITY GATE (Codex): a raw TCP socket to :8554 is enough to BOOTSTRAP the first
+/// open — it has to be, because go2rtc's exec is lazy and can't serve (spawn ffmpeg, get RTP) until this
+/// task brings the panel up — but a raw socket alone must not PIN the panel indefinitely: an
+/// unauthenticated LAN host (a scanner, a health-check, a malicious hold) could otherwise keep the session
+/// up without ever knowing the RTSP credentials, and simply reconnecting must not refresh that ability.
+/// So a socket earns exactly ONE `grace` allowance; renewing past it — or arming another after it lapses —
+/// requires either `serving` (go2rtc's own exec ffmpeg republishing on loopback :8554, present ONLY while
+/// it is actually serving an authenticated consumer) or that the cooldown gate (`next_arm`) has elapsed.
+///
+/// Arguments: `until` = current allowance end (None if unarmed); `next_arm` = earliest instant a new
+/// allowance may arm; `viewer` = an external socket is present; `serving` = the authenticated-serving
+/// signal; `now`; `grace` = the allowance length for the unit's provisioning tier; `cooldown` = the arm-
+/// to-next-arm gate. Returns `(new_until, new_next_arm, poke)`.
+fn bootstrap_decision(
+    until: Option<Instant>,
+    next_arm: Instant,
+    viewer: bool,
+    serving: bool,
+    now: Instant,
+    grace: Duration,
+    cooldown: Duration,
+) -> (Option<Instant>, Instant, bool) {
+    if serving {
+        // Authenticated media is flowing: renew, and let the NEXT allowance arm immediately — a real view
+        // proved the path works, so a later reopen isn't cooldown-gated. Drop the socket-alone allowance;
+        // serving is the authority while it holds.
+        return (None, now, true);
+    }
+    if !viewer {
+        // No external socket: nothing to hold, and the loopback publisher alone is never a viewer. Crucially
+        // we PRESERVE `next_arm` — a mere connection gap must not grant the next raw connection a fresh
+        // allowance (Codex), so an unauthenticated cycler stays gated across the gap.
+        return (until, next_arm, false);
+    }
+    match until {
+        // Within the active allowance: keep poking.
+        Some(d) if now < d => (until, next_arm, true),
+        // No live allowance (unarmed, or the last one lapsed without serving) AND the cooldown gate has
+        // elapsed: arm a fresh allowance and push the gate out past it. This is the ONLY place a raw socket
+        // earns socket-alone renewal, and it's rate-limited — a client that never reaches `serving` gets at
+        // most one `grace` per `grace + cooldown`, so it cannot pin the panel indefinitely by cycling; a
+        // genuine viewer bootstraps immediately when no recent allowance was spent, and unlocks fully the
+        // moment its view authenticates (the `serving` branch above).
+        _ if now >= next_arm => (Some(now + grace), now + grace + cooldown, true),
+        // Allowance spent and still within the cooldown gate: hold off.
+        _ => (until, next_arm, false),
     }
 }
 
@@ -405,5 +461,119 @@ mod tests {
     fn empty_and_header_only_are_zero() {
         assert_eq!(established_local_port_counts("", "216A"), (0, 0));
         assert_eq!(established_local_port_counts(HEADER, "216A"), (0, 0));
+    }
+
+    // --- bootstrap_decision: the socket-alone allowance + serving gate + cooldown state machine ---
+
+    // Fixture durations for the pure state-machine tests. Their absolute values are irrelevant to the
+    // logic — only their ordering against the injected `now` — so GRACE/COOL are simply distinct, round
+    // numbers matching the provisioned-tier shape (short grace, a longer arm-to-next-arm gate).
+    const GRACE: Duration = Duration::from_secs(15);
+    const COOL: Duration = Duration::from_secs(60);
+
+    fn at(base: Instant, secs: u64) -> Instant {
+        base + Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn first_viewer_arms_an_allowance_and_pokes() {
+        let t = Instant::now();
+        // Unarmed, cooldown gate already open (next_arm == now), a viewer appears, not serving yet.
+        let (until, next_arm, poke) = bootstrap_decision(None, t, true, false, t, GRACE, COOL);
+        assert!(poke);
+        assert_eq!(until, Some(t + GRACE)); // allowance = now + grace
+        assert_eq!(next_arm, t + GRACE + COOL); // next arm gated by grace + cooldown
+    }
+
+    #[test]
+    fn within_the_allowance_keeps_poking_without_rearming() {
+        let t = Instant::now();
+        let until = Some(at(t, 15));
+        let next_arm = at(t, 75);
+        // 10 s in: still inside the allowance ⇒ poke, state unchanged.
+        let (u, n, poke) = bootstrap_decision(until, next_arm, true, false, at(t, 10), GRACE, COOL);
+        assert!(poke);
+        assert_eq!(u, until);
+        assert_eq!(n, next_arm);
+    }
+
+    #[test]
+    fn expired_allowance_without_serving_is_gated_until_cooldown() {
+        let t = Instant::now();
+        let until = Some(at(t, 15));
+        let next_arm = at(t, 75);
+        // 20 s in: the allowance lapsed (now >= until) but the cooldown gate hasn't elapsed (now <
+        // next_arm) ⇒ no poke, and no fresh allowance armed.
+        let (u, n, poke) = bootstrap_decision(until, next_arm, true, false, at(t, 20), GRACE, COOL);
+        assert!(!poke);
+        assert_eq!(u, until);
+        assert_eq!(n, next_arm);
+    }
+
+    #[test]
+    fn reconnect_within_cooldown_cannot_refresh_the_allowance() {
+        // Codex: an unauthenticated client holds a socket, drops it for a poll, and reconnects. The gap
+        // (viewer == false) must NOT reset the cooldown gate, so the reconnect stays gated — otherwise a
+        // raw socket could pin the panel indefinitely by cycling faster than the SIP window lapses.
+        let t = Instant::now();
+        let until = Some(at(t, 15));
+        let next_arm = at(t, 75);
+        // Gap poll: no viewer ⇒ state preserved verbatim (the key property: next_arm survives the gap).
+        let (u_gap, n_gap, poke_gap) =
+            bootstrap_decision(until, next_arm, false, false, at(t, 16), GRACE, COOL);
+        assert!(!poke_gap);
+        assert_eq!(u_gap, until);
+        assert_eq!(n_gap, next_arm);
+        // Reconnect poll, still within the cooldown gate ⇒ still gated, no fresh grace.
+        let (_, _, poke_reconnect) =
+            bootstrap_decision(u_gap, n_gap, true, false, at(t, 17), GRACE, COOL);
+        assert!(!poke_reconnect);
+    }
+
+    #[test]
+    fn a_fresh_allowance_arms_once_the_cooldown_gate_elapses() {
+        // CodeRabbit: a genuine viewer that arrived after an earlier socket spent the allowance must not be
+        // starved forever — once the cooldown gate passes, a new allowance arms.
+        let t = Instant::now();
+        let now = at(t, 80); // past next_arm (t + 75)
+        let (u, n, poke) = bootstrap_decision(Some(at(t, 15)), at(t, 75), true, false, now, GRACE, COOL);
+        assert!(poke);
+        assert_eq!(u, Some(now + GRACE));
+        assert_eq!(n, now + GRACE + COOL);
+    }
+
+    #[test]
+    fn serving_pokes_and_opens_the_gate_immediately() {
+        // An authenticated view: poke regardless of the allowance, drop the allowance, and reset the gate
+        // to `now` so the NEXT reopen isn't cooldown-gated (a working unit stays instantly responsive).
+        let t = Instant::now();
+        let now = at(t, 500);
+        // Even with the allowance long expired and the cooldown gate far in the future, serving wins.
+        let (u, n, poke) = bootstrap_decision(Some(at(t, 15)), at(t, 999), true, true, now, GRACE, COOL);
+        assert!(poke);
+        assert_eq!(u, None);
+        assert_eq!(n, now); // gate reset to now
+    }
+
+    #[test]
+    fn serving_sustains_the_view_past_the_allowance() {
+        // Past the allowance and the cooldown, a still-serving view keeps poking (the serving branch is
+        // checked before the allowance logic).
+        let t = Instant::now();
+        let (_, _, poke) = bootstrap_decision(None, t, true, true, at(t, 300), GRACE, COOL);
+        assert!(poke);
+    }
+
+    #[test]
+    fn no_viewer_never_pokes_and_preserves_the_gate() {
+        // The loopback publisher alone is never a viewer; with no external socket we never poke, and the
+        // cooldown gate is preserved across the idle gap (so a later raw reconnect can't jump the gate).
+        let t = Instant::now();
+        let until = Some(at(t, 15));
+        let next_arm = at(t, 75);
+        let (u, n, poke) = bootstrap_decision(until, next_arm, false, false, at(t, 50), GRACE, COOL);
+        assert!(!poke);
+        assert_eq!(u, until);
+        assert_eq!(n, next_arm);
     }
 }

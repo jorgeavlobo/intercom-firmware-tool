@@ -214,13 +214,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
 /// stale record on the next learn; go2rtcd independently refuses to splice a mismatched-branch value
 /// (task #41). A missing/unreadable persist file AND template also reads as "not provisioned" so the
 /// listen continues. Delegates to the two readers below (persist via spawn_blocking; template async).
-///
-/// `pub(crate)` because `hold.rs` reuses this exact "is the unit provisioned?" predicate to size its
-/// bootstrap grace: an unprovisioned unit needs a longer grace to survive the first cold lock-on (the
-/// runtime SDP has no parameter sets yet, so go2rtc can't open its loopback publisher until the panel's
-/// next in-band SPS/PPS). Keeping the definition in one place ties the two subsystems to the same notion
-/// of "provisioned".
-pub(crate) async fn already_learned(branch: u8) -> bool {
+async fn already_learned(branch: u8) -> bool {
     persisted_for_branch(branch).await || template_has_sprop().await
 }
 
@@ -247,6 +241,19 @@ async fn template_has_sprop() -> bool {
 /// without touching the fixed `/etc` template path).
 fn has_sprop(sdp: &str) -> bool {
     sdp.contains("sprop-parameter-sets=")
+}
+
+/// True iff the RUNTIME tmpfs SDP go2rtc actually reads ([`SDP_PATH`]) currently carries
+/// `sprop-parameter-sets`. This — NOT [`already_learned`] — is what tells `hold.rs` whether go2rtc's
+/// `-c:v copy` ffmpeg will resolve the video FAST (parameter sets already in the SDP ⇒ loopback publisher
+/// within ~a second) or must wait for the panel's next in-band SPS/PPS (a cold lock-on, up to ~a keyframe
+/// interval). It deliberately reads the runtime file rather than the persist record because the two can
+/// diverge for one boot: a fresh learn PERSISTS the value durably but only BEST-EFFORT patches this boot's
+/// runtime SDP, so if that patch failed the value is present for the NEXT boot yet absent from the SDP
+/// go2rtc reads NOW — and the cold-lock-on grace must still apply until the next reboot splices it in
+/// (Codex). A missing/unreadable runtime SDP reads as "no sprop" (assume cold). `pub(crate)` for `hold.rs`.
+pub(crate) async fn runtime_sdp_has_sprop() -> bool {
+    matches!(tokio::fs::read_to_string(SDP_PATH).await, Ok(s) if has_sprop(&s))
 }
 
 /// Compute the offset of the RTP payload (the bytes AFTER the fixed header, CSRC list and any header
