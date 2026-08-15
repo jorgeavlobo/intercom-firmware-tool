@@ -39,7 +39,7 @@ PATH=/sbin:/usr/sbin:/usr/bin:/bin
 [ -x /etc/init.d/go2rtcd ] || exit 0
 
 # Re-assert the GO2RTC firewall rule right after the factory rebuild. `fw-reassert` is quick
-# and lock-bounded (mkdir mutex + `iptables -w 5`), so a plain best-effort call is safe; the
+# and lock-bounded (flock mutex + `iptables -w 5`), so a plain best-effort call is safe; the
 # `|| true` guarantees a non-zero exit (or a foreign/absent chain) can never fail the bring-up.
 /etc/init.d/go2rtcd fw-reassert >/dev/null 2>&1 || true
 

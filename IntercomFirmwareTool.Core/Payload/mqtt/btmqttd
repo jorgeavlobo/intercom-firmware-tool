@@ -15,7 +15,7 @@
 ### END INIT INFO
 #
 # MIT-licensed, part of IntercomFirmwareTool. Single control point for the daemon.
-# Concurrency model: an flock mutex (LOCKFILE) serialises the check-and-act
+# Concurrency model: a flock mutex (LOCKFILE) serialises the check-and-act
 # in start/stop/respawn, and the DISABLED marker records operator intent. Only an
 # explicit `start` clears the marker; the supervisor's `respawn` never does, so a
 # `stop` for maintenance is honoured until the operator starts it again (or a
