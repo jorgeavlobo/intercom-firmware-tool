@@ -84,7 +84,10 @@ public class Go2RtcdScriptTests
         // Reads the current branch from the installed conf (default 1 when absent, matching config.rs).
         Assert.Contains("CONF_FILE=/etc/btmqttd/btmqttd.conf", s);
         Assert.Contains(code, l => l.Contains("CAMERA_BRANCH=") && l.Contains("sed -n") && l.Contains("$CONF_FILE"));
-        Assert.Contains(code, l => l.Contains("cur_branch=1"));
+        // The current branch is normalized EXACTLY like config.rs (clamp to 0/1, default 1 for
+        // absent/out-of-range/garbage) so both consumers of the record agree on the branch.
+        Assert.Contains(code, l => l.Contains("0 | 1)"));
+        Assert.Contains(code, l => l.Contains("*)") && l.Contains("cur_branch=1"));
         // Splits the record on TAB: cut -f1 = branch, cut -f2- = value.
         Assert.Contains(code, l => l.Contains("rec_branch=") && l.Contains("cut -f1"));
         Assert.Contains(code, l => l.Contains("rec_value=") && l.Contains("cut -f2-"));

@@ -268,7 +268,13 @@ assemble_sdp() {
 		rec_branch=$(printf '%s' "$rec" | cut -f1)
 		rec_value=$(printf '%s' "$rec" | cut -f2- | sed 's/[[:space:]]*$//')
 		cur_branch=$(sed -n 's/^CAMERA_BRANCH=\([0-9][0-9]*\).*$/\1/p' "$CONF_FILE" 2>/dev/null | head -n 1)
-		[ -n "$cur_branch" ] || cur_branch=1
+		# Normalize EXACTLY as config.rs does — clamp to 0/1, default 1 for absent/out-of-range/garbage
+		# — so both consumers of the record agree on the branch even for a hand-edited/corrupt conf
+		# (config.rs: opt("CAMERA_BRANCH").and_then(parse).filter(|b| *b <= 1).unwrap_or(1)).
+		case "$cur_branch" in
+			0 | 1) ;;
+			*) cur_branch=1 ;;
+		esac
 		[ "$rec_branch" = "$cur_branch" ] && sprop="$rec_value"
 	fi
 	if [ -n "$sprop" ] && ! grep -q 'sprop-parameter-sets=' "$TEMPLATE_SDP"; then
