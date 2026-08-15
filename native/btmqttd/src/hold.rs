@@ -72,8 +72,10 @@
 //! once). The manual `view_camera`/`stop_camera` MQTT actions are unaffected — every source drives the
 //! same `view_rx`, and this task's `ViewCmd::Hold` renews only the short-linger deadline (a fresh
 //! [`VIEWER_LINGER`] each poke), a SEPARATE deadline from the `ViewCmd::Start` full window a manual
-//! `view_camera` press sets, so auto-hold can neither extend nor cut a manual view's window (sip.rs
-//! hangs up only once BOTH have elapsed).
+//! `view_camera` press sets. sip.rs hangs up only once BOTH have elapsed, so auto-hold can never CUT a
+//! manual view short (the manual window is a floor); while a viewer stays connected it does keep the
+//! session up past that window — the intended "follow the live viewer" behavior — then hangs up
+//! ~VIEWER_LINGER after the viewer disconnects.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
