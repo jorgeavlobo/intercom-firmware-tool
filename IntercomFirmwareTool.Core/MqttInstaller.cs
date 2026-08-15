@@ -1597,6 +1597,8 @@ namespace IntercomFirmwareTool.Core
             ("light_learn.json", "button", "light_learn"),
             ("view_camera.json", "button", "view_camera"),
             ("stop_camera.json", "button", "stop_camera"),
+            ("reboot_device.json", "button", "reboot_device"),
+            ("restart_bridge.json", "button", "restart_bridge"),
         };
 
         /// <summary>
@@ -2128,6 +2130,57 @@ namespace IntercomFirmwareTool.Core
                     }, HaJson)));
             else
                 entities.Add(new HaEntity("stop_camera.json", Topic("button", "stop_camera"), ""));
+
+            // Maintenance buttons (issue #43): a "Reboot device" and a "Restart bridge" button, same
+            // {"action":...}-to-TopicRx pattern as the locks / camera buttons. They are ALWAYS emitted
+            // (no hardware/feature gate — every unit can be rebooted or have its bridge restarted), but
+            // shipped disabled-by-default (enabled_by_default:false): HA discovers them yet hides them
+            // until the operator enables them, so these destructive maintenance actions never clutter the
+            // default dashboard. entity_category:"config" keeps them out of the everyday Controls section.
+            // The daemon handles {"action":"reboot"} / {"action":"restart_bridge"} ungated — TOPIC_RX is
+            // the trust boundary (a publisher can already actuate a lock), so a fixed reboot/restart is no
+            // wider a capability than the controls already on this same topic.
+            entities.Add(new HaEntity(
+                "reboot_device.json",
+                Topic("button", "reboot_device"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Reboot device",
+                    unique_id = $"{node}_reboot_device",
+                    default_entity_id = EntId("button", "reboot_device"),
+                    command_topic = controlTopic,
+                    // QoS 0: a redelivered DUP is harmless (the box is already going down); a press lost
+                    // during a reconnect is self-correcting — the user presses again.
+                    qos = 0,
+                    payload_press = "{\"action\":\"reboot\"}",
+                    icon = "mdi:restart-alert",
+                    entity_category = "config",
+                    enabled_by_default = false,
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            entities.Add(new HaEntity(
+                "restart_bridge.json",
+                Topic("button", "restart_bridge"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Restart bridge",
+                    unique_id = $"{node}_restart_bridge",
+                    default_entity_id = EntId("button", "restart_bridge"),
+                    command_topic = controlTopic,
+                    qos = 0,
+                    payload_press = "{\"action\":\"restart_bridge\"}",
+                    icon = "mdi:restart",
+                    entity_category = "config",
+                    enabled_by_default = false,
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
 
             // Stair-light SWITCH (opt-in). The actuator is a stateless TOGGLE with no readable
             // state (firmware-confirmed), so btmqttd tracks the on/off and publishes it retained

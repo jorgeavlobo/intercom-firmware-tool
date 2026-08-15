@@ -19,6 +19,7 @@ use rumqttc::{AsyncClient, QoS};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 
 use tokio::sync::mpsc::{self, Sender};
@@ -69,6 +70,7 @@ static REAP_SLOTS: Semaphore = Semaphore::const_new(REAP_CONCURRENCY);
 /// (a CRLF frame `*…##\r` therefore fails the OWN-frame check and is not forwarded,
 /// exactly as the shell's `^\*.*##$` did). Never panics; every failure is logged and
 /// swallowed so one bad record can't take the receiver down.
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch(
     cfg: &Arc<Config>,
     client: &AsyncClient,
@@ -76,6 +78,7 @@ pub async fn dispatch(
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
     view_tx: Option<&Sender<ViewCmd>>,
+    restart: &Arc<Notify>,
     payload: &[u8],
 ) {
     let text = match std::str::from_utf8(payload) {
@@ -86,7 +89,7 @@ pub async fn dispatch(
         }
     };
     for record in text.split('\n') {
-        dispatch_record(cfg, client, vol, lock, light, view_tx, record).await;
+        dispatch_record(cfg, client, vol, lock, light, view_tx, restart, record).await;
     }
 }
 
@@ -94,6 +97,7 @@ pub async fn dispatch(
 /// `\r` and any interior/leading/trailing spaces — a space-prefixed " *…##" is not an
 /// OWN frame (it falls to the ignored JSON path, as in the shell, rather than being
 /// forwarded to the gateway and executed).
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_record(
     cfg: &Arc<Config>,
     client: &AsyncClient,
@@ -101,6 +105,7 @@ async fn dispatch_record(
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
     view_tx: Option<&Sender<ViewCmd>>,
+    restart: &Arc<Notify>,
     record: &str,
 ) {
     // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
@@ -112,7 +117,7 @@ async fn dispatch_record(
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
-        handle_json(cfg, client, vol, lock, light, view_tx, record).await;
+        handle_json(cfg, client, vol, lock, light, view_tx, restart, record).await;
     }
 }
 
@@ -136,6 +141,7 @@ pub(crate) async fn forward_to_gateway(frame: &str, timeout: Duration) -> std::i
     })?
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_json(
     cfg: &Arc<Config>,
     client: &AsyncClient,
@@ -143,6 +149,7 @@ async fn handle_json(
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
     view_tx: Option<&Sender<ViewCmd>>,
+    restart: &Arc<Notify>,
     msg: &str,
 ) {
     let v: Value = match serde_json::from_str(msg) {
@@ -204,6 +211,27 @@ async fn handle_json(
             }
             return;
         }
+        // Maintenance actions (issue #43): the HA "Reboot device" / "Restart bridge" buttons. Same
+        // ungated posture and TOPIC_RX trust boundary as the controls above — a FIXED reboot/restart is
+        // no wider a capability than the lock a raw frame on this topic can already actuate.
+        if let Some(m) = parse_maintenance(action) {
+            match m {
+                Maintenance::Reboot => {
+                    eprintln!("btmqttd: reboot requested via MQTT; rebooting the device");
+                    spawn_reboot();
+                }
+                Maintenance::RestartBridge => {
+                    // Reuse main.rs's in-place re-exec path: a clean shutdown (flush the MQTT `offline`
+                    // will, drain the light-persist task) then `exec` of the SAME binary — same PID, so
+                    // bt_service_watchdog's pgrep supervision is undisturbed and the bridge is back in
+                    // ~1 s (vs a ~60 s watchdog respawn if we merely exited). btmqttd must NOT run the
+                    // init script's `restart` on itself — that would SIGKILL this handler mid-flight.
+                    eprintln!("btmqttd: restart requested via MQTT; re-execing the bridge");
+                    restart.notify_one();
+                }
+            }
+            return;
+        }
         handle_action(vol, lock, light, action, &v).await;
         return;
     }
@@ -235,6 +263,40 @@ async fn handle_json(
         },
         "" => eprintln!("btmqttd: JSON command missing 'command'"),
         other => eprintln!("btmqttd: unsupported command: {other}"),
+    }
+}
+
+/// A parsed MAINTENANCE action (issue #43) — the HA "Reboot device" / "Restart bridge" buttons. These
+/// have a SIDE EFFECT outside the vol/lock/light surface `handle_action` covers (a process spawn or a
+/// re-exec signal), so they are classified here and dispatched inline in `handle_json`. Pure classifier,
+/// separated so the action-name mapping is unit-testable without spawning a reboot or re-execing.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Maintenance {
+    /// Reboot the whole device (`{"action":"reboot"}`).
+    Reboot,
+    /// Re-exec btmqttd in place (`{"action":"restart_bridge"}`).
+    RestartBridge,
+}
+
+/// Map an `action` string to a [`Maintenance`] variant, or `None` if it isn't a maintenance action.
+fn parse_maintenance(action: &str) -> Option<Maintenance> {
+    match action {
+        "reboot" => Some(Maintenance::Reboot),
+        "restart_bridge" => Some(Maintenance::RestartBridge),
+        _ => None,
+    }
+}
+
+/// Spawn `reboot` detached for the "Reboot device" maintenance button. We do NOT await it: `reboot`
+/// signals init to bring the system down and this daemon is torn down as part of that shutdown, so
+/// there is nothing to reap (and the dropped `Child` handle is not killed — `std` never kills on drop).
+/// `reboot` is resolved via the daemon's inherited PATH (the init script exports
+/// `PATH=/sbin:/usr/sbin:/usr/bin:/bin`, so BusyBox / util-linux `reboot` at `/sbin` is found). The
+/// daemon runs as root, so it may reboot. Best-effort: a spawn failure is logged (nothing else we can do
+/// from here) rather than panicking — this module's contract is "never panics".
+fn spawn_reboot() {
+    if let Err(e) = std::process::Command::new("reboot").spawn() {
+        eprintln!("btmqttd: reboot: failed to spawn `reboot`: {e}");
     }
 }
 
@@ -771,6 +833,18 @@ mod tests {
         assert_eq!(parse_action("volume_step", &json!({"value": 0})), None);
         assert_eq!(parse_action("volume_step", &json!({})), None);
         assert_eq!(parse_action("volume_step", &json!({"value": "up"})), None);
+    }
+
+    #[test]
+    fn parse_maintenance_classifies_the_two_buttons() {
+        // The exact action strings the HA discovery payloads publish (issue #43).
+        assert_eq!(parse_maintenance("reboot"), Some(Maintenance::Reboot));
+        assert_eq!(parse_maintenance("restart_bridge"), Some(Maintenance::RestartBridge));
+        // Anything else is not a maintenance action (falls through to handle_action).
+        assert_eq!(parse_maintenance(""), None);
+        assert_eq!(parse_maintenance("restart"), None); // must be exactly `restart_bridge`
+        assert_eq!(parse_maintenance("reboot_device"), None); // the object id, not the action
+        assert_eq!(parse_maintenance("volume"), None);
     }
 
     #[test]

@@ -160,9 +160,10 @@ async fn run() -> Result<bool, String> {
     // OWN task (`run_persist`), fed by a watch channel. That task is DRAINED at shutdown (via
     // the oneshot below) so a toggle actuated the instant before SIGTERM is still written —
     // the command worker is aborted, but the persist task is signalled + awaited.
-    // Restart signal: fired when a WHERE is LEARNED at runtime, so `main` shuts down cleanly
-    // and the init/watchdog respawns btmqttd with the learned WHERE bound (the state-persist
-    // task is keyed by WHERE at startup — a clean restart is the simplest way to activate it).
+    // Restart signal: fired to make `main` shut down cleanly and RE-EXEC in place. Two triggers:
+    //   * a light WHERE is LEARNED at runtime (the state-persist task is keyed by WHERE at startup, so a
+    //     clean restart is the simplest way to bind it), and
+    //   * the HA "Restart bridge" maintenance button (issue #43), routed here from the command worker.
     let restart = Arc::new(tokio::sync::Notify::new());
     // LEARNABLE only in learn mode (a blank build-time WHERE). A CONFIGURED build's WHERE is
     // authoritative and always bound by the resolution below, so the HA Learn button must not be
@@ -394,9 +395,12 @@ async fn run() -> Result<bool, String> {
         let lock_tx = lock_tx.clone();
         let light = light.clone();
         let view_tx = view_tx.clone();
+        // Shared with the light-learn path: the HA "Restart bridge" button (issue #43) fires this same
+        // Notify to trigger the clean-shutdown-then-re-exec in `run`'s select loop below.
+        let restart = restart.clone();
         async move {
             while let Some(payload) = cmd_rx.recv().await {
-                receiver::dispatch(&cfg, &client, &volume, &lock_tx, light.as_ref(), view_tx.as_ref(), &payload).await;
+                receiver::dispatch(&cfg, &client, &volume, &lock_tx, light.as_ref(), view_tx.as_ref(), &restart, &payload).await;
             }
         }
     });
@@ -617,10 +621,11 @@ async fn run() -> Result<bool, String> {
         tokio::select! {
             _ = sig_term.recv() => break,
             _ = sig_int.recv() => break,
-            // A WHERE was just LEARNED: shut down cleanly (same path as SIGTERM), then RE-EXEC so
-            // btmqttd comes straight back up with the learned WHERE active.
+            // A restart was requested — a newly-learned light WHERE to activate, or the HA "Restart
+            // bridge" button (#43). Shut down cleanly (same path as SIGTERM), then RE-EXEC so btmqttd
+            // comes straight back up (with the learned WHERE active, and re-reading its config).
             _ = restart.notified() => {
-                eprintln!("btmqttd: restarting to activate a newly-learned light WHERE");
+                eprintln!("btmqttd: restart requested; shutting down cleanly to re-exec");
                 reexec = true;
                 break;
             }
