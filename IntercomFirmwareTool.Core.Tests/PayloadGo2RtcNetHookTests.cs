@@ -7,7 +7,7 @@ namespace IntercomFirmwareTool.Core.Tests;
 
 /// <summary>
 /// Shape checks for the on-device go2rtc ifupdown <c>if-up.d</c> hook (<c>go2rtc-net-hook</c>, task #42).
-/// It runs right AFTER the factory <c>if-pre-up.d/iptables</c> rebuild on a <c>wlan0</c> bring-up and
+/// It runs right AFTER the factory <c>if-pre-up.d/iptables</c> rebuild on ANY interface bring-up and
 /// re-asserts the GO2RTC :8554 rule via <c>go2rtcd fw-reassert</c>, so boot / WiFi-reconnect restore the
 /// port sequentially instead of the watchdog racing the factory's lock-less INPUT writes. The embedded
 /// resource asserted here is the exact one the installer's <c>InstallOnDeviceMediaServer</c> writes (and
@@ -44,13 +44,14 @@ public class PayloadGo2RtcNetHookTests
     }
 
     [Fact]
-    public void Acts_only_on_the_camera_interface_matching_go2rtcd()
+    public void Reasserts_after_every_interface_event_not_only_wlan0()
     {
-        // ifupdown sets $IFACE to the interface name (and "--all" for the global phase). The hook must
-        // no-op unless $IFACE is the camera interface wlan0 (== CAM_IFACE in go2rtcd) — skipping lo,
-        // usb0, --all, etc. — and exit 0 for everything else.
+        // The factory if-pre-up.d/iptables rebuilds the WHOLE INPUT chain on ANY interface bring-up, so
+        // filtering to wlan0 would leave :8554 unreachable after e.g. a usb0 bring-up flushed INPUT — and
+        // the periodic watchdog no longer re-asserts (task #42 / Codex). So the hook must NOT gate on
+        // $IFACE; fw-reassert re-opens the wlan0 rule regardless of which interface's event fired it.
         string[] code = CodeLines(ReadHook());
-        Assert.Contains(code, l => l.Contains("\"${IFACE:-}\" = wlan0") && l.Contains("|| exit 0"));
+        Assert.DoesNotContain(code, l => l.Contains("\"${IFACE:-}\" = wlan0"));
     }
 
     [Fact]

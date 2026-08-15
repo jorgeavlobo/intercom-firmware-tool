@@ -325,10 +325,10 @@ async fn run() -> Result<bool, String> {
     };
 
     // Viewer-activity auto-hold (issue #120, hold.rs): the "someone is watching" signal the SIP hold
-    // loop flagged as deferred. On-device ONLY — it polls the loopback go2rtc control API (which exists
-    // only in on-device mode) and renews the on-demand window while a viewer is connected, so Home
-    // Assistant just opens the camera with no manual `view_camera` press. Shares `view_tx` with the SIP
-    // UA (ViewCmd::Start is idempotent), and only runs when that UA is up (Some view_tx).
+    // loop flagged as deferred. On-device ONLY — it counts ESTABLISHED sockets on local port 8554 in
+    // /proc/net/tcp{,6} (a live RTSP viewer) and renews the on-demand window while one is connected, so
+    // Home Assistant just opens the camera with no manual `view_camera` press. Shares `view_tx` with the
+    // SIP UA (ViewCmd::Start is idempotent), and only runs when that UA is up (Some view_tx).
     let (hold_task, hold_stopping): (Option<tokio::task::JoinHandle<()>>, Arc<std::sync::atomic::AtomicBool>) = {
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         match (&view_tx, cfg.camera_ondevice) {

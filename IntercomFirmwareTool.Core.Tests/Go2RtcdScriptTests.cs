@@ -380,12 +380,13 @@ public class Go2RtcdScriptTests
         Assert.Contains(
             "iptables -C \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
             joined);
-        // The `-C` STATUS is captured (`if cerr=$(...)`) so a genuine rule MISMATCH (reconcile) is
-        // distinguished from a LOCK/inspection error: on the "xtables lock" message it BAILS rather than
-        // falling through to the mutating `-F` (CodeRabbit). The fast path exits (fw_jump + return) for
-        // BOTH the already-correct (n==1 + -C match) and the already-empty (no address, n==0) cases.
+        // The `-C` STATUS is captured (`if cerr=$(...)`) so ONLY the documented "rule not found"
+        // diagnostic reconciles; EVERY other non-zero status (lock contention, permission/resource/backend
+        // error) BAILS rather than falling through to the mutating `-F` (CodeRabbit). The fast path exits
+        // (fw_jump + return) for BOTH the already-correct (n==1 + -C match) and already-empty (n==0) cases.
         Assert.Contains("if cerr=$(iptables -C \"$FW_CHAIN\"", joined);
-        Assert.Contains("*\"xtables lock\"*) return 0 ;;", openBody);
+        Assert.Contains("*\"Bad rule\"* | *\"matching rule exist\"*) : ;;", openBody);  // mismatch → reconcile
+        Assert.Contains("*) return 0 ;;", openBody);                                    // any other error → bail
         Assert.Contains("[ \"$n\" -eq 0 ] && { fw_jump; return 0; }", openBody);
         // ZERO-WRITE PROOF: the first fast-path `{ fw_jump; return 0; }` must appear BEFORE the flush, so a
         // matching chain never reaches any `-F`/`-A` write.

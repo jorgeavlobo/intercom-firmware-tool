@@ -13,8 +13,10 @@
 #                    Generic Camera. Reads /etc/btmqttd/go2rtc/go2rtc.yaml. Also opens
 #                    the RTSP media port (:8554) in the panel firewall, LAN-source-
 #                    restricted (phase 1c-3). The desired state is a marker file
-#                    (DISABLED); bt_service_watchdog reconciles the running process AND
-#                    re-asserts the firewall rule each pass via `respawn`.
+#                    (DISABLED); bt_service_watchdog reconciles the running process each
+#                    pass via `respawn`. The firewall is (re)asserted ONLY on discrete
+#                    events — start/stop and the if-up.d hook (`fw-reassert`), never from
+#                    the periodic watchdog, which touches no iptables (task #42).
 ### END INIT INFO
 #
 # MIT-licensed, part of IntercomFirmwareTool. A byte-for-byte copy of the btmqttd
@@ -212,19 +214,21 @@ firewall_open() {
 	if [ -n "$lan" ]; then
 		if [ "$n" -eq 1 ]; then
 			# Non-blocking membership check for the ONE desired rule. Capture its output so we can tell a
-			# genuine MISMATCH (subnet changed / wrong rule → reconcile below) from a LOCK/inspection error:
-			# a `-C` that fails because the lock is contended must NOT fall through to the mutating `-F`
-			# (that would re-introduce a lock wait during the factory rebuild) — bail and let the if-up.d
-			# hook / next pass retry. `-C` exits 0 on an exact match; a non-zero exit is either "no such
-			# rule" or the xtables-lock error, which prints the "xtables lock" message.
+			# genuine MISMATCH (subnet changed / wrong rule → reconcile below) from ANY OTHER failure
+			# (xtables-lock contention, permission/resource/backend error). Only the documented "rule does
+			# not exist" diagnostic may fall through to the mutating `-F`; every other non-zero status BAILS
+			# — writing under lock contention or an unknown error could drop a factory rule, so we defer to
+			# the if-up.d hook / next event. `-C` exits 0 on an exact match; a missing rule prints the
+			# "Bad rule (does a matching rule exist…)" message.
 			if cerr=$(iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" \
 				-s "$lan" -j ACCEPT 2>&1); then
-				fw_jump; return 0                   # already exactly our desired rule → zero-write
+				fw_jump; return 0                        # already exactly our desired rule → zero-write
 			fi
 			case "$cerr" in
-				*"xtables lock"*) return 0 ;;       # lock contention → bail (never write under the rebuild)
+				*"Bad rule"* | *"matching rule exist"*) : ;;  # genuine mismatch → fall through to reconcile
+				*) return 0 ;;                                # lock / unknown error → bail (never flush)
 			esac
-			# else: genuine mismatch (changed subnet, wrong rule) → fall through to flush + repopulate
+			# genuine mismatch (changed subnet, wrong rule) → fall through to flush + repopulate
 		fi
 	else
 		[ "$n" -eq 0 ] && { fw_jump; return 0; }

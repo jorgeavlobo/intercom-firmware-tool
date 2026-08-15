@@ -213,7 +213,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
 /// reads as "not provisioned", so the listen re-learns the correct parameter sets and OVERWRITES the
 /// stale record on the next learn; go2rtcd independently refuses to splice a mismatched-branch value
 /// (task #41). A missing/unreadable persist file AND template also reads as "not provisioned" so the
-/// listen continues. Both reads are blocking → spawn_blocking.
+/// listen continues. Delegates to the two readers below (persist via spawn_blocking; template async).
 async fn already_learned(branch: u8) -> bool {
     persisted_for_branch(branch).await || template_has_sprop().await
 }
