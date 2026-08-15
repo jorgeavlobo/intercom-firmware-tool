@@ -157,6 +157,46 @@ public class MqttCameraValidationTests
         Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(OnDevice() with { CameraRtspUser = "" }));
     }
 
+    [Fact]
+    public void On_device_mode_accepts_a_valid_or_empty_sprop()
+    {
+        // sprop is optional (empty ⇒ omitted, the ~20 s-first-frame fallback) and, when set, must be a
+        // comma-separated list of well-formed base64 parameter sets (RFC 6184).
+        MqttInstaller.Validate(OnDevice() with { CameraSprop = null });                 // omitted
+        MqttInstaller.Validate(OnDevice() with { CameraSprop = "" });                    // omitted
+        MqttInstaller.Validate(OnDevice() with { CameraSprop = "Z0JAHqaAoD2Q,aM48gAA=" }); // SPS,PPS
+        MqttInstaller.Validate(OnDevice() with { CameraSprop = "Z0JAHqaAoD2Q" });        // single set
+    }
+
+    [Theory]
+    [InlineData("Z0JAHqaAoD2Q aM48gAA=")]   // space (would split the SDP attribute)
+    [InlineData("Z0JAHqaAoD2Q,aM48gAA=;x")] // ';' (would inject an fmtp parameter)
+    [InlineData("Z0JA\nHqaAoD2Q")]          // LF (would split the SDP line)
+    [InlineData("Z0JA<b>")]                 // '<' '>' — not base64
+    [InlineData(",")]                       // comma-only ⇒ two empty tokens
+    [InlineData("AA,,BB")]                   // double comma ⇒ empty middle token
+    [InlineData("Z0JAHqaAoD2Q,")]           // trailing comma ⇒ empty token
+    [InlineData("Z0J=AHqaAoD2Q,aM48gAA=")]  // '=' padding mid-token ⇒ not decodable
+    [InlineData("A")]                        // length not a multiple of 4 ⇒ not decodable
+    public void On_device_mode_rejects_a_malformed_sprop(string sprop)
+    {
+        // Embedded verbatim into the SDP fmtp line. Reject anything that is not a comma-separated list
+        // of non-empty, strictly-base64-decodable tokens — both alphabet violations (broken line /
+        // injected attribute) and structural ones (empty or non-decodable tokens ffmpeg can't use).
+        Assert.Throws<ArgumentException>(() =>
+            MqttInstaller.Validate(OnDevice() with { CameraSprop = sprop }));
+    }
+
+    [Fact]
+    public void On_device_mode_rejects_an_over_length_sprop()
+    {
+        // A real sprop is a few dozen chars; a huge value is rejected before the per-token base64 work
+        // (bounds allocations + the SDP fmtp line). 600 valid base64 chars (a multiple of 4) exceeds the
+        // 512 cap, so the length guard — not the token check — rejects it.
+        Assert.Throws<ArgumentException>(() =>
+            MqttInstaller.Validate(OnDevice() with { CameraSprop = new string('A', 600) }));
+    }
+
     [Theory]
     [InlineData("cam\nera", "s3cr3t")]      // LF
     [InlineData("camera", "s3\r\ncr3t")]    // CRLF

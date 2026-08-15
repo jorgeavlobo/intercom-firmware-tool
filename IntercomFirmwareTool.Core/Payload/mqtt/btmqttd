@@ -15,7 +15,7 @@
 ### END INIT INFO
 #
 # MIT-licensed, part of IntercomFirmwareTool. Single control point for the daemon.
-# Concurrency model: an atomic mkdir mutex (LOCKDIR) serialises the check-and-act
+# Concurrency model: a flock mutex (LOCKFILE) serialises the check-and-act
 # in start/stop/respawn, and the DISABLED marker records operator intent. Only an
 # explicit `start` clears the marker; the supervisor's `respawn` never does, so a
 # `stop` for maintenance is honoured until the operator starts it again (or a
@@ -26,7 +26,7 @@ DAEMON=/usr/sbin/btmqttd
 NAME=btmqttd
 LOGDIR=/var/log/btmqttd
 LOGFILE=$LOGDIR/btmqttd.log
-LOCKDIR=/var/run/btmqttd.lock
+LOCKFILE=/var/run/btmqttd.lock
 DISABLED=/var/run/btmqttd.disabled
 
 # PIDs of the actual daemon. `pgrep -x btmqttd` ALSO matches this init script's
@@ -42,17 +42,24 @@ daemon_pids() {
 }
 is_running() { [ -n "$(daemon_pids)" ]; }
 
-# Acquire the mutex (mkdir is atomic). Critical sections are short (never a
-# kill+wait), so retry briefly; steal a stale lock after ~10s so a process killed
-# mid-operation cannot wedge the service forever.
-acquire() {
-	i=0
-	while ! mkdir "$LOCKDIR" 2>/dev/null; do
-		i=$((i + 1))
-		if [ "$i" -ge 10 ]; then rmdir "$LOCKDIR" 2>/dev/null; else sleep 1; fi
-	done
-}
-release() { rmdir "$LOCKDIR" 2>/dev/null; }
+# The mutex is an exclusive flock on LOCKFILE, held on fd 9 for the duration of a critical section. flock is
+# KERNEL-MANAGED and released AUTOMATICALLY when the holding process dies or the fd closes, so a crashed
+# holder can NEVER wedge the lock and there is NO stale-lock detection, PID tracking, or steal logic to get
+# wrong — the whole "lease expired while the holder was alive / two waiters both break it" class simply does
+# not exist. util-linux flock is present on the target at /usr/bin/flock. `flock -w 30 9` waits (BOUNDED)
+# for the lock; closing fd 9 (or process death) releases it. The bounded wait means even a wedged-but-alive
+# holder — the only case flock could otherwise block on forever — can't hang start/stop/respawn indefinitely
+# (CodeRabbit); a `-w` timeout NEVER breaks the holder's lock (unlike the old stale-steal — it only caps how
+# long a waiter waits), so it can never interleave a critical section. Critical sections stay short (well
+# under 30 s). The backgrounded daemon MUST NOT inherit fd 9 — it would hold the lock for its whole lifetime
+# — so every daemon launch closes it with `9>&-`. This protocol is shared VERBATIM with the go2rtcd init
+# script.
+# acquire never returns WITHOUT the lock: if the lock file can't be opened, or flock fails / times out / is
+# interrupted, it EXITS non-zero rather than letting the caller run its critical section unlocked
+# (CodeRabbit). A watchdog `respawn` that exits just retries next pass; an operator start/stop surfaces the
+# failure.
+acquire() { exec 9>>"$LOCKFILE" || exit 1; flock -w 30 9 || exit 1; }
+release() { exec 9>&-; }
 
 # Signal every daemon instance. Defaults to SIGTERM; pass "-9" to force. (Without
 # a default an argument-less call would run `kill "" <pid>` — an invalid signal
@@ -73,7 +80,9 @@ launch_if_enabled() {
 	mkdir -p "$LOGDIR" 2>/dev/null
 	chmod 700 "$LOGDIR" 2>/dev/null
 	[ -L "$LOGFILE" ] && rm -f "$LOGFILE"
-	"$DAEMON" >> "$LOGFILE" 2>&1 &
+	# Close the mutex fd (9) in the child so the long-lived daemon does not inherit the flock and hold it
+	# for its whole lifetime (which would block every later acquire until the daemon exits).
+	"$DAEMON" >> "$LOGFILE" 2>&1 9>&- &
 }
 
 case "$1" in
@@ -129,9 +138,11 @@ case "$1" in
 		fi
 		;;
 	restart)
-		# `stop` sets the marker + waits for exit; `start` clears it + relaunches.
-		"$0" stop
-		"$0" start
+		# `stop` sets the marker + waits for exit; `start` clears it + relaunches. Chain them and PROPAGATE
+		# a child failure (e.g. an acquire that exited non-zero) via `exit $?` instead of falling through to
+		# the script's trailing `exit 0`, so a failed restart never reports success (Codex).
+		"$0" stop && "$0" start
+		exit $?
 		;;
 	*)
 		echo "Usage: $0 {start|stop|status|restart|respawn}"

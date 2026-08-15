@@ -52,7 +52,9 @@ jobs:
           # on the runner. dash ships with ubuntu-24.04 (it is /bin/sh there).
           for f in \
             IntercomFirmwareTool.Core/Payload/mqtt/bt_service_watchdog \
-            IntercomFirmwareTool.Core/Payload/mqtt/btmqttd; do
+            IntercomFirmwareTool.Core/Payload/mqtt/btmqttd \
+            IntercomFirmwareTool.Core/Payload/mqtt/go2rtcd \
+            IntercomFirmwareTool.Core/Payload/mqtt/go2rtc-net-hook; do
             echo "dash -n $f"; dash -n "$f"
           done
           # bash CI helper:
@@ -68,4 +70,6 @@ jobs:
           shellcheck \
             IntercomFirmwareTool.Core/Payload/mqtt/bt_service_watchdog \
             IntercomFirmwareTool.Core/Payload/mqtt/btmqttd \
+            IntercomFirmwareTool.Core/Payload/mqtt/go2rtcd \
+            IntercomFirmwareTool.Core/Payload/mqtt/go2rtc-net-hook \
             native/btmqttd/ci/verify-provenance.sh

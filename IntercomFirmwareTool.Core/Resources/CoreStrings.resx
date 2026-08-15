@@ -215,6 +215,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Mqtt_CameraRtspCredsRequired" xml:space="preserve">
     <value>On-device streaming requires RTSP credentials: set a username and password. go2rtc disables authentication when the username is blank, which would expose the camera stream on the LAN. Credentials must not contain control characters (including line breaks).</value>
   </data>
+  <data name="Mqtt_CameraSpropInvalid" xml:space="preserve">
+    <value>The camera parameter sets (sprop) must be one or more base64 sets joined by commas — each set using only A–Z, a–z, 0–9, +, / and =. Remove any spaces or other punctuation.</value>
+  </data>
   <data name="Mqtt_CredentialNewline" xml:space="preserve">
     <value>The MQTT username or password contains a line break; credentials must be a single line.</value>
   </data>

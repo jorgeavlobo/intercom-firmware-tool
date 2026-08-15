@@ -70,7 +70,9 @@ public class Go2RtcConfigTests
         Assert.Contains("m=video 40000 RTP/AVP 96", sdp);
         Assert.DoesNotContain("m=audio", sdp);
         Assert.Contains("a=rtpmap:96 H264/90000", sdp);
+        // No CameraSprop set → the fmtp carries no sprop-parameter-sets (the ~20 s-first-frame fallback).
         Assert.Contains("a=fmtp:96 packetization-mode=1;profile-level-id=42801f", sdp);
+        Assert.DoesNotContain("sprop-parameter-sets", sdp);
         // Connection pinned to the loopback alias 127.0.0.2 — ingest binds loopback, never the LAN.
         Assert.Contains("c=IN IP4 127.0.0.2", sdp);
         Assert.DoesNotContain("0.0.0.0", sdp);
@@ -80,11 +82,30 @@ public class Go2RtcConfigTests
     }
 
     [Fact]
+    public void BuildOnDeviceSdp_embeds_sprop_parameter_sets_when_configured()
+    {
+        // With CameraSprop set (issue #120), the panel's SPS/PPS go into the fmtp line between
+        // packetization-mode and profile-level-id, so go2rtc's `-c:v copy` ffmpeg resolves 640x480
+        // in <1 s instead of waiting ~20 s for the panel's next in-stream keyframe.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraVideoPort = 40000,
+            CameraAudioPort = 40002,
+            CameraSprop = "Z0JAHqaAoD2Q,aM48gAA=",
+        };
+        string sdp = Go2RtcConfig.BuildOnDeviceSdp(opts);
+        Assert.Contains(
+            "a=fmtp:96 packetization-mode=1;sprop-parameter-sets=Z0JAHqaAoD2Q,aM48gAA=;profile-level-id=42801f",
+            sdp);
+    }
+
+    [Fact]
     public void BuildOnDeviceYaml_loopback_api_lan_rtsp_with_auth_and_video_only_stream()
     {
         string yaml = Go2RtcConfig.BuildOnDeviceYaml(
-            "Front Door", "/usr/sbin/ffmpeg", "/etc/btmqttd/go2rtc/frontdoor.sdp",
-            "camera", "s3cr3t");
+            "Front Door", "/usr/sbin/ffmpeg", "camera", "s3cr3t");
         // Control API + web UI: loopback ONLY, never the LAN.
         Assert.Contains("api:", yaml);
         Assert.Contains("listen: \"127.0.0.1:1984\"", yaml);
@@ -94,11 +115,34 @@ public class Go2RtcConfigTests
         Assert.Contains("listen: \":8554\"", yaml);
         Assert.Contains("username: \"camera\"", yaml);
         Assert.Contains("password: \"s3cr3t\"", yaml);
-        // Stream: sanitized key, absolute ffmpeg + SDP paths, video-only H.264 copy.
+        // Stream: sanitized key, absolute ffmpeg path, video-only H.264 copy. The exec -i reads the
+        // tmpfs RUNTIME SDP (go2rtcd reassembles it at boot), NOT the read-only /etc template — the
+        // rootfs is read-only, so go2rtc + sprop.rs both use /var/run/btmqttd/doorbell.sdp.
         Assert.Contains("  frontdoor:", yaml);
         Assert.Contains("exec:/usr/sbin/ffmpeg", yaml);
-        Assert.Contains("-i /etc/btmqttd/go2rtc/frontdoor.sdp", yaml);
-        Assert.Contains("-an -c:v copy", yaml);
+        Assert.Contains("-i /var/run/btmqttd/doorbell.sdp", yaml);
+        Assert.DoesNotContain("-i /etc/btmqttd/go2rtc/", yaml);
+        // Plain `-c:v copy` with default input options (issue #120, hardware-diagnosed on the C100X). The
+        // vendored ffmpeg's H.264 parser recovers the SPS/PPS from the in-stream data, so the copy gets
+        // its dimensions and publishes without any jitter-buffer tuning. An earlier revision widened
+        // -reorder_queue_size/-max_delay to catch the sparse in-stream SPS/PPS, but the loopback ingest
+        // never reorders, so that oversized queue made ffmpeg drop every packet as "received too late" and
+        // 404 — reverting to defaults locks on in under a second. Guard that the harmful tuning and the
+        // (now-removed) extract_extradata/dump_extra bitstream filters stay OUT of the generated exec.
+        Assert.Contains("-i /var/run/btmqttd/doorbell.sdp -an -c:v copy -rtsp_transport tcp -f rtsp", yaml);
+        // A SECOND output on the SAME live-view ffmpeg ships a raw H.264 RTP copy to btmqttd (sprop
+        // learning, #120 / PR #129): sprop.rs binds this loopback port and parses the panel's in-band
+        // SPS/PPS from the RTP payload — ffmpeg's -sdp_file can't emit sprop on a copy path (hardware-
+        // confirmed), so there is NO derived.sdp any more.
+        Assert.Contains(
+            "-f rtsp {output} -c:v copy -f rtp rtp://127.0.0.1:40100",
+            yaml);
+        Assert.DoesNotContain("-sdp_file", yaml);
+        Assert.DoesNotContain("derived.sdp", yaml);
+        Assert.DoesNotContain("-reorder_queue_size", yaml);
+        Assert.DoesNotContain("-max_delay", yaml);
+        Assert.DoesNotContain("-analyzeduration", yaml);
+        Assert.DoesNotContain("-bsf", yaml);
         Assert.Contains("{output}", yaml);
         Assert.DoesNotContain("\r", yaml);
     }
@@ -109,7 +153,7 @@ public class Go2RtcConfigTests
         // A generated/typed credential may contain YAML-special punctuation; double-quoted scalars
         // must escape a backslash and a double-quote so the file stays valid.
         string yaml = Go2RtcConfig.BuildOnDeviceYaml(
-            "doorbell", "/usr/sbin/ffmpeg", "/x.sdp", "u\"x", "p\\y");
+            "doorbell", "/usr/sbin/ffmpeg", "u\"x", "p\\y");
         Assert.Contains("username: \"u\\\"x\"", yaml);
         Assert.Contains("password: \"p\\\\y\"", yaml);
     }
@@ -124,7 +168,7 @@ public class Go2RtcConfigTests
         // RTSP is LAN-facing and auth is mandatory (#120): go2rtc skips auth for a blank username, so
         // an empty credential opens the stream unauthenticated. The builder must refuse it outright.
         Assert.Throws<ArgumentException>(() =>
-            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", "/x.sdp", user!, pass!));
+            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", user!, pass!));
     }
 
     [Theory]
@@ -139,7 +183,7 @@ public class Go2RtcConfigTests
         // YamlDoubleQuoted escapes only '\' and '"', so ANY control character would land raw in the
         // double-quoted YAML scalar and corrupt the file — reject them all, not just CR/LF.
         Assert.Throws<ArgumentException>(() =>
-            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", "/x.sdp", user, pass));
+            Go2RtcConfig.BuildOnDeviceYaml("doorbell", "/usr/sbin/ffmpeg", user, pass));
     }
 
     [Fact]

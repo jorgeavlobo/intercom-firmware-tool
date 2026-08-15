@@ -13,12 +13,14 @@
 #                    Generic Camera. Reads /etc/btmqttd/go2rtc/go2rtc.yaml. Also opens
 #                    the RTSP media port (:8554) in the panel firewall, LAN-source-
 #                    restricted (phase 1c-3). The desired state is a marker file
-#                    (DISABLED); bt_service_watchdog reconciles the running process AND
-#                    re-asserts the firewall rule each pass via `respawn`.
+#                    (DISABLED); bt_service_watchdog reconciles the running process each
+#                    pass via `respawn`. The firewall is (re)asserted ONLY on discrete
+#                    events — start/stop and the if-up.d hook (`fw-reassert`), never from
+#                    the periodic watchdog, which touches no iptables (task #42).
 ### END INIT INFO
 #
 # MIT-licensed, part of IntercomFirmwareTool. A byte-for-byte copy of the btmqttd
-# init script's supervision model (atomic mkdir mutex LOCKDIR + DISABLED marker),
+# init script's supervision model (flock mutex + DISABLED marker),
 # retargeted at the go2rtc binary. Only an explicit `start` clears the marker; the
 # supervisor's `respawn` never does, so a `stop` for maintenance is honoured until
 # the operator starts it again (or a reboot clears the tmpfs marker).
@@ -28,8 +30,27 @@ NAME=go2rtc
 CONFIG=/etc/btmqttd/go2rtc/go2rtc.yaml
 LOGDIR=/var/log/go2rtc
 LOGFILE=$LOGDIR/go2rtc.log
-LOCKDIR=/var/run/go2rtc.lock
+LOCKFILE=/var/run/go2rtc.lock
 DISABLED=/var/run/go2rtc.disabled
+
+# Runtime SDP assembly (issue #120). The rootfs (incl. /etc) is mounted READ-ONLY, so go2rtc cannot read
+# a runtime-patched SDP under /etc. The installer writes a read-only TEMPLATE SDP; we (re)assemble the
+# RUNTIME SDP on tmpfs at each (re)launch — copy the template, then splice in the learned
+# sprop-parameter-sets that btmqttd (sprop.rs) persisted on the writable cfg/extra partition, if present.
+# go2rtc.yaml's exec -i points at RUNTIME_SDP; btmqttd patches the same tmpfs path after a fresh learn.
+TEMPLATE_SDP=/etc/btmqttd/go2rtc/doorbell.sdp
+RUNTIME_SDP_DIR=/var/run/btmqttd
+RUNTIME_SDP=$RUNTIME_SDP_DIR/doorbell.sdp
+# The persisted learned sprop record (single line `<branch>\t<value>`). STATE_DIR mirrors persist.rs's
+# DEFAULT_STATE_DIR and its $BTMQTTD_STATE_DIR override (tests/dev); on the device the env var is unset
+# and the default is used.
+STATE_DIR=${BTMQTTD_STATE_DIR:-/home/bticino/cfg/extra/btmqttd}
+SPROP_FILE=$STATE_DIR/camera-sprop
+# btmqttd's generated config, read ONLY to learn the CURRENT CAMERA_BRANCH. The sprop record is keyed
+# by the branch it was learned on (task #41): hi/lo-res encode different SPS, and cfg/extra survives a
+# reflash, so a record left by a previous install on the OTHER branch must not be spliced — btmqttd
+# re-learns it. Absent/unreadable ⇒ default branch 1 (matches config.rs's CAMERA_BRANCH default).
+CONF_FILE=/etc/btmqttd/btmqttd.conf
 
 # Firewall (issue #120, phase 1c-3): the RTSP media port + the LAN interface it is served on. The
 # panel enforces a default-deny INPUT chain (`-P INPUT DROP`) and does NOT open :8554, so nothing
@@ -47,9 +68,10 @@ DISABLED=/var/run/go2rtc.disabled
 # boot-scoped marker (FW_OWN, tmpfs — cleared every reboot together with the ruleset). A fixed chain name
 # is only a namespace convention; if a `GO2RTC` chain already exists when we first run (a foreign chain we
 # did not create), we leave it — and the port — entirely alone rather than flush someone else's chain. So
-# we never touch a rule we do not own. Reconciliation is otherwise STATELESS: every watchdog pass
-# re-asserts our chain's contents from scratch (flush + repopulate), so the chain itself is the state —
-# nothing to drift, and a DHCP subnet change is handled for free. (A second CAP_NET_ADMIN manager could
+# we never touch a rule we do not own. Reconciliation is otherwise STATELESS: each firewall event (start
+# / stop / fw-reassert — never the periodic watchdog, task #42) re-asserts our chain's contents from
+# scratch (flush + repopulate), so the chain itself is the state — nothing to drift, and a DHCP subnet
+# change is handled for free. (A second CAP_NET_ADMIN manager could
 # still rewrite the firewall wholesale, but that actor already fully controls netfilter — the same
 # boundary Docker/kube-proxy accept.)
 CAM_PORT=8554
@@ -61,16 +83,23 @@ FW_OWN=/var/run/go2rtc.fwown
 # filters (e.g. the conntrack `--ctstate INVALID -j DROP` guard installed by /etc/network/if-pre-up.d/
 # iptables) but still before the `-P INPUT DROP` policy (evaluated only after all rules). Our ACCEPT
 # therefore never lets traffic bypass a factory or admin filter. Merely checking existence is not enough:
-# the factory rebuild does `-F INPUT` then many `-A INPUT`, so a watchdog pass that appended our jump
+# the factory rebuild does `-F INPUT` then many `-A INPUT`, so an assert that appended our jump
 # mid-rebuild would leave it AHEAD of the later-restored filters. So if the jump is missing OR not the
-# last INPUT rule, drain it and re-append at the end — the next pass self-corrects the position within one
-# watchdog interval. Steady state (already last) mutates nothing. Non-matching packets RETURN from
-# our chain and continue INPUT, so the jump never disturbs other traffic.
+# last INPUT rule, drain it and re-append at the end — the next fw-reassert (run right after the factory
+# rebuild) self-corrects the position. Steady state (already last) mutates nothing. Non-matching packets
+# RETURN from our chain and continue INPUT, so the jump never disturbs other traffic.
+# LOCKING DISCIPLINE (task #42, industry practice for coexisting iptables managers). The factory
+# firewall rebuilds INPUT with LOCK-LESS `-A INPUT` calls (no `-w`), which FAIL if anyone else holds the
+# xtables lock at that instant. So READ-ONLY inspection here (`-S`, `-C`) runs WITHOUT `-w`: it never
+# WAITS for (and thus never holds) the lock across the factory's rebuild window — on contention it fails
+# fast and we bail the pass, letting the sequential if-up.d hook (`fw-reassert`) re-assert after the
+# rebuild. Only the rare MUTATING calls keep `-w 5`, and each bails on failure so it never writes under
+# contention. Reads therefore can never stall a factory `-A INPUT`.
 fw_jump() {
 	# Capture the listing FIRST and change nothing if it fails — an inspection error (xtables lock,
 	# resource) must not read as "jump out of place" and trigger a destructive drain+re-append that a
-	# failing backend might then leave with no jump at all.
-	inp=$(iptables -w 5 -S INPUT 2>/dev/null) || return 0
+	# failing backend might then leave with no jump at all. Non-blocking read (see LOCKING DISCIPLINE).
+	inp=$(iptables -S INPUT 2>/dev/null) || return 0
 	n=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
 	last=$(printf '%s\n' "$inp" | tail -n 1)
 	# Invariant: EXACTLY ONE INPUT jump, and it is LAST (after the factory/admin filters, before the policy
@@ -82,12 +111,12 @@ fw_jump() {
 	if [ "$last" != "-A INPUT -j $FW_CHAIN" ]; then
 		iptables -w 5 -A INPUT -j "$FW_CHAIN" 2>/dev/null || return 0
 	fi
-	# Drop EARLIER duplicate jumps one at a time, RE-COUNTING the LIVE ruleset each iteration so we can
-	# never delete below one — even if a concurrent factory `-F INPUT` flushed the old jumps after our
-	# listing (a stale count would otherwise delete the freshly appended jump). `-D` removes the
+	# Drop EARLIER duplicate jumps one at a time, RE-COUNTING the LIVE ruleset each iteration (non-blocking
+	# read) so we can never delete below one — even if a concurrent factory `-F INPUT` flushed the old jumps
+	# after our listing (a stale count would otherwise delete the freshly appended jump). `-D` removes the
 	# first match, so the last jump survives until exactly one remains. Stop on any failure and retry next
 	# pass (a listing failure yields count 0 and also stops, never over-deleting).
-	while [ "$(iptables -w 5 -S INPUT 2>/dev/null | grep -c -- "^-A INPUT -j $FW_CHAIN\$")" -gt 1 ]; do
+	while [ "$(iptables -S INPUT 2>/dev/null | grep -c -- "^-A INPUT -j $FW_CHAIN\$")" -gt 1 ]; do
 		iptables -w 5 -D INPUT -j "$FW_CHAIN" 2>/dev/null || break
 	done
 }
@@ -97,7 +126,7 @@ fw_jump() {
 # Prints nothing; returns: 0 = exists, 1 = confirmed absent ("No chain…"), 2 = could not determine. A
 # caller must never treat 2 as "absent" (that would relinquish ownership of a chain that may still be ours).
 fw_chain_exists() {
-	out=$(iptables -w 5 -S "$FW_CHAIN" 2>&1) && return 0
+	out=$(iptables -S "$FW_CHAIN" 2>&1) && return 0   # non-blocking read (see LOCKING DISCIPLINE)
 	case "$out" in *"No chain"*) return 1 ;; esac
 	return 2
 }
@@ -113,17 +142,24 @@ daemon_pids() {
 }
 is_running() { [ -n "$(daemon_pids)" ]; }
 
-# Acquire the mutex (mkdir is atomic). Critical sections are short (never a
-# kill+wait), so retry briefly; steal a stale lock after ~10s so a process killed
-# mid-operation cannot wedge the service forever.
-acquire() {
-	i=0
-	while ! mkdir "$LOCKDIR" 2>/dev/null; do
-		i=$((i + 1))
-		if [ "$i" -ge 10 ]; then rmdir "$LOCKDIR" 2>/dev/null; else sleep 1; fi
-	done
-}
-release() { rmdir "$LOCKDIR" 2>/dev/null; }
+# The mutex is an exclusive flock on LOCKFILE, held on fd 9 for the duration of a critical section. flock is
+# KERNEL-MANAGED and released AUTOMATICALLY when the holding process dies or the fd closes, so a crashed
+# holder can NEVER wedge the lock and there is NO stale-lock detection, PID tracking, or steal logic to get
+# wrong — the whole "lease expired while the holder was alive / two waiters both break it" class simply does
+# not exist. util-linux flock is present on the target at /usr/bin/flock. `flock -w 30 9` waits (BOUNDED)
+# for the lock; closing fd 9 (or process death) releases it. The bounded wait means even a wedged-but-alive
+# holder — the only case flock could otherwise block on forever — can't hang the SYNCHRONOUS if-up.d hook
+# (CodeRabbit); a `-w` timeout NEVER breaks the holder's lock (unlike the old stale-steal — it only caps how
+# long a waiter waits), so it can never interleave a critical section. Critical sections stay short (well
+# under 30 s). The backgrounded daemon MUST NOT inherit fd 9 — it would hold the lock for its whole lifetime
+# — so every daemon launch closes it with `9>&-`. This protocol is shared VERBATIM with the btmqttd init
+# script.
+# acquire never returns WITHOUT the lock: if the lock file can't be opened, or flock fails / times out / is
+# interrupted, it EXITS non-zero rather than letting the caller run its critical section unlocked
+# (CodeRabbit). A watchdog `respawn` that exits just retries next pass; an operator start/stop surfaces the
+# failure; the best-effort if-up.d hook (`|| true`) just skips and the next interface event re-asserts.
+acquire() { exec 9>>"$LOCKFILE" || exit 1; flock -w 30 9 || exit 1; }
+release() { exec 9>&-; }
 
 # Signal every daemon instance. Defaults to SIGTERM; pass "-9" to force. (Without
 # a default an argument-less call would run `kill "" <pid>` — an invalid signal
@@ -137,13 +173,22 @@ kill_all() {
 # stateless and DHCP-proof. Ownership first: if FW_CHAIN already exists but we did NOT create it this boot
 # (no FW_OWN marker), it is a FOREIGN chain — return without touching it or the port. Otherwise ensure OUR
 # chain exists (creating it claims ownership for this boot; also recreates it if the panel destroyed it),
-# then re-assert its contents from scratch: flush it (we own it, so this touches nothing foreign) and, if
-# CAM_IFACE currently has an address, add exactly one ACCEPT for tcp/CAM_PORT from that interface's own
-# subnet (derived at runtime; iptables masks the address to its /prefix). With NO address yet (the boot
-# race before DHCP, or a lease drop) the chain is left EMPTY — the port stays closed, never opened
-# interface-wide — and a later pass fills it. A DHCP subnet change is handled for free: the flush drops the
-# old subnet's ACCEPT and the new one is added. Finally ensure the INPUT jump exists (re-added after a
-# panel INPUT flush).
+# then reconcile its contents to exactly one ACCEPT for tcp/CAM_PORT from CAM_IFACE's own subnet (derived
+# at runtime; iptables masks the address to its /prefix). With NO address yet (the boot race before DHCP,
+# or a lease drop) the desired state is an EMPTY chain — the port stays closed, never opened interface-
+# wide — and a later event fills it once an address appears.
+#
+# ZERO-WRITE WHEN ALREADY CORRECT (task #42). This runs ONLY on discrete firewall events (start / stop /
+# fw-reassert), never the periodic watchdog — the watchdog touches no iptables, because our `-w 5`
+# mutating calls could HOLD the xtables lock across the factory firewall's LOCK-LESS `-F INPUT; -A INPUT …`
+# rebuild (in /etc/network/if-pre-up.d/iptables, no `-w`), making the factory's own `-A INPUT` calls FAIL
+# SILENTLY — dropping factory rules (FTP-over-USB reflash, security DROPs, even SSH). Even on those
+# events we WRITE ONLY WHEN THE STATE DIFFERS: if OUR chain already holds exactly the one desired ACCEPT
+# for the current subnet (address present) OR is already empty (no address), we make NO iptables writes
+# at all — just re-assert the (itself zero-write when already-last) INPUT jump and return. A DHCP subnet
+# change, a missing/extra rule, or a chain we just created still triggers the flush+repopulate path. The
+# if-up.d hook (go2rtc-net-hook → `fw-reassert`) is THE re-assert path, run sequentially right AFTER the
+# factory rebuild on every interface bring-up (boot / WiFi-reconnect / usb0 / …).
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	fw_chain_exists; fw_rc=$?
@@ -161,15 +206,117 @@ firewall_open() {
 		: > "$FW_OWN" 2>/dev/null || return 0
 		iptables -w 5 -N "$FW_CHAIN" 2>/dev/null || { rm -f "$FW_OWN" 2>/dev/null || true; return 0; }
 	fi
-	# Require a SUCCESSFUL flush before repopulating: if the xtables lock is contended past the wait and -F
-	# fails, abort this pass rather than append a second ACCEPT on top of the stale one (a later pass
-	# retries). The `-w 5` on every mutating call waits up to 5s for the lock (supported on the target, and
-	# under the ~10s lock-steal threshold), so a spurious failure while the panel touches iptables is rare.
-	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || return 0
+	# The desired LAN source for CAM_IFACE's CURRENT address (empty when there is no address yet).
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
+	# Read OUR chain's current rules once, NON-BLOCKING (see LOCKING DISCIPLINE). If the read FAILS (lock
+	# contention or error) we cannot know the chain state, so BAIL this pass rather than write blindly — the
+	# sequential if-up.d hook / next pass re-asserts. A SUCCESSFUL read with empty output is a genuinely
+	# empty chain (n=0), distinct from a failed read (bailed above); so `grep -c` here can only see a real
+	# listing.
+	fw_list=$(iptables -S "$FW_CHAIN" 2>/dev/null) || return 0
+	n=$(printf '%s\n' "$fw_list" | grep -c -- "^-A ")
+	# ZERO-WRITE FAST PATH: if the chain is ALREADY in the desired state, perform NO iptables writes — only
+	# re-assert the jump and return. `-C` (also non-blocking) canonicalizes arg order / `-m tcp` / subnet
+	# masking, so it matches the rule iptables actually stored, not just its textual form. Desired state is
+	# either exactly our one ACCEPT for the current subnet (address present) or an empty chain (no address).
+	if [ -n "$lan" ]; then
+		if [ "$n" -eq 1 ]; then
+			# Non-blocking membership check for the ONE desired rule. Capture its output so we can tell a
+			# genuine MISMATCH (subnet changed / wrong rule → reconcile below) from ANY OTHER failure
+			# (xtables-lock contention, permission/resource/backend error). Only the documented "rule does
+			# not exist" diagnostic may fall through to the mutating `-F`; every other non-zero status BAILS
+			# — writing under lock contention or an unknown error could drop a factory rule, so we defer to
+			# the if-up.d hook / next event. `-C` exits 0 on an exact match; a missing rule prints the
+			# "Bad rule (does a matching rule exist…)" message.
+			if cerr=$(iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" \
+				-s "$lan" -j ACCEPT 2>&1); then
+				fw_jump; return 0                        # already exactly our desired rule → zero-write
+			fi
+			case "$cerr" in
+				*"Bad rule"* | *"matching rule exist"*) : ;;  # genuine mismatch → fall through to reconcile
+				*) return 0 ;;                                # lock / unknown error → bail (never flush)
+			esac
+			# genuine mismatch (changed subnet, wrong rule) → fall through to flush + repopulate
+		fi
+	else
+		[ "$n" -eq 0 ] && { fw_jump; return 0; }
+	fi
+	# State DIFFERS (chain empty-but-needs-a-rule, wrong/changed subnet, extra rules, or a rule that should
+	# be gone): re-assert from scratch. Require a SUCCESSFUL flush before repopulating: if the xtables lock
+	# is contended past the wait and `-F` fails, abort this pass rather than append a second ACCEPT on top
+	# of the stale one (a later pass retries). The `-w 5` on every mutating call waits up to 5s for the
+	# xtables lock (supported on the target), so a spurious failure while the panel touches iptables is rare;
+	# a slow run under contention is safe because the flock mutex auto-releases only on death, never on a
+	# timer, so a live holder is never preempted.
+	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || return 0
+	# shellcheck disable=SC2015  # `[ -n "$lan" ] && add || true`: with no address we intentionally leave
+	# the chain empty (port closed) and still reach fw_jump — `|| true` only neutralizes the guard's exit.
 	[ -n "$lan" ] && iptables -w 5 -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
 		-j ACCEPT 2>/dev/null || true
 	fw_jump
+}
+
+# True (0) when the media port is ALREADY in its intended state for CAM_IFACE's CURRENT address: either our
+# ACCEPT for the present subnet is installed AND INPUT jumps to our chain, or the interface has NO address
+# yet (the port is intentionally closed until the address-up event opens it — nothing to retry). Any
+# inspection failure (lock contention / error) reads as "not confirmed open" so the caller retries; it can
+# never yield a false "open". Reads only, used SOLELY by firewall_open_confirmed on the discrete event path
+# (never the watchdog), so its lock-taking `-S` / `-C` is consistent with task #42.
+firewall_is_open() {
+	command -v iptables >/dev/null 2>&1 || return 0
+	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
+	[ -z "$lan" ] && return 0                                   # no address → correctly closed; settled
+	# Mirror fw_jump's EXACT invariant: our chain must be referenced by EXACTLY ONE INPUT jump AND that jump
+	# must be LAST (after the factory/admin filters, before the policy DROP). A present-but-not-last or
+	# duplicated jump is NOT "open" — our ACCEPT could then sit ahead of a factory filter — so it must keep
+	# the caller retrying until fw_jump repositions it (CodeRabbit). A failed listing (lock/error) yields
+	# n=0 / no last match ⇒ "not open" ⇒ retry, never a false "open".
+	inp=$(iptables -S INPUT 2>/dev/null) || return 1
+	n=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
+	last=$(printf '%s\n' "$inp" | tail -n 1)
+	[ "$n" -eq 1 ] && [ "$last" = "-A INPUT -j $FW_CHAIN" ] || return 1
+	# And OUR chain must hold EXACTLY ONE rule — the ACCEPT for the current subnet — matching firewall_open's
+	# desired state. Confirming the ACCEPT merely EXISTS isn't enough: if a transient flush bailed and left a
+	# stale/extra rule alongside it, that extra rule could expose another port or source, so an over-full
+	# chain reads "not open" ⇒ keep retrying until firewall_open reconciles it to the single rule (Codex). A
+	# failed chain listing likewise reads "not open" (retry), never a false "open".
+	fw_rules=$(iptables -S "$FW_CHAIN" 2>/dev/null) || return 1
+	cn=$(printf '%s\n' "$fw_rules" | grep -c -- "^-A ")
+	[ "$cn" -eq 1 ] || return 1
+	iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null
+}
+
+# Open the media port with a BOUNDED retry — for the DISCRETE EVENT path (start / fw-reassert) ONLY. A
+# single firewall_open deliberately BAILS without establishing the rule on a transient failure (xtables
+# lock contention past `-w 5`, or an ACCEPT that lost a race with the factory chain rebuild). Because the
+# periodic watchdog no longer retries iptables (task #42 / Codex P1), a transient miss would otherwise
+# leave :8554 CLOSED until the next interface event or a manual restart. So re-attempt a few times,
+# verifying the end state with firewall_is_open between tries and pausing briefly to let a contending
+# factory rebuild finish. Zero extra cost once open (the first firewall_is_open short-circuits, and the
+# no-address boot race settles immediately without sleeping).
+#
+# LOCK DISCIPLINE (CodeRabbit / Codex): this function TAKES THE MUTEX ITSELF, once PER ATTEMPT, around a
+# single firewall_open + verify, and the inter-attempt sleep runs LOCK-FREE. The flock mutex is never stolen
+# from a live holder (it auto-releases only on death), so no critical section here can be interleaved
+# regardless of how long its `-w 5` waits block. The per-attempt structure is kept for RESPONSIVENESS:
+# releasing between attempts lets a concurrent start/stop/respawn proceed during the sleeps instead of
+# blocking behind the whole retry loop. Because it self-locks, the CALLER MUST NOT hold the mutex. Each
+# attempt re-reads the DISABLED marker UNDER the lock, so a concurrent `stop` that disables us mid-retry
+# wins and we never re-open a port it just closed. Bounded at 3 attempts; a
+# persistent failure defers to the next fw-reassert, which the if-up.d hook fires right after every
+# interface event.
+firewall_open_confirmed() {
+	fw_try=0
+	while :; do
+		acquire
+		if [ -e "$DISABLED" ]; then release; return 0; fi   # concurrent stop disabled us → do not re-open
+		firewall_open
+		if firewall_is_open; then release; return 0; fi
+		release
+		fw_try=$((fw_try + 1))
+		[ "$fw_try" -ge 3 ] && return 0
+		sleep 1                                             # LOCK-FREE pause between attempts
+	done
 }
 
 # Close the media port again (service stopped/disabled/not running): tear down everything WE created and
@@ -184,14 +331,84 @@ firewall_close() {
 	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || true
 	iptables -w 5 -X "$FW_CHAIN" 2>/dev/null || true
 	# Drop ownership ONLY when a SUCCESSFUL listing confirms both the chain and its INPUT jump are gone. A
-	# failed listing (inspection error) or a still-present chain/jump keeps FW_OWN so a later close/respawn
-	# retries the teardown — an inspection failure must never be read as "absent". One `-S`
+	# failed listing (inspection error) or a still-present chain/jump keeps FW_OWN so a later stop /
+	# fw-reassert retries the teardown — an inspection failure must never be read as "absent". One `-S`
 	# lists the whole filter table (chain declarations `-N …` and rules `-A …`), so it covers both; capture
 	# it once and bail on failure rather than piping (a failed `-S` into grep would look empty = "gone").
-	rules=$(iptables -w 5 -S 2>/dev/null) || return 0
+	# Non-blocking read (see LOCKING DISCIPLINE); a contended/failed read bails and a later pass retries.
+	rules=$(iptables -S 2>/dev/null) || return 0
 	printf '%s\n' "$rules" | grep -q -- "^-A INPUT -j $FW_CHAIN\$" && return 0   # our INPUT jump still present
 	printf '%s\n' "$rules" | grep -q -- "^-N $FW_CHAIN\$" && return 0            # chain still declared
 	rm -f "$FW_OWN" 2>/dev/null || true
+}
+
+# (Re)assemble the tmpfs RUNTIME SDP go2rtc reads. Recreate the tmpfs dir (mkdir -p — /var/run is
+# cleared every boot), then either copy the read-only template verbatim or, when a learned sprop value
+# FOR THE CURRENT BRANCH is persisted (see the branch gate below) AND the template does not already
+# carry one, splice `sprop-parameter-sets=<value>;` into the fmtp line immediately after
+# `packetization-mode=1;` — the exact order Go2RtcConfig.BuildOnDeviceSdp / sprop.rs use. Written via a
+# temp file + atomic mv so go2rtc never reads a half-written SDP. Best-effort: a missing template (a
+# non-camera image) is a no-op, and any failure leaves whatever runtime SDP already existed rather than
+# truncating it.
+assemble_sdp() {
+	[ -f "$TEMPLATE_SDP" ] || return 0
+	mkdir -p "$RUNTIME_SDP_DIR" 2>/dev/null || return 0
+	tmp="$RUNTIME_SDP.tmp.$$"
+	# Resolve the sprop value ONLY when the persisted record's branch matches the current install's
+	# CAMERA_BRANCH (task #41). The record is `<branch>\t<value>`: cut -f1 is the branch (TAB is cut's
+	# default delimiter), cut -f2- the value. A legacy bare value (no TAB) makes cut -f1 == the whole
+	# line, which won't equal a single-digit branch, so it is ignored and btmqttd re-learns it.
+	sprop=""
+	if [ -s "$SPROP_FILE" ]; then
+		rec=$(head -n 1 "$SPROP_FILE" 2>/dev/null)
+		rec_branch=$(printf '%s' "$rec" | cut -f1)
+		rec_value=$(printf '%s' "$rec" | cut -f2- | sed 's/[[:space:]]*$//')
+		# Resolve the CURRENT branch and splice ONLY when it unambiguously matches the installer's
+		# canonical value, ERRING TOWARD NOT SPLICING otherwise. Rather than reimplement config.rs's
+		# full shell-quoting parser in sh (a losing game), we adopt a provably-safe rule: this yields a
+		# concrete 0/1 ONLY for a pure-integer assignment — the exact form the installer writes
+		# (`CAMERA_BRANCH=0`/`=1`) — and anything else (quoted, `export`-prefixed, non-numeric, absent)
+		# yields the sentinel `none`, which matches no record so nothing is spliced. ACCEPTED TRADEOFF
+		# (Codex): the INSTALLER only ever writes the canonical form, so a real unit always resolves 0/1
+		# and fast-opens. If someone HAND-EDITS the generated conf to a non-canonical shell form, config.rs
+		# may still resolve a branch (so btmqttd treats an existing record as already-learned and does not
+		# re-learn) while this yields `none` and leaves the runtime SDP bare — the panel then keeps the
+		# ~20 s cold-open resolve. That is SAFE (never a stale/mismatched splice), just slower, and only for
+		# a hand-corrupted config; we deliberately do not add a second parser to optimize that case.
+		# We DO mirror the two parse_env behaviours that could otherwise flip a real match: the LAST
+		# assignment wins (parse_env builds a map), and an optional `export ` prefix / surrounding
+		# whitespace / inline `#` comment are ignored. Leading zeros are stripped so 00 -> 0 and 01 -> 1
+		# compare as numbers, and > 1 clamps to 1 — matching parse::<u8>().filter(|b| *b <= 1). Safety
+		# invariant: whenever this yields 0 or 1, config.rs provably yields the SAME value, so go2rtcd
+		# can never splice a value for a branch btmqttd is not actually running.
+		# Match a CAMERA_BRANCH assignment the way config.rs's parse_env recognizes the KEY, so tail -n 1
+		# picks the true LAST assignment (config.rs last-wins) instead of skipping later lines it can't
+		# see: strip leading line whitespace (line.trim()), a LITERAL `export ` prefix (strip_prefix
+		# ("export ") matches ONE space — `export<TAB>…` is not an export line there and must NOT resolve),
+		# then allow whitespace around the key and the `=` (key.trim()). The value is cleaned + integer-
+		# validated below; a non-canonical value still falls to the `none` sentinel.
+		cur_branch=$(sed -n 's/^[[:space:]]*//; s/^export //; s/^[[:space:]]*CAMERA_BRANCH[[:space:]]*=\(.*\)$/\1/p' "$CONF_FILE" 2>/dev/null | tail -n 1)
+		cur_branch=$(printf '%s' "$cur_branch" | sed 's/^[[:blank:]]*//; s/[[:blank:]]#.*$//; s/[[:blank:]]*$//')
+		case "$cur_branch" in
+			'' | *[!0-9]*) cur_branch=none ;;   # absent / quoted / export-only / non-integer => never match
+			*)
+				case "$(printf '%s' "$cur_branch" | sed 's/^0*//')" in
+					'') cur_branch=0 ;;         # all-zero digits (0, 00, 000, …) => numeric 0
+					*) cur_branch=1 ;;          # 1/01/… or any value > 1 => 1 (config.rs clamps > 1 to 1)
+				esac
+				;;
+		esac
+		[ "$rec_branch" = "$cur_branch" ] && sprop="$rec_value"
+	fi
+	if [ -n "$sprop" ] && ! grep -q 'sprop-parameter-sets=' "$TEMPLATE_SDP"; then
+		# Escape sed replacement metacharacters (\ & /) — a base64 sprop value can contain '/' and '+'.
+		esc=$(printf '%s' "$sprop" | sed 's/[\\&/]/\\&/g')
+		sed "s/packetization-mode=1;/packetization-mode=1;sprop-parameter-sets=${esc};/" \
+			"$TEMPLATE_SDP" > "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+	else
+		cp "$TEMPLATE_SDP" "$tmp" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
+	fi
+	mv "$tmp" "$RUNTIME_SDP" 2>/dev/null || { rm -f "$tmp" 2>/dev/null; return 0; }
 }
 
 # Launch the daemon iff enabled (no marker) and not already running. Caller holds
@@ -207,16 +424,21 @@ launch_if_enabled() {
 	mkdir -p "$LOGDIR" 2>/dev/null
 	chmod 700 "$LOGDIR" 2>/dev/null
 	[ -L "$LOGFILE" ] && rm -f "$LOGFILE"
-	"$DAEMON" -config "$CONFIG" >> "$LOGFILE" 2>&1 &
+	# Assemble the tmpfs runtime SDP right before launch, so go2rtc reads a fresh copy each time it
+	# (re)starts — reflecting any sprop learned+persisted since the last launch.
+	assemble_sdp
+	# Close the mutex fd (9) in the child so the long-lived daemon does not inherit the flock and hold it
+	# for its whole lifetime (which would block every later acquire until the daemon exits).
+	"$DAEMON" -config "$CONFIG" >> "$LOGFILE" 2>&1 9>&- &
 	return 0
 }
 
-# Poll briefly for a just-backgrounded daemon to exec $DAEMON. Without this, the is_running check right
-# after a launch can race the child's exec and read "down", so a manual start/restart would close the
-# media port until the next watchdog pass ~60s later. Only ever called after launch_if_enabled
-# reports it launched, so steady-state respawns (already running) never sleep. Bounded to ~5s — well
-# under the ~10s lock-steal threshold — then returns is_running's verdict so a genuinely failed launch
-# still ends with the port closed.
+# Poll briefly for a just-backgrounded daemon to exec $DAEMON, so a manual `start`/`restart` returns only
+# once the daemon is actually up rather than racing the child's exec. Only ever called after
+# launch_if_enabled reports it launched, so steady-state respawns (already running) never sleep. Bounded
+# to ~5s; the flock mutex is held by this live process and auto-releases only on death, so the short hold is
+# safe. The firewall no longer depends on this verdict (the port follows the enabled/disabled intent, not
+# the run state), so the return value is informational.
 wait_running() {
 	i=0
 	while ! is_running && [ "$i" -lt 5 ]; do
@@ -228,32 +450,63 @@ wait_running() {
 
 case "$1" in
 	start)
-		# Operator/boot intent: enable the service, launch, then open the media port iff it came up.
+		# Operator/boot intent: enable the service, launch the daemon, and open the media port. The port
+		# follows the ENABLED intent, NOT the daemon's momentary run state — because the periodic watchdog
+		# no longer (re)opens the firewall (see `respawn`), the port must be open whenever the service is
+		# enabled so a slow/failed first launch (then a later respawn success) still ends up reachable.
+		# firewall_open is idempotent and zero-write when already correct; firewall_open_confirmed wraps it in
+		# a bounded retry so a boot-time overlap with the factory rebuild that makes one attempt BAIL is
+		# re-attempted here instead of leaving :8554 closed until the next interface event (Codex). It
+		# SELF-LOCKS per attempt (see its LOCK DISCIPLINE note), so it is called OUTSIDE this arm's mutex —
+		# the daemon launch stays under the lock, then the firewall is asserted with its own per-attempt lock.
 		acquire
 		rm -f "$DISABLED" 2>/dev/null
 		launch_if_enabled && wait_running
-		if is_running; then firewall_open; else firewall_close; fi
 		release
+		firewall_open_confirmed
 		echo "$NAME started"
 		;;
 	respawn)
-		# Supervisor-only reconcile (bt_service_watchdog). Under the lock: enforce
-		# the desired state - if stopped (marker present) kill any lingering or
-		# racily-started instance and close the port; otherwise (re)launch if it is
-		# down and (re)assert the firewall rule — running firewall_open EVERY pass is
-		# what re-opens :8554 after the panel rebuilds/flushes its chain. The rule is
-		# tied to the daemon actually running, so a persistently failed launch (missing
-		# binary/config) leaves no open port. Never clears the marker, so it
-		# cannot undo an operator's `stop`.
+		# Supervisor-only reconcile (bt_service_watchdog). This periodic pass MUST NOT touch iptables
+		# (task #42 / Codex P1): EVERY iptables invocation — even a read-only `-S` — acquires the xtables
+		# lock at launch, and if that overlaps the factory firewall's LOCK-LESS `-A INPUT` rebuild the
+		# factory call fails and a rule is dropped (FTP-over-USB reflash, SSH, security DROPs). The watchdog
+		# fires on an INDEPENDENT timer that cannot be sequenced against that rebuild, so it manages ONLY
+		# the daemon process here. The firewall is (re)asserted EXCLUSIVELY by discrete, sequenceable events
+		# — `start`, `stop`, and the if-up.d hook (`fw-reassert`), which runs RIGHT AFTER each factory
+		# rebuild — so our GO2RTC rule is restored after every flush without the watchdog ever racing the
+		# lock. Never clears the marker, so it cannot undo an operator's `stop`.
 		acquire
 		if [ -e "$DISABLED" ]; then
 			kill_all
-			firewall_close
 		else
 			launch_if_enabled && wait_running
-			if is_running; then firewall_open; else firewall_close; fi
 		fi
 		release
+		;;
+	fw-reassert)
+		# Firewall-ONLY reconcile (task #42) — the SINGLE source of truth for our GO2RTC rule, called by
+		# the if-up.d hook (go2rtc-net-hook) RIGHT AFTER the factory firewall rebuild on any iface bring-up,
+		# and (with start/stop) the only place that touches iptables. It re-asserts sequentially — no daemon
+		# racing the factory's lock-less INPUT writes — and is idempotent + zero-write in steady state (see
+		# firewall_open). It must NEVER launch or kill the daemon. The firewall follows the ENABLED/DISABLED
+		# intent, NOT the daemon's momentary run state: since the watchdog no longer re-opens the port, it
+		# must stay open whenever the service is enabled (a brief crash/relaunch window with :8554 open but
+		# nothing listening just yields a TCP reset — harmless, and LAN-source-restricted).
+		# firewall_open_confirmed SELF-LOCKS per attempt (re-reading DISABLED under the lock each time), so it
+		# is called WITHOUT this arm's mutex; the close path still runs under an explicit acquire/release. The
+		# outer test is only a fast-path dispatch (a racy read) — BOTH branches re-check DISABLED UNDER the
+		# lock so a concurrent start/stop that flips the marker after this test still wins: the open branch
+		# via firewall_open_confirmed's per-attempt check, and the close branch here re-checks before closing
+		# (matching the stop path), so a `start` that clears DISABLED can't be undone by a stale close that
+		# would otherwise leave the enabled service with :8554 closed (CodeRabbit).
+		if [ ! -e "$DISABLED" ]; then
+			firewall_open_confirmed
+		else
+			acquire
+			[ -e "$DISABLED" ] && firewall_close
+			release
+		fi
 		;;
 	stop)
 		# Operator intent: disable, then terminate. Set the marker FIRST (under the
@@ -292,12 +545,14 @@ case "$1" in
 		fi
 		;;
 	restart)
-		# `stop` sets the marker + waits for exit; `start` clears it + relaunches.
-		"$0" stop
-		"$0" start
+		# `stop` sets the marker + waits for exit; `start` clears it + relaunches. Chain them and PROPAGATE
+		# a child failure (e.g. an acquire that exited non-zero) via `exit $?` instead of falling through to
+		# the script's trailing `exit 0`, so a failed restart never reports success (Codex).
+		"$0" stop && "$0" start
+		exit $?
 		;;
 	*)
-		echo "Usage: $0 {start|stop|status|restart|respawn}"
+		echo "Usage: $0 {start|stop|status|restart|respawn|fw-reassert}"
 		exit 1
 		;;
 esac

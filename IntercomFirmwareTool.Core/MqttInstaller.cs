@@ -186,6 +186,35 @@ namespace IntercomFirmwareTool.Core
         /// on-device mode on must set it — <see cref="Validate"/> enforces this).</summary>
         public string? CameraRtspPass { get; init; }
 
+        /// <summary>
+        /// The panel's H.264 parameter sets (SPS,PPS) as the RFC 6184 <c>sprop-parameter-sets</c>
+        /// value — one or more base64 sets separated by commas (typically SPS,PPS), e.g.
+        /// <c>Z0JAHqaAoD2Q,aM48gAA=</c> — embedded
+        /// into the on-device go2rtc SDP's <c>a=fmtp</c> line (issue #120, <see cref="CameraOnDevice"/>
+        /// mode only).
+        /// <para>WHY: the panel's own SDP carries NO sprop, and its encoder emits an in-stream SPS/PPS
+        /// only about every 20 s (a very long keyframe interval). Without sprop, go2rtc's <c>-c:v copy</c>
+        /// ffmpeg must wait for that keyframe before it can resolve the video and publish — a ~20 s black
+        /// wait on every cold open (hardware-measured on the C100X). Handing ffmpeg the parameter sets up
+        /// front via the SDP makes it resolve in well under a second.</para>
+        /// <para>PER-DEVICE and NORMALLY AUTO-LEARNED: the value is fixed for a given panel but differs
+        /// across them, so it is NOT hardcoded. You usually leave this EMPTY (the recommended default):
+        /// with on-demand viewing enabled, btmqttd learns the panel's parameter sets on-device during the
+        /// first real view and persists them on the writable <c>cfg/extra</c> partition — keyed by the
+        /// selected <see cref="CameraBranch"/>, so a reflash that flips hi/lo-res re-learns rather than
+        /// splicing a stale value (see <c>native/btmqttd/src/sprop.rs</c>) — so the runtime SDP is
+        /// reassembled with them at every boot, transparent and zero-config. This field is an OPTIONAL
+        /// pre-seed only for a build where on-device
+        /// learning can't run; supply a value obtained from a KNOWN-GOOD source for that exact panel. (Do
+        /// NOT try to capture it with ffmpeg's <c>-sdp_file</c>: hardware testing in PR #129 proved that on
+        /// this panel's <c>-c:v copy</c> path ffmpeg never writes <c>sprop-parameter-sets</c> into the SDP
+        /// — which is exactly why btmqttd parses the SPS/PPS out of the RTP directly.) Empty/NULL = omit it
+        /// (learned on-device, or the ~20 s-first-frame fallback until it is). A WRONG value corrupts
+        /// decoding, so <see cref="Validate"/> requires one or more comma-separated, strictly
+        /// base64-decodable sets.</para>
+        /// </summary>
+        public string? CameraSprop { get; init; }
+
         /// <summary>Home Assistant MQTT discovery topic prefix (HA default is "homeassistant").</summary>
         public string HaDiscoveryPrefix { get; init; } = "homeassistant";
         /// <summary>
@@ -390,6 +419,12 @@ namespace IntercomFirmwareTool.Core
         private const string Go2RtcdInitPath = "/etc/init.d/go2rtcd";       // its own SysV init script
         private const string Go2RtcBootLink = "/etc/rc5.d/S99zGo2rtc";      // boot symlink (after factory S99)
         private const string Go2RtcBootTarget = "../init.d/go2rtcd";
+        // ifupdown if-up.d hook (task #42): runs AFTER the factory if-pre-up.d/iptables rebuild on EVERY
+        // interface bring-up and re-asserts the GO2RTC :8554 rule via `go2rtcd fw-reassert`, so boot/WiFi-
+        // reconnect/usb0 restore the port sequentially — it is the SOLE re-assert path (the periodic
+        // watchdog touches no iptables). Installed 0755 root:root on the on-device camera path only.
+        private const string Go2RtcNetHookDir = "/etc/network/if-up.d";
+        private const string Go2RtcNetHookPath = "/etc/network/if-up.d/go2rtc";
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
@@ -577,6 +612,18 @@ namespace IntercomFirmwareTool.Core
             fs.SetMode(Go2RtcdInitPath, ToMode(755));
             fs.SetOwner(Go2RtcdInitPath, 0, 0);
 
+            // ifupdown if-up.d hook (task #42), 0755 root:root — same gate/mode as go2rtcd. ifupdown runs
+            // if-up.d scripts AFTER the interface is up, right after the factory if-pre-up.d/iptables
+            // rebuild, so this re-asserts our GO2RTC :8554 rule sequentially (via `go2rtcd fw-reassert`)
+            // instead of the watchdog racing the factory's lock-less INPUT writes. The C100X v1.5.8 sample
+            // ships an EXISTING, EMPTY /etc/network/if-up.d, but EnsureDir it first so the install is robust
+            // on any variant where it is absent (Copilot); /etc/network itself is guaranteed by ifupdown.
+            string go2rtcNetHook = LoadScript(ResourcePrefix + "go2rtc-net-hook");
+            EnsureDir(fs, Go2RtcNetHookDir);
+            WriteTextFile(fs, Go2RtcNetHookPath, go2rtcNetHook);
+            fs.SetMode(Go2RtcNetHookPath, ToMode(755));
+            fs.SetOwner(Go2RtcNetHookPath, 0, 0);
+
             // Vendored media binaries (byte-exact, SHA-256 verified on read), 0775 root:root — the
             // same mode as the always-installed btmqttd. These are the two binaries 1c-1 embedded but
             // deliberately left out of PayloadBinaries.All; the on-device path is where they install.
@@ -590,6 +637,13 @@ namespace IntercomFirmwareTool.Core
 
             // Config dir + generated files. go2rtc.yaml holds the RTSP password → 0600 root:root; the
             // SDP carries no secret → 0644. Both are byte-exact re-checked by ValidateMqtt.
+            //
+            // The SDP written here (Go2RtcSdpPath, /etc/.../doorbell.sdp) is the read-only TEMPLATE/seed:
+            // the rootfs is mounted read-only, so go2rtc does NOT read this at runtime. Instead the
+            // go2rtcd init script copies it into a tmpfs RUNTIME SDP (Go2RtcConfig.OnDeviceRuntimeSdpPath)
+            // at every boot, splicing in the persisted learned sprop if any; the go2rtc.yaml's exec -i
+            // points at that runtime path. Nothing here creates /var/run/btmqttd — it is tmpfs, made at
+            // boot by go2rtcd.
             EnsureDir(fs, Go2RtcDir);
             fs.SetMode(Go2RtcDir, ToMode(755));
             fs.SetOwner(Go2RtcDir, 0, 0);
@@ -612,7 +666,8 @@ namespace IntercomFirmwareTool.Core
             Go2RtcConfig.BuildOnDeviceYaml(
                 OnDeviceStreamName,
                 PayloadBinaries.Ffmpeg.InstallPath,
-                Go2RtcSdpPath,
+                // The yaml's exec -i is fixed to the tmpfs runtime SDP (Go2RtcConfig.OnDeviceRuntimeSdpPath);
+                // the installer still writes the TEMPLATE to Go2RtcSdpPath (/etc/.../doorbell.sdp) below.
                 opts.CameraRtspUser,
                 opts.CameraRtspPass!);
 
@@ -810,6 +865,20 @@ namespace IntercomFirmwareTool.Core
                         || opts.CameraRtspUser.Any(char.IsControl) || opts.CameraRtspPass!.Any(char.IsControl))
                         throw new ArgumentException(
                             CoreStrings.Get("Mqtt_CameraRtspCredsRequired"), nameof(opts));
+                    // CameraSprop is embedded VERBATIM into the SDP fmtp line, so validate STRUCTURE, not
+                    // just the alphabet. RFC 6184 sprop-parameter-sets is a comma-separated list of base64
+                    // parameter sets (SPS/PPS); each token must be a NON-EMPTY, well-formed base64 string.
+                    // An alphabet-only check would wave through ",", "AA,,BB", "AA=BB", or a lone "A" —
+                    // values ffmpeg cannot decode as parameter sets, so an install accepted here would
+                    // still yield a broken/delayed stream. We (a) reject any character outside the base64
+                    // alphabet + ',' separator (whitespace/';'/CR-LF would break the SDP line or inject an
+                    // attribute), then (b) require every comma-token to decode as base64. Empty/null is
+                    // allowed: sprop is simply omitted (the ~20 s-first-frame fallback). This is still not
+                    // a semantic check — a well-formed but WRONG value is the operator's responsibility
+                    // (see MqttOptions.CameraSprop); it only rejects values that cannot be parameter sets.
+                    if (!string.IsNullOrEmpty(opts.CameraSprop) && !IsValidSprop(opts.CameraSprop))
+                        throw new ArgumentException(
+                            CoreStrings.Get("Mqtt_CameraSpropInvalid"), nameof(opts));
                 }
             }
 
@@ -996,6 +1065,47 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
+        /// True iff <paramref name="sprop"/> is a well-formed RFC 6184 <c>sprop-parameter-sets</c>
+        /// value: a comma-separated list of one or more NON-EMPTY, strictly-base64-decodable parameter
+        /// sets. Callers pass only a non-empty value (empty/null means "omit sprop"). This is structural,
+        /// not semantic — it rejects values that cannot be parameter sets (","; "AA,,BB"; "AA=BB"; a lone
+        /// "A"), but a well-formed yet wrong value is the operator's responsibility.
+        /// </summary>
+        private static bool IsValidSprop(string sprop)
+        {
+            // (0) Length cap — a real sprop-parameter-sets value is only a few dozen chars (SPS,PPS).
+            // Bound the whole string BEFORE the per-token base64 work so a hostile/accidental huge
+            // CameraSprop can't force large scratch allocations here or an oversized SDP fmtp line
+            // downstream (Copilot). 512 is far above any legitimate value; it also caps each token.
+            if (sprop.Length > 512)
+                return false;
+            // (a) Alphabet guard — only base64 chars, '=' padding, and ',' separators. This is NOT
+            // redundant with the base64 decode in (b): Convert.TryFromBase64String *ignores* whitespace,
+            // so on its own it would accept "AA BB" or "AA\nBB". Whitespace, ';', and CR/LF must be
+            // rejected because the value is spliced VERBATIM into the SDP fmtp line — a space or newline
+            // breaks the line, ';' injects another fmtp parameter.
+            foreach (var c in sprop)
+                if (c is not ((>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9')
+                              or '+' or '/' or '=' or ','))
+                    return false;
+            // (b) Structure guard — each comma-token must be a NON-EMPTY, well-formed base64 string.
+            foreach (var token in sprop.Split(','))
+            {
+                // Empty token = a leading/trailing/double comma ("," , "AA,,BB", "AA,"): reject. (Guard
+                // this explicitly — TryFromBase64String treats "" as a valid zero-byte decode.)
+                if (token.Length == 0)
+                    return false;
+                // Token is already whitespace-free (guard a), so TryFromBase64String now only accepts a
+                // correctly-padded, multiple-of-4 base64 string: "AA=BB" (mid-string '=') and a lone "A"
+                // (bad length) both fail. Decoded bytes never exceed the input length, so an input-sized
+                // scratch buffer always suffices.
+                if (!Convert.TryFromBase64String(token, new byte[token.Length], out _))
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>
         /// Re-checks every install artifact on an open filesystem (files with
         /// expected mode/owner, config content, patches, symlinks, and the runtime
         /// deps the README lists), returning a pass/fail checklist. Takes an open
@@ -1162,6 +1272,13 @@ namespace IntercomFirmwareTool.Core
                     string go2rtcdScript = fs.FileExists(Go2RtcdInitPath) ? ReadAllText(fs, Go2RtcdInitPath) : "";
                     checks.Add(new("go2rtcd matches the embedded init script",
                         go2rtcdScript == LoadScript(ResourcePrefix + "go2rtcd"), ""));
+
+                    // if-up.d hook (task #42): presence/mode/owner + byte-exact content, like go2rtcd. It
+                    // re-asserts the GO2RTC :8554 rule after the factory firewall rebuild on every iface bring-up.
+                    CheckFile(fs, checks, Go2RtcNetHookPath, 755);
+                    string go2rtcNetHook = fs.FileExists(Go2RtcNetHookPath) ? ReadAllText(fs, Go2RtcNetHookPath) : "";
+                    checks.Add(new("go2rtc if-up.d hook matches the embedded script",
+                        go2rtcNetHook == LoadScript(ResourcePrefix + "go2rtc-net-hook"), ""));
                     foreach (var bin in new[] { PayloadBinaries.Ffmpeg, PayloadBinaries.Go2Rtc })
                     {
                         CheckFile(fs, checks, bin.InstallPath, 775);
@@ -1207,6 +1324,7 @@ namespace IntercomFirmwareTool.Core
                         ("go2rtc binary", PayloadBinaries.Go2Rtc.InstallPath),
                         ("ffmpeg binary", PayloadBinaries.Ffmpeg.InstallPath),
                         ("go2rtcd init script", Go2RtcdInitPath),
+                        ("go2rtc if-up.d hook", Go2RtcNetHookPath),
                         ("go2rtc config dir", Go2RtcDir),
                         ("S99zGo2rtc boot link", Go2RtcBootLink),
                     })

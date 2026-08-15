@@ -59,6 +59,31 @@ namespace IntercomFirmwareTool.Core
         public const string OnDeviceFfmpegPath = "/usr/sbin/ffmpeg";
 
         /// <summary>
+        /// The RUNTIME SDP go2rtc's <c>exec -i</c> reads on the device — on <b>tmpfs</b>, because the
+        /// rootfs (including <c>/etc</c>) is mounted read-only. The installer writes the read-only
+        /// TEMPLATE SDP under <c>/etc/btmqttd/go2rtc/</c>; the <c>go2rtcd</c> init script (re)assembles
+        /// this runtime copy at every boot (copy the template into tmpfs, then splice in the persisted
+        /// learned <c>sprop-parameter-sets</c>, if any). btmqttd's <c>sprop.rs</c> patches THIS path
+        /// after a fresh learn, so it must equal <c>sprop.rs</c>'s <c>SDP_PATH</c>. Fixed (the on-device
+        /// stream is always <see cref="DefaultStreamName"/>).
+        /// </summary>
+        public const string OnDeviceRuntimeSdpPath = "/var/run/btmqttd/doorbell.sdp";
+
+        /// <summary>
+        /// The loopback UDP endpoint btmqttd listens on for the raw H.264 RTP copy the on-device
+        /// go2rtc live-view ffmpeg ships (its SECOND output). btmqttd's <c>sprop.rs</c> binds THIS
+        /// EXACT <c>host:port</c> (its <c>SPROP_RTP_ADDR</c>) to receive the stream and parse the
+        /// panel's periodic in-band SPS (NAL 7) / PPS (NAL 8) straight out of the RTP payload, so the
+        /// two MUST stay in sync. Hardware testing (issue #120, PR #129) proved ffmpeg's
+        /// <c>-sdp_file</c> can NOT emit the panel's <c>sprop-parameter-sets</c> on a copy path — it
+        /// parses the SPS only far enough to learn the resolution and never writes the parameter sets
+        /// into the SDP — so btmqttd parses the RTP itself instead. Port 40100 is loopback and collides
+        /// with nothing else in the on-device design: not the 40000/40002 siphon (on 127.0.0.2), nor
+        /// the RTSP (8554) / API (1984) listeners.
+        /// </summary>
+        public const string OnDeviceSpropRtpEndpoint = "127.0.0.1:40100";
+
+        /// <summary>
         /// Normalise a go2rtc stream name to the safe subset go2rtc keys and Home Assistant entity ids
         /// tolerate: lower-case ASCII letters, digits, <c>_</c> and <c>-</c>. Everything else is dropped;
         /// an empty or all-invalid input becomes <see cref="DefaultStreamName"/>. Deterministic so the
@@ -147,8 +172,18 @@ namespace IntercomFirmwareTool.Core
             sb.Append("t=0 0\n");
             sb.Append(string.Create(ci, $"m=video {opts.CameraVideoPort} RTP/AVP {VideoPayloadType}\n"));
             sb.Append(string.Create(ci, $"a=rtpmap:{VideoPayloadType} H264/{VideoClockRate}\n"));
+            // sprop-parameter-sets (issue #120, on-device, hardware-diagnosed on the C100X): the panel's
+            // encoder emits an in-stream SPS/PPS only ~every 20 s, so with a bare fmtp go2rtc's `-c:v copy`
+            // ffmpeg blocks ~20 s waiting for that keyframe before it can resolve 640x480 and publish —
+            // a black wait on every cold open. Embedding the panel's parameter sets here lets ffmpeg
+            // resolve in <1 s. The value is per-panel (MqttOptions.CameraSprop, base64+comma validated);
+            // when unset we omit it and accept the ~20 s-first-frame fallback. It goes between
+            // packetization-mode and profile-level-id, matching the order ffmpeg's own rtp muxer emits.
+            string sprop = string.IsNullOrWhiteSpace(opts.CameraSprop)
+                ? ""
+                : $"sprop-parameter-sets={opts.CameraSprop};";
             sb.Append(string.Create(ci,
-                $"a=fmtp:{VideoPayloadType} packetization-mode=1;profile-level-id={VideoProfileLevelId}\n"));
+                $"a=fmtp:{VideoPayloadType} packetization-mode=1;{sprop}profile-level-id={VideoProfileLevelId}\n"));
             sb.Append("a=recvonly\n");
             return sb.ToString();
         }
@@ -163,11 +198,13 @@ namespace IntercomFirmwareTool.Core
         /// <b>mandatory</b> username/password auth;</item>
         /// <item>the stream is <b>video-only</b> (Phase 1) — the ffmpeg <c>exec</c> uses <c>-an -c:v copy</c>.</item>
         /// </list>
-        /// <paramref name="ffmpegPath"/> and <paramref name="sdpPath"/> are absolute on-device paths.
-        /// LF line endings, trailing newline.
+        /// <paramref name="ffmpegPath"/> is an absolute on-device path. The <c>exec -i</c> input is fixed
+        /// to the tmpfs <see cref="OnDeviceRuntimeSdpPath"/> (NOT the read-only <c>/etc</c> template):
+        /// go2rtc reads the runtime SDP that <c>go2rtcd</c> reassembles at boot and that <c>sprop.rs</c>
+        /// patches. LF line endings, trailing newline.
         /// </summary>
         public static string BuildOnDeviceYaml(
-            string streamName, string ffmpegPath, string sdpPath, string rtspUser, string rtspPass)
+            string streamName, string ffmpegPath, string rtspUser, string rtspPass)
         {
             // RTSP is LAN-facing, so auth is MANDATORY (issue #120, decision #3). go2rtc treats an
             // EMPTY username as "no auth" and serves the stream to any LAN client — so an empty
@@ -204,10 +241,45 @@ namespace IntercomFirmwareTool.Core
             // The stream: ffmpeg reads the loopback SDP and copies H.264 into go2rtc's internal RTSP
             // ({output}). Video only — the minimal on-device ffmpeg has no audio codecs until Phase 3
             // (#105), so -an drops the SDP's (absent) audio outright.
+            //
+            // Deliberately PLAIN defaults on the input — no -analyzeduration/-probesize/-reorder_queue_size/
+            // -max_delay tuning. Two paths get `-c:v copy` its 640x480 dimensions. The FAST path is the
+            // sprop-parameter-sets in this SDP: btmqttd auto-provisions them into doorbell.sdp on first
+            // boot (native/btmqttd/src/sprop.rs), and the decoder-enabled ffmpeg (native/ffmpeg/build.sh)
+            // reads them at open — so it resolves the video IMMEDIATELY instead of waiting for the panel's
+            // next in-stream SPS/PPS. The FALLBACK — before that provisioning completes, or if on-demand
+            // is off — is the H.264 PARSER recovering the SPS/PPS from the in-stream data; correct but
+            // slow, since the panel emits an in-stream SPS only ~every 20 s. Either way `-c:v copy`
+            // publishes to go2rtc with no input tuning.
+            //
+            // HARDWARE-DIAGNOSED (issue #120, C100X): an earlier revision widened the RTP jitter buffer
+            // (-reorder_queue_size 3000 -max_delay 5000000) to catch the sparse in-stream SPS/PPS. That
+            // was ACTIVELY HARMFUL here: the ingest is loopback (127.0.0.2), which never reorders, so the
+            // oversized reorder queue made ffmpeg stall waiting for sequence numbers that never arrive and
+            // drop every packet as "RTP: dropping old packet received too late" — the producer never
+            // locked on and go2rtc answered DESCRIBE with 404. Reverting to plain defaults locks on in well
+            // under a second (hardware-verified: 94 frames in 8 s). The extract_extradata/dump_extra
+            // bitstream filters were likewise dropped — the parser already carries the parameter sets into
+            // the announce SDP, so they bought nothing.
+            //
+            // sprop LEARNING (issue #120, hardware-diagnosed on the C100X, revised in PR #129): the panel
+            // only sustains/feeds the video call for a REAL consumed view — a silent probe that brings the
+            // panel up just to run ffmpeg TIMES OUT and never learns. Hardware testing ALSO proved ffmpeg's
+            // -sdp_file CANNOT emit the panel's sprop-parameter-sets on this copy path: it parses the SPS
+            // only far enough to resolve the resolution and never writes the parameter sets into the SDP
+            // (confirmed even with a 25 s analyzeduration). So the derived-SDP mechanism is a dead end.
+            // Instead this SAME ffmpeg (which runs only while a client is watching) is given a SECOND
+            // output that ships a raw H.264 RTP copy to btmqttd:
+            //   -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}
+            // That RTP stream carries the panel's periodic in-band SPS/PPS. btmqttd's sprop.rs binds this
+            // exact loopback port, parses the SPS (NAL 7) / PPS (NAL 8) straight out of the RTP payload,
+            // base64-encodes them and persists sprop-parameter-sets=<b64SPS>,<b64PPS>. Because the output
+            // only runs while a client is actually watching, the learning stays transparent and never
+            // brings the panel up itself.
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {sdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}}\"\n"));
+                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {OnDeviceRuntimeSdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}} -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}\"\n"));
             return sb.ToString();
         }
 

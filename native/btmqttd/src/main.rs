@@ -27,6 +27,7 @@ mod av;
 mod config;
 mod dimension;
 mod ha;
+mod hold;
 mod keys;
 mod light;
 mod lock;
@@ -37,6 +38,7 @@ mod receiver;
 mod rediscovery;
 mod sender;
 mod sip;
+mod sprop;
 mod volume;
 
 use std::sync::Arc;
@@ -321,6 +323,49 @@ async fn run() -> Result<bool, String> {
             (None, stopping, None)
         }
     };
+
+    // Viewer-activity auto-hold (issue #120, hold.rs): the "someone is watching" signal the SIP hold
+    // loop flagged as deferred. On-device ONLY — it counts ESTABLISHED sockets on local port 8554 in
+    // /proc/net/tcp{,6} (a live RTSP viewer) and renews the short-linger window while one is connected, so
+    // Home Assistant just opens the camera with no manual `view_camera` press. Shares `view_tx` with the
+    // SIP UA (it pokes ViewCmd::Hold, which renews only the short linger — a separate deadline from the
+    // manual `view_camera` full window), and only runs when that UA is up (Some view_tx).
+    let (hold_task, hold_stopping): (Option<tokio::task::JoinHandle<()>>, Arc<std::sync::atomic::AtomicBool>) = {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        match (&view_tx, cfg.camera_ondevice) {
+            (Some(tx), true) => (
+                Some(tokio::spawn(hold::run(stopping.clone(), tx.clone()))),
+                stopping,
+            ),
+            _ => (None, stopping),
+        }
+    };
+
+    // Transparent sprop provisioning (issue #120, sprop.rs): the panel advertises no sprop-parameter-sets
+    // (nor in its SIP answer — hardware-confirmed), so on-device only. It is a PASSIVE loopback RTP
+    // listener: the panel only feeds a REAL consumed view (a silent probe times out — hardware-confirmed),
+    // and ffmpeg's `-sdp_file` can't emit sprop on a copy path either (also hardware-confirmed, PR #129).
+    // So go2rtc's own `exec:` ffmpeg (which runs while a client is watching) ships a raw H.264 RTP copy to
+    // a loopback UDP port (127.0.0.1:40100), and this task binds that port and parses the SPS/PPS itself,
+    // then persists the value — it never brings the panel up itself. Because it holds no SIP, it needs only
+    // the on-device gate (not the SIP UA): spawn it whenever `camera_ondevice` is set. It returns on its
+    // own once it learns; the handle is kept only to abort a still-listening task cleanly at shutdown (like
+    // av.rs).
+    let (sprop_task, sprop_stopping): (Option<tokio::task::JoinHandle<()>>, Arc<std::sync::atomic::AtomicBool>) = {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if cfg.camera_ondevice {
+            (Some(tokio::spawn(sprop::run(cfg.clone(), stopping.clone()))), stopping)
+        } else {
+            (None, stopping)
+        }
+    };
+    // On-device camera OFF ⇒ forget any learned sprop, so a later re-enable (or a panel swap) re-learns
+    // instead of reassembling the runtime SDP with a stale value. Mirrors the light-where disable reset.
+    // (Only when the on-device feature itself is off; an on-device unit with on-demand viewing off keeps
+    // its learned value — the operator may have supplied it, and the probe just can't run right now.)
+    if !cfg.camera_ondevice {
+        clear_persisted_camera_sprop("on-device camera disabled").await;
+    }
 
     // Commands from TOPIC_RX go through a BOUNDED channel to a SINGLE ordered worker,
     // not a task-per-message. This does two things at once:
@@ -893,6 +938,21 @@ async fn run() -> Result<bool, String> {
         av_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
     }
+    // Viewer-activity auto-hold (hold.rs): stop it FIRST. It holds a `view_tx` clone, so it must be gone
+    // before the SIP block below drops the LAST sender to close `view_rx` — otherwise a surviving clone
+    // keeps the channel open and the SIP task never sees the shutdown. It neither publishes to the broker
+    // nor holds half-actuated bus state (it only reads /proc and pokes Hold), so a plain abort is clean
+    // and drops its `view_tx` clone.
+    if let Some(h) = hold_task {
+        hold_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+        stop(h).await;
+    }
+    // Passive sprop listener (sprop.rs): a loopback UDP RTP listener that holds NO `view_tx` and
+    // publishes nothing, so abort it like av.rs — its ordering vs. the SIP drain below is irrelevant.
+    if let Some(h) = sprop_task {
+        sprop_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+        stop(h).await;
+    }
     // On-demand SIP UA (issue #104): drain it gracefully. `stop(cmd_worker)` above already dropped
     // that task's `view_tx` clone, so dropping THIS last sender closes `view_rx`; the SIP task then
     // observes the closed channel (its `view_rx.recv()==None`) and sends its BYE to tear the panel
@@ -938,6 +998,21 @@ async fn clear_persisted_light_where(reason: &str) {
     eprintln!(
         "btmqttd: could not clear persisted learned LIGHT_WHERE ({reason}); re-enabling in learn \
          mode later may restore the old learned address"
+    );
+}
+
+/// Best-effort clear of the persisted LEARNED camera sprop (bounded retries, log on ultimate failure).
+/// Used when the on-device camera is DISABLED, so disabling is a clean reset: re-enabling re-learns from
+/// the panel rather than reassembling the runtime SDP with a value from a past life (issue #120).
+async fn clear_persisted_camera_sprop(reason: &str) {
+    for _ in 0..3 {
+        if tokio::task::spawn_blocking(persist::clear_camera_sprop).await.unwrap_or(false) {
+            return;
+        }
+    }
+    eprintln!(
+        "btmqttd: could not clear persisted camera sprop ({reason}); re-enabling the on-device \
+         camera later may reassemble the SDP with a stale learned value"
     );
 }
 

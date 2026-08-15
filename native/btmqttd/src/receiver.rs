@@ -168,7 +168,10 @@ async fn handle_json(
     if let Some(action) = v.get("action").and_then(Value::as_str) {
         // On-demand viewing (issue #104): `view_camera` pokes the SIP UA to bring the idle panel A/V
         // session up (and refresh its idle-hangup timer); `stop_camera` ends it now instead of waiting
-        // for the idle timeout. Same ungated posture as the other actions — TOPIC_RX is the trust
+        // for the idle timeout. NOTE (#129): when the on-device camera's auto-hold is active, a
+        // `stop_camera` issued WHILE a viewer is connected is restarted within one poll (auto-hold is
+        // authoritative — see hold.rs); it ends the session only when no viewer is connected. To end an
+        // active view, close the viewer. Same ungated posture as the other actions — TOPIC_RX is the trust
         // boundary. try_send (never blocks the worker): Start is idempotent (the UA re-checks and
         // refreshes on each poke). A Stop dropped on a FULL queue is bounded and self-correcting:
         // while a session is UP the UA drains view_rx every select turn, so 8 messages can't pile up;

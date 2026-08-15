@@ -1,0 +1,46 @@
+#!/bin/sh
+# go2rtc-net-hook — ifupdown if-up.d hook (issue #120, task #42).
+#
+# WHY THIS EXISTS
+# The panel's FACTORY firewall lives in /etc/network/if-pre-up.d/iptables and, on every
+# interface bring-up, does `iptables -F INPUT` then ~40 LOCK-LESS `iptables -A INPUT …`
+# calls (no `-w`). go2rtcd's PERIODIC watchdog USED TO re-assert the GO2RTC :8554 rule each
+# pass; when its writes overlapped the factory's lock-less rebuild, the factory's own `-A INPUT` calls FAILED
+# SILENTLY and factory rules went missing on real hardware — the FTP-over-USB reflash port
+# (used by MyHOME Suite), the factory security DROPs, and even the SSH ACCEPT after a reboot
+# (locking SSH out until a power-cycle). The #42 fix has two halves:
+#   A) go2rtcd's PERIODIC watchdog (`respawn`) no longer touches iptables AT ALL — every
+#      iptables invocation (even a read-only `-S`) takes the xtables lock at launch, and the
+#      watchdog fires on an independent timer that can't be sequenced against the factory's
+#      rebuild. The firewall is (re)asserted ONLY on discrete events: start, stop, and B.
+#   B) THIS hook re-asserts our rule at exactly the right moment for the events that bite.
+#
+# ifupdown runs if-pre-up.d scripts BEFORE the interface is up and if-up.d scripts AFTER, in
+# the same event sequence. Living in if-up.d, this hook runs right AFTER the factory firewall
+# rebuild — SEQUENTIALLY, with no competing daemon — so on boot and on WiFi-reconnect our
+# single :8554 ACCEPT is restored without ever holding the xtables lock during the factory's
+# lock-less writes. This hook is THE re-assert path for every factory rebuild (the factory
+# only flushes INPUT on interface events, each of which runs this hook right after).
+#
+# It re-asserts the FIREWALL ONLY, via `go2rtcd fw-reassert`; it never starts or stops the
+# daemon. It is best-effort and NON-FATAL: it must never fail an interface bring-up, so it
+# always exits 0.
+PATH=/sbin:/usr/sbin:/usr/bin:/bin
+
+# Re-assert after EVERY interface event, not just wlan0's. The factory if-pre-up.d/iptables rebuilds
+# the WHOLE INPUT chain on ANY interface bring-up (see above), flushing our GO2RTC jump — so a usb0 (or
+# any) bring-up would leave :8554 unreachable if we filtered to wlan0, and the periodic watchdog no
+# longer re-asserts (task #42). fw-reassert always re-opens the wlan0 rule regardless of which
+# interface's event fired it (firewall_open reads wlan0's own address) and is idempotent/zero-write when
+# already correct, so running it on every event — including a harmless no-op on lo — is safe.
+
+# Defensive: on a non-camera image go2rtcd is not installed (or not executable) — there is
+# no GO2RTC rule to re-assert, so do nothing.
+[ -x /etc/init.d/go2rtcd ] || exit 0
+
+# Re-assert the GO2RTC firewall rule right after the factory rebuild. `fw-reassert` is quick
+# and lock-bounded (flock mutex + `iptables -w 5`), so a plain best-effort call is safe; the
+# `|| true` guarantees a non-zero exit (or a foreign/absent chain) can never fail the bring-up.
+/etc/init.d/go2rtcd fw-reassert >/dev/null 2>&1 || true
+
+exit 0

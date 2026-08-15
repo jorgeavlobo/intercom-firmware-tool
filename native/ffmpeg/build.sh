@@ -42,7 +42,20 @@ cd "$src" || exit 1
   --enable-protocol=file,udp,rtp,tcp \
   --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp \
   --enable-parser=h264 --enable-parser=hevc \
+  --enable-decoder=h264 \
   --extra-cflags="-Os" --extra-ldflags="-static -s"
+# --enable-decoder=h264: needed so `-c:v copy` resolves the video dimensions FAST. The C100X test
+# (issue #120) proved the panel emits an in-stream SPS/PPS only ~every 20 s, so with the parser
+# ALONE ffmpeg blocks ~20-30 s per cold open before it catches one ("Could not find codec
+# parameters"). btmqttd learns the panel's parameter sets and puts them in the SDP's
+# sprop-parameter-sets (extradata), but ffmpeg's find_stream_info reads the SPS out of extradata
+# only by OPENING THE DECODER (the parser reads in-stream data only). So with the parser but no
+# decoder the sprop is ignored and it still waits ~20-30 s; WITH the decoder, find_stream_info parses
+# the sprop SPS at open and resolves 640x480 in <1 s. `-c:v copy` still never decodes a frame at
+# runtime — the decoder is used only for that one-time parameter-set read — so the resident CPU cost
+# is unchanged. The H.264 DECODER is LGPL (only the x264 ENCODER is GPL; not enabled). It pulls
+# h264_sei.o (film-grain SEI) exactly as the parser did, so the HEVC-parser link dependency below
+# still applies.
 # --enable-parser=h264: the C100X hardware test (issue #120) proved `-c:v copy` DOES need
 # in-stream parameter-set extraction after all. The panel's SDP carries no sprop-parameter-sets,
 # so without the H.264 parser ffmpeg never extracts the SPS: it logs `parser not found for codec
@@ -59,6 +72,14 @@ cd "$src" || exit 1
 # undefined symbol`). The lightest lever that pulls CONFIG_HEVC_SEI is the HEVC *parser*
 # (hevc_parser_select="hevcparse hevc_sei"; hevc_sei_select="atsc_a53 golomb" — no decoder, no
 # dovi). All are LGPL FFmpeg components (no --enable-gpl/-nonfree).
+# NB: bitstream filters are deliberately NOT enabled. A C100X test bench briefly added
+# `--enable-bsf=extract_extradata,dump_extra` to force the SPS/PPS into go2rtc's announce, but
+# hardware testing (issue #120) proved they were unnecessary: the H.264 parser already carries the
+# parameter sets into the announce SDP, and `-c:v copy` publishes fine with plain default input
+# options. (It also only half-worked — FFmpeg's `--enable-bsf=` took only the first name, leaving
+# `dump_extra` out — another reason not to rely on it.) The real on-device fix was to DROP the
+# oversized RTP reorder buffer in Go2RtcConfig's exec (loopback never reorders, so it stalled and
+# dropped every packet as "received too late"); see IntercomFirmwareTool.Core/Go2RtcConfig.cs.
 # NB: `rtsp` is deliberately NOT in --enable-protocol — FFmpeg has no `rtsp` URL protocol
 # (RTSP is the demuxer/muxer enabled just above; it runs over tcp/udp/rtp, which ARE listed).
 # `--enable-protocol=rtsp` matched nothing and only added a configure warning (CodeRabbit).
