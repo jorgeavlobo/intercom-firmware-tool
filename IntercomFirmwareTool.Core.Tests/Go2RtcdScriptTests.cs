@@ -215,7 +215,9 @@ public class Go2RtcdScriptTests
         // It calls firewall_open, then verifies with firewall_is_open, and is bounded by a counter guard.
         Assert.Contains("firewall_open", body);
         Assert.Contains("firewall_is_open && return 0", body);
-        Assert.Contains("-ge 4 ] && return 0", body); // bounded attempt count
+        // Bounded attempt count, kept short so the held mutex is released well under acquire's ~10s
+        // stale-lock steal threshold (a longer retry could be stolen mid-loop and interleave — Codex).
+        Assert.Contains("-ge 3 ] && return 0", body);
         // firewall_is_open is a READ-ONLY predicate that treats a no-address interface as settled (nothing
         // to retry) and any inspection failure as "not open" (so the caller retries, never a false "open").
         int pStart = s.IndexOf("firewall_is_open() {", System.StringComparison.Ordinal);
@@ -228,6 +230,9 @@ public class Go2RtcdScriptTests
         // reading "open" with our ACCEPT ahead of a factory filter (CodeRabbit).
         Assert.Contains("[ \"$n\" -eq 1 ]", pred);
         Assert.Contains("[ \"$last\" = \"-A INPUT -j $FW_CHAIN\" ]", pred);
+        // And OUR chain must hold EXACTLY ONE rule (the ACCEPT) — an extra/stale rule could expose another
+        // port or source, so a membership-only check isn't enough; it must count the chain rules (Codex).
+        Assert.Contains("[ \"$cn\" -eq 1 ]", pred);
     }
 
     [Fact]

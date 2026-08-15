@@ -267,7 +267,14 @@ firewall_is_open() {
 	n=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
 	last=$(printf '%s\n' "$inp" | tail -n 1)
 	[ "$n" -eq 1 ] && [ "$last" = "-A INPUT -j $FW_CHAIN" ] || return 1
-	# And OUR chain must carry exactly the ACCEPT for the current subnet.
+	# And OUR chain must hold EXACTLY ONE rule — the ACCEPT for the current subnet — matching firewall_open's
+	# desired state. Confirming the ACCEPT merely EXISTS isn't enough: if a transient flush bailed and left a
+	# stale/extra rule alongside it, that extra rule could expose another port or source, so an over-full
+	# chain reads "not open" ⇒ keep retrying until firewall_open reconciles it to the single rule (Codex). A
+	# failed chain listing likewise reads "not open" (retry), never a false "open".
+	fw_rules=$(iptables -S "$FW_CHAIN" 2>/dev/null) || return 1
+	cn=$(printf '%s\n' "$fw_rules" | grep -c -- "^-A ")
+	[ "$cn" -eq 1 ] || return 1
 	iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null
 }
 
@@ -277,17 +284,21 @@ firewall_is_open() {
 # periodic watchdog no longer retries iptables (task #42 / Codex P1), a transient miss would otherwise
 # leave :8554 CLOSED until the next interface event or a manual restart. So re-attempt a few times,
 # verifying the end state with firewall_is_open between tries and pausing briefly to let a contending
-# factory rebuild finish. Bounded (never an unbounded spin); still lock-disciplined (each attempt's writes
-# use `-w 5`); zero extra cost once open (the first firewall_is_open short-circuits, and the no-address
-# boot race settles immediately without sleeping). If every attempt is contended we give up quietly — the
-# next fw-reassert (run right after each factory rebuild) re-asserts.
+# factory rebuild finish. Zero extra cost once open (the first firewall_is_open short-circuits, and the
+# no-address boot race settles immediately without sleeping).
+#
+# Kept DELIBERATELY SHORT — 3 attempts, so at most 2 one-second pauses plus a handful of quick `-w 5`
+# writes — so the caller's `acquire`d mutex is released well within acquire's ~10 s stale-lock steal
+# threshold; a longer retry could otherwise be stolen mid-loop and let a concurrent start/stop/respawn
+# interleave (Codex). Covering only the brief factory-rebuild transient here is sufficient: a persistent
+# failure defers to the next fw-reassert, which the if-up.d hook fires right after every interface event.
 firewall_open_confirmed() {
 	fw_try=0
 	while :; do
 		firewall_open
 		firewall_is_open && return 0
 		fw_try=$((fw_try + 1))
-		[ "$fw_try" -ge 4 ] && return 0
+		[ "$fw_try" -ge 3 ] && return 0
 		sleep 1
 	done
 }
