@@ -173,6 +173,12 @@ public class Go2RtcdScriptTests
         // The long-lived daemon must NOT inherit the lock fd (it would hold the flock for its whole life),
         // so its launch closes fd 9.
         Assert.Contains("9>&- &", s);
+        // restart runs `stop`/`start` as child processes; since acquire EXITS on a lock failure (in the
+        // child), the restart arm must PROPAGATE that child status rather than fall through to the script's
+        // trailing `exit 0` and report a failed restart as success (Codex).
+        Assert.Contains("\"$0\" stop && \"$0\" start", s);
+        int restartIdx = s.IndexOf("\"$0\" stop && \"$0\" start", System.StringComparison.Ordinal);
+        Assert.Contains("exit $?", s.Substring(restartIdx));
     }
 
     [Fact]

@@ -540,9 +540,11 @@ case "$1" in
 		fi
 		;;
 	restart)
-		# `stop` sets the marker + waits for exit; `start` clears it + relaunches.
-		"$0" stop
-		"$0" start
+		# `stop` sets the marker + waits for exit; `start` clears it + relaunches. Chain them and PROPAGATE
+		# a child failure (e.g. an acquire that exited non-zero) via `exit $?` instead of falling through to
+		# the script's trailing `exit 0`, so a failed restart never reports success (Codex).
+		"$0" stop && "$0" start
+		exit $?
 		;;
 	*)
 		echo "Usage: $0 {start|stop|status|restart|respawn|fw-reassert}"
