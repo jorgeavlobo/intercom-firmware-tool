@@ -588,17 +588,22 @@ fn srtp_key() -> String {
 /// A command on the trigger channel.
 ///   * `Start` = the HA "View Camera" button (a MANUAL press): bring the session up and renew the FULL
 ///     `camera_view_idle_secs` window — a single press holds the panel for that whole window.
-///   * `Hold` = the viewer-activity auto-hold (`hold.rs`): bring the session up and renew only the short
-///     [`VIEWER_LINGER`] window. `hold.rs` re-pokes this every poll while a viewer holds an ESTABLISHED
-///     `:8554` socket, so the panel follows the live viewer and hangs up ~`VIEWER_LINGER` after the last
-///     one disconnects — WITHOUT shortening a concurrent manual `Start` window (the two deadlines are
-///     tracked independently and the LATER governs hang-up; see `session`).
+///   * `Hold(expiry)` = the viewer-activity auto-hold (`hold.rs`): bring the session up and renew only
+///     the short [`VIEWER_LINGER`] window. `hold.rs` re-pokes this every poll while a viewer holds an
+///     ESTABLISHED `:8554` socket, so the panel follows the live viewer and hangs up ~`VIEWER_LINGER`
+///     after the last one disconnects — WITHOUT shortening a concurrent manual `Start` window (the two
+///     deadlines are tracked independently and the LATER governs hang-up; see `session`). The payload is
+///     the poke's ABSOLUTE expiry (`poke instant + VIEWER_LINGER`): a `Hold` that queues while `run` is
+///     in reconnect backoff and is only consumed after the viewer has already disconnected is STALE, so
+///     the consumer drops it once `expiry` has passed rather than reviving or extending a viewerless
+///     session, and derives `hold_deadline` from `expiry` (poke time) rather than receipt time (Codex,
+///     CodeRabbit). `tokio::time::Instant` (not `std`) so it's the same clock the SIP hold loop sleeps on.
 ///   * `Stop` = the HA "Stop Camera" button (end the on-demand view now instead of waiting for a window
 ///     to elapse). A `Stop` received while no session is up is a harmless no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewCmd {
     Start,
-    Hold,
+    Hold(tokio::time::Instant),
     Stop,
 }
 
@@ -610,15 +615,20 @@ pub enum ViewCmd {
 pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, mut view_rx: mpsc::Receiver<ViewCmd>) {
     let mut backoff = BACKOFF_INIT;
     while !stopping.load(Ordering::Relaxed) {
-        // Idle until a Start or Hold is requested (channel closed ⇒ shutting down). A Stop while idle
-        // has nothing to stop — ignore it and keep waiting. The triggering command is threaded into
-        // `session` so it seeds the matching initial deadline (a manual `Start` ⇒ the full window; an
-        // auto `Hold` ⇒ the short linger), rather than every auto-opened view starting with the full
-        // window (which the extend-only linger could then never bring back down).
-        let trigger = match view_rx.recv().await {
-            None => return,
-            Some(ViewCmd::Stop) => continue,
-            Some(cmd @ (ViewCmd::Start | ViewCmd::Hold)) => cmd,
+        // Idle until a Start or a still-FRESH Hold is requested (channel closed ⇒ shutting down). A Stop
+        // while idle has nothing to stop — ignore it. A `Hold` whose absolute `expiry` has already passed
+        // is STALE — it queued while a prior session was in reconnect backoff and the viewer has since
+        // disconnected — so DISCARD it and keep waiting rather than reopening a viewerless session; a
+        // still-present viewer re-pokes a fresh `Hold` within one poll interval (Codex, CodeRabbit). The
+        // triggering command is threaded into `session` so it seeds the matching initial deadline (a
+        // manual `Start` ⇒ the full window; a fresh auto `Hold` ⇒ its short-linger expiry).
+        let trigger = loop {
+            match view_rx.recv().await {
+                None => return,
+                Some(ViewCmd::Stop) => continue,
+                Some(ViewCmd::Hold(expiry)) if expiry <= tokio::time::Instant::now() => continue,
+                Some(cmd) => break cmd, // Start, or a Hold that has not yet expired
+            }
         };
         if stopping.load(Ordering::Relaxed) {
             return;
@@ -635,19 +645,21 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, mut view_rx: mpsc:
 }
 
 /// Seed the two per-session viewing-window deadlines from what the session-open requested. `want_start`
-/// (a manual `view_camera` press) arms the full `window`; `want_hold` (auto-hold) arms the short
-/// `linger`. A regime nobody requested is seeded to `now` (already elapsed) so [`governing_deadline`]'s
-/// `max` ignores it. Pure, so the seed rule is unit-testable without a clock/runtime.
+/// (a manual `view_camera` press) arms the full `window` from `now`. `hold_expiry` is the ABSOLUTE expiry
+/// of the auto-hold `Hold` that opened (or arrived while establishing) the session, if any; it arms the
+/// short-linger deadline directly at that instant — but is DROPPED if it has already elapsed by `now`
+/// (session-up), so a `Hold` that queued during a reconnect backoff and outlived the viewer can't seed a
+/// linger on a viewerless session (Codex, CodeRabbit). A regime nobody requested is seeded to `now`
+/// (already elapsed) so [`governing_deadline`]'s `max` ignores it. Pure, so the seed rule is unit-testable.
 fn seed_deadlines(
     want_start: bool,
-    want_hold: bool,
+    hold_expiry: Option<tokio::time::Instant>,
     now: tokio::time::Instant,
     window: Duration,
-    linger: Duration,
 ) -> (tokio::time::Instant, tokio::time::Instant) {
     (
         if want_start { now + window } else { now },
-        if want_hold { now + linger } else { now },
+        hold_expiry.filter(|e| *e > now).unwrap_or(now),
     )
 }
 
@@ -725,10 +737,12 @@ async fn session(
     // bytes into that drain.
     //
     // Which window(s) to arm once the dialog is up, seeded by the command that OPENED the session and
-    // OR-ed with any that arrive while it establishes: `want_start` = a manual `view_camera` full
-    // window, `want_hold` = the auto-hold short linger.
+    // updated by any that arrive while it establishes: `want_start` = a manual `view_camera` full window;
+    // `hold_expiry` = the latest auto-hold `Hold` expiry seen (its short linger). We keep the LATEST
+    // expiry so a `Hold` that lands during establishment carries the freshest linger to the seed.
     let mut want_start = matches!(initial, ViewCmd::Start);
-    let mut want_hold = matches!(initial, ViewCmd::Hold);
+    let mut hold_expiry: Option<tokio::time::Instant> =
+        if let ViewCmd::Hold(e) = initial { Some(e) } else { None };
     let mut acc: Vec<u8> = Vec::new();
     let resp_deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
     let final_resp = loop {
@@ -741,9 +755,13 @@ async fn session(
             }
             v = view_rx.recv() => match v {
                 // A Start/Hold while still establishing — the INVITE already serves the "bring it up"
-                // intent, so keep waiting, but record which arrived so the post-ACK deadlines honor it.
+                // intent, so keep waiting, but record it so the post-ACK deadlines honor it. Keep the
+                // LATEST Hold expiry seen; `seed_deadlines` drops it if it has elapsed by session-up.
                 Some(ViewCmd::Start) => { want_start = true; continue; }
-                Some(ViewCmd::Hold) => { want_hold = true; continue; }
+                Some(ViewCmd::Hold(e)) => {
+                    hold_expiry = Some(hold_expiry.map_or(e, |cur| cur.max(e)));
+                    continue;
+                }
                 Some(ViewCmd::Stop) | None => {    // user aborted the start (or the channel closed)
                     let seed = std::mem::take(&mut acc);
                     cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
@@ -834,7 +852,7 @@ async fn session(
     let window = Duration::from_secs(cfg.camera_view_idle_secs);
     let now0 = tokio::time::Instant::now();
     let (mut start_deadline, mut hold_deadline) =
-        seed_deadlines(want_start, want_hold, now0, window, VIEWER_LINGER);
+        seed_deadlines(want_start, hold_expiry, now0, window);
     let mut scratch = [0u8; 4096];
     // FRAME in-dialog requests the same way `wait_final_response` frames responses: TCP can split a
     // panel BYE across reads, or coalesce it after other in-dialog traffic, so inspecting one raw
@@ -854,9 +872,18 @@ async fn session(
             v = view_rx.recv() => match v {
                 // A manual View press = a fresh FULL window; an auto-hold poke = a fresh short LINGER.
                 // Each renews only its own deadline (the other is untouched) so neither can shorten the
-                // other; there is no viewer heartbeat beyond these explicit commands.
+                // other; there is no viewer heartbeat beyond these explicit commands. A `Hold` renews
+                // hold_deadline from its ABSOLUTE `expiry` (poke time + linger), not receipt time, and a
+                // poke that is ALREADY expired on arrival (a straggler buffered during a stall while the
+                // viewer left) is ignored — so buffered holds can neither extend nor revive a viewerless
+                // session past ~VIEWER_LINGER after the last live poke (Codex, CodeRabbit). `max` keeps
+                // the deadline monotonic against any out-of-order or already-surpassed expiry.
                 Some(ViewCmd::Start) => start_deadline = tokio::time::Instant::now() + window,
-                Some(ViewCmd::Hold) => hold_deadline = tokio::time::Instant::now() + VIEWER_LINGER,
+                Some(ViewCmd::Hold(expiry)) => {
+                    if expiry > tokio::time::Instant::now() {
+                        hold_deadline = hold_deadline.max(expiry);
+                    }
+                }
                 Some(ViewCmd::Stop) => break,  // user pressed "Stop Camera" ⇒ hang up now (our BYE)
                 None => break,                 // shutting down
             },
@@ -1556,10 +1583,10 @@ mod tests {
 
     #[test]
     fn auto_hold_open_governs_by_the_short_linger() {
-        // A `Hold`-opened session (want_hold, no manual press): only the short linger is armed, so once
-        // the auto pokes stop the session hangs up ~VIEWER_LINGER later — not after the full window.
+        // A `Hold`-opened session (a fresh hold expiry, no manual press): only the short linger is armed,
+        // so once the auto pokes stop the session hangs up ~VIEWER_LINGER later — not after the full window.
         let now = tokio::time::Instant::now();
-        let (start, hold) = seed_deadlines(false, true, now, WINDOW, LINGER);
+        let (start, hold) = seed_deadlines(false, Some(now + LINGER), now, WINDOW);
         assert_eq!(start, now); // no manual window armed (already elapsed)
         assert_eq!(hold, now + LINGER);
         assert_eq!(governing_deadline(start, hold), now + LINGER);
@@ -1569,10 +1596,24 @@ mod tests {
     fn manual_open_governs_by_the_full_window() {
         // A manual `view_camera` press with no live viewer: only the full window is armed.
         let now = tokio::time::Instant::now();
-        let (start, hold) = seed_deadlines(true, false, now, WINDOW, LINGER);
+        let (start, hold) = seed_deadlines(true, None, now, WINDOW);
         assert_eq!(start, now + WINDOW);
         assert_eq!(hold, now); // no auto linger armed
         assert_eq!(governing_deadline(start, hold), now + WINDOW);
+    }
+
+    #[test]
+    fn a_hold_expiry_already_elapsed_at_session_up_is_dropped() {
+        // CodeRabbit (Major): a `Hold` that queued while sip.rs was in reconnect backoff and is only
+        // consumed after the viewer disconnected carries an expiry now in the PAST. `seed_deadlines` must
+        // drop it (seed the hold side already-elapsed) so it can't seed a linger on a viewerless session —
+        // the session then governs by whatever the manual side says (here nothing ⇒ hangs up at once).
+        let now = tokio::time::Instant::now();
+        let stale = now - Duration::from_secs(1); // poked >VIEWER_LINGER ago
+        let (start, hold) = seed_deadlines(false, Some(stale), now, WINDOW);
+        assert_eq!(start, now);
+        assert_eq!(hold, now); // stale expiry dropped, not armed
+        assert_eq!(governing_deadline(start, hold), now);
     }
 
     #[test]
@@ -1604,7 +1645,7 @@ mod tests {
         // Codex P2: a `Hold`-opened session that also saw a manual `Start` while the INVITE established
         // arms BOTH deadlines, so a later disconnect honors the full window (not just the short linger).
         let now = tokio::time::Instant::now();
-        let (start, hold) = seed_deadlines(true, true, now, WINDOW, LINGER);
+        let (start, hold) = seed_deadlines(true, Some(now + LINGER), now, WINDOW);
         assert_eq!(start, now + WINDOW);
         assert_eq!(hold, now + LINGER);
         assert_eq!(governing_deadline(start, hold), now + WINDOW); // full manual window preserved

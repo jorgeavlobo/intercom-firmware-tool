@@ -195,7 +195,13 @@ pub async fn run(stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
             // connection reappears, and a suppression flag would fight HA's reconnect for no real benefit
             // (product decision on #129; Codex). The poke is `Hold` (short linger), never `Start` (the
             // full manual window), so it never lengthens a view past ~VIEWER_LINGER after the viewer leaves.
-            let _ = view_tx.try_send(ViewCmd::Hold);
+            //
+            // The poke carries its ABSOLUTE expiry (`now + VIEWER_LINGER`, on the tokio clock sip.rs's hold
+            // loop sleeps on), NOT a bare "renew" signal: if this poke sits queued while sip.rs is in
+            // reconnect backoff and the viewer disconnects meanwhile, sip.rs sees the expiry has passed and
+            // drops it instead of reviving/extending a viewerless session (Codex, CodeRabbit). `now` is the
+            // poll's own clock reading, so the expiry is anchored to when the viewer was actually observed.
+            let _ = view_tx.try_send(ViewCmd::Hold(tokio::time::Instant::from_std(now + VIEWER_LINGER)));
         }
         // Re-check `stopping` before sleeping so a shutdown observed mid-poll exits promptly.
         if stopping.load(Ordering::Relaxed) {
