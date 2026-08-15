@@ -200,9 +200,11 @@ namespace IntercomFirmwareTool.Core
         /// <para>PER-DEVICE and NORMALLY AUTO-LEARNED: the value is fixed for a given panel but differs
         /// across them, so it is NOT hardcoded. You usually leave this EMPTY (the recommended default):
         /// with on-demand viewing enabled, btmqttd learns the panel's parameter sets on-device during the
-        /// first real view and persists them on the writable <c>cfg/extra</c> partition (see
-        /// <c>native/btmqttd/src/sprop.rs</c>), so the runtime SDP is reassembled with them at every boot —
-        /// transparent, zero-config. This field is an OPTIONAL pre-seed only for a build where on-device
+        /// first real view and persists them on the writable <c>cfg/extra</c> partition — keyed by the
+        /// selected <see cref="CameraBranch"/>, so a reflash that flips hi/lo-res re-learns rather than
+        /// splicing a stale value (see <c>native/btmqttd/src/sprop.rs</c>) — so the runtime SDP is
+        /// reassembled with them at every boot, transparent and zero-config. This field is an OPTIONAL
+        /// pre-seed only for a build where on-device
         /// learning can't run; supply a value obtained from a KNOWN-GOOD source for that exact panel. (Do
         /// NOT try to capture it with ffmpeg's <c>-sdp_file</c>: hardware testing in PR #129 proved that on
         /// this panel's <c>-c:v copy</c> path ffmpeg never writes <c>sprop-parameter-sets</c> into the SDP

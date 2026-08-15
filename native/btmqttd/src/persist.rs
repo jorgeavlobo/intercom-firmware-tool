@@ -59,9 +59,15 @@ const LIGHT_FILE: &str = "light-state";
 /// (LIGHT_ENABLED with an empty WHERE) keeps the WHERE it learned across reboots.
 const LIGHT_WHERE_FILE: &str = "light-where";
 
-/// The LEARNED camera `sprop-parameter-sets` (issue #120), a single-line base64+comma string.
-/// Persisted so the runtime tmpfs SDP (`/var/run/btmqttd/doorbell.sdp`) can be reassembled at
-/// every boot: go2rtcd copies the read-only template SDP into tmpfs and, when this value exists,
+/// The LEARNED camera `sprop-parameter-sets` (issue #120), stored KEYED BY the video branch it was
+/// learned on as a single line `<branch>\t<sprop>`. The parameter sets are branch-specific: the
+/// hi- and lo-res `CAMERA_BRANCH` encode DIFFERENT SPS (the encoded resolution lives in the SPS), so
+/// a value learned on one branch is wrong for the other. Because `cfg/extra` SURVIVES a reflash,
+/// keying the record to the branch lets a reflash that FLIPS `CAMERA_BRANCH` reject the now-stale
+/// value and re-learn (task #41) — the same "key the record so a config change can't restore a stale
+/// value" discipline the light-state (`<where>\t…`) and broker-IP (base-IP) records use. Persisted so
+/// the runtime tmpfs SDP (`/var/run/btmqttd/doorbell.sdp`) can be reassembled at every boot: go2rtcd
+/// copies the read-only template SDP into tmpfs and, when a value for the CURRENT branch exists,
 /// splices it into the fmtp line. `sprop.rs` learns it once per install and stores it here — the
 /// durable source of truth for "provisioned", surviving reboots on the same cfg/extra partition.
 const CAMERA_SPROP_FILE: &str = "camera-sprop";
@@ -190,13 +196,18 @@ fn read_light_where_in(dir: &Path) -> Option<String> {
     (!t.is_empty() && t.bytes().all(|b| b.is_ascii_digit())).then(|| t.to_string())
 }
 
-/// Persist the LEARNED camera `sprop-parameter-sets` so the runtime SDP can be reassembled at
-/// boot from the read-only template + this value. Atomic write + dir fsync like the other
-/// records. Returns `true` on success. Blocking; call via `spawn_blocking`.
+/// Persist the LEARNED camera `sprop-parameter-sets` KEYED by the video `branch` it was learned on
+/// (`<branch>\t<value>`), so the runtime SDP can be reassembled at boot from the read-only template +
+/// this value, and a reflash that changes `CAMERA_BRANCH` re-learns instead of splicing the stale
+/// value (task #41). Atomic write + dir fsync like the other records. Returns `true` on success.
+/// Blocking; call via `spawn_blocking`.
 #[must_use]
-pub fn store_camera_sprop(value: &str) -> bool {
-    let dir = state_dir();
-    atomic_write_in(&dir, &camera_sprop_file_in(&dir), value.as_bytes())
+pub fn store_camera_sprop(branch: u8, value: &str) -> bool {
+    store_camera_sprop_in(&state_dir(), branch, value)
+}
+
+fn store_camera_sprop_in(dir: &Path, branch: u8, value: &str) -> bool {
+    atomic_write_in(dir, &camera_sprop_file_in(dir), format_camera_sprop(branch, value).as_bytes())
 }
 
 /// Forget any persisted camera sprop — a reflash re-learns from scratch, and clearing it is a
@@ -207,10 +218,12 @@ pub fn clear_camera_sprop() -> bool {
     clear_camera_sprop_in(&state_dir())
 }
 
-/// Read the persisted LEARNED camera sprop (a single base64+comma line). Returns `None` when
-/// absent, unreadable, or empty — a caller then treats the panel as not-yet-provisioned. The
-/// trailing newline (if any) is trimmed.
-pub fn read_camera_sprop() -> Option<String> {
+/// Read the persisted LEARNED camera sprop as `(branch, value)`. Returns `None` when absent,
+/// unreadable, empty, or not in the `<branch>\t<value>` form — including a LEGACY bare value written
+/// before the record was branch-keyed, which is treated as not-provisioned so the panel re-learns for
+/// the current branch (a one-time relearn on upgrade). The caller compares `branch` against the
+/// current `CAMERA_BRANCH`; a mismatch is stale (task #41). Trailing whitespace is trimmed.
+pub fn read_camera_sprop() -> Option<(u8, String)> {
     read_camera_sprop_in(&state_dir())
 }
 
@@ -218,10 +231,9 @@ fn camera_sprop_file_in(dir: &Path) -> PathBuf {
     dir.join(CAMERA_SPROP_FILE)
 }
 
-fn read_camera_sprop_in(dir: &Path) -> Option<String> {
+fn read_camera_sprop_in(dir: &Path) -> Option<(u8, String)> {
     let s = std::fs::read_to_string(camera_sprop_file_in(dir)).ok()?;
-    let t = s.trim();
-    (!t.is_empty()).then(|| t.to_string())
+    parse_camera_sprop(&s)
 }
 
 fn clear_camera_sprop_in(dir: &Path) -> bool {
@@ -388,6 +400,25 @@ fn store_light_in(dir: &Path, where_: &str, on: Option<bool>) -> bool {
 /// hosts file, so the record is human-greppable on the device).
 fn format_state(host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> String {
     format!("{host}\t{base_ip}\t{learned_ip}\n")
+}
+
+/// The one-line camera-sprop body: `<branch>\t<value>\n` (tab-separated, same shape go2rtcd's
+/// `assemble_sdp` parses with `cut -f1`/`cut -f2-`). Kept beside its parser so the two can't drift.
+fn format_camera_sprop(branch: u8, value: &str) -> String {
+    format!("{branch}\t{value}\n")
+}
+
+/// Parse a `<branch>\t<value>` sprop record into `(branch, value)`. `None` for a malformed line: a
+/// missing TAB (a legacy bare value written before branch-keying), a non-numeric / out-of-`u8` branch,
+/// or an empty value. The branch is NOT range-clamped here — the caller compares it against the
+/// (already-clamped) current `CAMERA_BRANCH`, so an out-of-range branch simply never matches and is
+/// re-learned. Pure — no I/O — so it is unit-tested directly.
+fn parse_camera_sprop(text: &str) -> Option<(u8, String)> {
+    let line = text.lines().next()?.trim();
+    let (branch, value) = line.split_once('\t')?;
+    let branch: u8 = branch.trim().parse().ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| (branch, value.to_string()))
 }
 
 /// Parse the state body into `(base_ip, learned_ip)`, only when its first line records
@@ -565,10 +596,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_camera_sprop_reads_branch_and_value() {
+        // Well-formed `<branch>\t<value>` records (task #41): branch parsed, value trimmed.
+        assert_eq!(
+            parse_camera_sprop("1\tZ0JAHqaAoD2Q,aM48gAA=\n"),
+            Some((1, "Z0JAHqaAoD2Q,aM48gAA=".to_string()))
+        );
+        assert_eq!(parse_camera_sprop("0\tAAA,BBB="), Some((0, "AAA,BBB=".to_string())));
+        // Malformed → None so the caller re-learns for the current branch:
+        assert_eq!(parse_camera_sprop("Z0JAHqaAoD2Q,aM48gAA="), None); // legacy bare value, no TAB
+        assert_eq!(parse_camera_sprop("1\t\n"), None); // empty value
+        assert_eq!(parse_camera_sprop("x\tAAA,BBB="), None); // non-numeric branch
+        assert_eq!(parse_camera_sprop("999\tAAA,BBB="), None); // branch out of u8 range
+        assert_eq!(parse_camera_sprop(""), None); // empty file
+    }
+
+    #[test]
     fn camera_sprop_store_read_clear_roundtrip() {
         // Directory-injected cores — no env mutation, so this is parallel-safe. The learned camera
-        // sprop is a single base64+comma line; store writes it, read trims a trailing newline, and
-        // clear forgets it (a reflash re-learns).
+        // sprop is a single `<branch>\t<value>` line (task #41); store writes it keyed by branch, read
+        // returns (branch, value), and clear forgets it (a reflash re-learns).
         use std::sync::atomic::{AtomicU32, Ordering};
         static NONCE: AtomicU32 = AtomicU32::new(6000);
         let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
@@ -578,11 +625,17 @@ mod tests {
         let file = camera_sprop_file_in(&dir);
 
         assert!(read_camera_sprop_in(&dir).is_none()); // no file yet
-        assert!(atomic_write_in(&dir, &file, b"Z0JAHqaAoD2Q,aM48gAA="));
-        assert_eq!(read_camera_sprop_in(&dir).as_deref(), Some("Z0JAHqaAoD2Q,aM48gAA="));
-        // A trailing newline is trimmed on read.
-        assert!(atomic_write_in(&dir, &file, b"AAA,BBB=\n"));
-        assert_eq!(read_camera_sprop_in(&dir).as_deref(), Some("AAA,BBB="));
+        assert!(store_camera_sprop_in(&dir, 1, "Z0JAHqaAoD2Q,aM48gAA="));
+        assert_eq!(
+            read_camera_sprop_in(&dir),
+            Some((1, "Z0JAHqaAoD2Q,aM48gAA=".to_string()))
+        );
+        // A different branch is stored/read back distinctly (the reflash-flip case).
+        assert!(store_camera_sprop_in(&dir, 0, "AAA,BBB="));
+        assert_eq!(read_camera_sprop_in(&dir), Some((0, "AAA,BBB=".to_string())));
+        // A legacy bare value (no branch prefix) reads back as None → re-learn.
+        assert!(atomic_write_in(&dir, &file, b"Z0JAHqaAoD2Q,aM48gAA=\n"));
+        assert!(read_camera_sprop_in(&dir).is_none());
         // An empty/whitespace file reads back as None (treated as not-yet-provisioned).
         assert!(atomic_write_in(&dir, &file, b"\n"));
         assert!(read_camera_sprop_in(&dir).is_none());

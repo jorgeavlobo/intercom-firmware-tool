@@ -15,7 +15,12 @@
 //! A later revision watched a DERIVED SDP that go2rtc's live-view ffmpeg wrote via `-sdp_file`. Hardware
 //! testing (PR #129) proved THAT can't work either: ffmpeg's `-sdp_file` parses the SPS only far enough
 //! to learn the resolution and never writes the parameter sets into the SDP on a copy path (confirmed
-//! even with a 25 s analyzeduration). So this task is purely passive AND parses the RTP itself:
+//! even with a 25 s analyzeduration). So this task is purely passive AND parses the RTP itself.
+//!
+//! The learned value is persisted KEYED BY the current `CAMERA_BRANCH` (`<branch>\t<value>`), because
+//! the hi- and lo-res branches encode different SPS. `cfg/extra` survives a reflash, so a reflash that
+//! flips the branch would otherwise splice a stale value; keying the record makes such a unit re-learn
+//! (task #41). The listen below therefore treats "already provisioned" as branch-specific:
 //!   * go2rtc's OWN `exec:` ffmpeg — which runs only while a client is actually watching — is given a
 //!     SECOND output (in `Go2RtcConfig.BuildOnDeviceYaml`) that ships a raw H.264 RTP copy to a loopback
 //!     UDP port: `-c:v copy -f rtp rtp://{OnDeviceSpropRtpPort}`. That RTP stream carries the panel's
@@ -25,9 +30,10 @@
 //!     extracts the SPS/PPS straight out of the RTP payload (accumulating across packets — they may
 //!     arrive as separate single NALs or bundled in one STAP-A), base64-encodes them and PERSISTS the
 //!     VALUE `sprop-parameter-sets=<b64SPS>,<b64PPS>` on the writable `cfg/extra` partition via
-//!     `persist::store_camera_sprop` (the durable source of truth — `go2rtcd` reassembles the runtime
-//!     SDP from template + persisted value at boot), best-effort patches THIS boot's runtime tmpfs SDP
-//!     ([`SDP_PATH`]) so the current session speeds up without waiting for a reboot, and returns.
+//!     `persist::store_camera_sprop`, KEYED by the current `CAMERA_BRANCH` (the durable source of
+//!     truth — `go2rtcd` reassembles the runtime SDP from template + persisted value at boot), best-
+//!     effort patches THIS boot's runtime tmpfs SDP ([`SDP_PATH`]) so the current session speeds up
+//!     without waiting for a reboot, and returns.
 //!   * The first view is the ~20 s parser resolve (unchanged); every later view is fast. Until a live
 //!     view produces the SPS/PPS, it just keeps listening.
 //!
@@ -36,11 +42,12 @@
 //! the `/etc` SDP fails with `EROFS`. The design therefore SPLITS the SDP:
 //!   * the installer's `/etc/.../doorbell.sdp` is the read-only TEMPLATE/seed;
 //!   * go2rtc reads a RUNTIME copy on tmpfs (`/var/run/btmqttd/doorbell.sdp`), which the `go2rtcd` init
-//!     script (re)assembles at EVERY boot: it copies the template into tmpfs and, if a learned value is
-//!     persisted, splices `sprop-parameter-sets=<value>;` into the fmtp line. This task patches THAT
-//!     runtime copy (writable) after a fresh learn. Reflash-safe by composition: `cfg/extra` survives a
-//!     reflash, so a re-flashed unit that already learned keeps its value; a genuinely fresh unit has no
-//!     persisted value and re-learns from the next live view.
+//!     script (re)assembles at EVERY boot: it copies the template into tmpfs and, if a value learned on
+//!     the CURRENT `CAMERA_BRANCH` is persisted, splices `sprop-parameter-sets=<value>;` into the fmtp
+//!     line. This task patches THAT runtime copy (writable) after a fresh learn. Reflash-safe by
+//!     composition: `cfg/extra` survives a reflash, so a re-flashed unit that already learned keeps its
+//!     value WHEN the branch is unchanged; a reflash that flips `CAMERA_BRANCH` — or a genuinely fresh
+//!     unit — has no matching persisted value and re-learns from the next live view (task #41).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -78,14 +85,19 @@ const BIND_RETRY: Duration = Duration::from_secs(5);
 /// Listen on the loopback RTP port, parse the panel's SPS/PPS from the H.264 the live-view ffmpeg ships
 /// there, persist the learned `sprop-parameter-sets`, and return. Spawned when the on-device camera is
 /// enabled. It holds no `view_tx` and publishes nothing — it only reads a UDP socket and writes the
-/// persisted value / runtime SDP — so `main` aborts it at shutdown like `av.rs`. `cfg` is unused (the
-/// paths/port are fixed installer locations); kept for a uniform task signature.
-pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
-    // Already learned on a prior boot (the VALUE persisted on cfg/extra), or an operator pre-seeded the
-    // template ⇒ nothing to do. The persist file — not the runtime SDP — is the source of truth:
-    // go2rtcd already spliced the value into the runtime tmpfs SDP at boot. Idempotent guard so the
-    // steady state after the first learn is a single cheap file read at startup.
-    if already_learned().await {
+/// persisted value / runtime SDP — so `main` aborts it at shutdown like `av.rs`. From `cfg` it reads
+/// only `camera_branch`: the learned value is persisted keyed by it, and a persisted value for a
+/// DIFFERENT branch (a reflash that flipped `CAMERA_BRANCH`) is not "already learned" (task #41).
+pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
+    // The video branch the panel is currently siphoned on. The learned SPS/PPS are branch-specific, so
+    // this keys the persisted record and the "already learned" gate.
+    let branch = cfg.camera_branch;
+    // Already learned on a prior boot FOR THIS BRANCH (the VALUE persisted on cfg/extra), or an
+    // operator pre-seeded the template ⇒ nothing to do. The persist file — not the runtime SDP — is the
+    // source of truth: go2rtcd already spliced a matching-branch value into the runtime tmpfs SDP at
+    // boot. Idempotent guard so the steady state after the first learn is a single cheap file read at
+    // startup.
+    if already_learned(branch).await {
         return;
     }
 
@@ -137,7 +149,7 @@ pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
                     // REQUIRES the persist write to land. persist is blocking → spawn_blocking.
                     let stored = {
                         let v = value.clone();
-                        tokio::task::spawn_blocking(move || persist::store_camera_sprop(&v))
+                        tokio::task::spawn_blocking(move || persist::store_camera_sprop(branch, &v))
                             .await
                             .unwrap_or(false)
                     };
@@ -171,7 +183,7 @@ pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
             // Idle: no datagram this interval. Re-check `already_learned` (an operator could pre-seed)
             // and loop back to re-check `stopping`.
             Err(_timeout) => {
-                if already_learned().await {
+                if already_learned(branch).await {
                     return;
                 }
             }
@@ -179,15 +191,20 @@ pub async fn run(_cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     }
 }
 
-/// True iff there is nothing to provision: EITHER a value was already LEARNED and persisted on a prior
-/// boot (the durable source of truth on cfg/extra), OR the installer PRE-SEEDED a `CameraSprop` into the
-/// read-only `/etc` template SDP (an operator-supplied value — nothing to learn). A missing/unreadable
-/// persist file AND template reads as "not provisioned" so the listen continues. Both reads are blocking
-/// → spawn_blocking.
-async fn already_learned() -> bool {
-    let persisted = tokio::task::spawn_blocking(|| persist::read_camera_sprop().is_some())
-        .await
-        .unwrap_or(false);
+/// True iff there is nothing to provision FOR THE CURRENT `branch`: EITHER a value learned on this same
+/// branch was persisted on a prior boot (the durable source of truth on cfg/extra), OR the installer
+/// PRE-SEEDED a `CameraSprop` into the read-only `/etc` template SDP (an operator-supplied value —
+/// nothing to learn). A value persisted for a DIFFERENT branch (a reflash that flipped `CAMERA_BRANCH`)
+/// reads as "not provisioned", so the listen re-learns the correct parameter sets and OVERWRITES the
+/// stale record on the next learn; go2rtcd independently refuses to splice a mismatched-branch value
+/// (task #41). A missing/unreadable persist file AND template also reads as "not provisioned" so the
+/// listen continues. Both reads are blocking → spawn_blocking.
+async fn already_learned(branch: u8) -> bool {
+    let persisted = tokio::task::spawn_blocking(move || {
+        matches!(persist::read_camera_sprop(), Some((b, _)) if b == branch)
+    })
+    .await
+    .unwrap_or(false);
     persisted || template_has_sprop().await
 }
 

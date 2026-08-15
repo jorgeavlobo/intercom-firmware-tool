@@ -39,10 +39,16 @@ DISABLED=/var/run/go2rtc.disabled
 TEMPLATE_SDP=/etc/btmqttd/go2rtc/doorbell.sdp
 RUNTIME_SDP_DIR=/var/run/btmqttd
 RUNTIME_SDP=$RUNTIME_SDP_DIR/doorbell.sdp
-# The persisted learned sprop value (single line). STATE_DIR mirrors persist.rs's DEFAULT_STATE_DIR and
-# its $BTMQTTD_STATE_DIR override (tests/dev); on the device the env var is unset and the default is used.
+# The persisted learned sprop record (single line `<branch>\t<value>`). STATE_DIR mirrors persist.rs's
+# DEFAULT_STATE_DIR and its $BTMQTTD_STATE_DIR override (tests/dev); on the device the env var is unset
+# and the default is used.
 STATE_DIR=${BTMQTTD_STATE_DIR:-/home/bticino/cfg/extra/btmqttd}
 SPROP_FILE=$STATE_DIR/camera-sprop
+# btmqttd's generated config, read ONLY to learn the CURRENT CAMERA_BRANCH. The sprop record is keyed
+# by the branch it was learned on (task #41): hi/lo-res encode different SPS, and cfg/extra survives a
+# reflash, so a record left by a previous install on the OTHER branch must not be spliced — btmqttd
+# re-learns it. Absent/unreadable ⇒ default branch 1 (matches config.rs's CAMERA_BRANCH default).
+CONF_FILE=/etc/btmqttd/btmqttd.conf
 
 # Firewall (issue #120, phase 1c-3): the RTSP media port + the LAN interface it is served on. The
 # panel enforces a default-deny INPUT chain (`-P INPUT DROP`) and does NOT open :8554, so nothing
@@ -242,17 +248,29 @@ firewall_close() {
 
 # (Re)assemble the tmpfs RUNTIME SDP go2rtc reads. Recreate the tmpfs dir (mkdir -p — /var/run is
 # cleared every boot), then either copy the read-only template verbatim or, when a learned sprop value
-# is persisted (non-empty file) AND the template does not already carry one, splice
-# `sprop-parameter-sets=<value>;` into the fmtp line immediately after `packetization-mode=1;` — the
-# exact order Go2RtcConfig.BuildOnDeviceSdp / sprop.rs use. Written via a temp file + atomic mv so go2rtc
-# never reads a half-written SDP. Best-effort: a missing template (a non-camera image) is a no-op, and
-# any failure leaves whatever runtime SDP already existed rather than truncating it.
+# FOR THE CURRENT BRANCH is persisted (see the branch gate below) AND the template does not already
+# carry one, splice `sprop-parameter-sets=<value>;` into the fmtp line immediately after
+# `packetization-mode=1;` — the exact order Go2RtcConfig.BuildOnDeviceSdp / sprop.rs use. Written via a
+# temp file + atomic mv so go2rtc never reads a half-written SDP. Best-effort: a missing template (a
+# non-camera image) is a no-op, and any failure leaves whatever runtime SDP already existed rather than
+# truncating it.
 assemble_sdp() {
 	[ -f "$TEMPLATE_SDP" ] || return 0
 	mkdir -p "$RUNTIME_SDP_DIR" 2>/dev/null || return 0
 	tmp="$RUNTIME_SDP.tmp.$$"
+	# Resolve the sprop value ONLY when the persisted record's branch matches the current install's
+	# CAMERA_BRANCH (task #41). The record is `<branch>\t<value>`: cut -f1 is the branch (TAB is cut's
+	# default delimiter), cut -f2- the value. A legacy bare value (no TAB) makes cut -f1 == the whole
+	# line, which won't equal a single-digit branch, so it is ignored and btmqttd re-learns it.
 	sprop=""
-	[ -s "$SPROP_FILE" ] && sprop=$(head -n 1 "$SPROP_FILE" 2>/dev/null | sed 's/[[:space:]]*$//')
+	if [ -s "$SPROP_FILE" ]; then
+		rec=$(head -n 1 "$SPROP_FILE" 2>/dev/null)
+		rec_branch=$(printf '%s' "$rec" | cut -f1)
+		rec_value=$(printf '%s' "$rec" | cut -f2- | sed 's/[[:space:]]*$//')
+		cur_branch=$(sed -n 's/^CAMERA_BRANCH=\([0-9][0-9]*\).*$/\1/p' "$CONF_FILE" 2>/dev/null | head -n 1)
+		[ -n "$cur_branch" ] || cur_branch=1
+		[ "$rec_branch" = "$cur_branch" ] && sprop="$rec_value"
+	fi
 	if [ -n "$sprop" ] && ! grep -q 'sprop-parameter-sets=' "$TEMPLATE_SDP"; then
 		# Escape sed replacement metacharacters (\ & /) — a base64 sprop value can contain '/' and '+'.
 		esc=$(printf '%s' "$sprop" | sed 's/[\\&/]/\\&/g')

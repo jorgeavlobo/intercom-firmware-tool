@@ -74,6 +74,26 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
+    public void Only_splices_a_sprop_whose_branch_matches_the_installed_camera_branch()
+    {
+        // Task #41: the persisted sprop record is `<branch>\t<value>` and cfg/extra survives a reflash,
+        // so assemble_sdp must splice ONLY when the record's branch equals the current CAMERA_BRANCH —
+        // otherwise a reflash that flips hi/lo-res would decode with the previous branch's SPS.
+        string s = ReadScript();
+        string[] code = CodeLines(s);
+        // Reads the current branch from the installed conf (default 1 when absent, matching config.rs).
+        Assert.Contains("CONF_FILE=/etc/btmqttd/btmqttd.conf", s);
+        Assert.Contains(code, l => l.Contains("CAMERA_BRANCH=") && l.Contains("sed -n") && l.Contains("$CONF_FILE"));
+        Assert.Contains(code, l => l.Contains("cur_branch=1"));
+        // Splits the record on TAB: cut -f1 = branch, cut -f2- = value.
+        Assert.Contains(code, l => l.Contains("rec_branch=") && l.Contains("cut -f1"));
+        Assert.Contains(code, l => l.Contains("rec_value=") && l.Contains("cut -f2-"));
+        // The gate: only assign $sprop when the record branch equals the current branch.
+        Assert.Contains(code, l =>
+            l.Contains("[ \"$rec_branch\" = \"$cur_branch\" ]") && l.Contains("sprop=\"$rec_value\""));
+    }
+
+    [Fact]
     public void Keeps_the_pgrep_exe_filter_so_it_never_matches_itself()
     {
         // Assert on executable lines so a comment can't satisfy the check. pgrep -x matches by comm;
