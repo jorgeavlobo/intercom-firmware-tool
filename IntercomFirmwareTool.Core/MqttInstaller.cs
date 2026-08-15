@@ -423,6 +423,7 @@ namespace IntercomFirmwareTool.Core
         // interface bring-up and re-asserts the GO2RTC :8554 rule via `go2rtcd fw-reassert`, so boot/WiFi-
         // reconnect/usb0 restore the port sequentially — it is the SOLE re-assert path (the periodic
         // watchdog touches no iptables). Installed 0755 root:root on the on-device camera path only.
+        private const string Go2RtcNetHookDir = "/etc/network/if-up.d";
         private const string Go2RtcNetHookPath = "/etc/network/if-up.d/go2rtc";
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
@@ -614,10 +615,11 @@ namespace IntercomFirmwareTool.Core
             // ifupdown if-up.d hook (task #42), 0755 root:root — same gate/mode as go2rtcd. ifupdown runs
             // if-up.d scripts AFTER the interface is up, right after the factory if-pre-up.d/iptables
             // rebuild, so this re-asserts our GO2RTC :8554 rule sequentially (via `go2rtcd fw-reassert`)
-            // instead of the watchdog racing the factory's lock-less INPUT writes. The factory ships an
-            // EXISTING, EMPTY /etc/network/if-up.d (verified on the C100X v1.5.8 sample), so we only drop
-            // our own file in it.
+            // instead of the watchdog racing the factory's lock-less INPUT writes. The C100X v1.5.8 sample
+            // ships an EXISTING, EMPTY /etc/network/if-up.d, but EnsureDir it first so the install is robust
+            // on any variant where it is absent (Copilot); /etc/network itself is guaranteed by ifupdown.
             string go2rtcNetHook = LoadScript(ResourcePrefix + "go2rtc-net-hook");
+            EnsureDir(fs, Go2RtcNetHookDir);
             WriteTextFile(fs, Go2RtcNetHookPath, go2rtcNetHook);
             fs.SetMode(Go2RtcNetHookPath, ToMode(755));
             fs.SetOwner(Go2RtcNetHookPath, 0, 0);
