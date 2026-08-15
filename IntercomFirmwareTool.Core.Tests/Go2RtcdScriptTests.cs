@@ -178,16 +178,51 @@ public class Go2RtcdScriptTests
         // `fw-reassert` (open/close per the enabled/disabled marker) — following the ENABLED intent, not
         // the daemon's momentary run state.
         string s = ReadScript().Replace("\r\n", "\n");
-        // respawn body: manages the daemon only, NO firewall calls.
+        // respawn body: manages the daemon only, NO firewall calls and NO iptables of any kind (including
+        // the firewall_open_confirmed / firewall_is_open helpers, which read iptables). Check EXECUTABLE
+        // lines only — the respawn comment legitimately explains why it avoids iptables, so a raw substring
+        // scan would false-positive on the prose.
         int rStart = s.IndexOf("\trespawn)", System.StringComparison.Ordinal);
         string respawnBody = s.Substring(rStart, s.IndexOf("\tfw-reassert)", rStart, System.StringComparison.Ordinal) - rStart);
-        Assert.DoesNotContain("firewall_open", respawnBody);
-        Assert.DoesNotContain("firewall_close", respawnBody);
-        // start opens the port when enabled (after launching), decoupled from is_running.
+        string[] respawnCode = CodeLines(respawnBody);
+        foreach (var token in new[] { "iptables", "firewall_open", "firewall_close", "firewall_is_open" })
+            Assert.DoesNotContain(respawnCode, l => l.Contains(token));
+        // start opens the port when enabled (after launching), decoupled from is_running, via the bounded-
+        // retry wrapper (a single firewall_open can bail on a transient failure; the watchdog no longer
+        // retries, so the event path must — Codex).
         int stStart = s.IndexOf("\tstart)", System.StringComparison.Ordinal);
         string startBody = s.Substring(stStart, s.IndexOf("\trespawn)", stStart, System.StringComparison.Ordinal) - stStart);
-        Assert.Contains("firewall_open", startBody);
+        Assert.Contains("firewall_open_confirmed", startBody);
         Assert.DoesNotContain("if is_running; then firewall_open", startBody);
+        // fw-reassert (the if-up.d hook path) opens via the same bounded-retry wrapper when enabled.
+        int fwStart = s.IndexOf("\tfw-reassert)", System.StringComparison.Ordinal);
+        string fwBody = s.Substring(fwStart, s.IndexOf("\tstop)", fwStart, System.StringComparison.Ordinal) - fwStart);
+        Assert.Contains("firewall_open_confirmed", fwBody);
+    }
+
+    [Fact]
+    public void Firewall_open_is_retried_bounded_on_the_discrete_event_path()
+    {
+        // Codex on the #42 redesign: with the watchdog no longer retrying iptables, a single firewall_open
+        // that BAILS on a transient failure (lock contention, or an ACCEPT that lost a race with the factory
+        // rebuild) would leave :8554 closed until the next interface event. firewall_open_confirmed re-tries
+        // from the discrete event path, verifying the end state with firewall_is_open, and is BOUNDED (never
+        // an unbounded spin).
+        string s = ReadScript().Replace("\r\n", "\n");
+        int oStart = s.IndexOf("firewall_open_confirmed() {", System.StringComparison.Ordinal);
+        Assert.True(oStart >= 0, "firewall_open_confirmed must exist");
+        string body = s.Substring(oStart, s.IndexOf("\n}\n", oStart, System.StringComparison.Ordinal) - oStart);
+        // It calls firewall_open, then verifies with firewall_is_open, and is bounded by a counter guard.
+        Assert.Contains("firewall_open", body);
+        Assert.Contains("firewall_is_open && return 0", body);
+        Assert.Contains("-ge 4 ] && return 0", body); // bounded attempt count
+        // firewall_is_open is a READ-ONLY predicate that treats a no-address interface as settled (nothing
+        // to retry) and any inspection failure as "not open" (so the caller retries, never a false "open").
+        int pStart = s.IndexOf("firewall_is_open() {", System.StringComparison.Ordinal);
+        Assert.True(pStart >= 0, "firewall_is_open must exist");
+        string pred = s.Substring(pStart, s.IndexOf("\n}\n", pStart, System.StringComparison.Ordinal) - pStart);
+        Assert.Contains("[ -z \"$lan\" ] && return 0", pred); // no address → settled, no retry
+        Assert.Contains("iptables -C \"$FW_CHAIN\"", pred);   // confirms our exact ACCEPT is installed
     }
 
     [Fact]

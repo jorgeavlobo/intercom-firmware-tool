@@ -248,6 +248,41 @@ firewall_open() {
 	fw_jump
 }
 
+# True (0) when the media port is ALREADY in its intended state for CAM_IFACE's CURRENT address: either our
+# ACCEPT for the present subnet is installed AND INPUT jumps to our chain, or the interface has NO address
+# yet (the port is intentionally closed until the address-up event opens it — nothing to retry). Any
+# inspection failure (lock contention / error) reads as "not confirmed open" so the caller retries; it can
+# never yield a false "open". Reads only, used SOLELY by firewall_open_confirmed on the discrete event path
+# (never the watchdog), so its lock-taking `-S` / `-C` is consistent with task #42.
+firewall_is_open() {
+	command -v iptables >/dev/null 2>&1 || return 0
+	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
+	[ -z "$lan" ] && return 0                                   # no address → correctly closed; settled
+	iptables -S INPUT 2>/dev/null | grep -q -- "^-A INPUT -j $FW_CHAIN\$" || return 1
+	iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null
+}
+
+# Open the media port with a BOUNDED retry — for the DISCRETE EVENT path (start / fw-reassert) ONLY. A
+# single firewall_open deliberately BAILS without establishing the rule on a transient failure (xtables
+# lock contention past `-w 5`, or an ACCEPT that lost a race with the factory chain rebuild). Because the
+# periodic watchdog no longer retries iptables (task #42 / Codex P1), a transient miss would otherwise
+# leave :8554 CLOSED until the next interface event or a manual restart. So re-attempt a few times,
+# verifying the end state with firewall_is_open between tries and pausing briefly to let a contending
+# factory rebuild finish. Bounded (never an unbounded spin); still lock-disciplined (each attempt's writes
+# use `-w 5`); zero extra cost once open (the first firewall_is_open short-circuits, and the no-address
+# boot race settles immediately without sleeping). If every attempt is contended we give up quietly — the
+# next fw-reassert (run right after each factory rebuild) re-asserts.
+firewall_open_confirmed() {
+	fw_try=0
+	while :; do
+		firewall_open
+		firewall_is_open && return 0
+		fw_try=$((fw_try + 1))
+		[ "$fw_try" -ge 4 ] && return 0
+		sleep 1
+	done
+}
+
 # Close the media port again (service stopped/disabled/not running): tear down everything WE created and
 # nothing else. Only act if we own the chain (FW_OWN marker) — a foreign GO2RTC chain is never touched.
 # Remove the INPUT jump(s) to our chain, then flush and delete the chain (the jump must go before `-X`,
@@ -380,12 +415,13 @@ case "$1" in
 		# follows the ENABLED intent, NOT the daemon's momentary run state — because the periodic watchdog
 		# no longer (re)opens the firewall (see `respawn`), the port must be open whenever the service is
 		# enabled so a slow/failed first launch (then a later respawn success) still ends up reachable.
-		# firewall_open is idempotent, zero-write when already correct, and BAILS on lock contention, so a
-		# boot-time overlap with the factory rebuild just gets retried by the if-up.d hook.
+		# firewall_open is idempotent and zero-write when already correct; firewall_open_confirmed wraps it in
+		# a bounded retry so a boot-time overlap with the factory rebuild that makes one attempt BAIL is
+		# re-attempted here instead of leaving :8554 closed until the next interface event (Codex).
 		acquire
 		rm -f "$DISABLED" 2>/dev/null
 		launch_if_enabled && wait_running
-		firewall_open
+		firewall_open_confirmed
 		release
 		echo "$NAME started"
 		;;
@@ -418,7 +454,7 @@ case "$1" in
 		# nothing listening just yields a TCP reset — harmless, and LAN-source-restricted).
 		acquire
 		if [ ! -e "$DISABLED" ]; then
-			firewall_open
+			firewall_open_confirmed
 		else
 			firewall_close
 		fi
