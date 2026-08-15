@@ -70,6 +70,12 @@ const RTSP_PORT_HEX: &str = "216A";
 /// third of the viewing window). The effective period is still capped under the window (see `run`) so a
 /// held view never lapses between pokes.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// How long a freshly-connected viewer socket may renew the window on the SOCKET ALONE before renewal
+/// additionally requires go2rtc to be ACTUALLY serving (see `run`). Long enough for the client to finish
+/// the RTSP handshake so go2rtc spawns its lazy, auth-gated exec ffmpeg after our bootstrap `Start`;
+/// short enough that a raw unauthenticated socket cannot pin the panel for long (Codex). Generous — the
+/// panel-up + first republish can take a few seconds — and validated on hardware.
+const BOOTSTRAP_GRACE: Duration = Duration::from_secs(15);
 
 /// Debounce for the (essentially never taken) `/proc` read-error log, so a broken procfs can't spam the
 /// log every poll — the same one-shot-warn role the old API-unreachable `warned` flag served.
@@ -86,23 +92,43 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
     let period = POLL_INTERVAL
         .min(window / 2)
         .max(Duration::from_millis(500));
+    // Start of the current viewer socket's BOOTSTRAP GRACE. A freshly-connected socket may renew on its
+    // own for [`BOOTSTRAP_GRACE`]; past that, renewal ALSO requires go2rtc to be actually serving. Reset
+    // whenever no viewer socket is present, so each new connection gets a fresh grace.
+    let mut grace_deadline: Option<tokio::time::Instant> = None;
     while !stopping.load(Ordering::Relaxed) {
-        if viewer_connected().await {
-            // Renew the on-demand window. try_send never blocks the poll loop: a full queue means
-            // sip.rs isn't draining (reconnect backoff) and a dropped poke is harmless — the next poll
-            // pokes again; Closed means the SIP task is gone, nothing to hold.
-            //
-            // DELIBERATE: auto-hold is AUTHORITATIVE while a viewer's TCP session is up. If an operator
-            // issues `stop_camera` (ViewCmd::Stop) while Home Assistant still has the feed open, this
-            // poll re-Starts within one interval — so a Stop only interrupts an active view briefly
-            // rather than ending it. This is by design: the session follows the live viewer, which is
-            // exactly what makes the feature "transparent" (HA just opens the camera). To end a view,
-            // close it (the TCP connection clears → these pokes stop → the window lapses); `stop_camera`
-            // remains effective when no viewer is connected (e.g. after a ring). Honoring the Stop over
-            // an active viewer was considered and rejected: tearing the session down drops the client,
-            // HA auto-reconnects, the connection reappears, and a suppression flag would fight HA's
-            // reconnect for no real benefit (product decision on #129; Codex review).
-            let _ = view_tx.try_send(ViewCmd::Start);
+        let (viewer, serving) = viewer_signals().await;
+        if viewer {
+            // AUTHENTICATED-ACTIVITY GATE (Codex): a raw TCP socket to :8554 is enough to BOOTSTRAP the
+            // first open — it has to be, because go2rtc's exec is lazy and can't serve (spawn ffmpeg, get
+            // RTP) until this task brings the panel up. But a raw socket alone must not PIN the panel
+            // forever: an unauthenticated LAN host (a scanner, a health-check, or a malicious hold) could
+            // otherwise keep the session up without ever knowing the RTSP credentials. So we renew on the
+            // socket only within the bootstrap grace; past it, renewal requires `serving` — go2rtc's own
+            // exec ffmpeg republishing on loopback :8554, which exists ONLY while it is actually serving
+            // an authenticated consumer. A socket that never authenticates therefore lapses when the
+            // grace expires and cannot sustain the hold.
+            let now = tokio::time::Instant::now();
+            let deadline = *grace_deadline.get_or_insert(now + BOOTSTRAP_GRACE);
+            if now < deadline || serving {
+                // Renew the on-demand window. try_send never blocks the poll loop: a full queue means
+                // sip.rs isn't draining (reconnect backoff) and a dropped poke is harmless — the next poll
+                // pokes again; Closed means the SIP task is gone, nothing to hold.
+                //
+                // DELIBERATE: auto-hold is AUTHORITATIVE while a viewer is genuinely watching. If an
+                // operator issues `stop_camera` (ViewCmd::Stop) while Home Assistant still has the feed
+                // open, this poll re-Starts within one interval — so a Stop only interrupts an active view
+                // briefly rather than ending it. This is by design: the session follows the live viewer,
+                // which is exactly what makes the feature "transparent" (HA just opens the camera). To end
+                // a view, close it (the TCP connection clears → these pokes stop → the window lapses);
+                // `stop_camera` remains effective when no viewer is connected (e.g. after a ring).
+                // Honoring the Stop over an active viewer was considered and rejected: tearing the session
+                // down drops the client, HA auto-reconnects, the connection reappears, and a suppression
+                // flag would fight HA's reconnect for no real benefit (product decision on #129; Codex).
+                let _ = view_tx.try_send(ViewCmd::Start);
+            }
+        } else {
+            grace_deadline = None; // no viewer socket → reset the grace for the next connection
         }
         // Re-check `stopping` before sleeping so a shutdown observed mid-poll exits promptly.
         if stopping.load(Ordering::Relaxed) {
@@ -112,20 +138,26 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
     }
 }
 
-/// True iff at least one client holds an ESTABLISHED TCP connection to go2rtc's RTSP port (LOCAL port
-/// 8554). Sums LOCAL-port-8554 ESTABLISHED sockets across `/proc/net/tcp` and `/proc/net/tcp6` (see the
-/// module doc for why that count is exactly the viewer count with no double-count). Reading `/proc`
-/// doesn't fail meaningfully: a file that can't be read contributes 0 (treated as "no viewer"), and if
+/// Read `/proc/net/tcp{,6}` and report `(viewer_connected, serving_consumer)`:
+///   * `viewer_connected` — at least one real LAN client holds an ESTABLISHED :8554 socket (the
+///     bootstrap signal: "someone connected").
+///   * `serving_consumer` — go2rtc's OWN exec ffmpeg is republishing on loopback :8554 (the sustain
+///     signal: "authenticated media is actually flowing"; see [`established_local_port_counts`]).
+///
+/// Reading `/proc` doesn't fail meaningfully: a file that can't be read contributes nothing, and if
 /// NEITHER file could be read that's logged once via [`READ_WARNED`]. Reads are async
 /// (`tokio::fs::read_to_string`, consistent with `sprop.rs`) so a slow procfs read never blocks the
-/// single-threaded runtime; the parsing helpers below stay pure/synchronous and unit-testable.
-async fn viewer_connected() -> bool {
-    let mut count = 0usize;
+/// single-threaded runtime; the parsing helper below stays pure/synchronous and unit-testable.
+async fn viewer_signals() -> (bool, bool) {
+    let mut external = 0usize;
+    let mut publisher = 0usize;
     let mut any_read = false;
     for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
         if let Ok(text) = tokio::fs::read_to_string(path).await {
             any_read = true;
-            count += established_local_port_count(&text, RTSP_PORT_HEX);
+            let (e, p) = established_local_port_counts(&text, RTSP_PORT_HEX);
+            external += e;
+            publisher += p;
         }
     }
     if any_read {
@@ -136,45 +168,46 @@ async fn viewer_connected() -> bool {
             "btmqttd: camera auto-hold: could not read /proc/net/tcp{{,6}}; assuming no viewer"
         );
     }
-    count > 0
+    (external > 0, publisher > 0)
 }
 
-/// Count ESTABLISHED sockets whose LOCAL port equals `port_hex` AND whose LOCAL IP is not loopback,
-/// parsing `/proc/net/tcp`-format text. Skips the header line; for each remaining line it reads only
-/// field[1] (`HEXIP:HEXPORT`, the LOCAL address — the port is the substring after the LAST `:`, the IP
-/// the part before it) and field[3] (the connection state) straight off the whitespace iterator (no
-/// per-line allocation), and counts the line when the local port matches `port_hex` (case-insensitive),
-/// the state is `01` (TCP_ESTABLISHED), AND the local IP is NOT loopback (see [`is_loopback_hex`] — this
-/// drops go2rtc's own `127.0.0.1:8554` republish so it is not miscounted as a viewer). Pure and
-/// testable — no `/proc` I/O.
-fn established_local_port_count(proc_tcp: &str, port_hex: &str) -> usize {
-    proc_tcp
-        .lines()
-        .skip(1) // header row
-        .filter(|line| {
-            // Pull only the two fields we need straight from the iterator — no per-line Vec allocation,
-            // since this runs every poll (~1s) on the single-threaded runtime. field[1] is the LOCAL
-            // address, field[3] the state: `nth(1)` yields field[1] (skipping field[0]), then a second
-            // `nth(1)` yields field[3] (skipping field[2]) from where the iterator now sits.
-            let mut cols = line.split_whitespace();
-            let (Some(local), Some(state)) = (cols.nth(1), cols.nth(1)) else {
-                return false;
-            };
-            // `local` is the LOCAL `HEXIP:HEXPORT`; split off the port after the LAST ':' (IPv6
-            // addresses in /proc are a single colon-free hex blob, so there's exactly one ':' here). The
-            // part before it is the LOCAL IP. `state` "01" is TCP_ESTABLISHED.
-            let (local_ip, local_port) = match local.rsplit_once(':') {
-                Some((ip, port)) => (ip, port),
-                None => return false,
-            };
-            // A local-port-8554 ESTABLISHED socket is a viewer only when its LOCAL IP is a real LAN
-            // address: go2rtc's own exec ffmpeg republishes {output} to 127.0.0.1:8554 during a view, so
-            // a LOOPBACK local IP here is that publisher, not an external viewer — skip it.
-            local_port.eq_ignore_ascii_case(port_hex)
-                && state == "01"
-                && !is_loopback_hex(local_ip)
-        })
-        .count()
+/// Tally ESTABLISHED sockets whose LOCAL port equals `port_hex`, parsing `/proc/net/tcp`-format text,
+/// SPLIT by whether the LOCAL IP is loopback. Returns `(external, loopback)`:
+///   * `external` — a NON-loopback local IP: a real LAN RTSP client (the "viewer connected" signal).
+///   * `loopback` — a LOOPBACK local IP: go2rtc's OWN exec ffmpeg republishing `{output}` to
+///     `127.0.0.1:8554`, which is present ONLY while go2rtc is actively serving an authenticated
+///     consumer (its exec is lazy and RTSP-auth-gated) — the "actually being watched" signal `run` uses
+///     to sustain the hold past the bootstrap grace.
+///
+/// Skips the header line; for each remaining line it reads only field[1] (`HEXIP:HEXPORT`, the LOCAL
+/// address — port after the LAST `:`, IP before it) and field[3] (the connection state) straight off the
+/// whitespace iterator (no per-line allocation, since this runs every poll ~1s). Pure and testable — no
+/// `/proc` I/O.
+fn established_local_port_counts(proc_tcp: &str, port_hex: &str) -> (usize, usize) {
+    let mut external = 0usize;
+    let mut loopback = 0usize;
+    for line in proc_tcp.lines().skip(1) {
+        // `nth(1)` yields field[1] (skipping field[0]); a second `nth(1)` yields field[3] (skipping
+        // field[2]) from where the iterator now sits.
+        let mut cols = line.split_whitespace();
+        let (Some(local), Some(state)) = (cols.nth(1), cols.nth(1)) else {
+            continue;
+        };
+        // `local` is the LOCAL `HEXIP:HEXPORT`; split off the port after the LAST ':' (IPv6 addresses in
+        // /proc are a single colon-free hex blob, so there's exactly one ':' here). `state` "01" is
+        // TCP_ESTABLISHED.
+        let Some((local_ip, local_port)) = local.rsplit_once(':') else {
+            continue;
+        };
+        if local_port.eq_ignore_ascii_case(port_hex) && state == "01" {
+            if is_loopback_hex(local_ip) {
+                loopback += 1; // go2rtc's own republish — an authenticated-serving signal, not a viewer
+            } else {
+                external += 1; // a real external LAN viewer
+            }
+        }
+    }
+    (external, loopback)
 }
 
 /// True iff `ip_hex` is a `/proc`-format LOOPBACK local address we must EXCLUDE from the viewer count.
@@ -208,7 +241,7 @@ mod tests {
             "{HEADER}\n\
                0: 00000000000000000000000000000000:216A 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 10001 1 0000000000000000 100 0 0 10 0"
         );
-        assert_eq!(established_local_port_count(&proc, "216A"), 0);
+        assert_eq!(established_local_port_counts(&proc, "216A"), (0, 0));
     }
 
     #[test]
@@ -219,13 +252,13 @@ mod tests {
             "{HEADER}\n\
               44: FB32A8C0:216A 0100007F:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_count(&proc, "216A"), 1);
+        assert_eq!(established_local_port_counts(&proc, "216A"), (1, 0));
         // The LISTEN socket alongside it still doesn't add to the count.
         let with_listen = format!(
             "{proc}\n\
                0: 00000000000000000000000000000000:216A 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 10001 1 0000000000000000 100 0 0 10 0"
         );
-        assert_eq!(established_local_port_count(&with_listen, "216A"), 1);
+        assert_eq!(established_local_port_counts(&with_listen, "216A"), (1, 0));
     }
 
     #[test]
@@ -237,7 +270,7 @@ mod tests {
             "{HEADER}\n\
               45: FB32A8C0:AA70 0100007F:216A 01 00000000:00000000 00:00000000 00000000  1000        0 12346 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_count(&proc, "216A"), 0);
+        assert_eq!(established_local_port_counts(&proc, "216A"), (0, 0));
     }
 
     #[test]
@@ -250,7 +283,7 @@ mod tests {
               46: FB32A8C0:216A 0200A8C0:C1AB 01 00000000:00000000 00:00000000 00000000  1000        0 12347 1 0000000000000000 20 0 0 10 -1\n\
               45: FB32A8C0:AA70 0100007F:216A 01 00000000:00000000 00:00000000 00000000  1000        0 12346 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_count(&proc, "216A"), 2);
+        assert_eq!(established_local_port_counts(&proc, "216A"), (2, 0));
     }
 
     #[test]
@@ -261,8 +294,8 @@ mod tests {
             "{HEADER}\n\
               44: FB32A8C0:216a 0100007F:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_count(&proc, "216A"), 1);
-        assert_eq!(established_local_port_count(&proc, "216a"), 1);
+        assert_eq!(established_local_port_counts(&proc, "216A"), (1, 0));
+        assert_eq!(established_local_port_counts(&proc, "216a"), (1, 0));
     }
 
     #[test]
@@ -273,31 +306,33 @@ mod tests {
             "{HEADER}\n\
               44: 0000000000000000FFFF0000FB32A8C0:216A 0000000000000000FFFF0000FB32A8FB:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_count(&proc, "216A"), 1);
+        assert_eq!(established_local_port_counts(&proc, "216A"), (1, 0));
     }
 
     #[test]
-    fn loopback_publisher_is_not_a_viewer() {
+    fn loopback_publisher_is_the_serving_signal_not_an_external_viewer() {
         // go2rtc's OWN exec ffmpeg republishes {output} to 127.0.0.1:8554 during a real view: its socket
-        // has local port 8554 (216A) and state 01, but a LOOPBACK local IP (::ffff:127.0.0.1). It must
-        // NOT count, or the panel would be held ~go2rtc-idle after the real viewer already left.
+        // has local port 8554 (216A) and state 01, but a LOOPBACK local IP (::ffff:127.0.0.1). It is NOT
+        // an external viewer (external == 0), so it can never PIN the panel on its own; instead it is the
+        // `serving` signal (loopback == 1) — present only while go2rtc actively serves an authenticated
+        // consumer — that `run` uses to sustain the hold past the bootstrap grace.
         let proc = format!(
             "{HEADER}\n\
               47: 0000000000000000FFFF00000100007F:216A 0000000000000000FFFF00000100007F:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12348 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_count(&proc, "216A"), 0);
+        assert_eq!(established_local_port_counts(&proc, "216A"), (0, 1));
     }
 
     #[test]
-    fn ipv6_loopback_local_is_not_a_viewer() {
-        // A ::1 accepted socket (local port 8554, state 01) is likewise a loopback publisher, not an
-        // external viewer ⇒ excluded. ::1 is rendered in procfs word-endian as the low word 0x00000001
-        // byte-swapped to `01000000` (NOT the network-order `…00000001`).
+    fn ipv6_loopback_local_is_the_serving_signal_not_an_external_viewer() {
+        // A ::1 accepted socket (local port 8554, state 01) is likewise a loopback publisher: external ==
+        // 0 (never a viewer), loopback == 1 (the serving signal). ::1 is rendered in procfs word-endian as
+        // the low word 0x00000001 byte-swapped to `01000000` (NOT the network-order `…00000001`).
         let proc = format!(
             "{HEADER}\n\
               48: 00000000000000000000000001000000:216A 00000000000000000000000001000000:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12349 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_count(&proc, "216A"), 0);
+        assert_eq!(established_local_port_counts(&proc, "216A"), (0, 1));
     }
 
     #[test]
@@ -320,7 +355,7 @@ mod tests {
 
     #[test]
     fn empty_and_header_only_are_zero() {
-        assert_eq!(established_local_port_count("", "216A"), 0);
-        assert_eq!(established_local_port_count(HEADER, "216A"), 0);
+        assert_eq!(established_local_port_counts("", "216A"), (0, 0));
+        assert_eq!(established_local_port_counts(HEADER, "216A"), (0, 0));
     }
 }
