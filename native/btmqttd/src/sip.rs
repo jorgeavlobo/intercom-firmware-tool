@@ -728,9 +728,9 @@ async fn session(
     //   * a `Stop` on view_rx — pressing "Stop Camera" WHILE the INVITE is still pending must abort the
     //     start PROMPTLY, not sit queued up to RESPONSE_TIMEOUT while the panel establishes (Codex +
     //     CodeRabbit). A `Start`/`Hold` in this window doesn't re-send anything (the INVITE already
-    //     serves the "bring it up" intent) but its TYPE is recorded (`want_start`/`want_hold`) so the
-    //     post-ACK deadlines honor it: a manual `Start` that arrives while a `Hold`-opened session is
-    //     still establishing must still seed the FULL window, not just the auto linger (Codex).
+    //     serves the "bring it up" intent) but it IS recorded (`want_start` / the latest `hold_expiry`)
+    //     so the post-ACK deadlines honor it: a manual `Start` that arrives while a `Hold`-opened session
+    //     is still establishing must still seed the FULL window, not just the auto linger (Codex).
     // The timeout is an ABSOLUTE deadline (timeout_at) so a `Start` poke doesn't restart the 10 s
     // budget each loop turn. All non-success exits route through cancel_pending_invite (CANCEL + drain
     // + ACK/BYE a racing 2xx); the accumulator is owned HERE so a timeout mid-2xx carries its partial
@@ -843,9 +843,9 @@ async fn session(
     //     (`ViewCmd::Hold`, from hold.rs) every poll while a viewer holds an ESTABLISHED :8554 socket. So
     //     an auto-opened view follows the live viewer and hangs up ~VIEWER_LINGER after the last one
     //     disconnects, rather than lingering for the whole (much longer) manual window.
-    // Seed each from what was requested by session-open (`want_start`/`want_hold`, above): the deadline
-    // for a regime nobody asked for starts already-elapsed at `now0`, so `governing_deadline`'s `max`
-    // ignores it. An auto `Hold` open lingers ~VIEWER_LINGER; a manual `Start` open gets the full
+    // Seed each from what was requested by session-open (`want_start` / `hold_expiry`, above): the
+    // deadline for a regime nobody asked for starts already-elapsed at `now0`, so `governing_deadline`'s
+    // `max` ignores it. An auto `Hold` open lingers ~VIEWER_LINGER; a manual `Start` open gets the full
     // window; a session that saw BOTH gets both. Neither deadline is renewed by socket traffic or the
     // in-dialog chatter the panel sends (OPTIONS/re-INVITE/media stats) — only by an explicit `view_rx`
     // command — or that chatter would keep resetting the timer and pin the session open forever (Codex).

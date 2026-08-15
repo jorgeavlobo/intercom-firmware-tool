@@ -86,10 +86,12 @@ use tokio::sync::mpsc;
 use crate::sip::{ViewCmd, VIEWER_LINGER};
 use crate::sprop;
 
-/// go2rtc's on-device RTSP port (`Go2RtcConfig.OnDeviceRtspPort` = 8554) as the uppercase hex the
-/// `/proc/net/tcp` port field uses: 8554 = 0x216A. A client holding an ESTABLISHED connection to this
-/// LOCAL port is a live viewer.
-const RTSP_PORT_HEX: &str = "216A";
+/// go2rtc's on-device RTSP port (`Go2RtcConfig.OnDeviceRtspPort` = 8554). A client holding an
+/// ESTABLISHED connection to this LOCAL port is a live viewer. Kept as a plain decimal `u16` and
+/// compared against each parsed `/proc/net/tcp` port (the field is hex there) — rather than a
+/// hand-precomputed `"216A"` string — so there is no manual hex-encoding step to drift if the port
+/// ever changes.
+const RTSP_PORT: u16 = 8554;
 /// Target poll cadence. Short for RESPONSIVENESS: when Home Assistant opens the camera, the client
 /// connects to `:8554` and this task must bring the panel session up within a couple seconds (not a
 /// third of the viewing window). The effective period is still capped under the window (see `run`) so a
@@ -283,7 +285,7 @@ async fn viewer_signals() -> (bool, bool) {
     for path in ["/proc/net/tcp", "/proc/net/tcp6"] {
         if let Ok(text) = tokio::fs::read_to_string(path).await {
             any_read = true;
-            let (e, p) = established_local_port_counts(&text, RTSP_PORT_HEX);
+            let (e, p) = established_local_port_counts(&text, RTSP_PORT);
             external += e;
             publisher += p;
         }
@@ -299,7 +301,7 @@ async fn viewer_signals() -> (bool, bool) {
     (external > 0, publisher > 0)
 }
 
-/// Tally ESTABLISHED sockets whose LOCAL port equals `port_hex`, parsing `/proc/net/tcp`-format text,
+/// Tally ESTABLISHED sockets whose LOCAL port equals `port`, parsing `/proc/net/tcp`-format text,
 /// SPLIT by whether the LOCAL IP is loopback. Returns `(external, loopback)`:
 ///   * `external` — a NON-loopback local IP: a real LAN RTSP client (the "viewer connected" signal).
 ///   * `loopback` — a LOOPBACK local IP: go2rtc's OWN exec ffmpeg republishing `{output}` to
@@ -311,7 +313,7 @@ async fn viewer_signals() -> (bool, bool) {
 /// address — port after the LAST `:`, IP before it) and field[3] (the connection state) straight off the
 /// whitespace iterator (no per-line allocation, since this runs every poll ~1s). Pure and testable — no
 /// `/proc` I/O.
-fn established_local_port_counts(proc_tcp: &str, port_hex: &str) -> (usize, usize) {
+fn established_local_port_counts(proc_tcp: &str, port: u16) -> (usize, usize) {
     let mut external = 0usize;
     let mut loopback = 0usize;
     for line in proc_tcp.lines().skip(1) {
@@ -323,11 +325,13 @@ fn established_local_port_counts(proc_tcp: &str, port_hex: &str) -> (usize, usiz
         };
         // `local` is the LOCAL `HEXIP:HEXPORT`; split off the port after the LAST ':' (IPv6 addresses in
         // /proc are a single colon-free hex blob, so there's exactly one ':' here). `state` "01" is
-        // TCP_ESTABLISHED.
+        // TCP_ESTABLISHED. The port field is hex — parse it to a number and compare to `port` (a
+        // malformed field can't parse and is skipped); comparing numerically avoids a precomputed hex
+        // literal and is case-agnostic by construction.
         let Some((local_ip, local_port)) = local.rsplit_once(':') else {
             continue;
         };
-        if local_port.eq_ignore_ascii_case(port_hex) && state == "01" {
+        if state == "01" && u16::from_str_radix(local_port, 16) == Ok(port) {
             if is_loopback_hex(local_ip) {
                 loopback += 1; // go2rtc's own republish — an authenticated-serving signal, not a viewer
             } else {
@@ -382,7 +386,7 @@ mod tests {
             "{HEADER}\n\
                0: 00000000000000000000000000000000:216A 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 10001 1 0000000000000000 100 0 0 10 0"
         );
-        assert_eq!(established_local_port_counts(&proc, "216A"), (0, 0));
+        assert_eq!(established_local_port_counts(&proc, 8554), (0, 0));
     }
 
     #[test]
@@ -393,13 +397,13 @@ mod tests {
             "{HEADER}\n\
               44: FB32A8C0:216A 0100007F:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_counts(&proc, "216A"), (1, 0));
+        assert_eq!(established_local_port_counts(&proc, 8554), (1, 0));
         // The LISTEN socket alongside it still doesn't add to the count.
         let with_listen = format!(
             "{proc}\n\
                0: 00000000000000000000000000000000:216A 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 10001 1 0000000000000000 100 0 0 10 0"
         );
-        assert_eq!(established_local_port_counts(&with_listen, "216A"), (1, 0));
+        assert_eq!(established_local_port_counts(&with_listen, 8554), (1, 0));
     }
 
     #[test]
@@ -411,7 +415,7 @@ mod tests {
             "{HEADER}\n\
               45: FB32A8C0:AA70 0100007F:216A 01 00000000:00000000 00:00000000 00000000  1000        0 12346 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_counts(&proc, "216A"), (0, 0));
+        assert_eq!(established_local_port_counts(&proc, 8554), (0, 0));
     }
 
     #[test]
@@ -424,19 +428,19 @@ mod tests {
               46: FB32A8C0:216A 0200A8C0:C1AB 01 00000000:00000000 00:00000000 00000000  1000        0 12347 1 0000000000000000 20 0 0 10 -1\n\
               45: FB32A8C0:AA70 0100007F:216A 01 00000000:00000000 00:00000000 00000000  1000        0 12346 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_counts(&proc, "216A"), (2, 0));
+        assert_eq!(established_local_port_counts(&proc, 8554), (2, 0));
     }
 
     #[test]
-    fn port_hex_match_is_case_insensitive() {
-        // The /proc port field is uppercase hex, but match case-insensitively so a lowercase port_hex
-        // (or a kernel that emitted lowercase) still counts. Local IP is a NON-loopback LAN address.
+    fn lowercase_hex_port_field_still_matches() {
+        // The /proc port field is normally uppercase hex, but we parse it case-agnostically, so a
+        // lowercase `216a` (a kernel that emitted lowercase) still resolves to 8554 and counts. Local IP
+        // is a NON-loopback LAN address.
         let proc = format!(
             "{HEADER}\n\
               44: FB32A8C0:216a 0100007F:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_counts(&proc, "216A"), (1, 0));
-        assert_eq!(established_local_port_counts(&proc, "216a"), (1, 0));
+        assert_eq!(established_local_port_counts(&proc, 8554), (1, 0));
     }
 
     #[test]
@@ -447,7 +451,7 @@ mod tests {
             "{HEADER}\n\
               44: 0000000000000000FFFF0000FB32A8C0:216A 0000000000000000FFFF0000FB32A8FB:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_counts(&proc, "216A"), (1, 0));
+        assert_eq!(established_local_port_counts(&proc, 8554), (1, 0));
     }
 
     #[test]
@@ -461,7 +465,7 @@ mod tests {
             "{HEADER}\n\
               47: 0000000000000000FFFF00000100007F:216A 0000000000000000FFFF00000100007F:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12348 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_counts(&proc, "216A"), (0, 1));
+        assert_eq!(established_local_port_counts(&proc, 8554), (0, 1));
     }
 
     #[test]
@@ -473,7 +477,7 @@ mod tests {
             "{HEADER}\n\
               48: 00000000000000000000000001000000:216A 00000000000000000000000001000000:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12349 1 0000000000000000 20 0 0 10 -1"
         );
-        assert_eq!(established_local_port_counts(&proc, "216A"), (0, 1));
+        assert_eq!(established_local_port_counts(&proc, 8554), (0, 1));
     }
 
     #[test]
@@ -496,8 +500,8 @@ mod tests {
 
     #[test]
     fn empty_and_header_only_are_zero() {
-        assert_eq!(established_local_port_counts("", "216A"), (0, 0));
-        assert_eq!(established_local_port_counts(HEADER, "216A"), (0, 0));
+        assert_eq!(established_local_port_counts("", 8554), (0, 0));
+        assert_eq!(established_local_port_counts(HEADER, 8554), (0, 0));
     }
 
     // --- bootstrap_decision: the socket-alone allowance + serving gate + cooldown state machine ---

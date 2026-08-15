@@ -81,7 +81,7 @@ namespace IntercomFirmwareTool.Core
         /// with nothing else in the on-device design: not the 40000/40002 siphon (on 127.0.0.2), nor
         /// the RTSP (8554) / API (1984) listeners.
         /// </summary>
-        public const string OnDeviceSpropRtpPort = "127.0.0.1:40100";
+        public const string OnDeviceSpropRtpEndpoint = "127.0.0.1:40100";
 
         /// <summary>
         /// Normalise a go2rtc stream name to the safe subset go2rtc keys and Home Assistant entity ids
@@ -270,7 +270,7 @@ namespace IntercomFirmwareTool.Core
             // (confirmed even with a 25 s analyzeduration). So the derived-SDP mechanism is a dead end.
             // Instead this SAME ffmpeg (which runs only while a client is watching) is given a SECOND
             // output that ships a raw H.264 RTP copy to btmqttd:
-            //   -c:v copy -f rtp rtp://{OnDeviceSpropRtpPort}
+            //   -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}
             // That RTP stream carries the panel's periodic in-band SPS/PPS. btmqttd's sprop.rs binds this
             // exact loopback port, parses the SPS (NAL 7) / PPS (NAL 8) straight out of the RTP payload,
             // base64-encodes them and persists sprop-parameter-sets=<b64SPS>,<b64PPS>. Because the output
@@ -279,7 +279,7 @@ namespace IntercomFirmwareTool.Core
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {OnDeviceRuntimeSdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}} -c:v copy -f rtp rtp://{OnDeviceSpropRtpPort}\"\n"));
+                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {OnDeviceRuntimeSdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}} -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}\"\n"));
             return sb.ToString();
         }
 
