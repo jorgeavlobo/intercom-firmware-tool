@@ -184,9 +184,12 @@ fn established_local_port_count(proc_tcp: &str, port_hex: &str) -> usize {
 /// NOTHING else: matching by range could false-positive on a real LAN address and wrongly drop a viewer,
 /// which would break auto-hold. Pure — no I/O.
 fn is_loopback_hex(ip_hex: &str) -> bool {
-    // IPv4 (len 8): 127.0.0.1. IPv6 (len 32): ::1 or the IPv4-mapped ::ffff:127.0.0.1.
+    // The `/proc/net/tcp{,6}` address field prints each 32-bit word in HOST byte order (little-endian on
+    // the armv7 target), words in order — NOT the network-order text form. IPv4 (len 8): 127.0.0.1 =>
+    // `0100007F`. IPv6 (len 32): `::1` => `00000000000000000000000001000000` (the low word 0x00000001
+    // byte-swapped to `01000000`), and the IPv4-mapped `::ffff:127.0.0.1` => `…FFFF00000100007F`.
     ip_hex.eq_ignore_ascii_case("0100007F")
-        || ip_hex.eq_ignore_ascii_case("00000000000000000000000000000001")
+        || ip_hex.eq_ignore_ascii_case("00000000000000000000000001000000")
         || ip_hex.eq_ignore_ascii_case("0000000000000000FFFF00000100007F")
 }
 
@@ -226,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn eight554_as_the_remote_port_is_not_counted() {
+    fn remote_port_8554_is_not_counted() {
         // A CLIENT's own socket: local ephemeral (AA70) on a NON-loopback LAN IP, REMOTE port 8554
         // (216A), state 01. We key off the LOCAL port only, so this must NOT count — otherwise a viewer
         // would be double-counted (its client socket + go2rtc's accepted socket).
@@ -288,10 +291,11 @@ mod tests {
     #[test]
     fn ipv6_loopback_local_is_not_a_viewer() {
         // A ::1 accepted socket (local port 8554, state 01) is likewise a loopback publisher, not an
-        // external viewer ⇒ excluded.
+        // external viewer ⇒ excluded. ::1 is rendered in procfs word-endian as the low word 0x00000001
+        // byte-swapped to `01000000` (NOT the network-order `…00000001`).
         let proc = format!(
             "{HEADER}\n\
-              48: 00000000000000000000000000000001:216A 00000000000000000000000000000001:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12349 1 0000000000000000 20 0 0 10 -1"
+              48: 00000000000000000000000001000000:216A 00000000000000000000000001000000:AA70 01 00000000:00000000 00:00000000 00000000  1000        0 12349 1 0000000000000000 20 0 0 10 -1"
         );
         assert_eq!(established_local_port_count(&proc, "216A"), 0);
     }
@@ -301,13 +305,16 @@ mod tests {
         // The three /proc loopback encodings we exclude (case-insensitive) …
         assert!(is_loopback_hex("0100007F")); // 127.0.0.1
         assert!(is_loopback_hex("0100007f"));
-        assert!(is_loopback_hex("00000000000000000000000000000001")); // ::1
+        assert!(is_loopback_hex("00000000000000000000000001000000")); // ::1 (procfs word-endian)
         assert!(is_loopback_hex("0000000000000000FFFF00000100007F")); // ::ffff:127.0.0.1
         assert!(is_loopback_hex("0000000000000000ffff00000100007f"));
         // … and NOTHING else — a real LAN address must never be treated as loopback.
         assert!(!is_loopback_hex("FB32A8C0")); // 192.168.50.251
         assert!(!is_loopback_hex("0000000000000000FFFF0000FB32A8C0")); // ::ffff:192.168.50.251
         assert!(!is_loopback_hex("00000000000000000000000000000000")); // :: (unspecified)
+        // The NETWORK-order text of ::1 is NOT a procfs encoding — must not match (regression guard: the
+        // constant is the word-endian form the kernel actually prints, not `…00000001`).
+        assert!(!is_loopback_hex("00000000000000000000000000000001"));
         assert!(!is_loopback_hex(""));
     }
 
