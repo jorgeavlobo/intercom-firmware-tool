@@ -4,8 +4,8 @@
 # WHY THIS EXISTS
 # The panel's FACTORY firewall lives in /etc/network/if-pre-up.d/iptables and, on every
 # interface bring-up, does `iptables -F INPUT` then ~40 LOCK-LESS `iptables -A INPUT …`
-# calls (no `-w`). Our go2rtcd watchdog re-asserts the GO2RTC :8554 rule; when its writes
-# overlapped the factory's lock-less rebuild, the factory's own `-A INPUT` calls FAILED
+# calls (no `-w`). go2rtcd's PERIODIC watchdog USED TO re-assert the GO2RTC :8554 rule each
+# pass; when its writes overlapped the factory's lock-less rebuild, the factory's own `-A INPUT` calls FAILED
 # SILENTLY and factory rules went missing on real hardware — the FTP-over-USB reflash port
 # (used by MyHOME Suite), the factory security DROPs, and even the SSH ACCEPT after a reboot
 # (locking SSH out until a power-cycle). The #42 fix has two halves:

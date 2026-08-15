@@ -260,8 +260,8 @@ firewall_close() {
 	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || true
 	iptables -w 5 -X "$FW_CHAIN" 2>/dev/null || true
 	# Drop ownership ONLY when a SUCCESSFUL listing confirms both the chain and its INPUT jump are gone. A
-	# failed listing (inspection error) or a still-present chain/jump keeps FW_OWN so a later close/respawn
-	# retries the teardown — an inspection failure must never be read as "absent". One `-S`
+	# failed listing (inspection error) or a still-present chain/jump keeps FW_OWN so a later stop /
+	# fw-reassert retries the teardown — an inspection failure must never be read as "absent". One `-S`
 	# lists the whole filter table (chain declarations `-N …` and rules `-A …`), so it covers both; capture
 	# it once and bail on failure rather than piping (a failed `-S` into grep would look empty = "gone").
 	# Non-blocking read (see LOCKING DISCIPLINE); a contended/failed read bails and a later pass retries.
