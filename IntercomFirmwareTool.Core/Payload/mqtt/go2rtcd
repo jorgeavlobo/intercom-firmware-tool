@@ -287,19 +287,26 @@ firewall_is_open() {
 # factory rebuild finish. Zero extra cost once open (the first firewall_is_open short-circuits, and the
 # no-address boot race settles immediately without sleeping).
 #
-# Kept DELIBERATELY SHORT — 3 attempts, so at most 2 one-second pauses plus a handful of quick `-w 5`
-# writes — so the caller's `acquire`d mutex is released well within acquire's ~10 s stale-lock steal
-# threshold; a longer retry could otherwise be stolen mid-loop and let a concurrent start/stop/respawn
-# interleave (Codex). Covering only the brief factory-rebuild transient here is sufficient: a persistent
-# failure defers to the next fw-reassert, which the if-up.d hook fires right after every interface event.
+# LOCK DISCIPLINE (CodeRabbit / Codex): this function TAKES THE MUTEX ITSELF, once PER ATTEMPT, around a
+# single firewall_open + verify, and the inter-attempt sleep runs LOCK-FREE. So every critical section is
+# exactly ONE firewall_open — the same bound the non-retry path already had — and the retry can NEVER hold
+# LOCKDIR past acquire's ~10 s stale-lock steal threshold no matter how many `-w 5` waits a contended
+# attempt incurs (a whole-loop-under-one-lock version could reach ~lease and be stolen mid-loop, letting a
+# concurrent start/stop/respawn interleave). Because it self-locks, the CALLER MUST NOT hold the mutex.
+# Each attempt re-reads the DISABLED marker UNDER the lock, so a concurrent `stop` that disables us mid-
+# retry wins and we never re-open a port it just closed. Bounded at 3 attempts; a persistent failure
+# defers to the next fw-reassert, which the if-up.d hook fires right after every interface event.
 firewall_open_confirmed() {
 	fw_try=0
 	while :; do
+		acquire
+		if [ -e "$DISABLED" ]; then release; return 0; fi   # concurrent stop disabled us → do not re-open
 		firewall_open
-		firewall_is_open && return 0
+		if firewall_is_open; then release; return 0; fi
+		release
 		fw_try=$((fw_try + 1))
 		[ "$fw_try" -ge 3 ] && return 0
-		sleep 1
+		sleep 1                                             # LOCK-FREE pause between attempts
 	done
 }
 
@@ -437,12 +444,14 @@ case "$1" in
 		# enabled so a slow/failed first launch (then a later respawn success) still ends up reachable.
 		# firewall_open is idempotent and zero-write when already correct; firewall_open_confirmed wraps it in
 		# a bounded retry so a boot-time overlap with the factory rebuild that makes one attempt BAIL is
-		# re-attempted here instead of leaving :8554 closed until the next interface event (Codex).
+		# re-attempted here instead of leaving :8554 closed until the next interface event (Codex). It
+		# SELF-LOCKS per attempt (see its LOCK DISCIPLINE note), so it is called OUTSIDE this arm's mutex —
+		# the daemon launch stays under the lock, then the firewall is asserted with its own per-attempt lock.
 		acquire
 		rm -f "$DISABLED" 2>/dev/null
 		launch_if_enabled && wait_running
-		firewall_open_confirmed
 		release
+		firewall_open_confirmed
 		echo "$NAME started"
 		;;
 	respawn)
@@ -472,13 +481,15 @@ case "$1" in
 		# intent, NOT the daemon's momentary run state: since the watchdog no longer re-opens the port, it
 		# must stay open whenever the service is enabled (a brief crash/relaunch window with :8554 open but
 		# nothing listening just yields a TCP reset — harmless, and LAN-source-restricted).
-		acquire
+		# firewall_open_confirmed SELF-LOCKS per attempt (re-reading DISABLED under the lock each time), so it
+		# is called WITHOUT this arm's mutex; the close path still runs under an explicit acquire/release.
 		if [ ! -e "$DISABLED" ]; then
 			firewall_open_confirmed
 		else
+			acquire
 			firewall_close
+			release
 		fi
-		release
 		;;
 	stop)
 		# Operator intent: disable, then terminate. Set the marker FIRST (under the

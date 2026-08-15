@@ -214,10 +214,19 @@ public class Go2RtcdScriptTests
         string body = s.Substring(oStart, s.IndexOf("\n}\n", oStart, System.StringComparison.Ordinal) - oStart);
         // It calls firewall_open, then verifies with firewall_is_open, and is bounded by a counter guard.
         Assert.Contains("firewall_open", body);
-        Assert.Contains("firewall_is_open && return 0", body);
-        // Bounded attempt count, kept short so the held mutex is released well under acquire's ~10s
-        // stale-lock steal threshold (a longer retry could be stolen mid-loop and interleave — Codex).
-        Assert.Contains("-ge 3 ] && return 0", body);
+        Assert.Contains("if firewall_is_open; then release; return 0; fi", body);
+        Assert.Contains("-ge 3 ] && return 0", body); // bounded attempt count
+        // LOCK DISCIPLINE (Codex/CodeRabbit): it SELF-LOCKS per attempt (acquire/release around one
+        // firewall_open) so each critical section is bounded to a single firewall_open — never the whole
+        // loop — and it re-reads DISABLED under the lock so a concurrent stop wins. The inter-attempt sleep
+        // must run LOCK-FREE: the last release precedes the sleep, so the mutex is never held across the
+        // pause (which is what would let the hold exceed acquire's ~10s stale-lock steal threshold).
+        Assert.Contains("acquire", body);
+        Assert.Contains("if [ -e \"$DISABLED\" ]; then release; return 0; fi", body);
+        Assert.True(
+            body.LastIndexOf("release", System.StringComparison.Ordinal)
+            < body.IndexOf("sleep 1", System.StringComparison.Ordinal),
+            "the inter-attempt sleep must run after release (lock-free), not while holding the mutex");
         // firewall_is_open is a READ-ONLY predicate that treats a no-address interface as settled (nothing
         // to retry) and any inspection failure as "not open" (so the caller retries, never a false "open").
         int pStart = s.IndexOf("firewall_is_open() {", System.StringComparison.Ordinal);
