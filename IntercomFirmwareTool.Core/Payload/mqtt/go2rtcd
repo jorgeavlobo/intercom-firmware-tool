@@ -20,7 +20,7 @@
 ### END INIT INFO
 #
 # MIT-licensed, part of IntercomFirmwareTool. A byte-for-byte copy of the btmqttd
-# init script's supervision model (atomic mkdir mutex LOCKDIR + DISABLED marker),
+# init script's supervision model (flock mutex + DISABLED marker),
 # retargeted at the go2rtc binary. Only an explicit `start` clears the marker; the
 # supervisor's `respawn` never does, so a `stop` for maintenance is honoured until
 # the operator starts it again (or a reboot clears the tmpfs marker).
@@ -30,7 +30,7 @@ NAME=go2rtc
 CONFIG=/etc/btmqttd/go2rtc/go2rtc.yaml
 LOGDIR=/var/log/go2rtc
 LOGFILE=$LOGDIR/go2rtc.log
-LOCKDIR=/var/run/go2rtc.lock
+LOCKFILE=/var/run/go2rtc.lock
 DISABLED=/var/run/go2rtc.disabled
 
 # Runtime SDP assembly (issue #120). The rootfs (incl. /etc) is mounted READ-ONLY, so go2rtc cannot read
@@ -142,47 +142,16 @@ daemon_pids() {
 }
 is_running() { [ -n "$(daemon_pids)" ]; }
 
-# Acquire the mutex. `mkdir` is atomic, so exactly one caller wins LOCKDIR and the rest wait. A holder that
-# CRASHED mid-operation must not wedge the service forever — but a holder that is merely SLOW (several
-# `iptables -w 5` calls under xtables contention, or any fs/process stall) must NEVER be preempted, or its
-# critical section could be interleaved by a stolen lock. So the lock records the holder's PROCESS IDENTITY
-# (PID + its /proc start-time, which a recycled PID cannot forge) and a waiter reclaims it ONLY when that
-# exact process is GONE — never on a timer, so there is NO fixed-time eviction of a live holder. Recovery of
-# a dead holder's lock is serialized through a second atomic mkdir and re-verified, so two waiters can never
-# both break it. This protocol is shared VERBATIM with the btmqttd init script.
-LOCK_PID="$LOCKDIR/pid"
-# Field 22 of /proc/<pid>/stat is the process start-time; `sub(/.*\) /,"")` strips the "pid (comm) " prefix
-# (robust to a comm containing ') '), so $20 of the remainder is the start-time. Empty ⇒ no such process.
-proc_starttime() { awk '{ sub(/.*\) /, ""); print $20; exit }' "/proc/$1/stat" 2>/dev/null; }
-# True iff the recorded LOCKDIR holder is GONE: a recorded PID that no longer exists, or now carries a
-# DIFFERENT start-time (its number was recycled). An empty record (a fresh holder mid-acquire) is NOT gone,
-# and a live original holder (PID + start-time both match) is NEVER reported gone.
-holder_gone() {
-	_h=$(cat "$LOCK_PID" 2>/dev/null); _p=${_h%% *}
-	[ -z "$_p" ] && return 1
-	case "$_h" in *" "*) _s=${_h#* } ;; *) _s= ;; esac
-	_c=$(proc_starttime "$_p")
-	[ -z "$_c" ] && return 0
-	[ -n "$_s" ] && [ "$_c" != "$_s" ]
-}
-acquire() {
-	while :; do
-		if mkdir "$LOCKDIR" 2>/dev/null; then
-			printf '%s %s\n' "$$" "$(proc_starttime "$$")" > "$LOCK_PID" 2>/dev/null || true
-			return
-		fi
-		# Contended. If the holder is GONE, recover — but serialize the break through a second atomic mkdir
-		# so only ONE waiter breaks a given stale lock, and RE-VERIFY it is still gone under that lock, so a
-		# waiter that already took over is never broken (closes the two-waiters-both-steal race).
-		if holder_gone && mkdir "$LOCKDIR.recover" 2>/dev/null; then
-			holder_gone && { rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; }
-			rmdir "$LOCKDIR.recover" 2>/dev/null
-			continue
-		fi
-		sleep 1
-	done
-}
-release() { rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; }
+# The mutex is an exclusive flock on LOCKFILE, held on fd 9 for the duration of a critical section. flock is
+# KERNEL-MANAGED and released AUTOMATICALLY when the holding process dies or the fd closes, so a crashed
+# holder can NEVER wedge the lock and there is NO stale-lock detection, PID tracking, or steal logic to get
+# wrong — the whole "lease expired while the holder was alive / two waiters both break it" class simply does
+# not exist. util-linux flock is present on the target at /usr/bin/flock. `flock 9` blocks until the lock is
+# ours; closing fd 9 (or process death) releases it. Critical sections stay short. The backgrounded daemon
+# MUST NOT inherit fd 9 — it would hold the lock for its whole lifetime — so every daemon launch closes it
+# with `9>&-`. This protocol is shared VERBATIM with the btmqttd init script.
+acquire() { exec 9>>"$LOCKFILE"; flock 9; }
+release() { exec 9>&-; }
 
 # Signal every daemon instance. Defaults to SIGTERM; pass "-9" to force. (Without
 # a default an argument-less call would run `kill "" <pid>` — an invalid signal
@@ -269,7 +238,8 @@ firewall_open() {
 	# is contended past the wait and `-F` fails, abort this pass rather than append a second ACCEPT on top
 	# of the stale one (a later pass retries). The `-w 5` on every mutating call waits up to 5s for the
 	# xtables lock (supported on the target), so a spurious failure while the panel touches iptables is rare;
-	# a slow run under contention is safe now that the LOCKDIR mutex is never stolen from a live holder.
+	# a slow run under contention is safe because the flock mutex auto-releases only on death, never on a
+	# timer, so a live holder is never preempted.
 	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || return 0
 	# shellcheck disable=SC2015  # `[ -n "$lan" ] && add || true`: with no address we intentionally leave
 	# the chain empty (port closed) and still reach fw_jump — `|| true` only neutralizes the guard's exit.
@@ -318,13 +288,13 @@ firewall_is_open() {
 # no-address boot race settles immediately without sleeping).
 #
 # LOCK DISCIPLINE (CodeRabbit / Codex): this function TAKES THE MUTEX ITSELF, once PER ATTEMPT, around a
-# single firewall_open + verify, and the inter-attempt sleep runs LOCK-FREE. Correctness against a stolen
-# lock now rests on acquire's LIVENESS-based staleness — a live holder is never preempted, so no critical
-# section here can be interleaved regardless of how long its `-w 5` waits block. The per-attempt structure
-# is kept for RESPONSIVENESS: releasing between attempts lets a concurrent start/stop/respawn proceed
-# during the sleeps instead of blocking behind the whole retry loop. Because it self-locks, the CALLER MUST
-# NOT hold the mutex. Each attempt re-reads the DISABLED marker UNDER the lock, so a concurrent `stop` that
-# disables us mid-retry wins and we never re-open a port it just closed. Bounded at 3 attempts; a
+# single firewall_open + verify, and the inter-attempt sleep runs LOCK-FREE. The flock mutex is never stolen
+# from a live holder (it auto-releases only on death), so no critical section here can be interleaved
+# regardless of how long its `-w 5` waits block. The per-attempt structure is kept for RESPONSIVENESS:
+# releasing between attempts lets a concurrent start/stop/respawn proceed during the sleeps instead of
+# blocking behind the whole retry loop. Because it self-locks, the CALLER MUST NOT hold the mutex. Each
+# attempt re-reads the DISABLED marker UNDER the lock, so a concurrent `stop` that disables us mid-retry
+# wins and we never re-open a port it just closed. Bounded at 3 attempts; a
 # persistent failure defers to the next fw-reassert, which the if-up.d hook fires right after every
 # interface event.
 firewall_open_confirmed() {
@@ -449,16 +419,18 @@ launch_if_enabled() {
 	# Assemble the tmpfs runtime SDP right before launch, so go2rtc reads a fresh copy each time it
 	# (re)starts — reflecting any sprop learned+persisted since the last launch.
 	assemble_sdp
-	"$DAEMON" -config "$CONFIG" >> "$LOGFILE" 2>&1 &
+	# Close the mutex fd (9) in the child so the long-lived daemon does not inherit the flock and hold it
+	# for its whole lifetime (which would block every later acquire until the daemon exits).
+	"$DAEMON" -config "$CONFIG" >> "$LOGFILE" 2>&1 9>&- &
 	return 0
 }
 
 # Poll briefly for a just-backgrounded daemon to exec $DAEMON, so a manual `start`/`restart` returns only
 # once the daemon is actually up rather than racing the child's exec. Only ever called after
 # launch_if_enabled reports it launched, so steady-state respawns (already running) never sleep. Bounded
-# to ~5s; the LOCKDIR mutex is never stolen from this live holder, so the short hold is safe. The firewall
-# no longer depends on this verdict (the port follows the enabled/disabled intent, not the run state), so
-# the return value is informational.
+# to ~5s; the flock mutex is held by this live process and auto-releases only on death, so the short hold is
+# safe. The firewall no longer depends on this verdict (the port follows the enabled/disabled intent, not
+# the run state), so the return value is informational.
 wait_running() {
 	i=0
 	while ! is_running && [ "$i" -lt 5 ]; do

@@ -7,7 +7,7 @@ namespace IntercomFirmwareTool.Core.Tests;
 
 /// <summary>
 /// Shape checks for the on-device go2rtc SysV init script (<c>go2rtcd</c>, issue #120). It mirrors
-/// the btmqttd init script's supervision model (atomic mkdir mutex + DISABLED marker) but drives the
+/// the btmqttd init script's supervision model (flock mutex + DISABLED marker) but drives the
 /// vendored go2rtc binary with the generated config. These lock in the key wiring from the embedded
 /// resource — no ext4 image needed.
 /// </summary>
@@ -27,16 +27,15 @@ public class Go2RtcdScriptTests
         return reader.ReadToEnd();
     }
 
-    // Extract the shared lock protocol — from the `LOCK_PID=` line (which starts the helper block:
-    // proc_starttime, holder_gone, acquire, release) through the end of the `release()` line — so the two
-    // init scripts can be compared for the "shared verbatim" invariant.
+    // Extract the shared lock protocol — the `acquire()` and `release()` definitions — so the two init
+    // scripts can be compared for the "shared verbatim" invariant.
     private static string LockProtocol(string script)
     {
         string s = script.Replace("\r\n", "\n");
-        int a = s.IndexOf("LOCK_PID=\"$LOCKDIR/pid\"", System.StringComparison.Ordinal);
-        Assert.True(a >= 0, "LOCK_PID= must exist");
+        int a = s.IndexOf("acquire() {", System.StringComparison.Ordinal);
+        Assert.True(a >= 0, "acquire() must exist");
         int r = s.IndexOf("release()", a, System.StringComparison.Ordinal);
-        Assert.True(r > a, "release() must follow the lock helpers");
+        Assert.True(r > a, "release() must follow acquire()");
         int end = s.IndexOf('\n', r);
         return s.Substring(a, (end < 0 ? s.Length : end) - a);
     }
@@ -145,7 +144,7 @@ public class Go2RtcdScriptTests
         string s = ReadScript();
         // Its own lock/marker/log paths — distinct from btmqttd's, so the two services don't
         // collide on the mutex or the DISABLED marker.
-        Assert.Contains("LOCKDIR=/var/run/go2rtc.lock", s);
+        Assert.Contains("LOCKFILE=/var/run/go2rtc.lock", s);
         Assert.Contains("DISABLED=/var/run/go2rtc.disabled", s);
         Assert.Contains("LOGDIR=/var/log/go2rtc", s);
         // Like the watchdog, it must never poke the core BTicino stack.
@@ -155,36 +154,23 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
-    public void Lock_reclaim_is_process_identity_based_with_no_fixed_time_eviction()
+    public void Lock_is_a_kernel_flock_with_no_hand_rolled_stale_detection()
     {
-        // Gold-standard fix (Codex/CodeRabbit): a slow-but-alive holder — e.g. firewall_close running
-        // several `iptables -w 5` calls, or a stalled process — must NEVER have its mutex reclaimed on a
-        // timer, or its critical section could be interleaved. So the lock records PID + /proc start-time
-        // (an identity a recycled PID cannot forge) and reclaims ONLY when that exact process is gone (no
-        // proc, or a different start-time). There must be NO fixed-time steal of any kind.
+        // Gold standard (issue resolution): the mutex is an exclusive flock held on fd 9, which the KERNEL
+        // releases automatically when the holder dies — so a crashed holder can never wedge the lock and
+        // there is no stale-lock detection, PID tracking, or steal logic to get wrong (the whole class the
+        // earlier mkdir-mutex kept re-introducing). util-linux flock is present on the target.
         string s = ReadScript().Replace("\r\n", "\n");
-        int aStart = s.IndexOf("acquire() {", System.StringComparison.Ordinal);
-        Assert.True(aStart >= 0, "acquire() must exist");
-        string acq = s.Substring(aStart, s.IndexOf("\n}\n", aStart, System.StringComparison.Ordinal) - aStart);
-        // Records PID + start-time, and reclaims via holder_gone (identity), not a timer.
-        Assert.Contains("printf '%s %s\\n' \"$$\" \"$(proc_starttime \"$$\")\" > \"$LOCK_PID\"", acq);
-        Assert.Contains("holder_gone", acq);
-        // NO fixed-time eviction survives: no waited counter, no backstop, no kill -0 liveness (superseded
-        // by start-time identity), no fixed-count steal.
-        foreach (var banned in new[] { "LOCK_STEAL_BACKSTOP", "waited", "kill -0", "-ge 10 ]", "-ge " })
-            Assert.DoesNotContain(banned, acq);
-        // holder_gone uses the start-time identity: a recorded PID whose /proc start-time is absent or
-        // changed is "gone"; a matching live holder is NOT (so a live holder's lock is never removed).
-        int hStart = s.IndexOf("holder_gone() {", System.StringComparison.Ordinal);
-        Assert.True(hStart >= 0, "holder_gone() must exist");
-        string hg = s.Substring(hStart, s.IndexOf("\n}\n", hStart, System.StringComparison.Ordinal) - hStart);
-        Assert.Contains("proc_starttime \"$_p\"", hg);          // reads the recorded PID's current start-time
-        Assert.Contains("[ -z \"$_c\" ] && return 0", hg);      // no such process ⇒ gone
-        Assert.Contains("[ \"$_c\" != \"$_s\" ]", hg);          // different start-time ⇒ recycled ⇒ gone
-        // Recovery of a stale lock is serialized + re-verified so two waiters can't both break it.
-        Assert.Contains("mkdir \"$LOCKDIR.recover\"", acq);
-        // release removes the PID file it wrote (so a fresh acquire doesn't read a stale record).
-        Assert.Contains("release() { rm -f \"$LOCK_PID\"", s);
+        Assert.Contains("acquire() { exec 9>>\"$LOCKFILE\"; flock 9; }", s); // open fd 9, block for the lock
+        Assert.Contains("release() { exec 9>&-; }", s);                       // close fd 9 → kernel releases
+        // None of the fragile hand-rolled locking survives (each was a source of a review finding).
+        foreach (var banned in new[]
+                 { "mkdir \"$LOCKDIR\"", "LOCKDIR", "proc_starttime", "holder_gone", "LOCK_PID",
+                   "LOCK_STEAL_BACKSTOP", "kill -0", ".recover" })
+            Assert.DoesNotContain(banned, s);
+        // The long-lived daemon must NOT inherit the lock fd (it would hold the flock for its whole life),
+        // so its launch closes fd 9.
+        Assert.Contains("9>&- &", s);
     }
 
     [Fact]
