@@ -346,11 +346,11 @@ public class Go2RtcdScriptTests
         // matching chain never reaches any `-F`/`-A` write.
         int fastReturn = openBody.IndexOf("{ fw_jump; return 0; }", System.StringComparison.Ordinal);
         int flush = openBody.IndexOf("iptables -w 5 -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
-        int count = openBody.IndexOf("n=$(iptables -w 5 -S \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int listing = openBody.IndexOf("if fw_list=$(iptables -w 5 -S \"$FW_CHAIN\"", System.StringComparison.Ordinal);
         Assert.True(fastReturn >= 0 && flush > fastReturn,
             "the zero-write fast path must return before the destructive flush");
-        Assert.True(count >= 0 && count < fastReturn && count < flush,
-            "the rule count must be taken before the fast-path decision and the flush");
+        Assert.True(listing >= 0 && listing < fastReturn && listing < flush,
+            "the chain listing must be read before the fast-path decision and the flush");
         // The full flush+repopulate path is still there for when the state DIFFERS (missing/extra rule,
         // changed subnet, freshly created chain), gated on a successful flush.
         Assert.Contains("iptables -w 5 -F \"$FW_CHAIN\" 2>/dev/null || return 0", openBody);
