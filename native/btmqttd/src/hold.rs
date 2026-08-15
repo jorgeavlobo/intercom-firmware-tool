@@ -1,12 +1,15 @@
 //! Viewer-activity auto-hold for the on-device camera (issue #120, the #104 follow-up the SIP hold
 //! loop flagged as deferred — see the note at `sip.rs`'s hold loop).
 //!
-//! `sip.rs` holds the on-demand panel session for a FIXED window per `view_camera` press because there
-//! was no continuous "someone is watching" signal — so a single press bounds the session to one window
-//! and it auto-hangs-up when the window elapses. This task supplies that missing signal for the
+//! `sip.rs` holds the on-demand panel session for a FIXED window per manual `view_camera` press because
+//! there was no continuous "someone is watching" signal — so a single press bounds the session to one
+//! window and it auto-hangs-up when the window elapses. This task supplies that missing signal for the
 //! on-device media path: while a client holds an ESTABLISHED TCP connection to go2rtc's RTSP port
-//! (`:8554`, = `Go2RtcConfig.OnDeviceRtspPort`) it pokes `ViewCmd::Start` to renew the window, so Home
-//! Assistant "just opens the camera" and the panel session follows the live viewer.
+//! (`:8554`, = `Go2RtcConfig.OnDeviceRtspPort`) it pokes [`ViewCmd::Hold`] to renew sip.rs's SHORT
+//! [`VIEWER_LINGER`] window, so Home Assistant "just opens the camera" and the panel session follows the
+//! live viewer — hanging up ~VIEWER_LINGER after the last one disconnects (decoupled from the longer
+//! `camera_view_idle_secs` manual window). The short linger, rather than an instant hang-up, absorbs a
+//! brief HA reconnect (it drops and re-opens the RTSP socket) without thrashing the SIP session.
 //!
 //! ## Why the client TCP session, and NOT go2rtc's `/api/streams` (both hardware-confirmed on a C100X)
 //! An earlier revision keyed auto-hold off go2rtc's control API. Real-hardware testing proved BOTH of
@@ -17,7 +20,7 @@
 //!   * **consumers** stays `null` until go2rtc actually SERVES video. But go2rtc's `exec:` is a LAZY
 //!     source: it can't answer a viewer's RTSP DESCRIBE (start its ffmpeg, get RTP) unless the panel is
 //!     already up — which only this task brings up. So a consumers-based trigger DEADLOCKS the very
-//!     first open: no consumer ⇒ no Start ⇒ no RTP ⇒ DESCRIBE never completes ⇒ no consumer.
+//!     first open: no consumer ⇒ no poke ⇒ no RTP ⇒ DESCRIBE never completes ⇒ no consumer.
 //!
 //! A raw TCP connection to `:8554`, by contrast, is present the instant the client CONNECTS — before any
 //! video, before go2rtc answers DESCRIBE — so it BOOTSTRAPS the first open; and it clears the instant the
@@ -58,7 +61,7 @@
 //! it is live the socket renews on its own; once it lapses, renewal — and arming any FURTHER allowance —
 //! requires either the SERVING signal (which only a genuinely authenticated view produces) or that a
 //! cooldown gate has elapsed. Merely disconnecting and reconnecting does NOT mint a fresh allowance
-//! ([`BOOTSTRAP_COOLDOWN`]), so a raw socket can't pin the panel by cycling faster than the SIP window
+//! ([`BOOTSTRAP_COOLDOWN`]), so a raw socket can't pin the panel by cycling faster than the linger
 //! lapses; an observed serving clears the gate at once, so a working unit stays instantly responsive.
 //! The allowance length is sized to whether the RUNTIME SDP already carries the parameter sets (see
 //! [`BOOTSTRAP_GRACE`] / [`PROVISIONING_GRACE`] and [`sprop::runtime_sdp_has_sprop`]): a unit whose SDP
@@ -67,7 +70,10 @@
 //!
 //! Best-effort: reading `/proc` doesn't fail meaningfully — a read error reads as "no viewer" (logged
 //! once). The manual `view_camera`/`stop_camera` MQTT actions are unaffected — every source drives the
-//! same `view_rx`, and `ViewCmd::Start` is idempotent (a fresh full window each time).
+//! same `view_rx`, and this task's `ViewCmd::Hold` renews only the short-linger deadline (a fresh
+//! [`VIEWER_LINGER`] each poke), a SEPARATE deadline from the `ViewCmd::Start` full window a manual
+//! `view_camera` press sets, so auto-hold can neither extend nor cut a manual view's window (sip.rs
+//! hangs up only once BOTH have elapsed).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -75,8 +81,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
-use crate::config::Config;
-use crate::sip::ViewCmd;
+use crate::sip::{ViewCmd, VIEWER_LINGER};
 use crate::sprop;
 
 /// go2rtc's on-device RTSP port (`Go2RtcConfig.OnDeviceRtspPort` = 8554) as the uppercase hex the
@@ -102,43 +107,51 @@ const BOOTSTRAP_GRACE: Duration = Duration::from_secs(15);
 /// ffmpeg cannot resolve the video — and therefore cannot open the loopback publisher `serving` keys off —
 /// until the panel emits its next in-band SPS/PPS, up to a full ~20 s keyframe interval after the panel
 /// comes up (see `sprop.rs`). The passive learner is renew-less, so THIS allowance is the only thing
-/// holding the panel up through that first cold lock-on; it must outlast one keyframe interval + SIP settle
-/// regardless of how short `camera_view_idle_secs` is, or the session BYEs before `serving` can ever go
-/// true and the unit never learns (Codex). Generous margin over the ~20 s interval for settle/jitter and a
-/// just-missed keyframe. Applies only until the runtime SDP gains its parameter sets (then serving
-/// sustains the view and later opens fall back to `BOOTSTRAP_GRACE`).
+/// keeping auto-hold poking (`Hold`) on the socket alone through that first cold lock-on; it must outlast
+/// one keyframe interval + SIP settle so those every-poll pokes keep renewing sip.rs's short linger until
+/// `serving` appears — otherwise the pokes stop, the linger lapses, and the session BYEs before `serving`
+/// can ever go true and the unit never learns (Codex). (The linger being short is fine here: pokes arrive
+/// every `POLL_INTERVAL`, far inside `VIEWER_LINGER`, so the window never lapses between them while the
+/// allowance lasts — only when the allowance ends do the pokes stop.) Generous margin over the ~20 s
+/// interval for settle/jitter and a just-missed keyframe. Applies only until the runtime SDP gains its
+/// parameter sets (then serving sustains the view and later opens fall back to `BOOTSTRAP_GRACE`).
 const PROVISIONING_GRACE: Duration = Duration::from_secs(45);
 /// Forced idle gap after a bootstrap allowance is SPENT WITHOUT reaching `serving`, before another
 /// socket-alone allowance may arm. A raw socket earns exactly one `grace` allowance, then — crucially —
 /// merely disconnecting and reconnecting must NOT mint a fresh one (that would let an unauthenticated
-/// client pin the panel indefinitely by cycling the socket faster than the SIP window lapses; Codex). So
-/// `run` gates the NEXT allowance behind `camera_view_idle_secs + BOOTSTRAP_COOLDOWN` measured from the
-/// last arm: the `+ window` guarantees the panel actually comes down (a poke holds it up for the whole
-/// window) and this margin is the true idle gap. An observed `serving` (a real authenticated view) clears
-/// the gate immediately, so a working unit is always instantly responsive; the gate only bites an
-/// unauthenticated cycler, bounding it to one `grace + window` up-period per `grace + window + cooldown`.
-/// A benign socket that lingered through a genuine viewer's first attempt likewise recovers within it.
+/// client pin the panel indefinitely by cycling the socket faster than the linger lapses; Codex). So
+/// `run` gates the NEXT allowance behind `VIEWER_LINGER + BOOTSTRAP_COOLDOWN` measured from the last arm:
+/// the `+ linger` guarantees the panel actually comes down (the last poke holds it up for one whole
+/// linger after the allowance ends) and this margin is the true idle gap. An observed `serving` (a real
+/// authenticated view) clears the gate immediately, so a working unit is always instantly responsive; the
+/// gate only bites an unauthenticated cycler, bounding it to one `grace + linger` up-period per
+/// `grace + linger + cooldown`. A benign socket that lingered through a genuine viewer's first attempt
+/// likewise recovers within it.
 const BOOTSTRAP_COOLDOWN: Duration = Duration::from_secs(30);
 
 /// Debounce for the (essentially never taken) `/proc` read-error log, so a broken procfs can't spam the
 /// log every poll — the same one-shot-warn role the old API-unreachable `warned` flag served.
 static READ_WARNED: AtomicBool = AtomicBool::new(false);
 
-/// Poke `Start` while a viewer holds an ESTABLISHED TCP connection to go2rtc's RTSP port. Returns when
+/// Poke `Hold` while a viewer holds an ESTABLISHED TCP connection to go2rtc's RTSP port. Returns when
 /// `stopping` is set. `main` also aborts this task at shutdown, so the poll-interval sleep is a bounded
 /// wait.
-pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
+///
+/// The poke is [`ViewCmd::Hold`] (the short-linger renewal), NOT `Start` (the full-window manual press):
+/// while a viewer is connected this renews sip.rs's [`VIEWER_LINGER`] window every poll, so once the last
+/// viewer disconnects the pokes stop and the panel session hangs up ~VIEWER_LINGER later — decoupled from
+/// the (longer) `camera_view_idle_secs` manual-press window, which auto-hold no longer touches.
+pub async fn run(stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
     // Poll every POLL_INTERVAL for a prompt panel start when a viewer connects, but never longer than
-    // half the viewing window so a held view can't lapse between pokes (floored so a pathological tiny
-    // window can't spin the loop). On the 30 s default this is a flat 1 s.
-    let window = Duration::from_secs(cfg.camera_view_idle_secs.max(1));
+    // half the LINGER so a held view can't lapse between pokes (floored so a pathological config can't
+    // spin the loop). VIEWER_LINGER (5 s) with a 1 s poll ⇒ a flat 1 s.
     let period = POLL_INTERVAL
-        .min(window / 2)
+        .min(VIEWER_LINGER / 2)
         .max(Duration::from_millis(500));
-    // The next allowance is gated behind window + BOOTSTRAP_COOLDOWN from the last arm, so a spent
-    // allowance can't be refreshed by cycling the socket faster than the SIP window lapses (see
+    // The next allowance is gated behind VIEWER_LINGER + BOOTSTRAP_COOLDOWN from the last arm, so a spent
+    // allowance can't be refreshed by cycling the socket faster than the linger lapses (see
     // [`bootstrap_decision`] / [`BOOTSTRAP_COOLDOWN`]).
-    let cooldown = window + BOOTSTRAP_COOLDOWN;
+    let cooldown = VIEWER_LINGER + BOOTSTRAP_COOLDOWN;
     // Bootstrap-allowance state (see [`bootstrap_decision`]): `boot_until` is the end of the current
     // socket-alone allowance (None if none is armed); `next_arm` is the earliest instant a NEW allowance
     // may arm (the cooldown gate). Starting `next_arm` in the past lets the first viewer arm immediately.
@@ -165,21 +178,22 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, view_tx: mpsc::Sen
         boot_until = new_until;
         next_arm = new_next_arm;
         if poke {
-            // Renew the on-demand window. try_send never blocks the poll loop: a full queue means sip.rs
-            // isn't draining (reconnect backoff) and a dropped poke is harmless — the next poll pokes
-            // again; Closed means the SIP task is gone, nothing to hold.
+            // Renew the short-linger window. try_send never blocks the poll loop: a full queue means
+            // sip.rs isn't draining (reconnect backoff) and a dropped poke is harmless — the next poll
+            // pokes again; Closed means the SIP task is gone, nothing to hold.
             //
             // DELIBERATE: auto-hold is AUTHORITATIVE while a viewer is genuinely watching. If an operator
             // issues `stop_camera` (ViewCmd::Stop) while Home Assistant still has the feed open, this poll
-            // re-Starts within one interval — so a Stop only interrupts an active view briefly rather than
+            // re-Holds within one interval — so a Stop only interrupts an active view briefly rather than
             // ending it. This is by design: the session follows the live viewer, which is exactly what makes
             // the feature "transparent" (HA just opens the camera). To end a view, close it (the TCP
-            // connection clears → these pokes stop → the window lapses); `stop_camera` remains effective
+            // connection clears → these pokes stop → the linger lapses); `stop_camera` remains effective
             // when no viewer is connected (e.g. after a ring). Honoring the Stop over an active viewer was
             // considered and rejected: tearing the session down drops the client, HA auto-reconnects, the
             // connection reappears, and a suppression flag would fight HA's reconnect for no real benefit
-            // (product decision on #129; Codex).
-            let _ = view_tx.try_send(ViewCmd::Start);
+            // (product decision on #129; Codex). The poke is `Hold` (short linger), never `Start` (the
+            // full manual window), so it never lengthens a view past ~VIEWER_LINGER after the viewer leaves.
+            let _ = view_tx.try_send(ViewCmd::Hold);
         }
         // Re-check `stopping` before sleeping so a shutdown observed mid-poll exits promptly.
         if stopping.load(Ordering::Relaxed) {
@@ -335,6 +349,19 @@ fn is_loopback_hex(ip_hex: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poke_cadence_cannot_let_the_linger_lapse() {
+        // Auto-hold pokes `Hold` every `period`, each renewing sip.rs's VIEWER_LINGER window; if a poke
+        // could arrive LATER than the window it renews, a held view would hang up between pokes. `run`
+        // computes `period = POLL_INTERVAL.min(VIEWER_LINGER/2).max(500ms)`; guard the whole chain so a
+        // future edit that shrinks VIEWER_LINGER (or lengthens POLL_INTERVAL) can't cross that line.
+        let period = POLL_INTERVAL
+            .min(VIEWER_LINGER / 2)
+            .max(Duration::from_millis(500));
+        assert!(period < VIEWER_LINGER, "a poke must renew before the linger it set can lapse");
+        assert!(POLL_INTERVAL < VIEWER_LINGER, "the poll interval must stay inside the linger");
+    }
 
     // A realistic /proc/net/tcp header line (the parser skips it).
     const HEADER: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
