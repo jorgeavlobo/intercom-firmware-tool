@@ -419,10 +419,10 @@ namespace IntercomFirmwareTool.Core
         private const string Go2RtcdInitPath = "/etc/init.d/go2rtcd";       // its own SysV init script
         private const string Go2RtcBootLink = "/etc/rc5.d/S99zGo2rtc";      // boot symlink (after factory S99)
         private const string Go2RtcBootTarget = "../init.d/go2rtcd";
-        // ifupdown if-up.d hook (task #42): runs AFTER the factory if-pre-up.d/iptables rebuild on a
-        // wlan0 bring-up and re-asserts the GO2RTC :8554 rule via `go2rtcd fw-reassert`, so boot/WiFi-
-        // reconnect restore the port sequentially instead of the watchdog racing the factory's lock-less
-        // INPUT writes. Installed 0755 root:root on the on-device camera path only (same gate as go2rtcd).
+        // ifupdown if-up.d hook (task #42): runs AFTER the factory if-pre-up.d/iptables rebuild on EVERY
+        // interface bring-up and re-asserts the GO2RTC :8554 rule via `go2rtcd fw-reassert`, so boot/WiFi-
+        // reconnect/usb0 restore the port sequentially — it is the SOLE re-assert path (the periodic
+        // watchdog touches no iptables). Installed 0755 root:root on the on-device camera path only.
         private const string Go2RtcNetHookPath = "/etc/network/if-up.d/go2rtc";
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
@@ -1272,7 +1272,7 @@ namespace IntercomFirmwareTool.Core
                         go2rtcdScript == LoadScript(ResourcePrefix + "go2rtcd"), ""));
 
                     // if-up.d hook (task #42): presence/mode/owner + byte-exact content, like go2rtcd. It
-                    // re-asserts the GO2RTC :8554 rule after the factory firewall rebuild on a wlan0 bring-up.
+                    // re-asserts the GO2RTC :8554 rule after the factory firewall rebuild on every iface bring-up.
                     CheckFile(fs, checks, Go2RtcNetHookPath, 755);
                     string go2rtcNetHook = fs.FileExists(Go2RtcNetHookPath) ? ReadAllText(fs, Go2RtcNetHookPath) : "";
                     checks.Add(new("go2rtc if-up.d hook matches the embedded script",

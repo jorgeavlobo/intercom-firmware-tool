@@ -68,9 +68,10 @@ CONF_FILE=/etc/btmqttd/btmqttd.conf
 # boot-scoped marker (FW_OWN, tmpfs — cleared every reboot together with the ruleset). A fixed chain name
 # is only a namespace convention; if a `GO2RTC` chain already exists when we first run (a foreign chain we
 # did not create), we leave it — and the port — entirely alone rather than flush someone else's chain. So
-# we never touch a rule we do not own. Reconciliation is otherwise STATELESS: every watchdog pass
-# re-asserts our chain's contents from scratch (flush + repopulate), so the chain itself is the state —
-# nothing to drift, and a DHCP subnet change is handled for free. (A second CAP_NET_ADMIN manager could
+# we never touch a rule we do not own. Reconciliation is otherwise STATELESS: each firewall event (start
+# / stop / fw-reassert — never the periodic watchdog, task #42) re-asserts our chain's contents from
+# scratch (flush + repopulate), so the chain itself is the state — nothing to drift, and a DHCP subnet
+# change is handled for free. (A second CAP_NET_ADMIN manager could
 # still rewrite the firewall wholesale, but that actor already fully controls netfilter — the same
 # boundary Docker/kube-proxy accept.)
 CAM_PORT=8554
@@ -82,11 +83,11 @@ FW_OWN=/var/run/go2rtc.fwown
 # filters (e.g. the conntrack `--ctstate INVALID -j DROP` guard installed by /etc/network/if-pre-up.d/
 # iptables) but still before the `-P INPUT DROP` policy (evaluated only after all rules). Our ACCEPT
 # therefore never lets traffic bypass a factory or admin filter. Merely checking existence is not enough:
-# the factory rebuild does `-F INPUT` then many `-A INPUT`, so a watchdog pass that appended our jump
+# the factory rebuild does `-F INPUT` then many `-A INPUT`, so an assert that appended our jump
 # mid-rebuild would leave it AHEAD of the later-restored filters. So if the jump is missing OR not the
-# last INPUT rule, drain it and re-append at the end — the next pass self-corrects the position within one
-# watchdog interval. Steady state (already last) mutates nothing. Non-matching packets RETURN from
-# our chain and continue INPUT, so the jump never disturbs other traffic.
+# last INPUT rule, drain it and re-append at the end — the next fw-reassert (run right after the factory
+# rebuild) self-corrects the position. Steady state (already last) mutates nothing. Non-matching packets
+# RETURN from our chain and continue INPUT, so the jump never disturbs other traffic.
 # LOCKING DISCIPLINE (task #42, industry practice for coexisting iptables managers). The factory
 # firewall rebuilds INPUT with LOCK-LESS `-A INPUT` calls (no `-w`), which FAIL if anyone else holds the
 # xtables lock at that instant. So READ-ONLY inspection here (`-S`, `-C`) runs WITHOUT `-w`: it never
@@ -168,19 +169,19 @@ kill_all() {
 # then reconcile its contents to exactly one ACCEPT for tcp/CAM_PORT from CAM_IFACE's own subnet (derived
 # at runtime; iptables masks the address to its /prefix). With NO address yet (the boot race before DHCP,
 # or a lease drop) the desired state is an EMPTY chain — the port stays closed, never opened interface-
-# wide — and a later pass fills it once an address appears.
+# wide — and a later event fills it once an address appears.
 #
-# ZERO-WRITE IN STEADY STATE (task #42). Earlier this ALWAYS did `-F` + `-A` every watchdog pass (~60s).
-# That per-pass write churn is the collision source: our `-w 5` mutating calls could HOLD the xtables lock
-# across the factory firewall's LOCK-LESS `-F INPUT; -A INPUT …` rebuild (in /etc/network/if-pre-up.d/
-# iptables, no `-w`), making the factory's own `-A INPUT` calls FAIL SILENTLY — dropping factory rules
-# (FTP-over-USB reflash, security DROPs, even SSH). So we now WRITE ONLY WHEN THE STATE DIFFERS: if OUR
-# chain already holds exactly the one desired ACCEPT for the current subnet (address present) OR is already
-# empty (no address), we make NO iptables writes at all — just re-assert the (itself zero-write when
-# already-last) INPUT jump and return. A DHCP subnet change, a missing/extra rule, or a chain we just
-# created still triggers the flush+repopulate path. The if-up.d hook (go2rtc-net-hook → `fw-reassert`)
-# re-asserts sequentially right AFTER the factory rebuild for boot/WiFi-reconnect; this zero-write
-# reconciliation is the watchdog-driven safety net for every other trigger.
+# ZERO-WRITE WHEN ALREADY CORRECT (task #42). This runs ONLY on discrete firewall events (start / stop /
+# fw-reassert), never the periodic watchdog — the watchdog touches no iptables, because our `-w 5`
+# mutating calls could HOLD the xtables lock across the factory firewall's LOCK-LESS `-F INPUT; -A INPUT …`
+# rebuild (in /etc/network/if-pre-up.d/iptables, no `-w`), making the factory's own `-A INPUT` calls FAIL
+# SILENTLY — dropping factory rules (FTP-over-USB reflash, security DROPs, even SSH). Even on those
+# events we WRITE ONLY WHEN THE STATE DIFFERS: if OUR chain already holds exactly the one desired ACCEPT
+# for the current subnet (address present) OR is already empty (no address), we make NO iptables writes
+# at all — just re-assert the (itself zero-write when already-last) INPUT jump and return. A DHCP subnet
+# change, a missing/extra rule, or a chain we just created still triggers the flush+repopulate path. The
+# if-up.d hook (go2rtc-net-hook → `fw-reassert`) is THE re-assert path, run sequentially right AFTER the
+# factory rebuild on every interface bring-up (boot / WiFi-reconnect / usb0 / …).
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	fw_chain_exists; fw_rc=$?
@@ -408,7 +409,7 @@ case "$1" in
 		;;
 	fw-reassert)
 		# Firewall-ONLY reconcile (task #42) — the SINGLE source of truth for our GO2RTC rule, called by
-		# the if-up.d hook (go2rtc-net-hook) RIGHT AFTER the factory firewall rebuild on a wlan0 bring-up,
+		# the if-up.d hook (go2rtc-net-hook) RIGHT AFTER the factory firewall rebuild on any iface bring-up,
 		# and (with start/stop) the only place that touches iptables. It re-asserts sequentially — no daemon
 		# racing the factory's lock-less INPUT writes — and is idempotent + zero-write in steady state (see
 		# firewall_open). It must NEVER launch or kill the daemon. The firewall follows the ENABLED/DISABLED
