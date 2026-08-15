@@ -329,8 +329,12 @@ public class Go2RtcdScriptTests
         int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         string openBody = s.Substring(oOpen, cOpen - oOpen);
         // The decision reads the LIVE chain: a rule-count (`grep -c "^-A "`) plus a `-C` membership check
-        // (which canonicalizes arg order / `-m tcp` / subnet masking) for the CURRENT subnet.
-        Assert.Contains("n=$(iptables -w 5 -S \"$FW_CHAIN\" 2>/dev/null | grep -c -- \"^-A \")", openBody);
+        // (which canonicalizes arg order / `-m tcp` / subnet masking) for the CURRENT subnet. The listing
+        // STATUS is captured separately — `n=-1` on a failed `-S` — so an inspection error never reads as
+        // "already correct" and always falls through to the flush path.
+        Assert.Contains("if fw_list=$(iptables -w 5 -S \"$FW_CHAIN\" 2>/dev/null); then", openBody);
+        Assert.Contains("grep -c -- \"^-A \"", openBody);
+        Assert.Contains("n=-1", openBody);
         Assert.Contains(
             "iptables -w 5 -C \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
             joined);

@@ -188,7 +188,8 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// The panel's H.264 parameter sets (SPS,PPS) as the RFC 6184 <c>sprop-parameter-sets</c>
-        /// value — two base64 tokens separated by a comma, e.g. <c>Z0JAHqaAoD2Q,aM48gAA=</c> — embedded
+        /// value — one or more base64 sets separated by commas (typically SPS,PPS), e.g.
+        /// <c>Z0JAHqaAoD2Q,aM48gAA=</c> — embedded
         /// into the on-device go2rtc SDP's <c>a=fmtp</c> line (issue #120, <see cref="CameraOnDevice"/>
         /// mode only).
         /// <para>WHY: the panel's own SDP carries NO sprop, and its encoder emits an in-stream SPS/PPS
