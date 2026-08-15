@@ -193,8 +193,11 @@ public class Go2RtcdScriptTests
             "while [ \"$(iptables -w 5 -S INPUT 2>/dev/null | grep -c -- \"^-A INPUT -j $FW_CHAIN\\$\")\" -gt 1 ]", fj);
         Assert.Contains("iptables -w 5 -D INPUT -j \"$FW_CHAIN\" 2>/dev/null || break", fj);
         // The ONLY thing we ever add to INPUT is the jump to our chain — never a bare rule in INPUT.
+        // Code lines only: a COMMENT may legitimately describe the factory's `-F INPUT; -A INPUT` rebuild,
+        // so skip comment lines (the invariant is about what the script EXECUTES, not what it documents).
         foreach (var l in System.Text.RegularExpressions.Regex.Split(joined, "\n"))
-            if (l.Contains(" -A INPUT ") || l.Contains(" -I INPUT "))
+            if (!l.TrimStart().StartsWith("#", System.StringComparison.Ordinal)
+                && (l.Contains(" -A INPUT ") || l.Contains(" -I INPUT ")))
                 Assert.Contains("-j \"$FW_CHAIN\"", l);
         // close tears down only our own chain + jump, removing the jump BEFORE deleting the chain (-X
         // refuses a referenced chain).
