@@ -85,6 +85,13 @@ const BIND_RETRY: Duration = Duration::from_secs(5);
 /// socket is unusual, but if one recurs we must not spin: sleeping here keeps a persistent error from
 /// pegging the single-threaded runtime.
 const RECV_ERR_BACKOFF: Duration = Duration::from_secs(1);
+/// Bounded retries for clearing the superseded learned record on a seeded image (see `run`'s
+/// `ClearThenDone`). Enough to ride out a transient `cfg/extra` write failure (the partition briefly
+/// unavailable) without treating the clear as done while the stale record survives; a persistent failure
+/// is a hardware fault we log and move on from.
+const CLEAR_RETRIES: u32 = 5;
+/// Backoff between clear retries.
+const CLEAR_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
 /// Listen on the loopback RTP port, parse the panel's SPS/PPS from the H.264 the live-view ffmpeg ships
 /// there, persist the learned `sprop-parameter-sets`, and return. Spawned when the on-device camera is
@@ -100,9 +107,29 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     // startup; the steady state after the first learn is `Done`.
     match provision_action(template_has_sprop().await, persisted_for_branch(branch).await) {
         // A seeded template supersedes any learned record: CLEAR the stale record so a later bare reflash
-        // re-learns instead of resurrecting the old value (Codex), then there is nothing to learn.
+        // re-learns instead of resurrecting the old value (Codex). Do NOT treat this as done until the
+        // clear actually succeeds — if it fails (cfg/extra briefly unavailable) the stale record would
+        // survive and a later bare reflash could re-splice it (CodeRabbit) — so retry with a bounded
+        // backoff and log an ultimate failure. `clear_camera_sprop` returns true when the file is gone
+        // (removed OR already absent), so on the common seeded image with no record it succeeds at once.
         Provision::ClearThenDone => {
-            let _ = tokio::task::spawn_blocking(persist::clear_camera_sprop).await;
+            for attempt in 0..CLEAR_RETRIES {
+                if stopping.load(Ordering::Relaxed) {
+                    return;
+                }
+                if tokio::task::spawn_blocking(persist::clear_camera_sprop)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return;
+                }
+                if attempt + 1 < CLEAR_RETRIES {
+                    tokio::time::sleep(CLEAR_RETRY_BACKOFF).await;
+                }
+            }
+            eprintln!(
+                "btmqttd: sprop: could not clear the superseded camera-sprop record; a later bare reflash may re-splice a stale value"
+            );
             return;
         }
         Provision::Done => return,
