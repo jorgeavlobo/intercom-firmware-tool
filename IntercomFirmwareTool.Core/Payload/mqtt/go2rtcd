@@ -258,7 +258,16 @@ firewall_is_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
 	[ -z "$lan" ] && return 0                                   # no address → correctly closed; settled
-	iptables -S INPUT 2>/dev/null | grep -q -- "^-A INPUT -j $FW_CHAIN\$" || return 1
+	# Mirror fw_jump's EXACT invariant: our chain must be referenced by EXACTLY ONE INPUT jump AND that jump
+	# must be LAST (after the factory/admin filters, before the policy DROP). A present-but-not-last or
+	# duplicated jump is NOT "open" — our ACCEPT could then sit ahead of a factory filter — so it must keep
+	# the caller retrying until fw_jump repositions it (CodeRabbit). A failed listing (lock/error) yields
+	# n=0 / no last match ⇒ "not open" ⇒ retry, never a false "open".
+	inp=$(iptables -S INPUT 2>/dev/null) || return 1
+	n=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
+	last=$(printf '%s\n' "$inp" | tail -n 1)
+	[ "$n" -eq 1 ] && [ "$last" = "-A INPUT -j $FW_CHAIN" ] || return 1
+	# And OUR chain must carry exactly the ACCEPT for the current subnet.
 	iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null
 }
 

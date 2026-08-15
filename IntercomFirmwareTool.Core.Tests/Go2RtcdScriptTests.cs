@@ -223,6 +223,11 @@ public class Go2RtcdScriptTests
         string pred = s.Substring(pStart, s.IndexOf("\n}\n", pStart, System.StringComparison.Ordinal) - pStart);
         Assert.Contains("[ -z \"$lan\" ] && return 0", pred); // no address → settled, no retry
         Assert.Contains("iptables -C \"$FW_CHAIN\"", pred);   // confirms our exact ACCEPT is installed
+        // It must verify the SAME INPUT-jump invariant fw_jump enforces — EXACTLY ONE jump AND it is LAST —
+        // so a present-but-not-last (or duplicated) jump keeps the caller retrying instead of falsely
+        // reading "open" with our ACCEPT ahead of a factory filter (CodeRabbit).
+        Assert.Contains("[ \"$n\" -eq 1 ]", pred);
+        Assert.Contains("[ \"$last\" = \"-A INPUT -j $FW_CHAIN\" ]", pred);
     }
 
     [Fact]
