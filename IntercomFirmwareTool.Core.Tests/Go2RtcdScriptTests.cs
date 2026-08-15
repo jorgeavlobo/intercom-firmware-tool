@@ -27,15 +27,16 @@ public class Go2RtcdScriptTests
         return reader.ReadToEnd();
     }
 
-    // Extract the shared lock protocol — from `acquire() {` through the end of the `release()` line — so
-    // the two init scripts can be compared for the "shared verbatim" invariant.
+    // Extract the shared lock protocol — from the `LOCK_PID=` line (which starts the helper block:
+    // proc_starttime, holder_gone, acquire, release) through the end of the `release()` line — so the two
+    // init scripts can be compared for the "shared verbatim" invariant.
     private static string LockProtocol(string script)
     {
         string s = script.Replace("\r\n", "\n");
-        int a = s.IndexOf("acquire() {", System.StringComparison.Ordinal);
-        Assert.True(a >= 0, "acquire() must exist");
+        int a = s.IndexOf("LOCK_PID=\"$LOCKDIR/pid\"", System.StringComparison.Ordinal);
+        Assert.True(a >= 0, "LOCK_PID= must exist");
         int r = s.IndexOf("release()", a, System.StringComparison.Ordinal);
-        Assert.True(r > a, "release() must follow acquire()");
+        Assert.True(r > a, "release() must follow the lock helpers");
         int end = s.IndexOf('\n', r);
         return s.Substring(a, (end < 0 ? s.Length : end) - a);
     }
@@ -154,25 +155,35 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
-    public void Lock_staleness_is_liveness_based_not_a_fixed_time_steal()
+    public void Lock_reclaim_is_process_identity_based_with_no_fixed_time_eviction()
     {
-        // Gold-standard fix (Codex): a slow-but-alive holder — e.g. firewall_close running several
-        // `iptables -w 5` calls under xtables contention — must NEVER have its mutex stolen, or its
-        // critical section could be interleaved by a concurrent start/stop/respawn. So acquire() records
-        // the holder PID and reclaims the lock only when that PID is no longer alive (kill -0), with a time
-        // BACKSTOP solely for PID reuse — not the old unconditional fixed-time steal. release() drops the
-        // PID it wrote.
+        // Gold-standard fix (Codex/CodeRabbit): a slow-but-alive holder — e.g. firewall_close running
+        // several `iptables -w 5` calls, or a stalled process — must NEVER have its mutex reclaimed on a
+        // timer, or its critical section could be interleaved. So the lock records PID + /proc start-time
+        // (an identity a recycled PID cannot forge) and reclaims ONLY when that exact process is gone (no
+        // proc, or a different start-time). There must be NO fixed-time steal of any kind.
         string s = ReadScript().Replace("\r\n", "\n");
         int aStart = s.IndexOf("acquire() {", System.StringComparison.Ordinal);
         Assert.True(aStart >= 0, "acquire() must exist");
         string acq = s.Substring(aStart, s.IndexOf("\n}\n", aStart, System.StringComparison.Ordinal) - aStart);
-        Assert.Contains("printf '%s\\n' \"$$\" > \"$LOCK_PID\"", acq); // records the holder PID
-        Assert.Contains("kill -0 \"$holder\"", acq);                   // liveness-based staleness
-        Assert.Contains("[ \"$waited\" -ge \"$LOCK_STEAL_BACKSTOP\" ]", acq); // PID-reuse backstop only
-        // The old unconditional fixed-time steal must be gone — no `-ge 10 ] ... rmdir` preemption of a
-        // live holder.
-        Assert.DoesNotContain("-ge 10 ]", acq);
-        // release removes the PID file it wrote (so a fresh acquire doesn't read a stale PID).
+        // Records PID + start-time, and reclaims via holder_gone (identity), not a timer.
+        Assert.Contains("printf '%s %s\\n' \"$$\" \"$(proc_starttime \"$$\")\" > \"$LOCK_PID\"", acq);
+        Assert.Contains("holder_gone", acq);
+        // NO fixed-time eviction survives: no waited counter, no backstop, no kill -0 liveness (superseded
+        // by start-time identity), no fixed-count steal.
+        foreach (var banned in new[] { "LOCK_STEAL_BACKSTOP", "waited", "kill -0", "-ge 10 ]", "-ge " })
+            Assert.DoesNotContain(banned, acq);
+        // holder_gone uses the start-time identity: a recorded PID whose /proc start-time is absent or
+        // changed is "gone"; a matching live holder is NOT (so a live holder's lock is never removed).
+        int hStart = s.IndexOf("holder_gone() {", System.StringComparison.Ordinal);
+        Assert.True(hStart >= 0, "holder_gone() must exist");
+        string hg = s.Substring(hStart, s.IndexOf("\n}\n", hStart, System.StringComparison.Ordinal) - hStart);
+        Assert.Contains("proc_starttime \"$_p\"", hg);          // reads the recorded PID's current start-time
+        Assert.Contains("[ -z \"$_c\" ] && return 0", hg);      // no such process ⇒ gone
+        Assert.Contains("[ \"$_c\" != \"$_s\" ]", hg);          // different start-time ⇒ recycled ⇒ gone
+        // Recovery of a stale lock is serialized + re-verified so two waiters can't both break it.
+        Assert.Contains("mkdir \"$LOCKDIR.recover\"", acq);
+        // release removes the PID file it wrote (so a fresh acquire doesn't read a stale record).
         Assert.Contains("release() { rm -f \"$LOCK_PID\"", s);
     }
 

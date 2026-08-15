@@ -143,37 +143,41 @@ daemon_pids() {
 is_running() { [ -n "$(daemon_pids)" ]; }
 
 # Acquire the mutex. `mkdir` is atomic, so exactly one caller wins LOCKDIR and the rest wait. A holder that
-# CRASHED mid-operation must not wedge the service forever — but a holder that is merely SLOW (e.g. running
-# several `iptables -w 5` calls under xtables contention) must NEVER be preempted, or its critical section
-# could be interleaved by a stolen lock. So staleness is LIVENESS-based, not time-based (an earlier fixed
-# ~10 s steal could preempt a live-but-slow holder): the winner records its PID in the lock, and a waiter
-# reclaims it only when that PID is no longer alive (`kill -0`), with a generous TIME BACKSTOP purely to
-# cover PID reuse. This is the standard fix for "the lease expired while the holder was still alive" and
-# bounds every critical section (firewall_open, firewall_close, launch/kill) regardless of how long its
-# iptables calls block (Codex). This lock protocol is shared VERBATIM with the btmqttd init script.
+# CRASHED mid-operation must not wedge the service forever — but a holder that is merely SLOW (several
+# `iptables -w 5` calls under xtables contention, or any fs/process stall) must NEVER be preempted, or its
+# critical section could be interleaved by a stolen lock. So the lock records the holder's PROCESS IDENTITY
+# (PID + its /proc start-time, which a recycled PID cannot forge) and a waiter reclaims it ONLY when that
+# exact process is GONE — never on a timer, so there is NO fixed-time eviction of a live holder. Recovery of
+# a dead holder's lock is serialized through a second atomic mkdir and re-verified, so two waiters can never
+# both break it. This protocol is shared VERBATIM with the btmqttd init script.
 LOCK_PID="$LOCKDIR/pid"
-# Backstop (seconds) for PID reuse ONLY: comfortably longer than the worst legitimate critical section (a
-# single firewall open/close is a handful of `-w 5` waits, ~25 s worst case), so it never preempts a live
-# holder; a genuinely dead holder is reclaimed at once via the liveness check, not this.
-LOCK_STEAL_BACKSTOP=60
+# Field 22 of /proc/<pid>/stat is the process start-time; `sub(/.*\) /,"")` strips the "pid (comm) " prefix
+# (robust to a comm containing ') '), so $20 of the remainder is the start-time. Empty ⇒ no such process.
+proc_starttime() { awk '{ sub(/.*\) /, ""); print $20; exit }' "/proc/$1/stat" 2>/dev/null; }
+# True iff the recorded LOCKDIR holder is GONE: a recorded PID that no longer exists, or now carries a
+# DIFFERENT start-time (its number was recycled). An empty record (a fresh holder mid-acquire) is NOT gone,
+# and a live original holder (PID + start-time both match) is NEVER reported gone.
+holder_gone() {
+	_h=$(cat "$LOCK_PID" 2>/dev/null); _p=${_h%% *}
+	[ -z "$_p" ] && return 1
+	case "$_h" in *" "*) _s=${_h#* } ;; *) _s= ;; esac
+	_c=$(proc_starttime "$_p")
+	[ -z "$_c" ] && return 0
+	[ -n "$_s" ] && [ "$_c" != "$_s" ]
+}
 acquire() {
-	waited=0
 	while :; do
 		if mkdir "$LOCKDIR" 2>/dev/null; then
-			printf '%s\n' "$$" > "$LOCK_PID" 2>/dev/null || true  # tmpfs write; a failure is outside the model
+			printf '%s %s\n' "$$" "$(proc_starttime "$$")" > "$LOCK_PID" 2>/dev/null || true
 			return
 		fi
-		# Contended. Reclaim ONLY if the recorded holder is genuinely gone (dead PID). A fresh holder that
-		# has not yet written its PID reads empty and is left alone — never stolen mid-acquire.
-		holder=$(cat "$LOCK_PID" 2>/dev/null)
-		if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-			rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; waited=0; continue
-		fi
-		waited=$((waited + 1))
-		if [ "$waited" -ge "$LOCK_STEAL_BACKSTOP" ]; then
-			# Holder looks alive but has held far past any legitimate critical section — most likely PID
-			# reuse of a dead holder. Reclaim as a backstop.
-			rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; waited=0; continue
+		# Contended. If the holder is GONE, recover — but serialize the break through a second atomic mkdir
+		# so only ONE waiter breaks a given stale lock, and RE-VERIFY it is still gone under that lock, so a
+		# waiter that already took over is never broken (closes the two-waiters-both-steal race).
+		if holder_gone && mkdir "$LOCKDIR.recover" 2>/dev/null; then
+			holder_gone && { rm -f "$LOCK_PID" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null; }
+			rmdir "$LOCKDIR.recover" 2>/dev/null
+			continue
 		fi
 		sleep 1
 	done
