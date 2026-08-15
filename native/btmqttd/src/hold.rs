@@ -205,7 +205,7 @@ pub async fn run(stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
     }
 }
 
-/// Decide, for one poll, whether to poke `Start` and how the bootstrap-allowance state advances. Pure (no
+/// Decide, for one poll, whether to poke `Hold` and how the bootstrap-allowance state advances. Pure (no
 /// I/O, no wall clock) so the bootstrap / serving / cooldown state machine is unit-testable; `run` owns the
 /// clock and the async `/proc` + SDP reads.
 ///

@@ -941,7 +941,7 @@ async fn run() -> Result<bool, String> {
     // Viewer-activity auto-hold (hold.rs): stop it FIRST. It holds a `view_tx` clone, so it must be gone
     // before the SIP block below drops the LAST sender to close `view_rx` — otherwise a surviving clone
     // keeps the channel open and the SIP task never sees the shutdown. It neither publishes to the broker
-    // nor holds half-actuated bus state (it only reads /proc and pokes Start), so a plain abort is clean
+    // nor holds half-actuated bus state (it only reads /proc and pokes Hold), so a plain abort is clean
     // and drops its `view_tx` clone.
     if let Some(h) = hold_task {
         hold_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
