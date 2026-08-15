@@ -81,6 +81,10 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(1);
 /// Backoff between retries when binding [`SPROP_RTP_ADDR`] fails (e.g. the port is briefly in use). A
 /// transient bind failure must not kill learning, so we sleep and retry rather than return.
 const BIND_RETRY: Duration = Duration::from_secs(5);
+/// Backoff after a `recv_from` ERROR (as opposed to a timeout). A recv error on a bound loopback UDP
+/// socket is unusual, but if one recurs we must not spin: sleeping here keeps a persistent error from
+/// pegging the single-threaded runtime.
+const RECV_ERR_BACKOFF: Duration = Duration::from_secs(1);
 
 /// Listen on the loopback RTP port, parse the panel's SPS/PPS from the H.264 the live-view ffmpeg ships
 /// there, persist the learned `sprop-parameter-sets`, and return. Spawned when the on-device camera is
@@ -130,6 +134,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     let mut sps: Option<Vec<u8>> = None;
     let mut pps: Option<Vec<u8>> = None;
     let mut persist_warned = false;
+    let mut recv_warned = false;
     while !stopping.load(Ordering::Relaxed) {
         match tokio::time::timeout(RECV_TIMEOUT, socket.recv_from(&mut buf)).await {
             Ok(Ok((n, _from))) => {
@@ -178,12 +183,22 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
                     }
                 }
             }
-            // A recv error on a bound loopback UDP socket is unusual; keep listening rather than exit.
-            Ok(Err(_)) => {}
-            // Idle: no datagram this interval. Re-check `already_learned` (an operator could pre-seed)
-            // and loop back to re-check `stopping`.
+            // A recv error on a bound loopback UDP socket is unusual; keep listening rather than exit,
+            // but log ONCE and back off so a persistent error can't spin this into a busy loop on the
+            // single-threaded runtime.
+            Ok(Err(e)) => {
+                if !recv_warned {
+                    eprintln!("btmqttd: sprop listener: recv error ({e}); backing off and retrying");
+                    recv_warned = true;
+                }
+                tokio::time::sleep(RECV_ERR_BACKOFF).await;
+            }
+            // Idle: no datagram this interval. Re-check ONLY the persisted value (an earlier boot's
+            // learn on this branch) — the read-only `/etc` template can't change at runtime and was
+            // already checked before the loop, so we skip that flash read here — then loop to re-check
+            // `stopping`.
             Err(_timeout) => {
-                if already_learned(branch).await {
+                if persisted_for_branch(branch).await {
                     return;
                 }
             }
@@ -200,12 +215,19 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
 /// (task #41). A missing/unreadable persist file AND template also reads as "not provisioned" so the
 /// listen continues. Both reads are blocking → spawn_blocking.
 async fn already_learned(branch: u8) -> bool {
-    let persisted = tokio::task::spawn_blocking(move || {
+    persisted_for_branch(branch).await || template_has_sprop().await
+}
+
+/// True iff a value learned on THIS `branch` is already persisted on cfg/extra (the durable source of
+/// truth). Split out from [`already_learned`] so the idle re-check can poll JUST this — the read-only
+/// `/etc` template is immutable at runtime (a set template makes `run` return before the loop), so the
+/// per-second idle path skips that flash read. Blocking read → spawn_blocking.
+async fn persisted_for_branch(branch: u8) -> bool {
+    tokio::task::spawn_blocking(move || {
         matches!(persist::read_camera_sprop(), Some((b, _)) if b == branch)
     })
     .await
-    .unwrap_or(false);
-    persisted || template_has_sprop().await
+    .unwrap_or(false)
 }
 
 /// True iff the read-only `/etc` template SDP already carries an operator-supplied

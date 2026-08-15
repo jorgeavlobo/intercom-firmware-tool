@@ -83,14 +83,14 @@ public class Go2RtcdScriptTests
         string[] code = CodeLines(s);
         // Reads the current branch from the installed conf (default 1 when absent, matching config.rs).
         Assert.Contains("CONF_FILE=/etc/btmqttd/btmqttd.conf", s);
-        Assert.Contains(code, l => l.Contains("CAMERA_BRANCH=") && l.Contains("sed -n") && l.Contains("$CONF_FILE"));
+        Assert.Contains(code, l => l.Contains("CAMERA_BRANCH") && l.Contains("sed -n") && l.Contains("$CONF_FILE"));
         // Splice ONLY when the branch unambiguously matches the installer's canonical value; anything
         // else (quoted, export-only, non-integer, absent) resolves to the sentinel `none` so nothing is
         // spliced (btmqttd re-learns) — a stale-branch splice is then structurally impossible.
         Assert.Contains(code, l => l.Contains("*[!0-9]*") && l.Contains("cur_branch=none"));
-        // Mirror the two parse_env behaviours that could flip a real match: the LAST assignment wins,
-        // and an optional `export ` prefix is ignored.
-        Assert.Contains(code, l => l.Contains("CAMERA_BRANCH=") && l.Contains("tail -n 1"));
+        // Mirror parse_env's key grammar so the LAST assignment always wins: match whitespace around the
+        // key and `=` (key.trim()), strip only a LITERAL `export ` prefix, and take the last match.
+        Assert.Contains(code, l => l.Contains("CAMERA_BRANCH[[:space:]]*=") && l.Contains("tail -n 1"));
         Assert.Contains(code, l => l.Contains("s/^export"));
         // Leading zeros are stripped so 00 -> 0 and 01 -> 1 compare numerically; all-zero digits -> 0.
         Assert.Contains(code, l => l.Contains("sed 's/^0*//'"));

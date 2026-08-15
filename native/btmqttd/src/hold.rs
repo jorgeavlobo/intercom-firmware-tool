@@ -140,25 +140,30 @@ async fn viewer_connected() -> bool {
 }
 
 /// Count ESTABLISHED sockets whose LOCAL port equals `port_hex` AND whose LOCAL IP is not loopback,
-/// parsing `/proc/net/tcp`-format text. Skips the header line; for each remaining line, whitespace-splits
-/// it, takes field[1] (`HEXIP:HEXPORT`, the LOCAL address — the port is the substring after the LAST `:`,
-/// the IP the part before it) and field[3] (the connection state), and counts the line when the local
-/// port matches `port_hex` (case-insensitive), the state is `01` (TCP_ESTABLISHED), AND the local IP is
-/// NOT loopback (see [`is_loopback_hex`] — this drops go2rtc's own `127.0.0.1:8554` republish so it is
-/// not miscounted as a viewer). Pure and testable — no `/proc` I/O.
+/// parsing `/proc/net/tcp`-format text. Skips the header line; for each remaining line it reads only
+/// field[1] (`HEXIP:HEXPORT`, the LOCAL address — the port is the substring after the LAST `:`, the IP
+/// the part before it) and field[3] (the connection state) straight off the whitespace iterator (no
+/// per-line allocation), and counts the line when the local port matches `port_hex` (case-insensitive),
+/// the state is `01` (TCP_ESTABLISHED), AND the local IP is NOT loopback (see [`is_loopback_hex`] — this
+/// drops go2rtc's own `127.0.0.1:8554` republish so it is not miscounted as a viewer). Pure and
+/// testable — no `/proc` I/O.
 fn established_local_port_count(proc_tcp: &str, port_hex: &str) -> usize {
     proc_tcp
         .lines()
         .skip(1) // header row
         .filter(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() < 4 {
+            // Pull only the two fields we need straight from the iterator — no per-line Vec allocation,
+            // since this runs every poll (~1s) on the single-threaded runtime. field[1] is the LOCAL
+            // address, field[3] the state: `nth(1)` yields field[1] (skipping field[0]), then a second
+            // `nth(1)` yields field[3] (skipping field[2]) from where the iterator now sits.
+            let mut cols = line.split_whitespace();
+            let (Some(local), Some(state)) = (cols.nth(1), cols.nth(1)) else {
                 return false;
-            }
-            // field[1] is the LOCAL `HEXIP:HEXPORT`; split off the port after the LAST ':' (IPv6
+            };
+            // `local` is the LOCAL `HEXIP:HEXPORT`; split off the port after the LAST ':' (IPv6
             // addresses in /proc are a single colon-free hex blob, so there's exactly one ':' here). The
-            // part before it is the LOCAL IP. field[3] is the state; "01" is TCP_ESTABLISHED.
-            let (local_ip, local_port) = match fields[1].rsplit_once(':') {
+            // part before it is the LOCAL IP. `state` "01" is TCP_ESTABLISHED.
+            let (local_ip, local_port) = match local.rsplit_once(':') {
                 Some((ip, port)) => (ip, port),
                 None => return false,
             };
@@ -166,7 +171,7 @@ fn established_local_port_count(proc_tcp: &str, port_hex: &str) -> usize {
             // address: go2rtc's own exec ffmpeg republishes {output} to 127.0.0.1:8554 during a view, so
             // a LOOPBACK local IP here is that publisher, not an external viewer — skip it.
             local_port.eq_ignore_ascii_case(port_hex)
-                && fields[3] == "01"
+                && state == "01"
                 && !is_loopback_hex(local_ip)
         })
         .count()

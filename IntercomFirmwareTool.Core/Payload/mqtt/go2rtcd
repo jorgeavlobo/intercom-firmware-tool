@@ -279,7 +279,13 @@ assemble_sdp() {
 		# compare as numbers, and > 1 clamps to 1 — matching parse::<u8>().filter(|b| *b <= 1). Safety
 		# invariant: whenever this yields 0 or 1, config.rs provably yields the SAME value, so go2rtcd
 		# can never splice a value for a branch btmqttd is not actually running.
-		cur_branch=$(sed -n 's/^[[:space:]]*//; s/^export[[:space:]][[:space:]]*//; s/^CAMERA_BRANCH=\(.*\)$/\1/p' "$CONF_FILE" 2>/dev/null | tail -n 1)
+		# Match a CAMERA_BRANCH assignment the way config.rs's parse_env recognizes the KEY, so tail -n 1
+		# picks the true LAST assignment (config.rs last-wins) instead of skipping later lines it can't
+		# see: strip leading line whitespace (line.trim()), a LITERAL `export ` prefix (strip_prefix
+		# ("export ") matches ONE space — `export<TAB>…` is not an export line there and must NOT resolve),
+		# then allow whitespace around the key and the `=` (key.trim()). The value is cleaned + integer-
+		# validated below; a non-canonical value still falls to the `none` sentinel.
+		cur_branch=$(sed -n 's/^[[:space:]]*//; s/^export //; s/^[[:space:]]*CAMERA_BRANCH[[:space:]]*=\(.*\)$/\1/p' "$CONF_FILE" 2>/dev/null | tail -n 1)
 		cur_branch=$(printf '%s' "$cur_branch" | sed 's/^[[:blank:]]*//; s/[[:blank:]]#.*$//; s/[[:blank:]]*$//')
 		case "$cur_branch" in
 			'' | *[!0-9]*) cur_branch=none ;;   # absent / quoted / export-only / non-integer => never match
