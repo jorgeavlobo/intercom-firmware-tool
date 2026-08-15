@@ -5,8 +5,8 @@
 //! answer doesn't advertise them either (only `profile-level-id`). Its encoder emits an in-stream
 //! SPS/PPS only about every 20 s, so go2rtc's `-c:v copy` ffmpeg blocks ~20 s on a cold open before it
 //! can resolve the video and serve it. Rather than make the operator find and paste their panel's
-//! parameter sets, btmqttd LEARNS them itself and reassembles the go2rtc SDP with them, so every open
-//! (including the first) resolves in under a second and nothing is configured.
+//! parameter sets, btmqttd LEARNS them itself and reassembles the go2rtc SDP with them, so that once the
+//! first real view has learned them, every LATER open resolves in under a second — nothing to configure.
 //!
 //! ## Lifecycle (passive listen; learns once; persists the VALUE, not a patched file)
 //! An earlier revision brought the panel up ITSELF (a silent on-demand INVITE) to run a one-shot ffmpeg
