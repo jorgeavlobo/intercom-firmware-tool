@@ -201,9 +201,10 @@ public class Go2RtcdScriptTests
         Assert.DoesNotContain(code, l => l.Contains("-I INPUT"));
         // The jump is kept LAST in INPUT — repositioned if a concurrent factory `-F INPUT; -A …` rebuild
         // left it out of place — so it can never sit ahead of the factory filters. The listing is captured
-        // first and a failed `iptables -S INPUT` changes nothing (an inspection error must not trigger a
-        // destructive drain+re-append).
-        Assert.Contains("inp=$(iptables -w 5 -S INPUT 2>/dev/null) || return 0", s);
+        // first with a NON-BLOCKING read (no `-w` — reads never wait-and-hold the xtables lock across the
+        // factory rebuild; task #42), and a failed `iptables -S INPUT` changes nothing (an inspection error
+        // must not trigger a destructive drain+re-append).
+        Assert.Contains("inp=$(iptables -S INPUT 2>/dev/null) || return 0", s);
         // The early-return is COUNT-AWARE: only exactly-one-jump-and-last is "already correct", so a stale
         // duplicate is never early-returned and a failed cleanup self-heals on a later pass.
         Assert.Contains("[ \"$n\" -eq 1 ] && [ \"$last\" = \"-A INPUT -j $FW_CHAIN\" ] && return 0", s);
@@ -220,7 +221,7 @@ public class Go2RtcdScriptTests
         // flush after our listing can't make a stale count delete the freshly appended jump. It stops on
         // any failure (a failed `-D`, or a listing failure that yields count 0) and retries next pass.
         Assert.Contains(
-            "while [ \"$(iptables -w 5 -S INPUT 2>/dev/null | grep -c -- \"^-A INPUT -j $FW_CHAIN\\$\")\" -gt 1 ]", fj);
+            "while [ \"$(iptables -S INPUT 2>/dev/null | grep -c -- \"^-A INPUT -j $FW_CHAIN\\$\")\" -gt 1 ]", fj);
         Assert.Contains("iptables -w 5 -D INPUT -j \"$FW_CHAIN\" 2>/dev/null || break", fj);
         // The ONLY thing we ever add to INPUT is the jump to our chain — never a bare rule in INPUT.
         // Code lines only: a COMMENT may legitimately describe the factory's `-F INPUT; -A INPUT` rebuild,
@@ -292,7 +293,7 @@ public class Go2RtcdScriptTests
         // (`|| { rm -f "$FW_OWN" … }`) so the next pass treats the newly appeared chain as foreign and never
         // flushes it — the create line above is the single (re)create path (no separate recreate branch).
         // (2) close captures ONE listing, bails on its failure, and confirms both objects gone before drop.
-        int listing = closeBody.IndexOf("rules=$(iptables -w 5 -S 2>/dev/null) || return 0", System.StringComparison.Ordinal);
+        int listing = closeBody.IndexOf("rules=$(iptables -S 2>/dev/null) || return 0", System.StringComparison.Ordinal);
         int jumpChk = closeBody.IndexOf("grep -q -- \"^-A INPUT -j $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);
         int chainChk = closeBody.IndexOf("grep -q -- \"^-N $FW_CHAIN\\$\" && return 0", System.StringComparison.Ordinal);
         int drop = closeBody.IndexOf("rm -f \"$FW_OWN\"", System.StringComparison.Ordinal);
@@ -358,25 +359,25 @@ public class Go2RtcdScriptTests
         int oOpen = s.IndexOf("firewall_open()", System.StringComparison.Ordinal);
         int cOpen = s.IndexOf("firewall_close()", System.StringComparison.Ordinal);
         string openBody = s.Substring(oOpen, cOpen - oOpen);
-        // The decision reads the LIVE chain: a rule-count (`grep -c "^-A "`) plus a `-C` membership check
-        // (which canonicalizes arg order / `-m tcp` / subnet masking) for the CURRENT subnet. The listing
-        // STATUS is captured separately — `n=-1` on a failed `-S` — so an inspection error never reads as
-        // "already correct" and always falls through to the flush path.
-        Assert.Contains("if fw_list=$(iptables -w 5 -S \"$FW_CHAIN\" 2>/dev/null); then", openBody);
+        // The decision reads the LIVE chain with a NON-BLOCKING read (no `-w` — reads never hold the xtables
+        // lock across the factory rebuild; task #42) that BAILS on failure (`|| return 0`), so an inspection
+        // error never writes blindly. On success it counts rules (`grep -c "^-A "`) plus a `-C` membership
+        // check (also non-blocking; canonicalizes arg order / `-m tcp` / subnet masking) for the CURRENT
+        // subnet.
+        Assert.Contains("fw_list=$(iptables -S \"$FW_CHAIN\" 2>/dev/null) || return 0", openBody);
         Assert.Contains("grep -c -- \"^-A \"", openBody);
-        Assert.Contains("n=-1", openBody);
         Assert.Contains(
-            "iptables -w 5 -C \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
+            "iptables -C \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
             joined);
         // The fast path exits (fw_jump + return) for BOTH the already-correct (n==1 + -C match) and the
         // already-empty (no address, n==0) cases.
-        Assert.Contains("[ \"$n\" -eq 1 ] && iptables -w 5 -C \"$FW_CHAIN\"", joined);
+        Assert.Contains("[ \"$n\" -eq 1 ] && iptables -C \"$FW_CHAIN\"", joined);
         Assert.Contains("[ \"$n\" -eq 0 ] && { fw_jump; return 0; }", openBody);
         // ZERO-WRITE PROOF: the first fast-path `{ fw_jump; return 0; }` must appear BEFORE the flush, so a
         // matching chain never reaches any `-F`/`-A` write.
         int fastReturn = openBody.IndexOf("{ fw_jump; return 0; }", System.StringComparison.Ordinal);
         int flush = openBody.IndexOf("iptables -w 5 -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
-        int listing = openBody.IndexOf("if fw_list=$(iptables -w 5 -S \"$FW_CHAIN\"", System.StringComparison.Ordinal);
+        int listing = openBody.IndexOf("fw_list=$(iptables -S \"$FW_CHAIN\"", System.StringComparison.Ordinal);
         Assert.True(fastReturn >= 0 && flush > fastReturn,
             "the zero-write fast path must return before the destructive flush");
         Assert.True(listing >= 0 && listing < fastReturn && listing < flush,
