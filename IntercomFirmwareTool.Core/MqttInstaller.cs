@@ -197,15 +197,18 @@ namespace IntercomFirmwareTool.Core
         /// wait on every cold open (hardware-measured on the C100X). Handing ffmpeg the parameter sets up
         /// front via the SDP makes it resolve in well under a second.</para>
         /// <para>PER-DEVICE and NORMALLY AUTO-LEARNED: the value is fixed for a given panel but differs
-        /// across them, so it is NOT hardcoded. You usually leave this EMPTY: with on-demand viewing
-        /// enabled, btmqttd learns the panel's parameter sets on-device on first boot and persists them on
-        /// the writable <c>cfg/extra</c> partition (see <c>native/btmqttd/src/sprop.rs</c>), so the runtime
-        /// SDP is reassembled with them at every boot — transparent, zero-config. This field is an OPTIONAL
-        /// pre-seed for a build where on-device learning can't run or you already know the value (capture
-        /// once with <c>ffmpeg -i doorbell.sdp -c:v copy -sdp_file out.sdp -f rtp rtp://127.0.0.1:0</c> and
-        /// read the <c>sprop-parameter-sets=</c> it prints). Empty/NULL = omit it (learned on-device, or
-        /// the ~20 s-first-frame fallback until it is). A WRONG value corrupts decoding, so
-        /// <see cref="Validate"/> requires one or more comma-separated, strictly base64-decodable sets.</para>
+        /// across them, so it is NOT hardcoded. You usually leave this EMPTY (the recommended default):
+        /// with on-demand viewing enabled, btmqttd learns the panel's parameter sets on-device during the
+        /// first real view and persists them on the writable <c>cfg/extra</c> partition (see
+        /// <c>native/btmqttd/src/sprop.rs</c>), so the runtime SDP is reassembled with them at every boot —
+        /// transparent, zero-config. This field is an OPTIONAL pre-seed only for a build where on-device
+        /// learning can't run; supply a value obtained from a KNOWN-GOOD source for that exact panel. (Do
+        /// NOT try to capture it with ffmpeg's <c>-sdp_file</c>: hardware testing in PR #129 proved that on
+        /// this panel's <c>-c:v copy</c> path ffmpeg never writes <c>sprop-parameter-sets</c> into the SDP
+        /// — which is exactly why btmqttd parses the SPS/PPS out of the RTP directly.) Empty/NULL = omit it
+        /// (learned on-device, or the ~20 s-first-frame fallback until it is). A WRONG value corrupts
+        /// decoding, so <see cref="Validate"/> requires one or more comma-separated, strictly
+        /// base64-decodable sets.</para>
         /// </summary>
         public string? CameraSprop { get; init; }
 

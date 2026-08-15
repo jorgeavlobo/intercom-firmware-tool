@@ -185,9 +185,15 @@ firewall_open() {
 	fi
 	# The desired LAN source for CAM_IFACE's CURRENT address (empty when there is no address yet).
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
-	# Count OUR chain's current rules once. A failed listing yields 0 here and simply falls through to the
-	# flush path below (which itself bails on a contended `-F`), never a wrong early return.
-	n=$(iptables -w 5 -S "$FW_CHAIN" 2>/dev/null | grep -c -- "^-A ")
+	# Count OUR chain's current rules once. Capture the LISTING STATUS separately and set n=-1 on failure:
+	# a plain `grep -c` yields 0 both for an empty chain AND a failed listing, so with no address the fast
+	# path below would read that 0 as "already empty/correct" and return, leaving a stale rule in place. An
+	# inspection error must instead fall through to the flush path (which itself bails on a contended `-F`).
+	if fw_list=$(iptables -w 5 -S "$FW_CHAIN" 2>/dev/null); then
+		n=$(printf '%s\n' "$fw_list" | grep -c -- "^-A ")
+	else
+		n=-1                            # inspection error — never read as "already correct"
+	fi
 	# ZERO-WRITE FAST PATH: if the chain is ALREADY in the desired state, perform NO iptables writes — only
 	# re-assert the jump and return. `-C` canonicalizes arg order / `-m tcp` / subnet masking, so it matches
 	# the rule iptables actually stored, not just its textual form. Desired state is either exactly our one
