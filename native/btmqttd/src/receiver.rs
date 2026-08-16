@@ -362,7 +362,7 @@ static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// the bound from real kernel state instead — a `reboot` this daemon can't see in memory it can still see
 /// in `/proc` — holds the bound across every such boundary, and it self-clears with no lockout: once the
 /// `reboot` process is gone (the box rebooted, or it exited), `/proc` is clear and the button works again.
-pub fn reboot_in_progress() -> bool {
+pub(crate) fn reboot_in_progress() -> bool {
     REBOOT_REQUESTED.load(Ordering::Relaxed) || reboot_process_running()
 }
 
