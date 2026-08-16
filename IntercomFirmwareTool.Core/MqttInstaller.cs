@@ -2163,8 +2163,10 @@ namespace IntercomFirmwareTool.Core
                     unique_id = $"{node}_reboot_device",
                     default_entity_id = EntId("button", "reboot_device"),
                     command_topic = controlTopic,
-                    // QoS 0: a redelivered DUP is harmless (the box is already going down); a press lost
-                    // during a reconnect is self-correcting — the user presses again.
+                    // QoS 0 (at-most-once, fire-and-forget) — deliberately NOT QoS 1: a maintenance press
+                    // must never be queued and redelivered on a later reconnect, which could re-fire the
+                    // action (an unexpected reboot). A press dropped in transit is self-correcting — the
+                    // user simply presses again.
                     qos = 0,
                     payload_press = "{\"action\":\"reboot\"}",
                     icon = "mdi:restart-alert",
