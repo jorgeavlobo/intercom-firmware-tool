@@ -343,6 +343,11 @@ namespace IntercomFirmwareTool.Core
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicLight"/>.</summary>
         public string? TopicLight { get; init; }
 
+        /// <summary>Retained "last maintenance action" topic (the reboot/restart feedback sensor).
+        /// NULL (default) derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicMaintenance"/>.</summary>
+        public string? TopicMaintenance { get; init; }
+
         /// <summary>The volume state topic actually used: the explicit
         /// <see cref="TopicVolume"/>, or one derived from the <see cref="TopicLastWill"/>
         /// namespace so multi-unit deployments auto-scope without extra UI.</summary>
@@ -361,6 +366,10 @@ namespace IntercomFirmwareTool.Core
         /// keeps HA's switch + resync unavailable until a WHERE is known). Defaults from the LWT
         /// namespace like the other topics; btmqttd's default key must match (TOPIC_LIGHT_AVAIL).</summary>
         public string EffectiveTopicLightAvail => TopicLightAvail ?? (TopicNamespace(TopicLastWill) + "light_avail");
+        /// <summary>The retained "last maintenance action" state topic — the HA feedback sensor for the
+        /// reboot / restart-bridge buttons (issue #43). Defaults from the LWT namespace like the other
+        /// state topics; btmqttd's default key must match (TOPIC_MAINTENANCE).</summary>
+        public string EffectiveTopicMaintenance => TopicMaintenance ?? (TopicNamespace(TopicLastWill) + "maintenance");
         /// <summary>Whether the exterior-light subsystem is present at all — the "has exterior
         /// light" opt-in. When true the switch + resync + learn entities ship; the WHERE may be
         /// known (from the build) or LEARNED at runtime (<see cref="LightLearnMode"/>).</summary>
@@ -888,7 +897,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
                                       opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail })
+                                      opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
@@ -901,7 +910,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                       opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail })
+                                      opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
                 // prefix — both are subscription-only and invalid to PUBLISH to (a broker
                 // rejects the publish), so no publish topic (including the derived volume/
@@ -931,7 +940,7 @@ namespace IntercomFirmwareTool.Core
                 opts.TopicCmdResult, opts.TopicFileContent, opts.EffectiveTopicVolume,
                 opts.EffectiveTopicMute, opts.EffectiveTopicEntrancePanelCall,
                 opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                opts.EffectiveTopicLightAvail,
+                opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
             };
             // The light STATE topic is published whenever the light is ENABLED, in BOTH modes: a
             // bistable light publishes the tracked on/off, and a momentary light publishes an empty
@@ -1000,7 +1009,8 @@ namespace IntercomFirmwareTool.Core
             foreach (var pub in new[] { opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill,
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                         opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
-                                        opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState })
+                                        opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
+                                        opts.EffectiveTopicMaintenance })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
@@ -1458,6 +1468,7 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("LIGHT_MODE", opts.LightMomentary ? "momentary" : "bistable"));
             sb.Append(Conf("TOPIC_LIGHT", opts.EffectiveTopicLight));
             sb.Append(Conf("TOPIC_LIGHT_AVAIL", opts.EffectiveTopicLightAvail));
+            sb.Append(Conf("TOPIC_MAINTENANCE", opts.EffectiveTopicMaintenance));
 
             // Live doorbell camera (#103): opt-in. When enabled, av.rs adds a UDP client to the
             // on-board bt_av_media daemon on every A/V session and fans the cleartext RTP to
@@ -1597,6 +1608,11 @@ namespace IntercomFirmwareTool.Core
             ("light_learn.json", "button", "light_learn"),
             ("view_camera.json", "button", "view_camera"),
             ("stop_camera.json", "button", "stop_camera"),
+            ("reboot_device.json", "button", "reboot_device"),
+            ("restart_bridge.json", "button", "restart_bridge"),
+            // The maintenance FEEDBACK sensor (issue #43) — a read-only diagnostic, but it only makes
+            // sense alongside the buttons, so it is tombstoned with them when there is no command topic.
+            ("maintenance_action.json", "sensor", "maintenance_action"),
         };
 
         /// <summary>
@@ -2128,6 +2144,84 @@ namespace IntercomFirmwareTool.Core
                     }, HaJson)));
             else
                 entities.Add(new HaEntity("stop_camera.json", Topic("button", "stop_camera"), ""));
+
+            // Maintenance buttons (issue #43): a "Reboot device" and a "Restart bridge" button, same
+            // {"action":...}-to-TopicRx pattern as the locks / camera buttons. They are ALWAYS emitted
+            // (no hardware/feature gate — every unit can be rebooted or have its bridge restarted), but
+            // shipped disabled-by-default (enabled_by_default:false): HA discovers them yet hides them
+            // until the operator enables them, so these destructive maintenance actions never clutter the
+            // default dashboard. entity_category:"config" keeps them out of the everyday Controls section.
+            // The daemon handles {"action":"reboot"} / {"action":"restart_bridge"} ungated — TOPIC_RX is
+            // the trust boundary (a publisher can already actuate a lock), so a fixed reboot/restart is no
+            // wider a capability than the controls already on this same topic.
+            entities.Add(new HaEntity(
+                "reboot_device.json",
+                Topic("button", "reboot_device"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Reboot device",
+                    unique_id = $"{node}_reboot_device",
+                    default_entity_id = EntId("button", "reboot_device"),
+                    command_topic = controlTopic,
+                    // QoS 0 (at-most-once, fire-and-forget) — deliberately NOT QoS 1: a maintenance press
+                    // must never be queued and redelivered on a later reconnect, which could re-fire the
+                    // action (an unexpected reboot). A press dropped in transit is self-correcting — the
+                    // user simply presses again.
+                    qos = 0,
+                    payload_press = "{\"action\":\"reboot\"}",
+                    icon = "mdi:restart-alert",
+                    entity_category = "config",
+                    enabled_by_default = false,
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            entities.Add(new HaEntity(
+                "restart_bridge.json",
+                Topic("button", "restart_bridge"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Restart bridge",
+                    unique_id = $"{node}_restart_bridge",
+                    default_entity_id = EntId("button", "restart_bridge"),
+                    command_topic = controlTopic,
+                    qos = 0,
+                    payload_press = "{\"action\":\"restart_bridge\"}",
+                    icon = "mdi:restart",
+                    entity_category = "config",
+                    enabled_by_default = false,
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // Maintenance FEEDBACK sensor (issue #43): the visible ack for the otherwise-stateless
+            // buttons. btmqttd publishes a retained {"action":…,"at":…} to EffectiveTopicMaintenance on
+            // each accepted press; the sensor shows the last action's name, with the ISO timestamp as an
+            // attribute (so a repeated action still updates something visible). Diagnostic + disabled-by-
+            // default, matching the buttons — the operator enables the maintenance group together.
+            entities.Add(new HaEntity(
+                "maintenance_action.json",
+                Topic("sensor", "maintenance_action"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Last maintenance action",
+                    unique_id = $"{node}_maintenance_action",
+                    default_entity_id = EntId("sensor", "maintenance_action"),
+                    state_topic = opts.EffectiveTopicMaintenance,
+                    value_template = "{{ value_json.action }}",
+                    json_attributes_topic = opts.EffectiveTopicMaintenance,
+                    icon = "mdi:wrench-clock",
+                    entity_category = "diagnostic",
+                    enabled_by_default = false,
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
 
             // Stair-light SWITCH (opt-in). The actuator is a stateless TOGGLE with no readable
             // state (firmware-confirmed), so btmqttd tracks the on/off and publishes it retained

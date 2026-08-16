@@ -11,7 +11,7 @@
 //!
 //! Extends StartMqttReceive's dispatch/handle_json with the device-control actions.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +19,7 @@ use rumqttc::{AsyncClient, QoS};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 
 use tokio::sync::mpsc::{self, Sender};
@@ -69,6 +70,7 @@ static REAP_SLOTS: Semaphore = Semaphore::const_new(REAP_CONCURRENCY);
 /// (a CRLF frame `*…##\r` therefore fails the OWN-frame check and is not forwarded,
 /// exactly as the shell's `^\*.*##$` did). Never panics; every failure is logged and
 /// swallowed so one bad record can't take the receiver down.
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch(
     cfg: &Arc<Config>,
     client: &AsyncClient,
@@ -76,6 +78,7 @@ pub async fn dispatch(
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
     view_tx: Option<&Sender<ViewCmd>>,
+    restart: &Arc<Notify>,
     payload: &[u8],
 ) {
     let text = match std::str::from_utf8(payload) {
@@ -86,7 +89,7 @@ pub async fn dispatch(
         }
     };
     for record in text.split('\n') {
-        dispatch_record(cfg, client, vol, lock, light, view_tx, record).await;
+        dispatch_record(cfg, client, vol, lock, light, view_tx, restart, record).await;
     }
 }
 
@@ -94,6 +97,7 @@ pub async fn dispatch(
 /// `\r` and any interior/leading/trailing spaces — a space-prefixed " *…##" is not an
 /// OWN frame (it falls to the ignored JSON path, as in the shell, rather than being
 /// forwarded to the gateway and executed).
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_record(
     cfg: &Arc<Config>,
     client: &AsyncClient,
@@ -101,6 +105,7 @@ async fn dispatch_record(
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
     view_tx: Option<&Sender<ViewCmd>>,
+    restart: &Arc<Notify>,
     record: &str,
 ) {
     // Blank / whitespace-only records are neither a frame nor JSON — ignore them.
@@ -112,7 +117,7 @@ async fn dispatch_record(
             eprintln!("btmqttd: forwarding frame to gateway failed: {e}");
         }
     } else {
-        handle_json(cfg, client, vol, lock, light, view_tx, record).await;
+        handle_json(cfg, client, vol, lock, light, view_tx, restart, record).await;
     }
 }
 
@@ -136,6 +141,7 @@ pub(crate) async fn forward_to_gateway(frame: &str, timeout: Duration) -> std::i
     })?
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_json(
     cfg: &Arc<Config>,
     client: &AsyncClient,
@@ -143,6 +149,7 @@ async fn handle_json(
     lock: &Sender<Lock>,
     light: Option<&Arc<LightCtl>>,
     view_tx: Option<&Sender<ViewCmd>>,
+    restart: &Arc<Notify>,
     msg: &str,
 ) {
     let v: Value = match serde_json::from_str(msg) {
@@ -204,6 +211,57 @@ async fn handle_json(
             }
             return;
         }
+        // Maintenance actions (issue #43): the HA "Reboot device" / "Restart bridge" buttons. Same
+        // ungated posture and TOPIC_RX trust boundary as the controls above — a FIXED reboot/restart is
+        // no wider a capability than the lock a raw frame on this topic can already actuate.
+        if let Some(m) = parse_maintenance(action) {
+            match m {
+                Maintenance::Reboot => {
+                    // Accept a reboot only while none is OUTSTANDING; ignore repeats so a `reboot` that
+                    // hasn't exited can't be re-fired into unbounded processes (see [`reboot_in_progress`]).
+                    // "Outstanding" spans BOTH this daemon's owned reboot (the in-memory gate) and any live
+                    // `reboot` in `/proc` — including one a PRIOR daemon instance launched before a re-exec
+                    // or watchdog respawn — so a fresh daemon can't pile a second `reboot` on a still-hung
+                    // one. The single ordered worker means no press can race this check; once past it,
+                    // latch the in-memory gate and `spawn_reboot` owns the process, releasing the gate only
+                    // once it is OBSERVED to have exited — a hung reboot keeps the bound, an exited/failed
+                    // one re-enables the button.
+                    if reboot_in_progress().await {
+                        eprintln!("btmqttd: reboot already in progress; ignoring this press");
+                        return;
+                    }
+                    REBOOT_REQUESTED.store(true, Ordering::Relaxed);
+                    eprintln!("btmqttd: reboot requested via MQTT; rebooting the device");
+                    // Publish the HA feedback BEFORE rebooting so it can flush; then reboot.
+                    publish_maintenance(client, cfg, "reboot").await;
+                    spawn_reboot();
+                }
+                Maintenance::RestartBridge => {
+                    // Reuse main.rs's in-place re-exec path: a clean shutdown (flush the MQTT `offline`
+                    // will, drain the light-persist task) then `exec` of the SAME binary — same PID, so
+                    // bt_service_watchdog's pgrep supervision is undisturbed and the bridge is back in
+                    // ~1 s (vs a ~60 s watchdog respawn if we merely exited). btmqttd must NOT run the
+                    // init script's `restart` on itself — that would SIGKILL this handler mid-flight.
+                    //
+                    // Stand down early while a reboot is OUTSTANDING. The AUTHORITATIVE guard is the main
+                    // loop's `restart.notified()` arm (it covers BOTH restart producers — this button and
+                    // the light-WHERE learn — from cancelling the reboot observer); rejecting here as well
+                    // avoids publishing a misleading "restart_bridge" feedback and notifying for a press the
+                    // loop would only drop. A reboot supersedes a bridge restart anyway — the box is going
+                    // down — so the press is dropped, not queued; the button works again once the reboot is
+                    // observed to have exited (gate cleared) or in a fresh daemon.
+                    if reboot_in_progress().await {
+                        eprintln!("btmqttd: restart ignored: a reboot is already in progress");
+                        return;
+                    }
+                    eprintln!("btmqttd: restart requested via MQTT; re-execing the bridge");
+                    // Publish the HA feedback first; the clean shutdown below flushes it before the BYE.
+                    publish_maintenance(client, cfg, "restart_bridge").await;
+                    restart.notify_one();
+                }
+            }
+            return;
+        }
         handle_action(vol, lock, light, action, &v).await;
         return;
     }
@@ -236,6 +294,199 @@ async fn handle_json(
         "" => eprintln!("btmqttd: JSON command missing 'command'"),
         other => eprintln!("btmqttd: unsupported command: {other}"),
     }
+}
+
+/// A parsed MAINTENANCE action (issue #43) — the HA "Reboot device" / "Restart bridge" buttons. These
+/// have a SIDE EFFECT outside the vol/lock/light surface `handle_action` covers (a process spawn or a
+/// re-exec signal), so they are classified here and dispatched inline in `handle_json`. Pure classifier,
+/// separated so the action-name mapping is unit-testable without spawning a reboot or re-execing.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum Maintenance {
+    /// Reboot the whole device (`{"action":"reboot"}`).
+    Reboot,
+    /// Re-exec btmqttd in place (`{"action":"restart_bridge"}`).
+    RestartBridge,
+}
+
+/// Map an `action` string to a [`Maintenance`] variant, or `None` if it isn't a maintenance action.
+fn parse_maintenance(action: &str) -> Option<Maintenance> {
+    match action {
+        "reboot" => Some(Maintenance::Reboot),
+        "restart_bridge" => Some(Maintenance::RestartBridge),
+        _ => None,
+    }
+}
+
+/// Publish a RETAINED "last maintenance action" record to `topic_maintenance` for the HA feedback
+/// sensor (issue #43) — the visible ack for an otherwise-stateless button press: `{"action":"<name>",
+/// "at":"<iso>"}`. RETAINED so Home Assistant still shows it across the reboot / bridge re-exec that
+/// immediately follows (HA re-reads the retained value on reconnect). Published BEFORE the action so a
+/// restart's clean MQTT shutdown flushes it; for a reboot the unit's own offline blip is the primary
+/// feedback if this last publish doesn't reach the broker before the box goes down. Best-effort — a
+/// publish error is logged. `action` is a fixed internal token (`reboot`/`restart_bridge`) and the ISO
+/// timestamp has no JSON-special characters, so the hand-built object needs no escaping.
+async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &str) {
+    let payload = format!("{{\"action\":\"{action}\",\"at\":\"{}\"}}", own::utc_now_iso());
+    if let Err(e) = client
+        .publish(&cfg.topic_maintenance, QoS::AtLeastOnce, true, payload.into_bytes())
+        .await
+    {
+        eprintln!("btmqttd: maintenance: publish to {} failed: {e}", cfg.topic_maintenance);
+    }
+}
+
+/// The IN-MEMORY half of the reboot bound (the `/proc` half is [`reboot_process_running`]; both are read
+/// together via [`reboot_in_progress`]). Latched while THIS daemon owns a reboot attempt — from accepting
+/// the "Reboot device" press until the `reboot` process is OBSERVED to have exited (or its launch is known
+/// to have failed). While set it bounds the reboot path to ONE outstanding process, so repeated presses or
+/// an automation can't spawn a pile of `reboot` processes and exhaust the process table; it also makes
+/// `restart_bridge` stand down (a re-exec would cancel the exit-observer below). It is released by
+/// [`spawn_reboot`]'s observer once that process is gone — so a still-running/hung `reboot` keeps the bound,
+/// while an exited/failed one re-enables the button. A FRESH process — after a real reboot, or a `restart_bridge`
+/// re-exec — starts with this reset, so the button works again afterward.
+static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a reboot attempt is currently OUTSTANDING. TRUE when THIS daemon owns a reboot (the in-memory
+/// gate), OR when a `reboot` process is live anywhere on the system ([`reboot_process_running`]) — even one
+/// this daemon never launched. The reboot accept path refuses while this holds, and the main loop consults
+/// it before a bridge re-exec: EVERY restart producer — the "Restart bridge" button AND a newly-learned
+/// light WHERE — funnels through one `restart.notified()` arm, and re-execing there would drop the runtime
+/// and cancel [`spawn_reboot`]'s exit-observer, stranding a hung reboot and resetting the in-memory gate in
+/// the fresh image. Guarding that single choke point covers both producers.
+///
+/// The `/proc` half is what makes the one-reboot bound survive a PROCESS BOUNDARY. The in-memory gate is
+/// reset by anything that starts a fresh daemon — a re-exec, a plain exit + watchdog respawn, the next boot
+/// — so on its own it can't stop a fresh daemon from launching a SECOND `reboot` while a prior, genuinely
+/// hung one still runs; repeated restart→reboot cycles could then pile up hung processes. Deriving
+/// the bound from real kernel state instead — a `reboot` this daemon can't see in memory it can still see
+/// in `/proc` — holds the bound across every such boundary, and it self-clears with no lockout: once the
+/// `reboot` process is gone (the box rebooted, or it exited), `/proc` is clear and the button works again.
+pub(crate) async fn reboot_in_progress() -> bool {
+    // Short-circuit on the in-memory gate so the common "this daemon owns the reboot" case skips the scan.
+    REBOOT_REQUESTED.load(Ordering::Relaxed) || reboot_process_running().await
+}
+
+/// Scan `/proc` for a LIVE `reboot` process — a system-wide, restart-surviving view of whether a reboot is
+/// still outstanding (see [`reboot_in_progress`]). Uses async `tokio::fs` (not blocking `std::fs`) so a
+/// slow procfs read never stalls the single-threaded runtime, consistent with `hold.rs`/`sprop.rs`. A
+/// per-entry read error SKIPS that entry and keeps scanning rather than aborting the whole enumeration —
+/// the standard `/proc`-walk contract (`pgrep`/`procps` do the same), so one unreadable entry can't
+/// false-negative and let a second reboot slip past the bound. Only genuine
+/// exhaustion (`Ok(None)`) ends the scan; a small cap on consecutive errors guards against a pathological
+/// directory stream that only ever errors. Best-effort throughout: an unreadable `/proc` (never, in
+/// practice, for a root daemon) or a stat file that vanishes mid-scan (the process exited) doesn't match.
+async fn reboot_process_running() -> bool {
+    let Ok(mut entries) = tokio::fs::read_dir("/proc").await else {
+        return false;
+    };
+    // `readdir` advances past an errored entry, so continuing is progress; the cap only backstops a stream
+    // that returns nothing but errors forever (which would otherwise spin) — /proc has a few hundred entries.
+    let mut errors = 0u32;
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                errors = 0; // a successful step ⇒ the stream is progressing; cap only CONSECUTIVE errors
+                let name = entry.file_name();
+                // Only numeric entries are process directories; skip `self`, `net`, etc.
+                let Some(name) = name.to_str() else { continue };
+                if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+                    continue;
+                }
+                if let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{name}/stat")).await {
+                    if stat_names_a_live_reboot(&stat) {
+                        return true;
+                    }
+                }
+            }
+            Ok(None) => return false, // enumerated every entry — no live reboot found
+            Err(_) => {
+                errors += 1;
+                if errors > 4096 {
+                    return false;
+                }
+            }
+        }
+    }
+}
+
+/// Does one `/proc/<pid>/stat` line name a LIVE `reboot` process? The format is `pid (comm) state …`; the
+/// comm can itself contain spaces or parentheses, so it is delimited by the FIRST `(` and the LAST `)`,
+/// with the single-character run-state next. A zombie/dead reboot (`Z`, or dead `X`/`x` — some kernels
+/// report `TASK_DEAD` lowercase) has already exited and will never reboot anything, so it does NOT count as
+/// outstanding — counting it would wedge the button on a defunct entry until the box actually rebooted.
+/// Pure (no I/O) so the parsing is unit-tested directly.
+fn stat_names_a_live_reboot(stat: &str) -> bool {
+    let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+        return false;
+    };
+    if open >= close || &stat[open + 1..close] != "reboot" {
+        return false;
+    }
+    // Run-state is the first non-space character after the closing ')'.
+    !matches!(stat[close + 1..].trim_start().chars().next(), Some('Z' | 'X' | 'x') | None)
+}
+
+/// Trigger `reboot` for the "Reboot device" maintenance button and OWN the resulting process so the gate
+/// tracks its true lifetime. `reboot` is spawned DIRECTLY (no intervening shell), which gives two things a
+/// backgrounded shell couldn't: the fork/`exec` handshake reports a launch failure (a missing/unrunnable
+/// applet fails `spawn` with `Err`, unlike a `... &` async list that exits 0 before the job's `exec` is
+/// known), and we hold the `Child` so we can observe when it exits. Its std streams are
+/// nulled off btmqttd's inherited fds; `reboot` resolves via the daemon's inherited PATH (the init script
+/// exports `PATH=/sbin:/usr/sbin:/usr/bin:/bin`) and the daemon runs as root.
+///
+/// The IN-MEMORY gate ([`REBOOT_REQUESTED`], latched by the caller) is released as soon as this side is done
+/// observing the child; the `/proc` scan in [`reboot_in_progress`] remains the authoritative check for a
+/// still-live reboot, so releasing the in-memory gate never allows a second one while a reboot is running:
+///   * `spawn` fails → `exec` never happened, no process exists → clear the gate, allow a retry;
+///   * the process EXITS (reaped by the observer, so no zombie) → clear the gate. On this target `reboot`
+///     signals init and exits promptly whether or not the machine then goes down, so a normal exit is NOT
+///     a failure — only a non-success status is logged; either way the process is gone;
+///   * `wait()` itself ERRORS → clear the gate too, rather than latching both buttons off for the daemon's
+///     lifetime if the error came after the child exited; a genuinely-live reboot is still caught by the
+///     `/proc` scan;
+///   * the process never exits (a truly hung `reboot`) → the observer stays pending, but the `/proc` scan
+///     sees the live process, so the one-reboot bound holds anyway; `restart_bridge` stands down meanwhile
+///     so no re-exec can cancel the observer and strand it. A fresh daemon starts reset regardless.
+///
+/// The observer runs as a detached task (not on the single ordered command worker) so a hung `reboot` never
+/// stalls the worker; because `restart_bridge` refuses while the gate is latched, the observer can only be
+/// dropped by a re-exec AFTER it has already cleared the gate — i.e. once there is no child left to strand.
+/// Best-effort — a spawn failure is logged rather than panicking; the module's contract is "never panics".
+fn spawn_reboot() {
+    let child = match tokio::process::Command::new("reboot")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            // `exec` never happened, so no reboot process exists — release the gate for a retry.
+            eprintln!("btmqttd: reboot: failed to spawn reboot: {e}");
+            REBOOT_REQUESTED.store(false, Ordering::Relaxed);
+            return;
+        }
+    };
+    // Observe the reboot process off-worker: reap it (no zombie), then release the IN-MEMORY gate once
+    // `wait()` returns — whether it reports the exit status or errors trying to. Releasing even on a
+    // `wait()` error is safe (and avoids latching both buttons off for the daemon's lifetime if `wait()`
+    // failed after the child already exited): the `/proc` scan in `reboot_in_progress` is the
+    // AUTHORITATIVE "is a reboot still running" check, so a still-live reboot keeps the bound regardless of
+    // the in-memory gate, and a departed one lets the button recover.
+    tokio::spawn(async move {
+        let mut child = child;
+        match child.wait().await {
+            // Exited — the process is gone. A non-success status means it could not initiate the reboot
+            // (a success just means it signalled init and returned).
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                eprintln!("btmqttd: reboot: reboot exited {status} without rebooting; re-enabling the button")
+            }
+            // Couldn't observe the exit; the `/proc` scan still gates a genuinely-live reboot.
+            Err(e) => eprintln!("btmqttd: reboot: waiting on reboot failed: {e}; re-enabling the button"),
+        }
+        REBOOT_REQUESTED.store(false, Ordering::Relaxed);
+    });
 }
 
 /// Handle an ungated device-control action (issue #40 volume, #41 lock). `v` is the
@@ -771,6 +1022,48 @@ mod tests {
         assert_eq!(parse_action("volume_step", &json!({"value": 0})), None);
         assert_eq!(parse_action("volume_step", &json!({})), None);
         assert_eq!(parse_action("volume_step", &json!({"value": "up"})), None);
+    }
+
+    #[test]
+    fn parse_maintenance_classifies_the_two_buttons() {
+        // The exact action strings the HA discovery payloads publish (issue #43).
+        assert_eq!(parse_maintenance("reboot"), Some(Maintenance::Reboot));
+        assert_eq!(parse_maintenance("restart_bridge"), Some(Maintenance::RestartBridge));
+        // Anything else is not a maintenance action (falls through to handle_action).
+        assert_eq!(parse_maintenance(""), None);
+        assert_eq!(parse_maintenance("restart"), None); // must be exactly `restart_bridge`
+        assert_eq!(parse_maintenance("reboot_device"), None); // the object id, not the action
+        assert_eq!(parse_maintenance("volume"), None);
+    }
+
+    #[test]
+    fn stat_matches_a_live_reboot_process() {
+        // A running (`S`) `reboot` applet — the system-wide "a reboot is outstanding" signal that survives
+        // a re-exec / watchdog respawn (issue #43). Real busybox `/proc/<pid>/stat` shape.
+        assert!(stat_names_a_live_reboot("1234 (reboot) S 1 1234 1234 0 -1 4194560 0 0"));
+        // Other run-states of a live reboot still count (R running, D uninterruptible).
+        assert!(stat_names_a_live_reboot("1234 (reboot) R 1 0 0"));
+        assert!(stat_names_a_live_reboot("1234 (reboot) D 1 0 0"));
+    }
+
+    #[test]
+    fn stat_ignores_zombie_dead_and_other_processes() {
+        // A zombie/dead reboot has already exited — it will never reboot anything, so it must NOT wedge
+        // the button (otherwise a defunct entry blocks every later reboot until the box actually reboots).
+        assert!(!stat_names_a_live_reboot("1234 (reboot) Z 1 0 0"));
+        assert!(!stat_names_a_live_reboot("1234 (reboot) X 1 0 0"));
+        // Some kernels report a dead task lowercase (`x`); exclude it too, so a dead reboot never counts.
+        assert!(!stat_names_a_live_reboot("1234 (reboot) x 1 0 0"));
+        // A different process is never a reboot, even one whose name merely contains "reboot".
+        assert!(!stat_names_a_live_reboot("1234 (btmqttd) S 1 0 0"));
+        assert!(!stat_names_a_live_reboot("1234 (rebooter) S 1 0 0"));
+        // A comm containing spaces/parens is delimited by the FIRST '(' and LAST ')', so the state is still
+        // read correctly and such a process is not mistaken for `reboot`.
+        assert!(!stat_names_a_live_reboot("1234 (weird )(name) S 1 0 0"));
+        // Malformed / truncated lines never match rather than panicking.
+        assert!(!stat_names_a_live_reboot(""));
+        assert!(!stat_names_a_live_reboot("1234 (reboot)"));
+        assert!(!stat_names_a_live_reboot("no parens here"));
     }
 
     #[test]

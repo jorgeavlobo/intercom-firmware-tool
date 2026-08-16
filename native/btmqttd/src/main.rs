@@ -160,9 +160,10 @@ async fn run() -> Result<bool, String> {
     // OWN task (`run_persist`), fed by a watch channel. That task is DRAINED at shutdown (via
     // the oneshot below) so a toggle actuated the instant before SIGTERM is still written —
     // the command worker is aborted, but the persist task is signalled + awaited.
-    // Restart signal: fired when a WHERE is LEARNED at runtime, so `main` shuts down cleanly
-    // and the init/watchdog respawns btmqttd with the learned WHERE bound (the state-persist
-    // task is keyed by WHERE at startup — a clean restart is the simplest way to activate it).
+    // Restart signal: fired to make `main` shut down cleanly and RE-EXEC in place. Two triggers:
+    //   * a light WHERE is LEARNED at runtime (the state-persist task is keyed by WHERE at startup, so a
+    //     clean restart is the simplest way to bind it), and
+    //   * the HA "Restart bridge" maintenance button (issue #43), routed here from the command worker.
     let restart = Arc::new(tokio::sync::Notify::new());
     // LEARNABLE only in learn mode (a blank build-time WHERE). A CONFIGURED build's WHERE is
     // authoritative and always bound by the resolution below, so the HA Learn button must not be
@@ -394,9 +395,12 @@ async fn run() -> Result<bool, String> {
         let lock_tx = lock_tx.clone();
         let light = light.clone();
         let view_tx = view_tx.clone();
+        // Shared with the light-learn path: the HA "Restart bridge" button (issue #43) fires this same
+        // Notify to trigger the clean-shutdown-then-re-exec in `run`'s select loop below.
+        let restart = restart.clone();
         async move {
             while let Some(payload) = cmd_rx.recv().await {
-                receiver::dispatch(&cfg, &client, &volume, &lock_tx, light.as_ref(), view_tx.as_ref(), &payload).await;
+                receiver::dispatch(&cfg, &client, &volume, &lock_tx, light.as_ref(), view_tx.as_ref(), &restart, &payload).await;
             }
         }
     });
@@ -617,10 +621,25 @@ async fn run() -> Result<bool, String> {
         tokio::select! {
             _ = sig_term.recv() => break,
             _ = sig_int.recv() => break,
-            // A WHERE was just LEARNED: shut down cleanly (same path as SIGTERM), then RE-EXEC so
-            // btmqttd comes straight back up with the learned WHERE active.
+            // A restart was requested — a newly-learned light WHERE to activate, or the HA "Restart
+            // bridge" button (#43). Shut down cleanly (same path as SIGTERM), then RE-EXEC so btmqttd
+            // comes straight back up (with the learned WHERE active, and re-reading its config).
             _ = restart.notified() => {
-                eprintln!("btmqttd: restarting to activate a newly-learned light WHERE");
+                // Stand down while a reboot is OUTSTANDING. This is the single point BOTH restart
+                // producers (the "Restart bridge" button and a newly-learned light WHERE) funnel
+                // through, so guarding it — not just the button's dispatch site — is what actually
+                // covers them: re-execing here drops the runtime and cancels the reboot process's
+                // exit-observer, which would strand a hung reboot and reset its one-process bound in
+                // the fresh image. A learned WHERE is already persisted, so it still
+                // activates at the next process start; the button press is simply superseded by the
+                // reboot. The gate clears once the reboot process is observed gone, re-enabling both.
+                if receiver::reboot_in_progress().await {
+                    // "ignored", not "deferred": the Notify permit is consumed here and not re-armed, so
+                    // THIS request is dropped (the box is going down anyway); a fresh press re-requests it.
+                    eprintln!("btmqttd: restart ignored: a reboot is already in progress");
+                    continue;
+                }
+                eprintln!("btmqttd: restart requested; shutting down cleanly to re-exec");
                 reexec = true;
                 break;
             }
@@ -911,6 +930,19 @@ async fn run() -> Result<bool, String> {
     stop(sender_task).await;
     stop(keys_task).await;
     stop(cmd_worker).await;
+    // The command worker is now quiesced — no further `reboot` command can be dispatched — so the reboot
+    // gate is STABLE from here. Re-check it before committing to a re-exec: the `restart.notified()` arm
+    // tested the gate when it fired, but a `reboot` queued behind that restart can still have run during one
+    // of the awaited task-stops ABOVE (each `stop(..).await` yields while this worker was alive), setting
+    // the gate and spawning the reboot child + its exit-observer only now. Re-execing would drop the runtime,
+    // cancel that observer, and resurrect with the gate reset — the stranded-hung-reboot the arm's guard is
+    // meant to prevent. So if a reboot became outstanding, do NOT re-exec: fall back to a plain exit
+    // (the watchdog respawns the bridge if the box does not actually go down), never racing a reboot with an
+    // instant same-PID re-exec.
+    if reexec && receiver::reboot_in_progress().await {
+        eprintln!("btmqttd: re-exec cancelled: a reboot became outstanding during shutdown; exiting instead");
+        reexec = false;
+    }
     // Drain the stair-light persist task LAST among the state producers: `command()` (on
     // cmd_worker) and `observe()` (on sender_task) are now stopped, so no further state can be
     // enqueued. Signal the task and await its final flush (bounded) so a toggle actuated in the
