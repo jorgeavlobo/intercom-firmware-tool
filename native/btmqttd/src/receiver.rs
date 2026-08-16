@@ -386,6 +386,7 @@ async fn reboot_process_running() -> bool {
     loop {
         match entries.next_entry().await {
             Ok(Some(entry)) => {
+                errors = 0; // a successful step ⇒ the stream is progressing; cap only CONSECUTIVE errors
                 let name = entry.file_name();
                 // Only numeric entries are process directories; skip `self`, `net`, etc.
                 let Some(name) = name.to_str() else { continue };
