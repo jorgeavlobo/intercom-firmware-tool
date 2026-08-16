@@ -11,7 +11,7 @@
 //!
 //! Extends StartMqttReceive's dispatch/handle_json with the device-control actions.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -287,6 +287,10 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
     }
 }
 
+/// True while a spawned `reboot` child is still outstanding (not yet reaped). Bounds the reboot path to
+/// ONE in-flight child (see [`spawn_reboot`]).
+static REBOOT_INFLIGHT: AtomicBool = AtomicBool::new(false);
+
 /// Spawn `reboot` for the "Reboot device" maintenance button and REAP it. In the normal case `reboot`
 /// signals init and the whole system (this daemon included) is torn down, but `reboot` typically returns
 /// promptly (often success) BEFORE the shutdown completes, and a broken/no-op `reboot` may return without
@@ -298,18 +302,38 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
 /// `PATH=/sbin:/usr/sbin:/usr/bin:/bin`, so BusyBox / util-linux `reboot` at `/sbin` is found); the
 /// daemon runs as root, so it may reboot. Best-effort: a spawn failure is logged (nothing else we can do
 /// from here) rather than panicking — this module's contract is "never panics".
+///
+/// Bounded to ONE in-flight reboot ([`REBOOT_INFLIGHT`]): a real `reboot` brings the box down almost at
+/// once, so a second concurrent one is never useful, and refusing further presses until the current child
+/// is reaped caps process/task growth if `reboot` ever HANGS instead of exiting or rebooting (CodeRabbit).
+/// The flag is cleared when the child is reaped (or if the spawn itself fails), so a genuinely stuck
+/// reboot holds the slot exactly once rather than accumulating one child per press.
 fn spawn_reboot() {
+    if REBOOT_INFLIGHT.swap(true, Ordering::Relaxed) {
+        eprintln!("btmqttd: reboot: a reboot is already in progress; ignoring this press");
+        return;
+    }
     match tokio::process::Command::new("reboot").spawn() {
         Ok(mut child) => {
             tokio::spawn(async move {
                 if let Ok(status) = child.wait().await {
-                    // Only reached if `reboot` returned without bringing the box down (e.g. it failed);
-                    // a successful shutdown tears this task down before `wait` resolves.
-                    eprintln!("btmqttd: reboot: `reboot` exited with {status} without rebooting");
+                    // A normal `reboot` returns SUCCESS right after signaling init — the shutdown then
+                    // proceeds and tears this task down — so a success exit is NOT a failure and must not
+                    // be logged as "did not reboot" (Codex). Only a NON-success exit means the reboot
+                    // didn't take (a broken/no-op `reboot`); warn on just that.
+                    if !status.success() {
+                        eprintln!(
+                            "btmqttd: reboot: `reboot` exited unsuccessfully ({status}); the device may not reboot"
+                        );
+                    }
                 }
+                REBOOT_INFLIGHT.store(false, Ordering::Relaxed);
             });
         }
-        Err(e) => eprintln!("btmqttd: reboot: failed to spawn `reboot`: {e}"),
+        Err(e) => {
+            eprintln!("btmqttd: reboot: failed to spawn `reboot`: {e}");
+            REBOOT_INFLIGHT.store(false, Ordering::Relaxed); // spawn failed → free the slot for a retry
+        }
     }
 }
 
