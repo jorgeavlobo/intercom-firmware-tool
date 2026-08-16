@@ -625,6 +625,18 @@ async fn run() -> Result<bool, String> {
             // bridge" button (#43). Shut down cleanly (same path as SIGTERM), then RE-EXEC so btmqttd
             // comes straight back up (with the learned WHERE active, and re-reading its config).
             _ = restart.notified() => {
+                // Stand down while a reboot is OUTSTANDING. This is the single point BOTH restart
+                // producers (the "Restart bridge" button and a newly-learned light WHERE) funnel
+                // through, so guarding it — not just the button's dispatch site — is what actually
+                // covers them: re-execing here drops the runtime and cancels the reboot process's
+                // exit-observer, which would strand a hung reboot and reset its one-process bound in
+                // the fresh image (CodeRabbit). A learned WHERE is already persisted, so it still
+                // activates at the next process start; the button press is simply superseded by the
+                // reboot. The gate clears once the reboot process is observed gone, re-enabling both.
+                if receiver::reboot_in_progress() {
+                    eprintln!("btmqttd: restart deferred: a reboot is already in progress");
+                    continue;
+                }
                 eprintln!("btmqttd: restart requested; shutting down cleanly to re-exec");
                 reexec = true;
                 break;

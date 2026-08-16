@@ -239,13 +239,14 @@ async fn handle_json(
                     // ~1 s (vs a ~60 s watchdog respawn if we merely exited). btmqttd must NOT run the
                     // init script's `restart` on itself — that would SIGKILL this handler mid-flight.
                     //
-                    // Refuse while a reboot is OUTSTANDING (gate latched = the reboot process may still be
-                    // running): re-execing now drops the runtime, cancelling that process's exit-observer,
-                    // so a hung reboot could be stranded and its one-attempt bound lost across the fresh
-                    // image (Codex). A reboot supersedes a bridge restart anyway — the box is going down —
-                    // so this is dropped, not queued; the button works again once the reboot is observed to
-                    // have exited (gate cleared) or in a fresh daemon.
-                    if REBOOT_REQUESTED.load(Ordering::Relaxed) {
+                    // Stand down early while a reboot is OUTSTANDING. The AUTHORITATIVE guard is the main
+                    // loop's `restart.notified()` arm (it covers BOTH restart producers — this button and
+                    // the light-WHERE learn — from cancelling the reboot observer); rejecting here as well
+                    // avoids publishing a misleading "restart_bridge" feedback and notifying for a press the
+                    // loop would only drop. A reboot supersedes a bridge restart anyway — the box is going
+                    // down — so the press is dropped, not queued; the button works again once the reboot is
+                    // observed to have exited (gate cleared) or in a fresh daemon.
+                    if reboot_in_progress() {
                         eprintln!("btmqttd: restart ignored: a reboot is already in progress");
                         return;
                     }
@@ -339,6 +340,15 @@ async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &s
 /// exited/failed one re-enables the button. A FRESH process — after a real reboot, or a `restart_bridge`
 /// re-exec — starts with this reset, so the button works again afterward.
 static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Whether a reboot attempt is currently OUTSTANDING (its process may still be running). The main loop
+/// consults this before a bridge re-exec: EVERY restart producer — the "Restart bridge" button AND a
+/// newly-learned light WHERE — funnels through one `restart.notified()` arm, and re-execing there would
+/// drop the runtime and cancel [`spawn_reboot`]'s exit-observer, stranding a hung reboot and resetting the
+/// one-process bound in the fresh image (CodeRabbit). Guarding that single choke point covers both.
+pub fn reboot_in_progress() -> bool {
+    REBOOT_REQUESTED.load(Ordering::Relaxed)
+}
 
 /// Trigger `reboot` for the "Reboot device" maintenance button and OWN the resulting process so the gate
 /// tracks its true lifetime. `reboot` is spawned DIRECTLY (no intervening shell), which gives two things a
