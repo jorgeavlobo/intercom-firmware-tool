@@ -370,26 +370,43 @@ pub(crate) async fn reboot_in_progress() -> bool {
 /// Scan `/proc` for a LIVE `reboot` process — a system-wide, restart-surviving view of whether a reboot is
 /// still outstanding (see [`reboot_in_progress`]). Uses async `tokio::fs` (not blocking `std::fs`) so a
 /// slow procfs read never stalls the single-threaded runtime, consistent with `hold.rs`/`sprop.rs`
-/// (Copilot). Best-effort: an unreadable `/proc` (never, in practice, for a root daemon) or a stat file
-/// that vanishes mid-scan (the process exited) simply doesn't match.
+/// (Copilot). A per-entry read error SKIPS that entry and keeps scanning rather than aborting the whole
+/// enumeration — the standard `/proc`-walk contract (`pgrep`/`procps` do the same), so one unreadable
+/// entry can't false-negative and let a second reboot slip past the bound (Copilot). Only genuine
+/// exhaustion (`Ok(None)`) ends the scan; a small cap on consecutive errors guards against a pathological
+/// directory stream that only ever errors. Best-effort throughout: an unreadable `/proc` (never, in
+/// practice, for a root daemon) or a stat file that vanishes mid-scan (the process exited) doesn't match.
 async fn reboot_process_running() -> bool {
     let Ok(mut entries) = tokio::fs::read_dir("/proc").await else {
         return false;
     };
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name();
-        // Only numeric entries are process directories; skip `self`, `net`, etc.
-        let Some(name) = name.to_str() else { continue };
-        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
-            continue;
-        }
-        if let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{name}/stat")).await {
-            if stat_names_a_live_reboot(&stat) {
-                return true;
+    // `readdir` advances past an errored entry, so continuing is progress; the cap only backstops a stream
+    // that returns nothing but errors forever (which would otherwise spin) — /proc has a few hundred entries.
+    let mut errors = 0u32;
+    loop {
+        match entries.next_entry().await {
+            Ok(Some(entry)) => {
+                let name = entry.file_name();
+                // Only numeric entries are process directories; skip `self`, `net`, etc.
+                let Some(name) = name.to_str() else { continue };
+                if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+                    continue;
+                }
+                if let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{name}/stat")).await {
+                    if stat_names_a_live_reboot(&stat) {
+                        return true;
+                    }
+                }
+            }
+            Ok(None) => return false, // enumerated every entry — no live reboot found
+            Err(_) => {
+                errors += 1;
+                if errors > 4096 {
+                    return false;
+                }
             }
         }
     }
-    false
 }
 
 /// Does one `/proc/<pid>/stat` line name a LIVE `reboot` process? The format is `pid (comm) state …`; the
