@@ -435,16 +435,19 @@ fn stat_names_a_live_reboot(stat: &str) -> bool {
 /// nulled off btmqttd's inherited fds; `reboot` resolves via the daemon's inherited PATH (the init script
 /// exports `PATH=/sbin:/usr/sbin:/usr/bin:/bin`) and the daemon runs as root.
 ///
-/// The gate ([`REBOOT_REQUESTED`], latched by the caller) is released ONLY when the reboot process is known
-/// to be gone, never on a blind timer:
+/// The IN-MEMORY gate ([`REBOOT_REQUESTED`], latched by the caller) is released as soon as this side is done
+/// observing the child; the `/proc` scan in [`reboot_in_progress`] remains the authoritative check for a
+/// still-live reboot, so releasing the in-memory gate never allows a second one while a reboot is running:
 ///   * `spawn` fails → `exec` never happened, no process exists → clear the gate, allow a retry;
 ///   * the process EXITS (reaped by the observer, so no zombie — Copilot) → clear the gate. On this target
 ///     `reboot` signals init and exits promptly whether or not the machine then goes down, so a normal exit
-///     is NOT a failure — only a non-success status is logged (Codex); either way the process is gone, so a
-///     retry is safe (and if the box is genuinely going down, clearing the gate is harmless);
-///   * the process never exits (a truly hung `reboot`) → the observer stays pending and the gate stays
-///     latched, preserving the one-process bound; `restart_bridge` stands down meanwhile so no re-exec can
-///     cancel the observer and strand it (Codex). A fresh daemon starts with the gate reset regardless.
+///     is NOT a failure — only a non-success status is logged (Codex); either way the process is gone;
+///   * `wait()` itself ERRORS → clear the gate too, rather than latching both buttons off for the daemon's
+///     lifetime if the error came after the child exited (Copilot); a genuinely-live reboot is still caught
+///     by the `/proc` scan;
+///   * the process never exits (a truly hung `reboot`) → the observer stays pending, but the `/proc` scan
+///     sees the live process, so the one-reboot bound holds anyway; `restart_bridge` stands down meanwhile
+///     so no re-exec can cancel the observer and strand it (Codex). A fresh daemon starts reset regardless.
 ///
 /// The observer runs as a detached task (not on the single ordered command worker) so a hung `reboot` never
 /// stalls the worker; because `restart_bridge` refuses while the gate is latched, the observer can only be
@@ -465,21 +468,25 @@ fn spawn_reboot() {
             return;
         }
     };
-    // Observe the reboot process off-worker: reap it (no zombie) and release the gate once it is gone.
+    // Observe the reboot process off-worker: reap it (no zombie), then release the IN-MEMORY gate once
+    // `wait()` returns — whether it reports the exit status or errors trying to. Releasing even on a
+    // `wait()` error is safe (and avoids latching both buttons off for the daemon's lifetime if `wait()`
+    // failed after the child already exited — Copilot): the `/proc` scan in `reboot_in_progress` is the
+    // AUTHORITATIVE "is a reboot still running" check, so a still-live reboot keeps the bound regardless of
+    // the in-memory gate, and a departed one lets the button recover.
     tokio::spawn(async move {
         let mut child = child;
         match child.wait().await {
             // Exited — the process is gone. A non-success status means it could not initiate the reboot
-            // (a success just means it signalled init and returned); either way, re-enable the button.
+            // (a success just means it signalled init and returned).
+            Ok(status) if status.success() => {}
             Ok(status) => {
-                if !status.success() {
-                    eprintln!("btmqttd: reboot: reboot exited {status} without rebooting; re-enabling the button");
-                }
-                REBOOT_REQUESTED.store(false, Ordering::Relaxed);
+                eprintln!("btmqttd: reboot: reboot exited {status} without rebooting; re-enabling the button")
             }
-            // Couldn't observe the exit — keep the gate latched rather than risk a second reboot process.
-            Err(e) => eprintln!("btmqttd: reboot: waiting on reboot failed: {e}"),
+            // Couldn't observe the exit; the `/proc` scan still gates a genuinely-live reboot.
+            Err(e) => eprintln!("btmqttd: reboot: waiting on reboot failed: {e}; re-enabling the button"),
         }
+        REBOOT_REQUESTED.store(false, Ordering::Relaxed);
     });
 }
 
