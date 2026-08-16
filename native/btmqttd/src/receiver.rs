@@ -391,9 +391,10 @@ fn reboot_process_running() -> bool {
 
 /// Does one `/proc/<pid>/stat` line name a LIVE `reboot` process? The format is `pid (comm) state …`; the
 /// comm can itself contain spaces or parentheses, so it is delimited by the FIRST `(` and the LAST `)`,
-/// with the single-character run-state next. A zombie/dead reboot (`Z`/`X`) has already exited and will
-/// never reboot anything, so it does NOT count as outstanding — counting it would wedge the button on a
-/// defunct entry until the box actually rebooted. Pure (no I/O) so the parsing is unit-tested directly.
+/// with the single-character run-state next. A zombie/dead reboot (`Z`, or dead `X`/`x` — some kernels
+/// report `TASK_DEAD` lowercase) has already exited and will never reboot anything, so it does NOT count as
+/// outstanding — counting it would wedge the button on a defunct entry until the box actually rebooted.
+/// Pure (no I/O) so the parsing is unit-tested directly.
 fn stat_names_a_live_reboot(stat: &str) -> bool {
     let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
         return false;
@@ -402,7 +403,7 @@ fn stat_names_a_live_reboot(stat: &str) -> bool {
         return false;
     }
     // Run-state is the first non-space character after the closing ')'.
-    !matches!(stat[close + 1..].trim_start().chars().next(), Some('Z') | Some('X') | None)
+    !matches!(stat[close + 1..].trim_start().chars().next(), Some('Z' | 'X' | 'x') | None)
 }
 
 /// Trigger `reboot` for the "Reboot device" maintenance button and OWN the resulting process so the gate
@@ -1024,6 +1025,8 @@ mod tests {
         // the button (otherwise a defunct entry blocks every later reboot until the box actually reboots).
         assert!(!stat_names_a_live_reboot("1234 (reboot) Z 1 0 0"));
         assert!(!stat_names_a_live_reboot("1234 (reboot) X 1 0 0"));
+        // Some kernels report a dead task lowercase (`x`); exclude it too, so a dead reboot never counts.
+        assert!(!stat_names_a_live_reboot("1234 (reboot) x 1 0 0"));
         // A different process is never a reboot, even one whose name merely contains "reboot".
         assert!(!stat_names_a_live_reboot("1234 (btmqttd) S 1 0 0"));
         assert!(!stat_names_a_live_reboot("1234 (rebooter) S 1 0 0"));
