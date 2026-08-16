@@ -384,16 +384,20 @@ async fn restore_ssh() {
 const DROPBEAR_START_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run `/etc/init.d/dropbear start` — the same idempotent command `bt_service_watchdog` uses to bring sshd
-/// back (a no-op if dropbear is already listening). Std streams nulled off btmqttd's inherited fds; the wait
-/// is bounded by [`DROPBEAR_START_TIMEOUT`] and the child is SIGKILL-reaped on expiry (`kill_on_drop` is the
-/// backstop), so `restore_ssh` always returns and the caller can publish the ack. Best-effort — errors are
-/// logged, never fatal.
+/// back (a no-op if dropbear is already listening). Std streams nulled off btmqttd's inherited fds. Spawned
+/// in its OWN process group (`process_group(0)`) so a timeout can SIGKILL the WHOLE group — the init script
+/// AND anything it spawned — not just the script interpreter, which would otherwise leave a reparented
+/// descendant running and let repeated presses pile up stuck processes (Codex; same idiom as
+/// `execute_command`). The wait is bounded by [`DROPBEAR_START_TIMEOUT`]; on expiry the group is killed and
+/// the direct child reaped, so `restore_ssh` always returns and the caller can publish the ack. Best-effort
+/// — errors are logged, never fatal.
 async fn start_dropbear() {
     let mut child = match tokio::process::Command::new("/etc/init.d/dropbear")
         .arg("start")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .process_group(0) // pgid == the script's pid, so a timeout can kill the whole group
         .kill_on_drop(true)
         .spawn()
     {
@@ -409,10 +413,31 @@ async fn start_dropbear() {
         Ok(Err(e)) => eprintln!("btmqttd: restore_ssh: waiting on dropbear start failed: {e}"),
         Err(_) => {
             eprintln!(
-                "btmqttd: restore_ssh: dropbear start did not finish within {}s; killing it",
+                "btmqttd: restore_ssh: dropbear start did not finish within {}s; killing its process group",
                 DROPBEAR_START_TIMEOUT.as_secs()
             );
-            let _ = child.kill().await; // SIGKILL + reap so we leave no lingering child
+            // SIGKILL the whole process GROUP (pgid == the script's pid, set via process_group(0)), so any
+            // descendant the init script spawned dies too — not just the script interpreter. ESRCH means the
+            // group is already gone (benign); any OTHER error → fall back to the direct child so nothing
+            // lingers. Then reap our direct child; init reaps the group's reparented descendants.
+            match child.id() {
+                Some(pid) => {
+                    let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+                    if rc != 0 {
+                        let err = std::io::Error::last_os_error();
+                        if err.raw_os_error() != Some(libc::ESRCH) {
+                            eprintln!(
+                                "btmqttd: restore_ssh: killpg({pid}) failed: {err}; killing the script directly"
+                            );
+                            let _ = child.start_kill();
+                        }
+                    }
+                }
+                None => {
+                    let _ = child.start_kill();
+                }
+            }
+            let _ = child.wait().await;
         }
     }
 }
