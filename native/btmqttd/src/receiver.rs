@@ -11,7 +11,7 @@
 //!
 //! Extends StartMqttReceive's dispatch/handle_json with the device-control actions.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -217,6 +217,12 @@ async fn handle_json(
         if let Some(m) = parse_maintenance(action) {
             match m {
                 Maintenance::Reboot => {
+                    // Accept a reboot ONCE per daemon lifetime; ignore repeats so a hung `reboot` can't
+                    // be re-fired into unbounded init-owned processes (see [`REBOOT_REQUESTED`]).
+                    if REBOOT_REQUESTED.swap(true, Ordering::Relaxed) {
+                        eprintln!("btmqttd: reboot already requested; ignoring this press");
+                        return;
+                    }
                     eprintln!("btmqttd: reboot requested via MQTT; rebooting the device");
                     spawn_reboot().await;
                 }
@@ -286,6 +292,14 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
         _ => None,
     }
 }
+
+/// Set once the "Reboot device" button has been ACCEPTED, and never cleared within this process. A
+/// reboot is TERMINAL, so a second one from the SAME daemon instance is never useful; gating on this
+/// bounds the reboot path to ONE attempt per process, so a broken/hung `reboot` (which stays alive,
+/// reparented to init) can't be re-fired by repeated presses or an automation into unbounded init-owned
+/// reboot processes that exhaust the process table (CodeRabbit, Codex). A FRESH process — after a real
+/// reboot, or a `restart_bridge` re-exec — starts with this reset, so the button works again afterward.
+static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Trigger `reboot` for the "Reboot device" maintenance button, fully DETACHED from btmqttd so the daemon
 /// never owns a long-lived reboot child it must reap. A shell BACKGROUNDS `reboot` and then exits at once:
