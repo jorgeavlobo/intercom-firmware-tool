@@ -86,6 +86,9 @@ pub struct Config {
     pub light_where: Option<String>,
     pub topic_light: String,
     pub topic_light_avail: String,
+    /// Retained "last maintenance action" state topic — the HA feedback sensor for the reboot/restart
+    /// buttons (issue #43). btmqttd publishes `{"action":…,"at":…}` here on each accepted press.
+    pub topic_maintenance: String,
     // OpenWebNet monitor endpoint (bus -> MQTT)
     pub own_host: String,
     pub own_port_mon: u16,
@@ -230,6 +233,7 @@ impl Config {
             light_momentary: opt("LIGHT_MODE").as_deref() == Some("momentary"),
             topic_light: get("TOPIC_LIGHT", "Bticino/light"),
             topic_light_avail: get("TOPIC_LIGHT_AVAIL", "Bticino/light_avail"),
+            topic_maintenance: get("TOPIC_MAINTENANCE", "Bticino/maintenance"),
             own_host: get("OWN_HOST", "127.0.0.1"),
             own_port_mon: opt("OWN_PORT_MON").and_then(|s| s.parse().ok()).unwrap_or(20000),
             // PAYLOAD_FORMAT defaults to json (mqtt_common.sh); anything but "raw" is json.
@@ -493,6 +497,13 @@ EMPTY=
         assert_eq!(c.topic_entrance_panel_call, "Bticino/entrance_panel_call");
         assert_eq!(c.topic_floor_call, "Bticino/floor_call");
         assert_eq!(c.topic_call_state, "Bticino/call_state");
+        assert_eq!(c.topic_maintenance, "Bticino/maintenance");
+    }
+
+    #[test]
+    fn maintenance_topic_honours_an_override() {
+        let c = Config::from_map(parse_env("MQTT_HOST=h\nTOPIC_MAINTENANCE=home/i42/maint\n"));
+        assert_eq!(c.topic_maintenance, "home/i42/maint");
     }
 
     #[test]

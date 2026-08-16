@@ -224,6 +224,8 @@ async fn handle_json(
                         return;
                     }
                     eprintln!("btmqttd: reboot requested via MQTT; rebooting the device");
+                    // Publish the HA feedback BEFORE rebooting so it can flush; then reboot.
+                    publish_maintenance(client, cfg, "reboot").await;
                     spawn_reboot().await;
                 }
                 Maintenance::RestartBridge => {
@@ -233,6 +235,8 @@ async fn handle_json(
                     // ~1 s (vs a ~60 s watchdog respawn if we merely exited). btmqttd must NOT run the
                     // init script's `restart` on itself — that would SIGKILL this handler mid-flight.
                     eprintln!("btmqttd: restart requested via MQTT; re-execing the bridge");
+                    // Publish the HA feedback first; the clean shutdown below flushes it before the BYE.
+                    publish_maintenance(client, cfg, "restart_bridge").await;
                     restart.notify_one();
                 }
             }
@@ -290,6 +294,24 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
         "reboot" => Some(Maintenance::Reboot),
         "restart_bridge" => Some(Maintenance::RestartBridge),
         _ => None,
+    }
+}
+
+/// Publish a RETAINED "last maintenance action" record to `topic_maintenance` for the HA feedback
+/// sensor (issue #43) — the visible ack for an otherwise-stateless button press: `{"action":"<name>",
+/// "at":"<iso>"}`. RETAINED so Home Assistant still shows it across the reboot / bridge re-exec that
+/// immediately follows (HA re-reads the retained value on reconnect). Published BEFORE the action so a
+/// restart's clean MQTT shutdown flushes it; for a reboot the unit's own offline blip is the primary
+/// feedback if this last publish doesn't reach the broker before the box goes down. Best-effort — a
+/// publish error is logged. `action` is a fixed internal token (`reboot`/`restart_bridge`) and the ISO
+/// timestamp has no JSON-special characters, so the hand-built object needs no escaping.
+async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &str) {
+    let payload = format!("{{\"action\":\"{action}\",\"at\":\"{}\"}}", own::utc_now_iso());
+    if let Err(e) = client
+        .publish(&cfg.topic_maintenance, QoS::AtLeastOnce, true, payload.into_bytes())
+        .await
+    {
+        eprintln!("btmqttd: maintenance: publish to {} failed: {e}", cfg.topic_maintenance);
     }
 }
 
