@@ -217,22 +217,20 @@ async fn handle_json(
         if let Some(m) = parse_maintenance(action) {
             match m {
                 Maintenance::Reboot => {
-                    // Accept a reboot ONCE per daemon lifetime; ignore repeats so a hung `reboot` can't
-                    // be re-fired into unbounded init-owned processes (see [`REBOOT_REQUESTED`]). The gate
-                    // is latched OPTIMISTICALLY here (the single ordered worker means no press can race
-                    // it). `reboot` is launched fire-and-forget (reparented to init), so its exec failure
-                    // can't be observed inline; instead `arm_reboot_gate_timeout` recovers the gate by
-                    // OUTCOME — if the daemon is still alive after the settle window the reboot did not
-                    // take effect, whatever the cause, so the button is re-enabled (CodeRabbit, Codex).
+                    // Accept a reboot only while none is OUTSTANDING; ignore repeats so a `reboot` that
+                    // hasn't exited can't be re-fired into unbounded processes (see [`REBOOT_REQUESTED`]).
+                    // The gate is latched OPTIMISTICALLY here (the single ordered worker means no press can
+                    // race it), and `spawn_reboot` owns the reboot process so the gate is released again
+                    // only once that process is OBSERVED to have exited — a still-running/hung reboot keeps
+                    // the bound, while an exited/failed one re-enables the button (CodeRabbit, Codex).
                     if REBOOT_REQUESTED.swap(true, Ordering::Relaxed) {
-                        eprintln!("btmqttd: reboot already requested; ignoring this press");
+                        eprintln!("btmqttd: reboot already in progress; ignoring this press");
                         return;
                     }
                     eprintln!("btmqttd: reboot requested via MQTT; rebooting the device");
                     // Publish the HA feedback BEFORE rebooting so it can flush; then reboot.
                     publish_maintenance(client, cfg, "reboot").await;
-                    spawn_reboot().await;
-                    arm_reboot_gate_timeout();
+                    spawn_reboot();
                 }
                 Maintenance::RestartBridge => {
                     // Reuse main.rs's in-place re-exec path: a clean shutdown (flush the MQTT `offline`
@@ -240,6 +238,17 @@ async fn handle_json(
                     // bt_service_watchdog's pgrep supervision is undisturbed and the bridge is back in
                     // ~1 s (vs a ~60 s watchdog respawn if we merely exited). btmqttd must NOT run the
                     // init script's `restart` on itself — that would SIGKILL this handler mid-flight.
+                    //
+                    // Refuse while a reboot is OUTSTANDING (gate latched = the reboot process may still be
+                    // running): re-execing now drops the runtime, cancelling that process's exit-observer,
+                    // so a hung reboot could be stranded and its one-attempt bound lost across the fresh
+                    // image (Codex). A reboot supersedes a bridge restart anyway — the box is going down —
+                    // so this is dropped, not queued; the button works again once the reboot is observed to
+                    // have exited (gate cleared) or in a fresh daemon.
+                    if REBOOT_REQUESTED.load(Ordering::Relaxed) {
+                        eprintln!("btmqttd: restart ignored: a reboot is already in progress");
+                        return;
+                    }
                     eprintln!("btmqttd: restart requested via MQTT; re-execing the bridge");
                     // Publish the HA feedback first; the clean shutdown below flushes it before the BYE.
                     publish_maintenance(client, cfg, "restart_bridge").await;
@@ -321,78 +330,70 @@ async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &s
     }
 }
 
-/// Set once the "Reboot device" button has been ACCEPTED. A reboot is TERMINAL, so a second one from the
-/// SAME daemon instance is never useful; gating on this bounds the reboot path to ONE in-flight attempt,
-/// so a broken/hung `reboot` (which stays alive, reparented to init) can't be re-fired by repeated presses
-/// or an automation into unbounded init-owned reboot processes that exhaust the process table (CodeRabbit,
-/// Codex). It is cleared only by [`arm_reboot_gate_timeout`] once the reboot is shown NOT to have taken
-/// effect (see there). A FRESH process — after a real reboot, or a `restart_bridge` re-exec — starts with
-/// this reset, so the button works again afterward.
+/// Latched while a reboot attempt is OUTSTANDING — from accepting the "Reboot device" press until the
+/// `reboot` process is OBSERVED to have exited (or its launch is known to have failed). While set it bounds
+/// the reboot path to ONE outstanding process, so repeated presses or an automation can't spawn a pile of
+/// `reboot` processes and exhaust the process table (CodeRabbit, Codex); it also makes `restart_bridge`
+/// stand down (a re-exec would cancel the exit-observer below). It is released by [`spawn_reboot`]'s
+/// observer once that process is gone — so a still-running/hung `reboot` keeps the bound, while an
+/// exited/failed one re-enables the button. A FRESH process — after a real reboot, or a `restart_bridge`
+/// re-exec — starts with this reset, so the button works again afterward.
 static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
-/// How long to wait after accepting a reboot before deciding it did NOT take effect. A real reboot takes
-/// the whole system (this daemon included) down well within this window, so if we are still running when
-/// it elapses the launch failed however it failed — comfortably longer than a slow graceful shutdown, so
-/// a reboot that is merely in progress is never misjudged.
-const REBOOT_SETTLE: Duration = Duration::from_secs(60);
-
-/// Recover the one-shot reboot gate by OUTCOME rather than by trying to predict a fire-and-forget launch.
-/// `reboot` is backgrounded and reparented to init, so — by the POSIX asynchronous-list rule — nothing on
-/// this side can observe whether the background job actually `exec`s: a missing applet, a resolved-but-
-/// unrunnable binary (bad ELF loader / shebang interpreter), or a `reboot` that simply gives up all look
-/// identical to success (CodeRabbit, Codex). So instead of guessing at launch time, this arms a detached
-/// timer that clears [`REBOOT_REQUESTED`] after [`REBOOT_SETTLE`] IF the daemon is still alive — which it
-/// only is when the reboot did not happen, whatever the cause — re-enabling the button. The task owns
-/// NOTHING (no child handle; the shell/`reboot` lifecycle is entirely init's), so unlike the earlier
-/// reaper-task designs a `restart_bridge` re-exec dropping the runtime can't strand a child through it;
-/// and losing the timer to that re-exec is harmless because the fresh process starts with the gate reset.
-fn arm_reboot_gate_timeout() {
-    tokio::spawn(async {
-        tokio::time::sleep(REBOOT_SETTLE).await;
-        // Still running after the settle window ⇒ the reboot did not take effect; re-enable the button.
-        if REBOOT_REQUESTED.swap(false, Ordering::Relaxed) {
-            eprintln!(
-                "btmqttd: reboot: still running {}s after the request; the reboot did not take effect, re-enabling the button",
-                REBOOT_SETTLE.as_secs()
-            );
-        }
-    });
-}
-
-/// Trigger `reboot` for the "Reboot device" maintenance button, fully DETACHED from btmqttd so the daemon
-/// never owns a long-lived reboot child it must reap. A shell BACKGROUNDS `reboot` and then exits at once:
-/// when the shell exits, its backgrounded `reboot` is REPARENTED to init (PID 1), and init reaps it
-/// whenever it exits. So there is no zombie under btmqttd even if `reboot` hangs, and nothing for a
-/// concurrent bridge re-exec (the "Restart bridge" button, which drops the runtime and re-execs the same
-/// PID) to orphan — the earlier reaper-task designs let a re-exec cancel the waiter and strand a hung
-/// `reboot` as an unreapable child (CodeRabbit, Codex). btmqttd owns only the SHELL, and awaits it INLINE
-/// on the single ordered command worker: the shell backgrounds `reboot` rather than waiting on it, so this
-/// completes in milliseconds even if `reboot` never exits, and it finishes before the worker can dequeue a
-/// following `restart_bridge`. `sh`/`reboot` resolve via the daemon's inherited PATH (the init script
-/// exports `PATH=/sbin:/usr/sbin:/usr/bin:/bin`); the daemon runs as root.
+/// Trigger `reboot` for the "Reboot device" maintenance button and OWN the resulting process so the gate
+/// tracks its true lifetime. `reboot` is spawned DIRECTLY (no intervening shell), which gives two things a
+/// backgrounded shell couldn't: the fork/`exec` handshake reports a launch failure (a missing/unrunnable
+/// applet fails `spawn` with `Err`, unlike a `... &` async list that exits 0 before the job's `exec` is
+/// known — Codex), and we hold the `Child` so we can observe when it exits (Codex). Its std streams are
+/// nulled off btmqttd's inherited fds; `reboot` resolves via the daemon's inherited PATH (the init script
+/// exports `PATH=/sbin:/usr/sbin:/usr/bin:/bin`) and the daemon runs as root.
 ///
-/// Fire-and-forget: because the job is backgrounded, its `exec` outcome is unobservable here (the shell
-/// exits 0 as soon as it forks the job), so this reports nothing about launch success — recovery from a
-/// failed launch is handled by OUTCOME in [`arm_reboot_gate_timeout`], not guessed at here. Best-effort —
-/// a shell that couldn't even start is logged rather than panicking; the module's contract is "never
-/// panics". We still `await` the shell (it exits in milliseconds) so the daemon reaps the SHELL itself.
-async fn spawn_reboot() {
-    match tokio::process::Command::new("sh")
-        .arg("-c")
-        // Background `reboot` and let the shell return, so `reboot` is reparented to init; redirect its
-        // std streams off btmqttd's inherited fds. (No `exec` — we WANT the shell to exit, not become
-        // `reboot` — and no wait on the job, so a hung `reboot` never stalls the shell or this await.)
-        .arg("reboot </dev/null >/dev/null 2>&1 &")
+/// The gate ([`REBOOT_REQUESTED`], latched by the caller) is released ONLY when the reboot process is known
+/// to be gone, never on a blind timer:
+///   * `spawn` fails → `exec` never happened, no process exists → clear the gate, allow a retry;
+///   * the process EXITS (reaped by the observer, so no zombie — Copilot) → clear the gate. On this target
+///     `reboot` signals init and exits promptly whether or not the machine then goes down, so a normal exit
+///     is NOT a failure — only a non-success status is logged (Codex); either way the process is gone, so a
+///     retry is safe (and if the box is genuinely going down, clearing the gate is harmless);
+///   * the process never exits (a truly hung `reboot`) → the observer stays pending and the gate stays
+///     latched, preserving the one-process bound; `restart_bridge` stands down meanwhile so no re-exec can
+///     cancel the observer and strand it (Codex). A fresh daemon starts with the gate reset regardless.
+///
+/// The observer runs as a detached task (not on the single ordered command worker) so a hung `reboot` never
+/// stalls the worker; because `restart_bridge` refuses while the gate is latched, the observer can only be
+/// dropped by a re-exec AFTER it has already cleared the gate — i.e. once there is no child left to strand.
+/// Best-effort — a spawn failure is logged rather than panicking; the module's contract is "never panics".
+fn spawn_reboot() {
+    let child = match tokio::process::Command::new("reboot")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
     {
-        // The shell exits (reaped here) once it has forked the background job; `reboot` is now init's.
-        Ok(mut sh) => {
-            if let Err(e) = sh.wait().await {
-                eprintln!("btmqttd: reboot: waiting on the reboot shell failed: {e}");
-            }
+        Ok(child) => child,
+        Err(e) => {
+            // `exec` never happened, so no reboot process exists — release the gate for a retry.
+            eprintln!("btmqttd: reboot: failed to spawn reboot: {e}");
+            REBOOT_REQUESTED.store(false, Ordering::Relaxed);
+            return;
         }
-        Err(e) => eprintln!("btmqttd: reboot: failed to spawn the reboot shell: {e}"),
-    }
+    };
+    // Observe the reboot process off-worker: reap it (no zombie) and release the gate once it is gone.
+    tokio::spawn(async move {
+        let mut child = child;
+        match child.wait().await {
+            // Exited — the process is gone. A non-success status means it could not initiate the reboot
+            // (a success just means it signalled init and returned); either way, re-enable the button.
+            Ok(status) => {
+                if !status.success() {
+                    eprintln!("btmqttd: reboot: reboot exited {status} without rebooting; re-enabling the button");
+                }
+                REBOOT_REQUESTED.store(false, Ordering::Relaxed);
+            }
+            // Couldn't observe the exit — keep the gate latched rather than risk a second reboot process.
+            Err(e) => eprintln!("btmqttd: reboot: waiting on reboot failed: {e}"),
+        }
+    });
 }
 
 /// Handle an ungated device-control action (issue #40 volume, #41 lock). `v` is the
