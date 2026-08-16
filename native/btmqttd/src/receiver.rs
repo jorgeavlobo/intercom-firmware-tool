@@ -11,7 +11,7 @@
 //!
 //! Extends StartMqttReceive's dispatch/handle_json with the device-control actions.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -218,7 +218,7 @@ async fn handle_json(
             match m {
                 Maintenance::Reboot => {
                     eprintln!("btmqttd: reboot requested via MQTT; rebooting the device");
-                    spawn_reboot();
+                    spawn_reboot().await;
                 }
                 Maintenance::RestartBridge => {
                     // Reuse main.rs's in-place re-exec path: a clean shutdown (flush the MQTT `offline`
@@ -287,53 +287,38 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
     }
 }
 
-/// True while a spawned `reboot` child is still outstanding (not yet reaped). Bounds the reboot path to
-/// ONE in-flight child (see [`spawn_reboot`]).
-static REBOOT_INFLIGHT: AtomicBool = AtomicBool::new(false);
-
-/// Spawn `reboot` for the "Reboot device" maintenance button and REAP it. In the normal case `reboot`
-/// signals init and the whole system (this daemon included) is torn down, but `reboot` typically returns
-/// promptly (often success) BEFORE the shutdown completes, and a broken/no-op `reboot` may return without
-/// rebooting at all — so we must not leak the child. A detached task awaits it: this reaps the exit
-/// status (no zombie accumulating across repeated presses if a reboot ever fails) without blocking the
-/// single command worker, and if the reboot does bring the box down the task simply dies with everything
-/// else. `kill_on_drop` stays false (tokio's default) so aborting the task never kills a `reboot` that is
-/// mid-shutdown. `reboot` is resolved via the daemon's inherited PATH (the init script exports
-/// `PATH=/sbin:/usr/sbin:/usr/bin:/bin`, so BusyBox / util-linux `reboot` at `/sbin` is found); the
-/// daemon runs as root, so it may reboot. Best-effort: a spawn failure is logged (nothing else we can do
-/// from here) rather than panicking — this module's contract is "never panics".
-///
-/// Bounded to ONE in-flight reboot ([`REBOOT_INFLIGHT`]): a real `reboot` brings the box down almost at
-/// once, so a second concurrent one is never useful, and refusing further presses until the current child
-/// is reaped caps process/task growth if `reboot` ever HANGS instead of exiting or rebooting (CodeRabbit).
-/// The flag is cleared when the child is reaped (or if the spawn itself fails), so a genuinely stuck
-/// reboot holds the slot exactly once rather than accumulating one child per press.
-fn spawn_reboot() {
-    if REBOOT_INFLIGHT.swap(true, Ordering::Relaxed) {
-        eprintln!("btmqttd: reboot: a reboot is already in progress; ignoring this press");
-        return;
-    }
-    match tokio::process::Command::new("reboot").spawn() {
-        Ok(mut child) => {
-            tokio::spawn(async move {
-                if let Ok(status) = child.wait().await {
-                    // A normal `reboot` returns SUCCESS right after signaling init — the shutdown then
-                    // proceeds and tears this task down — so a success exit is NOT a failure and must not
-                    // be logged as "did not reboot" (Codex). Only a NON-success exit means the reboot
-                    // didn't take (a broken/no-op `reboot`); warn on just that.
-                    if !status.success() {
-                        eprintln!(
-                            "btmqttd: reboot: `reboot` exited unsuccessfully ({status}); the device may not reboot"
-                        );
-                    }
+/// Trigger `reboot` for the "Reboot device" maintenance button, fully DETACHED from btmqttd so the daemon
+/// never owns a long-lived reboot child it must reap. A shell BACKGROUNDS `reboot` and then exits at once:
+/// when the shell exits, its backgrounded `reboot` is REPARENTED to init (PID 1), and init reaps it
+/// whenever it exits. So there is no zombie under btmqttd even if `reboot` hangs, and nothing for a
+/// concurrent bridge re-exec (the "Restart bridge" button, which drops the runtime and re-execs the same
+/// PID) to orphan — the earlier reaper-task designs let a re-exec cancel the waiter and strand a hung
+/// `reboot` as an unreapable child (CodeRabbit, Codex). btmqttd owns only the SHELL, and awaits it INLINE
+/// on the single ordered command worker: the shell backgrounds `reboot` rather than waiting on it, so this
+/// completes in milliseconds even if `reboot` never exits, and it finishes before the worker can dequeue a
+/// following `restart_bridge` — so there is no detached task at all for a re-exec to cancel. `sh`/`reboot`
+/// resolve via the daemon's inherited PATH (the init script exports `PATH=/sbin:/usr/sbin:/usr/bin:/bin`);
+/// the daemon runs as root. Best-effort — a spawn failure (or a shell that couldn't even start) is logged
+/// rather than panicking; the module's contract is "never panics".
+async fn spawn_reboot() {
+    match tokio::process::Command::new("sh")
+        .arg("-c")
+        // Background `reboot` and let the shell return, so `reboot` is reparented to init; redirect its
+        // std streams off btmqttd's inherited fds. (No `exec` — we WANT the shell to exit, not become
+        // `reboot` — and no wait on the job, so a hung `reboot` never stalls the shell or this await.)
+        .arg("reboot </dev/null >/dev/null 2>&1 &")
+        .spawn()
+    {
+        Ok(mut sh) => {
+            if let Ok(status) = sh.wait().await {
+                // The shell exits 0 once it has launched the background job; a nonzero status means the
+                // shell itself failed (it never got as far as backgrounding `reboot`), so surface that.
+                if !status.success() {
+                    eprintln!("btmqttd: reboot: reboot shell exited {status}; the device may not reboot");
                 }
-                REBOOT_INFLIGHT.store(false, Ordering::Relaxed);
-            });
+            }
         }
-        Err(e) => {
-            eprintln!("btmqttd: reboot: failed to spawn `reboot`: {e}");
-            REBOOT_INFLIGHT.store(false, Ordering::Relaxed); // spawn failed → free the slot for a retry
-        }
+        Err(e) => eprintln!("btmqttd: reboot: failed to spawn the reboot shell: {e}"),
     }
 }
 
