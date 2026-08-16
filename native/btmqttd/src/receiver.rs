@@ -347,18 +347,28 @@ static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// (or may have been) — keep the gate set. `false` means the launch is KNOWN to have failed and no
 /// `reboot` exists — the caller clears the gate so the button stays usable for a retry rather than being
 /// permanently locked out (CodeRabbit):
-///   * shell spawned AND exited success → the background `reboot` launched → `true`;
-///   * shell exited NONZERO → it never backgrounded `reboot` → known failure → `false`;
+///   * shell spawned AND exited success → `reboot` RESOLVED and the background job launched → `true`;
+///   * shell exited NONZERO → `reboot` was UNRESOLVABLE (foreground `command -v` failed → `exit 127`) or
+///     the shell otherwise failed before backgrounding it → known failure → `false`;
 ///   * shell could not be SPAWNED → known failure → `false`;
 ///   * `wait()` errored → the shell WAS spawned and may already have backgrounded `reboot`, so keep the
 ///     gate (`true`) rather than risk a SECOND reboot on retry.
+///
+/// A backgrounded `reboot` alone can't report an exec failure: by the POSIX asynchronous-list rule the
+/// shell exits 0 as soon as it FORKS the job, before `reboot`'s `exec` is known to have succeeded, so a
+/// missing/broken `reboot` applet would still look like success and latch the gate forever (Codex). To
+/// make the shell's status a real launch signal for that case, `reboot` is RESOLVED in the FOREGROUND
+/// first (`command -v reboot`); if it isn't a runnable command the shell exits 127 without backgrounding
+/// anything, and the caller clears the gate for a retry. Once resolved, the job is backgrounded and the
+/// resolved-then-immediately-launched applet is overwhelmingly likely to `exec` cleanly.
 async fn spawn_reboot() -> bool {
     match tokio::process::Command::new("sh")
         .arg("-c")
-        // Background `reboot` and let the shell return, so `reboot` is reparented to init; redirect its
-        // std streams off btmqttd's inherited fds. (No `exec` — we WANT the shell to exit, not become
+        // Resolve `reboot` in the FOREGROUND (exit 127 if it's missing/broken so the caller clears the
+        // gate), THEN background it and let the shell return, so `reboot` is reparented to init; redirect
+        // its std streams off btmqttd's inherited fds. (No `exec` — we WANT the shell to exit, not become
         // `reboot` — and no wait on the job, so a hung `reboot` never stalls the shell or this await.)
-        .arg("reboot </dev/null >/dev/null 2>&1 &")
+        .arg("command -v reboot >/dev/null 2>&1 || exit 127; reboot </dev/null >/dev/null 2>&1 &")
         .spawn()
     {
         // The shell exits 0 once it has launched the background job (`reboot` is now init's child).
