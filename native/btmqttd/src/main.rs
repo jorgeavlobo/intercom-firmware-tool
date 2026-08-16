@@ -928,6 +928,19 @@ async fn run() -> Result<bool, String> {
     stop(sender_task).await;
     stop(keys_task).await;
     stop(cmd_worker).await;
+    // The command worker is now quiesced — no further `reboot` command can be dispatched — so the reboot
+    // gate is STABLE from here. Re-check it before committing to a re-exec: the `restart.notified()` arm
+    // tested the gate when it fired, but a `reboot` queued behind that restart can still have run during one
+    // of the awaited task-stops ABOVE (each `stop(..).await` yields while this worker was alive), setting
+    // the gate and spawning the reboot child + its exit-observer only now. Re-execing would drop the runtime,
+    // cancel that observer, and resurrect with the gate reset — the stranded-hung-reboot the arm's guard is
+    // meant to prevent (Codex). So if a reboot became outstanding, do NOT re-exec: fall back to a plain exit
+    // (the watchdog respawns the bridge if the box does not actually go down), never racing a reboot with an
+    // instant same-PID re-exec.
+    if reexec && receiver::reboot_in_progress() {
+        eprintln!("btmqttd: re-exec cancelled: a reboot became outstanding during shutdown; exiting instead");
+        reexec = false;
+    }
     // Drain the stair-light persist task LAST among the state producers: `command()` (on
     // cmd_worker) and `observe()` (on sender_task) are now stopped, so no further state can be
     // enqueued. Signal the task and await its final flush (bounded) so a toggle actuated in the
