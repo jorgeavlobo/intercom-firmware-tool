@@ -634,7 +634,9 @@ async fn run() -> Result<bool, String> {
                 // activates at the next process start; the button press is simply superseded by the
                 // reboot. The gate clears once the reboot process is observed gone, re-enabling both.
                 if receiver::reboot_in_progress() {
-                    eprintln!("btmqttd: restart deferred: a reboot is already in progress");
+                    // "ignored", not "deferred": the Notify permit is consumed here and not re-armed, so
+                    // THIS request is dropped (the box is going down anyway); a fresh press re-requests it.
+                    eprintln!("btmqttd: restart ignored: a reboot is already in progress");
                     continue;
                 }
                 eprintln!("btmqttd: restart requested; shutting down cleanly to re-exec");
