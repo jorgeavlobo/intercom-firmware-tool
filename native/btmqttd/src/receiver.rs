@@ -287,16 +287,29 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
     }
 }
 
-/// Spawn `reboot` detached for the "Reboot device" maintenance button. We do NOT await it: `reboot`
-/// signals init to bring the system down and this daemon is torn down as part of that shutdown, so
-/// there is nothing to reap (and the dropped `Child` handle is not killed — `std` never kills on drop).
-/// `reboot` is resolved via the daemon's inherited PATH (the init script exports
-/// `PATH=/sbin:/usr/sbin:/usr/bin:/bin`, so BusyBox / util-linux `reboot` at `/sbin` is found). The
+/// Spawn `reboot` for the "Reboot device" maintenance button and REAP it. In the normal case `reboot`
+/// signals init and the whole system (this daemon included) is torn down, but `reboot` typically returns
+/// promptly (often success) BEFORE the shutdown completes, and a broken/no-op `reboot` may return without
+/// rebooting at all — so we must not leak the child. A detached task awaits it: this reaps the exit
+/// status (no zombie accumulating across repeated presses if a reboot ever fails) without blocking the
+/// single command worker, and if the reboot does bring the box down the task simply dies with everything
+/// else. `kill_on_drop` stays false (tokio's default) so aborting the task never kills a `reboot` that is
+/// mid-shutdown. `reboot` is resolved via the daemon's inherited PATH (the init script exports
+/// `PATH=/sbin:/usr/sbin:/usr/bin:/bin`, so BusyBox / util-linux `reboot` at `/sbin` is found); the
 /// daemon runs as root, so it may reboot. Best-effort: a spawn failure is logged (nothing else we can do
 /// from here) rather than panicking — this module's contract is "never panics".
 fn spawn_reboot() {
-    if let Err(e) = std::process::Command::new("reboot").spawn() {
-        eprintln!("btmqttd: reboot: failed to spawn `reboot`: {e}");
+    match tokio::process::Command::new("reboot").spawn() {
+        Ok(mut child) => {
+            tokio::spawn(async move {
+                if let Ok(status) = child.wait().await {
+                    // Only reached if `reboot` returned without bringing the box down (e.g. it failed);
+                    // a successful shutdown tears this task down before `wait` resolves.
+                    eprintln!("btmqttd: reboot: `reboot` exited with {status} without rebooting");
+                }
+            });
+        }
+        Err(e) => eprintln!("btmqttd: reboot: failed to spawn `reboot`: {e}"),
     }
 }
 
