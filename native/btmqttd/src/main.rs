@@ -633,7 +633,7 @@ async fn run() -> Result<bool, String> {
                 // the fresh image (CodeRabbit). A learned WHERE is already persisted, so it still
                 // activates at the next process start; the button press is simply superseded by the
                 // reboot. The gate clears once the reboot process is observed gone, re-enabling both.
-                if receiver::reboot_in_progress() {
+                if receiver::reboot_in_progress().await {
                     // "ignored", not "deferred": the Notify permit is consumed here and not re-armed, so
                     // THIS request is dropped (the box is going down anyway); a fresh press re-requests it.
                     eprintln!("btmqttd: restart ignored: a reboot is already in progress");
@@ -939,7 +939,7 @@ async fn run() -> Result<bool, String> {
     // meant to prevent (Codex). So if a reboot became outstanding, do NOT re-exec: fall back to a plain exit
     // (the watchdog respawns the bridge if the box does not actually go down), never racing a reboot with an
     // instant same-PID re-exec.
-    if reexec && receiver::reboot_in_progress() {
+    if reexec && receiver::reboot_in_progress().await {
         eprintln!("btmqttd: re-exec cancelled: a reboot became outstanding during shutdown; exiting instead");
         reexec = false;
     }

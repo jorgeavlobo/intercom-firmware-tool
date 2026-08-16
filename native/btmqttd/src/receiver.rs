@@ -226,7 +226,7 @@ async fn handle_json(
                     // it, latch the in-memory gate and `spawn_reboot` owns the process, releasing the gate
                     // only once it is OBSERVED to have exited — a hung reboot keeps the bound, an exited/
                     // failed one re-enables the button (CodeRabbit, Codex).
-                    if reboot_in_progress() {
+                    if reboot_in_progress().await {
                         eprintln!("btmqttd: reboot already in progress; ignoring this press");
                         return;
                     }
@@ -250,7 +250,7 @@ async fn handle_json(
                     // loop would only drop. A reboot supersedes a bridge restart anyway — the box is going
                     // down — so the press is dropped, not queued; the button works again once the reboot is
                     // observed to have exited (gate cleared) or in a fresh daemon.
-                    if reboot_in_progress() {
+                    if reboot_in_progress().await {
                         eprintln!("btmqttd: restart ignored: a reboot is already in progress");
                         return;
                     }
@@ -362,25 +362,28 @@ static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// the bound from real kernel state instead — a `reboot` this daemon can't see in memory it can still see
 /// in `/proc` — holds the bound across every such boundary, and it self-clears with no lockout: once the
 /// `reboot` process is gone (the box rebooted, or it exited), `/proc` is clear and the button works again.
-pub(crate) fn reboot_in_progress() -> bool {
-    REBOOT_REQUESTED.load(Ordering::Relaxed) || reboot_process_running()
+pub(crate) async fn reboot_in_progress() -> bool {
+    // Short-circuit on the in-memory gate so the common "this daemon owns the reboot" case skips the scan.
+    REBOOT_REQUESTED.load(Ordering::Relaxed) || reboot_process_running().await
 }
 
 /// Scan `/proc` for a LIVE `reboot` process — a system-wide, restart-surviving view of whether a reboot is
-/// still outstanding (see [`reboot_in_progress`]). Best-effort: an unreadable `/proc` (never, in practice,
-/// for a root daemon) or a stat file that vanishes mid-scan (the process exited) simply doesn't match.
-fn reboot_process_running() -> bool {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+/// still outstanding (see [`reboot_in_progress`]). Uses async `tokio::fs` (not blocking `std::fs`) so a
+/// slow procfs read never stalls the single-threaded runtime, consistent with `hold.rs`/`sprop.rs`
+/// (Copilot). Best-effort: an unreadable `/proc` (never, in practice, for a root daemon) or a stat file
+/// that vanishes mid-scan (the process exited) simply doesn't match.
+async fn reboot_process_running() -> bool {
+    let Ok(mut entries) = tokio::fs::read_dir("/proc").await else {
         return false;
     };
-    for entry in entries.flatten() {
+    while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name();
         // Only numeric entries are process directories; skip `self`, `net`, etc.
         let Some(name) = name.to_str() else { continue };
         if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{name}/stat")) {
+        if let Ok(stat) = tokio::fs::read_to_string(format!("/proc/{name}/stat")).await {
             if stat_names_a_live_reboot(&stat) {
                 return true;
             }
