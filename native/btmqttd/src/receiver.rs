@@ -260,10 +260,10 @@ async fn handle_json(
                     restart.notify_one();
                 }
                 Maintenance::RestoreSsh => {
-                    // On-demand SSH recovery net (issue #130): (re)start dropbear and REPORT whether the
-                    // factory `:22` INPUT ACCEPT rule is present — never writing the firewall. The MQTT
-                    // command reaches us even when inbound `:22` is blocked (our broker link is outbound),
-                    // so this restores SSH without a reboot or power-cycle. Idempotent; safe to repeat.
+                    // On-demand SSH recovery net (issue #130): (re)start dropbear so sshd is listening. The
+                    // MQTT command reaches us even when inbound `:22` is blocked (our broker link is
+                    // outbound), so this brings SSH back without a reboot or power-cycle. It never touches
+                    // the firewall (see `restore_ssh`). Idempotent; safe to repeat.
                     eprintln!("btmqttd: restore_ssh requested via MQTT");
                     restore_ssh().await;
                     // Publish the HA feedback AFTER the (fast, non-terminal) recovery so the ack reflects a
@@ -318,7 +318,7 @@ enum Maintenance {
     Reboot,
     /// Re-exec btmqttd in place (`{"action":"restart_bridge"}`).
     RestartBridge,
-    /// On-demand SSH recovery — (re)start dropbear and report `:22` reachability (`{"action":"restore_ssh"}`).
+    /// On-demand SSH recovery — (re)start dropbear so sshd listens on `:22` (`{"action":"restore_ssh"}`).
     RestoreSsh,
 }
 
@@ -351,20 +351,22 @@ async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &s
     }
 }
 
-/// Perform the "Restore SSH" recovery (issue #130): bring dropbear back and REPORT `:22` reachability,
-/// without ever writing the firewall. Best-effort and idempotent — every step logs and continues; the
-/// module's contract is "never panics". Two steps:
-///   1. dropbear — run `/etc/init.d/dropbear start` (the same command `bt_service_watchdog` uses), but
-///      ONLY when the rootfs is mounted READ-ONLY. The factory dropbear init takes its robust host-key
-///      path only under a `ro` rootfs; the `rw` path can abort under `set -e` and leave sshd down. btmqttd
-///      never remounts, so `ro` normally holds — assert it and log-and-skip rather than risk that path.
-///   2. firewall — VERIFY (read-only) that the factory `INPUT --dport 22 -j ACCEPT` rule is present and
-///      log the result. We never add/flush/reorder INPUT: the firewall WRITE-discipline lives entirely in
-///      the go2rtc shell layer, and #129 keeps the factory `:22` rule intact. If it is somehow missing we
-///      recommend the "Reboot device" button (a full factory-firewall rebuild on boot) rather than touch
-///      INPUT here.
+/// Perform the "Restore SSH" recovery (issue #130): (re)start dropbear so sshd is listening on `:22`.
+/// Best-effort and idempotent — logs and continues; the module's contract is "never panics".
+///
+/// Runs `/etc/init.d/dropbear start` (the same command `bt_service_watchdog` uses) but ONLY when the
+/// rootfs is mounted READ-ONLY. The factory dropbear init takes its robust host-key path only under a `ro`
+/// rootfs; the `rw` path can abort under `set -e` and leave sshd down. btmqttd never remounts, so `ro`
+/// normally holds — assert it and log-and-skip rather than risk that path.
+///
+/// Deliberately does NOT touch the firewall. Every iptables invocation — even a read-only `-C`/`-S` —
+/// takes the xtables lock at launch, and this handler fires on an MQTT press that CANNOT be sequenced
+/// against the factory firewall's lock-less `INPUT` rebuild on interface-up; an overlap makes the factory's
+/// own `-A INPUT` calls fail silently and drop rules (SSH/FTP/security), i.e. it could RECREATE the very
+/// lockout it is meant to fix (task #42; see `go2rtc-net-hook`). So the factory `:22` rule stays entirely
+/// the shell layer's concern: #129 keeps it intact, and the "Reboot device" button rebuilds the whole
+/// factory firewall on boot if it is ever lost. This action's job is strictly to bring dropbear back.
 async fn restore_ssh() {
-    // 1. dropbear — only under a read-only rootfs (host-key safety).
     match tokio::fs::read_to_string("/proc/mounts").await {
         Ok(mounts) if rootfs_is_ro(&mounts) => start_dropbear().await,
         Ok(_) => eprintln!(
@@ -375,51 +377,43 @@ async fn restore_ssh() {
             "btmqttd: restore_ssh: could not read /proc/mounts ({e}); skipping dropbear start to stay safe"
         ),
     }
-    // 2. firewall — read-only verification, never a write.
-    verify_ssh_port().await;
 }
 
-/// Run `/etc/init.d/dropbear start` — the same idempotent command `bt_service_watchdog` uses to bring
-/// sshd back (a no-op if dropbear is already listening). Std streams nulled off btmqttd's inherited fds;
-/// awaited so the outcome is logged. Best-effort — errors are logged, never fatal.
+/// Wall-clock cap for the `/etc/init.d/dropbear start` child, so a hung init script can't stall the single
+/// command worker or delay the maintenance ack. Generous — a normal start is well under a second.
+const DROPBEAR_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `/etc/init.d/dropbear start` — the same idempotent command `bt_service_watchdog` uses to bring sshd
+/// back (a no-op if dropbear is already listening). Std streams nulled off btmqttd's inherited fds; the wait
+/// is bounded by [`DROPBEAR_START_TIMEOUT`] and the child is SIGKILL-reaped on expiry (`kill_on_drop` is the
+/// backstop), so `restore_ssh` always returns and the caller can publish the ack. Best-effort — errors are
+/// logged, never fatal.
 async fn start_dropbear() {
-    match tokio::process::Command::new("/etc/init.d/dropbear")
+    let mut child = match tokio::process::Command::new("/etc/init.d/dropbear")
         .arg("start")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .await
+        .kill_on_drop(true)
+        .spawn()
     {
-        Ok(status) if status.success() => eprintln!("btmqttd: restore_ssh: dropbear start ok"),
-        Ok(status) => eprintln!("btmqttd: restore_ssh: dropbear start exited {status}"),
-        Err(e) => eprintln!("btmqttd: restore_ssh: failed to run /etc/init.d/dropbear start: {e}"),
-    }
-}
-
-/// Read-only check that the factory `INPUT -p tcp --dport 22 -j ACCEPT` rule is present, via `iptables -C`
-/// (which TESTS for a rule without modifying anything). Deliberately run WITHOUT `-w`: the factory firewall
-/// rebuilds INPUT lock-lessly, so a read that grabbed the xtables lock could stall it — read-only
-/// inspection must never hold the lock (the go2rtc shell layer follows the same rule). We never add the
-/// rule here; #129 keeps it intact, and if it is ever missing the "Reboot device" button rebuilds the whole
-/// factory firewall on boot.
-async fn verify_ssh_port() {
-    match tokio::process::Command::new("iptables")
-        .args(["-C", "INPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await
-    {
-        Ok(status) if status.success() => {
-            eprintln!("btmqttd: restore_ssh: firewall :22 ACCEPT present")
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("btmqttd: restore_ssh: failed to run /etc/init.d/dropbear start: {e}");
+            return;
         }
-        Ok(_) => eprintln!(
-            "btmqttd: restore_ssh: firewall :22 ACCEPT is MISSING — SSH may be unreachable; press the \
-             \"Reboot device\" button to rebuild the factory firewall (btmqttd never edits INPUT)"
-        ),
-        Err(e) => eprintln!("btmqttd: restore_ssh: could not check the :22 firewall rule: {e}"),
+    };
+    match tokio::time::timeout(DROPBEAR_START_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) if status.success() => eprintln!("btmqttd: restore_ssh: dropbear start ok"),
+        Ok(Ok(status)) => eprintln!("btmqttd: restore_ssh: dropbear start exited {status}"),
+        Ok(Err(e)) => eprintln!("btmqttd: restore_ssh: waiting on dropbear start failed: {e}"),
+        Err(_) => {
+            eprintln!(
+                "btmqttd: restore_ssh: dropbear start did not finish within {}s; killing it",
+                DROPBEAR_START_TIMEOUT.as_secs()
+            );
+            let _ = child.kill().await; // SIGKILL + reap so we leave no lingering child
+        }
     }
 }
 

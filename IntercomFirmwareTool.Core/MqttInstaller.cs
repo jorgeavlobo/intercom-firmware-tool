@@ -2201,11 +2201,14 @@ namespace IntercomFirmwareTool.Core
 
             // On-demand SSH recovery button (issue #130): a lightweight net that restores SSH even when
             // inbound :22 is unreachable, because btmqttd's broker link is OUTBOUND and survives an inbound
-            // firewall problem. On press the daemon (re)starts dropbear and reports whether the factory :22
-            // ACCEPT rule is present — it never edits the firewall (the go2rtc chain owns that discipline;
-            // #129 keeps :22 intact). config + disabled-by-default like the other maintenance buttons, so
-            // the safety net is discovered but stays hidden until the operator enables it — no reflash to
-            // arm it. Same QoS-0 fire-and-forget and TOPIC_RX trust boundary as the reboot/restart buttons.
+            // firewall problem. On press the daemon (re)starts dropbear so sshd is listening; it NEVER
+            // touches the firewall — even a read-only iptables call takes the xtables lock and, fired from
+            // an MQTT press that can't be sequenced against the factory's lock-less INPUT rebuild, could
+            // drop factory rules (task #42). The factory :22 rule stays the shell layer's concern (#129
+            // keeps it intact; the "Reboot device" button rebuilds the whole factory firewall on boot).
+            // config + disabled-by-default like the other maintenance buttons, so the safety net is
+            // discovered but stays hidden until the operator enables it — no reflash to arm it. Same QoS-0
+            // fire-and-forget and TOPIC_RX trust boundary as the reboot/restart buttons.
             entities.Add(new HaEntity(
                 "restore_ssh.json",
                 Topic("button", "restore_ssh"),
