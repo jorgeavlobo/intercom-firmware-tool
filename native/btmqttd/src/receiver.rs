@@ -218,7 +218,11 @@ async fn handle_json(
             match m {
                 Maintenance::Reboot => {
                     // Accept a reboot ONCE per daemon lifetime; ignore repeats so a hung `reboot` can't
-                    // be re-fired into unbounded init-owned processes (see [`REBOOT_REQUESTED`]).
+                    // be re-fired into unbounded init-owned processes (see [`REBOOT_REQUESTED`]). The gate
+                    // is latched OPTIMISTICALLY here (the single ordered worker means no press can race
+                    // it); if the launch is later KNOWN to have failed, `spawn_reboot` reports it and we
+                    // clear the gate so the button isn't permanently dead after a transient failure
+                    // (CodeRabbit).
                     if REBOOT_REQUESTED.swap(true, Ordering::Relaxed) {
                         eprintln!("btmqttd: reboot already requested; ignoring this press");
                         return;
@@ -226,7 +230,9 @@ async fn handle_json(
                     eprintln!("btmqttd: reboot requested via MQTT; rebooting the device");
                     // Publish the HA feedback BEFORE rebooting so it can flush; then reboot.
                     publish_maintenance(client, cfg, "reboot").await;
-                    spawn_reboot().await;
+                    if !spawn_reboot().await {
+                        REBOOT_REQUESTED.store(false, Ordering::Relaxed);
+                    }
                 }
                 Maintenance::RestartBridge => {
                     // Reuse main.rs's in-place re-exec path: a clean shutdown (flush the MQTT `offline`
@@ -336,7 +342,17 @@ static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// resolve via the daemon's inherited PATH (the init script exports `PATH=/sbin:/usr/sbin:/usr/bin:/bin`);
 /// the daemon runs as root. Best-effort — a spawn failure (or a shell that couldn't even start) is logged
 /// rather than panicking; the module's contract is "never panics".
-async fn spawn_reboot() {
+///
+/// Returns whether the one-shot reboot gate should STAY latched. `true` means the reboot was launched
+/// (or may have been) — keep the gate set. `false` means the launch is KNOWN to have failed and no
+/// `reboot` exists — the caller clears the gate so the button stays usable for a retry rather than being
+/// permanently locked out (CodeRabbit):
+///   * shell spawned AND exited success → the background `reboot` launched → `true`;
+///   * shell exited NONZERO → it never backgrounded `reboot` → known failure → `false`;
+///   * shell could not be SPAWNED → known failure → `false`;
+///   * `wait()` errored → the shell WAS spawned and may already have backgrounded `reboot`, so keep the
+///     gate (`true`) rather than risk a SECOND reboot on retry.
+async fn spawn_reboot() -> bool {
     match tokio::process::Command::new("sh")
         .arg("-c")
         // Background `reboot` and let the shell return, so `reboot` is reparented to init; redirect its
@@ -345,16 +361,24 @@ async fn spawn_reboot() {
         .arg("reboot </dev/null >/dev/null 2>&1 &")
         .spawn()
     {
-        Ok(mut sh) => {
-            if let Ok(status) = sh.wait().await {
-                // The shell exits 0 once it has launched the background job; a nonzero status means the
-                // shell itself failed (it never got as far as backgrounding `reboot`), so surface that.
-                if !status.success() {
-                    eprintln!("btmqttd: reboot: reboot shell exited {status}; the device may not reboot");
-                }
+        // The shell exits 0 once it has launched the background job (`reboot` is now init's child).
+        Ok(mut sh) => match sh.wait().await {
+            Ok(status) if status.success() => true,
+            Ok(status) => {
+                eprintln!("btmqttd: reboot: reboot shell exited {status}; the device may not reboot");
+                false
             }
+            Err(e) => {
+                // We couldn't observe the outcome, but the shell was running and may already have
+                // launched `reboot` — keep the gate latched so a retry can't spawn a second one.
+                eprintln!("btmqttd: reboot: waiting on the reboot shell failed: {e}");
+                true
+            }
+        },
+        Err(e) => {
+            eprintln!("btmqttd: reboot: failed to spawn the reboot shell: {e}");
+            false
         }
-        Err(e) => eprintln!("btmqttd: reboot: failed to spawn the reboot shell: {e}"),
     }
 }
 
