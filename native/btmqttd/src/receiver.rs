@@ -222,10 +222,10 @@ async fn handle_json(
                     // "Outstanding" spans BOTH this daemon's owned reboot (the in-memory gate) and any live
                     // `reboot` in `/proc` — including one a PRIOR daemon instance launched before a re-exec
                     // or watchdog respawn — so a fresh daemon can't pile a second `reboot` on a still-hung
-                    // one (Codex). The single ordered worker means no press can race this check; once past
-                    // it, latch the in-memory gate and `spawn_reboot` owns the process, releasing the gate
-                    // only once it is OBSERVED to have exited — a hung reboot keeps the bound, an exited/
-                    // failed one re-enables the button (CodeRabbit, Codex).
+                    // one. The single ordered worker means no press can race this check; once past it,
+                    // latch the in-memory gate and `spawn_reboot` owns the process, releasing the gate only
+                    // once it is OBSERVED to have exited — a hung reboot keeps the bound, an exited/failed
+                    // one re-enables the button.
                     if reboot_in_progress().await {
                         eprintln!("btmqttd: reboot already in progress; ignoring this press");
                         return;
@@ -339,11 +339,10 @@ async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &s
 /// together via [`reboot_in_progress`]). Latched while THIS daemon owns a reboot attempt — from accepting
 /// the "Reboot device" press until the `reboot` process is OBSERVED to have exited (or its launch is known
 /// to have failed). While set it bounds the reboot path to ONE outstanding process, so repeated presses or
-/// an automation can't spawn a pile of `reboot` processes and exhaust the process table (CodeRabbit, Codex);
-/// it also makes `restart_bridge` stand down (a re-exec would cancel the exit-observer below). It is
-/// released by [`spawn_reboot`]'s
-/// observer once that process is gone — so a still-running/hung `reboot` keeps the bound, while an
-/// exited/failed one re-enables the button. A FRESH process — after a real reboot, or a `restart_bridge`
+/// an automation can't spawn a pile of `reboot` processes and exhaust the process table; it also makes
+/// `restart_bridge` stand down (a re-exec would cancel the exit-observer below). It is released by
+/// [`spawn_reboot`]'s observer once that process is gone — so a still-running/hung `reboot` keeps the bound,
+/// while an exited/failed one re-enables the button. A FRESH process — after a real reboot, or a `restart_bridge`
 /// re-exec — starts with this reset, so the button works again afterward.
 static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -353,12 +352,12 @@ static REBOOT_REQUESTED: AtomicBool = AtomicBool::new(false);
 /// it before a bridge re-exec: EVERY restart producer — the "Restart bridge" button AND a newly-learned
 /// light WHERE — funnels through one `restart.notified()` arm, and re-execing there would drop the runtime
 /// and cancel [`spawn_reboot`]'s exit-observer, stranding a hung reboot and resetting the in-memory gate in
-/// the fresh image (CodeRabbit). Guarding that single choke point covers both producers.
+/// the fresh image. Guarding that single choke point covers both producers.
 ///
 /// The `/proc` half is what makes the one-reboot bound survive a PROCESS BOUNDARY. The in-memory gate is
 /// reset by anything that starts a fresh daemon — a re-exec, a plain exit + watchdog respawn, the next boot
 /// — so on its own it can't stop a fresh daemon from launching a SECOND `reboot` while a prior, genuinely
-/// hung one still runs; repeated restart→reboot cycles could then pile up hung processes (Codex). Deriving
+/// hung one still runs; repeated restart→reboot cycles could then pile up hung processes. Deriving
 /// the bound from real kernel state instead — a `reboot` this daemon can't see in memory it can still see
 /// in `/proc` — holds the bound across every such boundary, and it self-clears with no lockout: once the
 /// `reboot` process is gone (the box rebooted, or it exited), `/proc` is clear and the button works again.
@@ -369,10 +368,10 @@ pub(crate) async fn reboot_in_progress() -> bool {
 
 /// Scan `/proc` for a LIVE `reboot` process — a system-wide, restart-surviving view of whether a reboot is
 /// still outstanding (see [`reboot_in_progress`]). Uses async `tokio::fs` (not blocking `std::fs`) so a
-/// slow procfs read never stalls the single-threaded runtime, consistent with `hold.rs`/`sprop.rs`
-/// (Copilot). A per-entry read error SKIPS that entry and keeps scanning rather than aborting the whole
-/// enumeration — the standard `/proc`-walk contract (`pgrep`/`procps` do the same), so one unreadable
-/// entry can't false-negative and let a second reboot slip past the bound (Copilot). Only genuine
+/// slow procfs read never stalls the single-threaded runtime, consistent with `hold.rs`/`sprop.rs`. A
+/// per-entry read error SKIPS that entry and keeps scanning rather than aborting the whole enumeration —
+/// the standard `/proc`-walk contract (`pgrep`/`procps` do the same), so one unreadable entry can't
+/// false-negative and let a second reboot slip past the bound. Only genuine
 /// exhaustion (`Ok(None)`) ends the scan; a small cap on consecutive errors guards against a pathological
 /// directory stream that only ever errors. Best-effort throughout: an unreadable `/proc` (never, in
 /// practice, for a root daemon) or a stat file that vanishes mid-scan (the process exited) doesn't match.
@@ -431,7 +430,7 @@ fn stat_names_a_live_reboot(stat: &str) -> bool {
 /// tracks its true lifetime. `reboot` is spawned DIRECTLY (no intervening shell), which gives two things a
 /// backgrounded shell couldn't: the fork/`exec` handshake reports a launch failure (a missing/unrunnable
 /// applet fails `spawn` with `Err`, unlike a `... &` async list that exits 0 before the job's `exec` is
-/// known — Codex), and we hold the `Child` so we can observe when it exits (Codex). Its std streams are
+/// known), and we hold the `Child` so we can observe when it exits. Its std streams are
 /// nulled off btmqttd's inherited fds; `reboot` resolves via the daemon's inherited PATH (the init script
 /// exports `PATH=/sbin:/usr/sbin:/usr/bin:/bin`) and the daemon runs as root.
 ///
@@ -439,15 +438,15 @@ fn stat_names_a_live_reboot(stat: &str) -> bool {
 /// observing the child; the `/proc` scan in [`reboot_in_progress`] remains the authoritative check for a
 /// still-live reboot, so releasing the in-memory gate never allows a second one while a reboot is running:
 ///   * `spawn` fails → `exec` never happened, no process exists → clear the gate, allow a retry;
-///   * the process EXITS (reaped by the observer, so no zombie — Copilot) → clear the gate. On this target
-///     `reboot` signals init and exits promptly whether or not the machine then goes down, so a normal exit
-///     is NOT a failure — only a non-success status is logged (Codex); either way the process is gone;
+///   * the process EXITS (reaped by the observer, so no zombie) → clear the gate. On this target `reboot`
+///     signals init and exits promptly whether or not the machine then goes down, so a normal exit is NOT
+///     a failure — only a non-success status is logged; either way the process is gone;
 ///   * `wait()` itself ERRORS → clear the gate too, rather than latching both buttons off for the daemon's
-///     lifetime if the error came after the child exited (Copilot); a genuinely-live reboot is still caught
-///     by the `/proc` scan;
+///     lifetime if the error came after the child exited; a genuinely-live reboot is still caught by the
+///     `/proc` scan;
 ///   * the process never exits (a truly hung `reboot`) → the observer stays pending, but the `/proc` scan
 ///     sees the live process, so the one-reboot bound holds anyway; `restart_bridge` stands down meanwhile
-///     so no re-exec can cancel the observer and strand it (Codex). A fresh daemon starts reset regardless.
+///     so no re-exec can cancel the observer and strand it. A fresh daemon starts reset regardless.
 ///
 /// The observer runs as a detached task (not on the single ordered command worker) so a hung `reboot` never
 /// stalls the worker; because `restart_bridge` refuses while the gate is latched, the observer can only be
@@ -471,7 +470,7 @@ fn spawn_reboot() {
     // Observe the reboot process off-worker: reap it (no zombie), then release the IN-MEMORY gate once
     // `wait()` returns — whether it reports the exit status or errors trying to. Releasing even on a
     // `wait()` error is safe (and avoids latching both buttons off for the daemon's lifetime if `wait()`
-    // failed after the child already exited — Copilot): the `/proc` scan in `reboot_in_progress` is the
+    // failed after the child already exited): the `/proc` scan in `reboot_in_progress` is the
     // AUTHORITATIVE "is a reboot still running" check, so a still-live reboot keeps the bound regardless of
     // the in-memory gate, and a departed one lets the button recover.
     tokio::spawn(async move {

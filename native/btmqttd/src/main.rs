@@ -630,7 +630,7 @@ async fn run() -> Result<bool, String> {
                 // through, so guarding it — not just the button's dispatch site — is what actually
                 // covers them: re-execing here drops the runtime and cancels the reboot process's
                 // exit-observer, which would strand a hung reboot and reset its one-process bound in
-                // the fresh image (CodeRabbit). A learned WHERE is already persisted, so it still
+                // the fresh image. A learned WHERE is already persisted, so it still
                 // activates at the next process start; the button press is simply superseded by the
                 // reboot. The gate clears once the reboot process is observed gone, re-enabling both.
                 if receiver::reboot_in_progress().await {
@@ -936,7 +936,7 @@ async fn run() -> Result<bool, String> {
     // of the awaited task-stops ABOVE (each `stop(..).await` yields while this worker was alive), setting
     // the gate and spawning the reboot child + its exit-observer only now. Re-execing would drop the runtime,
     // cancel that observer, and resurrect with the gate reset — the stranded-hung-reboot the arm's guard is
-    // meant to prevent (Codex). So if a reboot became outstanding, do NOT re-exec: fall back to a plain exit
+    // meant to prevent. So if a reboot became outstanding, do NOT re-exec: fall back to a plain exit
     // (the watchdog respawns the bridge if the box does not actually go down), never racing a reboot with an
     // instant same-PID re-exec.
     if reexec && receiver::reboot_in_progress().await {
