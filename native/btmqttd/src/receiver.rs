@@ -389,9 +389,26 @@ const DROPBEAR_START_TIMEOUT: Duration = Duration::from_secs(10);
 /// AND anything it spawned — not just the script interpreter, which would otherwise leave a reparented
 /// descendant running and let repeated presses pile up stuck processes (Codex; same idiom as
 /// `execute_command`). The wait is bounded by [`DROPBEAR_START_TIMEOUT`]; on expiry the group is killed and
-/// the direct child reaped, so `restore_ssh` always returns and the caller can publish the ack. Best-effort
-/// — errors are logged, never fatal.
+/// the direct child handed to the detached, bounded [`reap`] task rather than awaited inline — a child stuck
+/// in uninterruptible kernel I/O (D-state) won't return from `wait()` even after SIGKILL until its syscall
+/// completes, and awaiting that here would pin the single ordered command worker (and delay the maintenance
+/// ack) indefinitely. So a cleanup permit is reserved BEFORE spawning (skip if none free, like
+/// `execute_command`): the reaper owns the killed child + permit off-worker, `start_dropbear` returns at
+/// once, and the caller publishes the ack immediately. Best-effort — errors are logged, never fatal.
 async fn start_dropbear() {
+    // Reserve a cleanup permit BEFORE spawning so a child that must be killed can be reaped OFF the command
+    // worker without the reaper count growing unbounded — same discipline as `execute_command`. If none is
+    // free (that many children still outstanding, e.g. an earlier kill stuck in D-state) skip rather than
+    // spawn a child we couldn't hand off; `bt_service_watchdog` still brings dropbear back within 60s.
+    let permit = match REAP_SLOTS.try_acquire() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!(
+                "btmqttd: restore_ssh: too many outstanding children; skipping dropbear start (watchdog will retry)"
+            );
+            return;
+        }
+    };
     let mut child = match tokio::process::Command::new("/etc/init.d/dropbear")
         .arg("start")
         .stdin(std::process::Stdio::null())
@@ -404,13 +421,26 @@ async fn start_dropbear() {
         Ok(child) => child,
         Err(e) => {
             eprintln!("btmqttd: restore_ssh: failed to run /etc/init.d/dropbear start: {e}");
+            drop(permit); // nothing spawned — release the reserved slot
             return;
         }
     };
     match tokio::time::timeout(DROPBEAR_START_TIMEOUT, child.wait()).await {
-        Ok(Ok(status)) if status.success() => eprintln!("btmqttd: restore_ssh: dropbear start ok"),
-        Ok(Ok(status)) => eprintln!("btmqttd: restore_ssh: dropbear start exited {status}"),
-        Ok(Err(e)) => eprintln!("btmqttd: restore_ssh: waiting on dropbear start failed: {e}"),
+        Ok(Ok(status)) if status.success() => {
+            eprintln!("btmqttd: restore_ssh: dropbear start ok");
+            drop(child);
+            drop(permit); // clean exit: child already reaped by child.wait() — release the slot
+        }
+        Ok(Ok(status)) => {
+            eprintln!("btmqttd: restore_ssh: dropbear start exited {status}");
+            drop(child);
+            drop(permit);
+        }
+        Ok(Err(e)) => {
+            eprintln!("btmqttd: restore_ssh: waiting on dropbear start failed: {e}");
+            drop(child);
+            drop(permit);
+        }
         Err(_) => {
             eprintln!(
                 "btmqttd: restore_ssh: dropbear start did not finish within {}s; killing its process group",
@@ -419,7 +449,7 @@ async fn start_dropbear() {
             // SIGKILL the whole process GROUP (pgid == the script's pid, set via process_group(0)), so any
             // descendant the init script spawned dies too — not just the script interpreter. ESRCH means the
             // group is already gone (benign); any OTHER error → fall back to the direct child so nothing
-            // lingers. Then reap our direct child; init reaps the group's reparented descendants.
+            // lingers.
             match child.id() {
                 Some(pid) => {
                     let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
@@ -437,7 +467,11 @@ async fn start_dropbear() {
                     let _ = child.start_kill();
                 }
             }
-            let _ = child.wait().await;
+            // Hand the killed child + its permit to the detached bounded reaper instead of awaiting here: a
+            // D-state child won't return from wait() until its syscall completes, and awaiting inline would
+            // pin the single command worker. The reaper collects it off-worker and releases the slot then;
+            // init reaps the group's reparented descendants.
+            reap(child, permit);
         }
     }
 }
