@@ -1610,6 +1610,7 @@ namespace IntercomFirmwareTool.Core
             ("stop_camera.json", "button", "stop_camera"),
             ("reboot_device.json", "button", "reboot_device"),
             ("restart_bridge.json", "button", "restart_bridge"),
+            ("restore_ssh.json", "button", "restore_ssh"),
             // The maintenance FEEDBACK sensor (issue #43) — a read-only diagnostic, but it only makes
             // sense alongside the buttons, so it is tombstoned with them when there is no command topic.
             ("maintenance_action.json", "sensor", "maintenance_action"),
@@ -2190,6 +2191,33 @@ namespace IntercomFirmwareTool.Core
                     qos = 0,
                     payload_press = "{\"action\":\"restart_bridge\"}",
                     icon = "mdi:restart",
+                    entity_category = "config",
+                    enabled_by_default = false,
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // On-demand SSH recovery button (issue #130): a lightweight net that restores SSH even when
+            // inbound :22 is unreachable, because btmqttd's broker link is OUTBOUND and survives an inbound
+            // firewall problem. On press the daemon (re)starts dropbear and reports whether the factory :22
+            // ACCEPT rule is present — it never edits the firewall (the go2rtc chain owns that discipline;
+            // #129 keeps :22 intact). config + disabled-by-default like the other maintenance buttons, so
+            // the safety net is discovered but stays hidden until the operator enables it — no reflash to
+            // arm it. Same QoS-0 fire-and-forget and TOPIC_RX trust boundary as the reboot/restart buttons.
+            entities.Add(new HaEntity(
+                "restore_ssh.json",
+                Topic("button", "restore_ssh"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Restore SSH",
+                    unique_id = $"{node}_restore_ssh",
+                    default_entity_id = EntId("button", "restore_ssh"),
+                    command_topic = controlTopic,
+                    qos = 0,
+                    payload_press = "{\"action\":\"restore_ssh\"}",
+                    icon = "mdi:ssh",
                     entity_category = "config",
                     enabled_by_default = false,
                     availability_topic = opts.TopicLastWill,

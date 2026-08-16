@@ -259,6 +259,17 @@ async fn handle_json(
                     publish_maintenance(client, cfg, "restart_bridge").await;
                     restart.notify_one();
                 }
+                Maintenance::RestoreSsh => {
+                    // On-demand SSH recovery net (issue #130): (re)start dropbear and REPORT whether the
+                    // factory `:22` INPUT ACCEPT rule is present — never writing the firewall. The MQTT
+                    // command reaches us even when inbound `:22` is blocked (our broker link is outbound),
+                    // so this restores SSH without a reboot or power-cycle. Idempotent; safe to repeat.
+                    eprintln!("btmqttd: restore_ssh requested via MQTT");
+                    restore_ssh().await;
+                    // Publish the HA feedback AFTER the (fast, non-terminal) recovery so the ack reflects a
+                    // completed action — unlike reboot/restart, which flush their feedback before going down.
+                    publish_maintenance(client, cfg, "restore_ssh").await;
+                }
             }
             return;
         }
@@ -296,16 +307,19 @@ async fn handle_json(
     }
 }
 
-/// A parsed MAINTENANCE action (issue #43) — the HA "Reboot device" / "Restart bridge" buttons. These
-/// have a SIDE EFFECT outside the vol/lock/light surface `handle_action` covers (a process spawn or a
-/// re-exec signal), so they are classified here and dispatched inline in `handle_json`. Pure classifier,
-/// separated so the action-name mapping is unit-testable without spawning a reboot or re-execing.
+/// A parsed MAINTENANCE action (issues #43, #130) — the HA "Reboot device" / "Restart bridge" /
+/// "Restore SSH" buttons. These have a SIDE EFFECT outside the vol/lock/light surface `handle_action`
+/// covers (a process spawn, a re-exec signal, or a dropbear start), so they are classified here and
+/// dispatched inline in `handle_json`. Pure classifier, separated so the action-name mapping is
+/// unit-testable without spawning a reboot, re-execing, or touching dropbear.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Maintenance {
     /// Reboot the whole device (`{"action":"reboot"}`).
     Reboot,
     /// Re-exec btmqttd in place (`{"action":"restart_bridge"}`).
     RestartBridge,
+    /// On-demand SSH recovery — (re)start dropbear and report `:22` reachability (`{"action":"restore_ssh"}`).
+    RestoreSsh,
 }
 
 /// Map an `action` string to a [`Maintenance`] variant, or `None` if it isn't a maintenance action.
@@ -313,6 +327,7 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
     match action {
         "reboot" => Some(Maintenance::Reboot),
         "restart_bridge" => Some(Maintenance::RestartBridge),
+        "restore_ssh" => Some(Maintenance::RestoreSsh),
         _ => None,
     }
 }
@@ -322,9 +337,10 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
 /// "at":"<iso>"}`. RETAINED so Home Assistant still shows it across the reboot / bridge re-exec that
 /// immediately follows (HA re-reads the retained value on reconnect). Published BEFORE the action so a
 /// restart's clean MQTT shutdown flushes it; for a reboot the unit's own offline blip is the primary
-/// feedback if this last publish doesn't reach the broker before the box goes down. Best-effort — a
-/// publish error is logged. `action` is a fixed internal token (`reboot`/`restart_bridge`) and the ISO
-/// timestamp has no JSON-special characters, so the hand-built object needs no escaping.
+/// feedback if this last publish doesn't reach the broker before the box goes down (`restore_ssh`, which
+/// doesn't restart anything, publishes AFTER it acts so the ack reflects a completed recovery). Best-effort
+/// — a publish error is logged. `action` is a fixed internal token (`reboot`/`restart_bridge`/`restore_ssh`)
+/// and the ISO timestamp has no JSON-special characters, so the hand-built object needs no escaping.
 async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &str) {
     let payload = format!("{{\"action\":\"{action}\",\"at\":\"{}\"}}", own::utc_now_iso());
     if let Err(e) = client
@@ -333,6 +349,99 @@ async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &s
     {
         eprintln!("btmqttd: maintenance: publish to {} failed: {e}", cfg.topic_maintenance);
     }
+}
+
+/// Perform the "Restore SSH" recovery (issue #130): bring dropbear back and REPORT `:22` reachability,
+/// without ever writing the firewall. Best-effort and idempotent — every step logs and continues; the
+/// module's contract is "never panics". Two steps:
+///   1. dropbear — run `/etc/init.d/dropbear start` (the same command `bt_service_watchdog` uses), but
+///      ONLY when the rootfs is mounted READ-ONLY. The factory dropbear init takes its robust host-key
+///      path only under a `ro` rootfs; the `rw` path can abort under `set -e` and leave sshd down. btmqttd
+///      never remounts, so `ro` normally holds — assert it and log-and-skip rather than risk that path.
+///   2. firewall — VERIFY (read-only) that the factory `INPUT --dport 22 -j ACCEPT` rule is present and
+///      log the result. We never add/flush/reorder INPUT: the firewall WRITE-discipline lives entirely in
+///      the go2rtc shell layer, and #129 keeps the factory `:22` rule intact. If it is somehow missing we
+///      recommend the "Reboot device" button (a full factory-firewall rebuild on boot) rather than touch
+///      INPUT here.
+async fn restore_ssh() {
+    // 1. dropbear — only under a read-only rootfs (host-key safety).
+    match tokio::fs::read_to_string("/proc/mounts").await {
+        Ok(mounts) if rootfs_is_ro(&mounts) => start_dropbear().await,
+        Ok(_) => eprintln!(
+            "btmqttd: restore_ssh: rootfs is not mounted read-only; skipping dropbear start to avoid the \
+             fragile rw host-key path (never remounting)"
+        ),
+        Err(e) => eprintln!(
+            "btmqttd: restore_ssh: could not read /proc/mounts ({e}); skipping dropbear start to stay safe"
+        ),
+    }
+    // 2. firewall — read-only verification, never a write.
+    verify_ssh_port().await;
+}
+
+/// Run `/etc/init.d/dropbear start` — the same idempotent command `bt_service_watchdog` uses to bring
+/// sshd back (a no-op if dropbear is already listening). Std streams nulled off btmqttd's inherited fds;
+/// awaited so the outcome is logged. Best-effort — errors are logged, never fatal.
+async fn start_dropbear() {
+    match tokio::process::Command::new("/etc/init.d/dropbear")
+        .arg("start")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => eprintln!("btmqttd: restore_ssh: dropbear start ok"),
+        Ok(status) => eprintln!("btmqttd: restore_ssh: dropbear start exited {status}"),
+        Err(e) => eprintln!("btmqttd: restore_ssh: failed to run /etc/init.d/dropbear start: {e}"),
+    }
+}
+
+/// Read-only check that the factory `INPUT -p tcp --dport 22 -j ACCEPT` rule is present, via `iptables -C`
+/// (which TESTS for a rule without modifying anything). Deliberately run WITHOUT `-w`: the factory firewall
+/// rebuilds INPUT lock-lessly, so a read that grabbed the xtables lock could stall it — read-only
+/// inspection must never hold the lock (the go2rtc shell layer follows the same rule). We never add the
+/// rule here; #129 keeps it intact, and if it is ever missing the "Reboot device" button rebuilds the whole
+/// factory firewall on boot.
+async fn verify_ssh_port() {
+    match tokio::process::Command::new("iptables")
+        .args(["-C", "INPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+    {
+        Ok(status) if status.success() => {
+            eprintln!("btmqttd: restore_ssh: firewall :22 ACCEPT present")
+        }
+        Ok(_) => eprintln!(
+            "btmqttd: restore_ssh: firewall :22 ACCEPT is MISSING — SSH may be unreachable; press the \
+             \"Reboot device\" button to rebuild the factory firewall (btmqttd never edits INPUT)"
+        ),
+        Err(e) => eprintln!("btmqttd: restore_ssh: could not check the :22 firewall rule: {e}"),
+    }
+}
+
+/// Does `/proc/mounts` show the root filesystem (`/`) mounted READ-ONLY? Each line is
+/// `dev mountpoint fstype options …`; the options are the 4th field, a comma list whose first element is
+/// `ro` or `rw`. When several mounts share `/` (a later one shadows earlier ones) the LAST `/` entry is the
+/// effective mount, so this checks that one. A missing `/` entry (never, in practice) reads as NOT ro
+/// (conservative — the caller then skips the dropbear start). Pure (no I/O) so it is unit-tested directly.
+fn rootfs_is_ro(mounts: &str) -> bool {
+    mounts
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let _dev = fields.next()?;
+            let mountpoint = fields.next()?;
+            let _fstype = fields.next()?;
+            let options = fields.next()?;
+            (mountpoint == "/").then_some(options)
+        })
+        .next_back()
+        .map(|options| options.split(',').any(|opt| opt == "ro"))
+        .unwrap_or(false)
 }
 
 /// The IN-MEMORY half of the reboot bound (the `/proc` half is [`reboot_process_running`]; both are read
@@ -1025,15 +1134,46 @@ mod tests {
     }
 
     #[test]
-    fn parse_maintenance_classifies_the_two_buttons() {
-        // The exact action strings the HA discovery payloads publish (issue #43).
+    fn parse_maintenance_classifies_the_buttons() {
+        // The exact action strings the HA discovery payloads publish (issues #43, #130).
         assert_eq!(parse_maintenance("reboot"), Some(Maintenance::Reboot));
         assert_eq!(parse_maintenance("restart_bridge"), Some(Maintenance::RestartBridge));
+        assert_eq!(parse_maintenance("restore_ssh"), Some(Maintenance::RestoreSsh));
         // Anything else is not a maintenance action (falls through to handle_action).
         assert_eq!(parse_maintenance(""), None);
         assert_eq!(parse_maintenance("restart"), None); // must be exactly `restart_bridge`
         assert_eq!(parse_maintenance("reboot_device"), None); // the object id, not the action
+        assert_eq!(parse_maintenance("ssh"), None); // must be exactly `restore_ssh`
         assert_eq!(parse_maintenance("volume"), None);
+    }
+
+    #[test]
+    fn rootfs_ro_is_read_from_the_effective_slash_mount() {
+        // Real /proc/mounts shape: `dev mountpoint fstype options dump pass`. The `/` mount's options
+        // (4th field) are a comma list; `ro`/`rw` is what restore_ssh gates the dropbear start on.
+        let ro = "/dev/root / ext4 ro,relatime,errors=continue 0 0\n\
+                  proc /proc proc rw,nosuid,nodev,noexec 0 0\n\
+                  tmpfs /var/run tmpfs rw,nosuid,nodev 0 0\n";
+        assert!(rootfs_is_ro(ro));
+
+        // A read-write rootfs must NOT be treated as ro (the caller then skips the dropbear start).
+        let rw = "/dev/root / ext4 rw,relatime 0 0\nproc /proc proc rw 0 0\n";
+        assert!(!rootfs_is_ro(rw));
+
+        // Only the `/` mount decides it — a ro `/proc` or ro `/other` must not flip the result.
+        assert!(!rootfs_is_ro("/dev/root / ext4 rw 0 0\nproc /proc proc ro 0 0\n"));
+        assert!(!rootfs_is_ro("/dev/x /other ext4 ro 0 0\n"));
+
+        // When several mounts share `/`, the LAST (effective, shadowing) one wins.
+        assert!(rootfs_is_ro("rootfs / rootfs rw 0 0\n/dev/root / ext4 ro,relatime 0 0\n"));
+        assert!(!rootfs_is_ro("rootfs / rootfs ro 0 0\n/dev/root / ext4 rw,relatime 0 0\n"));
+
+        // `rw` must not match on a substring (`ro` is a whole comma-separated option, not a prefix).
+        assert!(!rootfs_is_ro("/dev/root / ext4 rw,errors=remount-ro 0 0\n"));
+
+        // Malformed / empty input reads as NOT ro rather than panicking.
+        assert!(!rootfs_is_ro(""));
+        assert!(!rootfs_is_ro("garbage\n/dev/root /\n"));
     }
 
     #[test]
