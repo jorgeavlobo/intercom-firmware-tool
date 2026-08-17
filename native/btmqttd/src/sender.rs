@@ -454,10 +454,12 @@ enum Reconcile {
 /// the socket during a slow or timed-out query is still observed within its 3 s guard instead of
 /// being read late and misjudged as a physical press. Used by BOTH the reconnect reconcile
 /// and the periodic poll. Drained frames run the full [`publish_frame`] — light echoes, volume/mute,
-/// entrance-panel/floor call events, dump AND call-state are all handled the moment they arrive. A call-state transition
-/// seen here is a LIVE event from the monitor connection, at least as recent as the dim-35 snapshot
-/// (which travels over a SEPARATE connection); it is published, updates `call_watch`, and sets
-/// `saw_transition` so the caller leaves it in place rather than clobbering it with the snapshot
+/// entrance-panel/floor call events, dump AND call-state are all handled the moment they arrive. A
+/// call-state transition seen here is a LIVE event from the monitor connection; that connection is
+/// SEPARATE from the one carrying the dim-35 snapshot, so their relative order can't be inferred from
+/// local receipt time — the transition may predate or postdate the snapshot. It is published, updates
+/// `call_watch`, and sets `saw_transition` so the caller treats the snapshot as ambiguous and re-queries
+/// for a clean one rather than clobbering the live state with it.
 /// The socket is drained even with NO light controller: call classification is
 /// now time-sensitive on its own (a floor signature must reach the classifier BEFORE the snapshot
 /// is accepted, or a floor ring leaks to the entrance-panel sensor), independent of the light echo

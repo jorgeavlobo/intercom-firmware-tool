@@ -92,14 +92,18 @@ jobs:
           set -uo pipefail
           # grep exit status: 0 = matches found, 1 = no matches, >=2 = an ERROR (e.g. a scanned
           # path is missing or unreadable). Capture it explicitly and branch on all three — treating
-          # every nonzero status as "clean" would let a scan error masquerade as a pass. Run the grep
-          # OUTSIDE `set -e` so its status is inspectable. --binary-files=without-match skips the
-          # vendored ARM binary; --exclude-dir skips Rust (target) and .NET (bin/obj) build outputs.
+          # every nonzero status as "clean" would let a scan error masquerade as a pass. GitHub runs
+          # `run:` steps with `bash -e`, so `set +e` here is REQUIRED: without it the clean case
+          # (grep exits 1, no matches) would abort the step before we can read the status. Re-enable
+          # `-e` afterwards. --binary-files=without-match skips the vendored ARM binary; --exclude-dir
+          # skips Rust (target) and .NET (bin/obj) build outputs.
+          set +e
           hits=$(grep -rnwE '(Codex|CodeRabbit|Copilot)' \
               native IntercomFirmwareTool.Core IntercomFirmwareTool.Core.Tests IntercomFirmwareTool.App \
               --binary-files=without-match \
               --exclude-dir=target --exclude-dir=bin --exclude-dir=obj)
           status=$?
+          set -e
           case "$status" in
             0)
               echo "$hits"

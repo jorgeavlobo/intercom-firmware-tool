@@ -296,7 +296,7 @@ fn has_sprop(sdp: &str) -> bool {
 /// interval). It deliberately reads the runtime file rather than the persist record because the two can
 /// diverge for one boot: a fresh learn PERSISTS the value durably but only BEST-EFFORT patches this boot's
 /// runtime SDP, so if that patch failed the value is present for the NEXT boot yet absent from the SDP
-/// go2rtc reads NOW — and the cold-lock-on grace must still apply until the next reboot splices it in
+/// go2rtc reads NOW — and the cold-lock-on grace must still apply until the next reboot splices it in.
 /// A missing/unreadable runtime SDP reads as "no sprop" (assume cold). `pub(crate)` for `hold.rs`.
 pub(crate) async fn runtime_sdp_has_sprop() -> bool {
     matches!(tokio::fs::read_to_string(SDP_PATH).await, Ok(s) if has_sprop(&s))
