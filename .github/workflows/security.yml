@@ -44,14 +44,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           # Machine-readable output (--format json) rather than grepping a human-readable
-          # English string: robust against wording/localization changes and shell-independent
-          # (Copilot).
+          # English string: robust against wording/localization changes and shell-independent.
           $out = dotnet list IntercomFirmwareTool.slnx package --vulnerable --include-transitive --format json
           $code = $LASTEXITCODE
           Write-Host $out
           # Fail CLOSED on incomplete data: `dotnet list` can emit valid JSON and exit 0
           # while recording an unreachable audit source as a `problems` entry — which would
-          # otherwise let a vulnerable package pass unseen (CodeRabbit). Treat a non-zero
+          # otherwise let a vulnerable package pass unseen. Treat a non-zero
           # exit, or any reported problem, as a failure.
           if ($code -ne 0) {
             Write-Error "dotnet list package failed (exit $code) — vulnerability data may be incomplete."
@@ -59,11 +58,11 @@ jobs:
           }
           # `$out` is a string[] (one element per line) from the native command; join it
           # into a single string before parsing so multi-line/pretty-printed JSON is handled
-          # independently of PowerShell version (Copilot).
+          # independently of PowerShell version.
           $json = $out | Out-String | ConvertFrom-Json
           # Collect audit/restore problems from EVERY level dotnet list can report them —
           # root, per-project, and per-framework — flattening explicitly (AddRange of each
-          # flat array) so nothing is missed and we avoid arrays-of-arrays (Copilot). Any
+          # flat array) so nothing is missed and we avoid arrays-of-arrays. Any
           # problem => vulnerability data may be incomplete => fail closed.
           $problems = [System.Collections.Generic.List[object]]::new()
           if ($json.problems) { $problems.AddRange(@($json.problems)) }
@@ -133,5 +132,5 @@ jobs:
           # dependency-review spans BOTH the NuGet and Cargo graphs, not just btmqttd. Same
           # intent (permissive-only): the allow-list blocks any non-permissive license,
           # including copyleft we didn't enumerate (EPL, CDDL, GPL/LGPL/MPL/AGPL) — which a
-          # deny-list would miss (Codex/Copilot).
+          # deny-list would miss.
           allow-licenses: MIT, Apache-2.0, ISC, BSD-2-Clause, BSD-3-Clause, Unicode-3.0, Unlicense, 0BSD, Zlib, BSL-1.0

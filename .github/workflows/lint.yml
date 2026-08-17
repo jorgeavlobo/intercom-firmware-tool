@@ -75,46 +75,48 @@ jobs:
             native/btmqttd/ci/verify-provenance.sh
 
   attributions:
-    # Guard (issue #132): AI-reviewer tool names must not appear in source comments. Comments
-    # explain WHY, not WHO — the reviewer that surfaced a rationale is not something a future
-    # maintainer needs; that provenance lives in git history (blame + commit messages) and the PR
-    # threads, and a frozen `(Codex)` in source just ages badly. This fails the build if any of the
-    # three names reappears as a whole word in the source trees. It scans ONLY those trees — not
-    # `.github/` (so the pattern on the next line can't match this workflow itself) and not build
-    # outputs — and skips the vendored binary.
+    # Guard (issue #132): the AI-reviewer tool names must not appear ANYWHERE in the repo. They only
+    # ever showed up as reviewer attributions in comments — comments should explain WHY, not WHO; the
+    # reviewer that surfaced a rationale is not something a future maintainer needs (that provenance
+    # lives in git history and the PR threads), and a frozen attribution just ages badly. Since the
+    # names have no other legitimate use here, a plain whole-word text match is enough: this fails the
+    # build if any of the three reappears as a whole word, case-insensitively, anywhere in the tree —
+    # source AND config (including these workflows) — minus git internals, build outputs, and the
+    # reviewer's own config file (which legitimately names the tool).
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: No reviewer attributions in source comments
+      - name: No reviewer attributions anywhere in the repo
         run: |
           set -uo pipefail
-          # grep exit status: 0 = matches found, 1 = no matches, >=2 = an ERROR (e.g. a scanned
-          # path is missing or unreadable). Capture it explicitly and branch on all three — treating
-          # every nonzero status as "clean" would let a scan error masquerade as a pass. GitHub runs
-          # `run:` steps with `bash -e`, so `set +e` here is REQUIRED: without it the clean case
-          # (grep exits 1, no matches) would abort the step before we can read the status. Re-enable
-          # `-e` afterwards. --binary-files=without-match skips the vendored ARM binary; --exclude-dir
-          # skips Rust (target) and .NET (bin/obj) build outputs.
+          # `-w` whole-word, `-i` case-insensitive (a lowercase spelling can't slip past), `-I` skips
+          # binary files (the vendored ARM binaries). Exclusions: git internals and build outputs;
+          # `.coderabbit.yaml` (the reviewer's own config legitimately names the tool); and THIS
+          # workflow file, which must reference those names to describe and run the check.
+          # grep exit status: 0 = matches found, 1 = no matches, >=2 = an ERROR (e.g. an unreadable
+          # path). Capture it explicitly and branch on all three — treating every nonzero status as
+          # "clean" would let a scan error masquerade as a pass. GitHub runs `run:` steps with
+          # `bash -e`, so `set +e` here is REQUIRED: without it the clean case (grep exits 1) would
+          # abort the step before we can read the status. Re-enable `-e` afterwards.
           set +e
-          hits=$(grep -rnwE '(Codex|CodeRabbit|Copilot)' \
-              native IntercomFirmwareTool.Core IntercomFirmwareTool.Core.Tests IntercomFirmwareTool.App \
-              --binary-files=without-match \
-              --exclude-dir=target --exclude-dir=bin --exclude-dir=obj)
+          hits=$(grep -rIEnwi '(Codex|CodeRabbit|Copilot)' . \
+              --exclude-dir=.git --exclude-dir=target --exclude-dir=bin --exclude-dir=obj \
+              --exclude=.coderabbit.yaml --exclude=lint.yml)
           status=$?
           set -e
           case "$status" in
             0)
               echo "$hits"
-              echo "::error::AI-reviewer attribution(s) found in source comments (issue #132). Comments should explain why, not who — remove the tool name and reflow the sentence; the provenance already lives in git history and the PR thread."
+              echo "::error::AI-reviewer tool name(s) found in the repo (issue #132) — these only belong as attributions in comments, which should explain why, not who. Remove the name and reflow the sentence; the provenance already lives in git history and the PR thread."
               exit 1
               ;;
             1)
-              echo "OK: no AI-reviewer attributions in source."
+              echo "OK: no AI-reviewer attributions found."
               ;;
             *)
               echo "::error::attribution scan failed (grep exit ${status}) — a scanned path may be missing or unreadable, so the guard could not verify the tree."
-              exit 1
+              exit "${status}"
               ;;
           esac

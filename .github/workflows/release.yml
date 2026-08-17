@@ -38,8 +38,7 @@ concurrency:
   # One release per version; do NOT cancel an in-progress publish. On a dispatch run
   # github.ref is the default branch, which would serialize unrelated manual releases — so
   # key by the version instead. Prefix the manual input with 'v' (it is entered without one,
-  # e.g. 1.2.0) so a dispatch and a tag push for the same version share one group
-  # (Copilot/CodeRabbit).
+  # e.g. 1.2.0) so a dispatch and a tag push for the same version share one group.
   group: release-${{ inputs.version && (startsWith(inputs.version, 'v') && inputs.version || format('v{0}', inputs.version)) || github.ref_name }}
   cancel-in-progress: false
 
@@ -48,7 +47,7 @@ jobs:
   # run it HERE on the release ref (a v* tag / dispatch — which ffmpeg-provenance.yml's own
   # pull_request/push triggers don't cover). This rebuilds the vendored binary from the pinned,
   # SHA-256-verified source and requires an exact byte match, so a release can never publish the
-  # embedded binary alongside "corresponding source" it wasn't built from (Codex). The publish
+  # embedded binary alongside "corresponding source" it wasn't built from. The publish
   # job below `needs:` this, so publishing is blocked unless the binary↔source binding holds.
   verify-ffmpeg:
     uses: ./.github/workflows/ffmpeg-provenance.yml
@@ -98,17 +97,17 @@ jobs:
           # "Corresponding source" also includes the scripts that control HOW this specific binary
           # is configured/compiled — the exact ./configure flags + pinned inputs — not just the
           # upstream library source. Pointing at the (mutable) repo isn't a durable accompaniment,
-          # so ship an immutable copy of our build recipe with the release too (CodeRabbit).
+          # so ship an immutable copy of our build recipe with the release too.
           recipe="ffmpeg-${tag}-build-recipe.tar.gz"
           # Archive from the COMMITTED blobs (LF), NOT the working tree: on the windows-latest
           # runner core.autocrlf could otherwise materialize these text files as CRLF, shipping a
           # build.sh that fails under Linux `sh` (`set -eu\r`) and pins.env values with trailing
           # \r. git archive emits git's stored bytes (LF); .gitattributes also pins
-          # native/ffmpeg/** to eol=lf as belt-and-suspenders (Codex).
+          # native/ffmpeg/** to eol=lf as belt-and-suspenders.
           # Keep the native/ffmpeg/ PREFIX (archive from HEAD with full paths, not HEAD:native/ffmpeg
           # which would flatten to the archive root) so the extracted layout matches BUILD.md's own
           # instruction `sh native/ffmpeg/build.sh "$SRC_DIR"` — a recipient can extract and follow
-          # the shipped recipe verbatim (Codex).
+          # the shipped recipe verbatim.
           git archive --format=tar HEAD \
             native/ffmpeg/build.sh native/ffmpeg/pins.env native/ffmpeg/BUILD.md | gzip -n > "$recipe"
           echo "FFMPEG_RECIPE=$recipe" >> "$GITHUB_ENV"
@@ -139,7 +138,7 @@ jobs:
           # pass (its first line is valid SemVer) and then the `echo "…$v…"` lines would inject
           # extra 'tag='/'version=' records into $GITHUB_OUTPUT — the LAST one wins, overriding
           # steps.ver.outputs.tag with an arbitrary name (e.g. 'wrong-win-x64') that is OUTSIDE
-          # the 'v*' tag-protection ruleset. Require a single clean line (Codex).
+          # the 'v*' tag-protection ruleset. Require a single clean line.
           case "$v" in
             *[[:cntrl:]]*)
               echo "::error::invalid version (must be a single line with no control characters)"
@@ -148,13 +147,13 @@ jobs:
           # Strict SemVer 2.0.0 (this value becomes the git tag AND the MSBuild Version):
           # core with no leading zeros; an optional dot-separated prerelease where NUMERIC
           # identifiers may not have leading zeros (alphanumerics may); optional build
-          # metadata (Copilot/CodeRabbit).
+          # metadata.
           semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
           if ! printf '%s' "$v" | grep -qE "$semver"; then
             # Keep the raw (rejected) value OUT of the ::error:: workflow command: a dispatched
             # version containing a newline or %-escape could otherwise inject fake log commands /
             # annotations. Strip control chars and print it on a plain, prefixed line instead, so
-            # it can never start a '::' command line (Copilot).
+            # it can never start a '::' command line.
             v_safe="$(printf '%s' "$v" | tr -d '\000-\037')"
             printf 'rejected version input: %s\n' "$v_safe"
             echo "::error::invalid version (expected SemVer 2.0.0, e.g. 1.2.3 or 1.2.3-rc.1)"
@@ -163,7 +162,7 @@ jobs:
           # A SemVer prerelease (e.g. 1.2.3-rc.1) → mark the GitHub Release as a prerelease so
           # it isn't presented as the Latest/production release. The prerelease is the part
           # after the first '-' but BEFORE any '+' build metadata, so strip build metadata
-          # first (a '-' inside '+build' does not make it a prerelease) (Codex).
+          # first (a '-' inside '+build' does not make it a prerelease).
           core_and_pre="${v%%+*}"
           if [ "$core_and_pre" != "${core_and_pre#*-}" ]; then prerelease=true; else prerelease=false; fi
           {
@@ -183,7 +182,7 @@ jobs:
           # self-contained publish does NOT supply. Drop the Microsoft-redistributable copy into
           # lib\SharpExt4\ so the csproj ships it app-local — beside SharpExt4 in the .zip and
           # bundled into the single-file for first-run extraction — making the "runs on a clean
-          # machine" promise true (Codex).
+          # machine" promise true.
           #
           # Prefer the official VC++ redistributable copy from the VS install; fall back to the
           # system copy (the same signed DLL). Redistributing VCRUNTIME140 app-local is a
@@ -195,8 +194,7 @@ jobs:
           # Only bundle a genuine, valid Microsoft-signed runtime. Require a Valid Authenticode
           # signature AND a signer whose certificate Organization is Microsoft Corporation —
           # matching the 'O=Microsoft Corporation' RDN, not merely any subject that contains the
-          # word "Microsoft" (which a different vendor's cert could). Guard a null signer cert
-          # (Copilot).
+          # word "Microsoft" (which a different vendor's cert could). Guard a null signer cert.
           $sig = Get-AuthenticodeSignature $src
           if ($sig.Status -ne 'Valid' -or -not $sig.SignerCertificate -or
               $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
@@ -213,7 +211,7 @@ jobs:
       # DiskPartitionInfo / Ijwhost.dll next to AppContext.BaseDirectory at startup
       # (MainWindow.xaml.cs). So extract ALL bundled content (not just native libraries) on
       # first run — BaseDirectory then resolves to that run directory, where the three DLLs
-      # land, satisfying both the runtime loader and the startup check (Codex).
+      # land, satisfying both the runtime loader and the startup check.
       # ReadyToRun is intentionally NOT used: crossgen emits its own R2R copy of
       # DiskPartitionInfo.dll (SharpExt4's managed helper, declared in SharpExt4.deps.json) that
       # collides with the SDK-resolved runtime-dependency copy at the same relative path, failing
@@ -228,7 +226,7 @@ jobs:
           # IncludeSourceRevisionInInformationalVersion=false → the shipped .exe's
           # InformationalVersion ("Product version") is exactly $VERSION, not "$VERSION+<git-sha>"
           # (the SDK appends the commit id by default), so the file's version metadata matches the
-          # release tag / the in-app update check's expectation (Copilot).
+          # release tag / the in-app update check's expectation.
           # EnableCompressionInSingleFile is deliberately OFF: a COMPRESSED single-file bundle is a
           # packed blob that Windows Defender's heuristic/ML engines routinely flag as malware
           # (Wacatac/Wacapew false positives) — leaving it uncompressed makes the bundle a plain
@@ -266,8 +264,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           # Require EXACTLY one .exe from the single-file publish. A self-contained single-file
           # publish emits one apphost .exe; if it ever produced more (a runtime/diagnostic tool),
-          # picking the first would risk shipping the wrong binary — so fail loudly instead
-          # (Copilot).
+          # picking the first would risk shipping the wrong binary — so fail loudly instead.
           $exes = @(Get-ChildItem out/exe -Filter *.exe)
           if ($exes.Count -ne 1) { throw "expected exactly one .exe in out/exe, found $($exes.Count): $($exes.Name -join ', ')" }
           $exe = $exes[0]
@@ -288,7 +285,7 @@ jobs:
           # Defensive: if the self-contained publish ever emits its own LICENSE.txt into
           # out/folder, preserve it (rename to dotnet-publish-LICENSE.txt) before dropping the
           # app's LICENSE.txt there, so -Force can't silently replace a runtime license with the
-          # application license (CodeRabbit). A current .NET self-contained publish does not emit
+          # application license. A current .NET self-contained publish does not emit
           # one, so this normally no-ops.
           $preexisting = Join-Path 'out/folder' 'LICENSE.txt'
           if (Test-Path $preexisting) {
@@ -302,7 +299,7 @@ jobs:
           # License texts: keep them under licenses/ INSIDE the .zip so THIRD-PARTY-NOTICES.md's
           # relative links (licenses/…-LICENSE.txt) resolve when read from the bundle; also drop a
           # flat copy into dist/ for the standalone release assets (GitHub release assets can't be
-          # nested — their sibling license assets are on the release page) (Copilot).
+          # nested — their sibling license assets are on the release page).
           New-Item -ItemType Directory -Force -Path out/folder/licenses | Out-Null
           $licenseTexts = @(
             'licenses/SharpExt4-LICENSE.txt',
@@ -338,7 +335,7 @@ jobs:
           # Fail CLOSED on content changes: verify the pinned source archive and the bundled
           # binaries against the SHA-256 values documented in third_party/SharpExt4/README.md. A
           # future commit that swaps the archive or a DLL while keeping the same path would
-          # otherwise let a release ship a false correspondence (CodeRabbit). Update these expected
+          # otherwise let a release ship a false correspondence. Update these expected
           # hashes here and in that README together when the pinned revision is bumped.
           #
           # Two maps, matching the README's split: the binary<->source BINDING covers only the
@@ -366,7 +363,7 @@ jobs:
           # (the RSA MD4 grant in ext4_hash.c, ISC in getopt.h, BSD variants in misc/queue.h and
           # misc/tree.h) whose VERBATIM per-file terms must accompany binary redistribution; those
           # headers live in this archive, so bundling it in each ZIP means a ZIP download carries
-          # them without needing the separate asset (Codex). The single-file .exe can't embed it and
+          # them without needing the separate asset. The single-file .exe can't embed it and
           # is accompanied by the same archive as a sibling release asset.
           Copy-Item 'third_party/SharpExt4/SharpExt4-a9a41e1.zip' out/folder -Force
           # Same for the embedded LGPL FFmpeg binary: its complete corresponding source (the pinned,
@@ -376,7 +373,7 @@ jobs:
           Copy-Item $env:FFMPEG_RECIPE out/folder -Force
           # Portable .zip: it is the preferred download for many users, so it must ALSO carry the
           # compliance docs — not just sit beside them as sibling release assets (GitHub does not
-          # auto-download siblings) (Codex). Stage the single-file .exe together with the notices in
+          # auto-download siblings). Stage the single-file .exe together with the notices in
           # the same licenses/ layout as the loose zip, so the notice's relative links resolve, then
           # zip that staging dir (the .exe stays at the archive root — no 'dist/' prefix).
           $stage = Join-Path dist 'portable-stage'
@@ -422,7 +419,7 @@ jobs:
           # the portable .exe, its .zip wrapper, and the loose-folder .zip), plus a .sha256 sidecar
           # for each, and require every one to exist. Checking exact names — not just glob counts —
           # catches a packaging rename bug the counts alone would miss and keeps the upload matching
-          # the names the README documents (Copilot).
+          # the names the README documents.
           files=()
           for a in "${BASE}-portable.exe" "${BASE}-portable.zip" "${BASE}.zip"; do
             files+=("dist/$a" "dist/$a.sha256")
@@ -454,7 +451,7 @@ jobs:
           # non-atomically and can't enforce draft state, so a re-run could race a manual
           # publish, briefly drop assets, or attach a different commit's build to an existing
           # release. Deleting the stale draft (or bumping the version) is an explicit,
-          # auditable action; overwriting in place is not (Codex/CodeRabbit).
+          # auditable action; overwriting in place is not.
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "::error::a release for $TAG already exists — delete that (draft) release or bump the version, then re-run. Not overwriting it."
             exit 1
@@ -469,16 +466,16 @@ jobs:
           # build, so nothing can rebind it. A workflow_dispatch run does NOT get a tag from the
           # event, and letting the draft create the tag on publish leaves the whole review
           # window open — someone could push $TAG at a different commit and the published
-          # release would bind to it while the assets/attestation describe $COMMIT_SHA (Codex,
-          # CodeRabbit). So on dispatch we ANCHOR the tag now: create refs/tags/$TAG at
+          # release would bind to it while the assets/attestation describe $COMMIT_SHA. So on
+          # dispatch we ANCHOR the tag now: create refs/tags/$TAG at
           # $COMMIT_SHA via a create-ref, which is atomic and FAILS (422) if the ref already
           # exists — closing the creation window and doubling as the refuse-on-exists guard.
           # Keeping the anchored tag from being force-MOVED before publish needs the REQUIRED
           # 'refs/tags/v*' tag-protection ruleset (restrict updates + deletions); the create-ref
-          # alone only prevents a conflicting creation (Codex/CodeRabbit; see the README note).
+          # alone only prevents a conflicting creation (see the README note).
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             # stdout is the created-ref JSON (noise); let stderr through so a real failure
-            # (e.g. a 422 the message below only guesses at) is visible in the logs (Copilot).
+            # (e.g. a 422 the message below only guesses at) is visible in the logs.
             if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
                  -f ref="refs/tags/${TAG}" -f sha="$COMMIT_SHA" >/dev/null; then
               echo "::error::could not create tag ${TAG} at ${COMMIT_SHA} (it likely already exists) — delete the stale tag or bump the version, then re-run."
@@ -495,10 +492,10 @@ jobs:
           # tag-scoped `gh release create|upload|delete`: those resolve by tag, so if an actor
           # raced a replacement release onto $TAG after the guard above, a tag-scoped upload would
           # push our assets onto THEIR release and a tag-scoped delete could remove it — possibly
-          # a published one (Codex, CodeRabbit). Create returns both id and upload_url in one call.
+          # a published one. Create returns both id and upload_url in one call.
           # Capture id+upload_url from stdout; DON'T suppress stderr, so a create failure (race,
           # permissions, validation) surfaces its real reason in the logs. `|| true` keeps the
-          # empty-result handling below in charge of the exit, not set -e (Copilot).
+          # empty-result handling below in charge of the exit, not set -e.
           created="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
             -f tag_name="$TAG" -f name="$TAG" -F draft=true -F prerelease="$PRERELEASE" \
             -F generate_release_notes=true --jq '[.id, .upload_url] | @tsv' || true)"
@@ -523,10 +520,10 @@ jobs:
             # metadata allows '+' (e.g. v1.2.3+build), which a query string decodes to a space —
             # GitHub would then store the asset with a space while its .sha256 sidecar still names
             # the '+' file, breaking checksum verification. Every other char we emit (letters,
-            # digits, '.', '-') is query-safe (CodeRabbit).
+            # digits, '.', '-') is query-safe.
             asset_q="${asset//+/%2B}"
             # stdout is the uploaded-asset JSON (noise); let stderr through so an upload failure
-            # (size limit, auth, transient network) is diagnosable from the logs (Copilot).
+            # (size limit, auth, transient network) is diagnosable from the logs.
             if ! gh api --method POST "${upload_url}?name=${asset_q}" \
                  --header "Content-Type: application/octet-stream" \
                  --input "$f" >/dev/null; then
@@ -539,7 +536,7 @@ jobs:
             # ACTUAL outcome: if this delete also fails (e.g. a transient GitHub outage) the draft
             # is still there — publishable with missing assets — and the existence guard will block
             # a re-run, so we must NOT claim it was removed. Name the release id so it can be
-            # deleted by hand (Codex).
+            # deleted by hand.
             if gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${release_id}" >/dev/null; then
               draft_state="removed the partial draft"
             else
@@ -549,7 +546,7 @@ jobs:
             # restricts deletions the workflow token cannot delete the tag, so it no-ops and the
             # (correct, $COMMIT_SHA) tag is left to remove out-of-band or reuse. We grant the
             # workflow NO ruleset bypass — a bypass that can delete/move release tags would reopen
-            # the window this anchoring closes (CodeRabbit).
+            # the window this anchoring closes.
             if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
               gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null || true
             fi

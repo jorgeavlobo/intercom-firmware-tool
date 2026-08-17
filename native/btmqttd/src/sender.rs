@@ -333,8 +333,9 @@ async fn session(
                 .await?
                 {
                     Reconcile::SocketClosed => return Ok(()),
-                    // A live transition during the drain already published + updated `call_watch`
-                    // (in order, newer than this snapshot) — leave it.
+                    // A live transition during the drain already published + updated `call_watch`;
+                    // its order vs. this snapshot can't be inferred (separate connections), so the
+                    // snapshot is ambiguous — leave the live state rather than clobber it.
                     Reconcile::Done { saw_transition: true, .. } => {}
                     Reconcile::Done { result: Ok(Some(code)), saw_transition: false } => {
                         // Reconcile against the live classification here too. call_watch is NOT armed

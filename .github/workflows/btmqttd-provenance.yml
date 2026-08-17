@@ -95,7 +95,7 @@ jobs:
           # Read the channel pinned by rust-toolchain.toml and install it explicitly BY NAME,
           # with its declared target + components. Installing by name (not a bare
           # `rustup toolchain install`, which is ambiguous, nor relying on the runner's
-          # default or on auto-install) makes the toolchain deterministic (Copilot). The
+          # default or on auto-install) makes the toolchain deterministic. The
           # cargo steps below run in native/btmqttd and select this channel via the
           # rust-toolchain.toml directory override.
           channel="$(grep -oP '^\s*channel\s*=\s*"\K[^"]+' native/btmqttd/rust-toolchain.toml || true)"
@@ -106,7 +106,7 @@ jobs:
           echo "pinned channel: $channel"
           # Install both components rust-toolchain.toml declares (clippy + rustfmt) so
           # the CI toolchain matches the repo's pinned toolchain exactly and nothing is
-          # implicitly downloaded on first use in the directory (Copilot). `--component`
+          # implicitly downloaded on first use in the directory. `--component`
           # takes a COMMA-separated list; a space-separated `--component clippy rustfmt`
           # would parse `rustfmt` as a toolchain name (not a component) and rustup errors out.
           rustup toolchain install "$channel" --profile minimal \
@@ -155,12 +155,12 @@ jobs:
           # asserting the WHOLE line (grep -qxF: fixed-string, whole-line) + exit code is
           # the liveness signal — a generic non-zero exit could just be qemu failing to
           # execute it, and a mere substring could match a longer/unrelated diagnostic
-          # that happens to contain the token (Codex).
+          # that happens to contain the token.
           expected='btmqttd: MQTT_HOST is not set in the config'
           # The cross-gcc step above replaced apt's sources with a frozen Ubuntu snapshot
           # whose Release files predate "now", so this update must ALSO skip apt's
           # Valid-Until freshness check (same flag as that step) — otherwise it can error on
-          # an expired Release before qemu installs (Copilot). qemu-user-static is in the
+          # an expired Release before qemu installs. qemu-user-static is in the
           # snapshot's universe component.
           sudo apt-get -o Acquire::Check-Valid-Until=false update
           sudo apt-get install -y qemu-user-static
