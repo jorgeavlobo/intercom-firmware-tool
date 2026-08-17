@@ -966,14 +966,26 @@ async fn run() -> Result<bool, String> {
         // aborted, possibly-unreaped child; a plain exit lets init (PID 1) adopt and reap it while the watchdog
         // respawns the bridge. `CMD_WORKER_DRAIN` comfortably covers the restore_ssh dropbear start (10 s).
         const CMD_WORKER_DRAIN: Duration = Duration::from_secs(12);
-        if tokio::time::timeout(CMD_WORKER_DRAIN, &mut cmd_worker).await.is_err() {
-            eprintln!(
-                "btmqttd: command worker did not drain within {}s; aborting and exiting instead of re-exec",
-                CMD_WORKER_DRAIN.as_secs()
-            );
-            cmd_worker.abort();
-            let _ = cmd_worker.await;
-            reexec = false; // an aborted in-flight child may be unreaped — never re-exec over it
+        match tokio::time::timeout(CMD_WORKER_DRAIN, &mut cmd_worker).await {
+            Ok(Ok(())) => {} // clean drain: the worker finished its in-flight command and exited
+            Ok(Err(join_err)) => {
+                // The worker task ended abnormally (panic/cancel — its contract is "never panics", but be
+                // defensive): the unwind dropped the in-flight `Child` + permit, and kill_on_drop only
+                // SIGKILLs the direct child without reaping, so a child may be unreaped while
+                // `outstanding_reapers()` reads low. Never re-exec over that — plain-exit so init reaps it
+                // (Copilot).
+                eprintln!("btmqttd: command worker ended abnormally ({join_err}); exiting instead of re-exec");
+                reexec = false;
+            }
+            Err(_) => {
+                eprintln!(
+                    "btmqttd: command worker did not drain within {}s; aborting and exiting instead of re-exec",
+                    CMD_WORKER_DRAIN.as_secs()
+                );
+                cmd_worker.abort();
+                let _ = cmd_worker.await;
+                reexec = false; // an aborted in-flight child may be unreaped — never re-exec over it
+            }
         }
     } else {
         // Plain exit (SIGTERM/SIGINT — e.g. `/etc/init.d/btmqttd stop`, which SIGKILLs after only an 8 s
@@ -1017,8 +1029,8 @@ async fn run() -> Result<bool, String> {
         }
         if receiver::outstanding_reapers() > 0 {
             eprintln!(
-                "btmqttd: re-exec cancelled: a command-child reaper is still outstanding (a killed child \
-                 not yet collected); exiting so init can reap the orphan"
+                "btmqttd: re-exec cancelled: a command child is still outstanding (killed and awaiting reap); \
+                 exiting so init can reap the orphan"
             );
             reexec = false;
         }

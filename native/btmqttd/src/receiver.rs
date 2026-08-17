@@ -61,15 +61,17 @@ const REAP_CONCURRENCY: usize = 16;
 /// reaper task on cap/timeout). `const_new` so it lives in a `static` with no lazy init.
 static REAP_SLOTS: Semaphore = Semaphore::const_new(REAP_CONCURRENCY);
 
-/// How many command-child reapers are still outstanding — a killed child not yet collected
-/// (equivalently, permits currently held). Zero in steady state. The shutdown path consults this
-/// before an in-place re-exec: a running reaper owns an OS child of THIS pid, and the re-exec keeps
-/// the pid but drops the `Child` handle, so the fresh image (with a fresh, empty `REAP_SLOTS`) would
-/// have no handle to collect that child when it finally dies — it would leak as a zombie and silently
-/// defeat the REAP_CONCURRENCY bound across repeated restart cycles. When this is non-zero the daemon
-/// exits instead of re-execing, so init inherits and reaps the orphan (the watchdog respawns the
-/// bridge). Subtraction can't underflow: `available_permits()` never exceeds the fixed
-/// REAP_CONCURRENCY the pool was built with.
+/// How many command children are still OUTSTANDING — i.e. `REAP_SLOTS` permits currently held. A permit is
+/// reserved before a command child is spawned and released only once that child is collected, so this counts
+/// a child that is EITHER still running under the worker OR killed and awaiting reap (not only killed ones).
+/// Zero in steady state. The shutdown path consults it before an in-place re-exec — and by then the worker is
+/// already stopped, so any remaining permit is a killed-child reaper. Such a child is an OS child of THIS
+/// pid; the re-exec keeps the pid but drops the `Child` handle, so the fresh image (with a fresh, empty
+/// `REAP_SLOTS`) would have no handle to collect it when it finally dies — it would leak as a zombie and
+/// silently defeat the REAP_CONCURRENCY bound across repeated restart cycles. When this is non-zero the
+/// daemon exits instead of re-execing, so init inherits and reaps the orphan (the watchdog respawns the
+/// bridge). Subtraction can't underflow: `available_permits()` never exceeds the fixed REAP_CONCURRENCY the
+/// pool was built with.
 pub(crate) fn outstanding_reapers() -> usize {
     REAP_CONCURRENCY - REAP_SLOTS.available_permits()
 }
@@ -497,10 +499,13 @@ fn kill_group_and_reap(mut child: tokio::process::Child, permit: tokio::sync::Se
 }
 
 /// Does `/proc/mounts` show the root filesystem (`/`) mounted READ-ONLY? Each line is
-/// `dev mountpoint fstype options …`; the options are the 4th field, a comma list whose first element is
-/// `ro` or `rw`. When several mounts share `/` (a later one shadows earlier ones) the LAST `/` entry is the
-/// effective mount, so this checks that one. A missing `/` entry (never, in practice) reads as NOT ro
-/// (conservative — the caller then skips the dropbear start). Pure (no I/O) so it is unit-tested directly.
+/// `dev mountpoint fstype options …`; the options are the 4th field, a comma list whose FIRST element is
+/// always the access flag `ro` or `rw` (the kernel emits it first). We therefore test the first element
+/// specifically — not "does `ro` appear anywhere" — so a malformed `rw,…,ro` can't be misread as read-only
+/// and push restore_ssh onto the fragile rw host-key path. When several mounts share `/` (a later one
+/// shadows earlier ones) the LAST `/` entry is the effective mount, so this checks that one. A missing `/`
+/// entry (never, in practice) reads as NOT ro (conservative — the caller then skips the dropbear start).
+/// Pure (no I/O) so it is unit-tested directly.
 fn rootfs_is_ro(mounts: &str) -> bool {
     mounts
         .lines()
@@ -513,7 +518,7 @@ fn rootfs_is_ro(mounts: &str) -> bool {
             (mountpoint == "/").then_some(options)
         })
         .next_back()
-        .map(|options| options.split(',').any(|opt| opt == "ro"))
+        .map(|options| options.split(',').next() == Some("ro"))
         .unwrap_or(false)
 }
 
@@ -1243,6 +1248,10 @@ mod tests {
 
         // `rw` must not match on a substring (`ro` is a whole comma-separated option, not a prefix).
         assert!(!rootfs_is_ro("/dev/root / ext4 rw,errors=remount-ro 0 0\n"));
+
+        // Only the FIRST option (the kernel's access flag) counts: a malformed `rw,ro` is read-write.
+        assert!(!rootfs_is_ro("/dev/root / ext4 rw,ro 0 0\n"));
+        assert!(rootfs_is_ro("/dev/root / ext4 ro,rw 0 0\n"));
 
         // Malformed / empty input reads as NOT ro rather than panicking.
         assert!(!rootfs_is_ro(""));
