@@ -388,6 +388,12 @@ async fn run() -> Result<bool, String> {
     // (which escapes ~6x) is still dropped with a log line, as is anything larger.
     const MAX_CMD_BYTES: usize = 512 * 1024;
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CMD_QUEUE_DEPTH);
+    // Set at shutdown so the worker finishes the dispatch IN PROGRESS but starts no more — including any
+    // commands still BUFFERED in the channel. Dropping `cmd_tx` alone is not enough: a tokio MPSC receiver
+    // yields every already-queued message before it observes the closed channel, so the worker would keep
+    // running side-effecting commands (e.g. a queued execute_command) during shutdown and stretch the re-exec
+    // delay by the queue's worth of work (CodeRabbit). The flag makes it exit before the next `recv()`.
+    let cmd_stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut cmd_worker = tokio::spawn({
         let cfg = cfg.clone();
         let client = client.clone();
@@ -398,8 +404,15 @@ async fn run() -> Result<bool, String> {
         // Shared with the light-learn path: the HA "Restart bridge" button (issue #43) fires this same
         // Notify to trigger the clean-shutdown-then-re-exec in `run`'s select loop below.
         let restart = restart.clone();
+        let cmd_stopping = cmd_stopping.clone();
         async move {
             while let Some(payload) = cmd_rx.recv().await {
+                // Shutdown requested: do NOT start another command (the one in progress, if any, already
+                // finished and ran its own bounded cleanup). Break rather than dispatch, discarding whatever
+                // is still queued — those commands never started, so dropping them strands nothing.
+                if cmd_stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 receiver::dispatch(&cfg, &client, &volume, &lock_tx, light.as_ref(), view_tx.as_ref(), &restart, &payload).await;
             }
         }
@@ -935,16 +948,18 @@ async fn run() -> Result<bool, String> {
     // script's descendants running and the direct child unreaped, and releasing its REAP_SLOTS permit so the
     // re-exec guard below would read zero and proceed anyway (Codex). This matters because a restart can be
     // triggered by an INDEPENDENT task (a learned light WHERE via `light.rs`) while the worker is mid-command,
-    // not only by the worker dispatching `restart_bridge` itself. Dropping the sole `cmd_tx` closes the
-    // channel, so the worker's `while let Some = recv()` returns None and the loop ends AFTER the in-flight
-    // dispatch completes — and each dispatch is itself wall-clock bounded, so any child it owns is routed
-    // through the proper group-kill/reaper path first. Bound the drain so a wedged dispatch can't hang
-    // shutdown: `CMD_WORKER_DRAIN` comfortably covers the restore_ssh dropbear start (10 s). If it still has
-    // not finished (a longer in-flight command, e.g. a 60 s execute_command shell), abort as a fallback AND
-    // force a plain exit — never an in-place re-exec over an aborted, possibly-unreaped child; a plain exit
-    // lets init (PID 1) adopt and reap it while the watchdog respawns the bridge.
+    // not only by the worker dispatching `restart_bridge` itself. Set `cmd_stopping` so the worker starts no
+    // further command (the in-flight one finishes and runs its own bounded cleanup; anything still buffered is
+    // discarded — see the worker loop), then drop the sole `cmd_tx` to wake an idle `recv()` and end the loop.
+    // Each dispatch is itself wall-clock bounded, so any child it owns is routed through the proper
+    // group-kill/reaper path first. Bound the drain so a wedged dispatch can't hang shutdown: `CMD_WORKER_DRAIN`
+    // comfortably covers the restore_ssh dropbear start (10 s). If it still has not finished (a longer
+    // in-flight command, e.g. a 60 s execute_command shell), abort as a fallback AND force a plain exit —
+    // never an in-place re-exec over an aborted, possibly-unreaped child; a plain exit lets init (PID 1) adopt
+    // and reap it while the watchdog respawns the bridge.
     const CMD_WORKER_DRAIN: Duration = Duration::from_secs(12);
-    drop(cmd_tx); // sole sender; closing the channel ends the worker after its current command
+    cmd_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(cmd_tx); // sole sender; wake an idle recv() so the loop can observe `cmd_stopping` / channel close
     match tokio::time::timeout(CMD_WORKER_DRAIN, &mut cmd_worker).await {
         Ok(_) => {} // worker finished its in-flight command and exited cleanly
         Err(_) => {
