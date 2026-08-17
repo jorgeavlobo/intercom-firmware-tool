@@ -61,6 +61,21 @@ const REAP_CONCURRENCY: usize = 16;
 /// reaper task on cap/timeout). `const_new` so it lives in a `static` with no lazy init.
 static REAP_SLOTS: Semaphore = Semaphore::const_new(REAP_CONCURRENCY);
 
+/// How many command children are still OUTSTANDING — i.e. `REAP_SLOTS` permits currently held. A permit is
+/// reserved before a command child is spawned and released only once that child is collected, so this counts
+/// a child that is EITHER still running under the worker OR killed and awaiting reap (not only killed ones).
+/// Zero in steady state. The shutdown path consults it before an in-place re-exec — and by then the worker is
+/// already stopped, so any remaining permit is a killed-child reaper. Such a child is an OS child of THIS
+/// pid; the re-exec keeps the pid but drops the `Child` handle, so the fresh image (with a fresh, empty
+/// `REAP_SLOTS`) would have no handle to collect it when it finally dies — it would leak as a zombie and
+/// silently defeat the REAP_CONCURRENCY bound across repeated restart cycles. When this is non-zero the
+/// daemon exits instead of re-execing, so init inherits and reaps the orphan (the watchdog respawns the
+/// bridge). Subtraction can't underflow: `available_permits()` never exceeds the fixed REAP_CONCURRENCY the
+/// pool was built with.
+pub(crate) fn outstanding_reapers() -> usize {
+    REAP_CONCURRENCY - REAP_SLOTS.available_permits()
+}
+
 /// Dispatch one received payload. The shell receiver looped `while IFS= read -r
 /// rxcmd`, so it processed EVERY `\n`-delimited line of a payload IN ORDER — a
 /// multi-line message is several records, not one. We split on `\n` and run each
@@ -259,6 +274,17 @@ async fn handle_json(
                     publish_maintenance(client, cfg, "restart_bridge").await;
                     restart.notify_one();
                 }
+                Maintenance::RestoreSsh => {
+                    // On-demand SSH recovery net (issue #130): (re)start dropbear so sshd is listening. The
+                    // MQTT command reaches us even when inbound `:22` is blocked (our broker link is
+                    // outbound), so this brings SSH back without a reboot or power-cycle. It never touches
+                    // the firewall (see `restore_ssh`). Idempotent; safe to repeat.
+                    eprintln!("btmqttd: restore_ssh requested via MQTT");
+                    restore_ssh().await;
+                    // Publish the HA feedback AFTER the (fast, non-terminal) recovery so the ack reflects a
+                    // completed action — unlike reboot/restart, which flush their feedback before going down.
+                    publish_maintenance(client, cfg, "restore_ssh").await;
+                }
             }
             return;
         }
@@ -296,16 +322,19 @@ async fn handle_json(
     }
 }
 
-/// A parsed MAINTENANCE action (issue #43) — the HA "Reboot device" / "Restart bridge" buttons. These
-/// have a SIDE EFFECT outside the vol/lock/light surface `handle_action` covers (a process spawn or a
-/// re-exec signal), so they are classified here and dispatched inline in `handle_json`. Pure classifier,
-/// separated so the action-name mapping is unit-testable without spawning a reboot or re-execing.
+/// A parsed MAINTENANCE action (issues #43, #130) — the HA "Reboot device" / "Restart bridge" /
+/// "Restore SSH" buttons. These have a SIDE EFFECT outside the vol/lock/light surface `handle_action`
+/// covers (a process spawn, a re-exec signal, or a dropbear start), so they are classified here and
+/// dispatched inline in `handle_json`. Pure classifier, separated so the action-name mapping is
+/// unit-testable without spawning a reboot, re-execing, or touching dropbear.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Maintenance {
     /// Reboot the whole device (`{"action":"reboot"}`).
     Reboot,
     /// Re-exec btmqttd in place (`{"action":"restart_bridge"}`).
     RestartBridge,
+    /// On-demand SSH recovery — (re)start dropbear so sshd listens on `:22` (`{"action":"restore_ssh"}`).
+    RestoreSsh,
 }
 
 /// Map an `action` string to a [`Maintenance`] variant, or `None` if it isn't a maintenance action.
@@ -313,6 +342,7 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
     match action {
         "reboot" => Some(Maintenance::Reboot),
         "restart_bridge" => Some(Maintenance::RestartBridge),
+        "restore_ssh" => Some(Maintenance::RestoreSsh),
         _ => None,
     }
 }
@@ -322,9 +352,10 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
 /// "at":"<iso>"}`. RETAINED so Home Assistant still shows it across the reboot / bridge re-exec that
 /// immediately follows (HA re-reads the retained value on reconnect). Published BEFORE the action so a
 /// restart's clean MQTT shutdown flushes it; for a reboot the unit's own offline blip is the primary
-/// feedback if this last publish doesn't reach the broker before the box goes down. Best-effort — a
-/// publish error is logged. `action` is a fixed internal token (`reboot`/`restart_bridge`) and the ISO
-/// timestamp has no JSON-special characters, so the hand-built object needs no escaping.
+/// feedback if this last publish doesn't reach the broker before the box goes down (`restore_ssh`, which
+/// doesn't restart anything, publishes AFTER it acts so the ack reflects a completed recovery). Best-effort
+/// — a publish error is logged. `action` is a fixed internal token (`reboot`/`restart_bridge`/`restore_ssh`)
+/// and the ISO timestamp has no JSON-special characters, so the hand-built object needs no escaping.
 async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &str) {
     let payload = format!("{{\"action\":\"{action}\",\"at\":\"{}\"}}", own::utc_now_iso());
     if let Err(e) = client
@@ -333,6 +364,162 @@ async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &s
     {
         eprintln!("btmqttd: maintenance: publish to {} failed: {e}", cfg.topic_maintenance);
     }
+}
+
+/// Perform the "Restore SSH" recovery (issue #130): (re)start dropbear so sshd is listening on `:22`.
+/// Best-effort and idempotent — logs and continues; the module's contract is "never panics".
+///
+/// Runs `/etc/init.d/dropbear start` (the same command `bt_service_watchdog` uses) but ONLY when the
+/// rootfs is mounted READ-ONLY. The factory dropbear init takes its robust host-key path only under a `ro`
+/// rootfs; the `rw` path can abort under `set -e` and leave sshd down. btmqttd never remounts, so `ro`
+/// normally holds — assert it and log-and-skip rather than risk that path.
+///
+/// Deliberately does NOT touch the firewall. Every iptables invocation — even a read-only `-C`/`-S` —
+/// takes the xtables lock at launch, and this handler fires on an MQTT press that CANNOT be sequenced
+/// against the factory firewall's lock-less `INPUT` rebuild on interface-up; an overlap makes the factory's
+/// own `-A INPUT` calls fail silently and drop rules (SSH/FTP/security), i.e. it could RECREATE the very
+/// lockout it is meant to fix (task #42; see `go2rtc-net-hook`). So the factory `:22` rule stays entirely
+/// the shell layer's concern: #129 keeps it intact, and the "Reboot device" button rebuilds the whole
+/// factory firewall on boot if it is ever lost. This action's job is strictly to bring dropbear back.
+async fn restore_ssh() {
+    match tokio::fs::read_to_string("/proc/mounts").await {
+        Ok(mounts) if rootfs_is_ro(&mounts) => start_dropbear().await,
+        Ok(_) => eprintln!(
+            "btmqttd: restore_ssh: rootfs is not mounted read-only; skipping dropbear start to avoid the \
+             fragile rw host-key path (never remounting)"
+        ),
+        Err(e) => eprintln!(
+            "btmqttd: restore_ssh: could not read /proc/mounts ({e}); skipping dropbear start to stay safe"
+        ),
+    }
+}
+
+/// Wall-clock cap for the `/etc/init.d/dropbear start` child, so a hung init script can't stall the single
+/// command worker or delay the maintenance ack. Generous — a normal start is well under a second.
+const DROPBEAR_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run `/etc/init.d/dropbear start` — the same idempotent command `bt_service_watchdog` uses to bring sshd
+/// back (a no-op if dropbear is already listening). Std streams nulled off btmqttd's inherited fds. Spawned
+/// in its OWN process group (`process_group(0)`) so a timeout can SIGKILL the WHOLE group — the init script
+/// AND anything it spawned — not just the script interpreter, which would otherwise leave a reparented
+/// descendant running and let repeated presses pile up stuck processes (Codex; same idiom as
+/// `execute_command`). The wait is bounded by [`DROPBEAR_START_TIMEOUT`]; on expiry the group is killed and
+/// the direct child handed to the detached, bounded [`reap`] task rather than awaited inline — a child stuck
+/// in uninterruptible kernel I/O (D-state) won't return from `wait()` even after SIGKILL until its syscall
+/// completes, and awaiting that here would pin the single ordered command worker (and delay the maintenance
+/// ack) indefinitely. So a cleanup permit is reserved BEFORE spawning (skip if none free, like
+/// `execute_command`): the reaper owns the killed child + permit off-worker, `start_dropbear` returns at
+/// once, and the caller publishes the ack immediately. Best-effort — errors are logged, never fatal.
+async fn start_dropbear() {
+    // Reserve a cleanup permit BEFORE spawning so a child that must be killed can be reaped OFF the command
+    // worker without the reaper count growing unbounded — same discipline as `execute_command`. If none is
+    // free (that many children still outstanding, e.g. an earlier kill stuck in D-state) skip rather than
+    // spawn a child we couldn't hand off; `bt_service_watchdog` still brings dropbear back within 60s.
+    let permit = match REAP_SLOTS.try_acquire() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!(
+                "btmqttd: restore_ssh: too many outstanding children; skipping dropbear start (watchdog will retry)"
+            );
+            return;
+        }
+    };
+    let mut child = match tokio::process::Command::new("/etc/init.d/dropbear")
+        .arg("start")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .process_group(0) // pgid == the script's pid, so a timeout can kill the whole group
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("btmqttd: restore_ssh: failed to run /etc/init.d/dropbear start: {e}");
+            drop(permit); // nothing spawned — release the reserved slot
+            return;
+        }
+    };
+    match tokio::time::timeout(DROPBEAR_START_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) if status.success() => {
+            eprintln!("btmqttd: restore_ssh: dropbear start ok");
+            drop(child);
+            drop(permit); // clean exit: child already reaped by child.wait() — release the slot
+        }
+        Ok(Ok(status)) => {
+            eprintln!("btmqttd: restore_ssh: dropbear start exited {status}");
+            drop(child);
+            drop(permit);
+        }
+        Ok(Err(e)) => {
+            // We could NOT confirm the child exited (waitpid itself failed), so it may still be alive and
+            // UNREAPED — treat it exactly like the timeout: kill its group and hand it to the detached
+            // reaper, never a bare `drop` (kill_on_drop only SIGKILLs the direct child and does not reap,
+            // which would leak the process while still freeing the permit — Copilot).
+            eprintln!("btmqttd: restore_ssh: waiting on dropbear start failed: {e}; killing its process group");
+            kill_group_and_reap(child, permit);
+        }
+        Err(_) => {
+            eprintln!(
+                "btmqttd: restore_ssh: dropbear start did not finish within {}s; killing its process group",
+                DROPBEAR_START_TIMEOUT.as_secs()
+            );
+            kill_group_and_reap(child, permit);
+        }
+    }
+}
+
+/// SIGKILL a bounded child's WHOLE process group, then hand it (with its cleanup permit) to the detached
+/// [`reap`] task. Shared by `start_dropbear`'s timeout and wait-error arms — both cases where the child may
+/// still be alive and must be collected OFF the command worker (an inline `child.wait().await` on a D-state
+/// child would pin the single ordered worker; see `start_dropbear`). Killing the GROUP (pgid == the script's
+/// pid, set via `process_group(0)`) reaches any descendant the init script spawned, not just the interpreter.
+/// ESRCH means the group is already gone (benign); any OTHER `killpg` error falls back to the direct child so
+/// nothing lingers. The reaper collects our direct child and releases the permit; init reaps the group's
+/// reparented descendants.
+fn kill_group_and_reap(mut child: tokio::process::Child, permit: tokio::sync::SemaphorePermit<'static>) {
+    match child.id() {
+        Some(pid) => {
+            let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::ESRCH) {
+                    eprintln!(
+                        "btmqttd: restore_ssh: killpg({pid}) failed: {err}; killing the script directly"
+                    );
+                    let _ = child.start_kill();
+                }
+            }
+        }
+        None => {
+            let _ = child.start_kill();
+        }
+    }
+    reap(child, permit);
+}
+
+/// Does `/proc/mounts` show the root filesystem (`/`) mounted READ-ONLY? Each line is
+/// `dev mountpoint fstype options …`; the options are the 4th field, a comma list whose FIRST element is
+/// always the access flag `ro` or `rw` (the kernel emits it first). We therefore test the first element
+/// specifically — not "does `ro` appear anywhere" — so a malformed `rw,…,ro` can't be misread as read-only
+/// and push restore_ssh onto the fragile rw host-key path. When several mounts share `/` (a later one
+/// shadows earlier ones) the LAST `/` entry is the effective mount, so this checks that one. A missing `/`
+/// entry (never, in practice) reads as NOT ro (conservative — the caller then skips the dropbear start).
+/// Pure (no I/O) so it is unit-tested directly.
+fn rootfs_is_ro(mounts: &str) -> bool {
+    mounts
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let _dev = fields.next()?;
+            let mountpoint = fields.next()?;
+            let _fstype = fields.next()?;
+            let options = fields.next()?;
+            (mountpoint == "/").then_some(options)
+        })
+        .next_back()
+        .map(|options| options.split(',').next() == Some("ro"))
+        .unwrap_or(false)
 }
 
 /// The IN-MEMORY half of the reboot bound (the `/proc` half is [`reboot_process_running`]; both are read
@@ -1025,15 +1212,50 @@ mod tests {
     }
 
     #[test]
-    fn parse_maintenance_classifies_the_two_buttons() {
-        // The exact action strings the HA discovery payloads publish (issue #43).
+    fn parse_maintenance_classifies_the_buttons() {
+        // The exact action strings the HA discovery payloads publish (issues #43, #130).
         assert_eq!(parse_maintenance("reboot"), Some(Maintenance::Reboot));
         assert_eq!(parse_maintenance("restart_bridge"), Some(Maintenance::RestartBridge));
+        assert_eq!(parse_maintenance("restore_ssh"), Some(Maintenance::RestoreSsh));
         // Anything else is not a maintenance action (falls through to handle_action).
         assert_eq!(parse_maintenance(""), None);
         assert_eq!(parse_maintenance("restart"), None); // must be exactly `restart_bridge`
         assert_eq!(parse_maintenance("reboot_device"), None); // the object id, not the action
+        assert_eq!(parse_maintenance("ssh"), None); // must be exactly `restore_ssh`
         assert_eq!(parse_maintenance("volume"), None);
+    }
+
+    #[test]
+    fn rootfs_ro_is_read_from_the_effective_slash_mount() {
+        // Real /proc/mounts shape: `dev mountpoint fstype options dump pass`. The `/` mount's options
+        // (4th field) are a comma list; `ro`/`rw` is what restore_ssh gates the dropbear start on.
+        let ro = "/dev/root / ext4 ro,relatime,errors=continue 0 0\n\
+                  proc /proc proc rw,nosuid,nodev,noexec 0 0\n\
+                  tmpfs /var/run tmpfs rw,nosuid,nodev 0 0\n";
+        assert!(rootfs_is_ro(ro));
+
+        // A read-write rootfs must NOT be treated as ro (the caller then skips the dropbear start).
+        let rw = "/dev/root / ext4 rw,relatime 0 0\nproc /proc proc rw 0 0\n";
+        assert!(!rootfs_is_ro(rw));
+
+        // Only the `/` mount decides it — a ro `/proc` or ro `/other` must not flip the result.
+        assert!(!rootfs_is_ro("/dev/root / ext4 rw 0 0\nproc /proc proc ro 0 0\n"));
+        assert!(!rootfs_is_ro("/dev/x /other ext4 ro 0 0\n"));
+
+        // When several mounts share `/`, the LAST (effective, shadowing) one wins.
+        assert!(rootfs_is_ro("rootfs / rootfs rw 0 0\n/dev/root / ext4 ro,relatime 0 0\n"));
+        assert!(!rootfs_is_ro("rootfs / rootfs ro 0 0\n/dev/root / ext4 rw,relatime 0 0\n"));
+
+        // `rw` must not match on a substring (`ro` is a whole comma-separated option, not a prefix).
+        assert!(!rootfs_is_ro("/dev/root / ext4 rw,errors=remount-ro 0 0\n"));
+
+        // Only the FIRST option (the kernel's access flag) counts: a malformed `rw,ro` is read-write.
+        assert!(!rootfs_is_ro("/dev/root / ext4 rw,ro 0 0\n"));
+        assert!(rootfs_is_ro("/dev/root / ext4 ro,rw 0 0\n"));
+
+        // Malformed / empty input reads as NOT ro rather than panicking.
+        assert!(!rootfs_is_ro(""));
+        assert!(!rootfs_is_ro("garbage\n/dev/root /\n"));
     }
 
     #[test]

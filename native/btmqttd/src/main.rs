@@ -388,7 +388,13 @@ async fn run() -> Result<bool, String> {
     // (which escapes ~6x) is still dropped with a log line, as is anything larger.
     const MAX_CMD_BYTES: usize = 512 * 1024;
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CMD_QUEUE_DEPTH);
-    let cmd_worker = tokio::spawn({
+    // Set at shutdown so the worker finishes the dispatch IN PROGRESS but starts no more — including any
+    // commands still BUFFERED in the channel. Dropping `cmd_tx` alone is not enough: a tokio MPSC receiver
+    // yields every already-queued message before it observes the closed channel, so the worker would keep
+    // running side-effecting commands (e.g. a queued execute_command) during shutdown and stretch the re-exec
+    // delay by the queue's worth of work (CodeRabbit). The flag makes it exit before the next `recv()`.
+    let cmd_stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut cmd_worker = tokio::spawn({
         let cfg = cfg.clone();
         let client = client.clone();
         let volume = volume.clone();
@@ -398,8 +404,15 @@ async fn run() -> Result<bool, String> {
         // Shared with the light-learn path: the HA "Restart bridge" button (issue #43) fires this same
         // Notify to trigger the clean-shutdown-then-re-exec in `run`'s select loop below.
         let restart = restart.clone();
+        let cmd_stopping = cmd_stopping.clone();
         async move {
             while let Some(payload) = cmd_rx.recv().await {
+                // Shutdown requested: do NOT start another command (the one in progress, if any, already
+                // finished and ran its own bounded cleanup). Break rather than dispatch, discarding whatever
+                // is still queued — those commands never started, so dropping them strands nothing.
+                if cmd_stopping.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 receiver::dispatch(&cfg, &client, &volume, &lock_tx, light.as_ref(), view_tx.as_ref(), &restart, &payload).await;
             }
         }
@@ -910,6 +923,17 @@ async fn run() -> Result<bool, String> {
         }
     }
 
+    // FREEZE the command worker's intake the instant the event loop exits — BEFORE any awaited task-stop
+    // below. Each `stop(..).await` yields to the scheduler, and without this the worker could pull and
+    // dispatch a still-BUFFERED command mid-shutdown during one of those yields (CodeRabbit). Setting
+    // `cmd_stopping` makes the worker start no further command (it breaks before the next dispatch); dropping
+    // the sole `cmd_tx` wakes an idle `recv()`. The worker still finishes the dispatch that was already ACTIVE
+    // when shutdown began, running that command's own bounded cleanup; whatever is still queued is discarded
+    // (those commands never started, so dropping them strands nothing). The worker is JOINED further below,
+    // after the other producer tasks stop.
+    cmd_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(cmd_tx);
+
     // Stop every MQTT-producing task BEFORE the final `offline`, so none of them can
     // enqueue a publish after it and leave stale state (e.g. a lingering announce task
     // re-retaining `online`) on the broker. abort() alone is NOT enough — it is
@@ -929,7 +953,50 @@ async fn run() -> Result<bool, String> {
     }
     stop(sender_task).await;
     stop(keys_task).await;
-    stop(cmd_worker).await;
+    // JOIN the command worker (its intake was already frozen right after the loop). It starts no new command;
+    // we only wait out the dispatch that was ACTIVE when shutdown began. HOW we wait depends on the exit kind:
+    if reexec {
+        // Internal re-exec (restart_bridge / a learned light WHERE): the daemon replaces its image at the SAME
+        // pid, so an in-flight command's child is NOT reparented to init and must be cleaned up HERE. Wait for
+        // the active dispatch to finish its own group-kill + detached-reap (the guard below then downgrades to
+        // a plain exit if a reaper is still stuck) so the re-exec never strands a process group. No external
+        // deadline governs this btmqttd-internal path (the init script's 8 s SIGKILL grace applies only to
+        // `/etc/init.d/btmqttd stop`, which is the plain-exit branch). Bound it so a wedged dispatch can't hang
+        // the re-exec: on expiry, abort AND fall back to a plain exit — never an in-place re-exec over an
+        // aborted, possibly-unreaped child; a plain exit lets init (PID 1) adopt and reap it while the watchdog
+        // respawns the bridge. `CMD_WORKER_DRAIN` comfortably covers the restore_ssh dropbear start (10 s).
+        const CMD_WORKER_DRAIN: Duration = Duration::from_secs(12);
+        match tokio::time::timeout(CMD_WORKER_DRAIN, &mut cmd_worker).await {
+            Ok(Ok(())) => {} // clean drain: the worker finished its in-flight command and exited
+            Ok(Err(join_err)) => {
+                // The worker task ended abnormally (panic/cancel — its contract is "never panics", but be
+                // defensive): the unwind dropped the in-flight `Child` + permit, and kill_on_drop only
+                // SIGKILLs the direct child without reaping, so a child may be unreaped while
+                // `outstanding_reapers()` reads low. Never re-exec over that — plain-exit so init reaps it
+                // (Copilot).
+                eprintln!("btmqttd: command worker ended abnormally ({join_err}); exiting instead of re-exec");
+                reexec = false;
+            }
+            Err(_) => {
+                eprintln!(
+                    "btmqttd: command worker did not drain within {}s; aborting and exiting instead of re-exec",
+                    CMD_WORKER_DRAIN.as_secs()
+                );
+                cmd_worker.abort();
+                let _ = cmd_worker.await;
+                reexec = false; // an aborted in-flight child may be unreaped — never re-exec over it
+            }
+        }
+    } else {
+        // Plain exit (SIGTERM/SIGINT — e.g. `/etc/init.d/btmqttd stop`, which SIGKILLs after only an 8 s
+        // grace): the process fully EXITS, so the OS reparents any in-flight command's children to init
+        // (PID 1), which reaps them — there is no same-pid orphan to prevent, hence no long drain (which would
+        // overrun the grace and get SIGKILLed anyway — Codex). Abort-and-await like the other tasks, so the
+        // worker's already-enqueued publishes stay ordered before `offline` and shutdown stays well within the
+        // grace. The active command's direct child gets kill_on_drop's SIGKILL; anything it spawned (e.g. the
+        // dropbear it was starting — which we WANT to keep running) is reparented to init.
+        stop(cmd_worker).await;
+    }
     // The command worker is now quiesced — no further `reboot` command can be dispatched — so the reboot
     // gate is STABLE from here. Re-check it before committing to a re-exec: the `restart.notified()` arm
     // tested the gate when it fired, but a `reboot` queued behind that restart can still have run during one
@@ -942,6 +1009,31 @@ async fn run() -> Result<bool, String> {
     if reexec && receiver::reboot_in_progress().await {
         eprintln!("btmqttd: re-exec cancelled: a reboot became outstanding during shutdown; exiting instead");
         reexec = false;
+    }
+    // Likewise, do NOT re-exec in place while a command-child reaper is still outstanding. A reaper
+    // owns an OS child of THIS pid — a killed child not yet collected, e.g. a restore_ssh dropbear-start
+    // stuck in D-state on failing storage. An in-place re-exec keeps the pid but drops that `Child`
+    // handle; the fresh image (with a fresh, empty `REAP_SLOTS`) then has no handle to reap the child when
+    // it finally dies, so it leaks as a zombie and quietly defeats the REAP_CONCURRENCY bound across
+    // repeated restart cycles (Codex). Give any reaper a brief chance to finish first — a normally-killed
+    // child is collected in microseconds, so the common restart races through untouched — then, only if one
+    // is genuinely stuck, fall back to a plain exit so init inherits and reaps the orphan (the watchdog
+    // respawns the bridge within ~60 s). The runtime is still alive here, so the reap tasks make progress
+    // and release their permits during the drain.
+    if reexec && receiver::outstanding_reapers() > 0 {
+        for _ in 0..40 {
+            if receiver::outstanding_reapers() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if receiver::outstanding_reapers() > 0 {
+            eprintln!(
+                "btmqttd: re-exec cancelled: a command child is still outstanding (killed and awaiting reap); \
+                 exiting so init can reap the orphan"
+            );
+            reexec = false;
+        }
     }
     // Drain the stair-light persist task LAST among the state producers: `command()` (on
     // cmd_worker) and `observe()` (on sender_task) are now stopped, so no further state can be
