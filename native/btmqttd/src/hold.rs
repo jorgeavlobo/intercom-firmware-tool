@@ -103,7 +103,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// [`sprop::runtime_sdp_has_sprop`]). With the parameter sets already in the SDP, go2rtc's copy ffmpeg
 /// resolves the video and opens its loopback publisher within about a second of the panel coming up, so
 /// this only has to outlast the RTSP handshake + panel-up + first republish. Short so an unauthenticated
-/// socket's single allowance is brief (Codex). Validated on hardware.
+/// socket's single allowance is brief. Validated on hardware.
 const BOOTSTRAP_GRACE: Duration = Duration::from_secs(15);
 /// The bootstrap allowance when the RUNTIME SDP has NO parameter sets yet (a genuinely fresh unit, or a
 /// learn that persisted but whose best-effort runtime patch failed — see [`sprop::runtime_sdp_has_sprop`],
@@ -114,7 +114,7 @@ const BOOTSTRAP_GRACE: Duration = Duration::from_secs(15);
 /// keeping auto-hold poking (`Hold`) on the socket alone through that first cold lock-on; it must outlast
 /// one keyframe interval + SIP settle so those every-poll pokes keep renewing sip.rs's short linger until
 /// `serving` appears — otherwise the pokes stop, the linger lapses, and the session BYEs before `serving`
-/// can ever go true and the unit never learns (Codex). (The linger being short is fine here: pokes arrive
+/// can ever go true and the unit never learns. (The linger being short is fine here: pokes arrive
 /// every `POLL_INTERVAL`, far inside `VIEWER_LINGER`, so the window never lapses between them while the
 /// allowance lasts — only when the allowance ends do the pokes stop.) Generous margin over the ~20 s
 /// interval for settle/jitter and a just-missed keyframe. Applies only until the runtime SDP gains its
@@ -123,7 +123,7 @@ const PROVISIONING_GRACE: Duration = Duration::from_secs(45);
 /// Forced idle gap after a bootstrap allowance is SPENT WITHOUT reaching `serving`, before another
 /// socket-alone allowance may arm. A raw socket earns exactly one `grace` allowance, then — crucially —
 /// merely disconnecting and reconnecting must NOT mint a fresh one (that would let an unauthenticated
-/// client pin the panel indefinitely by cycling the socket faster than the linger lapses; Codex). So
+/// client pin the panel indefinitely by cycling the socket faster than the linger lapses). So
 /// `run` gates the NEXT allowance behind `VIEWER_LINGER + BOOTSTRAP_COOLDOWN` measured from the last arm:
 /// the `+ linger` guarantees the panel actually comes down (the last poke holds it up for one whole
 /// linger after the allowance ends) and this margin is the true idle gap. An observed `serving` (a real
@@ -195,13 +195,13 @@ pub async fn run(stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
             // when no viewer is connected (e.g. after a ring). Honoring the Stop over an active viewer was
             // considered and rejected: tearing the session down drops the client, HA auto-reconnects, the
             // connection reappears, and a suppression flag would fight HA's reconnect for no real benefit
-            // (product decision on #129; Codex). The poke is `Hold` (short linger), never `Start` (the
+            // (product decision on #129). The poke is `Hold` (short linger), never `Start` (the
             // full manual window), so it never lengthens a view past ~VIEWER_LINGER after the viewer leaves.
             //
             // The poke carries its ABSOLUTE expiry (`now + VIEWER_LINGER`, on the tokio clock sip.rs's hold
             // loop sleeps on), NOT a bare "renew" signal: if this poke sits queued while sip.rs is in
             // reconnect backoff and the viewer disconnects meanwhile, sip.rs sees the expiry has passed and
-            // drops it instead of reviving/extending a viewerless session (Codex, CodeRabbit). `now` is the
+            // drops it instead of reviving/extending a viewerless session. `now` is the
             // poll's own clock reading, so the expiry is anchored to when the viewer was actually observed.
             let _ = view_tx.try_send(ViewCmd::Hold(tokio::time::Instant::from_std(now + VIEWER_LINGER)));
         }
@@ -217,7 +217,7 @@ pub async fn run(stopping: Arc<AtomicBool>, view_tx: mpsc::Sender<ViewCmd>) {
 /// I/O, no wall clock) so the bootstrap / serving / cooldown state machine is unit-testable; `run` owns the
 /// clock and the async `/proc` + SDP reads.
 ///
-/// The AUTHENTICATED-ACTIVITY GATE (Codex): a raw TCP socket to :8554 is enough to BOOTSTRAP the first
+/// The AUTHENTICATED-ACTIVITY GATE: a raw TCP socket to :8554 is enough to BOOTSTRAP the first
 /// open — it has to be, because go2rtc's exec is lazy and can't serve (spawn ffmpeg, get RTP) until this
 /// task brings the panel up — but a raw socket alone must not PIN the panel indefinitely: an
 /// unauthenticated LAN host (a scanner, a health-check, a malicious hold) could otherwise keep the session
@@ -242,9 +242,9 @@ fn bootstrap_decision(
     if !viewer {
         // No external socket: nothing to hold. Checked BEFORE `serving` because the loopback publisher can
         // linger for a moment after the external RTSP client disconnects — and it alone must NEVER renew the
-        // SIP window (CodeRabbit), so a `(viewer=false, serving=true)` poll must not poke. We also PRESERVE
-        // `next_arm` — a mere connection gap must not grant the next raw connection a fresh allowance
-        // (Codex), so an unauthenticated cycler stays gated across the gap.
+        // SIP window, so a `(viewer=false, serving=true)` poll must not poke. We also PRESERVE
+        // `next_arm` — a mere connection gap must not grant the next raw connection a fresh allowance,
+        // so an unauthenticated cycler stays gated across the gap.
         return (until, next_arm, false);
     }
     if serving {
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn reconnect_within_cooldown_cannot_refresh_the_allowance() {
-        // Codex: an unauthenticated client holds a socket, drops it for a poll, and reconnects. The gap
+        // An unauthenticated client holds a socket, drops it for a poll, and reconnects. The gap
         // (viewer == false) must NOT reset the cooldown gate, so the reconnect stays gated — otherwise a
         // raw socket could pin the panel indefinitely by cycling faster than the SIP window lapses.
         let t = Instant::now();
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn a_fresh_allowance_arms_once_the_cooldown_gate_elapses() {
-        // CodeRabbit: a genuine viewer that arrived after an earlier socket spent the allowance must not be
+        // A genuine viewer that arrived after an earlier socket spent the allowance must not be
         // starved forever — once the cooldown gate passes, a new allowance arms.
         let t = Instant::now();
         let now = at(t, 80); // past next_arm (t + 75)
@@ -620,7 +620,7 @@ mod tests {
 
     #[test]
     fn lingering_publisher_without_a_viewer_does_not_renew() {
-        // CodeRabbit: go2rtc's loopback publisher can linger briefly AFTER the external RTSP client
+        // go2rtc's loopback publisher can linger briefly AFTER the external RTSP client
         // disconnects. In that `(viewer=false, serving=true)` window the publisher alone must NOT renew the
         // SIP window — the `!viewer` guard is checked before `serving`, so no poke — and the gate is
         // preserved (an active allowance and a future next_arm both survive) so a later reconnect can't

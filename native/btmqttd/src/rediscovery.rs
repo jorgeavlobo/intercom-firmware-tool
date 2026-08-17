@@ -49,7 +49,7 @@
 //! `_mqtt._tcp`/`_secure-mqtt._tcp`, or it runs on an mDNS-discoverable Home Assistant host — because
 //! link-local multicast (`224.0.0.251`) reaches the whole link, not just one `/24`. With no such
 //! advertisement both mDNS layers propose nothing and the fallback scan sweeps only the confirmed /
-//! build-time `/24`s, so a cross-`/24` move to a plain, unadvertised host is NOT recovered (Codex).
+//! build-time `/24`s, so a cross-`/24` move to a plain, unadvertised host is NOT recovered.
 //! A move to a **routed** subnet/VLAN is never recovered: mDNS multicast doesn't cross a router
 //! without an external reflector. And a **port/transport**
 //! move (1883 ↔ 8883, i.e. plaintext ↔ TLS) is a reconfiguration the user re-runs the tool for, NOT
@@ -93,12 +93,12 @@ const PROBE_CONCURRENCY: usize = 64;
 ///   * a **TLS** failure — this variant only occurs with TLS configured, and it means
 ///     the peer did NOT present our pinned certificate, i.e. the address is now served
 ///     by a DIFFERENT host (the classic DHCP-reuse case). The real broker passes the
-///     pinned-cert handshake and refuses (if at all) at the MQTT layer instead (Copilot).
+///     pinned-cert handshake and refuses (if at all) at the MQTT layer instead.
 ///
 /// A `ConnectionRefused` (MQTT CONNACK: bad credentials / not authorized — and, under
 /// TLS, only reached AFTER the cert validated, so it is the REAL broker) or another
 /// protocol-level variant means the host WAS reached as our broker and rejected US, so
-/// we must NOT wander off and retire the anchor (issue #43 / Codex P2).
+/// we must NOT wander off and retire the anchor (issue #43).
 ///
 /// For the `Io` variant we exclude only the `ErrorKind`s that signal a LOCAL fault
 /// (permission denied, unsupported) rather than an unreachable/foreign host; unexpected
@@ -143,7 +143,7 @@ pub fn is_unreachable(e: &rumqttc::ConnectionError) -> bool {
 /// WITHOUT TLS there is no way to authenticate the broker on reconnect (a rogue/other
 /// broker would simply accept the connection, and any credentials, in cleartext), so a
 /// candidate is adopted ONLY when its `/proc/net/arp` MAC matches the recorded
-/// `MQTT_BROKER_MAC` hint (issue #43 / Codex P1 / CodeRabbit). `main` additionally
+/// `MQTT_BROKER_MAC` hint (issue #43). `main` additionally
 /// refuses to activate rediscovery at all without one of these anchors.
 pub async fn rediscover(
     cfg: &Config,
@@ -165,7 +165,7 @@ pub async fn rediscover(
     // anchor `/24` — folding it into
     // `tried` would let `retire_scan_subnets` re-arm it every pass, so mDNS would re-propose the
     // same wrong broker forever and each optimistic repoint would reset `dry_cycles`, defeating
-    // the periodic full-reset bound (Codex P2). Only the bounded full-reset clears it.
+    // the periodic full-reset bound. Only the bounded full-reset clears it.
     if let Some(ip) = mdns_propose(cfg, tried, mdns_rejected).await {
         if let Some(done) = seed_proposal(&cfg.mqtt_host, ip, mdns_rejected, "mDNS").await {
             return Some(done);
@@ -199,13 +199,13 @@ pub async fn rediscover(
     };
     // Gather the subnets to scan. Three review findings converge here:
     //   * NEVER anchor on an UNCONFIRMED mDNS proposal sitting in /etc/hosts — that could
-    //     strand the scan on the wrong /24 (Copilot);
+    //     strand the scan on the wrong /24;
     //   * DO follow the broker to a subnet it legitimately moved to and CONFIRMED
     //     (`confirmed_anchor`, advanced only by a ConnAck) — a DHCP move WITHIN that subnet is
-    //     only recoverable by scanning it (Codex);
+    //     only recoverable by scanning it;
     //   * but ALSO keep scanning the immutable build-time subnet, so a broker that RETURNED to
     //     its original subnet while mDNS is unavailable is still found once the confirmed
-    //     subnet is exhausted (Codex).
+    //     subnet is exhausted.
     // So the fallback scans the UNION of the last-confirmed /24 and the build-time /24 — the
     // same /24 (deduped) when the broker never left. Neither is an unconfirmed proposal, so
     // there is no drift. Fall back to the current /etc/hosts mapping only when neither a
@@ -223,7 +223,7 @@ pub async fn rediscover(
         }
     }
     // Only ever scan a private LAN /24: drop any anchor pinned to a public, loopback or
-    // link-local address rather than probe a non-local subnet (Copilot).
+    // link-local address rather than probe a non-local subnet.
     anchors.retain(|a| anchor_is_scannable(*a));
     if anchors.is_empty() {
         eprintln!(
@@ -238,7 +238,7 @@ pub async fn rediscover(
     // Retire the CURRENT (stale) mapping — the address the broker is pinned to now, and that
     // just failed — so a repoint can't bounce back to it. The anchors themselves stay
     // probeable (the build-time or confirmed address must be findable if the broker returned
-    // there); only the current mapping is excluded, via `tried` (Codex). A current mapping
+    // there); only the current mapping is excluded, via `tried`. A current mapping
     // outside every anchor's /24 (a prior cross-subnet repoint) simply doesn't intersect the
     // candidates, so retiring it is then a harmless no-op.
     if let Some(current) = parse_hosts_ip(&hosts, &cfg.mqtt_host) {
@@ -278,7 +278,7 @@ pub async fn rediscover(
     // configured port: a port fallback (1883↔8883) is not recoverable here, because the client's
     // MqttOptions is fixed at cfg.mqtt_port for the process's life — repointing to a host that only
     // serves the OTHER port would just make the reconnect dial the closed configured port and cycle
-    // forever (Codex). And 1883↔8883 is plaintext↔TLS, a transport/security change (needs a CA, or
+    // forever. And 1883↔8883 is plaintext↔TLS, a transport/security change (needs a CA, or
     // is a downgrade) — a reconfiguration the user re-runs the tool for, NOT a rediscovery. A broker
     // that moved to a different port/transport is out of scope; an IP move on the same port is what
     // rediscovery recovers. (A move to a different /24 ON THE SAME L2 LINK is handled by the mDNS
@@ -291,7 +291,7 @@ pub async fn rediscover(
         );
         // No OPEN untried host this pass — re-arm the scanned /24(s) so the next pass re-probes
         // them (incl. former anchors) in case the real broker returns there, WITHOUT forgetting
-        // mDNS proposals already rejected this outage — in-/24 or cross-subnet (Codex P2).
+        // mDNS proposals already rejected this outage — in-/24 or cross-subnet.
         retire_scan_subnets(&anchors, tried, mdns_rejected, dry_cycles);
         return None;
     }
@@ -333,7 +333,7 @@ pub async fn rediscover(
             );
             // Every open host was untrusted (MAC-mismatched). Like the no-open-host case,
             // re-arm the scanned /24(s) for the next pass (the MAC gate still guards adoption)
-            // without forgetting mDNS proposals already rejected — in-/24 or cross-subnet (Codex P2).
+            // without forgetting mDNS proposals already rejected — in-/24 or cross-subnet.
             retire_scan_subnets(&anchors, tried, mdns_rejected, dry_cycles);
             return None;
         }
@@ -346,7 +346,7 @@ pub async fn rediscover(
             tried.insert(pick);
             // As in the mDNS branch above, do NOT reset `dry_cycles` on a scan proposal: a rewrite
             // is not a confirmation, so resetting here would defeat the bound when several
-            // non-broker hosts answer on the port and get picked in turn (Codex P2). Only a
+            // non-broker hosts answer on the port and get picked in turn. Only a
             // ConnAck resets it.
             Some(pick)
         }
@@ -377,8 +377,8 @@ pub async fn current_broker_ip(name: &str) -> Option<Ipv4Addr> {
 pub const BOOT_HOSTS_SCRIPT: &str = "/etc/init.d/bt_daemon-apps.sh";
 
 /// The build-time IPv4 the boot init seeds for broker `name`, read from
-/// [`BOOT_HOSTS_SCRIPT`] — the IMMUTABLE source of the record's "base" (issue #49 item 1 /
-/// Codex). Reading the build IP from here rather than the mutable `/etc/hosts` mapping is
+/// [`BOOT_HOSTS_SCRIPT`] — the IMMUTABLE source of the record's "base" (issue #49 item 1).
+/// Reading the build IP from here rather than the mutable `/etc/hosts` mapping is
 /// what makes the persistence correct across a `bt_service_watchdog` respawn (where
 /// `/etc/hosts` may already hold a rediscovered IP) and a firmware re-flash (which the
 /// rootfs script reflects but tmpfs does not). `None` if the script can't be read or has
@@ -390,7 +390,7 @@ pub async fn build_time_ip(name: &str) -> Option<Ipv4Addr> {
 
 /// Whether `ip` currently answers on `port` AND its `/proc/net/arp` MAC matches
 /// `want_mac`. This is the PLAINTEXT trust gate re-applied before the boot seed restores
-/// a persisted IP (issue #49 item 1 / Codex P1): `rediscover` only ever adopts a plaintext
+/// a persisted IP (issue #49 item 1): `rediscover` only ever adopts a plaintext
 /// candidate whose ARP MAC matches, so the boot restore must apply the same check — else
 /// an address DHCP reassigned while the unit was off could take our credentials on the
 /// first connect (a wrong broker would ConnAck and normal rediscovery would never run).
@@ -436,10 +436,10 @@ const MDNS_WINDOW: Duration = Duration::from_secs(2);
 /// in `mdns_rejected` so it isn't re-proposed if it turns out wrong — a proposal that authenticates
 /// is cleared on the next ConnAck. Returns `Some(ip)` when the mapping was actually rewritten (the
 /// caller returns it and lets the reconnect gate decide), `None` when it already pointed there (the
-/// address currently failing — CodeRabbit) or the rewrite failed, so the caller falls through to
+/// address currently failing) or the rewrite failed, so the caller falls through to
 /// the next layer. Deliberately does NOT touch `dry_cycles`: a hosts rewrite is a proposal, not a
 /// confirmation, so only a ConnAck (in `main`) resets that counter — else two-or-more spurious open
-/// hosts could alternate forever and the periodic full-reset would never fire (Codex P2).
+/// hosts could alternate forever and the periodic full-reset would never fire.
 async fn seed_proposal(
     host: &str,
     ip: Ipv4Addr,
@@ -506,7 +506,7 @@ async fn ha_propose(
 /// must be open AND the host's `/proc/net/arp` MAC must match the recorded `MQTT_BROKER_MAC`.
 /// Without TLS and without a MAC, nothing is proposed. The port probe is BATCHED across all
 /// candidates in one concurrency-limited [`probe_open`] call, so many answers don't serialize into
-/// `N * PROBE_TIMEOUT` before the fallback (Copilot); in plaintext `/proc/net/arp` is read ONCE and
+/// `N * PROBE_TIMEOUT` before the fallback; in plaintext `/proc/net/arp` is read ONCE and
 /// each candidate compared via [`mac_matches`]. Shared by `mdns_propose` and `ha_propose`.
 async fn gate_candidates(cfg: &Config, candidates: Vec<Ipv4Addr>) -> Option<Ipv4Addr> {
     if candidates.is_empty() {
@@ -521,7 +521,7 @@ async fn gate_candidates(cfg: &Config, candidates: Vec<Ipv4Addr>) -> Option<Ipv4
         // Plaintext: batch the port probes once (to populate the ARP table for the open hosts),
         // read /proc/net/arp once, then pick the first candidate that is open AND whose ARP entry
         // matches the recorded broker MAC — so many advertisers don't serialize into
-        // N * PROBE_TIMEOUT before the /24 fallback (Copilot).
+        // N * PROBE_TIMEOUT before the /24 fallback.
         let open: HashSet<Ipv4Addr> =
             probe_open(&candidates, cfg.mqtt_port).await.into_iter().collect();
         if open.is_empty() {
@@ -645,8 +645,8 @@ fn anchor_is_scannable(anchor: Ipv4Addr) -> bool {
 /// Every host address (`.1`–`.254`) in `anchor`'s `/24` — the addresses worth probing for
 /// the moved broker. The network (`.0`) and broadcast (`.255`) fall outside the range. The
 /// anchor address itself is deliberately NOT excluded: with the anchor fixed to the immutable
-/// build-time IP, that address must stay probeable so a broker that RETURNED to it is found
-/// (Codex); the caller excludes the current stale mapping via `tried` instead.
+/// build-time IP, that address must stay probeable so a broker that RETURNED to it is found;
+/// the caller excludes the current stale mapping via `tried` instead.
 fn slash24_candidates(anchor: Ipv4Addr) -> Vec<Ipv4Addr> {
     let o = anchor.octets();
     (1u8..=254)
@@ -678,11 +678,11 @@ const FULL_RESET_AFTER_DRY_CYCLES: u32 = 4;
 /// outage stay excluded even when they sit INSIDE an anchor `/24`. Keeping them in a set the
 /// scan re-arm never clears is what stops the mDNS layer from re-proposing the same wrong broker
 /// every reset — otherwise each optimistic repoint would reset `dry_cycles` and the periodic
-/// full-reset below would never fire, so discovery would oscillate instead of advancing (Codex).
+/// full-reset below would never fire, so discovery would oscillate instead of advancing.
 ///
 /// But holding a rejection for the WHOLE outage isn't self-healing either: if the real broker
-/// later takes over that IP (DHCP reassignment / restart) mid-outage, it would stay excluded
-/// (Copilot). So after `FULL_RESET_AFTER_DRY_CYCLES` consecutive fruitless passes it does a FULL
+/// later takes over that IP (DHCP reassignment / restart) mid-outage, it would stay excluded.
+/// So after `FULL_RESET_AFTER_DRY_CYCLES` consecutive fruitless passes it does a FULL
 /// clear of BOTH sets — giving every rejected address another chance, on a bounded cadence that
 /// keeps the anti-oscillation guarantee. The trust gate still guards every adoption regardless.
 ///
@@ -690,7 +690,7 @@ const FULL_RESET_AFTER_DRY_CYCLES: u32 = 4;
 /// clear) and by `main` on a ConnAck. It is deliberately NOT reset when `rediscover` merely
 /// PROPOSES an address (an mDNS repoint or a scan pick): a hosts rewrite is not a confirmation,
 /// and resetting on unconfirmed proposals would let two-or-more spurious open hosts in the /24
-/// alternate forever without the counter ever reaching the bound (Codex P2).
+/// alternate forever without the counter ever reaching the bound.
 fn retire_scan_subnets(
     anchors: &[Ipv4Addr],
     tried: &mut HashSet<Ipv4Addr>,
@@ -885,7 +885,7 @@ mod tests {
     #[test]
     fn slash24_candidates_covers_the_whole_24_including_the_anchor() {
         // The anchor (build-time IP) is NOT excluded: a broker that returned to it must be
-        // probeable; the caller drops the current stale mapping via `tried` (Codex).
+        // probeable; the caller drops the current stale mapping via `tried`.
         let c = slash24_candidates(Ipv4Addr::new(192, 168, 50, 64));
         assert_eq!(c.len(), 254); // .1..=.254 inclusive
         assert!(!c.contains(&Ipv4Addr::new(192, 168, 50, 0))); // network excluded by range
@@ -898,7 +898,7 @@ mod tests {
 
     #[test]
     fn scan_keeps_the_build_time_anchor_when_the_current_mapping_differs() {
-        // Codex: /etc/hosts points at a learned address in ANOTHER /24; the build-time
+        // /etc/hosts points at a learned address in ANOTHER /24; the build-time
         // anchor must remain a scan candidate so a broker that returned to it is found.
         let anchor = Ipv4Addr::new(192, 168, 50, 64); // build-time IP
         let mut tried = HashSet::new();
@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn scan_union_covers_both_confirmed_and_build_time_subnets() {
-        // Codex: sweep the union of the last-confirmed /24 and the build-time /24, so a broker
+        // sweep the union of the last-confirmed /24 and the build-time /24, so a broker
         // that RETURNED to its original subnet (mDNS down) is found alongside the confirmed one.
         let confirmed = Ipv4Addr::new(10, 0, 0, 40);
         let build_time = Ipv4Addr::new(192, 168, 50, 64);
@@ -944,7 +944,7 @@ mod tests {
     fn retire_scan_subnets_keeps_mdns_rejections_in_and_out_of_subnet() {
         // A scan re-arm re-probes the scanned /24 addresses (from `tried`) but must NOT forget any
         // mDNS rejection this outage — whether it sits INSIDE an anchor /24 or in another subnet.
-        // The in-/24 case is the Codex P2 regression: folding mDNS rejections into `tried` let the
+        // The in-/24 case is the regression: folding mDNS rejections into `tried` let the
         // re-arm re-propose the same wrong in-/24 broker every pass.
         let anchor = Ipv4Addr::new(192, 168, 50, 64);
         let mut tried = HashSet::new();
@@ -965,7 +965,7 @@ mod tests {
     #[test]
     fn retire_scan_subnets_full_clears_after_enough_dry_cycles() {
         // After FULL_RESET_AFTER_DRY_CYCLES fruitless passes it forgets EVERYTHING — both `tried`
-        // and every mDNS rejection (in-/24 and cross-subnet) — so recovery self-heals (Copilot),
+        // and every mDNS rejection (in-/24 and cross-subnet) — so recovery self-heals,
         // on a bounded cadence.
         let anchor = Ipv4Addr::new(192, 168, 50, 64);
         let mut tried = HashSet::new();
@@ -1085,7 +1085,7 @@ IP address       HW type     Flags       HW address            Mask     Device
     #[test]
     fn rewrite_hosts_preserves_other_aliases_on_the_line() {
         // A line carrying more than the broker name: only the matched alias moves; the
-        // other alias keeps its original address (CodeRabbit).
+        // other alias keeps its original address.
         let hosts = "192.168.50.64\tbroker.lan MyBroker\n";
         let out = rewrite_hosts(hosts, "broker.lan", Ipv4Addr::new(192, 168, 50, 200));
         // MyBroker stays put; broker.lan is repointed; neither is duplicated.

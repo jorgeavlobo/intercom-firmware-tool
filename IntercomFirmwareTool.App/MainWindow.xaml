@@ -1411,7 +1411,7 @@
                              do not apply. Toggled together with the on-device hint in ApplyCameraOnDeviceMode. -->
                         <TextBlock x:Name="LblMqttCameraOffDeviceHint" Text="{loc:Loc Hint_MqttCamera}"
                                    Foreground="Gray" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
-                        <!-- Security disclosure: the OFF-device fan-out is cleartext RTP over UDP (CodeRabbit). -->
+                        <!-- Security disclosure: the OFF-device fan-out is cleartext RTP over UDP. -->
                         <TextBlock x:Name="LblMqttCameraCleartextWarn" Text="{loc:Loc Warn_MqttCameraCleartext}"
                                    Foreground="#C0392B" FontSize="11" TextWrapping="Wrap" Margin="0,4,0,0"/>
                         <!-- On-demand viewing (Phase 2, #104): also view the camera when NOT ringing,

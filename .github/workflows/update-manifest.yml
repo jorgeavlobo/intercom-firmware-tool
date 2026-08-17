@@ -101,7 +101,7 @@ jobs:
           # Reject embedded control/newline chars FIRST: grep -E evaluates the anchored regex per
           # LINE, so a value like "2.0.0<newline>junk" would otherwise pass on its first line and be
           # treated as a valid version (then propagated) — the same trap the release-version check
-          # above guards against (Codex).
+          # above guards against.
           is_stable_ver() {
             case "$1" in *[![:print:]]*) return 1 ;; esac
             printf '%s' "$1" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -119,14 +119,14 @@ jobs:
           # (reused across releases so a still-pending bump never spawns a second, conflicting PR),
           # opened as a PR and auto-merged. Root that branch on a FRESHLY fetched master, not the
           # possibly-stale initial checkout: if the previous manifest PR merged mid-run, this keeps the
-          # new commit from rooting on a pre-merge base that would then conflict (Codex).
+          # new commit from rooting on a pre-merge base that would then conflict.
           git fetch origin master
           git checkout -B "$branch" origin/master
 
           # sort_le a b  ->  true when a <= b (sort -V handles the stable X.Y.Z values this step accepts).
           sort_le() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]; }
           # Resolve the open rolling PR number from THIS repo (prints empty when none). Centralised so the
-          # same-repo + base-master + open-state filter can never drift between call sites (CodeRabbit).
+          # same-repo + base-master + open-state filter can never drift between call sites.
           resolve_pr() {
             gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
               --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty'
@@ -136,7 +136,7 @@ jobs:
           # These come from the manifest on master (latestVersion is written by this workflow;
           # minimumSupportedVersion is hand-maintained). If either was corrupted to a non-stable value,
           # the sort -V comparisons below would be unreliable and we could propagate an unparseable
-          # value the app can't read — fail closed so a human fixes .well-known/updates.json (Copilot).
+          # value the app can't read — fail closed so a human fixes .well-known/updates.json.
           if ! is_stable_ver "$master_latest"; then
             echo "::error::master's latestVersion '$master_latest' is not a stable X.Y.Z; fix .well-known/updates.json before releasing."
             exit 1
@@ -148,10 +148,10 @@ jobs:
 
           # Is a PR already open on the rolling branch, from THIS repo? `gh pr list --head` filters by
           # branch NAME only, so on a public repo it could match a fork's same-named branch; select
-          # isCrossRepository == false and use the verified number for edit/merge (Codex P1). Fail
+          # isCrossRepository == false and use the verified number for edit/merge. Fail
           # CLOSED if the query itself errors (transient API/auth): treating a failed lookup as "no PR"
           # would skip the pending-version guard below and could force a lower version over a higher
-          # pending one, so abort instead (Codex P2). An empty result (no such PR) is fine and proceeds.
+          # pending one, so abort instead. An empty result (no such PR) is fine and proceeds.
           if ! existing="$(resolve_pr 2>/dev/null)"; then
             echo "::error::could not query the open rolling manifest PR; aborting rather than risk regressing a higher pending version."
             exit 1
@@ -160,18 +160,18 @@ jobs:
           # Fetch the rolling branch (for the lease below, and to read its pending value). The
           # EFFECTIVE current latestVersion is the max of what's on master AND any value carried on the
           # rolling branch, so a lower backport/dispatch never regresses a higher version already queued
-          # to merge (Codex P2). Read the branch value WHENEVER the branch exists, not only when an open
+          # to merge. Read the branch value WHENEVER the branch exists, not only when an open
           # PR does: if a prior run's `gh pr create` failed, the branch is orphaned (no PR) but may hold
-          # a NEWER version, and ignoring it would let a later lower bump overwrite and lose it (Codex).
+          # a NEWER version, and ignoring it would let a later lower bump overwrite and lose it.
           # A stale, already-merged branch just carries an old value <= master, so honoring it is safe.
           # Distinguish a genuinely-absent branch from a fetch that FAILED: if the branch exists on the
           # remote but the fetch errors (transient network/auth), fail closed. Otherwise pending_latest
           # would fall back to 0.0.0 (regressing a higher queued version) and the force-with-lease below
-          # would push without a fresh lease (CodeRabbit). A branch that simply doesn't exist is fine.
+          # would push without a fresh lease. A branch that simply doesn't exist is fine.
           # `git ls-remote --exit-code` returns 2 when the branch genuinely does not exist, but other
           # nonzero codes (e.g. 128) when the query itself fails. Only exit 2 means "absent, skip the
           # fetch"; any other failure must fail closed, or we'd re-mask a transient error and leave
-          # pending_latest at 0.0.0 / push without a fresh lease (CodeRabbit).
+          # pending_latest at 0.0.0 / push without a fresh lease.
           if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
             if ! git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
               echo "::error::could not fetch the existing rolling branch '$branch'; aborting rather than risk regressing a higher pending version or pushing without a fresh lease."
@@ -191,7 +191,7 @@ jobs:
           # The rolling branch is only ever written by this workflow (validated), but guard anyway: a
           # corrupted/hand-edited branch value must not be selected as target and written back. Ignore a
           # non-stable pending value (treat as 0.0.0) rather than fail closed, so a bad transient branch
-          # can't block releases indefinitely (Copilot).
+          # can't block releases indefinitely.
           if ! is_stable_ver "$pending_latest"; then
             echo "::warning::rolling branch '$branch' carries a non-stable latestVersion '$pending_latest'; ignoring it."
             pending_latest="0.0.0"
@@ -200,8 +200,8 @@ jobs:
           # and whatever the rolling branch already carries (including an orphaned bump from a failed
           # prior `gh pr create`). Framing it as this max resolves BOTH failure modes: a lower backport
           # can't regress a higher pending/orphaned value, AND an orphaned higher value is recovered
-          # (opened as a PR) instead of being skipped as "nothing to do" while master stays stale
-          # (Codex). If master is already at that max, there is genuinely nothing to do.
+          # (opened as a PR) instead of being skipped as "nothing to do" while master stays stale.
+          # If master is already at that max, there is genuinely nothing to do.
           target="$version"
           if ! sort_le "$master_latest" "$target"; then target="$master_latest"; fi
           if ! sort_le "$pending_latest" "$target"; then target="$pending_latest"; fi
@@ -232,14 +232,14 @@ jobs:
           git commit -m "chore(updates): set latestVersion to $version"
           # Push the rolling branch (a side branch, never the protected master). --force-with-lease
           # against the remote ref fetched above: refresh in place, but don't clobber an unexpected
-          # update (Copilot).
+          # update.
           git push --force-with-lease origin "HEAD:$branch"
 
           title="chore(updates): set latestVersion to $version"
           body="Automated update of \`.well-known/updates.json\` \`latestVersion\` to \`$version\` after the v$version release was published (issue #85). Merging this makes the in-app update check nudge users to v$version."
           # Re-resolve the open rolling PR AFTER pushing: the create-vs-reuse decision must reflect the
           # PR's state now, not the pre-guard snapshot. The prior PR may have merged/closed in between,
-          # which would otherwise make us edit a now-closed PR and never open a replacement (Codex).
+          # which would otherwise make us edit a now-closed PR and never open a replacement.
           # Non-fatal: both branches below tolerate a wrong guess (create errors if one exists; edit
           # errors if none), so a transient failure just falls through to the create path.
           existing="$(resolve_pr 2>/dev/null || true)"
@@ -253,7 +253,7 @@ jobs:
             # A PR is already open on the rolling branch; the force-push retargeted it to $version, so
             # refresh its title/body to match. If the edit FAILS (e.g. the PR closed in the narrow race
             # between the lookup above and here), re-resolve and fall back to creating a replacement, so
-            # the pushed bump never ends up stranded on a branch with no open PR (CodeRabbit).
+            # the pushed bump never ends up stranded on a branch with no open PR.
             if gh pr edit "$existing" --title "$title" --body "$body"; then
               echo "Reused open PR #$existing on $branch, retargeted to $version."
             else
@@ -268,7 +268,7 @@ jobs:
           fi
 
           # Turn on auto-merge so the PR lands once the required checks pass, targeting the verified PR
-          # NUMBER (never the ambiguous branch selector) (Codex P1). This only completes when the
+          # NUMBER (never the ambiguous branch selector). This only completes when the
           # checks actually RUN, which needs the PAT (a GITHUB_TOKEN PR doesn't trigger them).
           if [ "${HAVE_PAT:-false}" = "true" ]; then
             if [ -n "$existing" ]; then

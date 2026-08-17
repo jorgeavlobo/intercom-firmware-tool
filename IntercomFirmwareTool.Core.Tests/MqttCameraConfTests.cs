@@ -46,7 +46,7 @@ public class MqttCameraConfTests
     public void A_target_equal_to_the_broker_host_writes_empty(string target)
     {
         // A target that just repeats the broker host is redundant: serialize blank so the device
-        // follows MQTT_HOST like the locked default, instead of pinning the literal (Copilot). The
+        // follows MQTT_HOST like the locked default, instead of pinning the literal. The
         // comparison is case-insensitive, matching the App validator and MqttInstaller.
         var conf = MqttInstaller.GenerateConf(new MqttOptions("broker.lan")
         {

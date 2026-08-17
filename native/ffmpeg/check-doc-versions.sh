@@ -16,7 +16,7 @@
 # This guard is EXHAUSTIVE, not presence-only: it requires (1) the pinned version to appear in
 # each version-bearing file, and (2) EVERY structured version token in those files to equal the
 # pin — so a partial bump that updates one occurrence but leaves another stale (e.g. the
-# displayed version updated but a `/tree/n7.1.1` corresponding-source URL left behind — Codex)
+# displayed version updated but a `/tree/n7.1.1` corresponding-source URL left behind)
 # still fails.
 #
 # Requires FFMPEG_TAG and ZIG_VERSION in the environment (the caller loads them from pins.env).
@@ -57,7 +57,7 @@ done
 # substring of a larger alnum token nor a truncated prefix of a longer numeric tag. A four-part
 # n7.1.1.1 is thus captured whole (not as n7.1.1) and fails; the tag embedded in an asset name
 # like `ffmpeg-n7.1.1-source.tar.gz` is captured as n7.1.1 and validated. No series-prefix
-# exemption — a shorter series such as n7.1 identifies a DIFFERENT release (Codex). The docs carry
+# exemption — a shorter series such as n7.1 identifies a DIFFERENT release. The docs carry
 # no bare `n7.1`-style series token: BUILD.md's minimal-build note says "FFmpeg 7.1" (no `n`).
 for f in $FF_FILES; do
   for tok in $(grep -oP '(?<![0-9A-Za-z])n[0-9]+(\.[0-9]+)+(?![0-9A-Za-z])' "$f" 2>/dev/null || true); do
@@ -67,7 +67,7 @@ done
 # (2b) Corresponding-source ASSET NAMES must be complete, exact values — so a hyphen-suffixed
 # variant like `ffmpeg-n7.1.1-old-source.tar.gz` (whose numeric token still reads n7.1.1 in 2a)
 # can't misidentify the shipped source. The only valid names are the source + build-recipe
-# archives release.yml ships for the pinned tag (Codex).
+# archives release.yml ships for the pinned tag.
 for f in $FF_FILES; do
   for asset in $(grep -oE 'ffmpeg-n[0-9A-Za-z.-]+\.tar\.gz' "$f" 2>/dev/null || true); do
     case "$asset" in
@@ -83,7 +83,7 @@ done
 # captures the version belonging to the zig mention) or after an "x86_64-" download-name prefix.
 # The separator allowance is generous (up to 24 non-digit chars) so documented phrasings like
 # "Zig version X.Y.Z" / "Zig toolchain version X.Y.Z" — not just "Zig X.Y.Z" / "zig cc X.Y.Z" —
-# are validated too (CodeRabbit).
+# are validated too.
 for f in $ZIG_FILES; do
   for tok in $(grep -oiE '(zig[^0-9]{0,24}|x86_64-)[0-9]+\.[0-9]+\.[0-9]+' "$f" 2>/dev/null \
                  | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true); do

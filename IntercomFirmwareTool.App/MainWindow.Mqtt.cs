@@ -612,7 +612,7 @@ namespace IntercomFirmwareTool.App
         {
             // Guard against calls before InitializeComponent has created the controls. Include every
             // control dereferenced unconditionally below (LblMqttCameraTarget too) — a Checked/Unchecked
-            // handler can fire mid-XAML-parse, so a control declared later may still be null (Copilot).
+            // handler can fire mid-XAML-parse, so a control declared later may still be null.
             if (ChkMqttCameraOnDevice is null || TxtMqttCameraTarget is null
                 || ChkMqttCameraHostOverride is null || LblMqttCameraTarget is null) return;
 
@@ -623,7 +623,7 @@ namespace IntercomFirmwareTool.App
             ChkMqttCameraHostOverride.Visibility = hostVis;
             // The off-device guidance ("need a go2rtc host", "cleartext RTP over the LAN") contradicts
             // on-device (authenticated RTSP served directly, RTP over loopback) — hide it on-device and
-            // show the on-device hint instead (Codex).
+            // show the on-device hint instead.
             if (LblMqttCameraOffDeviceHint is not null) LblMqttCameraOffDeviceHint.Visibility = hostVis;
             if (LblMqttCameraCleartextWarn is not null) LblMqttCameraCleartextWarn.Visibility = hostVis;
             if (LblMqttCameraOnDeviceHint is not null)
@@ -689,7 +689,7 @@ namespace IntercomFirmwareTool.App
             TxtMqttCameraTarget.IsReadOnly = !overridden;
             // The target hint belongs to the OFF-device locked host field. Hide it when overridden AND
             // when on-device — on-device the whole host row is collapsed, and this shared refresh path
-            // (broker-host edits, prefill) must not resurrect an orphaned hint under it (Codex).
+            // (broker-host edits, prefill) must not resurrect an orphaned hint under it.
             if (LblMqttCameraTargetHint is not null)
                 LblMqttCameraTargetHint.Visibility =
                     (overridden || onDevice) ? Visibility.Collapsed : Visibility.Visible;
@@ -713,7 +713,7 @@ namespace IntercomFirmwareTool.App
         /// recognized Classe 300X — its `bt_av_media` has the hi-res `multiudpsink`. Every other case
         /// (the Classe 100X, which has no hi-res branch, AND unrecognized firmware) defaults to
         /// Standard (low-res, branch 1), which works on every model. Fail-safe: we offer hi-res only
-        /// when we can positively assert the model supports it, never on an unknown (CodeRabbit). Every
+        /// when we can positively assert the model supports it, never on an unknown. Every
         /// customizable firmware is either "Classe 100X" or "Classe 300X", so this never restricts a
         /// real 300X.</summary>
         private bool CameraModelSupportsHiRes =>
@@ -738,7 +738,7 @@ namespace IntercomFirmwareTool.App
         {
             // Reject invalid or equal ports BEFORE generating the guide — otherwise it would
             // describe a configuration (default 40000/40002, or an unusable equal-port SDP) that
-            // doesn't match the camera form (CodeRabbit). Surface the same messages the Build gate uses.
+            // doesn't match the camera form. Surface the same messages the Build gate uses.
             if (!TryParsePort(TxtMqttCameraVideoPort.Text, out int vp)
                 || !TryParsePort(TxtMqttCameraAudioPort.Text, out int ap))
             {
@@ -774,7 +774,7 @@ namespace IntercomFirmwareTool.App
             // On-device: nothing to paste — show the Home Assistant RTSP URL + credentials, using the
             // EXACT stream name the installer writes (MqttInstaller.OnDeviceStreamName), NOT the HA node
             // id — the installed go2rtc stream is fixed, so a node-id URL would point at a nonexistent
-            // stream (Codex). Off-device: the classic copy-paste config, whose stream name follows the
+            // stream. Off-device: the classic copy-paste config, whose stream name follows the
             // HA node id (the user pastes it, so any name is fine; fall back to "doorbell").
             string guide = onDevice
                 ? Go2RtcConfig.BuildOnDeviceSetupGuide(opts, MqttInstaller.OnDeviceStreamName)
@@ -1644,7 +1644,7 @@ namespace IntercomFirmwareTool.App
                     // Reject a CR/LF in the target before Core is reached: the value is sourced into the
                     // shell-quoted .conf, so it must be single-line (mirrors the credential/topic checks).
                     // A blank target is fine — Core defaults it to the broker host. Format (hostname vs.
-                    // IPv4-vs-IPv6) is left to Core's Validate, which surfaces a clear popup (CodeRabbit).
+                    // IPv4-vs-IPv6) is left to Core's Validate, which surfaces a clear popup.
                     if (TxtMqttCameraTarget.Text.IndexOfAny(NewlineChars) >= 0)
                         return L("MqttHint_CameraTarget");
                     // Mirror Core's device-resolvability rule: a target that differs from the broker host
@@ -1706,7 +1706,7 @@ namespace IntercomFirmwareTool.App
 
             // Camera fan-out ports (issue #103). When DISABLED, ALWAYS write the record defaults —
             // the field is irrelevant then, and reading it could serialize an out-of-range value
-            // (e.g. 70000, or 0) that would strand a later manual CAMERA_ENABLED=1 (Copilot). When
+            // (e.g. 70000, or 0) that would strand a later manual CAMERA_ENABLED=1. When
             // ENABLED, parse the field, failing closed to 0 on an unparseable value so Core's Validate
             // rejects it with a clean popup (the Build gate already blocks it earlier).
             bool cameraOn = ChkMqttCamera.IsChecked == true;

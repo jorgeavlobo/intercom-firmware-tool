@@ -221,8 +221,8 @@ impl Config {
             light_where: opt("LIGHT_WHERE").filter(|s| s.bytes().all(|b| b.is_ascii_digit())),
             // "Has exterior light". When the installer wrote LIGHT_ENABLED it is AUTHORITATIVE
             // ("1" enables, anything else disables) — so unticking the option reliably turns the
-            // subsystem off even if a stale numeric LIGHT_WHERE lingers in the conf (Copilot,
-            // Codex). Only an OLD conf that predates the key (LIGHT_ENABLED absent) falls back to
+            // subsystem off even if a stale numeric LIGHT_WHERE lingers in the conf. Only an
+            // OLD conf that predates the key (LIGHT_ENABLED absent) falls back to
             // "a numeric LIGHT_WHERE implies the feature", keeping legacy configs working.
             light_enabled: match opt("LIGHT_ENABLED") {
                 Some(v) => v == "1",
@@ -257,7 +257,7 @@ impl Config {
             },
             // Reject port 0 (a hand-edited / corrupt conf) as well as an unparseable value: 0 would
             // build an invalid `*7*300#…#0#…*##` frame the siphon can never use. Fall back to the
-            // default so a bad value degrades to a working port rather than a dead one (Copilot).
+            // default so a bad value degrades to a working port rather than a dead one.
             camera_video_port: opt("CAMERA_VIDEO_PORT")
                 .and_then(|s| s.parse().ok())
                 .filter(|p| *p != 0)
@@ -282,7 +282,7 @@ impl Config {
             sip_devaddr: get("SIP_DEVADDR", ""),
             // Clamp to 1 s..=86400 s (1 day). >0 keeps a hand-edited 0 from disabling the hang-up; the
             // upper cap keeps a huge hand-edited value from overflowing `Instant + Duration` (which
-            // panics) when sip.rs builds the viewing-window deadline (Copilot). 86400 s is far above any real
+            // panics) when sip.rs builds the viewing-window deadline. 86400 s is far above any real
             // on-demand view.
             camera_view_idle_secs: opt("CAMERA_VIEW_IDLE_SECS")
                 .and_then(|s| s.parse::<u64>().ok())
@@ -578,7 +578,7 @@ EMPTY=
     fn light_enabled_flag_is_authoritative_over_a_stale_where() {
         let cfg = |s: &str| Config::from_map(parse_env(s));
         // Explicit LIGHT_ENABLED=0 disables the subsystem even if a numeric LIGHT_WHERE lingers
-        // (the installer writes both keys; unticking "has exterior light" must win) — Copilot/Codex.
+        // (the installer writes both keys; unticking "has exterior light" must win).
         assert!(!cfg("MQTT_HOST=h\nLIGHT_ENABLED=0\nLIGHT_WHERE=112\n").light_enabled);
         // Explicit LIGHT_ENABLED=1 enables even with a blank WHERE (learn mode).
         assert!(cfg("MQTT_HOST=h\nLIGHT_ENABLED=1\n").light_enabled);

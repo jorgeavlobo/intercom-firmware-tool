@@ -53,7 +53,7 @@ const TEARDOWN: &str = "*7*0*##";
 
 /// A/V daemon reply frames. These are the SAME OpenWebNet control frames as the monitor
 /// ACK/NACK, so alias the shared `crate::own` definitions rather than re-spelling the bytes —
-/// the control-frame definition then has one source of truth and cannot drift (Copilot).
+/// the control-frame definition then has one source of truth and cannot drift.
 const AV_ACK: &[u8] = crate::own::ACK;
 const AV_NACK: &[u8] = crate::own::NACK;
 
@@ -119,7 +119,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
             // A clean return means `stopping` was observed — leave the loop.
             Ok(()) => break,
             // Log host AND port (and the "unavailable" suffix) so a mismatched OWN_HOST/port is
-            // diagnosable — same shape as sender.rs's monitor error (Copilot).
+            // diagnosable — same shape as sender.rs's monitor error.
             Err(e) => eprintln!(
                 "btmqttd: camera monitor {}:{} unavailable: {e}",
                 cfg.own_host, cfg.own_port_mon
@@ -232,7 +232,7 @@ async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Resu
 async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
     // Fail fast on a port config the fan-out can't use (a hand-edited / corrupt conf: config.rs
     // already maps 0 to the default, but guard here too, and reject equal video/audio ports which
-    // would collide two RTP streams on one UDP port and break go2rtc's demux) — Copilot.
+    // would collide two RTP streams on one UDP port and break go2rtc's demux).
     if cfg.camera_video_port == 0 || cfg.camera_audio_port == 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -275,9 +275,9 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
 ///   * loopback (127/8) is never a real off-device destination, so it is unroutable — and
 ///     `127.0.0.1` SPECIFICALLY is worse still: our add-client frame would be
 ///     `*7*300#127#0#0#1#…`, identical to DEVICE_MEDIA_PREFIX, so our own frame echoing on the
-///     monitor could be misread as a media-start "arm" signal (Copilot);
+///     monitor could be misread as a media-start "arm" signal;
 ///   * the unspecified 0.0.0.0 is a local bind wildcard, not a routable host — the daemon would
-///     report the siphon armed while no receiver ever gets the RTP (Codex).
+///     report the siphon armed while no receiver ever gets the RTP.
 ///
 /// EXCEPTION — on-device mode (issue #120): go2rtc runs ON the panel and listens on loopback, so
 /// the siphon target IS loopback by design. Permit EXACTLY [`CAMERA_ONDEVICE_TARGET`]
@@ -290,7 +290,7 @@ fn check_camera_target(ip: Ipv4Addr, camera_ondevice: bool) -> std::io::Result<(
     if !ondevice_ok && (ip.is_loopback() || ip.is_unspecified()) {
         // Mode-specific message: on-device mode DOES permit one loopback address (127.0.0.2),
         // so the generic "no loopback" wording would misdescribe why an on-device target was
-        // rejected (Copilot). Off-device, no loopback/unspecified address is ever valid.
+        // rejected. Off-device, no loopback/unspecified address is ever valid.
         let msg: &str = if camera_ondevice {
             "camera_target in on-device mode must be 127.0.0.2 (the CAMERA_ONDEVICE_TARGET loopback alias)"
         } else {
@@ -626,7 +626,7 @@ mod tests {
         let err = check_camera_target("127.0.0.1".parse().unwrap(), false).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         // The message is mode-specific: on-device rejections name the one permitted address
-        // (127.0.0.2) rather than the misleading blanket "no loopback" wording (Copilot).
+        // (127.0.0.2) rather than the misleading blanket "no loopback" wording.
         let ondevice_err = check_camera_target("127.0.0.1".parse().unwrap(), true).unwrap_err();
         assert!(ondevice_err.to_string().contains("127.0.0.2"));
         assert!(!err.to_string().contains("127.0.0.2"));

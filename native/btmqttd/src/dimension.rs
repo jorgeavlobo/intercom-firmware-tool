@@ -281,7 +281,7 @@ impl CallClassifier {
     /// call's ring onto the entrance-panel sensor. Reset to `Idle`: the authoritative reconcile then
     /// publishes IDLE for ambiguous rings (`1`/`2`) — clearing any stale retained value without ever
     /// asserting entrance — and publishes only definitive entrance-only phases (`4`/`6`), while live
-    /// frames after the reconnect reclassify from scratch (Codex). Cost: an entrance call merely
+    /// frames after the reconnect reclassify from scratch. Cost: an entrance call merely
     /// RINGING across a reconnect reads idle until it is answered (`4`/`6`), a live signature arrives,
     /// or it truly goes idle — the accepted price of never leaking a floor call.
     pub fn on_reconnect(&mut self) {
@@ -316,7 +316,7 @@ impl CallClassifier {
                 // unknown type. RE-HOLD it as Pending so the following signature classifies it
                 // (entrance flushes it via `saw_entrance_panel_call`, floor discards it), instead of
                 // publishing a floor ring as entrance (from Entrance) or silently dropping an
-                // entrance ring (from Floor) (Codex). Safe for a genuine repeated `1` mid-call: the
+                // entrance ring (from Floor). Safe for a genuine repeated `1` mid-call: the
                 // retained sensor keeps its last value during the one-frame hold and the next frame
                 // republishes — no idle flicker. (A leading ring is always `1`; a floor call's own
                 // sequence is `1 → 2 → 0`, so `Floor + 1` only ever means a new call, never a
@@ -334,7 +334,7 @@ impl CallClassifier {
             // call's sequence is `1 → 2 → 0`. So either is DEFINITIVE evidence of an entrance call:
             // (re)classify to Entrance and publish, even from a stale `Floor` left by a floor call
             // whose terminal `0` was missed across a monitor reconnect. Suppressing here would hide a
-            // real entrance call until its terminal idle (Codex).
+            // real entrance call until its terminal idle.
             4 | 6 => {
                 self.state = CallKind::Entrance;
                 CallStateAction::Publish(code)
@@ -342,7 +342,7 @@ impl CallClassifier {
             // Any OTHER code (`3`/`5`/`7` — never observed for door entry, mapped to the "active"
             // label). An unrecognised code is NOT definitive evidence of an entrance call, so it must
             // not reclassify a KNOWN floor call — honour "a floor call never reaches this sensor".
-            // From any other state, fall back to showing it as an entrance call (CodeRabbit).
+            // From any other state, fall back to showing it as an entrance call.
             _ => match self.state {
                 CallKind::Floor => CallStateAction::Suppress,
                 _ => {
@@ -362,8 +362,7 @@ impl CallClassifier {
     /// - `4`/`6` (answered/in-call) are entrance-ONLY phases — a floor call never emits them — so an
     ///   out-of-band read of one is DEFINITIVE entrance evidence: (re)classify to `Entrance` and
     ///   publish, from ANY state. This is exactly the case the poll/reconnect reconcile exists to
-    ///   repair — a real entrance call whose live frames were missed, even from a stale `Floor`
-    ///   (Codex/Copilot).
+    ///   repair — a real entrance call whose live frames were missed, even from a stale `Floor`.
     /// - `1`/`2` (ringing) are AMBIGUOUS — floor and entrance share them, and out-of-band there is no
     ///   signature to disambiguate. Publish the ring ONLY when the call is already KNOWN to be
     ///   entrance (`Entrance`). From every other state (`Floor`, `Pending`, or a fresh `Idle` at
@@ -371,7 +370,7 @@ impl CallClassifier {
     ///   non-idle retained value (e.g. a prior entrance call's "ringing" whose terminal `0` was
     ///   missed across the outage), so the entrance-panel sensor reads idle during a floor call. Both
     ///   uphold the hard rule that a floor call never surfaces here — suppressing instead would leave
-    ///   the stale value visible for the whole floor call (Codex). Cost: a genuine entrance call
+    ///   the stale value visible for the whole floor call. Cost: a genuine entrance call
     ///   merely RINGING across a reconnect reads idle until it is answered (`4`/`6`), a live signature
     ///   arrives, or it truly goes idle — an acceptable trade for never surfacing a floor call.
     ///
@@ -391,7 +390,7 @@ impl CallClassifier {
             }
             // 1/2 (ambiguous ring) AND any unrecognised code (`3`/`5`/`7`): show the ring only from a
             // KNOWN Entrance; otherwise publish IDLE to clear any stale non-idle value — never assume
-            // entrance, and never leave a floor call showing a prior "ringing" (Codex/CodeRabbit).
+            // entrance, and never leave a floor call showing a prior "ringing".
             _ => match self.state {
                 CallKind::Entrance => CallStateAction::Publish(code),
                 _ => CallStateAction::Publish(0),
@@ -472,8 +471,8 @@ pub async fn read_mute(host: &str, port: u16) -> std::io::Result<Option<bool>> {
 /// wait out the [`REPLY_IDLE`] tail after the report. For a single-report GET this makes the
 /// call return at the snapshot instant instead of ~500 ms later, which matters for the
 /// call-state reconcile: it shrinks the window in which the monitor read is blocked (so a light
-/// echo isn't buffered past its guard, Codex) and removes the gap in which a monitor transition
-/// arriving during the tail would be newer than this snapshot yet published before it (Codex).
+/// echo isn't buffered past its guard) and removes the gap in which a monitor transition
+/// arriving during the tail would be newer than this snapshot yet published before it.
 /// Still bounded by [`SESSION_TIMEOUT`]; returns `None` if the reply burst ends with no match.
 async fn session_first<T>(
     host: &str,

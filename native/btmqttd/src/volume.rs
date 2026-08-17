@@ -259,7 +259,7 @@ impl VolumeCtl {
     async fn publish_retained(&self, topic: &str, payload: Vec<u8>) {
         // Non-blocking single try_publish: observe_volume/observe_mute run on the monitor read
         // path, so this must never block on a full request queue — else the reader stalls and a
-        // following light echo misses its 3 s guard (Codex/CodeRabbit). A drop while the queue is
+        // following light echo misses its 3 s guard. A drop while the queue is
         // full is recovered off the read path by the sender loop's periodic reseed (and by
         // resync() on the next reconnect). See sender::try_publish_retained.
         crate::sender::try_publish_retained(&self.client, topic, QoS::AtMostOnce, payload);

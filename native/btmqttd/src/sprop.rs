@@ -107,9 +107,9 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     // startup; the steady state after the first learn is `Done`.
     match provision_action(template_has_sprop().await, persisted_for_branch(branch).await) {
         // A seeded template supersedes any learned record: CLEAR the stale record so a later bare reflash
-        // re-learns instead of resurrecting the old value (Codex). Do NOT treat this as done until the
+        // re-learns instead of resurrecting the old value. Do NOT treat this as done until the
         // clear actually succeeds — if it fails (cfg/extra briefly unavailable) the stale record would
-        // survive and a later bare reflash could re-splice it (CodeRabbit) — so retry with a bounded
+        // survive and a later bare reflash could re-splice it — so retry with a bounded
         // backoff and log an ultimate failure. `clear_camera_sprop` returns true when the file is gone
         // (removed OR already absent), so on the common seeded image with no record it succeeds at once.
         Provision::ClearThenDone => {
@@ -245,7 +245,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
 /// the persisted record — so it SUPERSEDES any learned value, and we must CLEAR that record rather than
 /// merely skip: a LATER reflash shipping a bare template would otherwise make go2rtcd splice the stale
 /// value back in (it splices the persisted value ONLY when the template has none), and this gate would
-/// then treat it as learned forever, corrupting video (Codex). So a seed always yields `ClearThenDone`,
+/// then treat it as learned forever, corrupting video. So a seed always yields `ClearThenDone`,
 /// EVEN when a same-branch value is learned. Otherwise a same-branch learned record means `Done` (go2rtcd
 /// already spliced it into the runtime SDP at boot); anything else — nothing learned, or only a record for
 /// a DIFFERENT branch after a `CAMERA_BRANCH` flip (task #41) — means `Listen` to learn the right sets.
@@ -296,8 +296,8 @@ fn has_sprop(sdp: &str) -> bool {
 /// interval). It deliberately reads the runtime file rather than the persist record because the two can
 /// diverge for one boot: a fresh learn PERSISTS the value durably but only BEST-EFFORT patches this boot's
 /// runtime SDP, so if that patch failed the value is present for the NEXT boot yet absent from the SDP
-/// go2rtc reads NOW — and the cold-lock-on grace must still apply until the next reboot splices it in
-/// (Codex). A missing/unreadable runtime SDP reads as "no sprop" (assume cold). `pub(crate)` for `hold.rs`.
+/// go2rtc reads NOW — and the cold-lock-on grace must still apply until the next reboot splices it in.
+/// A missing/unreadable runtime SDP reads as "no sprop" (assume cold). `pub(crate)` for `hold.rs`.
 pub(crate) async fn runtime_sdp_has_sprop() -> bool {
     matches!(tokio::fs::read_to_string(SDP_PATH).await, Ok(s) if has_sprop(&s))
 }
@@ -372,7 +372,7 @@ fn collect_sps_pps(payload: &[u8], sps: &mut Option<Vec<u8>>, pps: &mut Option<V
                 i += 2;
                 // A zero-size record can't hold even a NAL header, and `i += size` would not advance — a
                 // malformed STAP-A (size 0) would spin this loop forever. Stop the walk on a zero-size or
-                // out-of-bounds record (Copilot). The listener is loopback-fed, but must not hang on a bad
+                // out-of-bounds record. The listener is loopback-fed, but must not hang on a bad
                 // packet.
                 if size == 0 || i + size > len {
                     break;
@@ -466,7 +466,7 @@ mod tests {
     fn seeded_template_counts_as_provisioned() {
         // An installer-supplied CameraSprop lands in the template's fmtp line; has_sprop must detect it
         // so a pre-seeded image skips the listen (already_learned via template_has_sprop). A bare
-        // template (no sprop) must NOT — the listen still runs to learn it (CodeRabbit).
+        // template (no sprop) must NOT — the listen still runs to learn it.
         let seeded = "a=fmtp:96 packetization-mode=1;sprop-parameter-sets=Z0JAHqaAoD2Q,aM48gAA=;profile-level-id=42801f\n";
         assert!(has_sprop(seeded));
         let bare = "a=fmtp:96 packetization-mode=1;profile-level-id=42801f\n";
@@ -478,7 +478,7 @@ mod tests {
         use Provision::*;
         // A seeded template always wins and CLEARS any stale learned record — even when a same-branch
         // value is already learned. That is the case that would otherwise corrupt video after a
-        // seed-then-bare reflash (go2rtcd re-splices the old value once the template is bare again; Codex).
+        // seed-then-bare reflash (go2rtcd re-splices the old value once the template is bare again).
         assert!(matches!(provision_action(true, true), ClearThenDone));
         assert!(matches!(provision_action(true, false), ClearThenDone));
         // No seed: a same-branch learned record is Done (go2rtcd already spliced it); nothing learned or a

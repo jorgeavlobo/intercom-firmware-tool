@@ -79,7 +79,7 @@ fn main() {
 
 /// Re-exec this daemon in place (same PID, so `bt_service_watchdog`'s pgrep supervision is
 /// undisturbed) to activate a newly-learned light WHERE IMMEDIATELY. Exiting instead would leave
-/// the WHOLE bridge offline until the watchdog's next ~60 s poll respawns it (Codex). Called only
+/// the WHOLE bridge offline until the watchdog's next ~60 s poll respawns it. Called only
 /// AFTER the graceful shutdown in `run()`, so the learned WHERE is durably persisted and the MQTT
 /// `offline` will/DISCONNECT is already sent; the fresh process re-reads the config, picks up the
 /// persisted WHERE (learn-mode path), and reconnects. `exec` returns ONLY on error — then we fall
@@ -167,7 +167,7 @@ async fn run() -> Result<bool, String> {
     let restart = Arc::new(tokio::sync::Notify::new());
     // LEARNABLE only in learn mode (a blank build-time WHERE). A CONFIGURED build's WHERE is
     // authoritative and always bound by the resolution below, so the HA Learn button must not be
-    // able to persist a divergent address the daemon would then ignore on restart (Codex).
+    // able to persist a divergent address the daemon would then ignore on restart.
     let light_learnable = cfg.light_where.is_none();
     #[allow(clippy::type_complexity)]
     let (light, light_persist): (
@@ -176,16 +176,16 @@ async fn run() -> Result<bool, String> {
     ) = if !cfg.light_enabled {
         // Feature DISABLED: forget any persisted light-state, so that re-enabling the same
         // WHERE later starts from an UNKNOWN baseline instead of restoring a value that may
-        // have gone stale while untracked (a physical toggle we didn't see) — Codex. Also forget
+        // have gone stale while untracked (a physical toggle we didn't see). Also forget
         // any LEARNED WHERE: disabling is a deliberate reset, so re-enabling in learn mode
-        // re-learns rather than silently restoring an address from a past life (CodeRabbit).
+        // re-learns rather than silently restoring an address from a past life.
         clear_persisted_light("feature disabled").await;
         clear_persisted_light_where("feature disabled").await;
         (None, None)
     } else if let Some(where_) = {
         // Enabled. A build-time WHERE is AUTHORITATIVE: when the installer configured one, use it
         // so a later firmware can re-point the light and the reflash-surviving learned cache (on
-        // the cfg/extra partition) can't silently override the newly-configured address (Codex).
+        // the cfg/extra partition) can't silently override the newly-configured address.
         // Only when the build left WHERE blank (learn mode) do we fall back to what this unit
         // LEARNED at runtime and persisted, so a unit that shipped blank keeps it across reboots.
         match cfg.light_where.clone() {
@@ -195,7 +195,7 @@ async fn run() -> Result<bool, String> {
     } {
         // A CONFIGURED WHERE is authoritative, so FORGET any learned WHERE now — otherwise a later
         // build that clears the field to enter learn mode would restore this stale learned address
-        // (e.g. an old `112`) and control the wrong relay instead of re-learning (Codex). Only the
+        // (e.g. an old `112`) and control the wrong relay instead of re-learning. Only the
         // configured path clears it; the learn-mode path above is itself driven by that same file.
         if cfg.light_where.is_some() {
             clear_persisted_light_where("configured WHERE is authoritative").await;
@@ -205,7 +205,7 @@ async fn run() -> Result<bool, String> {
             // NO tracked on/off, so no state to restore and no persist task to run. FORGET any
             // bistable state record: the relay can change while running momentary (the hardware
             // auto-offs), so a later switch back to bistable must start UNKNOWN, not restore a stale
-            // on/off that could toggle the next command the wrong way (CodeRabbit).
+            // on/off that could toggle the next command the wrong way.
             clear_persisted_light("momentary — no tracked state").await;
             let (ctl, _persist_rx) = light::LightCtl::new(
                 &cfg,
@@ -231,7 +231,7 @@ async fn run() -> Result<bool, String> {
                 // Normal reboot restore: a valid on/off record for THIS WHERE — disk matches `initial`.
                 persist::LightRestore::State(on) => (Some(on), false),
                 // No usable record (absent, a DIFFERENT WHERE's, or corrupt). Forget it, so a later
-                // switch BACK to an old WHERE starts unknown instead of restoring a stale value (Codex).
+                // switch BACK to an old WHERE starts unknown instead of restoring a stale value.
                 // Disk is now confirmed absent (= None), so the baseline is certain.
                 persist::LightRestore::Absent => {
                     clear_persisted_light("no valid state for the configured WHERE").await;
@@ -240,7 +240,7 @@ async fn run() -> Result<bool, String> {
                 // Present but UNREADABLE (transient I/O). Do NOT clear — a valid state may still be on
                 // disk; keep it and retry next boot. Start the cache unknown, and mark the disk baseline
                 // UNCERTAIN so the first observed value is durably written (overwriting whatever record
-                // we couldn't read) rather than skipped as already-durable (Codex).
+                // we couldn't read) rather than skipped as already-durable.
                 persist::LightRestore::Unreadable => {
                     eprintln!(
                         "btmqttd: light: persisted state unreadable (I/O error) — keeping the record, \
@@ -278,7 +278,7 @@ async fn run() -> Result<bool, String> {
         // No state-persist task runs until a WHERE is learned (restarting btmqttd into the where-known
         // path above). The momentary flag is carried through so command()/observe() behave once learned.
         // In momentary mode, forget any stale bistable state so a later bistable build starts unknown
-        // (CodeRabbit) — mirrors the where-known momentary branch above.
+        // mirrors the where-known momentary branch above.
         if cfg.light_momentary {
             clear_persisted_light("momentary — no tracked state").await;
         }
@@ -392,7 +392,7 @@ async fn run() -> Result<bool, String> {
     // commands still BUFFERED in the channel. Dropping `cmd_tx` alone is not enough: a tokio MPSC receiver
     // yields every already-queued message before it observes the closed channel, so the worker would keep
     // running side-effecting commands (e.g. a queued execute_command) during shutdown and stretch the re-exec
-    // delay by the queue's worth of work (CodeRabbit). The flag makes it exit before the next `recv()`.
+    // delay by the queue's worth of work. The flag makes it exit before the next `recv()`.
     let cmd_stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut cmd_worker = tokio::spawn({
         let cfg = cfg.clone();
@@ -484,7 +484,7 @@ async fn run() -> Result<bool, String> {
     // Without an anchor, rediscovery could repoint a plaintext bridge at the wrong open
     // :1883 (the on-box mosquitto, a neighbour's broker) and leak credentials/commands
     // to it — so we DISABLE it and say why, rather than adopt an unauthenticated host
-    // (issue #43 / Codex P1 / CodeRabbit). Warnings are one-shot (startup only).
+    // (issue #43). Warnings are one-shot (startup only).
     let host_is_ip = cfg.mqtt_host.parse::<std::net::IpAddr>().is_ok();
     let has_trust_anchor = cfg.uses_tls() || cfg.broker_mac.is_some();
     let rediscovery_active = cfg.rediscovery && !host_is_ip && has_trust_anchor;
@@ -509,7 +509,7 @@ async fn run() -> Result<bool, String> {
         std::collections::HashSet::new();
     // mDNS proposals refused this outage, kept SEPARATE from `tried_ips` so the per-pass scan
     // re-arm (retire_scan_subnets) never re-arms them: a wrong mDNS broker INSIDE an anchor /24
-    // would otherwise be re-proposed every pass, resetting the dry-cycle bound forever (Codex P2).
+    // would otherwise be re-proposed every pass, resetting the dry-cycle bound forever.
     // Only a ConnAck or the bounded full-reset clears it.
     let mut mdns_rejected_ips: std::collections::HashSet<std::net::Ipv4Addr> =
         std::collections::HashSet::new();
@@ -517,7 +517,7 @@ async fn run() -> Result<bool, String> {
     // finding the broker (a "dry" cycle). After FULL_RESET_AFTER_DRY_CYCLES of these,
     // `retire_scan_subnets` fully clears BOTH `tried` and `mdns_rejected_ips` (including
     // cross-subnet mDNS rejections) — so recovery stays self-healing if a mDNS-advertised
-    // broker that was once (correctly) rejected later becomes reachable (Copilot). Reset on
+    // broker that was once (correctly) rejected later becomes reachable. Reset on
     // any connect.
     let mut rediscover_dry_cycles: u32 = 0;
 
@@ -531,15 +531,14 @@ async fn run() -> Result<bool, String> {
     // (rediscovery::build_time_ip), NOT the mutable /etc/hosts mapping. That is what makes
     // this correct across a bt_service_watchdog RESPAWN (where /etc/hosts may already hold
     // a rediscovered IP) and a firmware RE-FLASH (which the rootfs script reflects but the
-    // surviving cfg/extra record does not) — Codex.
+    // surviving cfg/extra record does not).
     //
     // Two independent flags: `last_persisted` is the ADOPTED learned IP (what /etc/hosts is
     // seeded to), so a stable broker never rewrites the flash partition; `persisted_on_disk`
     // is whether the state FILE exists at all — even one holding a record for a DIFFERENT host
     // or a corrupt one (neither parses), so a build-IP ConnAck clears it and a later switch
-    // back to that host can't resurrect its obsolete learned IP (Codex/Copilot). Persist I/O
-    // is blocking std::fs, so it's offloaded to the blocking pool (single-threaded runtime —
-    // Copilot).
+    // back to that host can't resurrect its obsolete learned IP. Persist I/O
+    // is blocking std::fs, so it's offloaded to the blocking pool (single-threaded runtime).
     let build_ip = if rediscovery_active {
         rediscovery::build_time_ip(&cfg.mqtt_host).await
     } else {
@@ -555,7 +554,7 @@ async fn run() -> Result<bool, String> {
             // true` — we DON'T know whether the file is there, so assume it MIGHT be, so a later
             // build-IP ConnAck can still run `persist::clear()` and drop a possibly-stale record
             // (clear is safe/idempotent when the file is absent). Reporting "absent" (false) could
-            // instead strand a stale record on disk (Copilot).
+            // instead strand a stale record on disk.
             Err(e) => {
                 eprintln!(
                     "btmqttd: persist: read_state task did not complete ({e}); treating the record \
@@ -575,7 +574,7 @@ async fn run() -> Result<bool, String> {
     // fallback /24 scan (rediscover's `confirmed_anchor`). It is deliberately SEPARATE from
     // `last_persisted`: the "MAC unconfirmed at boot" branch below sets `last_persisted` as a
     // write-comparison baseline for a REJECTED (un-seeded) record, and that address must never
-    // become a scan anchor — doing so could sweep the wrong subnet (Codex P1 / Copilot).
+    // become a scan anchor — doing so could sweep the wrong subnet.
     let mut last_confirmed_ip: Option<std::net::Ipv4Addr> = None;
     if let (Some(build_ip), Some((base, learned))) = (build_ip, record) {
         // Apply the record only while its base still matches this firmware's build IP; a
@@ -584,7 +583,7 @@ async fn run() -> Result<bool, String> {
         if base == build_ip {
             // Seed the learned IP. In PLAINTEXT mode re-apply the same ARP-MAC gate
             // rediscover() uses: a persisted IP that DHCP reassigned while the unit was off
-            // must not receive our credentials on the first connect (Codex). Under TLS the
+            // must not receive our credentials on the first connect. Under TLS the
             // reconnect's pinned-cert handshake is the gate. seed_hosts is idempotent, so a
             // respawn whose /etc/hosts already holds the learned IP just no-ops.
             let trusted = if cfg.uses_tls() {
@@ -616,7 +615,7 @@ async fn run() -> Result<bool, String> {
                 // keep `learned` as the write-comparison baseline — if normal rediscovery later
                 // confirms the broker AT that same learned IP, the ConnAck sees no change and
                 // skips a redundant rewrite/fsync of the identical record; if it's elsewhere,
-                // the ConnAck still updates it (Codex).
+                // the ConnAck still updates it.
                 last_persisted = Some(learned);
                 eprintln!(
                     "btmqttd: persisted broker IP {learned} did not confirm the broker MAC \
@@ -674,18 +673,18 @@ async fn run() -> Result<bool, String> {
                         // next boot. Only meaningful once a name broker has a build-time base
                         // to compare against (`build_ip`).
                         // The disk work runs on the blocking pool (the runtime is
-                        // single-threaded — Copilot) and is AWAITED there: awaiting a
+                        // single-threaded) and is AWAITED there: awaiting a
                         // spawn_blocking yields the reactor to other tasks rather than stalling
                         // it, and lets us advance the in-memory change-gate ONLY after the write
                         // actually lands — so a briefly-unavailable partition is retried on the
-                        // next ConnAck instead of being suppressed forever (Codex/Copilot).
+                        // next ConnAck instead of being suppressed forever.
                         let confirmed_now = rediscovery::current_broker_ip(&cfg.mqtt_host).await;
                         // This IP just authenticated: record it as the fallback-scan anchor
                         // regardless of whether a build-time mapping is readable. Gating this on
                         // `build_ip` (as the persistence block below is) would, when the boot
                         // script has no broker line, leave the anchor unset — and rediscovery
                         // would then fall back to the current /etc/hosts value, i.e. possibly an
-                        // unconfirmed mDNS proposal, the very drift the anchor prevents (CodeRabbit).
+                        // unconfirmed mDNS proposal, the very drift the anchor prevents.
                         if let Some(confirmed) = confirmed_now {
                             last_confirmed_ip = Some(confirmed);
                         }
@@ -695,7 +694,7 @@ async fn run() -> Result<bool, String> {
                                 // the boot init re-seeds anyway. Forget any on-disk record —
                                 // including one boot restore REJECTED (base mismatch / MAC gate),
                                 // so `persisted_on_disk`, not `last_persisted`, drives the clear
-                                // (CodeRabbit) — so a reboot doesn't seed a now-wrong address.
+                                // so a reboot doesn't seed a now-wrong address.
                                 if persisted_on_disk
                                     && tokio::task::spawn_blocking(persist::clear)
                                         .await
@@ -869,7 +868,7 @@ async fn run() -> Result<bool, String> {
                         // AFTER the cert validated, means the hostname still points at the
                         // REAL broker rejecting US — so it does not advance the streak,
                         // and RESETS it so the threshold stays truly CONSECUTIVE (issue
-                        // #43 / Codex P2 / Copilot).
+                        // #43).
                         let unreachable = rediscovery::is_unreachable(&e);
                         if unreachable {
                             conn_failures = conn_failures.saturating_add(1);
@@ -885,7 +884,7 @@ async fn run() -> Result<bool, String> {
                         // ACL) is NOT unreachable: it reset the streak above, so once the
                         // scan lands on the REAL broker (which rejects us only at the MQTT
                         // layer) we STOP repointing and stay on it rather than wandering to
-                        // another candidate (issue #43 / Codex P2). Each pass repoints the
+                        // another candidate (issue #43). Each pass repoints the
                         // /etc/hosts mapping; the reconnect applies the normal
                         // authenticated/TLS-pinned connect (the trust gate). RACE it
                         // against shutdown so a scan can't delay SIGTERM/SIGINT.
@@ -900,8 +899,7 @@ async fn run() -> Result<bool, String> {
                                 // (`last_confirmed_ip` — a ConnAck, or a trusted seeded persisted
                                 // IP; NEVER the MAC-rejected persistence baseline), so it follows
                                 // a confirmed cross-subnet move yet never latches onto an
-                                // unconfirmed mDNS proposal or a rejected record (Codex P1 /
-                                // Copilot). `None` ⇒ anchor on the build-time mapping.
+                                // unconfirmed mDNS proposal or a rejected record. `None` ⇒ anchor on the build-time mapping.
                                 r = rediscovery::rediscover(&cfg, &mut tried_ips, &mut mdns_rejected_ips, last_confirmed_ip, &mut rediscover_dry_cycles) => {
                                     if let Some(ip) = r {
                                         eprintln!(
@@ -925,7 +923,7 @@ async fn run() -> Result<bool, String> {
 
     // FREEZE the command worker's intake the instant the event loop exits — BEFORE any awaited task-stop
     // below. Each `stop(..).await` yields to the scheduler, and without this the worker could pull and
-    // dispatch a still-BUFFERED command mid-shutdown during one of those yields (CodeRabbit). Setting
+    // dispatch a still-BUFFERED command mid-shutdown during one of those yields. Setting
     // `cmd_stopping` makes the worker start no further command (it breaks before the next dispatch); dropping
     // the sole `cmd_tx` wakes an idle `recv()`. The worker still finishes the dispatch that was already ACTIVE
     // when shutdown began, running that command's own bounded cleanup; whatever is still queued is discarded
@@ -972,8 +970,7 @@ async fn run() -> Result<bool, String> {
                 // The worker task ended abnormally (panic/cancel — its contract is "never panics", but be
                 // defensive): the unwind dropped the in-flight `Child` + permit, and kill_on_drop only
                 // SIGKILLs the direct child without reaping, so a child may be unreaped while
-                // `outstanding_reapers()` reads low. Never re-exec over that — plain-exit so init reaps it
-                // (Copilot).
+                // `outstanding_reapers()` reads low. Never re-exec over that — plain-exit so init reaps it.
                 eprintln!("btmqttd: command worker ended abnormally ({join_err}); exiting instead of re-exec");
                 reexec = false;
             }
@@ -991,7 +988,7 @@ async fn run() -> Result<bool, String> {
         // Plain exit (SIGTERM/SIGINT — e.g. `/etc/init.d/btmqttd stop`, which SIGKILLs after only an 8 s
         // grace): the process fully EXITS, so the OS reparents any in-flight command's children to init
         // (PID 1), which reaps them — there is no same-pid orphan to prevent, hence no long drain (which would
-        // overrun the grace and get SIGKILLed anyway — Codex). Abort-and-await like the other tasks, so the
+        // overrun the grace and get SIGKILLed anyway). Abort-and-await like the other tasks, so the
         // worker's already-enqueued publishes stay ordered before `offline` and shutdown stays well within the
         // grace. The active command's direct child gets kill_on_drop's SIGKILL; anything it spawned (e.g. the
         // dropbear it was starting — which we WANT to keep running) is reparented to init.
@@ -1015,7 +1012,7 @@ async fn run() -> Result<bool, String> {
     // stuck in D-state on failing storage. An in-place re-exec keeps the pid but drops that `Child`
     // handle; the fresh image (with a fresh, empty `REAP_SLOTS`) then has no handle to reap the child when
     // it finally dies, so it leaks as a zombie and quietly defeats the REAP_CONCURRENCY bound across
-    // repeated restart cycles (Codex). Give any reaper a brief chance to finish first — a normally-killed
+    // repeated restart cycles. Give any reaper a brief chance to finish first — a normally-killed
     // child is collected in microseconds, so the common restart races through untouched — then, only if one
     // is genuinely stuck, fall back to a plain exit so init inherits and reaps the orphan (the watchdog
     // respawns the bridge within ~60 s). The runtime is still alive here, so the reap tasks make progress
@@ -1081,7 +1078,7 @@ async fn run() -> Result<bool, String> {
     // that task's `view_tx` clone, so dropping THIS last sender closes `view_rx`; the SIP task then
     // observes the closed channel (its `view_rx.recv()==None`) and sends its BYE to tear the panel
     // session down cleanly. AWAIT it with a bound rather than abort()-ing: an abort can drop the task
-    // at an `.await` before the BYE is sent, leaving the panel session pinned (CodeRabbit). The 3 s
+    // at an `.await` before the BYE is sent, leaving the panel session pinned. The 3 s
     // cap keeps shutdown bounded if the dialog is wedged.
     if let Some(h) = sip_task {
         sip_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1096,7 +1093,7 @@ async fn run() -> Result<bool, String> {
 /// failure). Used when the feature is DISABLED, and when an ENABLED build restored nothing for
 /// its configured WHERE (no record, a record left by a DIFFERENT WHERE, or a corrupt one) — so
 /// a later switch back to an old WHERE starts from an unknown baseline instead of a value that
-/// went stale while that WHERE was untracked (Codex). The disk work runs on the blocking pool;
+/// went stale while that WHERE was untracked. The disk work runs on the blocking pool;
 /// a transient failure is retried a few times, then logged rather than silently dropped.
 async fn clear_persisted_light(reason: &str) {
     for _ in 0..3 {
@@ -1112,7 +1109,7 @@ async fn clear_persisted_light(reason: &str) {
 
 /// Best-effort clear of the persisted LEARNED WHERE (bounded retries, log on ultimate failure).
 /// Used when the feature is DISABLED, so disabling is a clean reset: re-enabling in learn mode
-/// re-learns rather than silently restoring an address from a past life (CodeRabbit).
+/// re-learns rather than silently restoring an address from a past life.
 async fn clear_persisted_light_where(reason: &str) {
     for _ in 0..3 {
         if tokio::task::spawn_blocking(persist::clear_light_where).await.unwrap_or(false) {
@@ -1192,12 +1189,12 @@ async fn announce(
     // reflash from a configured WHERE to blank learn mode, the broker can still hold a retained
     // light_avail=online from the previous run; publishing the current gate (offline in learn
     // mode) first closes the window where HA would see the bridge online alongside that stale
-    // value and issue a light command the controller drops (WHERE still unbound) — Codex. seed()
+    // value and issue a light command the controller drops (WHERE still unbound). seed()
     // below re-asserts it (idempotent, retained). An AWAITED, error-checked publish (not the
-    // drop-on-full try-publish) so the bridge `online` cannot queue before this gate (CodeRabbit).
+    // drop-on-full try-publish) so the bridge `online` cannot queue before this gate.
     // If the gate FAILS to queue, DEFER the bridge `online`: declaring the bridge online while a
     // stale retained light_avail=online lingers would re-open the race. A publish error means the
-    // eventloop is gone, so a reconnect re-runs announce and retries (CodeRabbit).
+    // eventloop is gone, so a reconnect re-runs announce and retries.
     let light_gate_ok = match &light {
         Some(light) => light.announce_avail().await,
         None => {
@@ -1205,7 +1202,7 @@ async fn announce(
             // light_avail=online from a previous ENABLED run (and its discovery configs until
             // ha::reconcile tombstones them below). Assert `offline` here — an AWAITED retained
             // publish, before the bridge `online` — so the stale switch isn't briefly available
-            // and can't accept a command the absent controller would drop (Codex).
+            // and can't accept a command the absent controller would drop.
             match client
                 .publish(&cfg.topic_light_avail, QoS::AtMostOnce, true, "offline")
                 .await
@@ -1241,8 +1238,7 @@ async fn announce(
     // retained topics; a changed WHERE reusing the topic left a stale value). This is
     // INDEPENDENT of discovery — unlike the volume seed below it does NO gateway round-trip,
     // it just re-emits the already-restored cached value, so it's cheap and keeps the retained
-    // state topic correct even with discovery off (the daemon still accepts light commands) —
-    // Codex.
+    // state topic correct even with discovery off (the daemon still accepts light commands).
     if let Some(light) = &light {
         light.seed().await;
     }
@@ -1272,7 +1268,7 @@ fn is_concrete_topic(topic: &str) -> bool {
 /// but the daemon must not depend on that — if a hand-edited `.conf` pointed `TOPIC_CALL_STATE` at a
 /// momentary topic, a topic-only predicate would purge the retained state publish too. Requiring
 /// `AtMostOnce && !retain` makes this incapable of ever dropping a retained publish, and never loses
-/// a real momentary event (they are always exactly QoS 0 / non-retained) — CodeRabbit.
+/// a real momentary event (they are always exactly QoS 0 / non-retained).
 fn is_momentary_publish(req: &Request, cfg: &Config) -> bool {
     matches!(
         req,
@@ -1359,7 +1355,7 @@ mod tests {
 
     #[test]
     fn purge_predicate_keeps_retained_and_qos1_publishes_even_on_an_event_topic() {
-        // Shape guard (CodeRabbit): the predicate also requires QoS 0 + non-retained, so even if a
+        // Shape guard: the predicate also requires QoS 0 + non-retained, so even if a
         // hand-edited .conf ALIASED the call-state topic onto an event topic, the retained QoS 1
         // state publish is never purged. Build the publishes ON an event topic and vary the shape.
         let cfg = Config::from_map(HashMap::new());

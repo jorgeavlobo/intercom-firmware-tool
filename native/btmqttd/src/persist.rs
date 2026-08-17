@@ -92,7 +92,7 @@ fn light_file_in(dir: &Path) -> PathBuf {
 /// whether the state FILE is present at all (any content) — even one holding a record for a
 /// DIFFERENT host or a corrupt one, neither of which parses — so the caller can clear it
 /// after a build-IP connection and a later switch back to that host can't resurrect its
-/// obsolete learned IP (Codex/Copilot). `record` is `Some((base_ip, learned_ip))` only when
+/// obsolete learned IP. `record` is `Some((base_ip, learned_ip))` only when
 /// the file parses a record for THIS host (ASCII case-insensitive) with a private LAN
 /// learned IPv4; the caller compares `base_ip` against the build-time mapping (a re-flash
 /// mismatch ⇒ stale). Blocking `std::fs`; call via `spawn_blocking` off the async runtime.
@@ -105,7 +105,7 @@ pub fn read_state(host: &str) -> (bool, Option<(Ipv4Addr, Ipv4Addr)>) {
 /// it, so a concurrent reader (or a reboot mid-write) never sees a torn file. Returns
 /// `true` only when the write landed, so the caller advances its in-memory change-gate
 /// ONLY on success and retries on the next ConnAck if the partition was briefly
-/// unavailable (Codex/Copilot). Blocking; call via `spawn_blocking`.
+/// unavailable. Blocking; call via `spawn_blocking`.
 #[must_use]
 pub fn store(host: &str, base_ip: Ipv4Addr, learned_ip: Ipv4Addr) -> bool {
     store_in(&state_dir(), host, base_ip, learned_ip)
@@ -130,7 +130,7 @@ pub enum LightRestore {
     Absent,
     /// The record could not be READ (a transient I/O error — a permission or storage blip).
     /// Do NOT clear it: a valid state may still be on disk, so keep it and retry next boot,
-    /// rather than deleting a possibly-good record and starting from an unknown baseline (Codex).
+    /// rather than deleting a possibly-good record and starting from an unknown baseline.
     Unreadable,
 }
 
@@ -154,7 +154,7 @@ pub fn store_light(where_: &str, on: Option<bool>) -> bool {
 
 /// Forget any persisted stair-light record — called when the feature is DISABLED, so
 /// re-enabling the same WHERE later starts from an UNKNOWN baseline instead of restoring a
-/// value that may have gone stale (physical toggles while tracking was off) — Codex. Returns
+/// value that may have gone stale (physical toggles while tracking was off). Returns
 /// `true` when the file is gone (removed, or already absent). Blocking; call via
 /// `spawn_blocking`.
 #[must_use]
@@ -173,7 +173,7 @@ pub fn store_light_where(where_: &str) -> bool {
 
 /// Forget any LEARNED stair-light WHERE — called when the feature is DISABLED, so disabling is
 /// a clean reset: re-enabling in learn mode re-learns rather than silently restoring an address
-/// from a past life (CodeRabbit). Returns `true` when the file is gone (removed, or already
+/// from a past life. Returns `true` when the file is gone (removed, or already
 /// absent). Blocking; call via `spawn_blocking`.
 #[must_use]
 pub fn clear_light_where() -> bool {
@@ -263,7 +263,7 @@ fn read_state_in(dir: &Path, host: &str) -> (bool, Option<(Ipv4Addr, Ipv4Addr)>)
 /// DIRECTORY so the rename (the dir entry now pointing at the new inode) is durable, not
 /// just the file bytes. A dir-sync failure is reported as a FAILED write (`false`) so the
 /// caller doesn't advance its change-gate and retries later, rather than claiming a
-/// durability it didn't get (CodeRabbit). Kept in ONE place so the two records can't drift.
+/// durability it didn't get. Kept in ONE place so the two records can't drift.
 fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("btmqttd: persist: cannot create {}: {e}", dir.display());
@@ -299,7 +299,7 @@ fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
 /// path (broker IP, light state → unknown). Once the record is gone, fsync the PARENT
 /// directory so the removal (a dir-entry change) is DURABLE, not just cached — otherwise a
 /// power loss could restore the "deleted" file on reboot and resurrect a stale record
-/// (CodeRabbit); symmetric with [`atomic_write_in`]'s dir fsync. The fsync runs on BOTH the
+/// symmetric with [`atomic_write_in`]'s dir fsync. The fsync runs on BOTH the
 /// just-removed AND the already-absent (`NotFound`) paths: if a previous attempt unlinked the
 /// file but its dir-sync failed (returning `false`), a retry finds the file gone yet still
 /// confirms durability rather than short-circuiting as "already durable". A dir-sync failure
@@ -361,7 +361,7 @@ fn read_light_in(dir: &Path, want_where: &str) -> LightRestore {
         Ok(t) => t,
         // Genuinely absent → nothing to restore, safe to clear.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LightRestore::Absent,
-        // Present but unreadable (a transient I/O blip) → keep it, do not clear (Codex).
+        // Present but unreadable (a transient I/O blip) → keep it, do not clear.
         Err(_) => return LightRestore::Unreadable,
     };
     let Some(line) = text.lines().next().map(str::trim) else {
@@ -429,7 +429,7 @@ fn parse_camera_sprop(text: &str) -> Option<(u8, String)> {
 fn parse_record(text: &str, want_host: &str) -> Option<(Ipv4Addr, Ipv4Addr)> {
     let line = text.lines().next()?.trim();
     // format_state writes EXACTLY one line of three fields, so reject anything extra as
-    // corrupt: a non-empty trailing line, or a 4th token on the first line (CodeRabbit).
+    // corrupt: a non-empty trailing line, or a 4th token on the first line.
     if text.lines().skip(1).any(|rest| !rest.trim().is_empty()) {
         return None;
     }
@@ -500,9 +500,9 @@ mod tests {
 
     #[test]
     fn store_read_clear_roundtrip_in_temp_dir() {
-        // Directory-injected cores — no env mutation, so this is parallel-safe (Copilot).
+        // Directory-injected cores — no env mutation, so this is parallel-safe.
         // A per-call nonce (atop the pid) keeps the temp dir unique even if this pattern is
-        // reused by another parallel test or a rerun in the same process (Copilot).
+        // reused by another parallel test or a rerun in the same process.
         use std::sync::atomic::{AtomicU32, Ordering};
         static NONCE: AtomicU32 = AtomicU32::new(0);
         let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn read_light_in_reports_unreadable_on_io_error() {
         // A present-but-unreadable record must be Unreadable — NOT Absent — so main KEEPS it
-        // instead of deleting a possibly-valid record on a transient I/O blip (Codex). Simulate
+        // instead of deleting a possibly-valid record on a transient I/O blip. Simulate
         // an I/O error that is NOT NotFound by making the record path a DIRECTORY (read_to_string
         // then fails with EISDIR).
         use std::sync::atomic::{AtomicU32, Ordering};

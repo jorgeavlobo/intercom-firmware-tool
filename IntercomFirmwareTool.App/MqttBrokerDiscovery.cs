@@ -116,7 +116,7 @@ namespace IntercomFirmwareTool.App
                 // name always ends with its service) AND necessary: because we query both
                 // `_mqtt._tcp` and `_home-assistant._tcp`, keying off PTR-instance membership would
                 // let an HA SRV (port 8123) be misclassified as a plaintext MQTT broker — hiding the
-                // whole HA-host fallback below and pre-filling HA's frontend port (Codex P1 / Copilot).
+                // whole HA-host fallback below and pre-filling HA's frontend port.
                 var found = new List<BrokerCandidate>();
                 foreach (var kv in srv)
                 {

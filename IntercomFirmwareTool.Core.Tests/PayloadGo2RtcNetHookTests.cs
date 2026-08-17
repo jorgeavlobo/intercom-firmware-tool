@@ -48,7 +48,7 @@ public class PayloadGo2RtcNetHookTests
     {
         // The factory if-pre-up.d/iptables rebuilds the WHOLE INPUT chain on ANY interface bring-up, so
         // filtering to wlan0 would leave :8554 unreachable after e.g. a usb0 bring-up flushed INPUT — and
-        // the periodic watchdog no longer re-asserts (task #42 / Codex). So the hook must NOT gate on
+        // the periodic watchdog no longer re-asserts (task #42). So the hook must NOT gate on
         // $IFACE; fw-reassert re-opens the wlan0 rule regardless of which interface's event fired it.
         string[] code = CodeLines(ReadHook());
         // Any form of an interface gate must fail this test, not just one exact spelling — a reintroduced

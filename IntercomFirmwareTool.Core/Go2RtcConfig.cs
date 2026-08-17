@@ -209,7 +209,7 @@ namespace IntercomFirmwareTool.Core
             // RTSP is LAN-facing, so auth is MANDATORY (issue #120, decision #3). go2rtc treats an
             // EMPTY username as "no auth" and serves the stream to any LAN client — so an empty
             // credential doesn't weaken auth, it removes it. Refuse to emit a config that would do
-            // that (CodeRabbit). The installer generates a strong random credential in 1c-2b; this
+            // that. The installer generates a strong random credential in 1c-2b; this
             // guard makes a blank one a hard error rather than a silent open stream.
             if (string.IsNullOrEmpty(rtspUser) || string.IsNullOrEmpty(rtspPass))
                 throw new ArgumentException(
@@ -218,7 +218,7 @@ namespace IntercomFirmwareTool.Core
             // Reject ANY control character. YamlDoubleQuoted escapes only '\\' and '\"', so a control
             // char in a credential would land raw in the double-quoted scalar: a CR/LF splits it across
             // lines, and NUL/ESC/TAB/etc. are forbidden in a YAML double-quoted scalar — either way
-            // go2rtc fails to load the config (Copilot: CR/LF; Codex: the rest).
+            // go2rtc fails to load the config.
             if (rtspUser.Any(char.IsControl) || rtspPass.Any(char.IsControl))
                 throw new ArgumentException(
                     "RTSP credentials must not contain control characters (CR/LF, NUL, ESC, ...): they would corrupt go2rtc.yaml.");
@@ -361,7 +361,7 @@ namespace IntercomFirmwareTool.Core
             // The App always sets a password on-device; only a bare/library caller hits the placeholder.
             bool hasPass = !string.IsNullOrEmpty(opts.CameraRtspPass);
             // A space-free placeholder if no password was set yet: spaces in the RTSP URL userinfo would
-            // make it awkward to copy-paste (Copilot).
+            // make it awkward to copy-paste.
             string pass = hasPass ? opts.CameraRtspPass! : "<password>";
             var ci = CultureInfo.InvariantCulture;
 
@@ -380,9 +380,9 @@ namespace IntercomFirmwareTool.Core
                 : "replace <intercom-ip> with the panel's IP and <password> with the RTSP password:\n\n");
             // URL-encode the credentials for the URL's userinfo: Validate rejects control chars but not
             // RTSP-URL-reserved punctuation (@ : / #), so escape defensively (today's fixed "camera" +
-            // base64url password never need it, but a future caller might) — CodeRabbit. The labeled
+            // base64url password never need it, but a future caller might). The labeled
             // credentials below stay RAW so the user copies the real values into HA's separate fields. The
-            // <password> placeholder is left literal (not %3C…%3E) so it reads as a placeholder (Copilot).
+            // <password> placeholder is left literal (not %3C…%3E) so it reads as a placeholder.
             string userEnc = Uri.EscapeDataString(user);
             string passInUrl = hasPass ? Uri.EscapeDataString(pass) : pass;
             sb.Append(string.Create(ci,

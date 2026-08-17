@@ -25,7 +25,7 @@ concurrency:
 
 # Every run: step below relies on bash (the reproduction helper uses `local`; the scripts use
 # `set -o pipefail`), so declare it explicitly rather than depending on the runner's default
-# shell staying bash (Copilot).
+# shell staying bash.
 defaults:
   run:
     shell: bash
@@ -103,7 +103,7 @@ jobs:
           # Build TWICE in independent scratch dirs and require byte-identical output BEFORE
           # committing. A refresh commit is pushed with [skip ci] by GITHUB_TOKEN, which does
           # NOT start ffmpeg-provenance.yml — so without this, a refreshed binary would never
-          # get an independent byte-for-byte rebuild until a later human PR (Codex). This
+          # get an independent byte-for-byte rebuild until a later human PR. This
           # proves the committed bytes are reproducible from the pinned source at refresh time.
           build "$RUNNER_TEMP/ffmpeg-src"
           build "$RUNNER_TEMP/ffmpeg-verify"
@@ -149,11 +149,11 @@ jobs:
           # Rewrite the recorded SHA-256 + size in BOTH metadata files IN THE SAME COMMIT, so
           # a refresh never leaves an inconsistent tree (PayloadBinaries.Read would otherwise
           # reject the new binary against a stale hash, and tests would fail, until a manual
-          # follow-up — Codex). sed is range-scoped to ONLY the ffmpeg entries, so btmqttd's
+          # follow-up). sed is range-scoped to ONLY the ffmpeg entries, so btmqttd's
           # metadata is never touched: PayloadBinaries.cs's Ffmpeg record (Name:"ffmpeg" → the
           # closing '};' of its object-initializer, NOT ');' — the record ends with the
           # AdditionalLicenseResourceNames initializer, so stop at '};' to keep the range from
-          # spilling past the record into whatever ');' comes next — Copilot), and THIRD_PARTY.md's
+          # spilling past the record into whatever ');' comes next), and THIRD_PARTY.md's
           # ffmpeg table (armhf/ffmpeg → SPDX expression).
           sed -i "/Name: \"ffmpeg\"/,/};/{
             s/Length: [0-9_]*,/Length: ${us},/
@@ -166,7 +166,7 @@ jobs:
           # Fail fast if ANY of the four substitutions didn't land (e.g. a table/record layout
           # change made a sed stop matching). Check the SIZE rewrites too, not just the SHAs: a
           # stale Length pushed with [skip ci] would make PayloadBinaries.Read(Ffmpeg) reject the
-          # binary, and this bot push starts no build/provenance run to catch it (Codex).
+          # binary, and this bot push starts no build/provenance run to catch it.
           grep -q "Sha256Hex: \"${FF_SHA}\"" "$PB" || { echo "::error::PayloadBinaries.cs sha not updated"; exit 1; }
           grep -q "Length: ${us},"           "$PB" || { echo "::error::PayloadBinaries.cs size (${us}) not updated"; exit 1; }
           grep -q "\`${FF_SHA}\`" "$TP"            || { echo "::error::THIRD_PARTY.md sha not updated"; exit 1; }

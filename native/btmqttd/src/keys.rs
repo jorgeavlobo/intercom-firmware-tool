@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(v["code"], 2);
         assert_eq!(v["value"], "pressed");
         // Validate the COMPLETE UTC ISO-8601 shape `YYYY-MM-DDTHH:MM:SSZ`, not just a trailing Z
-        // (which would accept "invalidZ") — this test guards the HA freshness contract (CodeRabbit).
+        // (which would accept "invalidZ") — this test guards the HA freshness contract.
         let ts = v["ts"].as_str().unwrap();
         assert_eq!(ts.len(), 20, "ts must be YYYY-MM-DDTHH:MM:SSZ, got {ts:?}");
         for (i, b) in ts.bytes().enumerate() {

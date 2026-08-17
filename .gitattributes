@@ -72,7 +72,7 @@ IntercomFirmwareTool.Core/Payload/mqtt/** text eol=lf
 # and pins.env is sourced by shell; they MUST stay LF (a CRLF `set -eu\r` / shebang breaks under
 # Linux `sh`). This is load-bearing because release.yml ships these as the FFmpeg LGPL
 # corresponding-source recipe, extracted + run on Linux — so a Windows-runner CRLF checkout must
-# not leak into the shipped archive (Codex). No binaries live here (the ELF is under
+# not leak into the shipped archive. No binaries live here (the ELF is under
 # Payload/vendor/armhf/), so eol=lf is safe for the whole directory.
 native/ffmpeg/** text eol=lf
 native/go2rtc/** text eol=lf

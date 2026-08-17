@@ -1155,8 +1155,8 @@ namespace IntercomFirmwareTool.Core
         /// True when <paramref name="path"/> can be opened for reading and has non-zero
         /// length. Opening FOLLOWS the path, so a symlinked-but-present target counts —
         /// unlike <see cref="ExtFileSystem.FileExists"/>, which reports false for a
-        /// symlink; any open failure (missing or unreadable) is treated as false
-        /// (Copilot). Self-contained, so callers need no separate existence guard.
+        /// symlink; any open failure (missing or unreadable) is treated as false.
+        /// Self-contained, so callers need no separate existence guard.
         /// </summary>
         private static bool FileNonEmpty(ExtFileSystem fs, string path)
         {
@@ -1177,8 +1177,8 @@ namespace IntercomFirmwareTool.Core
         /// alone reports false for a symlink, so a caller that only needs "is something
         /// already here?" (e.g. whether to read/patch <c>/etc/default/dropbear</c>) must
         /// also probe <see cref="ExtFileSystem.ReadSymLink"/>, or it would treat a
-        /// symlinked target as missing and overwrite the link with a regular file
-        /// (Copilot). The factory <c>/etc/default/dropbear</c> is a regular file, so
+        /// symlinked target as missing and overwrite the link with a regular file.
+        /// The factory <c>/etc/default/dropbear</c> is a regular file, so
         /// this is defensive against a non-standard image shape.
         /// </summary>
         private static bool PathPresent(ExtFileSystem fs, string path)
@@ -1193,8 +1193,8 @@ namespace IntercomFirmwareTool.Core
         /// argument on an ACTIVE (non-comment) line. Everything from the first <c>#</c> on a
         /// line is a comment and is ignored (as the shell does when sourcing the file), and
         /// the path is matched as a WHOLE token — split on whitespace, quotes and <c>=</c> —
-        /// so neither a commented occurrence (Codex) nor a different key whose path merely
-        /// starts with this one (e.g. <c>…host_key.old</c>, Copilot) is mistaken for a real
+        /// so neither a commented occurrence nor a different key whose path merely
+        /// starts with this one (e.g. <c>…host_key.old</c>) is mistaken for a real
         /// load. Both the space form (<c>-r path</c>) and the attached form (<c>-rpath</c>)
         /// count. Used to gate the idempotent patch AND to validate it, so the two agree.
         /// </summary>
@@ -1202,7 +1202,7 @@ namespace IntercomFirmwareTool.Core
         {
             // Include '\r' so a CRLF file doesn't leave a trailing '\r' stuck to the last
             // token on a line (which would make the key path compare unequal and duplicate
-            // the patch) — Copilot.
+            // the patch).
             char[] seps = { ' ', '\t', '\r', '"', '\'', '=' };
             foreach (string raw in body.Split('\n'))
             {
@@ -1244,7 +1244,7 @@ namespace IntercomFirmwareTool.Core
         /// Returns <paramref name="line"/> with any trailing shell comment removed. A
         /// <c>#</c> starts a comment ONLY when it is unquoted AND begins a word (at the
         /// line start or after whitespace) — the actual shell rule. So a <c>#</c> inside
-        /// quotes (e.g. a key path <c>"…host_key#old"</c>, Codex) or in the middle of a
+        /// quotes (e.g. a key path <c>"…host_key#old"</c>) or in the middle of a
         /// word is kept as data, not mistaken for a comment; otherwise the check could
         /// truncate a DIFFERENT key's path down to ours and wrongly skip the patch.
         /// </summary>
