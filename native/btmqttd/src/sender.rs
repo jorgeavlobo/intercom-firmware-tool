@@ -241,7 +241,8 @@ async fn session(
     // landing on the fresh session isn't buffered past its guard (see read_call_state_draining).
     // Apply the authoritative snapshot ONLY IF no live call-state transition was observed on the
     // monitor during the query — if one was, the drain already published it and updated
-    // `call_watch` (it is at least as recent as the snapshot, over a separate connection). On a
+    // `call_watch` (the two arrive over separate connections, so their order is ambiguous and the
+    // snapshot can't be trusted to be current). On a
     // FAILED read (session refused / no reply) do NOT fabricate a state — publishing idle would
     // clobber a real ringing/in_call; keep what the frames left and, if still disarmed, arm an
     // "unknown" marker so a later poll re-queries.
@@ -435,8 +436,8 @@ async fn session(
 enum Reconcile {
     /// The query finished. `result` is its own Ok/Err; `saw_transition` is true when a LIVE
     /// call-state frame was observed on the monitor DURING the query — in which case the caller
-    /// must NOT overwrite it with the (possibly older) snapshot, since the two arrive over
-    /// separate connections and the monitor frame is at least as recent.
+    /// must NOT overwrite it with the snapshot, since the two arrive over separate connections and
+    /// their relative order can't be inferred from local receipt time (the snapshot may be stale).
     Done {
         result: std::io::Result<Option<u8>>,
         saw_transition: bool,
