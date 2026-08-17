@@ -923,6 +923,17 @@ async fn run() -> Result<bool, String> {
         }
     }
 
+    // FREEZE the command worker's intake the instant the event loop exits — BEFORE any awaited task-stop
+    // below. Each `stop(..).await` yields to the scheduler, and without this the worker could pull and
+    // dispatch a still-BUFFERED command mid-shutdown during one of those yields (CodeRabbit). Setting
+    // `cmd_stopping` makes the worker start no further command (it breaks before the next dispatch); dropping
+    // the sole `cmd_tx` wakes an idle `recv()`. The worker still finishes the dispatch that was already ACTIVE
+    // when shutdown began, running that command's own bounded cleanup; whatever is still queued is discarded
+    // (those commands never started, so dropping them strands nothing). The worker is JOINED further below,
+    // after the other producer tasks stop.
+    cmd_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(cmd_tx);
+
     // Stop every MQTT-producing task BEFORE the final `offline`, so none of them can
     // enqueue a publish after it and leave stale state (e.g. a lingering announce task
     // re-retaining `online`) on the broker. abort() alone is NOT enough — it is
@@ -942,27 +953,20 @@ async fn run() -> Result<bool, String> {
     }
     stop(sender_task).await;
     stop(keys_task).await;
-    // DRAIN the command worker rather than abort() it. An abort would drop a command child that `dispatch`
-    // is still AWAITING (e.g. restore_ssh's `/etc/init.d/dropbear start`, or an execute_command shell)
-    // WITHOUT the group-kill + detached-reap that the command's OWN timeout path performs — leaving the
-    // script's descendants running and the direct child unreaped, and releasing its REAP_SLOTS permit so the
-    // re-exec guard below would read zero and proceed anyway (Codex). This matters because a restart can be
-    // triggered by an INDEPENDENT task (a learned light WHERE via `light.rs`) while the worker is mid-command,
-    // not only by the worker dispatching `restart_bridge` itself. Set `cmd_stopping` so the worker starts no
-    // further command (the in-flight one finishes and runs its own bounded cleanup; anything still buffered is
-    // discarded — see the worker loop), then drop the sole `cmd_tx` to wake an idle `recv()` and end the loop.
-    // Each dispatch is itself wall-clock bounded, so any child it owns is routed through the proper
-    // group-kill/reaper path first. Bound the drain so a wedged dispatch can't hang shutdown: `CMD_WORKER_DRAIN`
-    // comfortably covers the restore_ssh dropbear start (10 s). If it still has not finished (a longer
-    // in-flight command, e.g. a 60 s execute_command shell), abort as a fallback AND force a plain exit —
-    // never an in-place re-exec over an aborted, possibly-unreaped child; a plain exit lets init (PID 1) adopt
-    // and reap it while the watchdog respawns the bridge.
-    const CMD_WORKER_DRAIN: Duration = Duration::from_secs(12);
-    cmd_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
-    drop(cmd_tx); // sole sender; wake an idle recv() so the loop can observe `cmd_stopping` / channel close
-    match tokio::time::timeout(CMD_WORKER_DRAIN, &mut cmd_worker).await {
-        Ok(_) => {} // worker finished its in-flight command and exited cleanly
-        Err(_) => {
+    // JOIN the command worker (its intake was already frozen right after the loop). It starts no new command;
+    // we only wait out the dispatch that was ACTIVE when shutdown began. HOW we wait depends on the exit kind:
+    if reexec {
+        // Internal re-exec (restart_bridge / a learned light WHERE): the daemon replaces its image at the SAME
+        // pid, so an in-flight command's child is NOT reparented to init and must be cleaned up HERE. Wait for
+        // the active dispatch to finish its own group-kill + detached-reap (the guard below then downgrades to
+        // a plain exit if a reaper is still stuck) so the re-exec never strands a process group. No external
+        // deadline governs this btmqttd-internal path (the init script's 8 s SIGKILL grace applies only to
+        // `/etc/init.d/btmqttd stop`, which is the plain-exit branch). Bound it so a wedged dispatch can't hang
+        // the re-exec: on expiry, abort AND fall back to a plain exit — never an in-place re-exec over an
+        // aborted, possibly-unreaped child; a plain exit lets init (PID 1) adopt and reap it while the watchdog
+        // respawns the bridge. `CMD_WORKER_DRAIN` comfortably covers the restore_ssh dropbear start (10 s).
+        const CMD_WORKER_DRAIN: Duration = Duration::from_secs(12);
+        if tokio::time::timeout(CMD_WORKER_DRAIN, &mut cmd_worker).await.is_err() {
             eprintln!(
                 "btmqttd: command worker did not drain within {}s; aborting and exiting instead of re-exec",
                 CMD_WORKER_DRAIN.as_secs()
@@ -971,6 +975,15 @@ async fn run() -> Result<bool, String> {
             let _ = cmd_worker.await;
             reexec = false; // an aborted in-flight child may be unreaped — never re-exec over it
         }
+    } else {
+        // Plain exit (SIGTERM/SIGINT — e.g. `/etc/init.d/btmqttd stop`, which SIGKILLs after only an 8 s
+        // grace): the process fully EXITS, so the OS reparents any in-flight command's children to init
+        // (PID 1), which reaps them — there is no same-pid orphan to prevent, hence no long drain (which would
+        // overrun the grace and get SIGKILLed anyway — Codex). Abort-and-await like the other tasks, so the
+        // worker's already-enqueued publishes stay ordered before `offline` and shutdown stays well within the
+        // grace. The active command's direct child gets kill_on_drop's SIGKILL; anything it spawned (e.g. the
+        // dropbear it was starting — which we WANT to keep running) is reparented to init.
+        stop(cmd_worker).await;
     }
     // The command worker is now quiesced — no further `reboot` command can be dispatched — so the reboot
     // gate is STABLE from here. Re-check it before committing to a re-exec: the `restart.notified()` arm
