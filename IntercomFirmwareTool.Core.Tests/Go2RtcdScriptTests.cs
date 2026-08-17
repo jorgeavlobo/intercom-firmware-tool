@@ -162,7 +162,7 @@ public class Go2RtcdScriptTests
         // earlier mkdir-mutex kept re-introducing). util-linux flock is present on the target.
         string s = ReadScript().Replace("\r\n", "\n");
         // Open fd 9 and block for the lock; acquire EXITS (never returns) if it can't get the lock, so no
-        // caller can run its critical section unlocked (CodeRabbit).
+        // caller can run its critical section unlocked.
         Assert.Contains("acquire() { exec 9>>\"$LOCKFILE\" || exit 1; flock -w 30 9 || exit 1; }", s);
         Assert.Contains("release() { exec 9>&-; }", s);                       // close fd 9 → kernel releases
         // None of the fragile hand-rolled locking survives (each was a source of a review finding).
@@ -175,7 +175,7 @@ public class Go2RtcdScriptTests
         Assert.Contains("9>&- &", s);
         // restart runs `stop`/`start` as child processes; since acquire EXITS on a lock failure (in the
         // child), the restart arm must PROPAGATE that child status rather than fall through to the script's
-        // trailing `exit 0` and report a failed restart as success (Codex).
+        // trailing `exit 0` and report a failed restart as success.
         Assert.Contains("\"$0\" stop && \"$0\" start", s);
         int restartIdx = s.IndexOf("\"$0\" stop && \"$0\" start", System.StringComparison.Ordinal);
         Assert.Contains("exit $?", s.Substring(restartIdx));
@@ -226,7 +226,7 @@ public class Go2RtcdScriptTests
     [Fact]
     public void Firewall_follows_enabled_intent_and_the_watchdog_never_touches_iptables()
     {
-        // Task #42 / Codex P1: the periodic watchdog (`respawn`) MUST NOT invoke iptables — every
+        // Task #42: the periodic watchdog (`respawn`) MUST NOT invoke iptables — every
         // invocation acquires the xtables lock at launch and could fail a concurrent factory `-A INPUT`,
         // dropping a rule (USB-reflash FTP, SSH, security DROPs). So the firewall is (re)asserted ONLY by
         // discrete, sequenceable events: `start` (open), `stop` (close), and the if-up.d hook
@@ -244,7 +244,7 @@ public class Go2RtcdScriptTests
             Assert.DoesNotContain(respawnCode, l => l.Contains(token));
         // start opens the port when enabled (after launching), decoupled from is_running, via the bounded-
         // retry wrapper (a single firewall_open can bail on a transient failure; the watchdog no longer
-        // retries, so the event path must — Codex).
+        // retries, so the event path must).
         int stStart = s.IndexOf("\tstart)", System.StringComparison.Ordinal);
         string startBody = s.Substring(stStart, s.IndexOf("\trespawn)", stStart, System.StringComparison.Ordinal) - stStart);
         Assert.Contains("firewall_open_confirmed", startBody);
@@ -254,7 +254,7 @@ public class Go2RtcdScriptTests
         string fwBody = s.Substring(fwStart, s.IndexOf("\tstop)", fwStart, System.StringComparison.Ordinal) - fwStart);
         Assert.Contains("firewall_open_confirmed", fwBody);
         // The close path re-checks DISABLED UNDER the lock (after acquire) before firewall_close, so a
-        // concurrent start that clears DISABLED can't be undone by a stale close (CodeRabbit); the acquire
+        // concurrent start that clears DISABLED can't be undone by a stale close; the acquire
         // must precede that guarded close.
         Assert.Contains("[ -e \"$DISABLED\" ] && firewall_close", fwBody);
         Assert.True(
@@ -266,7 +266,7 @@ public class Go2RtcdScriptTests
     [Fact]
     public void Firewall_open_is_retried_bounded_on_the_discrete_event_path()
     {
-        // Codex on the #42 redesign: with the watchdog no longer retrying iptables, a single firewall_open
+        // On the #42 redesign: with the watchdog no longer retrying iptables, a single firewall_open
         // that BAILS on a transient failure (lock contention, or an ACCEPT that lost a race with the factory
         // rebuild) would leave :8554 closed until the next interface event. firewall_open_confirmed re-tries
         // from the discrete event path, verifying the end state with firewall_is_open, and is BOUNDED (never
@@ -279,7 +279,7 @@ public class Go2RtcdScriptTests
         Assert.Contains("firewall_open", body);
         Assert.Contains("if firewall_is_open; then release; return 0; fi", body);
         Assert.Contains("-ge 3 ] && return 0", body); // bounded attempt count
-        // LOCK DISCIPLINE (Codex/CodeRabbit): it SELF-LOCKS per attempt (acquire/release around one
+        // LOCK DISCIPLINE: it SELF-LOCKS per attempt (acquire/release around one
         // firewall_open) so each critical section is bounded to a single firewall_open — never the whole
         // loop — and it re-reads DISABLED under the lock so a concurrent stop wins. The inter-attempt sleep
         // must run LOCK-FREE: the last release precedes the sleep, so the mutex is never held across the
@@ -299,11 +299,11 @@ public class Go2RtcdScriptTests
         Assert.Contains("iptables -C \"$FW_CHAIN\"", pred);   // confirms our exact ACCEPT is installed
         // It must verify the SAME INPUT-jump invariant fw_jump enforces — EXACTLY ONE jump AND it is LAST —
         // so a present-but-not-last (or duplicated) jump keeps the caller retrying instead of falsely
-        // reading "open" with our ACCEPT ahead of a factory filter (CodeRabbit).
+        // reading "open" with our ACCEPT ahead of a factory filter.
         Assert.Contains("[ \"$n\" -eq 1 ]", pred);
         Assert.Contains("[ \"$last\" = \"-A INPUT -j $FW_CHAIN\" ]", pred);
         // And OUR chain must hold EXACTLY ONE rule (the ACCEPT) — an extra/stale rule could expose another
-        // port or source, so a membership-only check isn't enough; it must count the chain rules (Codex).
+        // port or source, so a membership-only check isn't enough; it must count the chain rules.
         Assert.Contains("[ \"$cn\" -eq 1 ]", pred);
     }
 
@@ -370,7 +370,7 @@ public class Go2RtcdScriptTests
     [Fact]
     public void Never_touches_a_pre_existing_foreign_chain_it_did_not_create()
     {
-        // CodeRabbit: a fixed chain name is a namespace convention, not proof of ownership. We manage the
+        // A fixed chain name is a namespace convention, not proof of ownership. We manage the
         // chain ONLY when we created it this boot, recorded by a boot-scoped marker (FW_OWN). A GO2RTC
         // chain we did not create is left untouched by both open and close.
         string s = ReadScript().Replace("\r\n", "\n");
@@ -402,7 +402,7 @@ public class Go2RtcdScriptTests
     [Fact]
     public void Keeps_chain_ownership_consistent_under_marker_and_teardown_failures()
     {
-        // Codex/CodeRabbit: the ownership marker and the chain must never diverge.
+        // The ownership marker and the chain must never diverge.
         //  (1) claim ownership BEFORE creating the chain, so a failed marker write leaves nothing to
         //      orphan; if the create then fails, drop the marker again.
         //  (2) close drops ownership ONLY when a SUCCESSFUL listing confirms the chain AND its jump are
@@ -457,7 +457,7 @@ public class Go2RtcdScriptTests
     [Fact]
     public void Stop_closes_the_firewall_under_the_lock_and_only_if_still_disabled()
     {
-        // Codex: the stop-time firewall cleanup must not race a concurrent `start`'s firewall_open. Guard
+        // The stop-time firewall cleanup must not race a concurrent `start`'s firewall_open. Guard
         // it under the mutex and skip it if a `start` re-enabled the service during the shutdown window.
         string s = ReadScript().Replace("\r\n", "\n");
         int stop = s.IndexOf("\tstop)", System.StringComparison.Ordinal);
@@ -499,7 +499,7 @@ public class Go2RtcdScriptTests
             joined);
         // The `-C` STATUS is captured (`if cerr=$(...)`) so ONLY the documented "rule not found"
         // diagnostic reconciles; EVERY other non-zero status (lock contention, permission/resource/backend
-        // error) BAILS rather than falling through to the mutating `-F` (CodeRabbit). The fast path exits
+        // error) BAILS rather than falling through to the mutating `-F`. The fast path exits
         // (fw_jump + return) for BOTH the already-correct (n==1 + -C match) and already-empty (n==0) cases.
         Assert.Contains("if cerr=$(iptables -C \"$FW_CHAIN\"", joined);
         Assert.Contains("*\"Bad rule\"* | *\"matching rule exist\"*) : ;;", openBody);  // mismatch → reconcile

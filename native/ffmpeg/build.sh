@@ -82,7 +82,7 @@ cd "$src" || exit 1
 # dropped every packet as "received too late"); see IntercomFirmwareTool.Core/Go2RtcConfig.cs.
 # NB: `rtsp` is deliberately NOT in --enable-protocol — FFmpeg has no `rtsp` URL protocol
 # (RTSP is the demuxer/muxer enabled just above; it runs over tcp/udp/rtp, which ARE listed).
-# `--enable-protocol=rtsp` matched nothing and only added a configure warning (CodeRabbit).
+# `--enable-protocol=rtsp` matched nothing and only added a configure warning.
 
 # -j1 (serial): FFmpeg's parallel build is not byte-reproducible across runs (object/archive
 # ordering follows parallel completion order); the serial build is deterministic.

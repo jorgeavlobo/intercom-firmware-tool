@@ -148,15 +148,15 @@ is_running() { [ -n "$(daemon_pids)" ]; }
 # wrong — the whole "lease expired while the holder was alive / two waiters both break it" class simply does
 # not exist. util-linux flock is present on the target at /usr/bin/flock. `flock -w 30 9` waits (BOUNDED)
 # for the lock; closing fd 9 (or process death) releases it. The bounded wait means even a wedged-but-alive
-# holder — the only case flock could otherwise block on forever — can't hang the SYNCHRONOUS if-up.d hook
-# (CodeRabbit); a `-w` timeout NEVER breaks the holder's lock (unlike the old stale-steal — it only caps how
+# holder — the only case flock could otherwise block on forever — can't hang the SYNCHRONOUS if-up.d hook;
+# a `-w` timeout NEVER breaks the holder's lock (unlike the old stale-steal — it only caps how
 # long a waiter waits), so it can never interleave a critical section. Critical sections stay short (well
 # under 30 s). The backgrounded daemon MUST NOT inherit fd 9 — it would hold the lock for its whole lifetime
 # — so every daemon launch closes it with `9>&-`. This protocol is shared VERBATIM with the btmqttd init
 # script.
 # acquire never returns WITHOUT the lock: if the lock file can't be opened, or flock fails / times out / is
-# interrupted, it EXITS non-zero rather than letting the caller run its critical section unlocked
-# (CodeRabbit). A watchdog `respawn` that exits just retries next pass; an operator start/stop surfaces the
+# interrupted, it EXITS non-zero rather than letting the caller run its critical section unlocked.
+# A watchdog `respawn` that exits just retries next pass; an operator start/stop surfaces the
 # failure; the best-effort if-up.d hook (`|| true`) just skips and the next interface event re-asserts.
 acquire() { exec 9>>"$LOCKFILE" || exit 1; flock -w 30 9 || exit 1; }
 release() { exec 9>&-; }
@@ -269,7 +269,7 @@ firewall_is_open() {
 	# Mirror fw_jump's EXACT invariant: our chain must be referenced by EXACTLY ONE INPUT jump AND that jump
 	# must be LAST (after the factory/admin filters, before the policy DROP). A present-but-not-last or
 	# duplicated jump is NOT "open" — our ACCEPT could then sit ahead of a factory filter — so it must keep
-	# the caller retrying until fw_jump repositions it (CodeRabbit). A failed listing (lock/error) yields
+	# the caller retrying until fw_jump repositions it. A failed listing (lock/error) yields
 	# n=0 / no last match ⇒ "not open" ⇒ retry, never a false "open".
 	inp=$(iptables -S INPUT 2>/dev/null) || return 1
 	n=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
@@ -278,7 +278,7 @@ firewall_is_open() {
 	# And OUR chain must hold EXACTLY ONE rule — the ACCEPT for the current subnet — matching firewall_open's
 	# desired state. Confirming the ACCEPT merely EXISTS isn't enough: if a transient flush bailed and left a
 	# stale/extra rule alongside it, that extra rule could expose another port or source, so an over-full
-	# chain reads "not open" ⇒ keep retrying until firewall_open reconciles it to the single rule (Codex). A
+	# chain reads "not open" ⇒ keep retrying until firewall_open reconciles it to the single rule. A
 	# failed chain listing likewise reads "not open" (retry), never a false "open".
 	fw_rules=$(iptables -S "$FW_CHAIN" 2>/dev/null) || return 1
 	cn=$(printf '%s\n' "$fw_rules" | grep -c -- "^-A ")
@@ -289,13 +289,13 @@ firewall_is_open() {
 # Open the media port with a BOUNDED retry — for the DISCRETE EVENT path (start / fw-reassert) ONLY. A
 # single firewall_open deliberately BAILS without establishing the rule on a transient failure (xtables
 # lock contention past `-w 5`, or an ACCEPT that lost a race with the factory chain rebuild). Because the
-# periodic watchdog no longer retries iptables (task #42 / Codex P1), a transient miss would otherwise
+# periodic watchdog no longer retries iptables (task #42), a transient miss would otherwise
 # leave :8554 CLOSED until the next interface event or a manual restart. So re-attempt a few times,
 # verifying the end state with firewall_is_open between tries and pausing briefly to let a contending
 # factory rebuild finish. Zero extra cost once open (the first firewall_is_open short-circuits, and the
 # no-address boot race settles immediately without sleeping).
 #
-# LOCK DISCIPLINE (CodeRabbit / Codex): this function TAKES THE MUTEX ITSELF, once PER ATTEMPT, around a
+# LOCK DISCIPLINE: this function TAKES THE MUTEX ITSELF, once PER ATTEMPT, around a
 # single firewall_open + verify, and the inter-attempt sleep runs LOCK-FREE. The flock mutex is never stolen
 # from a live holder (it auto-releases only on death), so no critical section here can be interleaved
 # regardless of how long its `-w 5` waits block. The per-attempt structure is kept for RESPONSIVENESS:
@@ -368,8 +368,8 @@ assemble_sdp() {
 		# full shell-quoting parser in sh (a losing game), we adopt a provably-safe rule: this yields a
 		# concrete 0/1 ONLY for a pure-integer assignment — the exact form the installer writes
 		# (`CAMERA_BRANCH=0`/`=1`) — and anything else (quoted, `export`-prefixed, non-numeric, absent)
-		# yields the sentinel `none`, which matches no record so nothing is spliced. ACCEPTED TRADEOFF
-		# (Codex): the INSTALLER only ever writes the canonical form, so a real unit always resolves 0/1
+		# yields the sentinel `none`, which matches no record so nothing is spliced. ACCEPTED TRADEOFF:
+		# the INSTALLER only ever writes the canonical form, so a real unit always resolves 0/1
 		# and fast-opens. If someone HAND-EDITS the generated conf to a non-canonical shell form, config.rs
 		# may still resolve a branch (so btmqttd treats an existing record as already-learned and does not
 		# re-learn) while this yields `none` and leaves the runtime SDP bare — the panel then keeps the
@@ -456,7 +456,7 @@ case "$1" in
 		# enabled so a slow/failed first launch (then a later respawn success) still ends up reachable.
 		# firewall_open is idempotent and zero-write when already correct; firewall_open_confirmed wraps it in
 		# a bounded retry so a boot-time overlap with the factory rebuild that makes one attempt BAIL is
-		# re-attempted here instead of leaving :8554 closed until the next interface event (Codex). It
+		# re-attempted here instead of leaving :8554 closed until the next interface event. It
 		# SELF-LOCKS per attempt (see its LOCK DISCIPLINE note), so it is called OUTSIDE this arm's mutex —
 		# the daemon launch stays under the lock, then the firewall is asserted with its own per-attempt lock.
 		acquire
@@ -468,7 +468,7 @@ case "$1" in
 		;;
 	respawn)
 		# Supervisor-only reconcile (bt_service_watchdog). This periodic pass MUST NOT touch iptables
-		# (task #42 / Codex P1): EVERY iptables invocation — even a read-only `-S` — acquires the xtables
+		# (task #42): EVERY iptables invocation — even a read-only `-S` — acquires the xtables
 		# lock at launch, and if that overlaps the factory firewall's LOCK-LESS `-A INPUT` rebuild the
 		# factory call fails and a rule is dropped (FTP-over-USB reflash, SSH, security DROPs). The watchdog
 		# fires on an INDEPENDENT timer that cannot be sequenced against that rebuild, so it manages ONLY
@@ -499,7 +499,7 @@ case "$1" in
 		# lock so a concurrent start/stop that flips the marker after this test still wins: the open branch
 		# via firewall_open_confirmed's per-attempt check, and the close branch here re-checks before closing
 		# (matching the stop path), so a `start` that clears DISABLED can't be undone by a stale close that
-		# would otherwise leave the enabled service with :8554 closed (CodeRabbit).
+		# would otherwise leave the enabled service with :8554 closed.
 		if [ ! -e "$DISABLED" ]; then
 			firewall_open_confirmed
 		else
@@ -547,7 +547,7 @@ case "$1" in
 	restart)
 		# `stop` sets the marker + waits for exit; `start` clears it + relaunches. Chain them and PROPAGATE
 		# a child failure (e.g. an acquire that exited non-zero) via `exit $?` instead of falling through to
-		# the script's trailing `exit 0`, so a failed restart never reports success (Codex).
+		# the script's trailing `exit 0`, so a failed restart never reports success.
 		"$0" stop && "$0" start
 		exit $?
 		;;

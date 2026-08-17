@@ -201,7 +201,7 @@ async fn handle_json(
         // connect), and in that state there is no active session to leave streaming — a session that
         // then starts from a queued Start still auto-hangs-up after CAMERA_VIEW_IDLE_SECS, and the user
         // can press Stop again once the queue drains. A parallel priority signal isn't worth the
-        // ordering complexity for that bounded case (Codex).
+        // ordering complexity for that bounded case.
         if action == "view_camera" || action == "stop_camera" {
             let cmd = if action == "view_camera" { ViewCmd::Start } else { ViewCmd::Stop };
             match view_tx {
@@ -402,7 +402,7 @@ const DROPBEAR_START_TIMEOUT: Duration = Duration::from_secs(10);
 /// back (a no-op if dropbear is already listening). Std streams nulled off btmqttd's inherited fds. Spawned
 /// in its OWN process group (`process_group(0)`) so a timeout can SIGKILL the WHOLE group — the init script
 /// AND anything it spawned — not just the script interpreter, which would otherwise leave a reparented
-/// descendant running and let repeated presses pile up stuck processes (Codex; same idiom as
+/// descendant running and let repeated presses pile up stuck processes (same idiom as
 /// `execute_command`). The wait is bounded by [`DROPBEAR_START_TIMEOUT`]; on expiry the group is killed and
 /// the direct child handed to the detached, bounded [`reap`] task rather than awaited inline — a child stuck
 /// in uninterruptible kernel I/O (D-state) won't return from `wait()` even after SIGKILL until its syscall
@@ -455,7 +455,7 @@ async fn start_dropbear() {
             // We could NOT confirm the child exited (waitpid itself failed), so it may still be alive and
             // UNREAPED — treat it exactly like the timeout: kill its group and hand it to the detached
             // reaper, never a bare `drop` (kill_on_drop only SIGKILLs the direct child and does not reap,
-            // which would leak the process while still freeing the permit — Copilot).
+            // which would leak the process while still freeing the permit).
             eprintln!("btmqttd: restore_ssh: waiting on dropbear start failed: {e}; killing its process group");
             kill_group_and_reap(child, permit);
         }
@@ -897,10 +897,10 @@ pub(crate) fn create_unique_temp(path: &str, bytes: &[u8]) -> std::io::Result<St
             Ok(mut f) => {
                 // Write + flush + fsync BEFORE the caller renames over the target, so a crash
                 // right after the rename can't leave the new name pointing at unwritten/zeroed
-                // data (CodeRabbit). A no-op on tmpfs (the hosts rewrite), a durability
+                // data. A no-op on tmpfs (the hosts rewrite), a durability
                 // guarantee on the persistent cfg partition. On ANY failure, remove the temp
                 // before returning so repeated retries can't accumulate .tmp files and fill
-                // the partition (CodeRabbit).
+                // the partition.
                 let write = (|| -> std::io::Result<()> {
                     f.write_all(bytes)?;
                     f.flush()?;

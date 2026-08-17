@@ -70,7 +70,7 @@ const FORWARD_TIMEOUT: Duration = Duration::from_secs(2);
 /// ignore an observed press within this window so our own toggle isn't counted a second time.
 /// The window must OUTLAST a full command: a forward may take up to [`FORWARD_TIMEOUT`] and its
 /// echo can arrive a little later still, so a shorter window would let a successful-but-late
-/// echo be miscounted as a physical press on top of the commit (Codex). Kept well above
+/// echo be miscounted as a physical press on top of the commit. Kept well above
 /// `FORWARD_TIMEOUT`. Loopback echo is normally near-instant, so this ceiling is rarely
 /// approached; and while a window this long could absorb a concurrent PHYSICAL press as if it
 /// were our echo, the toggle COUNT still balances (our commit plus one flip per extra frame),
@@ -92,7 +92,7 @@ struct State {
     /// than the bus echoes them each get their own echo absorbed; a failing command reclaims
     /// ONLY its own echo, never an earlier successful command's delayed echo; and a new
     /// command's arm can't extend an older expectation's window and let a stale count swallow a
-    /// genuine later physical press (all Codex). An expectation whose echo never arrives (e.g.
+    /// genuine later physical press. An expectation whose echo never arrives (e.g.
     /// missed across a monitor reconnect) simply EXPIRES by its own deadline, at which point the
     /// next observed frame is judged fresh — no cross-session bookkeeping is needed.
     pending: VecDeque<(u64, Instant)>,
@@ -230,7 +230,7 @@ pub struct LightCtl {
     /// Whether this unit may LEARN (or re-learn) its WHERE. `false` for a CONFIGURED build (a
     /// non-empty build-time `LIGHT_WHERE`): that address is authoritative and `main` always binds
     /// it, so accepting a learned frame would persist an address the daemon then ignores on
-    /// restart — a false "learned" that keeps toggling the old actuator (Codex). `true` only in
+    /// restart — a false "learned" that keeps toggling the old actuator. `true` only in
     /// learn mode (blank build), where the learned WHERE is what `main` actually binds.
     learnable: bool,
     /// MOMENTARY light (staircase-timer install): the actuator is fired once to turn ON and the
@@ -304,7 +304,7 @@ impl LightCtl {
     /// shows the switch as unknown. Clearing on unknown matters after a `LIGHT_WHERE` change:
     /// `read_light` returns `None` for the new actuator, and without this the broker would
     /// keep serving the OLD actuator's retained `on`/`off`, so HA would display a stale state
-    /// instead of unknown until the first toggle (Codex).
+    /// instead of unknown until the first toggle.
     async fn publish(&self, on: Option<bool>) {
         let payload = match on {
             Some(true) => "on",
@@ -313,7 +313,7 @@ impl LightCtl {
         };
         // Non-blocking single try_publish: observe() runs on the monitor read path, so this must
         // never block on a full request queue — else the reader stalls and a following light echo
-        // misses its 3 s guard (Codex/CodeRabbit). A drop while the queue is full is recovered off
+        // misses its 3 s guard. A drop while the queue is full is recovered off
         // the read path by the sender loop's periodic reseed (and by seed() on the next reconnect);
         // durable disk persistence goes through a separate, unaffected channel. See
         // sender::try_publish_retained.
@@ -332,7 +332,7 @@ impl LightCtl {
         // A MOMENTARY light has no tracked state, so it never asserts an on/off. But a PRIOR bistable
         // build may have left a retained `on`/`off` on TOPIC_LIGHT; discovery tombstones the switch
         // entity, yet that retained value lingers on the broker — clear it with an empty retained
-        // payload so nothing stale is served (CodeRabbit). Bistable re-asserts its tracked on/off.
+        // payload so nothing stale is served. Bistable re-asserts its tracked on/off.
         if self.momentary {
             self.publish(None).await;
         } else {
@@ -424,7 +424,7 @@ impl LightCtl {
     pub async fn press(&self) {
         // BISTABLE has no press button — a stray/stale `light_press` here would toggle the relay
         // while bypassing command()'s state tracking + persistence + retained publish, desyncing
-        // HA's switch. Refuse it; bistable actuation goes through command() only (CodeRabbit).
+        // HA's switch. Refuse it; bistable actuation goes through command() only.
         if !self.momentary {
             eprintln!("btmqttd: light: ignoring press — not a momentary light (use the switch)");
             return;
@@ -496,7 +496,7 @@ impl LightCtl {
         // A CONFIGURED build has a fixed, authoritative WHERE that `main` always binds; capturing
         // a learned frame here would persist an address the daemon ignores on restart (a false
         // "learned" that keeps toggling the old actuator) — so learning is refused. Learn mode
-        // (blank build) is the only place a learned WHERE is what `main` actually binds (Codex).
+        // (blank build) is the only place a learned WHERE is what `main` actually binds.
         if !self.learnable {
             eprintln!(
                 "btmqttd: light: ignoring learn — WHERE is fixed by configuration (LIGHT_WHERE)"
@@ -526,7 +526,7 @@ impl LightCtl {
         if self.where_.lock().expect("light where mutex poisoned").as_deref() == Some(w) {
             eprintln!("btmqttd: light: learned WHERE {w} matches the current one — no change");
             // A MOMENTARY light tracks no state, so the teaching press is nothing to record — just
-            // disarm (done above) and return, never publishing a retained state (CodeRabbit).
+            // disarm (done above) and return, never publishing a retained state.
             if self.momentary {
                 return;
             }
@@ -572,7 +572,7 @@ impl LightCtl {
     /// startup so the bridge birth `online` is not published until this gate is actually QUEUED.
     /// `publish_avail`'s drop-on-full try-publish would let the gate be dropped and the bridge
     /// `online` still queue after capacity frees, re-exposing the stale-`online` race on a
-    /// configured→learn-mode reflash (CodeRabbit). Retained, QoS 1, like the reconnect seed.
+    /// configured→learn-mode reflash. Retained, QoS 1, like the reconnect seed.
     ///
     /// Returns `true` when the gate was queued. The caller MUST NOT publish the bridge birth
     /// `online` on `false`: a failed gate leaves any stale retained `light_avail=online` in place,
@@ -601,7 +601,7 @@ impl LightCtl {
 /// shutdown: `main` signals `shutdown` AFTER aborting the command/monitor tasks (so no
 /// further state can be produced) and then awaits this task, whose final flush persists any
 /// state queued in the last instant — so a toggle actuated moments before SIGTERM is durable
-/// rather than lost with the aborted worker (Codex). Redundant writes are skipped.
+/// rather than lost with the aborted worker. Redundant writes are skipped.
 /// `initial_uncertain` marks the disk baseline as NOT known to match `initial`: used when the
 /// restore read FAILED (a valid record may still be on disk that we couldn't read), so the first
 /// value — even one equal to `initial` — is durably written rather than assumed already on disk.
@@ -623,7 +623,7 @@ pub async fn run_persist(
 /// without touching the filesystem. Advances the "durable" marker ONLY on a successful write
 /// and retries a failed one — on a timer while idle, and again at the final flush — so a
 /// transient partition outage can't leave the on-disk record stale while the loop believes it
-/// is durable (CodeRabbit). `write(v)` returns `true` on a durable write.
+/// is durable. `write(v)` returns `true` on a durable write.
 async fn run_persist_with<F, Fut>(
     initial: Option<bool>,
     initial_uncertain: bool,
@@ -639,20 +639,20 @@ async fn run_persist_with<F, Fut>(
     // `written` = the value known to be DURABLE on disk: the value RESTORED from disk, passed
     // in EXPLICITLY. It must NOT be read from the watch channel here — a `command()`/`observe()`
     // can bump the channel before this task is first polled, and capturing that as the baseline
-    // would make us skip persisting it, so a reboot would restore the older state (Codex). We
+    // would make us skip persisting it, so a reboot would restore the older state. We
     // deliberately do NOT `borrow_and_update`: leaving any pending value unseen lets the first
     // loop iteration persist it (it differs from this disk baseline).
     let mut written = initial;
     // A prior WRITE did not confirm durability (the spawn_blocking failed, or `atomic_write_in`
     // renamed the new file but its directory fsync failed, possibly leaving an intermediate value).
     // Arm the retry timer and keep rewriting the LATEST value until a write confirms; an
-    // unconfirmed write is NEVER mistaken for durable (Codex).
+    // unconfirmed write is NEVER mistaken for durable.
     let mut write_unconfirmed = false;
     // The RESTORED disk value could not be READ (`initial_uncertain`): a valid on/off record may
     // still be on disk. Force the FIRST genuine observation to be written even if it equals the
     // `None` baseline (to overwrite that unread record) — but do NOT arm the retry timer or
     // proactively write the initial `None`, or we would DELETE the record ~RETRY after boot even
-    // though nothing was pressed/commanded (CodeRabbit). Cleared once any write confirms.
+    // though nothing was pressed/commanded. Cleared once any write confirms.
     let mut baseline_unreadable = initial_uncertain;
     tokio::pin!(shutdown);
     loop {
@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn two_outstanding_command_echoes_are_each_absorbed() {
-        // Rapid ON→OFF issued before the bus echoes the first (Codex): with a single-slot
+        // Rapid ON→OFF issued before the bus echoes the first: with a single-slot
         // guard the second arm would clobber the first, and OFF's echo would be counted as a
         // physical press. With the per-command QUEUE, both echoes are absorbed and the cache
         // matches the relay (on then off = off).
@@ -812,7 +812,7 @@ mod tests {
         // Command A succeeds (echo still outstanding); command B arms; A's DELAYED echo is
         // absorbed during B's forward; then B FAILS. B must NOT reclaim A's echo — it belongs
         // to A (already committed). Keyed by generation: A's echo consumes A's (older) slot, so
-        // B's slot is still queued and B's failure is a clean no-op (Codex / CodeRabbit / Copilot).
+        // B's slot is still queued and B's failure is a clean no-op.
         let now = Instant::now();
         let mut st = state(Some(false));
         st.arm_guard(now); // A
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn a_new_arm_does_not_extend_an_older_echos_window() {
-        // Per-echo deadlines (Codex): A's echo is lost; B arms near the end of A's window. A
+        // Per-echo deadlines: A's echo is lost; B arms near the end of A's window. A
         // physical press AFTER A's own 3 s window (but before B's later deadline) must NOT be
         // absorbed against A's stale slot — it's physical and flips.
         let now = Instant::now();
@@ -848,7 +848,7 @@ mod tests {
     fn echo_guard_outlasts_the_forward_timeout() {
         // A successful-but-late echo (up to FORWARD_TIMEOUT plus latency) must still fall inside
         // the guard window, or apply_observe would count it as a physical press on top of the
-        // commit and invert the cache (Codex).
+        // commit and invert the cache.
         assert!(ECHO_GUARD > FORWARD_TIMEOUT);
     }
 
@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn commit_actuation_composes_with_a_concurrent_physical_press() {
-        // The race Codex flagged: cache=off, HA commands ON. Our echo consumed the guard,
+        // The race: cache=off, HA commands ON. Our echo consumed the guard,
         // then a PHYSICAL press was observed while forward_to_gateway() was still awaiting —
         // observe() flipped the cache to on. The relay has now taken TWO toggles (ours +
         // the physical one) and is back OFF. A flip-commit composes correctly (on → off),
@@ -919,7 +919,7 @@ mod tests {
         let a = attempts.clone();
         // Enqueue a toggled state BEFORE the worker is spawned: with the disk baseline passed
         // explicitly (None), the worker must still persist this pre-existing value rather than
-        // mistaking it for the restored baseline (the race Codex flagged).
+        // mistaking it for the restored baseline (the race).
         tx.send(Some(true)).unwrap();
         let worker = tokio::spawn(run_persist_with(None, false, rx, sd_rx, move |_on| {
             let a = a.clone();
@@ -946,7 +946,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
         // An unreadable restore (`initial_uncertain = true`, baseline `None`): a valid on/off
         // record may still be on disk. With NO press/command, the worker must NOT write — writing
-        // the `None` baseline would DELETE that record (CodeRabbit). The FIRST genuine observation
+        // the `None` baseline would DELETE that record. The FIRST genuine observation
         // IS written, to overwrite the unread record.
         let writes = Arc::new(AtomicUsize::new(0));
         let (tx, rx) = watch::channel::<Option<bool>>(None);

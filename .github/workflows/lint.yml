@@ -73,3 +73,32 @@ jobs:
             IntercomFirmwareTool.Core/Payload/mqtt/go2rtcd \
             IntercomFirmwareTool.Core/Payload/mqtt/go2rtc-net-hook \
             native/btmqttd/ci/verify-provenance.sh
+
+  attributions:
+    # Guard (issue #132): AI-reviewer tool names must not appear in source comments. Comments
+    # explain WHY, not WHO — the reviewer that surfaced a rationale is not something a future
+    # maintainer needs; that provenance lives in git history (blame + commit messages) and the PR
+    # threads, and a frozen `(Codex)` in source just ages badly. This fails the build if any of the
+    # three names reappears as a whole word in the source trees. It scans ONLY those trees — not
+    # `.github/` (so the pattern on the next line can't match this workflow itself) and not build
+    # outputs — and skips the vendored binary.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: No reviewer attributions in source comments
+        run: |
+          set -euo pipefail
+          # grep -r exits 0 when it finds a match, 1 when it finds none — so a match takes the
+          # `then` branch and fails the job. --binary-files=without-match skips the vendored ARM
+          # binary; --exclude-dir skips Rust (target) and .NET (bin/obj) build outputs.
+          if hits=$(grep -rnwE '(Codex|CodeRabbit|Copilot)' \
+              native IntercomFirmwareTool.Core IntercomFirmwareTool.Core.Tests IntercomFirmwareTool.App \
+              --binary-files=without-match \
+              --exclude-dir=target --exclude-dir=bin --exclude-dir=obj); then
+            echo "$hits"
+            echo "::error::AI-reviewer attribution(s) found in source comments (issue #132). Comments should explain why, not who — remove the tool name and reflow the sentence; the provenance already lives in git history and the PR thread."
+            exit 1
+          fi
+          echo "OK: no AI-reviewer attributions in source."

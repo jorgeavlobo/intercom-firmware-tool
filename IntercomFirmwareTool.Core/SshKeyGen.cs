@@ -135,7 +135,7 @@ namespace IntercomFirmwareTool.Core
             // Guard: this serializer is P-256-only (the field widths and the hard-coded
             // "ecdsa-sha2-nistp256"/"nistp256" labels below). Fail with a clear message if
             // handed another named curve (e.g. P-384) rather than an opaque padding/length
-            // error later (Copilot). Only reject a curve we can POSITIVELY identify as
+            // error later. Only reject a curve we can POSITIVELY identify as
             // non-P-256, so an unnamed/unidentifiable curve still falls through to the
             // field-width check and a valid P-256 key is never rejected.
             if (IsDefinitelyNotNistP256(p.Curve))
@@ -145,7 +145,7 @@ namespace IntercomFirmwareTool.Core
             // P-256 coordinate width: X and Y are fixed at 32 bytes each. .NET's
             // named-curve export already left-pads to this width, but pad defensively in
             // case a provider trims leading zeros — a short X/Y would make the point the
-            // wrong length and dropbear would reject the host key (Copilot).
+            // wrong length and dropbear would reject the host key.
             const int fieldSize = 32;
             byte[] x = LeftPad(p.Q.X ?? throw new ArgumentException("EC point X missing", nameof(p)), fieldSize);
             byte[] y = LeftPad(p.Q.Y ?? throw new ArgumentException("EC point Y missing", nameof(p)), fieldSize);

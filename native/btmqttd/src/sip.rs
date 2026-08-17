@@ -61,7 +61,7 @@ const MAIN_ENTRANCE_OWN_ADDR: &str = "20";
 /// Overall INVITE-response budget. This is the SINGLE timeout on the response wait (it wraps the
 /// whole `wait_final_response`), so there is exactly one timeout exit — routed through
 /// `cancel_pending_invite` — and no faster per-read timeout that could drop the socket without a
-/// CANCEL (Codex/CodeRabbit).
+/// CANCEL.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long we keep draining (framing responses, tearing down a racing 2xx) after sending CANCEL.
 const CANCEL_DRAIN: Duration = Duration::from_secs(2);
@@ -145,7 +145,7 @@ pub fn devaddr_from_mymodules(content: &str, own_addr: &str) -> Option<String> {
         // A blank or whitespace-only `id` on an otherwise-matching module is corrupt/mid-update
         // data: treat it as NO match (skip) rather than returning `Some("")` / `Some("  ")`, which
         // would pass resolve_identity's mandatory gate and emit an empty/blank `a=DEVADDR:` —
-        // defeating the fail-closed guarantee that we never originate a ringing INVITE (Codex/CodeRabbit).
+        // defeating the fail-closed guarantee that we never originate a ringing INVITE.
         let Some(id) = m.get("id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
         else {
             continue;
@@ -164,7 +164,7 @@ pub fn devaddr_from_mymodules(content: &str, own_addr: &str) -> Option<String> {
 /// household as a normal intercom call, so "cannot resolve it" must mean "do not send" (issue #104).
 async fn resolve_identity(cfg: &Config) -> Option<(String, String, String)> {
     // tokio::fs (not std::fs): btmqttd runs on a single-threaded runtime, so a blocking read here
-    // would stall the MQTT loop, the OWN monitor and the camera siphon for its duration (Copilot).
+    // would stall the MQTT loop, the OWN monitor and the camera siphon for its duration.
     let aor = if !cfg.sip_local_aor.is_empty() {
         cfg.sip_local_aor.clone()
     } else {
@@ -179,7 +179,7 @@ async fn resolve_identity(cfg: &Config) -> Option<(String, String, String)> {
     };
     // A whitespace-only SIP_DEVADDR override is treated as unset (fall through to auto-detect), and
     // the auto-detected id is likewise trimmed+non-empty (above) — so the DEVADDR we emit is never
-    // blank, keeping the fail-closed gate intact (CodeRabbit).
+    // blank, keeping the fail-closed gate intact.
     let devaddr = {
         let over = cfg.sip_devaddr.trim();
         if !over.is_empty() {
@@ -458,7 +458,7 @@ fn cseq_is_invite(msg: &str) -> bool {
 
 /// True when `msg` is a 2xx response to the INVITE transaction itself — i.e. an ESTABLISHED dialog
 /// we must ACK then BYE. Distinguished from the `200 OK` to our CANCEL (also 2xx, but `CSeq: N
-/// CANCEL`), which establishes nothing and must NOT trigger a teardown (CodeRabbit).
+/// CANCEL`), which establishes nothing and must NOT trigger a teardown.
 pub fn is_established_invite_2xx(msg: &str) -> bool {
     matches!(parse_status(msg), Some(s) if (200..300).contains(&s)) && cseq_is_invite(msg)
 }
@@ -596,8 +596,8 @@ fn srtp_key() -> String {
 ///     the poke's ABSOLUTE expiry (`poke instant + VIEWER_LINGER`): a `Hold` that queues while `run` is
 ///     in reconnect backoff and is only consumed after the viewer has already disconnected is STALE, so
 ///     the consumer drops it once `expiry` has passed rather than reviving or extending a viewerless
-///     session, and derives `hold_deadline` from `expiry` (poke time) rather than receipt time (Codex,
-///     CodeRabbit). `tokio::time::Instant` (not `std`) so it's the same clock the SIP hold loop sleeps on.
+///     session, and derives `hold_deadline` from `expiry` (poke time) rather than receipt time.
+///     `tokio::time::Instant` (not `std`) so it's the same clock the SIP hold loop sleeps on.
 ///   * `Stop` = the HA "Stop Camera" button (end the on-demand view now instead of waiting for a window
 ///     to elapse). A `Stop` received while no session is up is a harmless no-op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -619,7 +619,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, mut view_rx: mpsc:
         // while idle has nothing to stop — ignore it. A `Hold` whose absolute `expiry` has already passed
         // is STALE — it queued while a prior session was in reconnect backoff and the viewer has since
         // disconnected — so DISCARD it and keep waiting rather than reopening a viewerless session; a
-        // still-present viewer re-pokes a fresh `Hold` within one poll interval (Codex, CodeRabbit). The
+        // still-present viewer re-pokes a fresh `Hold` within one poll interval. The
         // triggering command is threaded into `session` so it seeds the matching initial deadline (a
         // manual `Start` ⇒ the full window; a fresh auto `Hold` ⇒ its short-linger expiry).
         let trigger = loop {
@@ -649,7 +649,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>, mut view_rx: mpsc:
 /// of the auto-hold `Hold` that opened (or arrived while establishing) the session, if any; it arms the
 /// short-linger deadline directly at that instant — but is DROPPED if it has already elapsed by `now`
 /// (session-up), so a `Hold` that queued during a reconnect backoff and outlived the viewer can't seed a
-/// linger on a viewerless session (Codex, CodeRabbit). A regime nobody requested is seeded to `now`
+/// linger on a viewerless session. A regime nobody requested is seeded to `now`
 /// (already elapsed) so [`governing_deadline`]'s `max` ignores it. Pure, so the seed rule is unit-testable.
 fn seed_deadlines(
     want_start: bool,
@@ -726,11 +726,11 @@ async fn session(
     //   * the outer RESPONSE_TIMEOUT deadline, or a reader error from wait_final_response,
     //   * daemon shutdown (run() can't interrupt an in-flight session; main.rs bounds shutdown), and
     //   * a `Stop` on view_rx — pressing "Stop Camera" WHILE the INVITE is still pending must abort the
-    //     start PROMPTLY, not sit queued up to RESPONSE_TIMEOUT while the panel establishes (Codex +
-    //     CodeRabbit). A `Start`/`Hold` in this window doesn't re-send anything (the INVITE already
+    //     start PROMPTLY, not sit queued up to RESPONSE_TIMEOUT while the panel establishes.
+    //     A `Start`/`Hold` in this window doesn't re-send anything (the INVITE already
     //     serves the "bring it up" intent) but it IS recorded (`want_start` / the latest `hold_expiry`)
     //     so the post-ACK deadlines honor it: a manual `Start` that arrives while a `Hold`-opened session
-    //     is still establishing must still seed the FULL window, not just the auto linger (Codex).
+    //     is still establishing must still seed the FULL window, not just the auto linger.
     // The timeout is an ABSOLUTE deadline (timeout_at) so a `Start` poke doesn't restart the 10 s
     // budget each loop turn. All non-success exits route through cancel_pending_invite (CANCEL + drain
     // + ACK/BYE a racing 2xx); the accumulator is owned HERE so a timeout mid-2xx carries its partial
@@ -794,7 +794,7 @@ async fn session(
         // ACK any NON-2xx final (486 Busy, 401/407, other rejects) — RFC 3261 §17.1.1.3. The ACK is
         // part of the INVITE client transaction: same Request-URI, top Via branch and CSeq number,
         // plus the response's To-tag. Without it flexisip holds the INVITE server transaction until
-        // Timer H, so repeated busy/failed views would pile up stale transactions (Codex). Best-effort.
+        // Timer H, so repeated busy/failed views would pile up stale transactions. Best-effort.
         if let Some(tag) = to_tag(&final_resp) {
             let _ = write_all_flush(&mut sock, build_ack_failure(&d, &tag).as_bytes()).await;
         }
@@ -811,7 +811,7 @@ async fn session(
 
     // A 2xx to INVITE MUST carry a To-tag — it's what makes the dialog "confirmed" and is echoed in
     // the ACK and BYE. Without it the teardown is unreliable, so fail rather than send an ACK/BYE with
-    // an empty tag (Copilot). The Contact is the panel's in-dialog request target for ACK/BYE; a 2xx
+    // an empty tag. The Contact is the panel's in-dialog request target for ACK/BYE; a 2xx
     // should include one, but fall back to the AOR (still routable via the proxy) if a peer omits it.
     d.to_tag = to_tag(&final_resp).ok_or_else(|| {
         std::io::Error::new(
@@ -824,7 +824,7 @@ async fn session(
 
     // Confirm the dialog. If the ACK can't be written/flushed, the signalling socket died AFTER the
     // panel accepted our INVITE (2xx) — the dialog may be active, so tear it down over a FRESH
-    // connection rather than leaving the panel streaming (CodeRabbit). This is the last confirmed-
+    // connection rather than leaving the panel streaming. This is the last confirmed-
     // dialog exit; together with the hold-loop's EOF/read-error/cap arms, no post-2xx path can strand
     // the panel.
     let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
@@ -848,7 +848,7 @@ async fn session(
     // `max` ignores it. An auto `Hold` open lingers ~VIEWER_LINGER; a manual `Start` open gets the full
     // window; a session that saw BOTH gets both. Neither deadline is renewed by socket traffic or the
     // in-dialog chatter the panel sends (OPTIONS/re-INVITE/media stats) — only by an explicit `view_rx`
-    // command — or that chatter would keep resetting the timer and pin the session open forever (Codex).
+    // command — or that chatter would keep resetting the timer and pin the session open forever.
     let window = Duration::from_secs(cfg.camera_view_idle_secs);
     let now0 = tokio::time::Instant::now();
     let (mut start_deadline, mut hold_deadline) =
@@ -858,7 +858,7 @@ async fn session(
     // panel BYE across reads, or coalesce it after other in-dialog traffic, so inspecting one raw
     // read chunk could miss the `BYE ` prefix (⇒ no 200 OK, the panel retransmits) or see the prefix
     // before its headers are complete (⇒ `build_ok_to` returns None yet we'd mark the dialog ended).
-    // Accumulate, then act only on COMPLETE messages (Codex + CodeRabbit).
+    // Accumulate, then act only on COMPLETE messages.
     let mut inbound: Vec<u8> = Vec::new();
     let mut panel_ended = false; // the panel tore the dialog down first ⇒ don't send our own BYE
     let mut transport_lost = false; // the signalling socket died ⇒ BYE over a fresh connection
@@ -876,7 +876,7 @@ async fn session(
                 // hold_deadline from its ABSOLUTE `expiry` (poke time + linger), not receipt time, and a
                 // poke that is ALREADY expired on arrival (a straggler buffered during a stall while the
                 // viewer left) is ignored — so buffered holds can neither extend nor revive a viewerless
-                // session past ~VIEWER_LINGER after the last live poke (Codex, CodeRabbit). `max` keeps
+                // session past ~VIEWER_LINGER after the last live poke. `max` keeps
                 // the deadline monotonic against any out-of-order or already-surpassed expiry.
                 Some(ViewCmd::Start) => start_deadline = tokio::time::Instant::now() + window,
                 Some(ViewCmd::Hold(expiry)) => {
@@ -890,7 +890,7 @@ async fn session(
             r = sock.read(&mut scratch) => match r {
                 // TCP EOF is NOT a panel BYE — flexisip may have closed/restarted our loopback leg
                 // while the SIP dialog is still up. Treat it as transport loss and BYE over a fresh
-                // connection below, so the panel isn't left streaming until its own timeout (Codex).
+                // connection below, so the panel isn't left streaming until its own timeout.
                 Ok(0) => { transport_lost = true; break; }
                 Ok(n) => {
                     inbound.extend_from_slice(&scratch[..n]);
@@ -898,7 +898,7 @@ async fn session(
                         // The dialog is CONFIRMED here (we ACKed a 2xx), so CANCEL is invalid — a
                         // best-effort BYE is what releases the panel. Returning without it would skip
                         // the teardown below and leave the camera session up until the panel's own
-                        // timeout (CodeRabbit). If the BYE write fails the socket is dead ⇒ reconnect.
+                        // timeout. If the BYE write fails the socket is dead ⇒ reconnect.
                         if teardown_bye(&mut sock, &d).await.is_err() {
                             bye_reconnect(cfg, &d).await;
                         }
@@ -926,7 +926,7 @@ async fn session(
                         // A RETRANSMITTED INVITE 2xx (our first ACK was lost between flexisip and the
                         // panel) must be re-ACKed — a UAC ACKs every 2xx or the panel times out the
                         // confirmed dialog and the camera stops. Best-effort; a dead socket surfaces on
-                        // the next read as EOF/error and routes through bye_reconnect (Codex).
+                        // the next read as EOF/error and routes through bye_reconnect.
                         if is_established_invite_2xx(&msg) {
                             let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
                             let _ = write_all_flush(&mut sock, ack.as_bytes()).await;
@@ -935,13 +935,13 @@ async fn session(
                         // Answer in-dialog REQUESTS the panel sends mid-session. Leaving them
                         // unanswered lets the peer transaction time out — and a session-refresh
                         // re-INVITE that times out can make the panel tear down the camera dialog
-                        // BEFORE our window deadline (Codex). `in_dialog_answer` picks the response
+                        // BEFORE our window deadline. `in_dialog_answer` picks the response
                         // (OPTIONS/other → 200 OK; re-INVITE/UPDATE → 488, no media renegotiation).
                         // A write failure here (BrokenPipe/ConnectionReset) proves the confirmed
                         // dialog's signalling socket is dead — do NOT discard it and wait for the next
                         // read / user command / window deadline, which would leave the panel streaming
                         // meanwhile. Tear down over a FRESH connection and surface the error for the
-                        // session-backoff path, exactly like the read-error arm below (CodeRabbit).
+                        // session-backoff path, exactly like the read-error arm below.
                         if let Some(resp) = in_dialog_answer(&msg) {
                             if let Err(e) = write_all_flush(&mut sock, resp.as_bytes()).await {
                                 bye_reconnect(cfg, &d).await;
@@ -953,7 +953,7 @@ async fn session(
                 // A socket error on a CONFIRMED dialog (ConnectionReset / BrokenPipe / …) means the
                 // signalling connection is gone — BYEing THIS dead socket would silently fail and leave
                 // the panel streaming, so tear the dialog down over a FRESH connection (like the Ok(0)
-                // EOF case) before propagating the error for backoff (Codex).
+                // EOF case) before propagating the error for backoff.
                 Err(e) => {
                     bye_reconnect(cfg, &d).await;
                     return Err(e);
@@ -985,7 +985,7 @@ async fn session(
 /// BYE a confirmed dialog whose ORIGINAL signalling socket died mid-session (TCP EOF from flexisip).
 /// Opens a fresh loopback connection and sends the in-dialog BYE there — a SIP dialog is identified
 /// by Call-ID + tags, not by the transport connection, so flexisip still routes it to the panel and
-/// the camera session ends instead of running to the panel's own timeout (Codex). Best-effort: if we
+/// the camera session ends instead of running to the panel's own timeout. Best-effort: if we
 /// can't even reconnect, there's nothing more we can do from here.
 async fn bye_reconnect(cfg: &Config, d: &Dialog) {
     if let Ok(mut sock) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
@@ -1034,7 +1034,7 @@ async fn ack_bye_reconnect(cfg: &Config, d: &Dialog) {
 /// BYE a CONFIRMED dialog on the given socket, then read the `200`-to-BYE best-effort. Returns the
 /// write/flush result so a caller on the LIVE-socket path can tell when the socket turned out dead
 /// (`ConnectionReset`/`BrokenPipe`) and fall back to `bye_reconnect` — otherwise a discarded write
-/// error would silently leave the panel streaming (Codex).
+/// error would silently leave the panel streaming.
 async fn teardown_bye(sock: &mut TcpStream, d: &Dialog) -> std::io::Result<()> {
     let bye = build_bye(d, &format!("z9hG4bK{}", rand_hex(8)));
     write_all_flush(sock, bye.as_bytes()).await?;
@@ -1056,10 +1056,10 @@ async fn wait_until_stopping(stopping: &AtomicBool) {
 /// socket does NOT cancel a pending INVITE transaction, so:
 ///  1. send `CANCEL` (matched to the INVITE by branch + CSeq) — and if that write fails because the
 ///     signalling socket already died (EOF/reset that ended the response wait), retry it over a FRESH
-///     loopback connection so flexisip still cancels the forwarded transaction (Codex), then
+///     loopback connection so flexisip still cancels the forwarded transaction, then
 ///  2. drain framed responses for a bounded window — and if a 2xx to the INVITE *raced in* (the panel
 ///     answered right as we gave up), CANCEL can't undo it, so we MUST confirm and tear that dialog
-///     down (`ACK` then `BYE`) or the panel keeps its camera streaming (Codex/CodeRabbit).
+///     down (`ACK` then `BYE`) or the panel keeps its camera streaming.
 async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, acc: Vec<u8>) {
     if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_ok() {
         // Same socket: `acc` was read from `sock`, so a trailing partial is a valid continuation.
@@ -1068,18 +1068,18 @@ async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialo
         // The original socket was dead. Resend over a fresh connection, but KEEP the INVITE's original
         // `Via` (branch AND sent-by port) unchanged: both the CANCEL and the drained non-2xx (487) ACK
         // are part of the INVITE client transaction and MUST reuse its top `Via`, or flexisip won't
-        // match them and the transaction lingers until Timer H (RFC 3261 §9.1 / §17.1.1.3 — CodeRabbit,
-        // Codex). Over TCP that's also fine for the drain's racing-2xx ACK/BYE: SIP sends responses back
+        // match them and the transaction lingers until Timer H (RFC 3261 §9.1 / §17.1.1.3). Over TCP
+        // that's also fine for the drain's racing-2xx ACK/BYE: SIP sends responses back
         // on the connection the request arrived on (§18.2.2), so the original sent-by port doesn't
         // misroute the 200-to-BYE. Hence we do NOT overwrite `d.local_port` here.
         let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
         // Carry `acc` (the bytes wait_final_response had already read) into the drain even on the
         // reconnect path: if it holds a COMPLETE INVITE 2xx buffered just before the old socket died,
         // drain_after_cancel frames and tears it down (ACK+BYE) — dropping it would leave the accepted
-        // camera session up (CodeRabbit). `seed_foreign = true`: it frames the seed's COMPLETE messages
+        // camera session up. `seed_foreign = true`: it frames the seed's COMPLETE messages
         // first, then DISCARDS any trailing partial from the dead stream before reading the fresh socket
         // — otherwise that partial would concatenate with the fresh socket's 200-to-CANCEL into one
-        // synthetic message and trigger a bogus ACK/BYE with mismatched dialog data (Codex).
+        // synthetic message and trigger a bogus ACK/BYE with mismatched dialog data.
         drain_after_cancel(&mut fresh, cfg, d, acc, true).await;
     }
     // else: couldn't even reconnect — nothing more we can do.
@@ -1094,7 +1094,7 @@ async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialo
 ///   fresh connection. After framing the seed's COMPLETE messages, any trailing partial belongs to
 ///   the dead stream and must be DISCARDED — concatenating it with `sock`'s bytes (e.g. the fresh
 ///   socket's `200`-to-CANCEL) would frame a synthetic message whose status line and headers come
-///   from two different streams, causing a bogus ACK/BYE with mismatched dialog data (Codex).
+///   from two different streams, causing a bogus ACK/BYE with mismatched dialog data.
 async fn drain_after_cancel(
     sock: &mut TcpStream,
     cfg: &Config,
@@ -1113,7 +1113,7 @@ async fn drain_after_cancel(
             acc.drain(..len);
             // We only act on responses to the INVITE transaction. The `200 OK` to our CANCEL is also
             // 2xx but carries `CSeq: N CANCEL` and needs no ACK — skip it and keep draining for the
-            // INVITE's own final response (CodeRabbit).
+            // INVITE's own final response.
             if !cseq_is_invite(&msg) {
                 continue;
             }
@@ -1121,7 +1121,7 @@ async fn drain_after_cancel(
                 // A 2xx to the INVITE means the dialog established despite our CANCEL. It was never
                 // ACKed on a live socket, so ACK-then-BYE; if EITHER write fails (socket reset before
                 // the ACK reaches flexisip, or between ACK and BYE), redo BOTH over a fresh connection
-                // (a BYE alone to an unacknowledged 2xx is unreliable) — CodeRabbit.
+                // (a BYE alone to an unacknowledged 2xx is unreliable).
                 Some(s) if (200..300).contains(&s) => {
                     if let Some(tag) = to_tag(&msg) {
                         d.to_tag = tag;
@@ -1136,7 +1136,7 @@ async fn drain_after_cancel(
                 // The normal terminal response to a cancelled INVITE is `487 Request Terminated` (or
                 // another non-2xx). That is ALSO a non-2xx final and requires an in-transaction ACK
                 // (build_ack_failure), or flexisip holds the server transaction until Timer H — the
-                // same stale-transaction accumulation the reject-path ACK fixes (Codex).
+                // same stale-transaction accumulation the reject-path ACK fixes.
                 Some(s) if s >= 300 => {
                     if let Some(tag) = to_tag(&msg) {
                         let _ = write_all_flush(sock, build_ack_failure(d, &tag).as_bytes()).await;
@@ -1148,7 +1148,7 @@ async fn drain_after_cancel(
         }
         // Seed fully framed. If it came from the dead original socket, drop any trailing partial
         // now — before the first read from the fresh `sock` — so the two streams' bytes never merge
-        // into one synthetic message (Codex). On the same-socket path the residue is a legitimate
+        // into one synthetic message. On the same-socket path the residue is a legitimate
         // continuation and is kept.
         if first_pass && seed_foreign {
             acc.clear();
@@ -1180,7 +1180,7 @@ async fn wait_final_response(sock: &mut TcpStream, acc: &mut Vec<u8>) -> std::io
         // message is complete only once its CRLFCRLF header terminator AND its Content-Length body
         // have all arrived — returning on the status line alone could hand back a 200 whose
         // To-tag/Contact haven't been read yet, so the ACK would carry an empty tag and the dialog
-        // would never confirm even though the panel accepted the INVITE (Codex).
+        // would never confirm even though the panel accepted the INVITE.
         while let Some(len) = complete_message_len(acc) {
             let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
             acc.drain(..len);
@@ -1283,7 +1283,7 @@ mod tests {
         assert_eq!(devaddr_from_mymodules("{}", "20"), None);
         // A matching EU@20 with a BLANK or whitespace-only id is corrupt/mid-update data ⇒ None, NOT
         // Some("")/Some("  "), so the mandatory gate can't be defeated into emitting an empty/blank
-        // `a=DEVADDR:` (Codex/CodeRabbit).
+        // `a=DEVADDR:`.
         let blank = r#"{"modules":[
             {"system":"videodoorentry","deviceType":"EU","id":"",
              "privateAddress":{"addressValues":[{"name":"address","value":"20"}]}}]}"#;
@@ -1450,7 +1450,7 @@ mod tests {
     // dead. The hold loop routes that error to bye_reconnect + `return Err(e)` (same idiom as the
     // read-error arm) so the panel is never left streaming. This test proves the precondition is
     // reachable: once our write half is shut down, writing the OPTIONS `200 OK` fails deterministically
-    // (so the branch takes its teardown path rather than silently swallowing the error — CodeRabbit).
+    // (so the branch takes its teardown path rather than silently swallowing the error).
     #[tokio::test]
     async fn in_dialog_answer_write_failure_is_surfaced_not_swallowed() {
         use tokio::io::AsyncWriteExt;
@@ -1537,7 +1537,7 @@ mod tests {
         assert!(cancel.ends_with("Content-Length: 0\r\n\r\n"));
         // RFC 3261 §9.1: the CANCEL's top Via must be byte-identical to the INVITE's (branch AND
         // sent-by port), so flexisip matches it — even when we resend over a fresh connection with a
-        // different local port, build_cancel must be given the ORIGINAL dialog (CodeRabbit).
+        // different local port, build_cancel must be given the ORIGINAL dialog.
         let invite = build_invite(&d, &build_sdp_offer(1, 2, "k", "da"));
         let via = |m: &str| m.lines().find(|l| l.starts_with("Via:")).unwrap().to_string();
         assert_eq!(via(&cancel), via(&invite));
@@ -1545,7 +1545,7 @@ mod tests {
 
     #[test]
     fn a_panel_bye_split_across_reads_is_framed_before_acting() {
-        // Regression for the in-dialog framing fix (Codex/CodeRabbit): a BYE that arrives in two TCP
+        // Regression for the in-dialog framing fix: a BYE that arrives in two TCP
         // chunks must only be recognized once BOTH halves have accumulated. Mirrors the loop's logic:
         // accumulate, then act only on a message complete_message_len() confirms.
         let bye = "BYE sip:btmqttd@127.0.0.1:5060 SIP/2.0\r\n\
@@ -1604,7 +1604,7 @@ mod tests {
 
     #[test]
     fn a_hold_expiry_already_elapsed_at_session_up_is_dropped() {
-        // CodeRabbit (Major): a `Hold` that queued while sip.rs was in reconnect backoff and is only
+        // A `Hold` that queued while sip.rs was in reconnect backoff and is only
         // consumed after the viewer disconnected carries an expiry now in the PAST. `seed_deadlines` must
         // drop it (seed the hold side already-elapsed) so it can't seed a linger on a viewerless session —
         // the session then governs by whatever the manual side says (here nothing ⇒ hangs up at once).
@@ -1620,7 +1620,7 @@ mod tests {
     fn manual_window_is_a_floor_the_auto_linger_cannot_cut_below() {
         // A manual window is active AND an auto `Hold` poke lands (a viewer is also connected): the auto
         // linger (now + LINGER) is SOONER than the manual window (now + WINDOW), so the governing
-        // deadline stays at the manual window — auto-hold can never shorten a manual view (CodeRabbit).
+        // deadline stays at the manual window — auto-hold can never shorten a manual view.
         let now = tokio::time::Instant::now();
         let start = now + WINDOW; // manual window
         let hold = now + LINGER; // an auto poke, sooner
@@ -1642,7 +1642,7 @@ mod tests {
 
     #[test]
     fn a_manual_start_during_establishment_still_arms_the_full_window() {
-        // Codex P2: a `Hold`-opened session that also saw a manual `Start` while the INVITE established
+        // A `Hold`-opened session that also saw a manual `Start` while the INVITE established
         // arms BOTH deadlines, so a later disconnect honors the full window (not just the short linger).
         let now = tokio::time::Instant::now();
         let (start, hold) = seed_deadlines(true, Some(now + LINGER), now, WINDOW);

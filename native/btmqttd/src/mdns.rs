@@ -31,7 +31,7 @@ const MDNS_PORT: u16 = 5353;
 /// The DNS-SD services we look for, both IANA-registered: `_mqtt._tcp` is plaintext MQTT
 /// (port 1883) and `_secure-mqtt._tcp` is MQTT over TLS (port 8883). A TLS-configured broker
 /// commonly advertises ONLY the secure service, so querying just `_mqtt._tcp` would miss it and
-/// leave a moved TLS broker undiscoverable across subnets (Codex). We query both and merge; the
+/// leave a moved TLS broker undiscoverable across subnets. We query both and merge; the
 /// caller's trust gate (pinned-cert reconnect under TLS, ARP-MAC under plaintext) still decides
 /// what is adopted, so an advertised service that doesn't match the configured transport is
 /// simply filtered out downstream.
@@ -77,12 +77,12 @@ async fn discover_service_ips(services: &[&str], window: Duration) -> Vec<Ipv4Ad
     let mut srv: HashMap<String, (String, u16)> = HashMap::new();
     // A host may advertise MORE THAN ONE A record (a multihomed broker): keep every
     // distinct address per name so a target reachable on one interface is not lost when
-    // a later, unreachable A record for the same host arrives (Codex P2).
+    // a later, unreachable A record for the same host arrives.
     let mut a: HashMap<String, Vec<Ipv4Addr>> = HashMap::new();
 
     if let Ok((sock, unicast_response)) = open_socket().await {
         // One PTR query per service (plaintext + TLS), so a broker advertising only the secure
-        // service is still discovered (Codex).
+        // service is still discovered.
         let queries: Vec<Vec<u8>> = services
             .iter()
             .filter_map(|svc| build_query(svc, QTYPE_PTR, unicast_response))
@@ -96,20 +96,19 @@ async fn discover_service_ips(services: &[&str], window: Duration) -> Vec<Ipv4Ad
         // Retransmit the queries ONCE partway through the window: a single UDP probe lost on
         // Wi-Fi would otherwise yield no candidates and push the caller into a full /24 sweep
         // (RFC 6762 §5.2 querier behaviour retransmits). One extra datagram per service, same
-        // window (CodeRabbit).
+        // window.
         let retry = tokio::time::sleep(window / 2);
         tokio::pin!(retry);
         let mut retried = false;
         // RFC 6762 §17 caps an mDNS message (incl. IP+UDP headers) at 9000 bytes; a smaller
         // buffer would let the kernel silently TRUNCATE a large datagram (many additional
         // records on a chatty LAN), and the bounds-checked parser would then bail early and
-        // miss an otherwise-valid broker answer (Copilot). Size for the RFC maximum.
+        // miss an otherwise-valid broker answer. Size for the RFC maximum.
         let mut buf = [0u8; 9000];
         // A minimal responder may answer a PTR query with ONLY the PTR record (SRV/A are
         // recommended additional answers, not guaranteed — RFC 6763 §12), leaving nothing to
         // correlate. So follow up within the same window: query SRV for each PTR instance still
-        // missing one, and A for each SRV target still missing one, each sent at most once
-        // (Codex).
+        // missing one, and A for each SRV target still missing one, each sent at most once.
         let mut srv_queried: HashSet<String> = HashSet::new();
         let mut a_queried: HashSet<String> = HashSet::new();
         let svc_suffixes: Vec<String> = services.iter().map(|s| format!(".{s}")).collect();
@@ -135,8 +134,8 @@ async fn discover_service_ips(services: &[&str], window: Duration) -> Vec<Ipv4Ad
                         for (name, (target, _port)) in &srv {
                             // Only chase A records for SRV entries under OUR MQTT services: `srv`
                             // accumulates every service seen on the shared socket, and A-querying
-                            // all of them would be needless multicast amplification on the device
-                            // (CodeRabbit). `correlate` filters the final output regardless.
+                            // all of them would be needless multicast amplification on the device.
+                            // `correlate` filters the final output regardless.
                             if !svc_suffixes.iter().any(|suf| name.ends_with(suf)) {
                                 continue;
                             }
@@ -167,13 +166,13 @@ async fn discover_service_ips(services: &[&str], window: Duration) -> Vec<Ipv4Ad
 /// A UDP socket for the exchange, plus whether to ask for a UNICAST response (the QU bit).
 ///
 /// Preferred: bind 5353 (with `SO_REUSEADDR` + `SO_REUSEPORT`) and join the group, so we co-bind
-/// alongside a system mDNS responder (e.g. Avahi) that already holds the port (Copilot). On this
+/// alongside a system mDNS responder (e.g. Avahi) that already holds the port. On this
 /// SHARED socket we must ask for a MULTICAST answer (`unicast_response = false`): a unicast reply
 /// to 5353 is delivered to only ONE of the co-bound sockets, so Avahi could consume the broker's
-/// answer and leave us empty-handed (Codex) — a multicast answer, by contrast, is copied to every
+/// answer and leave us empty-handed — a multicast answer, by contrast, is copied to every
 /// socket joined to the group. The preferred socket is usable ONLY if the JOIN also succeeds —
 /// otherwise we would request a multicast answer on a socket not subscribed to receive it and
-/// hear nothing (Codex/Copilot), so a failed join falls through to the fallback like a failed
+/// hear nothing, so a failed join falls through to the fallback like a failed
 /// bind. Fallback: an ephemeral port we solely own, where we did NOT join the group and so must
 /// ask for a UNICAST reply (`unicast_response = true`) to receive anything. TTL 255 per §11.
 async fn open_socket() -> std::io::Result<(UdpSocket, bool)> {
@@ -201,7 +200,7 @@ fn bind_reuse(port: u16) -> std::io::Result<UdpSocket> {
     // immediately, so every early return closes it via `Drop` — the fd is never leaked.
     unsafe {
         // SOCK_CLOEXEC so this fd is not leaked into the shells btmqttd spawns per command
-        // (std/tokio set it on their own sockets; the raw path must too — Copilot).
+        // (std/tokio set it on their own sockets; the raw path must too).
         let fd = libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0);
         if fd < 0 {
             return Err(err());
@@ -223,7 +222,7 @@ fn bind_reuse(port: u16) -> std::io::Result<UdpSocket> {
         }
         // SO_REUSEPORT is an ADDITIONAL sharing hint that older/embedded kernels may not know;
         // treat `ENOPROTOOPT` as best-effort so the reuse bind still succeeds with just
-        // SO_REUSEADDR (Copilot). Any other error is still surfaced.
+        // SO_REUSEADDR. Any other error is still surfaced.
         if libc::setsockopt(
             fd,
             libc::SOL_SOCKET,
@@ -292,15 +291,15 @@ fn presentation_labels(name: &str) -> Vec<String> {
 /// `name` doesn't fit the DNS wire limits (RFC 1035 §2.3.4): each label 1..=63 bytes and the
 /// encoded QNAME (labels + length octets + root) <= 255. The follow-up SRV/A queries reuse
 /// instance/target names parsed from UNTRUSTED responses, so an out-of-range name yields `None`
-/// (the caller skips it) instead of a malformed datagram (Copilot).
+/// (the caller skips it) instead of a malformed datagram.
 ///
 /// When `unicast_response` is set, the mDNS unicast-response (QU) top bit of QCLASS is set so
 /// responders reply to our source port — used ONLY on the solely-owned ephemeral socket. On the
 /// shared 5353 socket it is cleared, i.e. a normal multicast-response (QM) question, so the answer
-/// reaches every co-bound listener (Codex).
+/// reaches every co-bound listener.
 fn build_query(name: &str, qtype: u16, unicast_response: bool) -> Option<Vec<u8>> {
-    // Honour `\.`/`\\` escaping so a label that contained a literal dot round-trips as ONE label
-    // (Codex), rather than splitting on the presentation separator.
+    // Honour `\.`/`\\` escaping so a label that contained a literal dot round-trips as ONE label,
+    // rather than splitting on the presentation separator.
     let labels = presentation_labels(name);
     let mut encoded_len = 1usize; // the terminating root label
     for label in &labels {
@@ -376,7 +375,7 @@ fn parse_response(
                 // PTR: the RDATA is the instance name. Require it to decode WITHIN this record's
                 // RDLENGTH; a malformed datagram whose name has no terminator inside RDATA would
                 // otherwise let read_name splice in bytes from the following record and forge a
-                // false instance name (Copilot).
+                // false instance name.
                 let mut pp = rd;
                 let instance = read_name(b, &mut pp);
                 if !instance.is_empty() && pp <= rd + rdlen {
@@ -387,7 +386,7 @@ fn parse_response(
                 // SRV: priority(2) weight(2) port(2) target(name). The target must decode WITHIN
                 // this record's RDATA; if it overran `rd + rdlen` (a malformed datagram with no
                 // terminator inside RDLENGTH), reject it rather than accept a target spliced from
-                // the following record's bytes (Copilot). A compression pointer advances `pp` by
+                // the following record's bytes. A compression pointer advances `pp` by
                 // only its 2 bytes, so a legitimate target always lands at or before rd + rdlen.
                 let port = ((b[rd + 4] as u16) << 8) | b[rd + 5] as u16;
                 let mut pp = rd + 6;
@@ -445,7 +444,7 @@ fn read_name(b: &[u8], pos: &mut usize) -> String {
         }
         // Ordinary label: the top two bits must be 00 (0x40/0x80 are RFC 1035 reserved), so a
         // length octet > 63 here is malformed — stop rather than decode a garbage label from
-        // untrusted LAN input (Copilot). Pointers (0xC0) are already handled above.
+        // untrusted LAN input. Pointers (0xC0) are already handled above.
         if c > 63 {
             break;
         }
@@ -460,7 +459,7 @@ fn read_name(b: &[u8], pos: &mut usize) -> String {
         // Escape a `.` (and `\`) that occurs INSIDE a wire label — DNS-SD instance labels may
         // legally contain a literal dot (e.g. "70-35-60-63.1"). Without escaping, a follow-up
         // query rebuilt by splitting on `.` would break one label into two and ask for a
-        // different name (Codex). `presentation_labels` reverses this.
+        // different name. `presentation_labels` reverses this.
         for ch in String::from_utf8_lossy(&b[p..p + c]).to_ascii_lowercase().chars() {
             if ch == '.' || ch == '\\' {
                 out.push('\\');
@@ -482,7 +481,7 @@ fn read_name(b: &[u8], pos: &mut usize) -> String {
 /// A chatty responder's unrelated SRV+A pairs are ignored.
 ///
 /// The order is DETERMINISTIC (so `mdns_propose`'s "first open candidate" is reproducible across
-/// runs, unlike raw `HashMap` iteration — Copilot): SRV targets named by a PTR come first, in PTR
+/// runs, unlike raw `HashMap` iteration): SRV targets named by a PTR come first, in PTR
 /// discovery order; then any remaining `<instance>.<service>` SRV records with no PTR, sorted by
 /// name.
 fn correlate(
@@ -567,7 +566,7 @@ mod tests {
     fn build_query_rejects_out_of_range_names() {
         // Follow-up SRV/A queries reuse names parsed from untrusted responses; a label > 63 bytes,
         // an empty label, or a name > 255 bytes must yield None (no datagram) rather than a
-        // malformed query (Copilot).
+        // malformed query.
         let long_label = "a".repeat(64);
         assert!(build_query(&format!("{long_label}._tcp.local"), QTYPE_SRV, true).is_none());
         assert!(build_query("a..local", QTYPE_A, true).is_none()); // empty label
@@ -653,8 +652,8 @@ mod tests {
 
     #[test]
     fn correlate_resolves_the_tls_secure_mqtt_service() {
-        // A TLS broker advertising only `_secure-mqtt._tcp` must still be found via that service
-        // (Codex). Its instance/target under the secure suffix resolves through the A records.
+        // A TLS broker advertising only `_secure-mqtt._tcp` must still be found via that service.
+        // Its instance/target under the secure suffix resolves through the A records.
         let ptr = vec!["Mosquitto._secure-mqtt._tcp.local".to_string()];
         let mut srv = HashMap::new();
         srv.insert(
@@ -705,7 +704,7 @@ mod tests {
     #[test]
     fn correlate_returns_every_a_record_of_a_multihomed_broker() {
         // A broker advertising two A records for its SRV target must yield BOTH addresses,
-        // in first-seen order, so the caller can try each (Codex P2).
+        // in first-seen order, so the caller can try each.
         let mut srv = HashMap::new();
         srv.insert("Mosquitto._mqtt._tcp.local".to_string(), ("broker.local".to_string(), 1883u16));
         let mut a = HashMap::new();
@@ -770,7 +769,7 @@ mod tests {
     fn dotted_instance_label_round_trips_through_read_name_and_build_query() {
         // A DNS-SD instance label may contain a literal '.' (e.g. "70-35-60-63.1"). read_name must
         // escape it so build_query re-encodes it as ONE label, not two — otherwise a follow-up
-        // query would ask for a different name and miss the broker (Codex).
+        // query would ask for a different name and miss the broker.
         // Wire: one label "a.b" (3 bytes) + "local" + root.
         let mut b = Vec::new();
         b.push(3);
@@ -794,7 +793,7 @@ mod tests {
     fn read_name_stops_on_reserved_length_octet() {
         // A length octet with top bits 10 (0x80) is RFC 1035 reserved — not a valid label length
         // and not a compression pointer (0xC0). read_name must stop, not read a 128-byte label
-        // from untrusted input (Copilot).
+        // from untrusted input.
         let mut b = vec![3u8];
         b.extend_from_slice(b"abc"); // valid label "abc"
         b.push(0x80); // reserved length octet
@@ -813,7 +812,7 @@ mod tests {
     #[test]
     fn parse_response_rejects_ptr_name_overrunning_rdlength() {
         // A PTR whose instance name has no terminator inside RDLENGTH would let read_name splice
-        // in bytes from following records; the rd+rdlen guard must drop it (Copilot).
+        // in bytes from following records; the rd+rdlen guard must drop it.
         let mut b = vec![0, 0, 0x84, 0x00];
         b.extend_from_slice(&[0, 0]); // QDCOUNT
         b.extend_from_slice(&[0, 1]); // ANCOUNT = 1
@@ -832,7 +831,7 @@ mod tests {
     #[test]
     fn parse_response_rejects_srv_target_overrunning_rdlength() {
         // Likewise an SRV target that overruns its RDLENGTH must not be spliced from the next
-        // record's bytes (Copilot).
+        // record's bytes.
         let mut b = vec![0, 0, 0x84, 0x00];
         b.extend_from_slice(&[0, 0]); // QDCOUNT
         b.extend_from_slice(&[0, 1]); // ANCOUNT = 1

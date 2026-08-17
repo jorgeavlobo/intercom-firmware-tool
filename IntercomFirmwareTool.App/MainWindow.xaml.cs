@@ -1694,7 +1694,7 @@ namespace IntercomFirmwareTool.App
                 {
                     string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(mqttOpts, MqttInstaller.OnDeviceStreamName);
                     // The guide carries the RTSP password — copy via SecureClipboard so it is excluded
-                    // from Windows Clipboard History / cloud sync (like the root-password copy) — CodeRabbit.
+                    // from Windows Clipboard History / cloud sync (like the root-password copy).
                     try { SecureClipboard.SetText(guide); } catch { /* clipboard may be busy; still show it */ }
                     MessageBox.Show(this, guide, L("Cap_MqttGo2Rtc"),
                         MessageBoxButton.OK, MessageBoxImage.Information);

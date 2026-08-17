@@ -48,15 +48,15 @@ is_running() { [ -n "$(daemon_pids)" ]; }
 # wrong — the whole "lease expired while the holder was alive / two waiters both break it" class simply does
 # not exist. util-linux flock is present on the target at /usr/bin/flock. `flock -w 30 9` waits (BOUNDED)
 # for the lock; closing fd 9 (or process death) releases it. The bounded wait means even a wedged-but-alive
-# holder — the only case flock could otherwise block on forever — can't hang start/stop/respawn indefinitely
-# (CodeRabbit); a `-w` timeout NEVER breaks the holder's lock (unlike the old stale-steal — it only caps how
+# holder — the only case flock could otherwise block on forever — can't hang start/stop/respawn indefinitely;
+# a `-w` timeout NEVER breaks the holder's lock (unlike the old stale-steal — it only caps how
 # long a waiter waits), so it can never interleave a critical section. Critical sections stay short (well
 # under 30 s). The backgrounded daemon MUST NOT inherit fd 9 — it would hold the lock for its whole lifetime
 # — so every daemon launch closes it with `9>&-`. This protocol is shared VERBATIM with the go2rtcd init
 # script.
 # acquire never returns WITHOUT the lock: if the lock file can't be opened, or flock fails / times out / is
-# interrupted, it EXITS non-zero rather than letting the caller run its critical section unlocked
-# (CodeRabbit). A watchdog `respawn` that exits just retries next pass; an operator start/stop surfaces the
+# interrupted, it EXITS non-zero rather than letting the caller run its critical section unlocked.
+# A watchdog `respawn` that exits just retries next pass; an operator start/stop surfaces the
 # failure.
 acquire() { exec 9>>"$LOCKFILE" || exit 1; flock -w 30 9 || exit 1; }
 release() { exec 9>&-; }
@@ -140,7 +140,7 @@ case "$1" in
 	restart)
 		# `stop` sets the marker + waits for exit; `start` clears it + relaunches. Chain them and PROPAGATE
 		# a child failure (e.g. an acquire that exited non-zero) via `exit $?` instead of falling through to
-		# the script's trailing `exit 0`, so a failed restart never reports success (Codex).
+		# the script's trailing `exit 0`, so a failed restart never reports success.
 		"$0" stop && "$0" start
 		exit $?
 		;;

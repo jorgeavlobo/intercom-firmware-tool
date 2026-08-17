@@ -318,7 +318,7 @@ namespace IntercomFirmwareTool.Core
         /// lingers. <c>null</c> (the default, for a Core-API caller that never set it) falls back to
         /// the pre-opt-in behavior: the light is enabled iff <see cref="LightWhere"/> is populated,
         /// so old callers that enabled the light by setting only <see cref="LightWhere"/> keep
-        /// working (Codex). The WPF app always sets this explicitly.</summary>
+        /// working. The WPF app always sets this explicitly.</summary>
         public bool? HasExteriorLight { get; init; }
 
         /// <summary>Light type (default false = BISTABLE). <c>false</c>: a bistable/toggle actuator
@@ -626,7 +626,7 @@ namespace IntercomFirmwareTool.Core
             // rebuild, so this re-asserts our GO2RTC :8554 rule sequentially (via `go2rtcd fw-reassert`)
             // instead of the watchdog racing the factory's lock-less INPUT writes. The C100X v1.5.8 sample
             // ships an EXISTING, EMPTY /etc/network/if-up.d, but EnsureDir it first so the install is robust
-            // on any variant where it is absent (Copilot); /etc/network itself is guaranteed by ifupdown.
+            // on any variant where it is absent; /etc/network itself is guaranteed by ifupdown.
             string go2rtcNetHook = LoadScript(ResourcePrefix + "go2rtc-net-hook");
             EnsureDir(fs, Go2RtcNetHookDir);
             WriteTextFile(fs, Go2RtcNetHookPath, go2rtcNetHook);
@@ -694,7 +694,7 @@ namespace IntercomFirmwareTool.Core
         {
             // 18 bytes → exactly 24 base64 chars (18 is a multiple of 3, so no '=' padding today). Map to
             // the base64url alphabet and TrimEnd('=') so the value stays URL-/YAML-safe even if the byte
-            // count is ever changed to a non-multiple of 3 (Copilot).
+            // count is ever changed to a non-multiple of 3.
             Span<byte> bytes = stackalloc byte[18];
             RandomNumberGenerator.Fill(bytes);
             return Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_').TrimEnd('=');
@@ -827,14 +827,14 @@ namespace IntercomFirmwareTool.Core
                     // The fan-out target must be a hostname or an IPv4 literal: btmqttd's av.rs sends the
                     // WHO=7 `*7*300#a#b#c#d#…` frame, whose address field is IPv4-only, and its resolver
                     // takes the first IPv4 a lookup yields. An IPv6 literal (or a URL / host:port string)
-                    // would install but never arm — reject it here where the user sees why (CodeRabbit/Codex).
+                    // would install but never arm — reject it here where the user sees why.
                     if (!IsHostnameOrIpv4(camTarget))
                         throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidCameraTarget"), nameof(opts));
                     // Reject an unroutable target — go2rtc/Home Assistant runs OFF the intercom, so
                     // neither loopback (127/8) nor the unspecified 0.0.0.0 wildcard is a real fan-out
                     // destination. Loopback would also make our add-client frame collide with the panel's
-                    // own `*7*300#127#0#0#1#…` media-start signal (Copilot), and 0.0.0.0 would arm the
-                    // siphon against a bind wildcard no receiver reads (Codex). av.rs rejects both too,
+                    // own `*7*300#127#0#0#1#…` media-start signal, and 0.0.0.0 would arm the
+                    // siphon against a bind wildcard no receiver reads. av.rs rejects both too,
                     // but fail here so a broken config never ships.
                     if (IPAddress.TryParse(camTarget, out var camIp)
                         && (IPAddress.IsLoopback(camIp) || camIp.Equals(IPAddress.Any)))
@@ -842,7 +842,7 @@ namespace IntercomFirmwareTool.Core
                     // Also reject the stock "openserver" alias: the device pins it to 127.0.0.1, so a
                     // camera target equal to it (e.g. a blank target when MQTT_HOST is "openserver")
                     // resolves to loopback on-device and never arms — the IP-literal check above can't
-                    // see that a HOSTNAME maps to loopback (Codex).
+                    // see that a HOSTNAME maps to loopback.
                     if (BtDaemonAppsHosts.IsStockLoopbackAlias(camTarget))
                         throw new ArgumentException(CoreStrings.Get("Mqtt_CameraTargetLoopback"), nameof(opts));
                     // Device resolvability: the installer pins ONLY MQTT_HOST in /etc/hosts, and the
@@ -850,7 +850,7 @@ namespace IntercomFirmwareTool.Core
                     // resolver (see Payload/mqtt/README.md). So a blank target (⇒ MQTT_HOST) or one equal
                     // to it resolves via that pin, and an IPv4 literal is trivially resolvable; but any
                     // OTHER explicit hostname would never resolve on the device and the camera could never
-                    // arm. Require such a target to be an IPv4 literal (Codex).
+                    // arm. Require such a target to be an IPv4 literal.
                     if (!string.IsNullOrWhiteSpace(opts.CameraTargetHost)
                         && !string.Equals(opts.CameraTargetHost, opts.MqttHost, StringComparison.OrdinalIgnoreCase)
                         && !IPAddress.TryParse(opts.CameraTargetHost, out _))
@@ -933,7 +933,7 @@ namespace IntercomFirmwareTool.Core
             // derived but never published. The light AVAILABILITY topic is included UNCONDITIONALLY:
             // the daemon publishes it in every state — online/offline when enabled, and a retained
             // offline even when DISABLED (the announce disabled-path gate) — so an alias onto it must
-            // always be rejected (Codex).
+            // always be rejected.
             var publishTopics = new List<string>
             {
                 opts.TopicDump, opts.TopicStartDate, opts.TopicLastWill, opts.TopicKey,
@@ -946,7 +946,7 @@ namespace IntercomFirmwareTool.Core
             // bistable light publishes the tracked on/off, and a momentary light publishes an empty
             // retained payload on connect to clear any stale bistable value (LightCtl::seed). So it
             // must be in the collision set for either mode — otherwise a momentary seed could delete
-            // an aliased retained stream (Codex).
+            // an aliased retained stream.
             if (opts.LightEnabled) publishTopics.Add(opts.EffectiveTopicLight);
             if (publishTopics.Distinct(StringComparer.Ordinal).Count() != publishTopics.Count)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
@@ -957,7 +957,7 @@ namespace IntercomFirmwareTool.Core
             // toggle: the manifest is installed either way — btmqttd publishes the configs retained
             // when HA_DISCOVERY=1 and CLEARS them (empty retained) when HA_DISCOVERY=0 — so a data
             // publish into that namespace would corrupt an entity's config, or, against an empty
-            // retained clear, DELETE it / delete the data topic's own retained value (Codex). The
+            // retained clear, DELETE it / delete the data topic's own retained value. The
             // defaults are namespace-disjoint (data under "Bticino/", discovery under
             // "homeassistant/"), so this only rejects a caller that explicitly overrode a data topic
             // into the discovery namespace.
@@ -1019,14 +1019,14 @@ namespace IntercomFirmwareTool.Core
             // on connect (LightCtl::seed) — so its self-loop with TopicRx is checked in both modes.
             // A DISABLED build only derives EffectiveTopicLight and never publishes it, so it's
             // excluded there (else a valid opt-out config whose namespace happens to derive a
-            // colliding light topic would fail validation) — Codex.
+            // colliding light topic would fail validation).
             if (opts.LightEnabled && TopicFilterMatches(rxFilter, opts.EffectiveTopicLight))
                 throw new ArgumentException(
                     CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
             // The AVAILABILITY topic is published in EVERY state (including the disabled-path
             // retained offline), so its self-loop with TopicRx is checked UNCONDITIONALLY — an
             // alias onto TopicRx would make the daemon consume its own availability publish as a
-            // command even with the light disabled (Codex).
+            // command even with the light disabled.
             if (TopicFilterMatches(rxFilter, opts.EffectiveTopicLightAvail))
                 throw new ArgumentException(
                     CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
@@ -1086,7 +1086,7 @@ namespace IntercomFirmwareTool.Core
             // (0) Length cap — a real sprop-parameter-sets value is only a few dozen chars (SPS,PPS).
             // Bound the whole string BEFORE the per-token base64 work so a hostile/accidental huge
             // CameraSprop can't force large scratch allocations here or an oversized SDP fmtp line
-            // downstream (Copilot). 512 is far above any legitimate value; it also caps each token.
+            // downstream. 512 is far above any legitimate value; it also caps each token.
             if (sprop.Length > 512)
                 return false;
             // (a) Alphabet guard — only base64 chars, '=' padding, and ',' separators. This is NOT
@@ -1460,7 +1460,7 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("LIGHT_ENABLED", opts.LightEnabled ? "1" : "0"));
             // Write the WHERE only when the light is ON. Emitting a leftover WHERE with
             // LIGHT_ENABLED=0 would re-enable the subsystem device-side, because config.rs
-            // treats any valid LIGHT_WHERE as enabling (legacy-conf compatibility) — Codex.
+            // treats any valid LIGHT_WHERE as enabling (legacy-conf compatibility).
             sb.Append(Conf("LIGHT_WHERE", opts.LightEnabled ? (opts.LightWhere ?? "") : ""));
             // Light TYPE: "momentary" (staircase-timer install → press only, no tracked state) vs the
             // default "bistable" (toggle with tracked on/off + resync). btmqttd branches its light
@@ -1483,11 +1483,11 @@ namespace IntercomFirmwareTool.Core
             // reflash (#111). Writing the resolved host here would bake the current broker host in and
             // defeat that. Only a target DISTINCT from the broker host is pinned (validation requires
             // such a target to be an IPv4 literal); a target that just equals MQTT_HOST is redundant
-            // and is left blank so it follows the broker like the locked default (Copilot). When the
+            // and is left blank so it follows the broker like the locked default. When the
             // camera is DISABLED the value is irrelevant (av.rs never runs) and is left empty; writing a
             // target then would also let an unvalidated multi-line value (a library caller, or a paste)
             // inject a second KEY=value line — e.g. `x\nMQTT_HOST=bad` — that config.rs's line-based
-            // parse_env would honour, hijacking the broker even with the camera off (Codex). Empty is
+            // parse_env would honour, hijacking the broker even with the camera off. Empty is
             // safe: config.rs treats a present-but-empty value as unset and falls back to MQTT_HOST.
             sb.Append(Conf("CAMERA_TARGET_HOST",
                 opts.CameraEnabled
@@ -1515,7 +1515,7 @@ namespace IntercomFirmwareTool.Core
             // default (30) AND cap a huge value at the daemon's 1-day limit (86_400 s), so the emitted
             // conf is always the SAME value the daemon will use — not a 0/negative or an oversized value
             // it would silently override — keeping the written conf and the daemon's effective behaviour
-            // in step (Copilot).
+            // in step.
             sb.Append("CAMERA_VIEW_IDLE_SECS=")
                 .Append(opts.CameraViewIdleSecs > 0 ? System.Math.Min(opts.CameraViewIdleSecs, 86_400) : 30)
                 .Append('\n');
@@ -2361,7 +2361,7 @@ namespace IntercomFirmwareTool.Core
                 // plain device availability, not the WHERE-gated one. Emitted ONLY in LEARN MODE
                 // (blank build WHERE): a CONFIGURED build has a fixed, authoritative WHERE that
                 // btmqttd's `learn()` guard refuses to override, so the button would be a guaranteed
-                // no-op — tombstone it instead (Codex).
+                // no-op — tombstone it instead.
                 if (opts.LightLearnMode)
                     entities.Add(new HaEntity(
                         "light_learn.json",
