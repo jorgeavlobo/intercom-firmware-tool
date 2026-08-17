@@ -450,43 +450,50 @@ async fn start_dropbear() {
             drop(permit);
         }
         Ok(Err(e)) => {
-            eprintln!("btmqttd: restore_ssh: waiting on dropbear start failed: {e}");
-            drop(child);
-            drop(permit);
+            // We could NOT confirm the child exited (waitpid itself failed), so it may still be alive and
+            // UNREAPED — treat it exactly like the timeout: kill its group and hand it to the detached
+            // reaper, never a bare `drop` (kill_on_drop only SIGKILLs the direct child and does not reap,
+            // which would leak the process while still freeing the permit — Copilot).
+            eprintln!("btmqttd: restore_ssh: waiting on dropbear start failed: {e}; killing its process group");
+            kill_group_and_reap(child, permit);
         }
         Err(_) => {
             eprintln!(
                 "btmqttd: restore_ssh: dropbear start did not finish within {}s; killing its process group",
                 DROPBEAR_START_TIMEOUT.as_secs()
             );
-            // SIGKILL the whole process GROUP (pgid == the script's pid, set via process_group(0)), so any
-            // descendant the init script spawned dies too — not just the script interpreter. ESRCH means the
-            // group is already gone (benign); any OTHER error → fall back to the direct child so nothing
-            // lingers.
-            match child.id() {
-                Some(pid) => {
-                    let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
-                    if rc != 0 {
-                        let err = std::io::Error::last_os_error();
-                        if err.raw_os_error() != Some(libc::ESRCH) {
-                            eprintln!(
-                                "btmqttd: restore_ssh: killpg({pid}) failed: {err}; killing the script directly"
-                            );
-                            let _ = child.start_kill();
-                        }
-                    }
-                }
-                None => {
+            kill_group_and_reap(child, permit);
+        }
+    }
+}
+
+/// SIGKILL a bounded child's WHOLE process group, then hand it (with its cleanup permit) to the detached
+/// [`reap`] task. Shared by `start_dropbear`'s timeout and wait-error arms — both cases where the child may
+/// still be alive and must be collected OFF the command worker (an inline `child.wait().await` on a D-state
+/// child would pin the single ordered worker; see `start_dropbear`). Killing the GROUP (pgid == the script's
+/// pid, set via `process_group(0)`) reaches any descendant the init script spawned, not just the interpreter.
+/// ESRCH means the group is already gone (benign); any OTHER `killpg` error falls back to the direct child so
+/// nothing lingers. The reaper collects our direct child and releases the permit; init reaps the group's
+/// reparented descendants.
+fn kill_group_and_reap(mut child: tokio::process::Child, permit: tokio::sync::SemaphorePermit<'static>) {
+    match child.id() {
+        Some(pid) => {
+            let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() != Some(libc::ESRCH) {
+                    eprintln!(
+                        "btmqttd: restore_ssh: killpg({pid}) failed: {err}; killing the script directly"
+                    );
                     let _ = child.start_kill();
                 }
             }
-            // Hand the killed child + its permit to the detached bounded reaper instead of awaiting here: a
-            // D-state child won't return from wait() until its syscall completes, and awaiting inline would
-            // pin the single command worker. The reaper collects it off-worker and releases the slot then;
-            // init reaps the group's reparented descendants.
-            reap(child, permit);
+        }
+        None => {
+            let _ = child.start_kill();
         }
     }
+    reap(child, permit);
 }
 
 /// Does `/proc/mounts` show the root filesystem (`/`) mounted READ-ONLY? Each line is
