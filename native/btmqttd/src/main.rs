@@ -943,6 +943,31 @@ async fn run() -> Result<bool, String> {
         eprintln!("btmqttd: re-exec cancelled: a reboot became outstanding during shutdown; exiting instead");
         reexec = false;
     }
+    // Likewise, do NOT re-exec in place while a command-child reaper is still outstanding. A reaper
+    // owns an OS child of THIS pid — a killed child not yet collected, e.g. a restore_ssh dropbear-start
+    // stuck in D-state on failing storage. An in-place re-exec keeps the pid but drops that `Child`
+    // handle; the fresh image (with a fresh, empty `REAP_SLOTS`) then has no handle to reap the child when
+    // it finally dies, so it leaks as a zombie and quietly defeats the REAP_CONCURRENCY bound across
+    // repeated restart cycles (Codex). Give any reaper a brief chance to finish first — a normally-killed
+    // child is collected in microseconds, so the common restart races through untouched — then, only if one
+    // is genuinely stuck, fall back to a plain exit so init inherits and reaps the orphan (the watchdog
+    // respawns the bridge within ~60 s). The runtime is still alive here, so the reap tasks make progress
+    // and release their permits during the drain.
+    if reexec && receiver::outstanding_reapers() > 0 {
+        for _ in 0..40 {
+            if receiver::outstanding_reapers() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if receiver::outstanding_reapers() > 0 {
+            eprintln!(
+                "btmqttd: re-exec cancelled: a command-child reaper is still outstanding (a killed child \
+                 not yet collected); exiting so init can reap the orphan"
+            );
+            reexec = false;
+        }
+    }
     // Drain the stair-light persist task LAST among the state producers: `command()` (on
     // cmd_worker) and `observe()` (on sender_task) are now stopped, so no further state can be
     // enqueued. Signal the task and await its final flush (bounded) so a toggle actuated in the

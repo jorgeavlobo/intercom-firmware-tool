@@ -61,6 +61,19 @@ const REAP_CONCURRENCY: usize = 16;
 /// reaper task on cap/timeout). `const_new` so it lives in a `static` with no lazy init.
 static REAP_SLOTS: Semaphore = Semaphore::const_new(REAP_CONCURRENCY);
 
+/// How many command-child reapers are still outstanding — a killed child not yet collected
+/// (equivalently, permits currently held). Zero in steady state. The shutdown path consults this
+/// before an in-place re-exec: a running reaper owns an OS child of THIS pid, and the re-exec keeps
+/// the pid but drops the `Child` handle, so the fresh image (with a fresh, empty `REAP_SLOTS`) would
+/// have no handle to collect that child when it finally dies — it would leak as a zombie and silently
+/// defeat the REAP_CONCURRENCY bound across repeated restart cycles. When this is non-zero the daemon
+/// exits instead of re-execing, so init inherits and reaps the orphan (the watchdog respawns the
+/// bridge). Subtraction can't underflow: `available_permits()` never exceeds the fixed
+/// REAP_CONCURRENCY the pool was built with.
+pub(crate) fn outstanding_reapers() -> usize {
+    REAP_CONCURRENCY - REAP_SLOTS.available_permits()
+}
+
 /// Dispatch one received payload. The shell receiver looped `while IFS= read -r
 /// rxcmd`, so it processed EVERY `\n`-delimited line of a payload IN ORDER — a
 /// multi-line message is several records, not one. We split on `\n` and run each
