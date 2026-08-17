@@ -388,7 +388,7 @@ async fn run() -> Result<bool, String> {
     // (which escapes ~6x) is still dropped with a log line, as is anything larger.
     const MAX_CMD_BYTES: usize = 512 * 1024;
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(CMD_QUEUE_DEPTH);
-    let cmd_worker = tokio::spawn({
+    let mut cmd_worker = tokio::spawn({
         let cfg = cfg.clone();
         let client = client.clone();
         let volume = volume.clone();
@@ -929,7 +929,34 @@ async fn run() -> Result<bool, String> {
     }
     stop(sender_task).await;
     stop(keys_task).await;
-    stop(cmd_worker).await;
+    // DRAIN the command worker rather than abort() it. An abort would drop a command child that `dispatch`
+    // is still AWAITING (e.g. restore_ssh's `/etc/init.d/dropbear start`, or an execute_command shell)
+    // WITHOUT the group-kill + detached-reap that the command's OWN timeout path performs — leaving the
+    // script's descendants running and the direct child unreaped, and releasing its REAP_SLOTS permit so the
+    // re-exec guard below would read zero and proceed anyway (Codex). This matters because a restart can be
+    // triggered by an INDEPENDENT task (a learned light WHERE via `light.rs`) while the worker is mid-command,
+    // not only by the worker dispatching `restart_bridge` itself. Dropping the sole `cmd_tx` closes the
+    // channel, so the worker's `while let Some = recv()` returns None and the loop ends AFTER the in-flight
+    // dispatch completes — and each dispatch is itself wall-clock bounded, so any child it owns is routed
+    // through the proper group-kill/reaper path first. Bound the drain so a wedged dispatch can't hang
+    // shutdown: `CMD_WORKER_DRAIN` comfortably covers the restore_ssh dropbear start (10 s). If it still has
+    // not finished (a longer in-flight command, e.g. a 60 s execute_command shell), abort as a fallback AND
+    // force a plain exit — never an in-place re-exec over an aborted, possibly-unreaped child; a plain exit
+    // lets init (PID 1) adopt and reap it while the watchdog respawns the bridge.
+    const CMD_WORKER_DRAIN: Duration = Duration::from_secs(12);
+    drop(cmd_tx); // sole sender; closing the channel ends the worker after its current command
+    match tokio::time::timeout(CMD_WORKER_DRAIN, &mut cmd_worker).await {
+        Ok(_) => {} // worker finished its in-flight command and exited cleanly
+        Err(_) => {
+            eprintln!(
+                "btmqttd: command worker did not drain within {}s; aborting and exiting instead of re-exec",
+                CMD_WORKER_DRAIN.as_secs()
+            );
+            cmd_worker.abort();
+            let _ = cmd_worker.await;
+            reexec = false; // an aborted in-flight child may be unreaped — never re-exec over it
+        }
+    }
     // The command worker is now quiesced — no further `reboot` command can be dispatched — so the reboot
     // gate is STABLE from here. Re-check it before committing to a re-exec: the `restart.notified()` arm
     // tested the gate when it fired, but a `reboot` queued behind that restart can still have run during one
