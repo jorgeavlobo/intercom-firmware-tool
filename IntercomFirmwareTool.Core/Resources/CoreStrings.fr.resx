@@ -164,6 +164,9 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_Rc5dMissing" xml:space="preserve">
     <value>/etc/rc5.d n'existe pas dans l'image ; impossible d'activer le pont MQTT au démarrage.</value>
   </data>
+  <data name="Mqtt_FactoryFirewallUnhardenable" xml:space="preserve">
+    <value>Impossible de durcir le script du pare-feu d'usine /etc/network/if-pre-up.d/iptables contre la course au verrou xtables (issue #145) : il doit s'agir d'un script shell ordinaire commençant par un shebang #!.</value>
+  </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>L'hôte du broker MQTT n'est pas une adresse IP ni un nom d'hôte valide.</value>
   </data>

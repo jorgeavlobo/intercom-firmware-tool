@@ -454,10 +454,14 @@ namespace IntercomFirmwareTool.Core
         private const string FactoryFirewallShimMarker = "IntercomFirmwareTool #145";
         // The shim, spliced in immediately after the shebang so the `iptables` function is defined
         // before any factory `iptables` call runs. `command` reaches the real binary, bypassing the
-        // function, so there is no recursion; bare `--wait` (no timeout) waits indefinitely for the lock
-        // — the xtables lock is only ever held per-op (never by a dead process: it is a flock released on
-        // exit), so this can never deadlock and never times out into a silent drop. LF endings; the
-        // marker line carries FactoryFirewallShimMarker.
+        // function, so there is no recursion. Bare `--wait` (no timeout) WAITS for the lock rather than
+        // failing, so a factory rule is never silently dropped under contention. In practice iptables
+        // holds the xtables lock only briefly per operation — it is a flock released when the process
+        // exits, so even a crashed holder frees it — so the wait is sub-second. A pathological iptables
+        // process wedged WHILE holding the lock could in theory block the wait longer, but nothing on the
+        // panel runs such a long-held iptables operation; the bounded alternative (`-w N`) is deliberately
+        // avoided because a timeout would re-introduce exactly the silent drop this shim removes. LF
+        // endings; the marker line carries FactoryFirewallShimMarker.
         private const string FactoryFirewallShim =
             "# >>> IntercomFirmwareTool #145: make the factory firewall WAIT for the xtables lock >>>\n" +
             "# The factory rebuilds INPUT with lock-less `iptables -A` calls (no -w). With the on-device\n" +
@@ -1341,6 +1345,16 @@ namespace IntercomFirmwareTool.Core
                         checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
                             factoryFw.Contains(FactoryFirewallShimMarker, StringComparison.Ordinal), ""));
                     }
+                    else if (PathOccupied(fs, FactoryFirewallScriptPath))
+                    {
+                        // Present but NOT a regular file (e.g. a symlink) — FileExists is symlink-blind, so
+                        // the marker check above would silently skip. Report a FAILED check rather than a
+                        // false pass: the install path throws for this shape, so a passing validation here
+                        // would be inconsistent (#145).
+                        checks.Add(new("factory firewall is a regular, hardenable script (#145)", false,
+                            "present but not a regular file"));
+                    }
+                    // else genuinely absent — no factory firewall to harden, nothing to check.
                     foreach (var bin in new[] { PayloadBinaries.Ffmpeg, PayloadBinaries.Go2Rtc })
                     {
                         CheckFile(fs, checks, bin.InstallPath, 775);
@@ -2641,7 +2655,17 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         private static void PatchFactoryFirewallWaitForLock(ExtFileSystem fs)
         {
-            if (!fs.FileExists(FactoryFirewallScriptPath)) return;   // no factory firewall to harden
+            if (!fs.FileExists(FactoryFirewallScriptPath))
+            {
+                // FileExists is symlink-BLIND (like elsewhere in this file — see PathOccupied /
+                // DependencyPresent). A path that is OCCUPIED but not a regular file (a symlink on some
+                // variant, say) must NOT be silently skipped: that would leave the #145 race unfixed while
+                // ValidateMqtt still passed. Fail loudly. Only a GENUINELY ABSENT script (no factory
+                // firewall to clobber) is the skip case.
+                if (PathOccupied(fs, FactoryFirewallScriptPath))
+                    throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
+                return;                                              // genuinely absent — nothing to harden
+            }
             string script = ReadAllText(fs, FactoryFirewallScriptPath);
             string patched = EnsureFactoryFirewallShim(script);
             // Only rewrite when the splice actually changed the script — an already-hardened script
@@ -2662,6 +2686,13 @@ namespace IntercomFirmwareTool.Core
         {
             if (script.Contains(FactoryFirewallShimMarker, StringComparison.Ordinal))
                 return script;                                       // already hardened — unchanged
+            // The factory firewall is a shell script whose FIRST line is a `#!` shebang; the shim must
+            // land right after it so the `iptables` function is defined before any factory call. REFUSE
+            // to splice into a file that is not shebang-led: inserting after an arbitrary first line
+            // would leave that line's command lock-less while the marker suppressed any retry and let
+            // ValidateMqtt pass (issue #145). Fail loudly so an unexpected variant surfaces at build time.
+            if (!script.StartsWith("#!", StringComparison.Ordinal))
+                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             int firstNl = script.IndexOf('\n');
             return firstNl >= 0
                 ? script[..(firstNl + 1)] + FactoryFirewallShim + script[(firstNl + 1)..]

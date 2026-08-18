@@ -164,6 +164,9 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_Rc5dMissing" xml:space="preserve">
     <value>/etc/rc5.d existiert im Abbild nicht; die MQTT-Brücke kann beim Booten nicht aktiviert werden.</value>
   </data>
+  <data name="Mqtt_FactoryFirewallUnhardenable" xml:space="preserve">
+    <value>Das Werk-Firewall-Skript /etc/network/if-pre-up.d/iptables kann nicht gegen das xtables-Lock-Race (Issue #145) gehärtet werden: Es muss ein reguläres Shell-Skript sein, das mit einem #!-Shebang beginnt.</value>
+  </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>Der MQTT-Broker-Host ist keine gültige IP-Adresse und kein gültiger Hostname.</value>
   </data>

@@ -86,4 +86,17 @@ public class MqttFactoryFirewallShimTests
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched);
         Assert.StartsWith("#!/bin/bash\n", patched);
     }
+
+    [Fact]
+    public void A_script_without_a_shebang_is_rejected()
+    {
+        // A firewall script whose first line is a real command (no #! shebang) must be REJECTED, not
+        // patched after an arbitrary line — otherwise that first line stays lock-less while the marker
+        // suppresses retries and ValidateMqtt passes (#145). Fail loudly at build time instead.
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim("iptables -F INPUT\niptables -P INPUT DROP\n"));
+        // An empty script (no shebang) is likewise rejected rather than silently "hardened".
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(""));
+    }
 }

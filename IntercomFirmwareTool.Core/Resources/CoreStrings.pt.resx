@@ -164,6 +164,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Mqtt_Rc5dMissing" xml:space="preserve">
     <value>/etc/rc5.d não existe na imagem; não é possível ativar a ponte MQTT no arranque.</value>
   </data>
+  <data name="Mqtt_FactoryFirewallUnhardenable" xml:space="preserve">
+    <value>Não é possível endurecer o script da firewall de fábrica /etc/network/if-pre-up.d/iptables contra a corrida do lock do xtables (issue #145): tem de ser um script shell normal começado por um shebang #!.</value>
+  </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>O host do broker MQTT não é um endereço IP nem um nome de anfitrião válido.</value>
   </data>
