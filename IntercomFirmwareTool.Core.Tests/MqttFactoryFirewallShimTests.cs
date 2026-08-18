@@ -62,19 +62,18 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Fact]
-    public void Patching_is_idempotent_and_returns_the_same_reference_when_already_hardened()
+    public void Patching_is_idempotent_no_second_block_on_an_already_hardened_script()
     {
         string once = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
         string twice = MqttInstaller.EnsureFactoryFirewallShim(once);
-        // A second pass must not insert a second shim…
+        // A second pass must not insert a second shim — the output is byte-identical (the installer
+        // compares by value and skips the redundant write).
         Assert.Equal(once, twice);
-        // …and must return the SAME string reference unchanged, so the installer skips a redundant write.
-        Assert.Same(once, twice);
-        // Exactly one shim marker in the doubly-processed text.
+        // Exactly one shim block: two marker lines (the ">>>" opener and "<<<" closer).
         int count = 0, i = 0;
         while ((i = twice.IndexOf("IntercomFirmwareTool #145", i, System.StringComparison.Ordinal)) >= 0)
         { count++; i += 1; }
-        Assert.Equal(2, count); // the opening ">>>" and closing "<<<" marker lines — one shim block
+        Assert.Equal(2, count);
     }
 
     [Fact]
@@ -129,13 +128,52 @@ public class MqttFactoryFirewallShimTests
             "iptables() { command iptables -w \"$@\"; }\n";
         Assert.False(MqttInstaller.IsFactoryFirewallHardened(late));
 
-        // A genuinely hardened script with Windows CRLF line endings is still recognized (the whole-line
-        // match tolerates the trailing '\r') and is NOT wrongly re-patched.
+        // The shim function text inside an INACTIVE `if false` branch never actually defines the
+        // function at run time ⇒ NOT hardened (the block isn't the exact one right after the shebang).
+        string inactive =
+            "#!/bin/bash\n" +
+            "if false; then\n" +
+            "iptables() { command iptables -w \"$@\"; }\n" +
+            "fi\n" +
+            "iptables -F INPUT\n";
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(inactive));
+
+        // The shim function text inside a QUOTED here-document is data, not code ⇒ NOT hardened.
+        string heredoc =
+            "#!/bin/bash\n" +
+            "cat <<'EOF'\n" +
+            "iptables() { command iptables -w \"$@\"; }\n" +
+            "EOF\n" +
+            "iptables -F INPUT\n";
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(heredoc));
+    }
+
+    [Fact]
+    public void A_crlf_factory_script_is_normalized_to_lf_when_patched()
+    {
+        // A CRLF factory hook is unrunnable on Linux (ifupdown would exec `#!/bin/bash\r`, a nonexistent
+        // interpreter). Patching must NORMALIZE it to LF — not preserve the CRLF — so the result has no
+        // '\r', a clean shebang, and an effective shim. A raw CRLF script is therefore NOT "already
+        // hardened" (the LF-defined block never matches a CRLF one).
         string crlf =
+            "#!/bin/bash\r\n" +
+            "iptables -F INPUT\r\n" +
+            "iptables -P INPUT DROP\r\n";
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(crlf));
+        string patched = MqttInstaller.EnsureFactoryFirewallShim(crlf);
+        Assert.DoesNotContain("\r", patched);
+        Assert.StartsWith("#!/bin/bash\n", patched);
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(patched));
+
+        // Even a script that already carries the function but in CRLF form is re-emitted as LF (its CRLF
+        // shebang is unrunnable), so it is NOT an idempotent no-op — the result changes and has no '\r'.
+        string crlfHardened =
             "#!/bin/bash\r\n" +
             "iptables() { command iptables -w \"$@\"; }\r\n" +
             "iptables -F INPUT\r\n";
-        Assert.True(MqttInstaller.IsFactoryFirewallHardened(crlf));
+        string fixedUp = MqttInstaller.EnsureFactoryFirewallShim(crlfHardened);
+        Assert.DoesNotContain("\r", fixedUp);
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fixedUp));
     }
 
     [Fact]

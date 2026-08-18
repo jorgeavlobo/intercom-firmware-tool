@@ -145,15 +145,16 @@ iptables() { command iptables -w "$@"; }
 Shadowing `iptables` with a function that injects `--wait` makes **every** factory
 call **block** for the xtables lock instead of dropping a rule (`command` reaches
 the real binary, so there is no recursion). The insert is **idempotent** and
-preserves the script's mode/owner. "Already hardened" is judged by the operative
-**function line** — an active (uncommented) `iptables() { … -w … }` positioned
-**before** the first factory `iptables` call — not by the `IntercomFirmwareTool
-#145` marker comment (which is only a human-readable delimiter): a script whose
-function was commented out, truncated, or moved after a call is re-patched, and a
-file lacking a `#!` shebang is rejected outright. `ValidateMqtt` asserts the same
-(shebang + effective function). `go2rtcd`'s own mutating calls already use `-w 5`,
-so with the factory now waiting too, **all** writers serialize on the lock and no
-rule is ever lost.
+preserves the script's mode/owner. "Already hardened" is judged by whether the
+**exact installer-owned shim block sits immediately after the shebang** — not by
+the marker comment (only a human-readable delimiter) and not by the function text
+appearing somewhere in the file: text inside a comment, an inactive `if false`
+branch, or a quoted here-document never defines the function at run time, so such
+a script is re-patched. A file lacking a `#!` shebang is rejected outright, and a
+CRLF-lined script (unrunnable as a hook — Linux would try to exec the interpreter
+`/bin/bash\r`) is normalized to LF when patched. `ValidateMqtt` asserts the same.
+`go2rtcd`'s own mutating calls already use `-w 5`, so with the factory now waiting
+too, **all** writers serialize on the lock and no rule is ever lost.
 
 Everything else is generated or embedded elsewhere:
 

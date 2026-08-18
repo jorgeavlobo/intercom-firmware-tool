@@ -447,17 +447,18 @@ namespace IntercomFirmwareTool.Core
         // right after the factory script's shebang that shadows `iptables` with a function injecting
         // `--wait`, so every factory call BLOCKS for the lock instead of dropping a rule. Applied ONLY on
         // the on-device camera path (the only image that adds a second writer), idempotent (skips a
-        // script that already has the active shim function, keyed off the function line — not the marker
-        // comment — via IsFactoryFirewallHardened), preserving the script's mode/owner.
+        // script that already carries the exact shim block right after the shebang, judged by
+        // IsFactoryFirewallHardened — not the marker comment), preserving the script's mode/owner.
         private const string FactoryFirewallScriptPath = "/etc/network/if-pre-up.d/iptables";
         // Human-readable marker used only to delimit the shim block in the script text (grep/read
-        // convenience). It is NOT what gates idempotency or validation — a marker comment could survive
-        // while the operative function line was truncated or hand-edited away, leaving the factory calls
-        // lock-less. Those checks key off FactoryFirewallShimFn (the actual function) instead.
+        // convenience). It is NOT what gates idempotency or validation — the marker comment could survive
+        // while the block was truncated or hand-edited, and the function text can appear inertly (in a
+        // comment, an `if false` branch, or a quoted here-doc). Those checks require the EXACT shim block
+        // immediately after the shebang (IsFactoryFirewallHardened) instead.
         private const string FactoryFirewallShimMarker = "IntercomFirmwareTool #145";
-        // The OPERATIVE line of the shim: the exact `iptables` shell function that injects --wait. This —
-        // not the marker comment — is what "hardened" means, so both the idempotency skip and the
-        // ValidateMqtt check test for THIS literal. `command` reaches the real binary, bypassing the
+        // The OPERATIVE line of the shim: the exact `iptables` shell function that injects --wait. The
+        // FactoryFirewallShim block below is built from it (single source of truth). `command` reaches the
+        // real binary, bypassing the
         // function, so there is no recursion. Bare `--wait` (no timeout) WAITS for the lock rather than
         // failing, so a factory rule is never silently dropped under contention. In practice iptables
         // holds the xtables lock only briefly per operation — it is a flock released when the process
@@ -1349,13 +1350,12 @@ namespace IntercomFirmwareTool.Core
                     if (fs.FileExists(FactoryFirewallScriptPath))
                     {
                         string factoryFw = ReadAllText(fs, FactoryFirewallScriptPath);
-                        // Assert the script is a proper shell script (a `#!` shebang) AND the shim is
-                        // EFFECTIVE — an active function line before the first factory call (not merely the
-                        // marker comment or the text in some inert position). Both together are what make
-                        // the factory calls actually wait for the lock; matching the install-time gate.
+                        // EFFECTIVE hardening: our exact shim block immediately after a `#!` shebang, LF
+                        // line endings (IsFactoryFirewallHardened checks all of that) — not merely the
+                        // marker comment or the shim text in some inert/quoted position. This is exactly
+                        // what the install-time gate wrote.
                         checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
-                            factoryFw.StartsWith("#!", StringComparison.Ordinal)
-                            && IsFactoryFirewallHardened(factoryFw), ""));
+                            IsFactoryFirewallHardened(factoryFw), ""));
                     }
                     else if (PathOccupied(fs, FactoryFirewallScriptPath))
                     {
@@ -2659,8 +2659,9 @@ namespace IntercomFirmwareTool.Core
         /// script's shebang that shadows <c>iptables</c> with a function injecting <c>--wait</c>, so every
         /// factory call BLOCKS for the lock instead of dropping a rule.
         ///
-        /// <para>Idempotent: a script already carrying the operative <see cref="FactoryFirewallShimFn"/> is
-        /// left untouched. Preserves the script's mode/owner (<see cref="RewritePreservingMeta"/>). Best-effort
+        /// <para>Idempotent: a script already carrying the exact shim block right after its shebang (see
+        /// <see cref="IsFactoryFirewallHardened"/>) is left untouched. Preserves the script's mode/owner
+        /// (<see cref="RewritePreservingMeta"/>). Best-effort
         /// on shape: if the factory script is ABSENT (a variant that ships none — then there is no factory
         /// firewall to clobber) we skip. Invoked ONLY on the on-device camera path, the sole image that
         /// adds a second iptables writer.</para>
@@ -2678,72 +2679,73 @@ namespace IntercomFirmwareTool.Core
                     throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
                 return;                                              // genuinely absent — nothing to harden
             }
-            string script = ReadAllText(fs, FactoryFirewallScriptPath);
-            string patched = EnsureFactoryFirewallShim(script);
-            // Only rewrite when the splice actually changed the script — an already-hardened script
-            // (shim function present) is returned by-reference unchanged, so this skips a redundant write.
-            if (!ReferenceEquals(patched, script))
+            string original = ReadAllText(fs, FactoryFirewallScriptPath);
+            string patched = EnsureFactoryFirewallShim(original);
+            // Rewrite when the result differs from the original — either because we spliced the shim in,
+            // OR because we normalized CRLF endings to LF (a CRLF hook's `#!/bin/bash\r` shebang is
+            // unrunnable on Linux). An already-hardened LF script yields an identical string → no write.
+            if (!string.Equals(patched, original, StringComparison.Ordinal))
                 RewritePreservingMeta(fs, FactoryFirewallScriptPath, patched);
         }
 
         /// <summary>
-        /// Pure splice (issue #145): returns <paramref name="script"/> with the <c>--wait</c> shim
-        /// inserted immediately AFTER its shebang line — so the <c>iptables</c> function is defined
-        /// before any factory <c>iptables</c> call runs — or the SAME string (by reference) unchanged if
-        /// it already carries the operative <see cref="FactoryFirewallShimFn"/> (idempotent). A degenerate script
-        /// with no newline gets the shim appended after its content. Factored out with no I/O so the
-        /// splice + idempotency are unit-tested directly. <c>internal</c> for the test project.
+        /// Pure splice (issue #145): normalizes CRLF/CR to LF, then returns <paramref name="script"/> with
+        /// the <c>--wait</c> shim block inserted immediately AFTER its shebang line — so the
+        /// <c>iptables</c> function is defined before any factory <c>iptables</c> call runs — or the
+        /// LF-normalized text unchanged if it already carries the exact block there
+        /// (<see cref="IsFactoryFirewallHardened"/>, idempotent). A file with no <c>#!</c> shebang is
+        /// rejected. A degenerate script with no newline gets the shim appended after its content.
+        /// Factored out with no I/O so the splice + idempotency are unit-tested directly. <c>internal</c>
+        /// for the test project.
         /// </summary>
         internal static string EnsureFactoryFirewallShim(string script)
         {
-            // Shebang FIRST, before the idempotency return: a "hardened" script is only valid if it is
-            // also a proper shell script (a `#!` first line). A file that carries the shim function but
-            // has lost its shebang would run unusably (or lock-less) as a directly-executed if-pre-up.d
-            // hook, so it must be REJECTED, not accepted as already-hardened via the shortcut below. This
-            // also covers a pristine non-shebang variant: inserting after an arbitrary first line would
-            // leave that line's command lock-less. Fail loudly so an unexpected variant surfaces at build.
-            if (!script.StartsWith("#!", StringComparison.Ordinal))
+            // Normalize CRLF/CR → LF FIRST. A factory hook with CRLF endings is UNRUNNABLE on Linux: the
+            // direct-exec interpreter path becomes `/bin/bash\r`, which does not exist, so ifupdown can't
+            // run the hook at all. We must therefore NOT preserve CRLF — normalizing repairs the hook and
+            // lets the shim splice cleanly (mirrors LoadScript, which LF-normalizes embedded scripts). The
+            // caller rewrites whenever the result differs from the original, so a CRLF file is re-emitted
+            // as LF even when it already carries the function.
+            string lf = script.Replace("\r\n", "\n").Replace("\r", "\n");
+            // Shebang, before the idempotency return: a "hardened" script is only valid if it is also a
+            // proper shell script (a `#!` first line). A file that carries the shim function but has lost
+            // its shebang would run unusably (or lock-less) as a directly-executed if-pre-up.d hook, so it
+            // must be REJECTED, not accepted via the shortcut below. This also covers a pristine
+            // non-shebang variant: inserting after an arbitrary first line would leave it lock-less.
+            if (!lf.StartsWith("#!", StringComparison.Ordinal))
                 throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             // Idempotency keys off an ACTIVE, correctly-positioned shim (see IsFactoryFirewallHardened) —
             // not a mere text match. A commented-out copy of the function, the text embedded mid-line, or
             // a definition sitting AFTER a factory call would all leave some/all factory calls lock-less,
             // so none of those count as hardened: the script is re-patched, not skipped.
-            if (IsFactoryFirewallHardened(script))
-                return script;                                       // already hardened — unchanged
-            int firstNl = script.IndexOf('\n');
+            if (IsFactoryFirewallHardened(lf))
+                return lf;                                           // already hardened (normalized to LF)
+            int firstNl = lf.IndexOf('\n');
             return firstNl >= 0
-                ? script[..(firstNl + 1)] + FactoryFirewallShim + script[(firstNl + 1)..]
-                : script + "\n" + FactoryFirewallShim;
+                ? lf[..(firstNl + 1)] + FactoryFirewallShim + lf[(firstNl + 1)..]
+                : lf + "\n" + FactoryFirewallShim;
         }
 
         /// <summary>
-        /// True iff <paramref name="script"/> is EFFECTIVELY hardened (issue #145): an ACTIVE
-        /// (uncommented) line equal to <see cref="FactoryFirewallShimFn"/> appears BEFORE the first active
-        /// factory <c>iptables …</c> call. A commented-out copy, the text embedded inside a longer line, or
-        /// a definition that only appears after a factory call does NOT count — the shell would still run
-        /// some or all factory calls lock-less. Used by BOTH the idempotency skip and the
-        /// <c>ValidateMqtt</c> check, so neither is fooled by inert text. The whole-line compare (after
-        /// trimming leading whitespace) rules out comments and substrings; scanning top-to-bottom enforces
-        /// the ordering the shell itself uses — a function only shadows calls that FOLLOW its definition.
+        /// True iff <paramref name="script"/> is EFFECTIVELY hardened (issue #145): our EXACT
+        /// installer-owned <see cref="FactoryFirewallShim"/> block sits IMMEDIATELY after the shebang line.
+        /// That is precisely what the installer writes, and — unlike scanning for the function text
+        /// anywhere in the file — it cannot be fooled by that text appearing in a comment, in an inactive
+        /// <c>if false; then … fi</c> branch, or inside a quoted here-document (none of which place our
+        /// whole block right after the shebang, so none would actually define the function at run time).
+        /// The block is defined with LF, so a CRLF script — which is unrunnable as a hook (see
+        /// <see cref="EnsureFactoryFirewallShim"/>) — correctly reads as NOT hardened. Requires a
+        /// <c>#!</c> shebang first line. Used by both the idempotency skip and the <c>ValidateMqtt</c> check.
         /// </summary>
         internal static bool IsFactoryFirewallHardened(string script)
         {
-            foreach (string raw in script.Split('\n'))
-            {
-                // Trim BOTH ends: leading whitespace (indentation) and a trailing '\r' — so a CRLF-lined
-                // script still matches the whole-line function literal (and the call prefix) rather than
-                // being wrongly seen as unhardened and re-patched.
-                string line = raw.Trim();
-                if (line == FactoryFirewallShimFn)
-                    return true;                                     // active shim reached before any call
-                // An active factory `iptables …` invocation reached BEFORE the shim ⇒ that call would run
-                // lock-less. Our own definition is `iptables()` (parenthesis, no space), so the space/tab
-                // after `iptables` distinguishes a real call from the function definition.
-                if (line.StartsWith("iptables ", StringComparison.Ordinal)
-                    || line.StartsWith("iptables\t", StringComparison.Ordinal))
-                    return false;
-            }
-            return false;                                            // shim never seen
+            if (!script.StartsWith("#!", StringComparison.Ordinal))
+                return false;                                        // not a shell script — never hardened
+            int firstNl = script.IndexOf('\n');
+            if (firstNl < 0)
+                return false;                                        // shebang only, no room for the block
+            // The exact shim block must be the very next thing after the shebang line.
+            return script.AsSpan(firstNl + 1).StartsWith(FactoryFirewallShim.AsSpan());
         }
 
         private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)
