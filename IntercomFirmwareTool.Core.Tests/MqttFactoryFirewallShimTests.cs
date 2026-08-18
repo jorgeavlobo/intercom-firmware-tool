@@ -99,7 +99,7 @@ public class MqttFactoryFirewallShimTests
             "# <<< IntercomFirmwareTool #145 <<<\n" +
             "iptables -F INPUT\n";
         string patched = MqttInstaller.EnsureFactoryFirewallShim(tampered);
-        Assert.NotSame(tampered, patched);                                    // it was re-patched
+        Assert.NotEqual(tampered, patched);                                   // the text actually changed (re-patched)
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched); // now really hardened
     }
 
