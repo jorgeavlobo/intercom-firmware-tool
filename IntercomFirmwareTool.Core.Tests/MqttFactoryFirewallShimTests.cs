@@ -141,5 +141,11 @@ public class MqttFactoryFirewallShimTests
         // An empty script (no shebang) is likewise rejected rather than silently "hardened".
         Assert.Throws<System.InvalidOperationException>(
             () => MqttInstaller.EnsureFactoryFirewallShim(""));
+        // A file that ALREADY carries the active shim function but has lost its shebang must STILL be
+        // rejected — the shebang is checked before the idempotency shortcut, so it can't slip through as
+        // "already hardened" and ship an unusable directly-executed if-pre-up.d hook.
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(
+                "iptables() { command iptables -w \"$@\"; }\niptables -F INPUT\n"));
     }
 }

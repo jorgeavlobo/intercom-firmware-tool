@@ -1348,11 +1348,13 @@ namespace IntercomFirmwareTool.Core
                     if (fs.FileExists(FactoryFirewallScriptPath))
                     {
                         string factoryFw = ReadAllText(fs, FactoryFirewallScriptPath);
-                        // Assert the shim is EFFECTIVE — an active function line before the first factory
-                        // call (not merely the marker comment or the text in some inert position) — since
-                        // that is what actually makes the factory calls wait for the lock.
+                        // Assert the script is a proper shell script (a `#!` shebang) AND the shim is
+                        // EFFECTIVE — an active function line before the first factory call (not merely the
+                        // marker comment or the text in some inert position). Both together are what make
+                        // the factory calls actually wait for the lock; matching the install-time gate.
                         checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
-                            IsFactoryFirewallHardened(factoryFw), ""));
+                            factoryFw.StartsWith("#!", StringComparison.Ordinal)
+                            && IsFactoryFirewallHardened(factoryFw), ""));
                     }
                     else if (PathOccupied(fs, FactoryFirewallScriptPath))
                     {
@@ -2693,19 +2695,20 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static string EnsureFactoryFirewallShim(string script)
         {
+            // Shebang FIRST, before the idempotency return: a "hardened" script is only valid if it is
+            // also a proper shell script (a `#!` first line). A file that carries the shim function but
+            // has lost its shebang would run unusably (or lock-less) as a directly-executed if-pre-up.d
+            // hook, so it must be REJECTED, not accepted as already-hardened via the shortcut below. This
+            // also covers a pristine non-shebang variant: inserting after an arbitrary first line would
+            // leave that line's command lock-less. Fail loudly so an unexpected variant surfaces at build.
+            if (!script.StartsWith("#!", StringComparison.Ordinal))
+                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             // Idempotency keys off an ACTIVE, correctly-positioned shim (see IsFactoryFirewallHardened) —
             // not a mere text match. A commented-out copy of the function, the text embedded mid-line, or
             // a definition sitting AFTER a factory call would all leave some/all factory calls lock-less,
             // so none of those count as hardened: the script is re-patched, not skipped.
             if (IsFactoryFirewallHardened(script))
                 return script;                                       // already hardened — unchanged
-            // The factory firewall is a shell script whose FIRST line is a `#!` shebang; the shim must
-            // land right after it so the `iptables` function is defined before any factory call. REFUSE
-            // to splice into a file that is not shebang-led: inserting after an arbitrary first line
-            // would leave that line's command lock-less while the marker suppressed any retry and let
-            // ValidateMqtt pass (issue #145). Fail loudly so an unexpected variant surfaces at build time.
-            if (!script.StartsWith("#!", StringComparison.Ordinal))
-                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             int firstNl = script.IndexOf('\n');
             return firstNl >= 0
                 ? script[..(firstNl + 1)] + FactoryFirewallShim + script[(firstNl + 1)..]
