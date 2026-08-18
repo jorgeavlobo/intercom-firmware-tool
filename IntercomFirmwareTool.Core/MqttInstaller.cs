@@ -2726,10 +2726,40 @@ namespace IntercomFirmwareTool.Core
             // block re-inserted, the result is byte-identical to the input, so this is idempotent by value
             // (the caller writes only when the result differs).
             string stripped = RemoveOwnedFactoryFirewallBlocks(lf);
+            // After removing our OWNED block(s), any remaining `iptables()` function definition is FOREIGN
+            // — a later (unmarked) redefinition would be the shell's last definition and win, so a wrapper
+            // that omits `-w` would leave the factory calls lock-less even with our block in place. A
+            // pristine factory script (or one we previously owned, now stripped) has NONE. A variant or
+            // tampered script that does is an unexpected shape we cannot safely own, so FAIL loudly rather
+            // than report success — we deliberately don't try to parse/relocate arbitrary shell.
+            if (HasIptablesFunctionDef(stripped))
+                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             int firstNl = stripped.IndexOf('\n');
             return firstNl >= 0
                 ? stripped[..(firstNl + 1)] + FactoryFirewallShim + stripped[(firstNl + 1)..]
                 : stripped + "\n" + FactoryFirewallShim;
+        }
+
+        /// <summary>
+        /// True iff <paramref name="region"/> contains a line that DEFINES a shell function named
+        /// <c>iptables</c> — <c>iptables()</c>, <c>iptables ()</c>, or <c>function iptables …</c> (leading
+        /// whitespace ignored). A factory-rule CALL (<c>iptables -F …</c>) is NOT a definition and never
+        /// matches (the char after the name is a space+dash, not a parenthesis). Used to reject a foreign
+        /// redefinition that would override our <c>-w</c> wrapper. Conservative by design: it only needs to
+        /// catch the plain forms a hand-edit/variant would use; anything it flags is failed loudly, never
+        /// silently "fixed". Pure — no I/O.
+        /// </summary>
+        private static bool HasIptablesFunctionDef(string region)
+        {
+            foreach (string raw in region.Split('\n'))
+            {
+                string t = raw.TrimStart();
+                if (t.StartsWith("iptables(", StringComparison.Ordinal)
+                    || t.StartsWith("iptables (", StringComparison.Ordinal)
+                    || t.StartsWith("function iptables", StringComparison.Ordinal))
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>
@@ -2783,7 +2813,9 @@ namespace IntercomFirmwareTool.Core
         /// whole block right after the shebang, so none would actually define the function at run time).
         /// The block is defined with LF, so a CRLF script — which is unrunnable as a hook (see
         /// <see cref="EnsureFactoryFirewallShim"/>) — correctly reads as NOT hardened. Requires a
-        /// <c>#!</c> shebang first line. Used by both the idempotency skip and the <c>ValidateMqtt</c> check.
+        /// <c>#!</c> shebang first line, AND that NOTHING after our block redefines <c>iptables()</c> — a
+        /// later definition wins in the shell and would override our <c>-w</c> wrapper. Used by both the
+        /// idempotency skip and the <c>ValidateMqtt</c> check.
         /// </summary>
         internal static bool IsFactoryFirewallHardened(string script)
         {
@@ -2792,8 +2824,14 @@ namespace IntercomFirmwareTool.Core
             int firstNl = script.IndexOf('\n');
             if (firstNl < 0)
                 return false;                                        // shebang only, no room for the block
-            // The exact shim block must be the very next thing after the shebang line.
-            return script.AsSpan(firstNl + 1).StartsWith(FactoryFirewallShim.AsSpan());
+            // The exact shim block must be the very next thing after the shebang line …
+            int afterShebang = firstNl + 1;
+            if (!script.AsSpan(afterShebang).StartsWith(FactoryFirewallShim.AsSpan()))
+                return false;
+            // … and NOTHING after that block may (re)define `iptables()` — a later definition would be the
+            // shell's last and win, dropping our `-w`. The block owns the only legitimate definition.
+            int afterBlock = afterShebang + FactoryFirewallShim.Length;
+            return !HasIptablesFunctionDef(script[afterBlock..]);
         }
 
         private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)

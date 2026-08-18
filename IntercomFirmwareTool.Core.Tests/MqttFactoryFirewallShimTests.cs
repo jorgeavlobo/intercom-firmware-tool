@@ -199,6 +199,23 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Fact]
+    public void A_foreign_iptables_redefinition_after_the_block_is_rejected()
+    {
+        // Our EXACT block sits right after the shebang, but an UNMARKED `iptables()` redefinition (no -w)
+        // appears before the first factory call. In bash the LATER definition wins, so the factory calls
+        // would run lock-less. This must NOT read as hardened, and re-patching must FAIL — we won't try to
+        // parse/relocate arbitrary foreign shell, so we reject rather than report a false success.
+        string clean = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        const string blockEnd = "# <<< IntercomFirmwareTool #145 <<<\n";
+        int at = clean.IndexOf(blockEnd, System.StringComparison.Ordinal) + blockEnd.Length;
+        string tampered = clean[..at] + "iptables() { command iptables \"$@\"; }\n" + clean[at..];
+
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(tampered));
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(tampered));
+    }
+
+    [Fact]
     public void An_unterminated_owned_block_is_rejected_not_silently_truncated()
     {
         // A corrupt/tampered factory script carrying our OPENER marker but NO closer must FAIL the patch —
