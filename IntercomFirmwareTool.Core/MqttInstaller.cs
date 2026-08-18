@@ -2742,22 +2742,48 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// True iff <paramref name="region"/> contains a line that DEFINES a shell function named
-        /// <c>iptables</c> — <c>iptables()</c>, <c>iptables ()</c>, or <c>function iptables …</c> (leading
-        /// whitespace ignored). A factory-rule CALL (<c>iptables -F …</c>) is NOT a definition and never
-        /// matches (the char after the name is a space+dash, not a parenthesis). Used to reject a foreign
-        /// redefinition that would override our <c>-w</c> wrapper. Conservative by design: it only needs to
-        /// catch the plain forms a hand-edit/variant would use; anything it flags is failed loudly, never
-        /// silently "fixed". Pure — no I/O.
+        /// <c>iptables</c>, in EITHER Bash form, allowing arbitrary whitespace between the tokens the shell
+        /// accepts:
+        /// <list type="bullet">
+        /// <item><c>iptables</c> [ws] <c>(</c> …  — i.e. <c>iptables()</c>, <c>iptables ()</c>, <c>iptables\t()</c>;</item>
+        /// <item><c>function</c> [ws] <c>iptables</c> (word boundary) — i.e. <c>function iptables …</c>, <c>function  iptables { … }</c>.</item>
+        /// </list>
+        /// A factory-rule CALL (<c>iptables -F …</c>) is NOT a definition and never matches — the first
+        /// non-blank char after the name is <c>-</c>, not <c>(</c> — and a different function whose name
+        /// merely STARTS with <c>iptables</c> (e.g. <c>iptables_wrapper()</c>) doesn't match either. Used to
+        /// reject a foreign redefinition that would override our <c>-w</c> wrapper: anything it flags is
+        /// failed loudly, never silently "fixed". Pure — no I/O.
         /// </summary>
         private static bool HasIptablesFunctionDef(string region)
         {
             foreach (string raw in region.Split('\n'))
             {
                 string t = raw.TrimStart();
-                if (t.StartsWith("iptables(", StringComparison.Ordinal)
-                    || t.StartsWith("iptables (", StringComparison.Ordinal)
-                    || t.StartsWith("function iptables", StringComparison.Ordinal))
-                    return true;
+                // Form 1: `iptables` <ws?> `(` — the name must be EXACTLY "iptables" (the next char is
+                // whitespace or `(`), then optional blanks, then an opening paren.
+                if (t.StartsWith("iptables", StringComparison.Ordinal))
+                {
+                    int i = "iptables".Length;
+                    if (i >= t.Length || t[i] == ' ' || t[i] == '\t' || t[i] == '(')
+                    {
+                        while (i < t.Length && (t[i] == ' ' || t[i] == '\t')) i++;
+                        if (i < t.Length && t[i] == '(')
+                            return true;
+                    }
+                }
+                // Form 2: `function` <ws> `iptables` <word boundary>.
+                if (t.StartsWith("function", StringComparison.Ordinal))
+                {
+                    int i = "function".Length;
+                    int wsStart = i;
+                    while (i < t.Length && (t[i] == ' ' || t[i] == '\t')) i++;
+                    if (i > wsStart && t.AsSpan(i).StartsWith("iptables".AsSpan()))
+                    {
+                        int j = i + "iptables".Length;
+                        if (j >= t.Length || !(char.IsLetterOrDigit(t[j]) || t[j] == '_'))
+                            return true;
+                    }
+                }
             }
             return false;
         }

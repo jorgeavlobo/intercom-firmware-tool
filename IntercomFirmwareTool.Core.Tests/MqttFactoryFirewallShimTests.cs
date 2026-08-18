@@ -215,6 +215,60 @@ public class MqttFactoryFirewallShimTests
             () => MqttInstaller.EnsureFactoryFirewallShim(tampered));
     }
 
+    [Theory]
+    // Bash treats ANY run of blanks/tabs as a token separator, so every one of these is a REAL
+    // `iptables` function definition that would shadow our shim and run the factory calls lock-less.
+    // The detector must catch each variant, not just the single-space / no-space forms.
+    [InlineData("iptables ()  { command iptables \"$@\"; }\n")]        // one space before ()
+    [InlineData("iptables  () { command iptables \"$@\"; }\n")]        // two spaces before ()
+    [InlineData("iptables\t() { command iptables \"$@\"; }\n")]        // a tab before ()
+    [InlineData("iptables (  ) { command iptables \"$@\"; }\n")]       // blanks INSIDE the ()
+    [InlineData("function iptables { command iptables \"$@\"; }\n")]   // `function` keyword, one space
+    [InlineData("function  iptables { command iptables \"$@\"; }\n")]  // `function`, two spaces
+    [InlineData("function\tiptables { command iptables \"$@\"; }\n")]  // `function`, a tab
+    [InlineData("function iptables() { command iptables \"$@\"; }\n")] // `function` + explicit ()
+    [InlineData("\tiptables() { command iptables \"$@\"; }\n")]        // indented (leading tab)
+    public void A_foreign_iptables_redefinition_in_any_shell_whitespace_form_is_rejected(string foreign)
+    {
+        // Our EXACT block sits right after the shebang; the foreign redefinition (no -w) is spliced in
+        // just after it, before the first factory call. Whatever the spacing, bash's LATER definition
+        // wins ⇒ the factory calls would run lock-less. Must NOT read as hardened, and re-patching must
+        // FAIL rather than silently layer a fresh block over a definition we can't safely relocate.
+        string clean = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        const string blockEnd = "# <<< IntercomFirmwareTool #145 <<<\n";
+        int at = clean.IndexOf(blockEnd, System.StringComparison.Ordinal) + blockEnd.Length;
+        string tampered = clean[..at] + foreign + clean[at..];
+
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(tampered));
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(tampered));
+    }
+
+    [Theory]
+    // A near-miss that only SHARES the `iptables` prefix (a longer name) or the `function` prefix is a
+    // DIFFERENT command, not a redefinition of `iptables` — it must NOT trip the detector, or a legit
+    // factory script would be wrongly rejected.
+    [InlineData("iptables_helper() { :; }\n")]      // longer name — not `iptables`
+    [InlineData("iptablesx() { :; }\n")]            // no separator, longer name
+    [InlineData("functional() { :; }\n")]           // `function`-prefixed word, not the keyword
+    [InlineData("functioniptables() { :; }\n")]     // no separator after `function`
+    public void A_similarly_named_function_after_the_block_is_not_mistaken_for_a_redefinition(string benign)
+    {
+        // The benign definition is spliced after our block; because it does not redefine `iptables`, the
+        // script stays hardened and a re-patch succeeds (no false rejection).
+        string clean = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        const string blockEnd = "# <<< IntercomFirmwareTool #145 <<<\n";
+        int at = clean.IndexOf(blockEnd, System.StringComparison.Ordinal) + blockEnd.Length;
+        string extended = clean[..at] + benign + clean[at..];
+
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(extended));
+        // Re-patching an already-hardened script with a benign extra function is a no-op splice: it must
+        // not throw. (It may re-emit the block, but it must succeed.)
+        string repatched = MqttInstaller.EnsureFactoryFirewallShim(extended);
+        Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", repatched);
+        Assert.Contains(benign, repatched);
+    }
+
     [Fact]
     public void An_unterminated_owned_block_is_rejected_not_silently_truncated()
     {
