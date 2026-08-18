@@ -128,6 +128,14 @@ public class MqttFactoryFirewallShimTests
             "iptables -F INPUT\n" +
             "iptables() { command iptables -w \"$@\"; }\n";
         Assert.False(MqttInstaller.IsFactoryFirewallHardened(late));
+
+        // A genuinely hardened script with Windows CRLF line endings is still recognized (the whole-line
+        // match tolerates the trailing '\r') and is NOT wrongly re-patched.
+        string crlf =
+            "#!/bin/bash\r\n" +
+            "iptables() { command iptables -w \"$@\"; }\r\n" +
+            "iptables -F INPUT\r\n";
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(crlf));
     }
 
     [Fact]

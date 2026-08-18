@@ -447,7 +447,8 @@ namespace IntercomFirmwareTool.Core
         // right after the factory script's shebang that shadows `iptables` with a function injecting
         // `--wait`, so every factory call BLOCKS for the lock instead of dropping a rule. Applied ONLY on
         // the on-device camera path (the only image that adds a second writer), idempotent (skips a
-        // script already carrying the marker), preserving the script's mode/owner.
+        // script that already has the active shim function, keyed off the function line — not the marker
+        // comment — via IsFactoryFirewallHardened), preserving the script's mode/owner.
         private const string FactoryFirewallScriptPath = "/etc/network/if-pre-up.d/iptables";
         // Human-readable marker used only to delimit the shim block in the script text (grep/read
         // convenience). It is NOT what gates idempotency or validation — a marker comment could survive
@@ -2729,7 +2730,10 @@ namespace IntercomFirmwareTool.Core
         {
             foreach (string raw in script.Split('\n'))
             {
-                string line = raw.TrimStart();
+                // Trim BOTH ends: leading whitespace (indentation) and a trailing '\r' — so a CRLF-lined
+                // script still matches the whole-line function literal (and the call prefix) rather than
+                // being wrongly seen as unhardened and re-patched.
+                string line = raw.Trim();
                 if (line == FactoryFirewallShimFn)
                     return true;                                     // active shim reached before any call
                 // An active factory `iptables …` invocation reached BEFORE the shim ⇒ that call would run
