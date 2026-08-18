@@ -480,6 +480,13 @@ namespace IntercomFirmwareTool.Core
             "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
             FactoryFirewallShimFn + "\n" +
             "# <<< " + FactoryFirewallShimMarker + " <<<\n";
+        // The opener/closer marker-line prefixes of an installed shim block. Used to STRIP any prior
+        // owned block(s) before re-inserting a fresh one, so a stale or hand-altered copy — e.g. one whose
+        // `-w` was removed — can't survive below the fresh block and override it (the shell uses the LAST
+        // definition of a function). We only ever remove content BETWEEN our own markers, never foreign
+        // lines, so a legitimate here-document or conditional elsewhere is untouched.
+        private const string FactoryFirewallBlockOpen = "# >>> " + FactoryFirewallShimMarker;
+        private const string FactoryFirewallBlockClose = "# <<< " + FactoryFirewallShimMarker;
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
@@ -2689,14 +2696,14 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Pure splice (issue #145): normalizes CRLF/CR to LF, then returns <paramref name="script"/> with
-        /// the <c>--wait</c> shim block inserted immediately AFTER its shebang line — so the
-        /// <c>iptables</c> function is defined before any factory <c>iptables</c> call runs — or the
-        /// LF-normalized text unchanged if it already carries the exact block there
-        /// (<see cref="IsFactoryFirewallHardened"/>, idempotent). A file with no <c>#!</c> shebang is
-        /// rejected. A degenerate script with no newline gets the shim appended after its content.
-        /// Factored out with no I/O so the splice + idempotency are unit-tested directly. <c>internal</c>
-        /// for the test project.
+        /// Pure splice (issue #145): normalizes CRLF/CR to LF, strips any prior owned shim block(s), then
+        /// inserts ONE fresh <see cref="FactoryFirewallShim"/> block immediately AFTER the shebang line — so
+        /// the <c>iptables</c> function is defined before any factory <c>iptables</c> call runs and no stale
+        /// copy survives below it to override the fresh one. A file with no <c>#!</c> shebang is rejected. A
+        /// degenerate script with no newline gets the shim appended after its content. Idempotent BY VALUE:
+        /// an already-clean script strips to the same text and gets the same block back, so the output is
+        /// byte-identical to the input. Factored out with no I/O so it is unit-tested directly.
+        /// <c>internal</c> for the test project.
         /// </summary>
         internal static string EnsureFactoryFirewallShim(string script)
         {
@@ -2705,25 +2712,55 @@ namespace IntercomFirmwareTool.Core
             // run the hook at all. We must therefore NOT preserve CRLF — normalizing repairs the hook and
             // lets the shim splice cleanly (mirrors LoadScript, which LF-normalizes embedded scripts). The
             // caller rewrites whenever the result differs from the original, so a CRLF file is re-emitted
-            // as LF even when it already carries the function.
+            // as LF even when it already carries the block.
             string lf = script.Replace("\r\n", "\n").Replace("\r", "\n");
-            // Shebang, before the idempotency return: a "hardened" script is only valid if it is also a
-            // proper shell script (a `#!` first line). A file that carries the shim function but has lost
-            // its shebang would run unusably (or lock-less) as a directly-executed if-pre-up.d hook, so it
-            // must be REJECTED, not accepted via the shortcut below. This also covers a pristine
-            // non-shebang variant: inserting after an arbitrary first line would leave it lock-less.
+            // The script must be a proper shell script (a `#!` first line): a file with the shim function
+            // but no shebang would run unusably as a directly-executed if-pre-up.d hook, so REJECT it.
             if (!lf.StartsWith("#!", StringComparison.Ordinal))
                 throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
-            // Idempotency keys off an ACTIVE, correctly-positioned shim (see IsFactoryFirewallHardened) —
-            // not a mere text match. A commented-out copy of the function, the text embedded mid-line, or
-            // a definition sitting AFTER a factory call would all leave some/all factory calls lock-less,
-            // so none of those count as hardened: the script is re-patched, not skipped.
-            if (IsFactoryFirewallHardened(lf))
-                return lf;                                           // already hardened (normalized to LF)
-            int firstNl = lf.IndexOf('\n');
+            // STRIP any prior owned block(s) — clean or hand-altered, wherever they sit — then insert ONE
+            // fresh block immediately after the shebang. Removing first is what makes this robust: a stale
+            // or altered copy (e.g. one whose `-w` was removed) placed AFTER the fresh block would otherwise
+            // be the shell's LAST definition of `iptables()` and win, leaving the factory calls lock-less.
+            // Because a clean, already-hardened script strips to exactly the same text and then gets the same
+            // block re-inserted, the result is byte-identical to the input, so this is idempotent by value
+            // (the caller writes only when the result differs).
+            string stripped = RemoveOwnedFactoryFirewallBlocks(lf);
+            int firstNl = stripped.IndexOf('\n');
             return firstNl >= 0
-                ? lf[..(firstNl + 1)] + FactoryFirewallShim + lf[(firstNl + 1)..]
-                : lf + "\n" + FactoryFirewallShim;
+                ? stripped[..(firstNl + 1)] + FactoryFirewallShim + stripped[(firstNl + 1)..]
+                : stripped + "\n" + FactoryFirewallShim;
+        }
+
+        /// <summary>
+        /// Remove every installer-owned shim block from <paramref name="script"/> — each run of lines from a
+        /// <see cref="FactoryFirewallBlockOpen"/> marker line through its matching
+        /// <see cref="FactoryFirewallBlockClose"/> line (inclusive). Only content BETWEEN our own markers is
+        /// dropped; foreign lines (a legitimate here-document, conditional, or the factory rules) are kept
+        /// verbatim, preserving their order. An opener with no matching closer drops to end of file (a
+        /// truncated block is corrupt anyway). LF input; splits and rejoins on <c>'\n'</c> so the trailing
+        /// newline is preserved. Pure — no I/O.
+        /// </summary>
+        private static string RemoveOwnedFactoryFirewallBlocks(string script)
+        {
+            var kept = new List<string>();
+            bool inBlock = false;
+            foreach (string raw in script.Split('\n'))
+            {
+                string trimmed = raw.TrimStart();
+                if (!inBlock)
+                {
+                    if (trimmed.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal))
+                        inBlock = true;                              // start of an owned block — drop it
+                    else
+                        kept.Add(raw);
+                }
+                else if (trimmed.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal))
+                {
+                    inBlock = false;                                 // end of the block — drop the closer too
+                }
+            }
+            return string.Join('\n', kept);
         }
 
         /// <summary>

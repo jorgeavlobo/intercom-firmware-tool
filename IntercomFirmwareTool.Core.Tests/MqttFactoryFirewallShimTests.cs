@@ -37,9 +37,10 @@ public class MqttFactoryFirewallShimTests
         // the `iptables` function is defined before ANY factory `iptables` call runs.
         Assert.Equal("#!/bin/bash", lines[0]);
         Assert.StartsWith("# >>> IntercomFirmwareTool #145", lines[1]);
-        // The original body is preserved verbatim, after the shim.
-        Assert.Contains("iptables -F INPUT\n", patched);
-        Assert.Contains("iptables -P INPUT DROP\n", patched);
+        // The ENTIRE original body after the shebang is preserved verbatim (order + content), after the
+        // shim — so a regression that dropped or reordered any factory rule would fail, not just these two.
+        int shebangEnd = FactoryScript.IndexOf('\n') + 1;
+        Assert.EndsWith(FactoryScript[shebangEnd..], patched);
     }
 
     [Fact]
@@ -165,15 +166,36 @@ public class MqttFactoryFirewallShimTests
         Assert.StartsWith("#!/bin/bash\n", patched);
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(patched));
 
-        // Even a script that already carries the function but in CRLF form is re-emitted as LF (its CRLF
-        // shebang is unrunnable), so it is NOT an idempotent no-op — the result changes and has no '\r'.
-        string crlfHardened =
-            "#!/bin/bash\r\n" +
-            "iptables() { command iptables -w \"$@\"; }\r\n" +
-            "iptables -F INPUT\r\n";
+        // A VALID, already-hardened script in CRLF form must normalize to LF WITHOUT duplicating the shim.
+        // Build a CRLF copy of the COMPLETE LF-hardened output (marker block included), re-run, and assert
+        // it round-trips to exactly that LF output — one block, no '\r'.
+        string lfHardened = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        string crlfHardened = lfHardened.Replace("\n", "\r\n");
         string fixedUp = MqttInstaller.EnsureFactoryFirewallShim(crlfHardened);
+        Assert.Equal(lfHardened, fixedUp);
         Assert.DoesNotContain("\r", fixedUp);
-        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fixedUp));
+    }
+
+    [Fact]
+    public void A_prior_owned_block_with_an_altered_function_is_stripped_not_layered()
+    {
+        // A previously-installed block whose function was hand-altered (here: `-w` removed) must be REMOVED
+        // on re-patch, not left below a fresh block — otherwise the shell's LAST definition (the altered,
+        // lock-less one) would win. The result must carry exactly one block with the correct -w function
+        // and no trace of the altered one.
+        string tampered = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript)
+            .Replace("command iptables -w \"$@\"", "command iptables \"$@\"");  // remove -w inside the block
+        Assert.DoesNotContain("command iptables -w \"$@\"", tampered);          // sanity: it's really gone
+
+        string repatched = MqttInstaller.EnsureFactoryFirewallShim(tampered);
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(repatched));        // a clean block was restored
+        Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", repatched);  // correct function present
+        Assert.DoesNotContain("command iptables \"$@\"", repatched);            // altered function stripped
+        // Exactly one shim block: two marker lines (">>>" opener, "<<<" closer).
+        int count = 0, i = 0;
+        while ((i = repatched.IndexOf("IntercomFirmwareTool #145", i, System.StringComparison.Ordinal)) >= 0)
+        { count++; i += 1; }
+        Assert.Equal(2, count);
     }
 
     [Fact]
