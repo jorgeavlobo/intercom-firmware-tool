@@ -199,6 +199,24 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Fact]
+    public void An_unterminated_owned_block_is_rejected_not_silently_truncated()
+    {
+        // A corrupt/tampered factory script carrying our OPENER marker but NO closer must FAIL the patch —
+        // never silently drop the factory rules that follow it (SSH :22, FTP :21, the security DROPs). The
+        // helper throws, so the install aborts and the on-disk script is left untouched (nothing written).
+        string corrupt =
+            "#!/bin/bash\n" +
+            "# >>> IntercomFirmwareTool #145: make the factory firewall WAIT for the xtables lock >>>\n" +
+            "iptables() { command iptables -w \"$@\"; }\n" +
+            // closer marker deliberately missing
+            "iptables -F INPUT\n" +
+            "iptables -A INPUT -p tcp -m tcp --dport 22 -j ACCEPT\n" +
+            "iptables -P INPUT DROP\n";
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(corrupt));
+    }
+
+    [Fact]
     public void A_script_without_a_shebang_is_rejected()
     {
         // A firewall script whose first line is a real command (no #! shebang) must be REJECTED, not

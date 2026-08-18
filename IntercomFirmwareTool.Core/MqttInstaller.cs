@@ -2733,13 +2733,20 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Remove every installer-owned shim block from <paramref name="script"/> — each run of lines from a
-        /// <see cref="FactoryFirewallBlockOpen"/> marker line through its matching
+        /// Remove every COMPLETE installer-owned shim block from <paramref name="script"/> — each run of
+        /// lines from a <see cref="FactoryFirewallBlockOpen"/> marker line through its matching
         /// <see cref="FactoryFirewallBlockClose"/> line (inclusive). Only content BETWEEN our own markers is
         /// dropped; foreign lines (a legitimate here-document, conditional, or the factory rules) are kept
-        /// verbatim, preserving their order. An opener with no matching closer drops to end of file (a
-        /// truncated block is corrupt anyway). LF input; splits and rejoins on <c>'\n'</c> so the trailing
-        /// newline is preserved. Pure — no I/O.
+        /// verbatim, preserving their order.
+        ///
+        /// <para>An opener with NO matching closer means a CORRUPT/tampered factory script. We must NEVER
+        /// return the partially-filtered result — that would silently drop every factory rule after the
+        /// opener (SSH <c>:22</c>, the FTP-reflash <c>:21</c>, the security DROPs) and lock the unit out. So
+        /// this FAILS the install loudly (throws), consistent with the other shape guards (a missing
+        /// shebang / a non-regular file also throw) — the on-disk script is left untouched.</para>
+        ///
+        /// <para>LF input; splits and rejoins on <c>'\n'</c> so the trailing newline is preserved. Pure —
+        /// no I/O.</para>
         /// </summary>
         private static string RemoveOwnedFactoryFirewallBlocks(string script)
         {
@@ -2751,15 +2758,19 @@ namespace IntercomFirmwareTool.Core
                 if (!inBlock)
                 {
                     if (trimmed.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal))
-                        inBlock = true;                              // start of an owned block — drop it
+                        inBlock = true;              // start of an owned block — drop it (lines inside are dropped)
                     else
                         kept.Add(raw);
                 }
                 else if (trimmed.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal))
                 {
-                    inBlock = false;                                 // end of the block — drop the closer too
+                    inBlock = false;                 // end of the block — drop the closer too
                 }
             }
+            // Unterminated owned block ⇒ corrupt script. Fail loudly rather than ship a firewall reduced to
+            // just the shebang + shim (which would have dropped SSH/FTP/DROP rules). Nothing is written.
+            if (inBlock)
+                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             return string.Join('\n', kept);
         }
 
