@@ -122,6 +122,34 @@ re-run the tool for) is out of scope; the reservation above avoids all of it.
 | `bt_service_watchdog` | SysV init service (installed to `/etc/init.d/`, symlinked from `/etc/rc5.d/S99zBtServiceWatchdog`). Supervises **only this tool's own daemons** — `dropbear` (SSH, which `bt_daemon` stops when the app stack starts) — and reconciles `btmqttd` each pass via `/etc/init.d/btmqttd respawn` (and `/etc/init.d/go2rtcd respawn`, guarded on that script's presence). It deliberately does **not** restart the core BTicino services (`scsserver`/`mosquitto`/the `bt_daemon` app stack); the device manages those, and restarting them from here relaunched a colliding app stack that took the intercom down ~60s after boot. |
 | `go2rtcd` | SysV init script for the **on-device camera media server** (issue #120), a byte-for-byte copy of the `btmqttd` script's supervision model retargeted at `/usr/sbin/go2rtc -config /etc/btmqttd/go2rtc/go2rtc.yaml`. Installed to `/etc/init.d/go2rtcd` (symlinked from `/etc/rc5.d/S99zGo2rtc`) **only on the on-device camera path** — a non-camera image never carries it. `start\|stop\|restart\|status\|respawn`. It also **opens the RTSP media port** (`tcp/8554` on `wlan0`, source-restricted to the LAN subnet) when the daemon is **running** and closes it when stopped/disabled (phase 1c-3). Ownership is a **dedicated `GO2RTC` chain** — the industry-standard mechanism a userspace program uses to own iptables rules (Docker's `DOCKER` chain, kube-proxy's `KUBE-*` chains, fail2ban's `f2b-*` chains all work this way): it creates/flushes/populates/deletes only *its own* chain plus one `INPUT` jump to it, and never touches a foreign rule. Ownership is **proven, not just named** — a boot-scoped marker (`/var/run/go2rtc.fwown`) records that *we* created the chain; a pre-existing `GO2RTC` chain we did not create is left entirely alone. The `INPUT` jump is **appended** (after the panel's factory filters, e.g. the conntrack `--ctstate INVALID -j DROP` guard, but before the `-P INPUT DROP` policy) so our ACCEPT never lets traffic bypass a factory or admin filter, and all mutating calls use `-w 5` to wait for the xtables lock. This is deliberately **not** a `-m comment` tag: the target kernel (Linux 4.9 on the C100X, verified against the firmware sample — only the userspace `libxt_comment.so` parser is present, not the `xt_comment` kernel module) **rejects** a comment rule, so a tag would leave `:8554` permanently closed on the real hardware; a named chain needs no match module and works on every kernel. Reconciliation is **stateless**: every watchdog pass re-asserts the chain's contents from scratch (a *successful* `-F`, then re-add the current-subnet ACCEPT), so the chain *is* the state — no tmpfs state file to drift, and a DHCP subnet change is handled for free. With no `wlan0` address the chain is left **empty** (port closed, never interface-wide) until a later pass fills it. It is idempotently **re-asserted every watchdog pass** (`respawn`). The go2rtc control API (`:1984`) stays loopback-only and gets no rule. |
 
+### Factory firewall hardening (issue #145)
+
+The panel's **factory** firewall (`/etc/network/if-pre-up.d/iptables`) rebuilds
+the `INPUT` chain with ~40 **lock-less** `iptables -A` calls (no `-w`) on every
+interface bring-up, then sets `-P INPUT DROP`. Without `-w`, any of those calls
+**fails immediately** — and the factory script never checks the exit code — if
+the xtables lock is held by another process at that instant, so the rule is
+**silently dropped** for the whole boot. The on-device camera adds a **second**
+iptables writer (`go2rtcd`'s `GO2RTC :8554` rule), so a factory `-A` that
+overlaps our lock hold could go missing, taking a factory rule with it — observed
+on real hardware as an **SSH `:22` lockout** after a flash and an **FTP-over-USB
+reflash `:21` lockout**.
+
+On the on-device camera path only, `MqttInstaller` therefore inserts a one-line
+shell shim right after the factory script's shebang:
+
+```sh
+iptables() { command iptables -w "$@"; }
+```
+
+Shadowing `iptables` with a function that injects `--wait` makes **every** factory
+call **block** for the xtables lock instead of dropping a rule (`command` reaches
+the real binary, so there is no recursion). The insert is **idempotent** (a
+script already carrying the `IntercomFirmwareTool #145` marker is left untouched)
+and preserves the script's mode/owner; `ValidateMqtt` asserts the marker is
+present. `go2rtcd`'s own mutating calls already use `-w 5`, so with the factory
+now waiting too, **all** writers serialize on the lock and no rule is ever lost.
+
 Everything else is generated or embedded elsewhere:
 
 - **`btmqttd`** binary → embedded via

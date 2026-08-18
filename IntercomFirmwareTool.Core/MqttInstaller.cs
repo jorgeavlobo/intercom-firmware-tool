@@ -435,6 +435,40 @@ namespace IntercomFirmwareTool.Core
         private const string Go2RtcNetHookDir = "/etc/network/if-up.d";
         private const string Go2RtcNetHookPath = "/etc/network/if-up.d/go2rtc";
 
+        // Factory-firewall hardening (issue #145). The panel's FACTORY firewall
+        // (/etc/network/if-pre-up.d/iptables) rebuilds INPUT with ~40 LOCK-LESS `iptables -A` calls
+        // (no `-w`) on EVERY interface bring-up, then sets `-P INPUT DROP`. Without `-w`, any of those
+        // calls FAILS IMMEDIATELY (and the script never checks the exit code) if the xtables lock is
+        // held by another process at that instant — so the rule is SILENTLY dropped for the whole boot.
+        // The on-device camera adds a SECOND iptables writer (go2rtcd's GO2RTC :8554 rule, `-w 5`); when
+        // its lock hold overlaps a concurrent interface event's factory rebuild, a factory `-A` is lost
+        // and a factory rule goes missing — observed on real hardware as an SSH `:22` lockout after a
+        // flash and an FTP-over-USB reflash `:21` lockout (issue #145). Fix: insert a one-line shell shim
+        // right after the factory script's shebang that shadows `iptables` with a function injecting
+        // `--wait`, so every factory call BLOCKS for the lock instead of dropping a rule. Applied ONLY on
+        // the on-device camera path (the only image that adds a second writer), idempotent (skips a
+        // script already carrying the marker), preserving the script's mode/owner.
+        private const string FactoryFirewallScriptPath = "/etc/network/if-pre-up.d/iptables";
+        // Stable idempotency + validation marker — the patch skips a script already carrying it and
+        // ValidateMqtt asserts its presence. Do not reword (it is matched literally).
+        private const string FactoryFirewallShimMarker = "IntercomFirmwareTool #145";
+        // The shim, spliced in immediately after the shebang so the `iptables` function is defined
+        // before any factory `iptables` call runs. `command` reaches the real binary, bypassing the
+        // function, so there is no recursion; bare `--wait` (no timeout) waits indefinitely for the lock
+        // — the xtables lock is only ever held per-op (never by a dead process: it is a flock released on
+        // exit), so this can never deadlock and never times out into a silent drop. LF endings; the
+        // marker line carries FactoryFirewallShimMarker.
+        private const string FactoryFirewallShim =
+            "# >>> IntercomFirmwareTool #145: make the factory firewall WAIT for the xtables lock >>>\n" +
+            "# The factory rebuilds INPUT with lock-less `iptables -A` calls (no -w). With the on-device\n" +
+            "# camera's go2rtc rule as a second iptables writer, a factory call that fires while we hold\n" +
+            "# the xtables lock fails SILENTLY and a factory rule (SSH :22, the FTP-over-USB reflash :21,\n" +
+            "# security DROPs) goes missing until the next clean rebuild — locking out SSH or the reflash.\n" +
+            "# Shadowing `iptables` with a function that injects --wait makes every factory call BLOCK for\n" +
+            "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
+            "iptables() { command iptables -w \"$@\"; }\n" +
+            "# <<< IntercomFirmwareTool #145 <<<\n";
+
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
 
@@ -632,6 +666,12 @@ namespace IntercomFirmwareTool.Core
             WriteTextFile(fs, Go2RtcNetHookPath, go2rtcNetHook);
             fs.SetMode(Go2RtcNetHookPath, ToMode(755));
             fs.SetOwner(Go2RtcNetHookPath, 0, 0);
+
+            // Harden the factory firewall against the xtables-lock race (issue #145): make its lock-less
+            // INPUT rebuild WAIT for the lock, so our go2rtc :8554 rule (a second iptables writer) can
+            // never cause a factory rule (SSH :22, the FTP-over-USB reflash :21, security DROPs) to be
+            // dropped silently and lock the operator out. Idempotent; on-device camera path only.
+            PatchFactoryFirewallWaitForLock(fs);
 
             // Vendored media binaries (byte-exact, SHA-256 verified on read), 0775 root:root — the
             // same mode as the always-installed btmqttd. These are the two binaries 1c-1 embedded but
@@ -1289,6 +1329,18 @@ namespace IntercomFirmwareTool.Core
                     string go2rtcNetHook = fs.FileExists(Go2RtcNetHookPath) ? ReadAllText(fs, Go2RtcNetHookPath) : "";
                     checks.Add(new("go2rtc if-up.d hook matches the embedded script",
                         go2rtcNetHook == LoadScript(ResourcePrefix + "go2rtc-net-hook"), ""));
+
+                    // Factory firewall hardened against the xtables-lock race (issue #145): the factory
+                    // if-pre-up.d/iptables script must carry our --wait shim so its lock-less rebuild can
+                    // never silently drop a factory rule (SSH :22 / USB-reflash :21 / security DROPs) when
+                    // our go2rtc :8554 rule holds the lock. Only meaningful when the factory script exists
+                    // (a variant that ships none has no factory firewall to clobber → nothing to harden).
+                    if (fs.FileExists(FactoryFirewallScriptPath))
+                    {
+                        string factoryFw = ReadAllText(fs, FactoryFirewallScriptPath);
+                        checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
+                            factoryFw.Contains(FactoryFirewallShimMarker, StringComparison.Ordinal), ""));
+                    }
                     foreach (var bin in new[] { PayloadBinaries.Ffmpeg, PayloadBinaries.Go2Rtc })
                     {
                         CheckFile(fs, checks, bin.InstallPath, 775);
@@ -2568,6 +2620,52 @@ namespace IntercomFirmwareTool.Core
             WriteTextFile(fs, path, text);
             fs.SetMode(path, mode);
             if (owner != null) fs.SetOwner(path, owner.Item1, owner.Item2);
+        }
+
+        /// <summary>
+        /// Hardens the panel's FACTORY firewall against the xtables-lock race (issue #145) so the
+        /// on-device camera can never cause a factory INPUT rule to be dropped. The factory script
+        /// (<see cref="FactoryFirewallScriptPath"/>) rebuilds INPUT with ~40 LOCK-LESS <c>iptables -A</c>
+        /// calls on every interface bring-up; a call that overlaps another writer's xtables-lock hold
+        /// fails silently (the script never checks the exit code), so a factory rule — SSH <c>:22</c>, the
+        /// FTP-over-USB reflash <c>:21</c>, a security DROP — goes missing until the next clean rebuild,
+        /// locking out SSH or the MyHOME-Suite reflash. We insert a one-line shell shim right after the
+        /// script's shebang that shadows <c>iptables</c> with a function injecting <c>--wait</c>, so every
+        /// factory call BLOCKS for the lock instead of dropping a rule.
+        ///
+        /// <para>Idempotent: a script already carrying <see cref="FactoryFirewallShimMarker"/> is left
+        /// untouched. Preserves the script's mode/owner (<see cref="RewritePreservingMeta"/>). Best-effort
+        /// on shape: if the factory script is ABSENT (a variant that ships none — then there is no factory
+        /// firewall to clobber) we skip. Invoked ONLY on the on-device camera path, the sole image that
+        /// adds a second iptables writer.</para>
+        /// </summary>
+        private static void PatchFactoryFirewallWaitForLock(ExtFileSystem fs)
+        {
+            if (!fs.FileExists(FactoryFirewallScriptPath)) return;   // no factory firewall to harden
+            string script = ReadAllText(fs, FactoryFirewallScriptPath);
+            string patched = EnsureFactoryFirewallShim(script);
+            // Only rewrite when the splice actually changed the script — an already-hardened script
+            // (marker present) is returned by-reference unchanged, so this skips a redundant write.
+            if (!ReferenceEquals(patched, script))
+                RewritePreservingMeta(fs, FactoryFirewallScriptPath, patched);
+        }
+
+        /// <summary>
+        /// Pure splice (issue #145): returns <paramref name="script"/> with the <c>--wait</c> shim
+        /// inserted immediately AFTER its shebang line — so the <c>iptables</c> function is defined
+        /// before any factory <c>iptables</c> call runs — or the SAME string (by reference) unchanged if
+        /// it already carries <see cref="FactoryFirewallShimMarker"/> (idempotent). A degenerate script
+        /// with no newline gets the shim appended after its content. Factored out with no I/O so the
+        /// splice + idempotency are unit-tested directly. <c>internal</c> for the test project.
+        /// </summary>
+        internal static string EnsureFactoryFirewallShim(string script)
+        {
+            if (script.Contains(FactoryFirewallShimMarker, StringComparison.Ordinal))
+                return script;                                       // already hardened — unchanged
+            int firstNl = script.IndexOf('\n');
+            return firstNl >= 0
+                ? script[..(firstNl + 1)] + FactoryFirewallShim + script[(firstNl + 1)..]
+                : script + "\n" + FactoryFirewallShim;
         }
 
         private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)
