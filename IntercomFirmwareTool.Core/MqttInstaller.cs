@@ -452,7 +452,7 @@ namespace IntercomFirmwareTool.Core
         // Human-readable marker used only to delimit the shim block in the script text (grep/read
         // convenience). It is NOT what gates idempotency or validation — a marker comment could survive
         // while the operative function line was truncated or hand-edited away, leaving the factory calls
-        // lock-less (Codex P2). Those checks key off FactoryFirewallShimFn (the actual function) instead.
+        // lock-less. Those checks key off FactoryFirewallShimFn (the actual function) instead.
         private const string FactoryFirewallShimMarker = "IntercomFirmwareTool #145";
         // The OPERATIVE line of the shim: the exact `iptables` shell function that injects --wait. This —
         // not the marker comment — is what "hardened" means, so both the idempotency skip and the
@@ -1348,10 +1348,11 @@ namespace IntercomFirmwareTool.Core
                     if (fs.FileExists(FactoryFirewallScriptPath))
                     {
                         string factoryFw = ReadAllText(fs, FactoryFirewallScriptPath);
-                        // Assert the OPERATIVE function line is present (not merely the marker comment) —
-                        // that is what actually makes the factory calls wait for the lock (Codex P2).
+                        // Assert the shim is EFFECTIVE — an active function line before the first factory
+                        // call (not merely the marker comment or the text in some inert position) — since
+                        // that is what actually makes the factory calls wait for the lock.
                         checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
-                            factoryFw.Contains(FactoryFirewallShimFn, StringComparison.Ordinal), ""));
+                            IsFactoryFirewallHardened(factoryFw), ""));
                     }
                     else if (PathOccupied(fs, FactoryFirewallScriptPath))
                     {
@@ -2692,10 +2693,11 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static string EnsureFactoryFirewallShim(string script)
         {
-            // Idempotency keys off the OPERATIVE function line, not the marker comment: a script whose
-            // marker survived but whose function was truncated/edited away is NOT hardened and must be
-            // re-patched, not skipped (Codex P2).
-            if (script.Contains(FactoryFirewallShimFn, StringComparison.Ordinal))
+            // Idempotency keys off an ACTIVE, correctly-positioned shim (see IsFactoryFirewallHardened) —
+            // not a mere text match. A commented-out copy of the function, the text embedded mid-line, or
+            // a definition sitting AFTER a factory call would all leave some/all factory calls lock-less,
+            // so none of those count as hardened: the script is re-patched, not skipped.
+            if (IsFactoryFirewallHardened(script))
                 return script;                                       // already hardened — unchanged
             // The factory firewall is a shell script whose FIRST line is a `#!` shebang; the shim must
             // land right after it so the `iptables` function is defined before any factory call. REFUSE
@@ -2708,6 +2710,33 @@ namespace IntercomFirmwareTool.Core
             return firstNl >= 0
                 ? script[..(firstNl + 1)] + FactoryFirewallShim + script[(firstNl + 1)..]
                 : script + "\n" + FactoryFirewallShim;
+        }
+
+        /// <summary>
+        /// True iff <paramref name="script"/> is EFFECTIVELY hardened (issue #145): an ACTIVE
+        /// (uncommented) line equal to <see cref="FactoryFirewallShimFn"/> appears BEFORE the first active
+        /// factory <c>iptables …</c> call. A commented-out copy, the text embedded inside a longer line, or
+        /// a definition that only appears after a factory call does NOT count — the shell would still run
+        /// some or all factory calls lock-less. Used by BOTH the idempotency skip and the
+        /// <c>ValidateMqtt</c> check, so neither is fooled by inert text. The whole-line compare (after
+        /// trimming leading whitespace) rules out comments and substrings; scanning top-to-bottom enforces
+        /// the ordering the shell itself uses — a function only shadows calls that FOLLOW its definition.
+        /// </summary>
+        internal static bool IsFactoryFirewallHardened(string script)
+        {
+            foreach (string raw in script.Split('\n'))
+            {
+                string line = raw.TrimStart();
+                if (line == FactoryFirewallShimFn)
+                    return true;                                     // active shim reached before any call
+                // An active factory `iptables …` invocation reached BEFORE the shim ⇒ that call would run
+                // lock-less. Our own definition is `iptables()` (parenthesis, no space), so the space/tab
+                // after `iptables` distinguishes a real call from the function definition.
+                if (line.StartsWith("iptables ", StringComparison.Ordinal)
+                    || line.StartsWith("iptables\t", StringComparison.Ordinal))
+                    return false;
+            }
+            return false;                                            // shim never seen
         }
 
         private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)

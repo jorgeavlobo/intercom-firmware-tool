@@ -92,7 +92,7 @@ public class MqttFactoryFirewallShimTests
     {
         // The marker COMMENT alone must not count as hardened — only the operative function line does.
         // A script that kept the marker but lost the function (truncation / hand-edit) must be
-        // re-patched so the factory calls actually wait for the lock (Codex P2).
+        // re-patched so the factory calls actually wait for the lock.
         string tampered =
             "#!/bin/bash\n" +
             "# >>> IntercomFirmwareTool #145: make the factory firewall WAIT for the xtables lock >>>\n" +
@@ -102,6 +102,32 @@ public class MqttFactoryFirewallShimTests
         string patched = MqttInstaller.EnsureFactoryFirewallShim(tampered);
         Assert.NotSame(tampered, patched);                                    // it was re-patched
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched); // now really hardened
+    }
+
+    [Fact]
+    public void An_active_shim_before_the_calls_is_hardened_but_inert_text_is_not()
+    {
+        // The normal installer output — active function right after the shebang, before any call — is
+        // effectively hardened.
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(
+            MqttInstaller.EnsureFactoryFirewallShim(FactoryScript)));
+
+        // The function text present ONLY inside a comment is inert: it does not shadow anything, so the
+        // factory calls stay lock-less — NOT hardened, and re-patching makes it effective.
+        string commented =
+            "#!/bin/bash\n" +
+            "# iptables() { command iptables -w \"$@\"; }\n" +   // commented — inert
+            "iptables -F INPUT\n";
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(commented));
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(
+            MqttInstaller.EnsureFactoryFirewallShim(commented)));
+
+        // A definition placed AFTER the first factory call does not shadow that call ⇒ NOT hardened.
+        string late =
+            "#!/bin/bash\n" +
+            "iptables -F INPUT\n" +
+            "iptables() { command iptables -w \"$@\"; }\n";
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(late));
     }
 
     [Fact]
