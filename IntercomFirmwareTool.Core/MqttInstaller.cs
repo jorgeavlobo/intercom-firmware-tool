@@ -449,29 +449,35 @@ namespace IntercomFirmwareTool.Core
         // the on-device camera path (the only image that adds a second writer), idempotent (skips a
         // script already carrying the marker), preserving the script's mode/owner.
         private const string FactoryFirewallScriptPath = "/etc/network/if-pre-up.d/iptables";
-        // Stable idempotency + validation marker — the patch skips a script already carrying it and
-        // ValidateMqtt asserts its presence. Do not reword (it is matched literally).
+        // Human-readable marker used only to delimit the shim block in the script text (grep/read
+        // convenience). It is NOT what gates idempotency or validation — a marker comment could survive
+        // while the operative function line was truncated or hand-edited away, leaving the factory calls
+        // lock-less (Codex P2). Those checks key off FactoryFirewallShimFn (the actual function) instead.
         private const string FactoryFirewallShimMarker = "IntercomFirmwareTool #145";
-        // The shim, spliced in immediately after the shebang so the `iptables` function is defined
-        // before any factory `iptables` call runs. `command` reaches the real binary, bypassing the
+        // The OPERATIVE line of the shim: the exact `iptables` shell function that injects --wait. This —
+        // not the marker comment — is what "hardened" means, so both the idempotency skip and the
+        // ValidateMqtt check test for THIS literal. `command` reaches the real binary, bypassing the
         // function, so there is no recursion. Bare `--wait` (no timeout) WAITS for the lock rather than
         // failing, so a factory rule is never silently dropped under contention. In practice iptables
         // holds the xtables lock only briefly per operation — it is a flock released when the process
         // exits, so even a crashed holder frees it — so the wait is sub-second. A pathological iptables
         // process wedged WHILE holding the lock could in theory block the wait longer, but nothing on the
         // panel runs such a long-held iptables operation; the bounded alternative (`-w N`) is deliberately
-        // avoided because a timeout would re-introduce exactly the silent drop this shim removes. LF
-        // endings; the marker line carries FactoryFirewallShimMarker.
+        // avoided because a timeout would re-introduce exactly the silent drop this shim removes.
+        private const string FactoryFirewallShimFn = "iptables() { command iptables -w \"$@\"; }";
+        // The shim block, spliced in immediately after the shebang so the function is defined before any
+        // factory `iptables` call runs. Built from FactoryFirewallShimFn so the operative line has a
+        // single source of truth. LF endings; the >>> / <<< lines carry FactoryFirewallShimMarker.
         private const string FactoryFirewallShim =
-            "# >>> IntercomFirmwareTool #145: make the factory firewall WAIT for the xtables lock >>>\n" +
+            "# >>> " + FactoryFirewallShimMarker + ": make the factory firewall WAIT for the xtables lock >>>\n" +
             "# The factory rebuilds INPUT with lock-less `iptables -A` calls (no -w). With the on-device\n" +
             "# camera's go2rtc rule as a second iptables writer, a factory call that fires while we hold\n" +
             "# the xtables lock fails SILENTLY and a factory rule (SSH :22, the FTP-over-USB reflash :21,\n" +
             "# security DROPs) goes missing until the next clean rebuild — locking out SSH or the reflash.\n" +
             "# Shadowing `iptables` with a function that injects --wait makes every factory call BLOCK for\n" +
             "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
-            "iptables() { command iptables -w \"$@\"; }\n" +
-            "# <<< IntercomFirmwareTool #145 <<<\n";
+            FactoryFirewallShimFn + "\n" +
+            "# <<< " + FactoryFirewallShimMarker + " <<<\n";
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
@@ -1342,8 +1348,10 @@ namespace IntercomFirmwareTool.Core
                     if (fs.FileExists(FactoryFirewallScriptPath))
                     {
                         string factoryFw = ReadAllText(fs, FactoryFirewallScriptPath);
+                        // Assert the OPERATIVE function line is present (not merely the marker comment) —
+                        // that is what actually makes the factory calls wait for the lock (Codex P2).
                         checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
-                            factoryFw.Contains(FactoryFirewallShimMarker, StringComparison.Ordinal), ""));
+                            factoryFw.Contains(FactoryFirewallShimFn, StringComparison.Ordinal), ""));
                     }
                     else if (PathOccupied(fs, FactoryFirewallScriptPath))
                     {
@@ -2647,8 +2655,8 @@ namespace IntercomFirmwareTool.Core
         /// script's shebang that shadows <c>iptables</c> with a function injecting <c>--wait</c>, so every
         /// factory call BLOCKS for the lock instead of dropping a rule.
         ///
-        /// <para>Idempotent: a script already carrying <see cref="FactoryFirewallShimMarker"/> is left
-        /// untouched. Preserves the script's mode/owner (<see cref="RewritePreservingMeta"/>). Best-effort
+        /// <para>Idempotent: a script already carrying the operative <see cref="FactoryFirewallShimFn"/> is
+        /// left untouched. Preserves the script's mode/owner (<see cref="RewritePreservingMeta"/>). Best-effort
         /// on shape: if the factory script is ABSENT (a variant that ships none — then there is no factory
         /// firewall to clobber) we skip. Invoked ONLY on the on-device camera path, the sole image that
         /// adds a second iptables writer.</para>
@@ -2669,7 +2677,7 @@ namespace IntercomFirmwareTool.Core
             string script = ReadAllText(fs, FactoryFirewallScriptPath);
             string patched = EnsureFactoryFirewallShim(script);
             // Only rewrite when the splice actually changed the script — an already-hardened script
-            // (marker present) is returned by-reference unchanged, so this skips a redundant write.
+            // (shim function present) is returned by-reference unchanged, so this skips a redundant write.
             if (!ReferenceEquals(patched, script))
                 RewritePreservingMeta(fs, FactoryFirewallScriptPath, patched);
         }
@@ -2678,13 +2686,16 @@ namespace IntercomFirmwareTool.Core
         /// Pure splice (issue #145): returns <paramref name="script"/> with the <c>--wait</c> shim
         /// inserted immediately AFTER its shebang line — so the <c>iptables</c> function is defined
         /// before any factory <c>iptables</c> call runs — or the SAME string (by reference) unchanged if
-        /// it already carries <see cref="FactoryFirewallShimMarker"/> (idempotent). A degenerate script
+        /// it already carries the operative <see cref="FactoryFirewallShimFn"/> (idempotent). A degenerate script
         /// with no newline gets the shim appended after its content. Factored out with no I/O so the
         /// splice + idempotency are unit-tested directly. <c>internal</c> for the test project.
         /// </summary>
         internal static string EnsureFactoryFirewallShim(string script)
         {
-            if (script.Contains(FactoryFirewallShimMarker, StringComparison.Ordinal))
+            // Idempotency keys off the OPERATIVE function line, not the marker comment: a script whose
+            // marker survived but whose function was truncated/edited away is NOT hardened and must be
+            // re-patched, not skipped (Codex P2).
+            if (script.Contains(FactoryFirewallShimFn, StringComparison.Ordinal))
                 return script;                                       // already hardened — unchanged
             // The factory firewall is a shell script whose FIRST line is a `#!` shebang; the shim must
             // land right after it so the `iptables` function is defined before any factory call. REFUSE

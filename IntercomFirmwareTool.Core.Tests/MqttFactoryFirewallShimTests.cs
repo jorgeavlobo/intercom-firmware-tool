@@ -88,6 +88,23 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Fact]
+    public void A_marker_comment_without_the_function_line_is_re_patched_not_skipped()
+    {
+        // The marker COMMENT alone must not count as hardened — only the operative function line does.
+        // A script that kept the marker but lost the function (truncation / hand-edit) must be
+        // re-patched so the factory calls actually wait for the lock (Codex P2).
+        string tampered =
+            "#!/bin/bash\n" +
+            "# >>> IntercomFirmwareTool #145: make the factory firewall WAIT for the xtables lock >>>\n" +
+            "# (function line removed by tampering)\n" +
+            "# <<< IntercomFirmwareTool #145 <<<\n" +
+            "iptables -F INPUT\n";
+        string patched = MqttInstaller.EnsureFactoryFirewallShim(tampered);
+        Assert.NotSame(tampered, patched);                                    // it was re-patched
+        Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched); // now really hardened
+    }
+
+    [Fact]
     public void A_script_without_a_shebang_is_rejected()
     {
         // A firewall script whose first line is a real command (no #! shebang) must be REJECTED, not
