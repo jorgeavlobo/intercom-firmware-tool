@@ -259,6 +259,9 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/bin/bash -e\niptables -F INPUT\n")]                  // errexit in the SHEBANG flags
     [InlineData("#!/bin/bash -eu\niptables -F INPUT\n")]                 // errexit clustered in the shebang
     [InlineData("#!/usr/bin/env bash -e\niptables -F INPUT\n")]         // errexit in an env-form shebang
+    [InlineData("#!/bin/bash\nif true; then set -e; fi\niptables -F INPUT\n")]  // errexit after `then`
+    [InlineData("#!/bin/bash\ntrue && set -e\niptables -F INPUT\n")]           // errexit after `&&`
+    [InlineData("#!/bin/bash\nif false; then set -e; fi\niptables -F INPUT\n")] // inactive — conservatively rejected
     public void An_unpinnable_hook_non_bash_or_errexit_is_rejected(string script)
     {
         Assert.Throws<System.InvalidOperationException>(
@@ -277,6 +280,8 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/bin/bash\nset -o pipefail\niptables -F INPUT\n")]    // pipefail, not errexit
     [InlineData("#!/bin/bash\nset +e\niptables -F INPUT\n")]            // explicitly DISABLES errexit
     [InlineData("#!/bin/bash -x\niptables -F INPUT\n")]                 // xtrace SHEBANG flag, not errexit
+    [InlineData("#!/bin/bash\nif true; then set -x; fi\niptables -F INPUT\n")]  // set -x after `then`, not errexit
+    [InlineData("#!/bin/bash\ngrep -e foo /dev/null || true\niptables -F INPUT\n")] // `-e` is grep's, not `set`'s
     public void A_pinnable_bash_hook_without_errexit_is_hardened(string script)
     {
         string patched = MqttInstaller.EnsureFactoryFirewallShim(script);

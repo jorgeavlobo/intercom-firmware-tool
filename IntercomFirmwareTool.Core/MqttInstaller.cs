@@ -510,6 +510,10 @@ namespace IntercomFirmwareTool.Core
         // lines, so a legitimate here-document or conditional elsewhere is untouched.
         private const string FactoryFirewallBlockOpen = "# >>> " + FactoryFirewallShimMarker;
         private const string FactoryFirewallBlockClose = "# <<< " + FactoryFirewallShimMarker;
+        // Shell command separators and control keywords used by EnablesErrexit to find a `set` command that
+        // is not at line start (e.g. after `;`/`&&`/`then`). Conservative, not a full parser.
+        private static readonly char[] SegmentSeparators = { ';', '&', '|', '(', ')', '{', '}', '`' };
+        private static readonly string[] ControlKeywords = { "then", "do", "else", "elif", "!", "time" };
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
@@ -2880,23 +2884,30 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// True iff <paramref name="script"/> turns ON bash's <c>errexit</c>, from EITHER a <c>set</c> line
+        /// True iff <paramref name="script"/> turns ON bash's <c>errexit</c>, from a <c>set</c> command
         /// (<c>set -e</c>, a cluster containing <c>e</c> such as <c>set -euo pipefail</c>, or
         /// <c>set -o errexit</c>) OR the interpreter flags of the <c>#!</c> shebang (<c>#!/bin/bash -e</c>,
-        /// <c>#!/bin/bash -eu</c>). <c>set +e</c> (which DISABLES it) and unrelated options (<c>set -x</c>,
-        /// <c>set -o pipefail</c>) do not match. Under errexit the shim's <c>readonly -f</c> pin would turn a
-        /// later <c>iptables</c> redefinition into a fatal command, aborting the hook before the remaining
-        /// factory rules run, so such a hook is rejected as unhardenable. Pure — no I/O.
+        /// <c>#!/bin/bash -eu</c>). The <c>set</c> command is recognized not only at line start but after a
+        /// command separator or a control keyword too, so <c>if true; then set -e; fi</c> and
+        /// <c>x &amp;&amp; set -e</c> are caught. <c>set +e</c> (which DISABLES it) and unrelated options
+        /// (<c>set -x</c>, <c>set -o pipefail</c>) do not match. This is a CONSERVATIVE over-approximation —
+        /// it also flags an inactive <c>if false; then set -e; fi</c>, and cannot see errexit smuggled in via
+        /// <c>eval</c>, a sourced file, or <c>SHELLOPTS</c> — but over-rejecting is safe (an unexpected
+        /// errexit in the factory hook just fails the install loudly), and the real C100X hook has no
+        /// <c>set</c> at all. Under errexit the shim's <c>readonly -f</c> pin would turn a later
+        /// <c>iptables</c> redefinition into a fatal command, aborting the hook before the remaining factory
+        /// rules run, so such a hook is rejected as unhardenable. Pure — no I/O.
         /// </summary>
         private static bool EnablesErrexit(string script)
         {
             bool firstLine = true;
             foreach (string raw in script.Split('\n'))
             {
-                string t = raw.TrimStart().TrimEnd('\r');
+                string line = raw.TrimEnd('\r');
                 if (firstLine)
                 {
                     firstLine = false;
+                    string t = line.TrimStart();
                     // The shebang's own flags (everything after the interpreter word) run under errexit too.
                     if (t.StartsWith("#!", StringComparison.Ordinal))
                     {
@@ -2905,7 +2916,6 @@ namespace IntercomFirmwareTool.Core
                         int start = 1;
                         if (sh.Length > 0 && sh[0][(sh[0].LastIndexOf('/') + 1)..] == "env")
                         {
-                            start = 1;
                             while (start < sh.Length &&
                                    (sh[start].StartsWith("-", StringComparison.Ordinal) || sh[start].Contains('=')))
                                 start++;
@@ -2913,17 +2923,48 @@ namespace IntercomFirmwareTool.Core
                         }
                         if (ClusterEnablesErrexit(sh, start))
                             return true;
+                        continue;                                    // the shebang is never a `set` command
                     }
-                    continue;                                        // the shebang is never a `set` line
+                    // No shebang on the first line — fall through and scan it as commands like any other.
                 }
-                if (!(t.Equals("set", StringComparison.Ordinal)
-                      || t.StartsWith("set ", StringComparison.Ordinal)
-                      || t.StartsWith("set\t", StringComparison.Ordinal)))
-                    continue;
-                if (ClusterEnablesErrexit(t.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries), 1))
-                    return true;
+                // Split the line into command segments on shell separators, so a `set` after `;`, `&&`, `||`,
+                // `(`, `{`, or a control keyword is found — not only at line start.
+                foreach (string seg in line.Split(SegmentSeparators))
+                {
+                    string s = StripLeadingKeywords(seg.TrimStart());
+                    if (!(s.Equals("set", StringComparison.Ordinal)
+                          || s.StartsWith("set ", StringComparison.Ordinal)
+                          || s.StartsWith("set\t", StringComparison.Ordinal)))
+                        continue;
+                    if (ClusterEnablesErrexit(s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries), 1))
+                        return true;
+                }
             }
             return false;
+
+            // Strip leading shell control keywords (`then`/`do`/`else`/`elif`/`!`/`time`) so the command they
+            // introduce is examined — e.g. the `set -e` in `then set -e`.
+            static string StripLeadingKeywords(string s)
+            {
+                bool again = true;
+                while (again)
+                {
+                    again = false;
+                    foreach (string kw in ControlKeywords)
+                    {
+                        if (s.Equals(kw, StringComparison.Ordinal))
+                            return "";
+                        if ((s.StartsWith(kw, StringComparison.Ordinal))
+                            && s.Length > kw.Length && (s[kw.Length] == ' ' || s[kw.Length] == '\t'))
+                        {
+                            s = s[kw.Length..].TrimStart();
+                            again = true;
+                            break;
+                        }
+                    }
+                }
+                return s;
+            }
 
             // Scan option tokens from `start` for anything that turns errexit ON.
             static bool ClusterEnablesErrexit(string[] toks, int start)

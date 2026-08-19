@@ -180,10 +180,12 @@ security DROPs) is no longer dropped under lock contention. `go2rtcd`'s own muta
 calls use the **bounded** `-w 5` and its `firewall_open_confirmed` retries at most
 three times before deferring, so `go2rtcd`'s **own** `GO2RTC :8554` rule can still
 transiently miss under sustained contention — but it self-heals on the next
-`fw-reassert` (fired after every interface event), and it never blocks a factory
-rule. In short: the shim removes the silent loss of the **factory** rules that
-caused the SSH/reflash lockouts; the camera port has its own bounded, self-healing
-reconciler.
+`fw-reassert` (fired after every interface event). While `go2rtcd` holds the lock a
+factory call now **waits** (unbounded `-w`) rather than being dropped, so
+`go2rtcd` can never cause a factory rule to be **silently skipped** — the
+worst it can do is briefly delay one. In short: the shim removes the silent loss of
+the **factory** rules that caused the SSH/reflash lockouts; the camera port has its
+own bounded, self-healing reconciler.
 
 Everything else is generated or embedded elsewhere:
 
