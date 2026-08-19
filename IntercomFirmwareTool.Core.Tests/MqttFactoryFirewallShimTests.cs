@@ -11,8 +11,9 @@ namespace IntercomFirmwareTool.Core.Tests;
 /// DROPs) goes missing — observed on hardware as SSH / reflash lockouts. The installer inserts a plain
 /// shell shim after the script's shebang that shadows <c>iptables</c> with a function injecting
 /// <c>--wait</c>, so every subsequent factory call blocks for the lock instead of dropping a rule. It is a
-/// POSIX function shim (works under any <c>#!</c> interpreter) and is deliberately NOT tamper-proofed against
-/// a hand-edit that later redefines <c>iptables</c> — that is out of scope for a fixed, known factory hook.
+/// POSIX function shim (works under any POSIX shell — sh/dash/ash/bash — not shell-specific, which is why the
+/// installer accepts only a shell shebang) and is deliberately NOT tamper-proofed against a hand-edit that
+/// later redefines <c>iptables</c> — that is out of scope for a fixed, known factory hook.
 /// These tests pin the pure splice (<see cref="MqttInstaller.EnsureFactoryFirewallShim"/>): placement,
 /// content, idempotency, CRLF normalization, tolerance of later redefinitions, and rejection of a malformed
 /// (no-shebang or unterminated-block) script.
