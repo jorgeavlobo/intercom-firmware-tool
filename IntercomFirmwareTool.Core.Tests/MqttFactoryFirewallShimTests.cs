@@ -204,6 +204,38 @@ public class MqttFactoryFirewallShimTests
         Assert.Equal(2, count);
     }
 
+    [Fact]
+    public void Two_stacked_owned_blocks_at_the_anchor_are_both_stripped_not_layered()
+    {
+        // A tampered input could carry TWO back-to-back owned blocks right after the shebang, the second one
+        // altered to drop -w. Stripping only the first would leave the lock-less block below the fresh shim,
+        // where the shell's LAST iptables() definition wins — yet IsFactoryFirewallHardened, which only checks
+        // the block right after the shebang, would still read "hardened". Both anchor blocks must be peeled off
+        // so the re-patch lands on a clean anchor with exactly one, correct block.
+        string clean = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        int nl = clean.IndexOf('\n');
+        string shebang = clean[..(nl + 1)];
+        string body = clean[(nl + 1)..];
+        // Extract just the owned block (opener→closer inclusive) from the clean output.
+        const string blockEnd = "# <<< IntercomFirmwareTool #145 <<<\n";
+        int end = body.IndexOf(blockEnd, System.StringComparison.Ordinal) + blockEnd.Length;
+        string ownedBlock = body[..end];
+        string rest = body[end..];
+        string altered = ownedBlock.Replace("command iptables -w \"$@\"", "command iptables \"$@\"");
+        // shebang + [clean block] + [altered block] + factory rules — two owned blocks stacked at the anchor.
+        string stacked = shebang + ownedBlock + altered + rest;
+
+        string repatched = MqttInstaller.EnsureFactoryFirewallShim(stacked);
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(repatched));        // a clean anchor was restored
+        Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", repatched);
+        Assert.DoesNotContain("command iptables \"$@\"", repatched);            // altered block fully stripped
+        // Exactly one shim block survives: two marker lines (">>>" opener, "<<<" closer).
+        int count = 0, i = 0;
+        while ((i = repatched.IndexOf("IntercomFirmwareTool #145", i, System.StringComparison.Ordinal)) >= 0)
+        { count++; i += 1; }
+        Assert.Equal(2, count);
+    }
+
     [Theory]
     // A LATER `iptables` redefinition after our block — only possible via a hand-edit of the factory hook,
     // which is a fixed, known script that contains none — is OUT OF SCOPE. We install the FIRST definition

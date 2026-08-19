@@ -2753,11 +2753,13 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Remove the installer-owned shim block <b>only when it sits at the ANCHOR</b> — as the very first
+        /// Remove installer-owned shim blocks <b>only while they sit at the ANCHOR</b> — as the very first
         /// line after the shebang, which is the single place <see cref="EnsureFactoryFirewallShim"/> ever
-        /// writes it. If the first post-shebang line is a <see cref="FactoryFirewallBlockOpen"/> marker, the
-        /// contiguous run through its matching <see cref="FactoryFirewallBlockClose"/> is dropped; otherwise
-        /// the script is returned unchanged. Marker-looking lines ELSEWHERE (a quoted here-document, a
+        /// writes it. While the first post-shebang line is a <see cref="FactoryFirewallBlockOpen"/> marker, the
+        /// contiguous run through its matching <see cref="FactoryFirewallBlockClose"/> is dropped and the check
+        /// repeats, so EVERY block stacked at the anchor is peeled off (a tampered input could carry two, and a
+        /// surviving second block could redefine <c>iptables()</c> below the fresh shim); otherwise the script
+        /// is returned unchanged. Marker-looking lines ELSEWHERE (a quoted here-document, a
         /// conditional, the factory rules) are NEVER touched — deleting data between a marker pair that is not
         /// our block could strip real firewall rules.
         ///
@@ -2772,22 +2774,27 @@ namespace IntercomFirmwareTool.Core
         private static string StripOwnedBlockAtAnchor(string script)
         {
             var lines = new List<string>(script.Split('\n'));
-            if (lines.Count < 2)
-                return script;                                   // shebang only (or empty) — no block possible
-            if (!lines[1].TrimStart().StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal))
-                return script;                                   // no owned block at the anchor — leave as-is
-            // The anchor block runs from line 1 to its matching closer. A second opener before the closer
-            // means the anchor block is unterminated/corrupt.
-            int close = -1;
-            for (int i = 2; i < lines.Count; i++)
+            // Peel off EVERY owned block stacked at the anchor, not just the first. A tampered input could
+            // carry two back-to-back owned blocks; leaving the second in place would let it redefine
+            // iptables() (possibly WITHOUT -w) below the fresh shim, silently defeating the fix while
+            // IsFactoryFirewallHardened — which only inspects the block right after the shebang — still
+            // reads "hardened". Loop until line 1 is no longer an opener so the re-insert lands on a clean anchor.
+            while (lines.Count >= 2 &&
+                   lines[1].TrimStart().StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal))
             {
-                string t = lines[i].TrimStart();
-                if (t.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal)) { close = i; break; }
-                if (t.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal)) break;
+                // The anchor block runs from line 1 to its matching closer. A second opener before the closer
+                // means the anchor block is unterminated/corrupt.
+                int close = -1;
+                for (int i = 2; i < lines.Count; i++)
+                {
+                    string t = lines[i].TrimStart();
+                    if (t.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal)) { close = i; break; }
+                    if (t.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal)) break;
+                }
+                if (close < 0)
+                    throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
+                lines.RemoveRange(1, close);                     // drop lines[1..close] inclusive (opener→closer)
             }
-            if (close < 0)
-                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
-            lines.RemoveRange(1, close);                         // drop lines[1..close] inclusive (opener→closer)
             return string.Join('\n', lines);
         }
 
