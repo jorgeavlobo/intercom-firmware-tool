@@ -165,7 +165,7 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
     <value>/etc/rc5.d no existe en la imagen; no se puede activar el puente MQTT en el arranque.</value>
   </data>
   <data name="Mqtt_FactoryFirewallUnhardenable" xml:space="preserve">
-    <value>No se puede reforzar el script del cortafuegos de fábrica /etc/network/if-pre-up.d/iptables frente a la carrera del bloqueo de xtables (issue #145): no es un script de shell bien formado (falta el shebang #!, no es un archivo normal —p. ej. un symlink— o tiene un bloque de shim corrupto o sin terminar).</value>
+    <value>No se puede reforzar el script del cortafuegos de fábrica /etc/network/if-pre-up.d/iptables frente a la carrera del bloqueo de xtables (issue #145): no es un hook de bash que el shim pueda fijar de forma segura (falta el shebang #! o tiene un intérprete que no es bash, un hook que activa "set -e", no es un archivo normal —p. ej. un symlink— o tiene un bloque de shim corrupto o sin terminar).</value>
   </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>El host del broker MQTT no es una dirección IP ni un nombre de host válido.</value>

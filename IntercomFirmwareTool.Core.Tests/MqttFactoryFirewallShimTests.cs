@@ -12,8 +12,10 @@ namespace IntercomFirmwareTool.Core.Tests;
 /// shim after the script's shebang that shadows <c>iptables</c> with a function injecting <c>--wait</c>,
 /// so every factory call blocks for the lock instead of dropping a rule, and pins that function with
 /// <c>readonly -f</c> so a later redefinition anywhere below cannot silently drop back to a lock-less call.
-/// These tests pin the pure splice (<see cref="MqttInstaller.EnsureFactoryFirewallShim"/>): placement,
-/// content, the readonly guard, idempotency, and tolerance of later redefinitions.
+/// The pin only holds on a bash hook with no <c>set -e</c>, so a hook that is non-bash or enables errexit is
+/// REJECTED as unhardenable rather than shipped with a shim that only looks hardened. These tests pin the
+/// pure splice (<see cref="MqttInstaller.EnsureFactoryFirewallShim"/>): placement, content, the readonly
+/// pin, idempotency, tolerance of later redefinitions, and rejection of unpinnable hooks.
 /// </summary>
 public class MqttFactoryFirewallShimTests
 {
@@ -53,12 +55,10 @@ public class MqttFactoryFirewallShimTests
         // binary via `command` (no recursion).
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched);
         // …then PIN it with `readonly -f` so any later redefinition in the script (any spacing, nested
-        // after then/;/do) is rejected by bash at run time and this --wait version stays in force. The pin
-        // is GATED on $BASH_VERSION: `readonly` is a POSIX special built-in with no -f option, so an
-        // unguarded `readonly -f` would ABORT a non-bash hook (dash/ash) before `|| true`; under such a
-        // shell the line is skipped and the plain --wait shim still fixes the race.
-        Assert.Contains(
-            "if [ -n \"${BASH_VERSION:-}\" ]; then readonly -f iptables 2>/dev/null || true; fi\n", patched);
+        // after then/;/do) is rejected by bash at run time and this --wait version stays in force. The
+        // installer only patches a bash hook with no `set -e` (see the rejection tests), so this pin is
+        // always enforceable and its rejection of a later redefinition can never abort the hook.
+        Assert.Contains("readonly -f iptables 2>/dev/null || true\n", patched);
         // The guard MUST come after the function definition (you can only pin an already-defined function).
         int fnDef = patched.IndexOf("iptables() { command iptables -w", System.StringComparison.Ordinal);
         int guard = patched.IndexOf("readonly -f iptables", System.StringComparison.Ordinal);
@@ -235,42 +235,54 @@ public class MqttFactoryFirewallShimTests
         int at = clean.IndexOf(blockEnd, System.StringComparison.Ordinal) + blockEnd.Length;
         string extended = clean[..at] + foreign + clean[at..];
 
-        Assert.True(MqttInstaller.IsFactoryFirewallHardened(extended));       // block+guard still present
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(extended));       // block+pin still present
         string repatched = MqttInstaller.EnsureFactoryFirewallShim(extended); // must NOT throw
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", repatched);
-        Assert.Contains(
-            "if [ -n \"${BASH_VERSION:-}\" ]; then readonly -f iptables 2>/dev/null || true; fi\n", repatched);
+        Assert.Contains("readonly -f iptables 2>/dev/null || true\n", repatched);
         Assert.Contains(foreign, repatched);                                  // foreign text left in place, inert
     }
 
-    [Fact]
-    public void The_readonly_pin_is_bash_gated_so_it_can_never_abort_a_non_bash_hook()
+    [Theory]
+    // The shim's `readonly -f` pin only holds on a bash hook with no `set -e`. A hook we can't safely pin is
+    // REJECTED (unhardenable), never patched with a shim that only LOOKS hardened:
+    //   * a non-bash interpreter (POSIX sh / dash / BusyBox ash have no read-only-function mechanism, so the
+    //     pin can't be enforced — and an unguarded `readonly -f` there would even abort the hook);
+    //   * `set -e`, under which the pin's rejection of a later redefinition becomes a fatal command that
+    //     aborts the hook before the remaining factory rules run.
+    [InlineData("#!/bin/sh\niptables -F INPUT\n")]                       // POSIX sh — no readonly -f
+    [InlineData("#!/bin/dash\niptables -F INPUT\n")]                     // dash — no readonly -f
+    [InlineData("#!/bin/ash\niptables -F INPUT\n")]                      // BusyBox ash — no readonly -f
+    [InlineData("#!/usr/bin/env sh\niptables -F INPUT\n")]               // env sh — non-bash
+    [InlineData("#!/bin/bash\nset -e\niptables -F INPUT\n")]             // bash but errexit
+    [InlineData("#!/bin/bash\nset -euo pipefail\niptables -F INPUT\n")]  // errexit inside a cluster
+    [InlineData("#!/bin/bash\nset -o errexit\niptables -F INPUT\n")]     // errexit long form
+    [InlineData("#!/bin/bash -e\niptables -F INPUT\n")]                  // errexit in the SHEBANG flags
+    [InlineData("#!/bin/bash -eu\niptables -F INPUT\n")]                 // errexit clustered in the shebang
+    [InlineData("#!/usr/bin/env bash -e\niptables -F INPUT\n")]         // errexit in an env-form shebang
+    public void An_unpinnable_hook_non_bash_or_errexit_is_rejected(string script)
     {
-        // `readonly` is a POSIX special built-in with no `-f` option, so an UNGUARDED `readonly -f` line
-        // aborts a non-bash hook (dash/BusyBox ash) before `|| true` — which would kill the hook before the
-        // factory rules run. Verified out-of-band: in dash the unguarded line exits the shell (status 2),
-        // while the `$BASH_VERSION`-gated form is skipped (exit 0, the plain --wait shim still runs), and in
-        // bash the gated form still pins the function (a later redefinition fails with "readonly function").
-        // The C# test can't exec a shell, so it pins the PORTABILITY INVARIANT of the emitted text: every
-        // `readonly -f` is behind the bash gate on the same line, never on a bare line of its own.
-        foreach (string shebang in new[] { "#!/bin/sh", "#!/bin/bash", "#!/bin/ash" })
-        {
-            string patched = MqttInstaller.EnsureFactoryFirewallShim(
-                shebang + "\niptables -F INPUT\niptables -P INPUT DROP\n");
-            // The --wait shim (the actual fix) is always present …
-            Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched);
-            // … and the pin only ever appears gated on $BASH_VERSION, on one line.
-            Assert.Contains(
-                "if [ -n \"${BASH_VERSION:-}\" ]; then readonly -f iptables 2>/dev/null || true; fi\n", patched);
-            // No BARE, unguarded `readonly` line (which would abort a POSIX sh): every `readonly` occurrence
-            // is preceded on its line by the `if [ -n "${BASH_VERSION` gate.
-            foreach (string line in patched.Split('\n'))
-            {
-                string t = line.TrimStart();
-                if (t.StartsWith("readonly", System.StringComparison.Ordinal))
-                    Assert.Fail($"unguarded readonly line would abort a POSIX sh hook: {line}");
-            }
-        }
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(script));
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(script));
+    }
+
+    [Theory]
+    // A bash hook the pin CAN hold is accepted: a bash shebang (plain, absolute-variant, or the env form)
+    // with no errexit, or a `set` line that does not enable errexit. `set +e` DISABLES it; `set -x` /
+    // `set -o pipefail` are unrelated — none must trip the errexit guard.
+    [InlineData("#!/bin/bash\niptables -F INPUT\n")]
+    [InlineData("#!/usr/bin/bash\niptables -F INPUT\n")]
+    [InlineData("#!/usr/bin/env bash\niptables -F INPUT\n")]
+    [InlineData("#!/bin/bash\nset -x\niptables -F INPUT\n")]             // xtrace, not errexit
+    [InlineData("#!/bin/bash\nset -o pipefail\niptables -F INPUT\n")]    // pipefail, not errexit
+    [InlineData("#!/bin/bash\nset +e\niptables -F INPUT\n")]            // explicitly DISABLES errexit
+    [InlineData("#!/bin/bash -x\niptables -F INPUT\n")]                 // xtrace SHEBANG flag, not errexit
+    public void A_pinnable_bash_hook_without_errexit_is_hardened(string script)
+    {
+        string patched = MqttInstaller.EnsureFactoryFirewallShim(script);
+        Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched);
+        Assert.Contains("readonly -f iptables 2>/dev/null || true\n", patched);
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(patched));
     }
 
     [Fact]

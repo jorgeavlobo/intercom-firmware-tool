@@ -165,7 +165,7 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
     <value>/etc/rc5.d non esiste nell'immagine; impossibile attivare il bridge MQTT all'avvio.</value>
   </data>
   <data name="Mqtt_FactoryFirewallUnhardenable" xml:space="preserve">
-    <value>Impossibile rafforzare lo script del firewall di fabbrica /etc/network/if-pre-up.d/iptables contro la race del lock di xtables (issue #145): non è uno script shell ben formato (manca lo shebang #!, non è un file normale — ad es. un symlink — o ha un blocco di shim corrotto/non terminato).</value>
+    <value>Impossibile rafforzare lo script del firewall di fabbrica /etc/network/if-pre-up.d/iptables contro la race del lock di xtables (issue #145): non è un hook bash che lo shim possa fissare in sicurezza (manca lo shebang #! o ha un interprete non bash, un hook che abilita "set -e", non è un file normale — ad es. un symlink — o ha un blocco di shim corrotto/non terminato).</value>
   </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>L'host del broker MQTT non è un indirizzo IP né un nome host valido.</value>

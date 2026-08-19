@@ -140,33 +140,41 @@ shell shim right after the factory script's shebang:
 
 ```sh
 iptables() { command iptables -w "$@"; }
-if [ -n "${BASH_VERSION:-}" ]; then readonly -f iptables 2>/dev/null || true; fi
+readonly -f iptables 2>/dev/null || true
 ```
 
 Shadowing `iptables` with a function that injects `--wait` makes **every** factory
 call **block** for the xtables lock instead of dropping a rule (`command` reaches
-the real binary, so there is no recursion). On **bash**, `readonly -f` then
-**pins** that function: should the factory script — in some variant or after a
-hand-edit — redefine `iptables` further down (in any spacing, or nested after
-`then`/`;`/`do`), bash **rejects** the redefinition and keeps our `--wait` version,
-so correctness does not depend on statically proving no other definition exists
-anywhere in unparseable shell. The pin is **gated on `$BASH_VERSION`** on purpose:
-`readonly` is a POSIX *special built-in* with **no `-f` option**, so under a
-non-bash interpreter (dash, BusyBox `ash`) an unguarded `readonly -f` is a usage
-error that **aborts the whole hook** before `|| true` is reached (POSIX has no
-read-only-function mechanism at all). Gating it means a non-bash hook simply
-**skips** the line and runs the plain `--wait` shim — which still fixes the race,
-it just isn't pinned. The real C100X factory hook is `#!/bin/bash`, so on real
-hardware the pin is always in force. The insert is
-**idempotent** and preserves the script's mode/owner. "Already hardened" is judged
-by whether the **exact installer-owned shim block sits immediately after the
-shebang** — not by the marker comment (only a human-readable delimiter) and not by
-the function text appearing somewhere in the file: text inside a comment, an
+the real binary, so there is no recursion). `readonly -f` then **pins** that
+function: should the factory script — in some variant or after a hand-edit —
+redefine `iptables` further down (in any spacing, or nested after `then`/`;`/`do`),
+bash **rejects** the redefinition and keeps our `--wait` version, so correctness
+does not depend on statically proving no other definition exists anywhere in
+unparseable shell.
+
+The pin only holds on a **bash hook with no `set -e`**, so the installer **rejects**
+anything else as *unhardenable* rather than ship a shim that only looks hardened:
+
+- **non-bash interpreter** — `readonly -f` is a bashism; POSIX `sh`, dash, and
+  BusyBox `ash` have no read-only-function mechanism at all (and there `readonly` is
+  a *special built-in* whose `-f` usage error would even abort the hook), so the pin
+  could not be enforced and a later redefinition could drop back to a lock-less call;
+- **`set -e` enabled** — the pin makes a later `iptables` redefinition a *failing*
+  command, which under errexit would abort the hook before the remaining factory
+  rules run.
+
+The real C100X factory hook is `#!/bin/bash` with **no `set -e`**, so this rejects
+nothing that ships on the device. The insert is **idempotent** and preserves the
+script's mode/owner. "Already hardened" is judged by a bash shebang, the absence of
+`set -e`, and whether the **exact installer-owned shim block sits immediately after
+the shebang** — not by the marker comment (only a human-readable delimiter) and not
+by the function text appearing somewhere in the file: text inside a comment, an
 inactive `if false` branch, or a quoted here-document never places our whole block
-after the shebang, so such a script is re-patched. A file lacking a `#!` shebang is
-rejected outright, and a CRLF-lined script (unrunnable as a hook — Linux would try
-to exec the interpreter `/bin/bash\r`) is normalized to LF when patched.
-`ValidateMqtt` asserts the same. With the factory calls now **waiting** (unbounded
+after the shebang, so such a script is re-patched. A non-bash or `set -e` hook, a
+file lacking a `#!` shebang, and an unterminated shim block are all rejected
+outright, and a CRLF-lined script (unrunnable as a hook — Linux would try to exec
+the interpreter `/bin/bash\r`) is normalized to LF when patched. `ValidateMqtt`
+asserts the same. With the factory calls now **waiting** (unbounded
 `-w`) instead of failing, a **factory** rule (SSH `:22`, the FTP-reflash `:21`, the
 security DROPs) is no longer dropped under lock contention. `go2rtcd`'s own mutating
 calls use the **bounded** `-w 5` and its `firewall_open_confirmed` retries at most
