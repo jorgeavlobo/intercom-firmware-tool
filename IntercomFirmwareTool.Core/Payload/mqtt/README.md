@@ -147,10 +147,15 @@ subsequent factory call **block** for the xtables lock instead of dropping a rul
 (`command` reaches the real binary, so there is no recursion). This is the standard,
 surgical way to inject a default flag into a *known* script's calls: define the
 wrapper once at the top; every bare `iptables` call below picks it up. Because the
-shim is a POSIX function, **any supported POSIX shell** interpreter (bash, dash,
-BusyBox `ash`, `ksh`, `zsh`, …) runs it correctly. A hook whose shebang names a
-**non-shell** interpreter (e.g. `#!/usr/bin/python`) is **rejected** — a shell shim
-must never be spliced into a non-shell script.
+shim is a POSIX function, any hook with a **direct shell-path shebang** (bash, sh,
+dash, BusyBox `ash`, `ksh`, `zsh`, …) runs it correctly. Two shebang shapes are
+**rejected** so a shell shim is never spliced into something that can't run it: a
+**non-shell** interpreter (e.g. `#!/usr/bin/python`), and the
+`#!/usr/bin/env <shell>` indirection — ifupdown `if-pre-up.d` hooks use a direct
+interpreter path (the real C100X hook is `#!/bin/bash`), and Linux passes the whole
+post-`env` text as a *single* argument, so multi-token `env` forms aren't even
+runnable; rather than reproduce that kernel corner, we don't recognize the `env`
+form at all.
 
 The shim is deliberately **not** tamper-proofed against a hand-edit that later
 *redefines* `iptables` lower in the hook — that is out of scope. The factory hook is

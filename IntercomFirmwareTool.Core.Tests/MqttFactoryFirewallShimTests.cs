@@ -226,18 +226,15 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Theory]
-    // The `iptables() { command iptables -w …; }` shim is POSIX, so ANY known-shell interpreter is hardened —
-    // bash, sh, dash, BusyBox ash, ksh, zsh, the env form — and a `set -e` hook is fine too (there is no
-    // readonly pin whose failure mode errexit could trigger).
+    // The `iptables() { command iptables -w …; }` shim is POSIX, so any DIRECT shell-path shebang is hardened
+    // — bash, sh, dash, BusyBox ash, ksh, zsh, with or without interpreter args — and a `set -e` hook is fine
+    // too (there is no readonly pin whose failure mode errexit could trigger).
     [InlineData("#!/bin/bash\niptables -F INPUT\n")]
     [InlineData("#!/bin/sh\niptables -F INPUT\n")]
     [InlineData("#!/bin/dash\niptables -F INPUT\n")]
     [InlineData("#!/bin/ash\niptables -F INPUT\n")]
     [InlineData("#!/bin/ksh\niptables -F INPUT\n")]
     [InlineData("#!/usr/bin/zsh\niptables -F INPUT\n")]
-    [InlineData("#!/usr/bin/env bash\niptables -F INPUT\n")]
-    [InlineData("#!/usr/bin/env sh\niptables -F INPUT\n")]
-    [InlineData("#!/usr/bin/env -S -u BASH_ENV bash\niptables -F INPUT\n")] // env -u consumes BASH_ENV, not bash
     [InlineData("#!/bin/bash\nset -e\niptables -F INPUT\n")]             // errexit is now harmless (no pin)
     [InlineData("#!/bin/bash -e\niptables -F INPUT\n")]                  // errexit in the shebang — also fine
     public void Any_shell_shebang_is_hardened(string script)
@@ -249,15 +246,23 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Theory]
-    // A NON-shell interpreter cannot run the shell function shim (or the factory's own shell commands), so a
-    // hook with such a shebang is REJECTED — a shell shim must never be spliced into a non-shell script.
+    // Rejected as unhardenable — a shell shim must never be spliced in:
+    //   * a NON-shell interpreter (python/perl/openrc) cannot run the shim or the factory's shell commands;
+    //   * the `#!/usr/bin/env <shell>` indirection is not recognized — ifupdown hooks use a direct
+    //     interpreter path, and Linux passes the whole post-`env` text as ONE argument, so multi-token forms
+    //     (`env bash -e`, `env -i bash`, `env FOO=bar bash`) are not even runnable without `-S`. Rather than
+    //     reproduce env's kernel shebang semantics, we reject every env form.
     [InlineData("#!/usr/bin/python\niptables -F INPUT\n")]
     [InlineData("#!/usr/bin/python3\nprint('x')\n")]
     [InlineData("#!/usr/bin/perl\nsystem('iptables -F');\n")]
-    [InlineData("#!/usr/bin/env python3\nprint('x')\n")]
-    [InlineData("#!/usr/bin/env -u bash python\nprint('x')\n")]          // `-u bash` unsets var; python runs
     [InlineData("#!/sbin/openrc-run\n")]                                 // not a shell
-    public void A_non_shell_shebang_is_rejected(string script)
+    [InlineData("#!/usr/bin/env bash\niptables -F INPUT\n")]             // env form — not recognized
+    [InlineData("#!/usr/bin/env sh\niptables -F INPUT\n")]
+    [InlineData("#!/usr/bin/env bash -e\niptables -F INPUT\n")]          // not runnable (one kernel arg)
+    [InlineData("#!/usr/bin/env -i bash\niptables -F INPUT\n")]          // not runnable
+    [InlineData("#!/usr/bin/env FOO=bar bash\niptables -F INPUT\n")]     // not runnable
+    [InlineData("#!/usr/bin/env python3\nprint('x')\n")]
+    public void An_unsupported_shebang_is_rejected(string script)
     {
         Assert.Throws<System.InvalidOperationException>(
             () => MqttInstaller.EnsureFactoryFirewallShim(script));

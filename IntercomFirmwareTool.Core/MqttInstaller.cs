@@ -2820,10 +2820,16 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// True iff the FIRST line is a <c>#!</c> shebang whose interpreter basename is a known shell (see
-        /// <see cref="KnownShells"/>) — directly (<c>#!/bin/bash</c>, <c>#!/bin/sh</c>) or via the
-        /// <c>#!/usr/bin/env [opts|VAR=val …] &lt;shell&gt;</c> form. A non-shell interpreter (e.g.
-        /// <c>#!/usr/bin/python</c>) returns false, so a shell shim is never spliced into a non-shell hook.
-        /// Pure — no I/O. LF or CRLF input tolerated (the first line's trailing <c>\r</c> is trimmed).
+        /// <see cref="KnownShells"/>) — a DIRECT interpreter path such as <c>#!/bin/bash</c>, <c>#!/bin/sh</c>,
+        /// or <c>#!/usr/bin/dash</c> (any following tokens are the interpreter's own args, e.g.
+        /// <c>#!/bin/bash -x</c>). A non-shell interpreter (<c>#!/usr/bin/python</c>) returns false, so a
+        /// shell shim is never spliced into a non-shell hook. The <c>#!/usr/bin/env &lt;shell&gt;</c>
+        /// indirection is intentionally NOT recognized: ifupdown <c>if-pre-up.d</c> hooks use a direct
+        /// interpreter path (the real C100X hook is <c>#!/bin/bash</c>), and <c>env</c>'s kernel
+        /// single-argument shebang semantics (only a bare <c>env &lt;word&gt;</c>, or <c>env -S …</c>, is even
+        /// runnable) are error-prone to reproduce — so an <c>env</c>-form hook is rejected as unhardenable
+        /// rather than mis-parsed. Pure — no I/O. LF or CRLF input tolerated (the first line's trailing
+        /// <c>\r</c> is trimmed).
         /// </summary>
         private static bool HasShellShebang(string script)
         {
@@ -2834,31 +2840,8 @@ namespace IntercomFirmwareTool.Core
             string[] toks = first[2..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
             if (toks.Length == 0)
                 return false;
-            static string Base(string p) => p[(p.LastIndexOf('/') + 1)..];
-            string interp = Base(toks[0]);
-            if (interp == "env")
-            {
-                // `#!/usr/bin/env [opts|VAR=val …] <shell>` — the interpreter is the first bare word after
-                // env, but env's OPERAND-consuming options must skip their operand too, or we would mistake
-                // it for the interpreter: `-u NAME`/`--unset NAME` and `-C DIR`/`--chdir DIR` each eat the
-                // NEXT token. (`-S`/`--split-string` just enables word-splitting; `--unset=NAME` /
-                // `--chdir=DIR` carry the operand inline and are handled by the `=`/`-` skip below.)
-                interp = "";
-                for (int i = 1; i < toks.Length; i++)
-                {
-                    string t = toks[i];
-                    if (t is "-u" or "--unset" or "-C" or "--chdir")
-                    {
-                        i++;                                         // also skip this option's operand token
-                        continue;
-                    }
-                    if (t.StartsWith("-", StringComparison.Ordinal) || t.Contains('='))
-                        continue;                                    // a no-operand flag (-S, -i, …) or VAR=val
-                    interp = Base(t);                                // first bare word = the interpreter
-                    break;
-                }
-            }
-            return Array.IndexOf(KnownShells, interp) >= 0;
+            string interp = toks[0];                                 // the direct interpreter path
+            return Array.IndexOf(KnownShells, interp[(interp.LastIndexOf('/') + 1)..]) >= 0;
         }
 
         private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)
