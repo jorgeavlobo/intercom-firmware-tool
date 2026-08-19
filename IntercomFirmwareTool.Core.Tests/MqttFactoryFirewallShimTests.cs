@@ -10,8 +10,10 @@ namespace IntercomFirmwareTool.Core.Tests;
 /// hold fails silently and a factory rule (SSH <c>:22</c>, the FTP-over-USB reflash <c>:21</c>, security
 /// DROPs) goes missing — observed on hardware as SSH / reflash lockouts. The installer inserts a shell
 /// shim after the script's shebang that shadows <c>iptables</c> with a function injecting <c>--wait</c>,
-/// so every factory call blocks for the lock instead of dropping a rule. These tests pin the pure splice
-/// (<see cref="MqttInstaller.EnsureFactoryFirewallShim"/>): placement, content, and idempotency.
+/// so every factory call blocks for the lock instead of dropping a rule, and pins that function with
+/// <c>readonly -f</c> so a later redefinition anywhere below cannot silently drop back to a lock-less call.
+/// These tests pin the pure splice (<see cref="MqttInstaller.EnsureFactoryFirewallShim"/>): placement,
+/// content, the readonly guard, idempotency, and tolerance of later redefinitions.
 /// </summary>
 public class MqttFactoryFirewallShimTests
 {
@@ -44,12 +46,20 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Fact]
-    public void Shim_defines_a_waiting_iptables_function()
+    public void Shim_defines_a_waiting_iptables_function_and_pins_it_readonly()
     {
         string patched = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
         // The whole point: shadow `iptables` with a function that injects --wait and reaches the real
         // binary via `command` (no recursion).
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched);
+        // …then PIN it with `readonly -f` so any later redefinition in the script (any spacing, nested
+        // after then/;/do) is rejected by bash at run time and this --wait version stays in force. The
+        // `2>/dev/null || true` keeps a busybox /bin/sh (whose `readonly` lacks -f) running the plain shim.
+        // The guard MUST come after the function definition (you can only pin an already-defined function).
+        Assert.Contains("readonly -f iptables 2>/dev/null || true\n", patched);
+        int fnDef = patched.IndexOf("iptables() { command iptables -w", System.StringComparison.Ordinal);
+        int guard = patched.IndexOf("readonly -f iptables", System.StringComparison.Ordinal);
+        Assert.True(fnDef >= 0 && guard > fnDef, "the readonly guard must follow the function definition");
     }
 
     [Fact]
@@ -198,75 +208,35 @@ public class MqttFactoryFirewallShimTests
         Assert.Equal(2, count);
     }
 
-    [Fact]
-    public void A_foreign_iptables_redefinition_after_the_block_is_rejected()
-    {
-        // Our EXACT block sits right after the shebang, but an UNMARKED `iptables()` redefinition (no -w)
-        // appears before the first factory call. In bash the LATER definition wins, so the factory calls
-        // would run lock-less. This must NOT read as hardened, and re-patching must FAIL — we won't try to
-        // parse/relocate arbitrary foreign shell, so we reject rather than report a false success.
-        string clean = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
-        const string blockEnd = "# <<< IntercomFirmwareTool #145 <<<\n";
-        int at = clean.IndexOf(blockEnd, System.StringComparison.Ordinal) + blockEnd.Length;
-        string tampered = clean[..at] + "iptables() { command iptables \"$@\"; }\n" + clean[at..];
-
-        Assert.False(MqttInstaller.IsFactoryFirewallHardened(tampered));
-        Assert.Throws<System.InvalidOperationException>(
-            () => MqttInstaller.EnsureFactoryFirewallShim(tampered));
-    }
-
     [Theory]
-    // Bash treats ANY run of blanks/tabs as a token separator, so every one of these is a REAL
-    // `iptables` function definition that would shadow our shim and run the factory calls lock-less.
-    // The detector must catch each variant, not just the single-space / no-space forms.
-    [InlineData("iptables ()  { command iptables \"$@\"; }\n")]        // one space before ()
-    [InlineData("iptables  () { command iptables \"$@\"; }\n")]        // two spaces before ()
-    [InlineData("iptables\t() { command iptables \"$@\"; }\n")]        // a tab before ()
-    [InlineData("iptables (  ) { command iptables \"$@\"; }\n")]       // blanks INSIDE the ()
-    [InlineData("function iptables { command iptables \"$@\"; }\n")]   // `function` keyword, one space
-    [InlineData("function  iptables { command iptables \"$@\"; }\n")]  // `function`, two spaces
-    [InlineData("function\tiptables { command iptables \"$@\"; }\n")]  // `function`, a tab
-    [InlineData("function iptables() { command iptables \"$@\"; }\n")] // `function` + explicit ()
-    [InlineData("\tiptables() { command iptables \"$@\"; }\n")]        // indented (leading tab)
-    public void A_foreign_iptables_redefinition_in_any_shell_whitespace_form_is_rejected(string foreign)
+    // A LATER `iptables` redefinition after our block — a firmware variant or hand-edited hook — is
+    // NEUTRALIZED at run time by the block's `readonly -f iptables` guard: bash rejects the redefinition
+    // (verified: `readonly -f` makes every one of these forms fail with "readonly function", and without
+    // `set -e` the factory hook keeps running our --wait definition). So the installer must NOT try to
+    // statically detect or reject these — that arms race is unwinnable (an `iptables()` after `if true;
+    // then` is live, one after `if false; then` or inside a quoted here-doc is inert, and the two are
+    // indistinguishable without executing the shell). The script stays HARDENED and re-patching SUCCEEDS.
+    // These variants span every spacing/keyword/nesting form the redefinition could take.
+    [InlineData("iptables() { command iptables \"$@\"; }\n")]              // plain, no -w
+    [InlineData("iptables  () { command iptables \"$@\"; }\n")]            // two spaces before ()
+    [InlineData("iptables\t() { command iptables \"$@\"; }\n")]            // a tab before ()
+    [InlineData("function\tiptables { command iptables \"$@\"; }\n")]     // `function` keyword + tab
+    [InlineData("if true; then iptables() { command iptables \"$@\"; }; fi\n")] // nested after `then`
+    public void A_later_iptables_redefinition_is_neutralized_by_readonly_not_rejected(string foreign)
     {
-        // Our EXACT block sits right after the shebang; the foreign redefinition (no -w) is spliced in
-        // just after it, before the first factory call. Whatever the spacing, bash's LATER definition
-        // wins ⇒ the factory calls would run lock-less. Must NOT read as hardened, and re-patching must
-        // FAIL rather than silently layer a fresh block over a definition we can't safely relocate.
+        // Our EXACT block (function + `readonly -f` guard) sits right after the shebang; the foreign
+        // redefinition is spliced in just after it. Because the guard pins the function at run time, the
+        // script is still effectively hardened and re-patching is a clean no-op splice — no throw.
         string clean = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
         const string blockEnd = "# <<< IntercomFirmwareTool #145 <<<\n";
         int at = clean.IndexOf(blockEnd, System.StringComparison.Ordinal) + blockEnd.Length;
-        string tampered = clean[..at] + foreign + clean[at..];
+        string extended = clean[..at] + foreign + clean[at..];
 
-        Assert.False(MqttInstaller.IsFactoryFirewallHardened(tampered));
-        Assert.Throws<System.InvalidOperationException>(
-            () => MqttInstaller.EnsureFactoryFirewallShim(tampered));
-    }
-
-    [Theory]
-    // A near-miss that only SHARES the `iptables` prefix (a longer name) or the `function` prefix is a
-    // DIFFERENT command, not a redefinition of `iptables` — it must NOT trip the detector, or a legit
-    // factory script would be wrongly rejected.
-    [InlineData("iptables_helper() { :; }\n")]      // longer name — not `iptables`
-    [InlineData("iptablesx() { :; }\n")]            // no separator, longer name
-    [InlineData("functional() { :; }\n")]           // `function`-prefixed word, not the keyword
-    [InlineData("functioniptables() { :; }\n")]     // no separator after `function`
-    public void A_similarly_named_function_after_the_block_is_not_mistaken_for_a_redefinition(string benign)
-    {
-        // The benign definition is spliced after our block; because it does not redefine `iptables`, the
-        // script stays hardened and a re-patch succeeds (no false rejection).
-        string clean = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
-        const string blockEnd = "# <<< IntercomFirmwareTool #145 <<<\n";
-        int at = clean.IndexOf(blockEnd, System.StringComparison.Ordinal) + blockEnd.Length;
-        string extended = clean[..at] + benign + clean[at..];
-
-        Assert.True(MqttInstaller.IsFactoryFirewallHardened(extended));
-        // Re-patching an already-hardened script with a benign extra function is a no-op splice: it must
-        // not throw. (It may re-emit the block, but it must succeed.)
-        string repatched = MqttInstaller.EnsureFactoryFirewallShim(extended);
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(extended));       // block+guard still present
+        string repatched = MqttInstaller.EnsureFactoryFirewallShim(extended); // must NOT throw
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", repatched);
-        Assert.Contains(benign, repatched);
+        Assert.Contains("readonly -f iptables 2>/dev/null || true\n", repatched);
+        Assert.Contains(foreign, repatched);                                  // foreign text left in place, inert
     }
 
     [Fact]

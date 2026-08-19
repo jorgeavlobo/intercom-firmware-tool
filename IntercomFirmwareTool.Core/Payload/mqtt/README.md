@@ -135,26 +135,35 @@ overlaps our lock hold could go missing, taking a factory rule with it — obser
 on real hardware as an **SSH `:22` lockout** after a flash and an **FTP-over-USB
 reflash `:21` lockout**.
 
-On the on-device camera path only, `MqttInstaller` therefore inserts a one-line
+On the on-device camera path only, `MqttInstaller` therefore inserts a two-line
 shell shim right after the factory script's shebang:
 
 ```sh
 iptables() { command iptables -w "$@"; }
+readonly -f iptables 2>/dev/null || true
 ```
 
 Shadowing `iptables` with a function that injects `--wait` makes **every** factory
 call **block** for the xtables lock instead of dropping a rule (`command` reaches
-the real binary, so there is no recursion). The insert is **idempotent** and
-preserves the script's mode/owner. "Already hardened" is judged by whether the
-**exact installer-owned shim block sits immediately after the shebang** — not by
-the marker comment (only a human-readable delimiter) and not by the function text
-appearing somewhere in the file: text inside a comment, an inactive `if false`
-branch, or a quoted here-document never defines the function at run time, so such
-a script is re-patched. A file lacking a `#!` shebang is rejected outright, and a
-CRLF-lined script (unrunnable as a hook — Linux would try to exec the interpreter
-`/bin/bash\r`) is normalized to LF when patched. `ValidateMqtt` asserts the same.
-`go2rtcd`'s own mutating calls already use `-w 5`, so with the factory now waiting
-too, **all** writers serialize on the lock and no rule is ever lost.
+the real binary, so there is no recursion). `readonly -f` then **pins** that
+function: should the factory script — in some variant or after a hand-edit —
+redefine `iptables` further down (in any spacing, or nested after `then`/`;`/`do`),
+bash **rejects** the redefinition and keeps our `--wait` version, so correctness no
+longer depends on statically proving no other definition exists anywhere in
+unparseable shell. The factory hook has no `set -e`, so a rejected redefinition is
+a harmless stderr line, not an abort; `2>/dev/null || true` keeps a busybox
+`/bin/sh` (whose `readonly` lacks `-f`) running the plain shim. The insert is
+**idempotent** and preserves the script's mode/owner. "Already hardened" is judged
+by whether the **exact installer-owned shim block sits immediately after the
+shebang** — not by the marker comment (only a human-readable delimiter) and not by
+the function text appearing somewhere in the file: text inside a comment, an
+inactive `if false` branch, or a quoted here-document never places our whole block
+after the shebang, so such a script is re-patched. A file lacking a `#!` shebang is
+rejected outright, and a CRLF-lined script (unrunnable as a hook — Linux would try
+to exec the interpreter `/bin/bash\r`) is normalized to LF when patched.
+`ValidateMqtt` asserts the same. `go2rtcd`'s own mutating calls already use `-w 5`,
+so with the factory now waiting too, **all** writers serialize on the lock and no
+rule is ever lost.
 
 Everything else is generated or embedded elsewhere:
 

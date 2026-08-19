@@ -452,8 +452,7 @@ namespace IntercomFirmwareTool.Core
         private const string FactoryFirewallScriptPath = "/etc/network/if-pre-up.d/iptables";
         // Human-readable marker used only to delimit the shim block in the script text (grep/read
         // convenience). It is NOT what gates idempotency or validation — the marker comment could survive
-        // while the block was truncated or hand-edited, and the function text can appear inertly (in a
-        // comment, an `if false` branch, or a quoted here-doc). Those checks require the EXACT shim block
+        // while the block was truncated or hand-edited. Those checks require the EXACT shim block
         // immediately after the shebang (IsFactoryFirewallHardened) instead.
         private const string FactoryFirewallShimMarker = "IntercomFirmwareTool #145";
         // The OPERATIVE line of the shim: the exact `iptables` shell function that injects --wait. The
@@ -467,8 +466,17 @@ namespace IntercomFirmwareTool.Core
         // panel runs such a long-held iptables operation; the bounded alternative (`-w N`) is deliberately
         // avoided because a timeout would re-introduce exactly the silent drop this shim removes.
         private const string FactoryFirewallShimFn = "iptables() { command iptables -w \"$@\"; }";
+        // The RUNTIME guard, emitted right after the function. `readonly -f` pins the `iptables` function so
+        // that ANY later redefinition in the script — whatever its spacing (`iptables  ()`, a tab before
+        // `()`), and wherever it sits (nested after `then`/`;`/`do`, in a sourced fragment) — FAILS at run
+        // time and leaves this --wait version in force, instead of silently dropping back to a lock-less
+        // call. This makes the shim self-defending, so correctness no longer hinges on statically proving
+        // "no other iptables definition exists" in unparseable shell. The factory hook has no `set -e`, so a
+        // rejected redefinition is a harmless stderr line, not an abort. `2>/dev/null || true` keeps shells
+        // whose `readonly` lacks `-f` (e.g. a busybox `/bin/sh`) working with the plain function shim.
+        private const string FactoryFirewallShimGuard = "readonly -f iptables 2>/dev/null || true";
         // The shim block, spliced in immediately after the shebang so the function is defined before any
-        // factory `iptables` call runs. Built from FactoryFirewallShimFn so the operative line has a
+        // factory `iptables` call runs. Built from FactoryFirewallShimFn/Guard so the operative lines have a
         // single source of truth. LF endings; the >>> / <<< lines carry FactoryFirewallShimMarker.
         private const string FactoryFirewallShim =
             "# >>> " + FactoryFirewallShimMarker + ": make the factory firewall WAIT for the xtables lock >>>\n" +
@@ -478,7 +486,11 @@ namespace IntercomFirmwareTool.Core
             "# security DROPs) goes missing until the next clean rebuild — locking out SSH or the reflash.\n" +
             "# Shadowing `iptables` with a function that injects --wait makes every factory call BLOCK for\n" +
             "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
+            "# `readonly -f` then pins the function so a later redefinition (any spacing, nested after\n" +
+            "# then/;/do) cannot silently drop back to a lock-less call; `|| true` keeps a busybox /bin/sh\n" +
+            "# whose `readonly` lacks -f working with the plain shim.\n" +
             FactoryFirewallShimFn + "\n" +
+            FactoryFirewallShimGuard + "\n" +
             "# <<< " + FactoryFirewallShimMarker + " <<<\n";
         // The opener/closer marker-line prefixes of an installed shim block. Used to STRIP any prior
         // owned block(s) before re-inserting a fresh one, so a stale or hand-altered copy — e.g. one whose
@@ -2725,67 +2737,19 @@ namespace IntercomFirmwareTool.Core
             // Because a clean, already-hardened script strips to exactly the same text and then gets the same
             // block re-inserted, the result is byte-identical to the input, so this is idempotent by value
             // (the caller writes only when the result differs).
+            // Any FOREIGN `iptables()` redefinition still left after this (a variant/hand-edited hook) — in
+            // whatever spacing, and wherever it sits (nested after `then`/`;`/`do`, sourced in) — is
+            // neutralized at RUN TIME by the block's `readonly -f iptables` guard: bash rejects the later
+            // definition and keeps our --wait one. So we deliberately DON'T try to statically detect or
+            // reject such shell here (that can't be done reliably — an `iptables()` inside a quoted
+            // here-doc or a dead `if false` branch is inert, one after `if true; then` is live, and the two
+            // are indistinguishable without executing the script). We simply own the FIRST definition and
+            // pin it.
             string stripped = RemoveOwnedFactoryFirewallBlocks(lf);
-            // After removing our OWNED block(s), any remaining `iptables()` function definition is FOREIGN
-            // — a later (unmarked) redefinition would be the shell's last definition and win, so a wrapper
-            // that omits `-w` would leave the factory calls lock-less even with our block in place. A
-            // pristine factory script (or one we previously owned, now stripped) has NONE. A variant or
-            // tampered script that does is an unexpected shape we cannot safely own, so FAIL loudly rather
-            // than report success — we deliberately don't try to parse/relocate arbitrary shell.
-            if (HasIptablesFunctionDef(stripped))
-                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             int firstNl = stripped.IndexOf('\n');
             return firstNl >= 0
                 ? stripped[..(firstNl + 1)] + FactoryFirewallShim + stripped[(firstNl + 1)..]
                 : stripped + "\n" + FactoryFirewallShim;
-        }
-
-        /// <summary>
-        /// True iff <paramref name="region"/> contains a line that DEFINES a shell function named
-        /// <c>iptables</c>, in EITHER Bash form, allowing arbitrary whitespace between the tokens the shell
-        /// accepts:
-        /// <list type="bullet">
-        /// <item><c>iptables</c> [ws] <c>(</c> …  — i.e. <c>iptables()</c>, <c>iptables ()</c>, <c>iptables\t()</c>;</item>
-        /// <item><c>function</c> [ws] <c>iptables</c> (word boundary) — i.e. <c>function iptables …</c>, <c>function  iptables { … }</c>.</item>
-        /// </list>
-        /// A factory-rule CALL (<c>iptables -F …</c>) is NOT a definition and never matches — the first
-        /// non-blank char after the name is <c>-</c>, not <c>(</c> — and a different function whose name
-        /// merely STARTS with <c>iptables</c> (e.g. <c>iptables_wrapper()</c>) doesn't match either. Used to
-        /// reject a foreign redefinition that would override our <c>-w</c> wrapper: anything it flags is
-        /// failed loudly, never silently "fixed". Pure — no I/O.
-        /// </summary>
-        private static bool HasIptablesFunctionDef(string region)
-        {
-            foreach (string raw in region.Split('\n'))
-            {
-                string t = raw.TrimStart();
-                // Form 1: `iptables` <ws?> `(` — the name must be EXACTLY "iptables" (the next char is
-                // whitespace or `(`), then optional blanks, then an opening paren.
-                if (t.StartsWith("iptables", StringComparison.Ordinal))
-                {
-                    int i = "iptables".Length;
-                    if (i >= t.Length || t[i] == ' ' || t[i] == '\t' || t[i] == '(')
-                    {
-                        while (i < t.Length && (t[i] == ' ' || t[i] == '\t')) i++;
-                        if (i < t.Length && t[i] == '(')
-                            return true;
-                    }
-                }
-                // Form 2: `function` <ws> `iptables` <word boundary>.
-                if (t.StartsWith("function", StringComparison.Ordinal))
-                {
-                    int i = "function".Length;
-                    int wsStart = i;
-                    while (i < t.Length && (t[i] == ' ' || t[i] == '\t')) i++;
-                    if (i > wsStart && t.AsSpan(i).StartsWith("iptables".AsSpan()))
-                    {
-                        int j = i + "iptables".Length;
-                        if (j >= t.Length || !(char.IsLetterOrDigit(t[j]) || t[j] == '_'))
-                            return true;
-                    }
-                }
-            }
-            return false;
         }
 
         /// <summary>
@@ -2838,10 +2802,11 @@ namespace IntercomFirmwareTool.Core
         /// <c>if false; then … fi</c> branch, or inside a quoted here-document (none of which place our
         /// whole block right after the shebang, so none would actually define the function at run time).
         /// The block is defined with LF, so a CRLF script — which is unrunnable as a hook (see
-        /// <see cref="EnsureFactoryFirewallShim"/>) — correctly reads as NOT hardened. Requires a
-        /// <c>#!</c> shebang first line, AND that NOTHING after our block redefines <c>iptables()</c> — a
-        /// later definition wins in the shell and would override our <c>-w</c> wrapper. Used by both the
-        /// idempotency skip and the <c>ValidateMqtt</c> check.
+        /// <see cref="EnsureFactoryFirewallShim"/>) — correctly reads as NOT hardened. A later
+        /// <c>iptables()</c> redefinition elsewhere in the script does NOT unharden it: the block's
+        /// <c>readonly -f iptables</c> guard makes bash reject any such redefinition at run time and keep
+        /// our <c>-w</c> wrapper, so presence of the exact block is sufficient. Used by both the idempotency
+        /// skip and the <c>ValidateMqtt</c> check.
         /// </summary>
         internal static bool IsFactoryFirewallHardened(string script)
         {
@@ -2850,14 +2815,11 @@ namespace IntercomFirmwareTool.Core
             int firstNl = script.IndexOf('\n');
             if (firstNl < 0)
                 return false;                                        // shebang only, no room for the block
-            // The exact shim block must be the very next thing after the shebang line …
+            // The exact shim block must be the very next thing after the shebang line. That block pins the
+            // function via `readonly -f`, so a later redefinition anywhere below can't defeat it — presence
+            // of the exact block right after the shebang is the whole condition.
             int afterShebang = firstNl + 1;
-            if (!script.AsSpan(afterShebang).StartsWith(FactoryFirewallShim.AsSpan()))
-                return false;
-            // … and NOTHING after that block may (re)define `iptables()` — a later definition would be the
-            // shell's last and win, dropping our `-w`. The block owns the only legitimate definition.
-            int afterBlock = afterShebang + FactoryFirewallShim.Length;
-            return !HasIptablesFunctionDef(script[afterBlock..]);
+            return script.AsSpan(afterShebang).StartsWith(FactoryFirewallShim.AsSpan());
         }
 
         private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)
