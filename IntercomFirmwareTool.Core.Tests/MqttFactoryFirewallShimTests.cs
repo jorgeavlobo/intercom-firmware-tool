@@ -297,6 +297,32 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Fact]
+    public void Marker_lines_that_are_heredoc_data_are_not_stripped_as_an_owned_block()
+    {
+        // A hook that carries a COMPLETE marker pair as DATA inside a quoted here-document (NOT at the anchor
+        // — it's below `cat <<'EOF'`, not the first line after the shebang) must be preserved. Only the block
+        // at the anchor is ever ours; deleting the lines between a marker pair elsewhere could strip real
+        // factory rules. Patching inserts our block at the anchor and leaves the here-document verbatim.
+        string hook =
+            "#!/bin/bash\n" +
+            "cat <<'EOF'\n" +
+            "# >>> IntercomFirmwareTool #145: make the factory firewall WAIT for the xtables lock >>>\n" +
+            "iptables() { command iptables \"$@\"; }\n" +   // here-doc DATA that must survive
+            "# <<< IntercomFirmwareTool #145 <<<\n" +
+            "EOF\n" +
+            "iptables -F INPUT\n";
+        string patched = MqttInstaller.EnsureFactoryFirewallShim(hook);
+        // Our real block is spliced in at the anchor …
+        Assert.StartsWith("#!/bin/bash\n# >>> IntercomFirmwareTool #145", patched);
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(patched));
+        // … and the ENTIRE original body after the shebang (the here-doc + its marker-looking data) is kept
+        // verbatim — nothing between the here-doc markers was deleted.
+        int shebangEnd = hook.IndexOf('\n') + 1;
+        Assert.EndsWith(hook[shebangEnd..], patched);
+        Assert.Contains("iptables() { command iptables \"$@\"; }\n", patched);
+    }
+
+    [Fact]
     public void A_script_without_a_shebang_is_rejected()
     {
         // A firewall script whose first line is a real command (no #! shebang) must be REJECTED, not

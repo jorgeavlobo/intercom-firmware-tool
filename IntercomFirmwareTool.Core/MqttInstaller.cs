@@ -2736,16 +2736,16 @@ namespace IntercomFirmwareTool.Core
             // require bash.
             if (!HasShellShebang(lf))
                 throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
-            // STRIP any prior owned block(s) — clean or hand-altered, wherever they sit — then insert ONE
-            // fresh block immediately after the shebang. Removing first is what makes this robust: a stale
-            // or altered copy (e.g. one whose `-w` was removed) placed AFTER the fresh block would otherwise
-            // be the shell's LAST definition of `iptables()` and win, leaving the factory calls lock-less.
-            // Because a clean, already-hardened script strips to exactly the same text and then gets the same
-            // block re-inserted, the result is byte-identical to the input, so this is idempotent by value
-            // (the caller writes only when the result differs). We do NOT defend against a hand-edit that
-            // adds its OWN `iptables()` redefinition AFTER our block — that is out of scope (see the
-            // FactoryFirewallShim comment); the real factory hook contains no such redefinition.
-            string stripped = RemoveOwnedFactoryFirewallBlocks(lf);
+            // STRIP a prior owned block ONLY at the ANCHOR — immediately after the shebang, the single place
+            // the installer ever writes it — then insert ONE fresh block there. Removing first makes re-patch
+            // idempotent by value: an already-hardened script strips to the same text and gets the same block
+            // back, so the output is byte-identical (the caller writes only when the result differs). We do
+            // NOT scan the rest of the hook for marker-looking lines: a complete marker pair could legitimately
+            // appear later as DATA (e.g. inside a quoted here-document), and deleting the content between them
+            // would corrupt the hook. We also do NOT defend against a hand-edit that adds its OWN `iptables()`
+            // redefinition after our block — out of scope (see the FactoryFirewallShim comment); the real
+            // factory hook has neither our markers as data nor a foreign redefinition.
+            string stripped = StripOwnedBlockAtAnchor(lf);
             int firstNl = stripped.IndexOf('\n');
             return firstNl >= 0
                 ? stripped[..(firstNl + 1)] + FactoryFirewallShim + stripped[(firstNl + 1)..]
@@ -2753,45 +2753,42 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Remove every COMPLETE installer-owned shim block from <paramref name="script"/> — each run of
-        /// lines from a <see cref="FactoryFirewallBlockOpen"/> marker line through its matching
-        /// <see cref="FactoryFirewallBlockClose"/> line (inclusive). Only content BETWEEN our own markers is
-        /// dropped; foreign lines (a legitimate here-document, conditional, or the factory rules) are kept
-        /// verbatim, preserving their order.
+        /// Remove the installer-owned shim block <b>only when it sits at the ANCHOR</b> — as the very first
+        /// line after the shebang, which is the single place <see cref="EnsureFactoryFirewallShim"/> ever
+        /// writes it. If the first post-shebang line is a <see cref="FactoryFirewallBlockOpen"/> marker, the
+        /// contiguous run through its matching <see cref="FactoryFirewallBlockClose"/> is dropped; otherwise
+        /// the script is returned unchanged. Marker-looking lines ELSEWHERE (a quoted here-document, a
+        /// conditional, the factory rules) are NEVER touched — deleting data between a marker pair that is not
+        /// our block could strip real firewall rules.
         ///
-        /// <para>An opener with NO matching closer means a CORRUPT/tampered factory script. We must NEVER
-        /// return the partially-filtered result — that would silently drop every factory rule after the
-        /// opener (SSH <c>:22</c>, the FTP-reflash <c>:21</c>, the security DROPs) and lock the unit out. So
-        /// this FAILS the install loudly (throws), consistent with the other shape guards (a missing
-        /// shebang / a non-regular file also throw) — the on-disk script is left untouched.</para>
+        /// <para>An opener at the anchor with NO matching closer before the next opener means a CORRUPT/
+        /// tampered block. We must NEVER return the partially-filtered result — that would silently drop every
+        /// factory rule after the opener (SSH <c>:22</c>, the FTP-reflash <c>:21</c>, the security DROPs) and
+        /// lock the unit out — so this FAILS the install loudly (throws), like the other shape guards.</para>
         ///
         /// <para>LF input; splits and rejoins on <c>'\n'</c> so the trailing newline is preserved. Pure —
         /// no I/O.</para>
         /// </summary>
-        private static string RemoveOwnedFactoryFirewallBlocks(string script)
+        private static string StripOwnedBlockAtAnchor(string script)
         {
-            var kept = new List<string>();
-            bool inBlock = false;
-            foreach (string raw in script.Split('\n'))
+            var lines = new List<string>(script.Split('\n'));
+            if (lines.Count < 2)
+                return script;                                   // shebang only (or empty) — no block possible
+            if (!lines[1].TrimStart().StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal))
+                return script;                                   // no owned block at the anchor — leave as-is
+            // The anchor block runs from line 1 to its matching closer. A second opener before the closer
+            // means the anchor block is unterminated/corrupt.
+            int close = -1;
+            for (int i = 2; i < lines.Count; i++)
             {
-                string trimmed = raw.TrimStart();
-                if (!inBlock)
-                {
-                    if (trimmed.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal))
-                        inBlock = true;              // start of an owned block — drop it (lines inside are dropped)
-                    else
-                        kept.Add(raw);
-                }
-                else if (trimmed.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal))
-                {
-                    inBlock = false;                 // end of the block — drop the closer too
-                }
+                string t = lines[i].TrimStart();
+                if (t.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal)) { close = i; break; }
+                if (t.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal)) break;
             }
-            // Unterminated owned block ⇒ corrupt script. Fail loudly rather than ship a firewall reduced to
-            // just the shebang + shim (which would have dropped SSH/FTP/DROP rules). Nothing is written.
-            if (inBlock)
+            if (close < 0)
                 throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
-            return string.Join('\n', kept);
+            lines.RemoveRange(1, close);                         // drop lines[1..close] inclusive (opener→closer)
+            return string.Join('\n', lines);
         }
 
         /// <summary>
