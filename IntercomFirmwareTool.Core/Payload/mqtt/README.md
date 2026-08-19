@@ -148,9 +148,10 @@ subsequent factory call **block** for the xtables lock instead of dropping a rul
 surgical way to inject a default flag into a *known* script's calls: define the
 wrapper once at the top; every bare `iptables` call below picks it up. Because the
 shim is a POSIX function, any hook with a **direct shell-path shebang** (bash, sh,
-dash, BusyBox `ash`, `ksh`, `zsh`, …) runs it correctly. Two shebang shapes are
-**rejected** so a shell shim is never spliced into something that can't run it: a
-**non-shell** interpreter (e.g. `#!/usr/bin/python`), and the
+dash, `ash`, `ksh`, `zsh`, …) runs it, as does the BusyBox/Toybox multicall form
+`#!/bin/busybox sh` (accepted only as the exact `<multicall> <shell>` the kernel can
+run). Two shapes are **rejected** so a shell shim is never spliced into something
+that can't run it: a **non-shell** interpreter (e.g. `#!/usr/bin/python`), and the
 `#!/usr/bin/env <shell>` indirection — ifupdown `if-pre-up.d` hooks use a direct
 interpreter path (the real C100X hook is `#!/bin/bash`), and Linux passes the whole
 post-`env` text as a *single* argument, so multi-token `env` forms aren't even

@@ -237,6 +237,8 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/usr/bin/zsh\niptables -F INPUT\n")]
     [InlineData("#!/bin/bash\nset -e\niptables -F INPUT\n")]             // errexit is now harmless (no pin)
     [InlineData("#!/bin/bash -e\niptables -F INPUT\n")]                  // errexit in the shebang — also fine
+    [InlineData("#!/bin/busybox sh\niptables -F INPUT\n")]               // BusyBox multicall — sh applet
+    [InlineData("#!/bin/busybox ash\niptables -F INPUT\n")]              // BusyBox multicall — ash applet
     public void Any_shell_shebang_is_hardened(string script)
     {
         string patched = MqttInstaller.EnsureFactoryFirewallShim(script);
@@ -262,6 +264,9 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/usr/bin/env -i bash\niptables -F INPUT\n")]          // not runnable
     [InlineData("#!/usr/bin/env FOO=bar bash\niptables -F INPUT\n")]     // not runnable
     [InlineData("#!/usr/bin/env python3\nprint('x')\n")]
+    [InlineData("#!/bin/busybox awk\nBEGIN{}\n")]                        // busybox applet, but not a shell
+    [InlineData("#!/bin/busybox sh -x\niptables -F INPUT\n")]            // 3 tokens — not runnable as a shebang
+    [InlineData("#!/bin/busybox\niptables -F INPUT\n")]                  // busybox with no applet
     public void An_unsupported_shebang_is_rejected(string script)
     {
         Assert.Throws<System.InvalidOperationException>(

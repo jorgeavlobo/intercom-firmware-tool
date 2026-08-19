@@ -2819,11 +2819,13 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// True iff the FIRST line is a <c>#!</c> shebang whose interpreter basename is a known shell (see
-        /// <see cref="KnownShells"/>) — a DIRECT interpreter path such as <c>#!/bin/bash</c>, <c>#!/bin/sh</c>,
-        /// or <c>#!/usr/bin/dash</c> (any following tokens are the interpreter's own args, e.g.
-        /// <c>#!/bin/bash -x</c>). A non-shell interpreter (<c>#!/usr/bin/python</c>) returns false, so a
-        /// shell shim is never spliced into a non-shell hook. The <c>#!/usr/bin/env &lt;shell&gt;</c>
+        /// True iff the FIRST line is a <c>#!</c> shebang that runs a known shell (see
+        /// <see cref="KnownShells"/>): either a DIRECT interpreter path — <c>#!/bin/bash</c>, <c>#!/bin/sh</c>,
+        /// <c>#!/usr/bin/dash</c> (any following tokens are the interpreter's own args, e.g.
+        /// <c>#!/bin/bash -x</c>) — or the BusyBox/Toybox multicall form <c>#!/bin/busybox sh</c> /
+        /// <c>#!/bin/busybox ash</c> (accepted only as the exact two-token <c>&lt;multicall&gt; &lt;shell&gt;</c>
+        /// the kernel can actually run). A non-shell interpreter (<c>#!/usr/bin/python</c>) returns false, so
+        /// a shell shim is never spliced into a non-shell hook. The <c>#!/usr/bin/env &lt;shell&gt;</c>
         /// indirection is intentionally NOT recognized: ifupdown <c>if-pre-up.d</c> hooks use a direct
         /// interpreter path (the real C100X hook is <c>#!/bin/bash</c>), and <c>env</c>'s kernel
         /// single-argument shebang semantics (only a bare <c>env &lt;word&gt;</c>, or <c>env -S …</c>, is even
@@ -2840,8 +2842,17 @@ namespace IntercomFirmwareTool.Core
             string[] toks = first[2..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
             if (toks.Length == 0)
                 return false;
-            string interp = toks[0];                                 // the direct interpreter path
-            return Array.IndexOf(KnownShells, interp[(interp.LastIndexOf('/') + 1)..]) >= 0;
+            static string Base(string p) => p[(p.LastIndexOf('/') + 1)..];
+            string b0 = Base(toks[0]);
+            if (Array.IndexOf(KnownShells, b0) >= 0)
+                return true;                                         // a direct shell-path shebang
+            // BusyBox / Toybox multicall form: `#!/bin/busybox sh`, `#!/bin/busybox ash`. The kernel passes
+            // the applet name as the SINGLE shebang argument, so ONLY the exact two-token
+            // `<multicall> <shell>` form is runnable (`#!/bin/busybox sh -x` would pass "sh -x" as one arg,
+            // which busybox can't resolve). Accept it iff the applet is a known shell.
+            if ((b0 == "busybox" || b0 == "toybox") && toks.Length == 2)
+                return Array.IndexOf(KnownShells, Base(toks[1])) >= 0;
+            return false;
         }
 
         private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)
