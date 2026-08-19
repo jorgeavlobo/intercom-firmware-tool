@@ -495,6 +495,12 @@ namespace IntercomFirmwareTool.Core
         // lines, so a legitimate here-document or conditional elsewhere is untouched.
         private const string FactoryFirewallBlockOpen = "# >>> " + FactoryFirewallShimMarker;
         private const string FactoryFirewallBlockClose = "# <<< " + FactoryFirewallShimMarker;
+        // Interpreter basenames we recognize as a POSIX-ish shell that runs the `iptables()` function shim
+        // (function syntax + the `command` builtin). A firewall hook with a NON-shell shebang (say
+        // `#!/usr/bin/python`) must NOT get a shell shim spliced into it — it would corrupt the file — so
+        // such a hook is rejected as unhardenable. The real C100X hook is `#!/bin/bash`.
+        private static readonly string[] KnownShells =
+            { "sh", "bash", "dash", "ash", "ksh", "ksh93", "mksh", "pdksh", "lksh", "zsh", "yash" };
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
@@ -2722,11 +2728,13 @@ namespace IntercomFirmwareTool.Core
             // caller rewrites whenever the result differs from the original, so a CRLF file is re-emitted
             // as LF even when it already carries the block.
             string lf = script.Replace("\r\n", "\n").Replace("\r", "\n");
-            // The script must be a proper shell script (a `#!` first line): a file with the shim function
-            // but no shebang would run unusably as a directly-executed if-pre-up.d hook, so REJECT it. The
-            // `iptables() { command iptables -w …; }` shim is POSIX, so ANY `#!` interpreter (bash, dash,
-            // BusyBox ash) runs it correctly — we do not require bash.
-            if (!lf.StartsWith("#!", StringComparison.Ordinal))
+            // The script must be a SHELL script — a `#!` first line naming a known shell (see KnownShells).
+            // A file with no shebang would run unusably as a directly-executed if-pre-up.d hook, and one with
+            // a NON-shell interpreter (say `#!/usr/bin/python`) cannot run the `iptables()` function shim or
+            // the factory's own shell commands — splicing shell into it would corrupt the file. Either is
+            // REJECTED. The shim is POSIX, so any real shell (bash, dash, BusyBox ash, …) runs it; we do not
+            // require bash.
+            if (!HasShellShebang(lf))
                 throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             // STRIP any prior owned block(s) — clean or hand-altered, wherever they sit — then insert ONE
             // fresh block immediately after the shebang. Removing first is what makes this robust: a stale
@@ -2787,26 +2795,60 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// True iff <paramref name="script"/> is hardened (issue #145): a <c>#!</c> shebang, then our EXACT
-        /// installer-owned <see cref="FactoryFirewallShim"/> block IMMEDIATELY after the shebang line — which
-        /// is exactly what <see cref="EnsureFactoryFirewallShim"/> writes. Requiring the whole block (not
-        /// merely the function text somewhere) means it cannot be fooled by that text in a comment, an
-        /// inactive <c>if false; then … fi</c> branch, or a quoted here-document — none of which place our
-        /// whole block right after the shebang. The block is LF, so a CRLF script — unrunnable as a hook —
-        /// correctly reads as NOT hardened. This certifies that OUR shim is installed; it does not attempt to
-        /// prove a hand-edit lower in the hook can't redefine <c>iptables()</c> (out of scope — see the
+        /// True iff <paramref name="script"/> is hardened (issue #145): a <c>#!</c> shebang naming a known
+        /// SHELL (see <see cref="KnownShells"/>), then our EXACT installer-owned
+        /// <see cref="FactoryFirewallShim"/> block IMMEDIATELY after the shebang line — which is exactly what
+        /// <see cref="EnsureFactoryFirewallShim"/> writes. Requiring the whole block (not merely the function
+        /// text somewhere) means it cannot be fooled by that text in a comment, an inactive
+        /// <c>if false; then … fi</c> branch, or a quoted here-document — none of which place our whole block
+        /// right after the shebang. The block is LF, so a CRLF script — unrunnable as a hook — correctly
+        /// reads as NOT hardened. This certifies that OUR shim is installed; it does not attempt to prove a
+        /// hand-edit lower in the hook can't redefine <c>iptables()</c> (out of scope — see the
         /// <see cref="FactoryFirewallShim"/> comment). Used by the idempotency skip and <c>ValidateMqtt</c>.
         /// </summary>
         internal static bool IsFactoryFirewallHardened(string script)
         {
-            if (!script.StartsWith("#!", StringComparison.Ordinal))
-                return false;                                        // not a shell script — never hardened
+            if (!HasShellShebang(script))
+                return false;                                        // not a shell hook — never hardened
             int firstNl = script.IndexOf('\n');
             if (firstNl < 0)
                 return false;                                        // shebang only, no room for the block
             // The exact shim block must be the very next thing after the shebang line.
             int afterShebang = firstNl + 1;
             return script.AsSpan(afterShebang).StartsWith(FactoryFirewallShim.AsSpan());
+        }
+
+        /// <summary>
+        /// True iff the FIRST line is a <c>#!</c> shebang whose interpreter basename is a known shell (see
+        /// <see cref="KnownShells"/>) — directly (<c>#!/bin/bash</c>, <c>#!/bin/sh</c>) or via the
+        /// <c>#!/usr/bin/env [opts|VAR=val …] &lt;shell&gt;</c> form. A non-shell interpreter (e.g.
+        /// <c>#!/usr/bin/python</c>) returns false, so a shell shim is never spliced into a non-shell hook.
+        /// Pure — no I/O. LF or CRLF input tolerated (the first line's trailing <c>\r</c> is trimmed).
+        /// </summary>
+        private static bool HasShellShebang(string script)
+        {
+            int nl = script.IndexOf('\n');
+            string first = (nl >= 0 ? script[..nl] : script).TrimEnd('\r');
+            if (!first.StartsWith("#!", StringComparison.Ordinal))
+                return false;
+            string[] toks = first[2..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (toks.Length == 0)
+                return false;
+            static string Base(string p) => p[(p.LastIndexOf('/') + 1)..];
+            string interp = Base(toks[0]);
+            if (interp == "env")
+            {
+                // `#!/usr/bin/env [opts|VAR=val …] <shell>` — the interpreter is the first bare word after env.
+                interp = "";
+                for (int i = 1; i < toks.Length; i++)
+                {
+                    if (toks[i].StartsWith("-", StringComparison.Ordinal) || toks[i].Contains('='))
+                        continue;                                    // env option or VAR=val assignment
+                    interp = Base(toks[i]);
+                    break;
+                }
+            }
+            return Array.IndexOf(KnownShells, interp) >= 0;
         }
 
         private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)

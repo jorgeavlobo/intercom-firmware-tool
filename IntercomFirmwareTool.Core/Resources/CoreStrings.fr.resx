@@ -165,7 +165,7 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
     <value>/etc/rc5.d n'existe pas dans l'image ; impossible d'activer le pont MQTT au démarrage.</value>
   </data>
   <data name="Mqtt_FactoryFirewallUnhardenable" xml:space="preserve">
-    <value>Impossible de durcir le script du pare-feu d'usine /etc/network/if-pre-up.d/iptables contre la course au verrou xtables (issue #145) : ce n'est pas un script shell bien formé (shebang #! manquant, fichier non ordinaire — p. ex. un lien symbolique — ou bloc de shim corrompu/non terminé).</value>
+    <value>Impossible de durcir le script du pare-feu d'usine /etc/network/if-pre-up.d/iptables contre la course au verrou xtables (issue #145) : ce n'est pas un script shell bien formé (shebang #! manquant ou non-shell, fichier non ordinaire — p. ex. un lien symbolique — ou bloc de shim non terminé).</value>
   </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>L'hôte du broker MQTT n'est pas une adresse IP ni un nom d'hôte valide.</value>

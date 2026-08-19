@@ -147,8 +147,10 @@ subsequent factory call **block** for the xtables lock instead of dropping a rul
 (`command` reaches the real binary, so there is no recursion). This is the standard,
 surgical way to inject a default flag into a *known* script's calls: define the
 wrapper once at the top; every bare `iptables` call below picks it up. Because the
-shim is a POSIX function, **any** `#!` interpreter (bash, dash, BusyBox `ash`) runs
-it correctly.
+shim is a POSIX function, **any supported POSIX shell** interpreter (bash, dash,
+BusyBox `ash`, `ksh`, `zsh`, …) runs it correctly. A hook whose shebang names a
+**non-shell** interpreter (e.g. `#!/usr/bin/python`) is **rejected** — a shell shim
+must never be spliced into a non-shell script.
 
 The shim is deliberately **not** tamper-proofed against a hand-edit that later
 *redefines* `iptables` lower in the hook — that is out of scope. The factory hook is
@@ -164,7 +166,8 @@ immediately after the shebang** — not by the marker comment (only a human-read
 delimiter) and not by the function text appearing somewhere in the file: text inside
 a comment, an inactive `if false` branch, or a quoted here-document never places our
 whole block after the shebang, so such a script is re-patched. A file lacking a `#!`
-shebang and an unterminated shim block are rejected outright, and a CRLF-lined script
+shebang, a non-shell shebang, and an unterminated shim block are rejected outright,
+and a CRLF-lined script
 (unrunnable as a hook — Linux would try to exec the interpreter `/bin/bash\r`) is
 normalized to LF when patched. `ValidateMqtt` asserts the same. With the factory
 calls now **waiting** (unbounded

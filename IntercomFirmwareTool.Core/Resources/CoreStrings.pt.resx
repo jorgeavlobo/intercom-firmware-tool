@@ -165,7 +165,7 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
     <value>/etc/rc5.d não existe na imagem; não é possível ativar a ponte MQTT no arranque.</value>
   </data>
   <data name="Mqtt_FactoryFirewallUnhardenable" xml:space="preserve">
-    <value>Não é possível endurecer o script da firewall de fábrica /etc/network/if-pre-up.d/iptables contra a corrida do lock do xtables (issue #145): não é um script shell bem formado (falta o shebang #!, não é um ficheiro normal — p. ex. um symlink — ou tem um bloco de shim corrompido/não terminado).</value>
+    <value>Não é possível endurecer o script da firewall de fábrica /etc/network/if-pre-up.d/iptables contra a corrida do lock do xtables (issue #145): não é um script shell bem formado (falta o shebang #! ou não é de shell, não é um ficheiro normal — p. ex. um symlink — ou tem um bloco de shim não terminado).</value>
   </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>O host do broker MQTT não é um endereço IP nem um nome de anfitrião válido.</value>

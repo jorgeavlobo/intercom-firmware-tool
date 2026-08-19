@@ -226,14 +226,17 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Theory]
-    // The `iptables() { command iptables -w …; }` shim is POSIX, so ANY `#!` interpreter is hardened — bash,
-    // dash, BusyBox ash, the env form — and a `set -e` hook is fine too (there is no readonly pin whose
-    // failure mode errexit could trigger). The only rejection is a MISSING shebang (see the dedicated test).
+    // The `iptables() { command iptables -w …; }` shim is POSIX, so ANY known-shell interpreter is hardened —
+    // bash, sh, dash, BusyBox ash, ksh, zsh, the env form — and a `set -e` hook is fine too (there is no
+    // readonly pin whose failure mode errexit could trigger).
     [InlineData("#!/bin/bash\niptables -F INPUT\n")]
     [InlineData("#!/bin/sh\niptables -F INPUT\n")]
     [InlineData("#!/bin/dash\niptables -F INPUT\n")]
     [InlineData("#!/bin/ash\niptables -F INPUT\n")]
+    [InlineData("#!/bin/ksh\niptables -F INPUT\n")]
+    [InlineData("#!/usr/bin/zsh\niptables -F INPUT\n")]
     [InlineData("#!/usr/bin/env bash\niptables -F INPUT\n")]
+    [InlineData("#!/usr/bin/env sh\niptables -F INPUT\n")]
     [InlineData("#!/bin/bash\nset -e\niptables -F INPUT\n")]             // errexit is now harmless (no pin)
     [InlineData("#!/bin/bash -e\niptables -F INPUT\n")]                  // errexit in the shebang — also fine
     public void Any_shell_shebang_is_hardened(string script)
@@ -242,6 +245,21 @@ public class MqttFactoryFirewallShimTests
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched);
         Assert.DoesNotContain("readonly -f", patched);
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(patched));
+    }
+
+    [Theory]
+    // A NON-shell interpreter cannot run the shell function shim (or the factory's own shell commands), so a
+    // hook with such a shebang is REJECTED — a shell shim must never be spliced into a non-shell script.
+    [InlineData("#!/usr/bin/python\niptables -F INPUT\n")]
+    [InlineData("#!/usr/bin/python3\nprint('x')\n")]
+    [InlineData("#!/usr/bin/perl\nsystem('iptables -F');\n")]
+    [InlineData("#!/usr/bin/env python3\nprint('x')\n")]
+    [InlineData("#!/sbin/openrc-run\n")]                                 // not a shell
+    public void A_non_shell_shebang_is_rejected(string script)
+    {
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(script));
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(script));
     }
 
     [Fact]
