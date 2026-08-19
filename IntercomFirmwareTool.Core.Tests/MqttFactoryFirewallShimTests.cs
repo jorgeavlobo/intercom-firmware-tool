@@ -282,6 +282,8 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/bin/bash -x\niptables -F INPUT\n")]                 // xtrace SHEBANG flag, not errexit
     [InlineData("#!/bin/bash\nif true; then set -x; fi\niptables -F INPUT\n")]  // set -x after `then`, not errexit
     [InlineData("#!/bin/bash\ngrep -e foo /dev/null || true\niptables -F INPUT\n")] // `-e` is grep's, not `set`'s
+    [InlineData("#!/bin/bash\n# a comment mentioning set -e must not trip the scanner\niptables -F INPUT\n")]
+    [InlineData("#!/bin/bash\necho \"$(set -e; true)\"\niptables -F INPUT\n")]   // set -e in a subshell — not the parent
     public void A_pinnable_bash_hook_without_errexit_is_hardened(string script)
     {
         string patched = MqttInstaller.EnsureFactoryFirewallShim(script);

@@ -511,8 +511,12 @@ namespace IntercomFirmwareTool.Core
         private const string FactoryFirewallBlockOpen = "# >>> " + FactoryFirewallShimMarker;
         private const string FactoryFirewallBlockClose = "# <<< " + FactoryFirewallShimMarker;
         // Shell command separators and control keywords used by EnablesErrexit to find a `set` command that
-        // is not at line start (e.g. after `;`/`&&`/`then`). Conservative, not a full parser.
-        private static readonly char[] SegmentSeparators = { ';', '&', '|', '(', ')', '{', '}', '`' };
+        // is not at line start (e.g. after `;`/`&&`/`then`). Conservative, not a full parser. Only
+        // SAME-SHELL separators are included: `;` `&` `|` and the `{ … }` brace group. A subshell — `( … )`
+        // or a `` `…` ``/`$(…)` command substitution — runs `set -e` in a CHILD shell that cannot change the
+        // parent's errexit, so those are deliberately NOT split on (splitting on a backtick also used to
+        // manufacture a false `set -e` out of this file's own shim comment).
+        private static readonly char[] SegmentSeparators = { ';', '&', '|', '{', '}' };
         private static readonly string[] ControlKeywords = { "then", "do", "else", "elif", "!", "time" };
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
@@ -2927,8 +2931,12 @@ namespace IntercomFirmwareTool.Core
                     }
                     // No shebang on the first line — fall through and scan it as commands like any other.
                 }
-                // Split the line into command segments on shell separators, so a `set` after `;`, `&&`, `||`,
-                // `(`, `{`, or a control keyword is found — not only at line start.
+                // A whole-line comment carries no executable command — skip it so its text (e.g. this file's
+                // own shim comment mentioning `set -e`) is never mistaken for a `set` command.
+                if (line.TrimStart().StartsWith("#", StringComparison.Ordinal))
+                    continue;
+                // Split the line into command segments on same-shell separators, so a `set` after `;`, `&&`,
+                // `||`, a `{ … }` group, or a control keyword is found — not only at line start.
                 foreach (string seg in line.Split(SegmentSeparators))
                 {
                     string s = StripLeadingKeywords(seg.TrimStart());
