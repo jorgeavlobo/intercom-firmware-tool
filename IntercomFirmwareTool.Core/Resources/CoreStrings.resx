@@ -165,7 +165,7 @@ The verified build was kept here — move/rename it manually:
     <value>/etc/rc5.d does not exist in the image; cannot activate the MQTT bridge at boot.</value>
   </data>
   <data name="Mqtt_FactoryFirewallUnhardenable" xml:space="preserve">
-    <value>Cannot harden the factory firewall script /etc/network/if-pre-up.d/iptables against the xtables-lock race (issue #145): it is not a bash hook the shim can safely pin (a missing #! shebang or a non-bash interpreter, a hook that enables "set -e", a non-regular file such as a symlink, or a corrupt/unterminated shim block).</value>
+    <value>Cannot harden the factory firewall script /etc/network/if-pre-up.d/iptables against the xtables-lock race (issue #145): it is not a well-formed shell script (a missing #! shebang, a non-regular file such as a symlink, or a corrupt/unterminated shim block).</value>
   </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>The MQTT broker host is not a valid IP address or hostname.</value>

@@ -466,28 +466,18 @@ namespace IntercomFirmwareTool.Core
         // panel runs such a long-held iptables operation; the bounded alternative (`-w N`) is deliberately
         // avoided because a timeout would re-introduce exactly the silent drop this shim removes.
         private const string FactoryFirewallShimFn = "iptables() { command iptables -w \"$@\"; }";
-        // The RUNTIME guard, emitted right after the function. `readonly -f` pins the `iptables` function so
-        // that ANY later redefinition in the script — whatever its spacing (`iptables  ()`, a tab before
-        // `()`), and wherever it sits (nested after `then`/`;`/`do`, in a sourced fragment) — FAILS at run
-        // time and leaves this --wait version in force, instead of silently dropping back to a lock-less
-        // call. This makes the shim self-defending, so correctness no longer hinges on statically proving
-        // "no other iptables definition exists" in unparseable shell.
-        //
-        // `readonly -f` is a BASHISM with NO POSIX equivalent: POSIX `sh`, dash, and BusyBox `ash` have no
-        // read-only-function mechanism at all. We therefore harden ONLY a hook the pin can safely hold —
-        // EnsureFactoryFirewallShim/IsFactoryFirewallHardened require a bash shebang AND the absence of
-        // `set -e`, and REJECT anything else as unhardenable rather than ship a shim whose pin can't hold:
-        //   * non-bash interpreter → `readonly -f` is unsupported (would let a later redefinition drop back
-        //     to a lock-less call while validation still passed);
-        //   * `set -e` enabled → the pin's rejection of a later redefinition becomes a FATAL command that
-        //     aborts the hook before the remaining factory rules run.
-        // The real C100X factory hook is `#!/bin/bash` with no `set -e`, so this rejects nothing that ships
-        // on the device. `2>/dev/null || true` stays as a belt-and-suspenders no-op for any bash build where
-        // `readonly -f` might warn.
-        private const string FactoryFirewallShimGuard = "readonly -f iptables 2>/dev/null || true";
         // The shim block, spliced in immediately after the shebang so the function is defined before any
-        // factory `iptables` call runs. Built from FactoryFirewallShimFn/Guard so the operative lines have a
-        // single source of truth. LF endings; the >>> / <<< lines carry FactoryFirewallShimMarker.
+        // factory `iptables` call runs. Built from FactoryFirewallShimFn so the operative line has a single
+        // source of truth. LF endings; the >>> / <<< lines carry FactoryFirewallShimMarker.
+        //
+        // This is a plain function shim — the standard, surgical way to inject a default flag into the calls
+        // of a KNOWN script: define the wrapper once at the top, and every subsequent bare `iptables` call in
+        // the hook picks it up. `command` reaches the real binary (no recursion). We deliberately do NOT try
+        // to make the shim tamper-proof against a hand-edited hook that later REDEFINES `iptables` — that is
+        // out of scope (the factory hook is a fixed, known script; the extracted C100X hook contains no such
+        // redefinition), and the mechanisms to attempt it (a `readonly -f` pin, or statically parsing the
+        // shell to prove no other definition exists) are non-portable and/or undecidable and caused more
+        // fragility than they removed.
         private const string FactoryFirewallShim =
             "# >>> " + FactoryFirewallShimMarker + ": make the factory firewall WAIT for the xtables lock >>>\n" +
             "# The factory rebuilds INPUT with lock-less `iptables -A` calls (no -w). With the on-device\n" +
@@ -496,12 +486,7 @@ namespace IntercomFirmwareTool.Core
             "# security DROPs) goes missing until the next clean rebuild — locking out SSH or the reflash.\n" +
             "# Shadowing `iptables` with a function that injects --wait makes every factory call BLOCK for\n" +
             "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
-            "# `readonly -f` then pins the function so a later redefinition (any spacing, nested after\n" +
-            "# then/;/do) is rejected by bash at run time and cannot drop back to a lock-less call. The\n" +
-            "# installer only patches a bash hook with no `set -e`, so this pin is always enforceable and its\n" +
-            "# rejection of a later redefinition is a harmless stderr line, never an abort.\n" +
             FactoryFirewallShimFn + "\n" +
-            FactoryFirewallShimGuard + "\n" +
             "# <<< " + FactoryFirewallShimMarker + " <<<\n";
         // The opener/closer marker-line prefixes of an installed shim block. Used to STRIP any prior
         // owned block(s) before re-inserting a fresh one, so a stale or hand-altered copy — e.g. one whose
@@ -510,14 +495,6 @@ namespace IntercomFirmwareTool.Core
         // lines, so a legitimate here-document or conditional elsewhere is untouched.
         private const string FactoryFirewallBlockOpen = "# >>> " + FactoryFirewallShimMarker;
         private const string FactoryFirewallBlockClose = "# <<< " + FactoryFirewallShimMarker;
-        // Shell command separators and control keywords used by EnablesErrexit to find a `set` command that
-        // is not at line start (e.g. after `;`/`&&`/`then`). Conservative, not a full parser. Only
-        // SAME-SHELL separators are included: `;` `&` `|` and the `{ … }` brace group. A subshell — `( … )`
-        // or a `` `…` ``/`$(…)` command substitution — runs `set -e` in a CHILD shell that cannot change the
-        // parent's errexit, so those are deliberately NOT split on (splitting on a backtick also used to
-        // manufacture a false `set -e` out of this file's own shim comment).
-        private static readonly char[] SegmentSeparators = { ';', '&', '|', '{', '}' };
-        private static readonly string[] ControlKeywords = { "then", "do", "else", "elif", "!", "time" };
 
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
@@ -2745,18 +2722,11 @@ namespace IntercomFirmwareTool.Core
             // caller rewrites whenever the result differs from the original, so a CRLF file is re-emitted
             // as LF even when it already carries the block.
             string lf = script.Replace("\r\n", "\n").Replace("\r", "\n");
-            // The hook must be one we can harden with the `readonly -f` pin — a BASH script with no `set -e`.
-            // Anything else is REJECTED (unhardenable) rather than patched with a shim whose pin can't hold:
-            //  * A non-`#!` file, or a shebang that does not name bash: only bash implements `readonly -f`
-            //    (POSIX sh/dash/BusyBox ash have no read-only-function mechanism at all), so on any other
-            //    interpreter the pin cannot be enforced and a later redefinition could drop back to a
-            //    lock-less call while validation still passed.
-            //  * A hook that enables `set -e`: the pin makes a later `iptables` redefinition a FAILING
-            //    command, which under errexit would abort the hook before the remaining factory rules run.
-            // The real C100X factory hook is `#!/bin/bash` with no `set -e`, so this rejects nothing that
-            // ships on the device; a variant we can't safely pin fails loudly instead of shipping a shim
-            // that only looks hardened.
-            if (!HasBashShebang(lf) || EnablesErrexit(lf))
+            // The script must be a proper shell script (a `#!` first line): a file with the shim function
+            // but no shebang would run unusably as a directly-executed if-pre-up.d hook, so REJECT it. The
+            // `iptables() { command iptables -w …; }` shim is POSIX, so ANY `#!` interpreter (bash, dash,
+            // BusyBox ash) runs it correctly — we do not require bash.
+            if (!lf.StartsWith("#!", StringComparison.Ordinal))
                 throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             // STRIP any prior owned block(s) — clean or hand-altered, wherever they sit — then insert ONE
             // fresh block immediately after the shebang. Removing first is what makes this robust: a stale
@@ -2764,15 +2734,9 @@ namespace IntercomFirmwareTool.Core
             // be the shell's LAST definition of `iptables()` and win, leaving the factory calls lock-less.
             // Because a clean, already-hardened script strips to exactly the same text and then gets the same
             // block re-inserted, the result is byte-identical to the input, so this is idempotent by value
-            // (the caller writes only when the result differs).
-            // Any FOREIGN `iptables()` redefinition still left after this (a variant/hand-edited hook) — in
-            // whatever spacing, and wherever it sits (nested after `then`/`;`/`do`, sourced in) — is
-            // neutralized at RUN TIME by the block's `readonly -f iptables` pin: bash rejects the later
-            // definition and keeps our --wait one (and with `set -e` excluded above, that rejection is a
-            // harmless stderr line, not an abort). So we deliberately DON'T try to statically detect or
-            // reject such shell here — that can't be done reliably (an `iptables()` inside a quoted here-doc
-            // or a dead `if false` branch is inert, one after `if true; then` is live, and the two are
-            // indistinguishable without executing the script). The pin handles it at run time instead.
+            // (the caller writes only when the result differs). We do NOT defend against a hand-edit that
+            // adds its OWN `iptables()` redefinition AFTER our block — that is out of scope (see the
+            // FactoryFirewallShim comment); the real factory hook contains no such redefinition.
             string stripped = RemoveOwnedFactoryFirewallBlocks(lf);
             int firstNl = stripped.IndexOf('\n');
             return firstNl >= 0
@@ -2823,178 +2787,26 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// True iff <paramref name="script"/> is EFFECTIVELY hardened (issue #145). Three conditions, all
-        /// required — exactly what <see cref="EnsureFactoryFirewallShim"/> guarantees when it writes:
-        /// <list type="number">
-        /// <item>a <c>#!</c> shebang that names <b>bash</b> — only bash implements the <c>readonly -f</c> pin
-        /// the shim relies on;</item>
-        /// <item>the hook does NOT enable <c>set -e</c> — under errexit the pin would turn a later
-        /// redefinition into an abort;</item>
-        /// <item>our EXACT installer-owned <see cref="FactoryFirewallShim"/> block sits IMMEDIATELY after the
-        /// shebang line.</item>
-        /// </list>
-        /// Requiring the whole block (not merely the function text somewhere) means it cannot be fooled by
-        /// that text in a comment, an inactive <c>if false; then … fi</c> branch, or a quoted here-document.
-        /// A later <c>iptables()</c> redefinition elsewhere does NOT unharden it: the block's
-        /// <c>readonly -f iptables</c> pin makes bash reject any such redefinition at run time and keep our
-        /// <c>-w</c> wrapper (and errexit is excluded, so that rejection can't abort the hook). The block is
-        /// LF, so a CRLF script — unrunnable as a hook — correctly reads as NOT hardened. Used by both the
-        /// idempotency skip and the <c>ValidateMqtt</c> check.
+        /// True iff <paramref name="script"/> is hardened (issue #145): a <c>#!</c> shebang, then our EXACT
+        /// installer-owned <see cref="FactoryFirewallShim"/> block IMMEDIATELY after the shebang line — which
+        /// is exactly what <see cref="EnsureFactoryFirewallShim"/> writes. Requiring the whole block (not
+        /// merely the function text somewhere) means it cannot be fooled by that text in a comment, an
+        /// inactive <c>if false; then … fi</c> branch, or a quoted here-document — none of which place our
+        /// whole block right after the shebang. The block is LF, so a CRLF script — unrunnable as a hook —
+        /// correctly reads as NOT hardened. This certifies that OUR shim is installed; it does not attempt to
+        /// prove a hand-edit lower in the hook can't redefine <c>iptables()</c> (out of scope — see the
+        /// <see cref="FactoryFirewallShim"/> comment). Used by the idempotency skip and <c>ValidateMqtt</c>.
         /// </summary>
         internal static bool IsFactoryFirewallHardened(string script)
         {
-            if (!HasBashShebang(script) || EnablesErrexit(script))
-                return false;                                        // not a pinnable bash hook — never hardened
+            if (!script.StartsWith("#!", StringComparison.Ordinal))
+                return false;                                        // not a shell script — never hardened
             int firstNl = script.IndexOf('\n');
             if (firstNl < 0)
                 return false;                                        // shebang only, no room for the block
-            // The exact shim block must be the very next thing after the shebang line. That block pins the
-            // function via `readonly -f`, so a later redefinition anywhere below can't defeat it — presence
-            // of the exact block right after the shebang (in a pinnable bash hook) is the whole condition.
+            // The exact shim block must be the very next thing after the shebang line.
             int afterShebang = firstNl + 1;
             return script.AsSpan(afterShebang).StartsWith(FactoryFirewallShim.AsSpan());
-        }
-
-        /// <summary>
-        /// True iff the FIRST line is a <c>#!</c> shebang whose interpreter is <b>bash</b> — <c>/bin/bash</c>,
-        /// <c>/usr/bin/bash</c>, any <c>…/bash</c>, or the <c>#!/usr/bin/env bash</c> form (with optional
-        /// <c>env</c> options / <c>VAR=val</c> assignments before <c>bash</c>). Bash is required because the
-        /// shim's <c>readonly -f</c> pin is a bashism with no POSIX equivalent. Pure — no I/O. LF or CRLF
-        /// input tolerated (the first line's trailing <c>\r</c> is trimmed).
-        /// </summary>
-        private static bool HasBashShebang(string script)
-        {
-            int nl = script.IndexOf('\n');
-            string first = (nl >= 0 ? script[..nl] : script).TrimEnd('\r');
-            if (!first.StartsWith("#!", StringComparison.Ordinal))
-                return false;
-            string[] toks = first[2..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (toks.Length == 0)
-                return false;
-            static string Base(string p) => p[(p.LastIndexOf('/') + 1)..];
-            if (Base(toks[0]) == "bash")
-                return true;
-            // `#!/usr/bin/env [options|VAR=val …] bash` — the interpreter is the first bare word after env.
-            if (Base(toks[0]) == "env")
-            {
-                for (int i = 1; i < toks.Length; i++)
-                {
-                    if (toks[i].StartsWith("-", StringComparison.Ordinal) || toks[i].Contains('='))
-                        continue;                                    // env option or VAR=val assignment
-                    return Base(toks[i]) == "bash";                  // first real argument is the interpreter
-                }
-            }
-            return false;
-        }
-
-        /// <summary>
-        /// True iff <paramref name="script"/> turns ON bash's <c>errexit</c>, from a <c>set</c> command
-        /// (<c>set -e</c>, a cluster containing <c>e</c> such as <c>set -euo pipefail</c>, or
-        /// <c>set -o errexit</c>) OR the interpreter flags of the <c>#!</c> shebang (<c>#!/bin/bash -e</c>,
-        /// <c>#!/bin/bash -eu</c>). The <c>set</c> command is recognized not only at line start but after a
-        /// command separator or a control keyword too, so <c>if true; then set -e; fi</c> and
-        /// <c>x &amp;&amp; set -e</c> are caught. <c>set +e</c> (which DISABLES it) and unrelated options
-        /// (<c>set -x</c>, <c>set -o pipefail</c>) do not match. This is a CONSERVATIVE over-approximation —
-        /// it also flags an inactive <c>if false; then set -e; fi</c>, and cannot see errexit smuggled in via
-        /// <c>eval</c>, a sourced file, or <c>SHELLOPTS</c> — but over-rejecting is safe (an unexpected
-        /// errexit in the factory hook just fails the install loudly), and the real C100X hook has no
-        /// <c>set</c> at all. Under errexit the shim's <c>readonly -f</c> pin would turn a later
-        /// <c>iptables</c> redefinition into a fatal command, aborting the hook before the remaining factory
-        /// rules run, so such a hook is rejected as unhardenable. Pure — no I/O.
-        /// </summary>
-        private static bool EnablesErrexit(string script)
-        {
-            bool firstLine = true;
-            foreach (string raw in script.Split('\n'))
-            {
-                string line = raw.TrimEnd('\r');
-                if (firstLine)
-                {
-                    firstLine = false;
-                    string t = line.TrimStart();
-                    // The shebang's own flags (everything after the interpreter word) run under errexit too.
-                    if (t.StartsWith("#!", StringComparison.Ordinal))
-                    {
-                        string[] sh = t[2..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-                        // Skip the interpreter (and, for the env form, env's options / VAR=val / the target).
-                        int start = 1;
-                        if (sh.Length > 0 && sh[0][(sh[0].LastIndexOf('/') + 1)..] == "env")
-                        {
-                            while (start < sh.Length &&
-                                   (sh[start].StartsWith("-", StringComparison.Ordinal) || sh[start].Contains('=')))
-                                start++;
-                            start++;                                 // skip the interpreter word itself
-                        }
-                        if (ClusterEnablesErrexit(sh, start))
-                            return true;
-                        continue;                                    // the shebang is never a `set` command
-                    }
-                    // No shebang on the first line — fall through and scan it as commands like any other.
-                }
-                // A whole-line comment carries no executable command — skip it so its text (e.g. this file's
-                // own shim comment mentioning `set -e`) is never mistaken for a `set` command.
-                if (line.TrimStart().StartsWith("#", StringComparison.Ordinal))
-                    continue;
-                // Split the line into command segments on same-shell separators, so a `set` after `;`, `&&`,
-                // `||`, a `{ … }` group, or a control keyword is found — not only at line start.
-                foreach (string seg in line.Split(SegmentSeparators))
-                {
-                    string s = StripLeadingKeywords(seg.TrimStart());
-                    if (!(s.Equals("set", StringComparison.Ordinal)
-                          || s.StartsWith("set ", StringComparison.Ordinal)
-                          || s.StartsWith("set\t", StringComparison.Ordinal)))
-                        continue;
-                    if (ClusterEnablesErrexit(s.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries), 1))
-                        return true;
-                }
-            }
-            return false;
-
-            // Strip leading shell control keywords (`then`/`do`/`else`/`elif`/`!`/`time`) so the command they
-            // introduce is examined — e.g. the `set -e` in `then set -e`.
-            static string StripLeadingKeywords(string s)
-            {
-                bool again = true;
-                while (again)
-                {
-                    again = false;
-                    foreach (string kw in ControlKeywords)
-                    {
-                        if (s.Equals(kw, StringComparison.Ordinal))
-                            return "";
-                        if ((s.StartsWith(kw, StringComparison.Ordinal))
-                            && s.Length > kw.Length && (s[kw.Length] == ' ' || s[kw.Length] == '\t'))
-                        {
-                            s = s[kw.Length..].TrimStart();
-                            again = true;
-                            break;
-                        }
-                    }
-                }
-                return s;
-            }
-
-            // Scan option tokens from `start` for anything that turns errexit ON.
-            static bool ClusterEnablesErrexit(string[] toks, int start)
-            {
-                for (int i = start; i < toks.Length; i++)
-                {
-                    string o = toks[i];
-                    if (o == "-o")                                   // `-o errexit` (two tokens)
-                    {
-                        if (i + 1 < toks.Length && toks[i + 1] == "errexit")
-                            return true;
-                        continue;
-                    }
-                    if (o == "-oerrexit")                            // `-oerrexit` (one token)
-                        return true;
-                    // A short-option cluster that enables errexit: leading '-' (not '+'), and contains 'e'.
-                    // (The `-o…` long forms are handled above, so a cluster that is just `-o…` is excluded.)
-                    if (o.Length >= 2 && o[0] == '-' && o[1] != 'o' && o.Contains('e'))
-                        return true;
-                }
-                return false;
-            }
         }
 
         private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)
