@@ -226,17 +226,17 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Theory]
-    // The `iptables() { command iptables -w …; }` shim is POSIX, so any DIRECT shell-path shebang is hardened
-    // — bash, sh, dash, BusyBox ash, ksh, zsh, with or without interpreter args — and a `set -e` hook is fine
-    // too (there is no readonly pin whose failure mode errexit could trigger).
+    // The `iptables() { command iptables -w …; }` shim is POSIX, so any BARE direct shell-path shebang is
+    // hardened — bash, sh, dash, BusyBox ash, ksh, zsh — as is the BusyBox/Toybox `<multicall> <shell>`
+    // form. `set -e` on a LATER line is fine too (there is no readonly pin whose failure mode errexit could
+    // trigger); only the shebang line itself is inspected.
     [InlineData("#!/bin/bash\niptables -F INPUT\n")]
     [InlineData("#!/bin/sh\niptables -F INPUT\n")]
     [InlineData("#!/bin/dash\niptables -F INPUT\n")]
     [InlineData("#!/bin/ash\niptables -F INPUT\n")]
     [InlineData("#!/bin/ksh\niptables -F INPUT\n")]
     [InlineData("#!/usr/bin/zsh\niptables -F INPUT\n")]
-    [InlineData("#!/bin/bash\nset -e\niptables -F INPUT\n")]             // errexit is now harmless (no pin)
-    [InlineData("#!/bin/bash -e\niptables -F INPUT\n")]                  // errexit in the shebang — also fine
+    [InlineData("#!/bin/bash\nset -e\niptables -F INPUT\n")]             // errexit on line 2 — harmless (no pin)
     [InlineData("#!/bin/busybox sh\niptables -F INPUT\n")]               // BusyBox multicall — sh applet
     [InlineData("#!/bin/busybox ash\niptables -F INPUT\n")]              // BusyBox multicall — ash applet
     public void Any_shell_shebang_is_hardened(string script)
@@ -250,15 +250,19 @@ public class MqttFactoryFirewallShimTests
     [Theory]
     // Rejected as unhardenable — a shell shim must never be spliced in:
     //   * a NON-shell interpreter (python/perl/openrc) cannot run the shim or the factory's shell commands;
-    //   * the `#!/usr/bin/env <shell>` indirection is not recognized — ifupdown hooks use a direct
-    //     interpreter path, and Linux passes the whole post-`env` text as ONE argument, so multi-token forms
-    //     (`env bash -e`, `env -i bash`, `env FOO=bar bash`) are not even runnable without `-S`. Rather than
-    //     reproduce env's kernel shebang semantics, we reject every env form.
+    //   * a direct shell path WITH interpreter arguments — `#!/bin/bash -c` makes bash run the hook path as
+    //     a command string (body never runs); we reject all args rather than enumerate safe-vs-unsafe flags;
+    //   * the whole `#!/usr/bin/env <shell>` indirection — ifupdown hooks use a direct interpreter path, and
+    //     Linux passes the whole post-`env` text as ONE argument (so `env -S` would be needed to split
+    //     multi-token forms); rather than reproduce env's kernel semantics, we reject every env form.
     [InlineData("#!/usr/bin/python\niptables -F INPUT\n")]
     [InlineData("#!/usr/bin/python3\nprint('x')\n")]
     [InlineData("#!/usr/bin/perl\nsystem('iptables -F');\n")]
     [InlineData("#!/sbin/openrc-run\n")]                                 // not a shell
-    [InlineData("#!/usr/bin/env bash\niptables -F INPUT\n")]             // env form — not recognized
+    [InlineData("#!/bin/bash -c\niptables -F INPUT\n")]                  // -c: bash runs the path as a command
+    [InlineData("#!/bin/bash -e\niptables -F INPUT\n")]                  // any interpreter arg is rejected
+    [InlineData("#!/bin/bash -x\niptables -F INPUT\n")]
+    [InlineData("#!/usr/bin/env bash\niptables -F INPUT\n")]             // env form — not recognized (even runnable)
     [InlineData("#!/usr/bin/env sh\niptables -F INPUT\n")]
     [InlineData("#!/usr/bin/env bash -e\niptables -F INPUT\n")]          // not runnable (one kernel arg)
     [InlineData("#!/usr/bin/env -i bash\niptables -F INPUT\n")]          // not runnable

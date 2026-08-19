@@ -2820,11 +2820,13 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// True iff the FIRST line is a <c>#!</c> shebang that runs a known shell (see
-        /// <see cref="KnownShells"/>): either a DIRECT interpreter path — <c>#!/bin/bash</c>, <c>#!/bin/sh</c>,
-        /// <c>#!/usr/bin/dash</c> (any following tokens are the interpreter's own args, e.g.
-        /// <c>#!/bin/bash -x</c>) — or the BusyBox/Toybox multicall form <c>#!/bin/busybox sh</c> /
-        /// <c>#!/bin/busybox ash</c> (accepted only as the exact two-token <c>&lt;multicall&gt; &lt;shell&gt;</c>
-        /// the kernel can actually run). A non-shell interpreter (<c>#!/usr/bin/python</c>) returns false, so
+        /// <see cref="KnownShells"/>): either a BARE DIRECT interpreter path — <c>#!/bin/bash</c>,
+        /// <c>#!/bin/sh</c>, <c>#!/usr/bin/dash</c> with NO interpreter arguments (a `-c` argument would make
+        /// bash run the hook path as a command string, so the body never executes; safe options aren't worth
+        /// enumerating and the real hook is a bare <c>#!/bin/bash</c>) — or the BusyBox/Toybox multicall form
+        /// <c>#!/bin/busybox sh</c> / <c>#!/bin/busybox ash</c> (accepted only as the exact two-token
+        /// <c>&lt;multicall&gt; &lt;shell&gt;</c> the kernel can actually run). A non-shell interpreter
+        /// (<c>#!/usr/bin/python</c>) returns false, so
         /// a shell shim is never spliced into a non-shell hook. The <c>#!/usr/bin/env &lt;shell&gt;</c>
         /// indirection is intentionally NOT recognized: ifupdown <c>if-pre-up.d</c> hooks use a direct
         /// interpreter path (the real C100X hook is <c>#!/bin/bash</c>), and <c>env</c>'s kernel
@@ -2844,13 +2846,18 @@ namespace IntercomFirmwareTool.Core
                 return false;
             static string Base(string p) => p[(p.LastIndexOf('/') + 1)..];
             string b0 = Base(toks[0]);
-            if (Array.IndexOf(KnownShells, b0) >= 0)
-                return true;                                         // a direct shell-path shebang
+            // A BARE direct shell-path shebang — the interpreter and NOTHING else. We deliberately reject
+            // interpreter arguments: most (`-e`, `-x`) are harmless, but some change execution semantics —
+            // `#!/bin/bash -c` makes bash treat the hook PATH as a command string, so the body never runs —
+            // and enumerating safe-vs-unsafe shell flags is not worth it. The real C100X hook is a bare
+            // `#!/bin/bash`, so this rejects nothing that ships on the device.
+            if (toks.Length == 1 && Array.IndexOf(KnownShells, b0) >= 0)
+                return true;
             // BusyBox / Toybox multicall form: `#!/bin/busybox sh`, `#!/bin/busybox ash`. The kernel passes
             // the applet name as the SINGLE shebang argument, so ONLY the exact two-token
             // `<multicall> <shell>` form is runnable (`#!/bin/busybox sh -x` would pass "sh -x" as one arg,
             // which busybox can't resolve). Accept it iff the applet is a known shell.
-            if ((b0 == "busybox" || b0 == "toybox") && toks.Length == 2)
+            if (toks.Length == 2 && (b0 == "busybox" || b0 == "toybox"))
                 return Array.IndexOf(KnownShells, Base(toks[1])) >= 0;
             return false;
         }
