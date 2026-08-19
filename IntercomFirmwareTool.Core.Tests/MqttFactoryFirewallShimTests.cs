@@ -237,6 +237,7 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/usr/bin/zsh\niptables -F INPUT\n")]
     [InlineData("#!/usr/bin/env bash\niptables -F INPUT\n")]
     [InlineData("#!/usr/bin/env sh\niptables -F INPUT\n")]
+    [InlineData("#!/usr/bin/env -S -u BASH_ENV bash\niptables -F INPUT\n")] // env -u consumes BASH_ENV, not bash
     [InlineData("#!/bin/bash\nset -e\niptables -F INPUT\n")]             // errexit is now harmless (no pin)
     [InlineData("#!/bin/bash -e\niptables -F INPUT\n")]                  // errexit in the shebang — also fine
     public void Any_shell_shebang_is_hardened(string script)
@@ -254,6 +255,7 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/usr/bin/python3\nprint('x')\n")]
     [InlineData("#!/usr/bin/perl\nsystem('iptables -F');\n")]
     [InlineData("#!/usr/bin/env python3\nprint('x')\n")]
+    [InlineData("#!/usr/bin/env -u bash python\nprint('x')\n")]          // `-u bash` unsets var; python runs
     [InlineData("#!/sbin/openrc-run\n")]                                 // not a shell
     public void A_non_shell_shebang_is_rejected(string script)
     {

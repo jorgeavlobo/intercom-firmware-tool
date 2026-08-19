@@ -2838,13 +2838,23 @@ namespace IntercomFirmwareTool.Core
             string interp = Base(toks[0]);
             if (interp == "env")
             {
-                // `#!/usr/bin/env [opts|VAR=val …] <shell>` — the interpreter is the first bare word after env.
+                // `#!/usr/bin/env [opts|VAR=val …] <shell>` — the interpreter is the first bare word after
+                // env, but env's OPERAND-consuming options must skip their operand too, or we would mistake
+                // it for the interpreter: `-u NAME`/`--unset NAME` and `-C DIR`/`--chdir DIR` each eat the
+                // NEXT token. (`-S`/`--split-string` just enables word-splitting; `--unset=NAME` /
+                // `--chdir=DIR` carry the operand inline and are handled by the `=`/`-` skip below.)
                 interp = "";
                 for (int i = 1; i < toks.Length; i++)
                 {
-                    if (toks[i].StartsWith("-", StringComparison.Ordinal) || toks[i].Contains('='))
-                        continue;                                    // env option or VAR=val assignment
-                    interp = Base(toks[i]);
+                    string t = toks[i];
+                    if (t is "-u" or "--unset" or "-C" or "--chdir")
+                    {
+                        i++;                                         // also skip this option's operand token
+                        continue;
+                    }
+                    if (t.StartsWith("-", StringComparison.Ordinal) || t.Contains('='))
+                        continue;                                    // a no-operand flag (-S, -i, …) or VAR=val
+                    interp = Base(t);                                // first bare word = the interpreter
                     break;
                 }
             }
