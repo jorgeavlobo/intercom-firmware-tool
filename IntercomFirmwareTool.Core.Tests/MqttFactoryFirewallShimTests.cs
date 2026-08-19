@@ -239,6 +239,7 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/bin/bash\nset -e\niptables -F INPUT\n")]             // errexit on line 2 — harmless (no pin)
     [InlineData("#!/bin/busybox sh\niptables -F INPUT\n")]               // BusyBox multicall — sh applet
     [InlineData("#!/bin/busybox ash\niptables -F INPUT\n")]              // BusyBox multicall — ash applet
+    [InlineData("#!/bin/toybox sh\niptables -F INPUT\n")]                // Toybox multicall — sh applet
     public void Any_shell_shebang_is_hardened(string script)
     {
         string patched = MqttInstaller.EnsureFactoryFirewallShim(script);
@@ -271,6 +272,9 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/bin/busybox awk\nBEGIN{}\n")]                        // busybox applet, but not a shell
     [InlineData("#!/bin/busybox sh -x\niptables -F INPUT\n")]            // 3 tokens — not runnable as a shebang
     [InlineData("#!/bin/busybox\niptables -F INPUT\n")]                  // busybox with no applet
+    [InlineData("#!/bin/busybox /bin/sh\niptables -F INPUT\n")]          // applet is a PATH — busybox can't resolve it
+    [InlineData("#!/bin/busybox bash\niptables -F INPUT\n")]             // busybox ships no `bash` applet
+    [InlineData("#!/bin/toybox ash\niptables -F INPUT\n")]               // toybox ships no `ash` applet
     public void An_unsupported_shebang_is_rejected(string script)
     {
         Assert.Throws<System.InvalidOperationException>(

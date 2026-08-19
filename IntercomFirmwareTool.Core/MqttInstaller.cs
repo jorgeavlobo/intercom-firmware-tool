@@ -2853,9 +2853,14 @@ namespace IntercomFirmwareTool.Core
             // BusyBox / Toybox multicall form: `#!/bin/busybox sh`, `#!/bin/busybox ash`. The kernel passes
             // the applet name as the SINGLE shebang argument, so ONLY the exact two-token
             // `<multicall> <shell>` form is runnable (`#!/bin/busybox sh -x` would pass "sh -x" as one arg,
-            // which busybox can't resolve). Accept it iff the applet is a known shell.
-            if (toks.Length == 2 && (b0 == "busybox" || b0 == "toybox"))
-                return Array.IndexOf(KnownShells, Base(toks[1])) >= 0;
+            // which busybox can't resolve). The applet is a BARE name resolved by the multicall binary — not
+            // a path — so compare toks[1] RAW (no basename) against the shells each actually ships: busybox
+            // provides `sh` and `ash`; toybox provides `sh`. This rejects a path applet (`busybox /bin/sh`),
+            // an absent applet (`busybox bash`, `toybox ash`), and non-shell applets (`busybox awk`).
+            if (toks.Length == 2 && b0 == "busybox")
+                return toks[1] is "sh" or "ash";
+            if (toks.Length == 2 && b0 == "toybox")
+                return toks[1] == "sh";
             return false;
         }
 
