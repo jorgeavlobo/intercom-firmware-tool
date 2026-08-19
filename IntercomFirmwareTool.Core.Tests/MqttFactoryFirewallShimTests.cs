@@ -53,10 +53,13 @@ public class MqttFactoryFirewallShimTests
         // binary via `command` (no recursion).
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched);
         // …then PIN it with `readonly -f` so any later redefinition in the script (any spacing, nested
-        // after then/;/do) is rejected by bash at run time and this --wait version stays in force. The
-        // `2>/dev/null || true` keeps a busybox /bin/sh (whose `readonly` lacks -f) running the plain shim.
+        // after then/;/do) is rejected by bash at run time and this --wait version stays in force. The pin
+        // is GATED on $BASH_VERSION: `readonly` is a POSIX special built-in with no -f option, so an
+        // unguarded `readonly -f` would ABORT a non-bash hook (dash/ash) before `|| true`; under such a
+        // shell the line is skipped and the plain --wait shim still fixes the race.
+        Assert.Contains(
+            "if [ -n \"${BASH_VERSION:-}\" ]; then readonly -f iptables 2>/dev/null || true; fi\n", patched);
         // The guard MUST come after the function definition (you can only pin an already-defined function).
-        Assert.Contains("readonly -f iptables 2>/dev/null || true\n", patched);
         int fnDef = patched.IndexOf("iptables() { command iptables -w", System.StringComparison.Ordinal);
         int guard = patched.IndexOf("readonly -f iptables", System.StringComparison.Ordinal);
         Assert.True(fnDef >= 0 && guard > fnDef, "the readonly guard must follow the function definition");
@@ -235,8 +238,39 @@ public class MqttFactoryFirewallShimTests
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(extended));       // block+guard still present
         string repatched = MqttInstaller.EnsureFactoryFirewallShim(extended); // must NOT throw
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", repatched);
-        Assert.Contains("readonly -f iptables 2>/dev/null || true\n", repatched);
+        Assert.Contains(
+            "if [ -n \"${BASH_VERSION:-}\" ]; then readonly -f iptables 2>/dev/null || true; fi\n", repatched);
         Assert.Contains(foreign, repatched);                                  // foreign text left in place, inert
+    }
+
+    [Fact]
+    public void The_readonly_pin_is_bash_gated_so_it_can_never_abort_a_non_bash_hook()
+    {
+        // `readonly` is a POSIX special built-in with no `-f` option, so an UNGUARDED `readonly -f` line
+        // aborts a non-bash hook (dash/BusyBox ash) before `|| true` — which would kill the hook before the
+        // factory rules run. Verified out-of-band: in dash the unguarded line exits the shell (status 2),
+        // while the `$BASH_VERSION`-gated form is skipped (exit 0, the plain --wait shim still runs), and in
+        // bash the gated form still pins the function (a later redefinition fails with "readonly function").
+        // The C# test can't exec a shell, so it pins the PORTABILITY INVARIANT of the emitted text: every
+        // `readonly -f` is behind the bash gate on the same line, never on a bare line of its own.
+        foreach (string shebang in new[] { "#!/bin/sh", "#!/bin/bash", "#!/bin/ash" })
+        {
+            string patched = MqttInstaller.EnsureFactoryFirewallShim(
+                shebang + "\niptables -F INPUT\niptables -P INPUT DROP\n");
+            // The --wait shim (the actual fix) is always present …
+            Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched);
+            // … and the pin only ever appears gated on $BASH_VERSION, on one line.
+            Assert.Contains(
+                "if [ -n \"${BASH_VERSION:-}\" ]; then readonly -f iptables 2>/dev/null || true; fi\n", patched);
+            // No BARE, unguarded `readonly` line (which would abort a POSIX sh): every `readonly` occurrence
+            // is preceded on its line by the `if [ -n "${BASH_VERSION` gate.
+            foreach (string line in patched.Split('\n'))
+            {
+                string t = line.TrimStart();
+                if (t.StartsWith("readonly", System.StringComparison.Ordinal))
+                    Assert.Fail($"unguarded readonly line would abort a POSIX sh hook: {line}");
+            }
+        }
     }
 
     [Fact]

@@ -470,11 +470,20 @@ namespace IntercomFirmwareTool.Core
         // that ANY later redefinition in the script — whatever its spacing (`iptables  ()`, a tab before
         // `()`), and wherever it sits (nested after `then`/`;`/`do`, in a sourced fragment) — FAILS at run
         // time and leaves this --wait version in force, instead of silently dropping back to a lock-less
-        // call. This makes the shim self-defending, so correctness no longer hinges on statically proving
-        // "no other iptables definition exists" in unparseable shell. The factory hook has no `set -e`, so a
-        // rejected redefinition is a harmless stderr line, not an abort. `2>/dev/null || true` keeps shells
-        // whose `readonly` lacks `-f` (e.g. a busybox `/bin/sh`) working with the plain function shim.
-        private const string FactoryFirewallShimGuard = "readonly -f iptables 2>/dev/null || true";
+        // call. This makes the shim self-defending on bash, so correctness no longer hinges on statically
+        // proving "no other iptables definition exists" in unparseable shell.
+        //
+        // `readonly -f` is a BASHISM: POSIX `sh`, dash, and BusyBox `ash` have no read-only-function
+        // mechanism at all, and `readonly` is a SPECIAL built-in — a usage error (the unknown `-f` option)
+        // makes a non-interactive POSIX shell EXIT before `|| true` is ever reached (verified: dash exits 2).
+        // So the factory hook's shebang MUST NOT decide this: gate the line on `$BASH_VERSION` (set only
+        // under bash), so under any non-bash interpreter the line is simply skipped — never executed, never
+        // aborting the hook. On such a shell the plain `--wait` function above still applies and fixes the
+        // race (it just isn't pinned; POSIX offers no portable way to pin it). The real C100X factory hook
+        // is `#!/bin/bash`, so on real hardware the pin is always in force. `2>/dev/null || true` stays as a
+        // belt-and-suspenders no-op for any bash build where `readonly -f` might warn.
+        private const string FactoryFirewallShimGuard =
+            "if [ -n \"${BASH_VERSION:-}\" ]; then readonly -f iptables 2>/dev/null || true; fi";
         // The shim block, spliced in immediately after the shebang so the function is defined before any
         // factory `iptables` call runs. Built from FactoryFirewallShimFn/Guard so the operative lines have a
         // single source of truth. LF endings; the >>> / <<< lines carry FactoryFirewallShimMarker.
@@ -485,10 +494,12 @@ namespace IntercomFirmwareTool.Core
             "# the xtables lock fails SILENTLY and a factory rule (SSH :22, the FTP-over-USB reflash :21,\n" +
             "# security DROPs) goes missing until the next clean rebuild — locking out SSH or the reflash.\n" +
             "# Shadowing `iptables` with a function that injects --wait makes every factory call BLOCK for\n" +
-            "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
+            "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion). On bash\n" +
             "# `readonly -f` then pins the function so a later redefinition (any spacing, nested after\n" +
-            "# then/;/do) cannot silently drop back to a lock-less call; `|| true` keeps a busybox /bin/sh\n" +
-            "# whose `readonly` lacks -f working with the plain shim.\n" +
+            "# then/;/do) cannot silently drop back to a lock-less call. It is gated on $BASH_VERSION because\n" +
+            "# `readonly` is a POSIX special built-in with no -f option: an unguarded `readonly -f` would\n" +
+            "# ABORT a non-bash hook (dash/ash) before `|| true`. Under such a shell the line is skipped and\n" +
+            "# the plain --wait shim above still fixes the race. The real C100X hook is #!/bin/bash.\n" +
             FactoryFirewallShimFn + "\n" +
             FactoryFirewallShimGuard + "\n" +
             "# <<< " + FactoryFirewallShimMarker + " <<<\n";

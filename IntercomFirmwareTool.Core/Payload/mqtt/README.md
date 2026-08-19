@@ -140,19 +140,24 @@ shell shim right after the factory script's shebang:
 
 ```sh
 iptables() { command iptables -w "$@"; }
-readonly -f iptables 2>/dev/null || true
+if [ -n "${BASH_VERSION:-}" ]; then readonly -f iptables 2>/dev/null || true; fi
 ```
 
 Shadowing `iptables` with a function that injects `--wait` makes **every** factory
 call **block** for the xtables lock instead of dropping a rule (`command` reaches
-the real binary, so there is no recursion). `readonly -f` then **pins** that
-function: should the factory script — in some variant or after a hand-edit —
-redefine `iptables` further down (in any spacing, or nested after `then`/`;`/`do`),
-bash **rejects** the redefinition and keeps our `--wait` version, so correctness no
-longer depends on statically proving no other definition exists anywhere in
-unparseable shell. The factory hook has no `set -e`, so a rejected redefinition is
-a harmless stderr line, not an abort; `2>/dev/null || true` keeps a busybox
-`/bin/sh` (whose `readonly` lacks `-f`) running the plain shim. The insert is
+the real binary, so there is no recursion). On **bash**, `readonly -f` then
+**pins** that function: should the factory script — in some variant or after a
+hand-edit — redefine `iptables` further down (in any spacing, or nested after
+`then`/`;`/`do`), bash **rejects** the redefinition and keeps our `--wait` version,
+so correctness does not depend on statically proving no other definition exists
+anywhere in unparseable shell. The pin is **gated on `$BASH_VERSION`** on purpose:
+`readonly` is a POSIX *special built-in* with **no `-f` option**, so under a
+non-bash interpreter (dash, BusyBox `ash`) an unguarded `readonly -f` is a usage
+error that **aborts the whole hook** before `|| true` is reached (POSIX has no
+read-only-function mechanism at all). Gating it means a non-bash hook simply
+**skips** the line and runs the plain `--wait` shim — which still fixes the race,
+it just isn't pinned. The real C100X factory hook is `#!/bin/bash`, so on real
+hardware the pin is always in force. The insert is
 **idempotent** and preserves the script's mode/owner. "Already hardened" is judged
 by whether the **exact installer-owned shim block sits immediately after the
 shebang** — not by the marker comment (only a human-readable delimiter) and not by
@@ -161,9 +166,16 @@ inactive `if false` branch, or a quoted here-document never places our whole blo
 after the shebang, so such a script is re-patched. A file lacking a `#!` shebang is
 rejected outright, and a CRLF-lined script (unrunnable as a hook — Linux would try
 to exec the interpreter `/bin/bash\r`) is normalized to LF when patched.
-`ValidateMqtt` asserts the same. `go2rtcd`'s own mutating calls already use `-w 5`,
-so with the factory now waiting too, **all** writers serialize on the lock and no
-rule is ever lost.
+`ValidateMqtt` asserts the same. With the factory calls now **waiting** (unbounded
+`-w`) instead of failing, a **factory** rule (SSH `:22`, the FTP-reflash `:21`, the
+security DROPs) is no longer dropped under lock contention. `go2rtcd`'s own mutating
+calls use the **bounded** `-w 5` and its `firewall_open_confirmed` retries at most
+three times before deferring, so `go2rtcd`'s **own** `GO2RTC :8554` rule can still
+transiently miss under sustained contention — but it self-heals on the next
+`fw-reassert` (fired after every interface event), and it never blocks a factory
+rule. In short: the shim removes the silent loss of the **factory** rules that
+caused the SSH/reflash lockouts; the camera port has its own bounded, self-healing
+reconciler.
 
 Everything else is generated or embedded elsewhere:
 
