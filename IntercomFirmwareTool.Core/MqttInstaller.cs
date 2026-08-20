@@ -2817,11 +2817,14 @@ namespace IntercomFirmwareTool.Core
             int firstNl = script.IndexOf('\n');
             if (firstNl < 0)
                 return false;                                        // shebang only, no room for the block
-            // A CRLF shebang line (`#!/bin/bash\r\n`) is unrunnable as a hook — the kernel takes `/bin/bash\r`
-            // as the interpreter — even when the shim below is LF. HasShellShebang tolerates that trailing `\r`
-            // (it also guards not-yet-normalized input), so reject it HERE: the certification must never bless a
-            // hook that won't execute. (firstNl >= 2 here — the script starts with `#!` — so the index is safe.)
-            if (script[firstNl - 1] == '\r')
+            // A genuinely hardened hook is pure LF: EnsureFactoryFirewallShim normalizes CRLF/CR to LF before
+            // writing, so ANY `\r` means this is not what we wrote and won't run as intended. A CRLF SHEBANG
+            // (`#!/bin/bash\r\n`) is unrunnable — the kernel takes `/bin/bash\r` as the interpreter — and a CRLF
+            // factory BODY passes trailing-`\r` arguments to the factory `iptables` calls (e.g. `INPUT\r`), so
+            // those rules fail. HasShellShebang tolerates a trailing `\r` (it also guards not-yet-normalized
+            // input), so enforce the LF-only contract HERE: the certification must never bless a hook that
+            // won't execute correctly.
+            if (script.Contains('\r'))
                 return false;
             // The exact shim block must be the very next thing after the shebang line.
             int afterShebang = firstNl + 1;

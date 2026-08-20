@@ -197,6 +197,23 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Fact]
+    public void An_lf_shim_followed_by_a_crlf_factory_body_is_not_hardened()
+    {
+        // The other MIXED case: an LF shebang and our exact LF shim block, but the factory BODY below is CRLF.
+        // The shim prefix matches byte-for-byte, yet the shell passes trailing-'\r' arguments to the factory
+        // `iptables` calls (e.g. `INPUT\r`), so those rules fail — SSH/reflash lockout — while the certification
+        // would otherwise report hardened. A genuinely hardened hook is pure LF (EnsureFactoryFirewallShim
+        // normalizes before writing), so ANY '\r' must read as NOT hardened.
+        string patched = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);  // all-LF, genuinely hardened
+        const string blockEnd = "# <<< IntercomFirmwareTool #145 <<<\n";
+        int at = patched.IndexOf(blockEnd, System.StringComparison.Ordinal) + blockEnd.Length;
+        // Leave the shebang + shim block LF; convert only the factory body after our block to CRLF.
+        string mixed = patched[..at] + patched[at..].Replace("\n", "\r\n");
+        Assert.Contains("\r", mixed);                                            // sanity: the body really is CRLF
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(mixed));
+    }
+
+    [Fact]
     public void A_prior_owned_block_with_an_altered_function_is_stripped_not_layered()
     {
         // A previously-installed block whose function was hand-altered (here: `-w` removed) must be REMOVED
