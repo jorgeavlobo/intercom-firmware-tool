@@ -308,6 +308,10 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/bin/busybox /bin/sh\niptables -F INPUT\n")]          // applet is a PATH — busybox can't resolve it
     [InlineData("#!/bin/busybox bash\niptables -F INPUT\n")]             // busybox ships no `bash` applet
     [InlineData("#!/bin/toybox ash\niptables -F INPUT\n")]               // toybox ships no `ash` applet
+    [InlineData("#!bash\niptables -F INPUT\n")]                          // relative interpreter — kernel resolves vs CWD, not $PATH
+    [InlineData("#!sh\niptables -F INPUT\n")]                            // relative interpreter
+    [InlineData("#!busybox sh\niptables -F INPUT\n")]                    // relative multicall path
+    [InlineData("#!toybox sh\niptables -F INPUT\n")]                     // relative multicall path
     public void An_unsupported_shebang_is_rejected(string script)
     {
         Assert.Throws<System.InvalidOperationException>(

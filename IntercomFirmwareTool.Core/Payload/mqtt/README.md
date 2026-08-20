@@ -154,6 +154,9 @@ multicall form `#!/bin/busybox sh` (accepted only as the exact `<multicall> <she
 the kernel can run). Everything else is **rejected** so a shell shim is never spliced
 into something that can't run it as intended:
 
+- a **relative** interpreter path (e.g. `#!bash`, `#!busybox sh`) — the kernel
+  resolves a relative `#!` interpreter against the process CWD, never `$PATH`, so it
+  wouldn't reliably exec as a hook; the interpreter path must be absolute;
 - a **non-shell** interpreter (e.g. `#!/usr/bin/python`);
 - a direct shell path **with interpreter arguments** (e.g. `#!/bin/bash -c`, which
   makes bash run the hook *path* as a command string so the body never executes;

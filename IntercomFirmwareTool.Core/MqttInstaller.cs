@@ -2825,7 +2825,10 @@ namespace IntercomFirmwareTool.Core
         /// <summary>
         /// True iff the FIRST line is a <c>#!</c> shebang that runs a known shell (see
         /// <see cref="KnownShells"/>): either a BARE DIRECT interpreter path — <c>#!/bin/bash</c>,
-        /// <c>#!/bin/sh</c>, <c>#!/usr/bin/dash</c> with NO interpreter arguments (a `-c` argument would make
+        /// <c>#!/bin/sh</c>, <c>#!/usr/bin/dash</c> with NO interpreter arguments. The interpreter path must be
+        /// ABSOLUTE (leading <c>/</c>): the kernel resolves a relative <c>#!</c> interpreter against the process
+        /// CWD, never <c>$PATH</c>, so <c>#!bash</c> or <c>#!busybox sh</c> would not reliably exec as a hook.
+        /// (A `-c` argument would make
         /// bash run the hook path as a command string, so the body never executes; safe options aren't worth
         /// enumerating and the real hook is a bare <c>#!/bin/bash</c>) — or the BusyBox/Toybox multicall form
         /// <c>#!/bin/busybox sh</c> / <c>#!/bin/busybox ash</c> (accepted only as the exact two-token
@@ -2847,6 +2850,12 @@ namespace IntercomFirmwareTool.Core
                 return false;
             string[] toks = first[2..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
             if (toks.Length == 0)
+                return false;
+            // The interpreter must be an ABSOLUTE path. The kernel resolves a relative `#!` interpreter against
+            // the process CWD (never $PATH), so a bare `#!bash` or `#!busybox sh` would exec unpredictably — or
+            // not at all — as an ifupdown hook, yet its basename would still match a known shell. Requiring a
+            // leading '/' matches the real device hook (`#!/bin/bash`) and keeps validation fail-closed.
+            if (!toks[0].StartsWith('/'))
                 return false;
             static string Base(string p) => p[(p.LastIndexOf('/') + 1)..];
             string b0 = Base(toks[0]);
