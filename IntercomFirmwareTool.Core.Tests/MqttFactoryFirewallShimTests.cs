@@ -184,6 +184,19 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Fact]
+    public void A_crlf_shebang_with_an_lf_shim_is_not_hardened()
+    {
+        // The MIXED case: a CRLF shebang line (`#!/bin/bash\r\n`) but an LF-encoded shim right below. The hook
+        // is still unrunnable — the kernel takes `/bin/bash\r` as the interpreter — so the factory rules never
+        // rebuild, yet the shim block below matches byte-for-byte. HasShellShebang trims the trailing '\r', so
+        // the certification itself must reject the CR; otherwise ValidateMqtt would bless a non-executing hook.
+        string patched = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);  // all-LF, genuinely hardened
+        int nl = patched.IndexOf('\n');
+        string crlfShebang = patched[..nl] + "\r\n" + patched[(nl + 1)..];        // only the shebang → CRLF
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(crlfShebang));
+    }
+
+    [Fact]
     public void A_prior_owned_block_with_an_altered_function_is_stripped_not_layered()
     {
         // A previously-installed block whose function was hand-altered (here: `-w` removed) must be REMOVED

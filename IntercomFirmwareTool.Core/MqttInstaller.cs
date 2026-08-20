@@ -2817,6 +2817,12 @@ namespace IntercomFirmwareTool.Core
             int firstNl = script.IndexOf('\n');
             if (firstNl < 0)
                 return false;                                        // shebang only, no room for the block
+            // A CRLF shebang line (`#!/bin/bash\r\n`) is unrunnable as a hook — the kernel takes `/bin/bash\r`
+            // as the interpreter — even when the shim below is LF. HasShellShebang tolerates that trailing `\r`
+            // (it also guards not-yet-normalized input), so reject it HERE: the certification must never bless a
+            // hook that won't execute. (firstNl >= 2 here — the script starts with `#!` — so the index is safe.)
+            if (script[firstNl - 1] == '\r')
+                return false;
             // The exact shim block must be the very next thing after the shebang line.
             int afterShebang = firstNl + 1;
             return script.AsSpan(afterShebang).StartsWith(FactoryFirewallShim.AsSpan());
