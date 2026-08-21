@@ -2794,21 +2794,32 @@ namespace IntercomFirmwareTool.Core
         /// absent while <c>.ift-bak</c> holds the intact original: restore it (<c>bak → path</c>, carrying
         /// mode/owner), else the firewall hook would be treated as absent and hardening silently skipped.</item>
         /// <item>crash AFTER <c>temp → path</c> but BEFORE the backup cleanup — the hardened target is present and
-        /// the idempotency check would skip the rewrite, so the stale (executable) <c>.ift-bak</c> would linger in
-        /// the image forever: delete it.</item>
+        /// the idempotency check would skip the rewrite, so a stale (executable) <c>.ift-bak</c> — or a leftover
+        /// <c>.ift-tmp</c> — would linger in the image forever: delete both regular siblings.</item>
         /// </list>
-        /// A path OCCUPIED by a non-regular node (symlink/dir) is left untouched here — the backup is preserved
+        /// A path OCCUPIED by a non-regular node (symlink/dir) is left untouched here — the siblings are preserved
         /// and the caller fails closed on that shape.
         /// </summary>
         private static void RecoverInterruptedRewrite(IExtFs fs, string path)
         {
+            string tmp = path + ".ift-tmp";
             string bak = path + ".ift-bak";
-            if (!fs.FileExists(bak)) return;                 // nothing left behind
             if (fs.FileExists(path))
-                TryDeleteRegular(fs, bak);                   // swap completed, crashed before cleanup: drop stale backup
-            else if (!PathOccupied(fs, path))
-                fs.RenameFile(bak, path);                    // swap crashed before promote: restore the original
-            // else path is a symlink/dir — leave the backup intact; the caller rejects that shape.
+            {
+                // Target already present: any swap siblings are stale leftovers from an interrupted or a
+                // completed-but-uncleaned run. The idempotency check in the caller may skip the rewrite that
+                // would otherwise clear them (via ClearSwapSibling), so drop BOTH regular siblings here.
+                TryDeleteRegular(fs, tmp);
+                TryDeleteRegular(fs, bak);
+            }
+            else if (!PathOccupied(fs, path) && fs.FileExists(bak))
+            {
+                // Swap crashed AFTER original -> .ift-bak but BEFORE the promote: restore the original, and drop
+                // any partial temp from that interrupted run.
+                fs.RenameFile(bak, path);
+                TryDeleteRegular(fs, tmp);
+            }
+            // else path is a symlink/dir — leave the siblings intact; the caller rejects that shape.
         }
 
         /// <summary>

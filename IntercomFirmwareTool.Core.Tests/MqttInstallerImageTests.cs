@@ -230,6 +230,22 @@ public class MqttInstallerImageTests
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));   // hook itself untouched
     }
 
+    [Fact]
+    public void Install_deletes_a_stale_temp_when_the_target_is_already_hardened()
+    {
+        // Same completed-but-uncleaned shape, for the OTHER sibling: an already-hardened hook makes the
+        // idempotency check skip the rewrite (and its ClearSwapSibling cleanup), so a stale .ift-tmp must be
+        // dropped by recovery rather than left in the image.
+        string hardened = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        var fs = FsWithBash().AddFile(Hook, hardened, InMemoryExtFs.Mode0755);
+        fs.AddFile(Hook + ".ift-tmp", "leftover staged content from an interrupted run", InMemoryExtFs.Mode0644);
+
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+
+        Assert.False(fs.HasFile(Hook + ".ift-tmp"));             // stale temp removed
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));   // hook itself untouched
+    }
+
     // ----------------------------- recovery: other RewritePreservingMeta callers -----------------------------
 
     [Fact]
