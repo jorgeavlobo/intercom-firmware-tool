@@ -1379,12 +1379,13 @@ namespace IntercomFirmwareTool.Core
                         // what the install-time gate wrote.
                         checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
                             IsFactoryFirewallHardened(factoryFw), ""));
-                        // The shim only runs if the hook's shebang interpreter actually exists in the image;
-                        // otherwise Linux can't exec the hook and the firewall is unprotected despite the
-                        // marker being present. DependencyPresent follows symlinks (e.g. `/bin/sh -> busybox`).
+                        // The shim only runs if the hook's shebang interpreter actually exists AND is
+                        // executable in the image; otherwise Linux can't exec the hook and the firewall is
+                        // unprotected despite the marker being present. InterpreterExecutable follows symlinks
+                        // (e.g. `/bin/sh -> busybox`) and checks the execute bit.
                         string? fwInterp = ShebangInterpreterPath(factoryFw);
-                        checks.Add(new("factory firewall shebang interpreter present in the image (#145)",
-                            fwInterp != null && DependencyPresent(fs, fwInterp), fwInterp ?? "(no shebang)"));
+                        checks.Add(new("factory firewall shebang interpreter present and executable (#145)",
+                            fwInterp != null && InterpreterExecutable(fs, fwInterp), fwInterp ?? "(no shebang)"));
                     }
                     else if (PathOccupied(fs, FactoryFirewallScriptPath))
                     {
@@ -1473,19 +1474,42 @@ namespace IntercomFirmwareTool.Core
         /// dangling symlink still fails (its chain never lands on a real file). The
         /// hop budget guards a symlink cycle.
         /// </summary>
-        private static bool DependencyPresent(ExtFileSystem fs, string path)
+        private static bool DependencyPresent(ExtFileSystem fs, string path) =>
+            ResolveToRegularFile(fs, path) != null;
+
+        /// <summary>
+        /// Resolves <paramref name="path"/> through up to 40 symlink hops to the real REGULAR FILE it names,
+        /// returning that resolved path, or null if the chain dangles, cycles, or never lands on a regular file.
+        /// The ext reader's <c>FileExists</c> is symlink-blind, so the walk follows <c>ReadSymLink</c> hops
+        /// (busybox applets, version links like <c>python -&gt; python2 -&gt; python2.7</c>) until it reaches a
+        /// real file. Shared by <see cref="DependencyPresent"/> and <see cref="InterpreterExecutable"/>.
+        /// </summary>
+        private static string? ResolveToRegularFile(ExtFileSystem fs, string path)
         {
             string current = path;
             for (int hops = 0; hops < 40; hops++)
             {
-                if (fs.FileExists(current)) return true;   // real file (executable / init script)
+                if (fs.FileExists(current)) return current;   // real file (executable / init script)
                 string target;
                 try { target = fs.ReadSymLink(current); } // throws if not a symlink (or absent)
-                catch { return false; }
-                if (string.IsNullOrEmpty(target)) return false;
+                catch { return null; }
+                if (string.IsNullOrEmpty(target)) return null;
                 current = ResolveLinkTarget(current, target);
             }
-            return false; // exceeded the hop budget (likely a cycle) — treat as absent
+            return null; // exceeded the hop budget (likely a cycle) — treat as absent
+        }
+
+        /// <summary>
+        /// True when <paramref name="path"/> resolves (following symlinks) to a regular file with at least one
+        /// execute bit set (owner/group/other, i.e. <c>0111</c>) — an interpreter Linux could actually exec as
+        /// root. A present-but-non-executable interpreter, a dangling/cyclic link, or an absent path all read as
+        /// NOT runnable. Certifying the factory hook "hardened" promises it will RUN, so the interpreter must be
+        /// not merely present (<see cref="DependencyPresent"/>) but executable.
+        /// </summary>
+        private static bool InterpreterExecutable(ExtFileSystem fs, string path)
+        {
+            string? real = ResolveToRegularFile(fs, path);
+            return real != null && (fs.GetMode(real) & 0x49u) != 0;  // 0x49 == 0111 (any execute bit)
         }
 
         /// <summary>
@@ -2730,11 +2754,11 @@ namespace IntercomFirmwareTool.Core
             // The certification promises the hardened hook will actually RUN. A shell shebang whose interpreter
             // is ABSENT from the image — a bogus `#!/opt/missing/bash`, or a dangling symlink — can't exec, so
             // hardening it would be a false positive that leaves the firewall unprotected while ValidateMqtt
-            // still passes. Verify the interpreter resolves to a real executable (DependencyPresent follows
-            // symlinks, e.g. `/bin/sh -> busybox`) before writing. The splice leaves the shebang unchanged, so
-            // checking `patched` is equivalent to checking `original`.
+            // still passes. Verify the interpreter resolves to a real EXECUTABLE (InterpreterExecutable follows
+            // symlinks, e.g. `/bin/sh -> busybox`, and checks the execute bit) before writing. The splice leaves
+            // the shebang unchanged, so checking `patched` is equivalent to checking `original`.
             string? interp = ShebangInterpreterPath(patched);
-            if (interp is null || !DependencyPresent(fs, interp))
+            if (interp is null || !InterpreterExecutable(fs, interp))
                 throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             // Rewrite when the result differs from the original — either because we spliced the shim in,
             // OR because we normalized CRLF endings to LF (a CRLF hook's `#!/bin/bash\r` shebang is
