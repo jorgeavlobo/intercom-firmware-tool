@@ -246,6 +246,19 @@ public class MqttInstallerImageTests
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));   // hook itself untouched
     }
 
+    [Fact]
+    public void Install_fails_closed_when_a_swap_sibling_is_a_non_regular_node()
+    {
+        // A symlink/dir at a tool-reserved swap path is an anomaly. Recovery clears siblings via
+        // ClearSwapSibling, which FAILS CLOSED on a non-regular node — so even an otherwise-idempotent run
+        // (hook already hardened) must throw rather than silently leave the unexpected shape in the image.
+        string hardened = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        var fs = FsWithBash().AddFile(Hook, hardened, InMemoryExtFs.Mode0755);
+        fs.AddSymlink(Hook + ".ift-tmp", "/some/target");
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
+
     // ----------------------------- recovery: other RewritePreservingMeta callers -----------------------------
 
     [Fact]

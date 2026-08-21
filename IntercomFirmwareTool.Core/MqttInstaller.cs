@@ -2795,10 +2795,12 @@ namespace IntercomFirmwareTool.Core
         /// mode/owner), else the firewall hook would be treated as absent and hardening silently skipped.</item>
         /// <item>crash AFTER <c>temp → path</c> but BEFORE the backup cleanup — the hardened target is present and
         /// the idempotency check would skip the rewrite, so a stale (executable) <c>.ift-bak</c> — or a leftover
-        /// <c>.ift-tmp</c> — would linger in the image forever: delete both regular siblings.</item>
+        /// <c>.ift-tmp</c> — would linger in the image forever: clear both siblings via <see cref="ClearSwapSibling"/>
+        /// (which deletes a regular leftover and FAILS CLOSED on a non-regular sibling, matching the pre-swap
+        /// cleanup so an idempotent run can't silently leave an unexpected shape at a tool-reserved path).</item>
         /// </list>
-        /// A path OCCUPIED by a non-regular node (symlink/dir) is left untouched here — the siblings are preserved
-        /// and the caller fails closed on that shape.
+        /// When the TARGET itself is a non-regular node (symlink/dir) the siblings are left intact and the caller
+        /// fails closed on that target shape.
         /// </summary>
         private static void RecoverInterruptedRewrite(IExtFs fs, string path)
         {
@@ -2806,20 +2808,21 @@ namespace IntercomFirmwareTool.Core
             string bak = path + ".ift-bak";
             if (fs.FileExists(path))
             {
-                // Target already present: any swap siblings are stale leftovers from an interrupted or a
-                // completed-but-uncleaned run. The idempotency check in the caller may skip the rewrite that
-                // would otherwise clear them (via ClearSwapSibling), so drop BOTH regular siblings here.
-                TryDeleteRegular(fs, tmp);
-                TryDeleteRegular(fs, bak);
+                // Target already present: clear any stale swap siblings. Route through ClearSwapSibling (not a
+                // silent delete) so it deletes a regular leftover but FAILS CLOSED on a non-regular node
+                // (symlink/dir) at these tool-reserved paths — matching the pre-swap cleanup, so an idempotent
+                // run that skips the rewrite can't silently leave an unexpected shape behind.
+                ClearSwapSibling(fs, tmp, path);
+                ClearSwapSibling(fs, bak, path);
             }
             else if (!PathOccupied(fs, path) && fs.FileExists(bak))
             {
-                // Swap crashed AFTER original -> .ift-bak but BEFORE the promote: restore the original, and drop
-                // any partial temp from that interrupted run.
+                // Swap crashed AFTER original -> .ift-bak but BEFORE the promote: restore the original, and clear
+                // any partial temp from that interrupted run (fail-closed on a non-regular temp).
                 fs.RenameFile(bak, path);
-                TryDeleteRegular(fs, tmp);
+                ClearSwapSibling(fs, tmp, path);
             }
-            // else path is a symlink/dir — leave the siblings intact; the caller rejects that shape.
+            // else path is a symlink/dir — leave the siblings intact; the caller rejects that target shape.
         }
 
         /// <summary>
