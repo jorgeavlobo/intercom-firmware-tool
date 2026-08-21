@@ -655,9 +655,9 @@ namespace IntercomFirmwareTool.Core
                 // device-only names — and don't append a duplicate line. An
                 // explicit HostIpForHosts override is always honored (ValidateMqtt
                 // then asserts that exact mapping).
-                bool alreadyMapped = BtDaemonAppsHosts.HasHostMapping(fs, opts.MqttHost);
+                bool alreadyMapped = BtDaemonAppsHosts.HasHostMapping(rawFs, opts.MqttHost);
                 if (!(alreadyMapped && string.IsNullOrWhiteSpace(opts.HostIpForHosts)))
-                    PatchHosts(fs, opts.MqttHost, ResolveHostIp(opts));
+                    PatchHosts(rawFs, opts.MqttHost, ResolveHostIp(opts));
             }
 
             // --- boot symlinks --------------------------------------------------
@@ -1308,8 +1308,8 @@ namespace IntercomFirmwareTool.Core
                 // Both go through the shared whole-line matcher (a commented line
                 // does not count).
                 bool hostLine = (!opts.HostIsIp && !string.IsNullOrWhiteSpace(opts.HostIpForHosts))
-                    ? BtDaemonAppsHosts.HasMapping(fs, opts.MqttHost, opts.HostIpForHosts!)
-                    : BtDaemonAppsHosts.HasHostMapping(fs, opts.MqttHost);
+                    ? BtDaemonAppsHosts.HasMapping(rawFs, opts.MqttHost, opts.HostIpForHosts!)
+                    : BtDaemonAppsHosts.HasHostMapping(rawFs, opts.MqttHost);
                 checks.Add(new("bt_daemon-apps.sh host line present iff hostname",
                     opts.HostIsIp ? !hostLine : hostLine, ""));
 
@@ -2644,7 +2644,10 @@ namespace IntercomFirmwareTool.Core
         /// idempotency and owner/mode preservation the OTA-update block uses, so the
         /// two paths cannot drift.
         /// </summary>
-        private static void PatchHosts(IExtFs fs, string host, string ip) =>
+        // Takes the raw ExtFileSystem (not IExtFs): it only delegates to BtDaemonAppsHosts, a separate
+        // collaborator that owns the /etc/hosts editing and works on ExtFileSystem directly — outside the
+        // factory-firewall seam under test (#150). Callers pass rawFs.
+        private static void PatchHosts(ExtFileSystem fs, string host, string ip) =>
             BtDaemonAppsHosts.AddMappings(fs, new[] { (host, ip) });
 
         /// <summary>Resolves the broker hostname to an IPv4 for the hosts edit.</summary>
