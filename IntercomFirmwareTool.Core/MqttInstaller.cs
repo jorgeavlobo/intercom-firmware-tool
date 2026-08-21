@@ -2709,12 +2709,14 @@ namespace IntercomFirmwareTool.Core
             ClearSwapSibling(fs, bak, path);
             try
             {
+                byte[] expected = Encoding.UTF8.GetBytes(text);
                 WriteTextFile(fs, tmp, text);
                 // Read the just-written temp back and require an exact match before it is allowed to replace the
                 // original. A short/partial write that slipped past WriteTextFile is caught HERE — while the
-                // original is still in place and nothing has been destroyed. (ReadAllText normalizes nothing and
-                // fails loudly on a short read, so an equal comparison is a true byte-for-byte check.)
-                if (!string.Equals(ReadAllText(fs, tmp), text, StringComparison.Ordinal))
+                // original is still in place and nothing has been destroyed. Compare RAW BYTES (not decoded
+                // text): UTF-8 decoding maps malformed sequences to U+FFFD, so a decoded-string compare could let
+                // a corrupted temp pass; ReadAllBytes also fails loudly on a short read.
+                if (!ReadAllBytes(fs, tmp).AsSpan().SequenceEqual(expected))
                     throw new IOException(CoreStrings.Format("Mqtt_RewriteVerifyFailed", path));
                 // Stamp the captured metadata onto the temp; SharpExt4's rename moves the inode, so mode/owner
                 // travel with it into the final path.
@@ -3174,7 +3176,10 @@ namespace IntercomFirmwareTool.Core
             fs.SetOwner(path, 0, 0);
         }
 
-        private static string ReadAllText(IExtFs fs, string path)
+        private static string ReadAllText(IExtFs fs, string path) =>
+            Encoding.UTF8.GetString(ReadAllBytes(fs, path));
+
+        private static byte[] ReadAllBytes(IExtFs fs, string path)
         {
             using var file = fs.OpenFile(path, FileMode.Open, FileAccess.Read);
             long length = file.Length;
@@ -3191,11 +3196,11 @@ namespace IntercomFirmwareTool.Core
                 total += n;
             }
             // A short read must fail loudly, not silently return a truncated
-            // string — patching/validation on partial content could rewrite an
+            // buffer — patching/validation on partial content could rewrite an
             // init script incorrectly. (Mirrors Ext4Probe's read helper.)
             if (total != len)
                 throw new IOException(CoreStrings.Format("Ext4_IncompleteRead", len, total));
-            return Encoding.UTF8.GetString(buf, 0, total);
+            return buf;
         }
 
         private static void CheckFile(IExtFs fs, List<Ext4Check> checks, string path, int mode)

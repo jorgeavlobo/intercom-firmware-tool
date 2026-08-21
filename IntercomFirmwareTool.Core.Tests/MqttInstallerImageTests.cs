@@ -96,7 +96,26 @@ public class MqttInstallerImageTests
         Assert.Equal(FactoryScript, inner.ReadText(Hook));        // original content untouched
         Assert.Equal(InMemoryExtFs.Mode0755, inner.ModeOf(Hook)); // original mode untouched
         Assert.Equal((uid, gid), inner.OwnerOf(Hook)!.Value);     // original owner untouched
-        Assert.False(inner.HasFile(Hook + ".ift-tmp"));           // partial temp cleaned up
+        Assert.False(inner.HasFile(Hook + ".ift-tmp"));           // no temp was ever created
+    }
+
+    [Fact]
+    public void Install_cleans_up_a_partially_written_temp_and_keeps_the_original()
+    {
+        // The scenario #151 targets: the write CREATES the temp, lands a prefix, then dies — leaving a partial
+        // temp on the image. The original must be untouched (nothing has moved yet) and the partial temp must be
+        // removed, not left dangling for the next run.
+        const uint uid = 4242, gid = 4343;
+        var inner = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
+        var fs = new FaultyExtFs(inner,
+            failPartialWrite: path => path.EndsWith(".ift-tmp", System.StringComparison.Ordinal));
+
+        Assert.ThrowsAny<System.Exception>(() => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+
+        Assert.Equal(FactoryScript, inner.ReadText(Hook));        // original content untouched
+        Assert.Equal(InMemoryExtFs.Mode0755, inner.ModeOf(Hook)); // original mode untouched
+        Assert.Equal((uid, gid), inner.OwnerOf(Hook)!.Value);     // original owner untouched
+        Assert.False(inner.HasFile(Hook + ".ift-tmp"));           // the PARTIAL temp was cleaned up
     }
 
     [Fact]

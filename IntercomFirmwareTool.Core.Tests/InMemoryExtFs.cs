@@ -160,14 +160,17 @@ internal sealed class FaultyExtFs : IExtFs
 {
     private readonly IExtFs _inner;
     private readonly Func<string, bool>? _failCreate;
+    private readonly Func<string, bool>? _failPartialWrite;
     private readonly Func<string, string, bool>? _failRename;
 
     public FaultyExtFs(IExtFs inner,
                        Func<string, bool>? failCreate = null,
+                       Func<string, bool>? failPartialWrite = null,
                        Func<string, string, bool>? failRename = null)
     {
         _inner = inner;
         _failCreate = failCreate;
+        _failPartialWrite = failPartialWrite;
         _failRename = failRename;
     }
 
@@ -175,6 +178,10 @@ internal sealed class FaultyExtFs : IExtFs
     {
         if (mode == FileMode.Create && _failCreate?.Invoke(path) == true)
             throw new IOException($"injected write failure for {path}");
+        // Model a write that creates the file, lands a PREFIX, then dies — leaving a partially-written temp on
+        // the image that the cleanup path must remove.
+        if (mode == FileMode.Create && _failPartialWrite?.Invoke(path) == true)
+            return new PartialWriteThenThrowStream(_inner.OpenFile(path, mode, access));
         return _inner.OpenFile(path, mode, access);
     }
 
@@ -195,4 +202,35 @@ internal sealed class FaultyExtFs : IExtFs
     public void CreateSymLink(string linkTarget, string linkPath) => _inner.CreateSymLink(linkTarget, linkPath);
     public void CreateDirectory(string path) => _inner.CreateDirectory(path);
     public void DeleteFile(string path) => _inner.DeleteFile(path);
+
+    /// <summary>A write stream that flushes a PREFIX of the first write into the wrapped stream and then throws,
+    /// modelling a create-write that leaves a partially-written file behind (the wrapped stream persists what it
+    /// received when disposed).</summary>
+    private sealed class PartialWriteThenThrowStream : Stream
+    {
+        private readonly Stream _inner;
+        public PartialWriteThenThrowStream(Stream inner) => _inner = inner;
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            int partial = count > 1 ? count / 2 : count;   // land a real prefix, then fail mid-write
+            _inner.Write(buffer, offset, partial);
+            throw new IOException("injected partial-write failure");
+        }
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _inner.Length;
+        public override long Position { get => _inner.Position; set => _inner.Position = value; }
+        public override void Flush() => _inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
+            base.Dispose(disposing);
+        }
+    }
 }
