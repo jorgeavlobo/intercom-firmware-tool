@@ -259,6 +259,18 @@ public class MqttInstallerImageTests
             () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
     }
 
+    [Fact]
+    public void Install_fails_closed_on_a_non_regular_sibling_even_when_the_target_is_absent()
+    {
+        // The absent-hook ("no factory firewall" variant) no-op must not become a loophole: a non-regular node
+        // at a reserved swap path still fails closed, since recovery reconciles both siblings before the caller
+        // decides the target is genuinely absent.
+        var fs = FsWithBash();                                    // no hook present
+        fs.AddSymlink(Hook + ".ift-bak", "/some/target");
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
+
     // ----------------------------- recovery: other RewritePreservingMeta callers -----------------------------
 
     [Fact]

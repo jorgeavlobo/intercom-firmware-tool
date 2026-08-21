@@ -2793,36 +2793,37 @@ namespace IntercomFirmwareTool.Core
         /// <item>crash AFTER <c>original → .ift-bak</c> but BEFORE <c>temp → path</c> — <paramref name="path"/> is
         /// absent while <c>.ift-bak</c> holds the intact original: restore it (<c>bak → path</c>, carrying
         /// mode/owner), else the firewall hook would be treated as absent and hardening silently skipped.</item>
-        /// <item>crash AFTER <c>temp → path</c> but BEFORE the backup cleanup — the hardened target is present and
-        /// the idempotency check would skip the rewrite, so a stale (executable) <c>.ift-bak</c> — or a leftover
-        /// <c>.ift-tmp</c> — would linger in the image forever: clear both siblings via <see cref="ClearSwapSibling"/>
-        /// (which deletes a regular leftover and FAILS CLOSED on a non-regular sibling, matching the pre-swap
-        /// cleanup so an idempotent run can't silently leave an unexpected shape at a tool-reserved path).</item>
+        /// <item>crash AFTER <c>temp → path</c> but BEFORE the backup cleanup — the target is present and the
+        /// idempotency check may skip the rewrite, so a stale (executable) <c>.ift-bak</c> or leftover
+        /// <c>.ift-tmp</c> would linger forever.</item>
         /// </list>
-        /// When the TARGET itself is a non-regular node (symlink/dir) the siblings are left intact and the caller
-        /// fails closed on that target shape.
+        /// After any restore, it reconciles BOTH swap siblings via <see cref="ClearSwapSibling"/> in every case —
+        /// target present, restored, or genuinely absent — which deletes a regular leftover and FAILS CLOSED on a
+        /// non-regular node (symlink/dir) at these tool-reserved paths, so an unexpected shape can't slip through
+        /// the idempotent-skip path or the absent-target no-op. Only when the TARGET itself is a non-regular node
+        /// are the siblings left intact — the caller fails closed on that target shape.
         /// </summary>
         private static void RecoverInterruptedRewrite(IExtFs fs, string path)
         {
             string tmp = path + ".ift-tmp";
             string bak = path + ".ift-bak";
-            if (fs.FileExists(path))
-            {
-                // Target already present: clear any stale swap siblings. Route through ClearSwapSibling (not a
-                // silent delete) so it deletes a regular leftover but FAILS CLOSED on a non-regular node
-                // (symlink/dir) at these tool-reserved paths — matching the pre-swap cleanup, so an idempotent
-                // run that skips the rewrite can't silently leave an unexpected shape behind.
-                ClearSwapSibling(fs, tmp, path);
-                ClearSwapSibling(fs, bak, path);
-            }
-            else if (!PathOccupied(fs, path) && fs.FileExists(bak))
-            {
-                // Swap crashed AFTER original -> .ift-bak but BEFORE the promote: restore the original, and clear
-                // any partial temp from that interrupted run (fail-closed on a non-regular temp).
+
+            // If the TARGET itself is a non-regular node (symlink/dir), leave everything as-is; the caller fails
+            // closed on that target shape. (FileExists is symlink-blind, so "absent AND occupied" == non-regular.)
+            if (!fs.FileExists(path) && PathOccupied(fs, path))
+                return;
+
+            // Swap crashed AFTER original -> .ift-bak but BEFORE the promote: the target is absent while a regular
+            // backup holds the original — restore it so the caller doesn't mistake the file for genuinely absent.
+            if (!fs.FileExists(path) && fs.FileExists(bak))
                 fs.RenameFile(bak, path);
-                ClearSwapSibling(fs, tmp, path);
-            }
-            // else path is a symlink/dir — leave the siblings intact; the caller rejects that target shape.
+
+            // Reconcile any remaining swap siblings in EVERY case (target present, restored, or genuinely absent).
+            // ClearSwapSibling deletes a regular leftover and FAILS CLOSED on a non-regular node at these
+            // tool-reserved paths — so a symlink/dir at .ift-tmp/.ift-bak can't slip through the idempotent-skip
+            // path or the absent-target no-op.
+            ClearSwapSibling(fs, tmp, path);
+            ClearSwapSibling(fs, bak, path);
         }
 
         /// <summary>
