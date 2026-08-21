@@ -164,6 +164,9 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_Rc5dMissing" xml:space="preserve">
     <value>/etc/rc5.d no existe en la imagen; no se puede activar el puente MQTT en el arranque.</value>
   </data>
+  <data name="Mqtt_FactoryFirewallUnhardenable" xml:space="preserve">
+    <value>No se puede reforzar el script del cortafuegos de fábrica /etc/network/if-pre-up.d/iptables frente a la carrera del bloqueo de xtables (issue #145): su shebang #! no es un intérprete de shell simple que el instalador pueda reescribir de forma segura (falta, indica un intérprete que no es de shell, usa una ruta de intérprete relativa, o invoca una shell con argumentos o mediante /usr/bin/env), el archivo no es un archivo normal (como un symlink) o no es ejecutable, el intérprete del shebang está ausente de la imagen o no es ejecutable, o contiene un bloque de shim sin terminar.</value>
+  </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>El host del broker MQTT no es una dirección IP ni un nombre de host válido.</value>
   </data>

@@ -122,6 +122,87 @@ re-run the tool for) is out of scope; the reservation above avoids all of it.
 | `bt_service_watchdog` | SysV init service (installed to `/etc/init.d/`, symlinked from `/etc/rc5.d/S99zBtServiceWatchdog`). Supervises **only this tool's own daemons** — `dropbear` (SSH, which `bt_daemon` stops when the app stack starts) — and reconciles `btmqttd` each pass via `/etc/init.d/btmqttd respawn` (and `/etc/init.d/go2rtcd respawn`, guarded on that script's presence). It deliberately does **not** restart the core BTicino services (`scsserver`/`mosquitto`/the `bt_daemon` app stack); the device manages those, and restarting them from here relaunched a colliding app stack that took the intercom down ~60s after boot. |
 | `go2rtcd` | SysV init script for the **on-device camera media server** (issue #120), a byte-for-byte copy of the `btmqttd` script's supervision model retargeted at `/usr/sbin/go2rtc -config /etc/btmqttd/go2rtc/go2rtc.yaml`. Installed to `/etc/init.d/go2rtcd` (symlinked from `/etc/rc5.d/S99zGo2rtc`) **only on the on-device camera path** — a non-camera image never carries it. `start\|stop\|restart\|status\|respawn`. It also **opens the RTSP media port** (`tcp/8554` on `wlan0`, source-restricted to the LAN subnet) when the daemon is **running** and closes it when stopped/disabled (phase 1c-3). Ownership is a **dedicated `GO2RTC` chain** — the industry-standard mechanism a userspace program uses to own iptables rules (Docker's `DOCKER` chain, kube-proxy's `KUBE-*` chains, fail2ban's `f2b-*` chains all work this way): it creates/flushes/populates/deletes only *its own* chain plus one `INPUT` jump to it, and never touches a foreign rule. Ownership is **proven, not just named** — a boot-scoped marker (`/var/run/go2rtc.fwown`) records that *we* created the chain; a pre-existing `GO2RTC` chain we did not create is left entirely alone. The `INPUT` jump is **appended** (after the panel's factory filters, e.g. the conntrack `--ctstate INVALID -j DROP` guard, but before the `-P INPUT DROP` policy) so our ACCEPT never lets traffic bypass a factory or admin filter, and all mutating calls use `-w 5` to wait for the xtables lock. This is deliberately **not** a `-m comment` tag: the target kernel (Linux 4.9 on the C100X, verified against the firmware sample — only the userspace `libxt_comment.so` parser is present, not the `xt_comment` kernel module) **rejects** a comment rule, so a tag would leave `:8554` permanently closed on the real hardware; a named chain needs no match module and works on every kernel. Reconciliation is **stateless**: every watchdog pass re-asserts the chain's contents from scratch (a *successful* `-F`, then re-add the current-subnet ACCEPT), so the chain *is* the state — no tmpfs state file to drift, and a DHCP subnet change is handled for free. With no `wlan0` address the chain is left **empty** (port closed, never interface-wide) until a later pass fills it. It is idempotently **re-asserted every watchdog pass** (`respawn`). The go2rtc control API (`:1984`) stays loopback-only and gets no rule. |
 
+### Factory firewall hardening (issue #145)
+
+The panel's **factory** firewall (`/etc/network/if-pre-up.d/iptables`) rebuilds
+the `INPUT` chain with ~40 **lock-less** `iptables -A` calls (no `-w`) on every
+interface bring-up, then sets `-P INPUT DROP`. Without `-w`, any of those calls
+**fails immediately** — and the factory script never checks the exit code — if
+the xtables lock is held by another process at that instant, so the rule is
+**silently dropped** for the whole boot. The on-device camera adds a **second**
+iptables writer (`go2rtcd`'s `GO2RTC :8554` rule), so a factory `-A` that
+overlaps our lock hold could go missing, taking a factory rule with it — observed
+on real hardware as an **SSH `:22` lockout** after a flash and an **FTP-over-USB
+reflash `:21` lockout**.
+
+On the on-device camera path only, `MqttInstaller` therefore inserts a one-line
+shell shim right after the factory script's shebang:
+
+```sh
+iptables() { command iptables -w "$@"; }
+```
+
+Shadowing `iptables` with a function that injects `--wait` makes **every**
+subsequent factory call **block** for the xtables lock instead of dropping a rule
+(`command` reaches the real binary, so there is no recursion). This is the standard,
+surgical way to inject a default flag into a *known* script's calls: define the
+wrapper once at the top; every bare `iptables` call below picks it up. Because the
+shim is a POSIX function, a hook with a **recognized bare direct shell-path shebang**
+— the interpreter and nothing else: `#!/bin/bash`, `#!/bin/sh`, `#!/bin/dash`,
+`#!/bin/ash`, `#!/bin/ksh`, `#!/bin/zsh`, … — runs it, as does the BusyBox/Toybox
+multicall form `#!/bin/busybox sh` (accepted only as the exact `<multicall> <shell>`
+the kernel can run). Everything else is **rejected** so a shell shim is never spliced
+into something that can't run it as intended:
+
+- a **relative** interpreter path (e.g. `#!bash`, `#!busybox sh`) — the kernel
+  resolves a relative `#!` interpreter against the process CWD, never `$PATH`, so it
+  wouldn't reliably exec as a hook; the interpreter path must be absolute;
+- a **non-shell** interpreter (e.g. `#!/usr/bin/python`);
+- a direct shell path **with interpreter arguments** (e.g. `#!/bin/bash -c`, which
+  makes bash run the hook *path* as a command string so the body never executes;
+  rather than enumerate safe-vs-unsafe flags we reject all args — the real hook is a
+  bare `#!/bin/bash`);
+- **every** `#!/usr/bin/env` form — even the runnable single-argument `#!/usr/bin/env
+  bash`. The ifupdown `if-pre-up.d` hooks use a direct interpreter path, and Linux passes
+  the whole post-`env` text as a *single* argument (so `env -S` would be needed just
+  to split multi-token forms); rather than reproduce env's kernel shebang semantics,
+  we don't recognize the `env` form at all.
+
+The shim is deliberately **not** tamper-proofed against a hand-edit that later
+*redefines* `iptables` lower in the hook — that is out of scope. The factory hook is
+a fixed, known script (the extracted C100X hook contains no such redefinition), and
+the mechanisms to defend it — a `readonly -f` pin, or statically parsing the shell
+to prove no other definition exists — are non-portable and/or undecidable and add
+more fragility than they remove (`readonly -f` is a bashism that also aborts a hook
+under `set -e`).
+
+The insert is **idempotent** and preserves the script's mode/owner. "Already
+hardened" is judged by whether the **exact installer-owned shim block sits
+immediately after the shebang** — not by the marker comment (only a human-readable
+delimiter) and not by the function text appearing somewhere in the file: text inside
+a comment, an inactive `if false` branch, or a quoted here-document never places our
+whole block after the shebang, so such a script is re-patched. A file lacking a `#!`
+shebang, a non-shell shebang, and an unterminated shim block are rejected outright,
+and a CRLF-lined script
+(unrunnable as a hook — Linux would try to exec the interpreter `/bin/bash\r`) is
+normalized to LF when patched. Because "hardened" means the hook will actually
+**run**, the shebang's interpreter path must resolve to an executable in the image
+(following symlinks, e.g. `/bin/sh -> busybox`); a dangling or bogus interpreter
+(`#!/opt/missing/bash`) is rejected rather than certified. `ValidateMqtt` asserts the
+same. With the factory
+calls now **waiting** (unbounded
+`-w`) instead of failing, a **factory** rule (SSH `:22`, the FTP-reflash `:21`, the
+security DROPs) is no longer dropped under lock contention. `go2rtcd`'s own mutating
+calls use the **bounded** `-w 5` and its `firewall_open_confirmed` retries at most
+three times before deferring, so `go2rtcd`'s **own** `GO2RTC :8554` rule can still
+transiently miss under sustained contention — but it self-heals on the next
+`fw-reassert` (fired after every interface event). While `go2rtcd` holds the lock a
+factory call now **waits** (unbounded `-w`) rather than being dropped, so
+`go2rtcd` can never cause a factory rule to be **silently skipped** — the
+worst it can do is briefly delay one. In short: the shim removes the silent loss of
+the **factory** rules that caused the SSH/reflash lockouts; the camera port has its
+own bounded, self-healing reconciler.
+
 Everything else is generated or embedded elsewhere:
 
 - **`btmqttd`** binary → embedded via

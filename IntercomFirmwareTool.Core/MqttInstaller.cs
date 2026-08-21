@@ -435,6 +435,77 @@ namespace IntercomFirmwareTool.Core
         private const string Go2RtcNetHookDir = "/etc/network/if-up.d";
         private const string Go2RtcNetHookPath = "/etc/network/if-up.d/go2rtc";
 
+        // Factory-firewall hardening (issue #145). The panel's FACTORY firewall
+        // (/etc/network/if-pre-up.d/iptables) rebuilds INPUT with ~40 LOCK-LESS `iptables -A` calls
+        // (no `-w`) on EVERY interface bring-up, then sets `-P INPUT DROP`. Without `-w`, any of those
+        // calls FAILS IMMEDIATELY (and the script never checks the exit code) if the xtables lock is
+        // held by another process at that instant — so the rule is SILENTLY dropped for the whole boot.
+        // The on-device camera adds a SECOND iptables writer (go2rtcd's GO2RTC :8554 rule, `-w 5`); when
+        // its lock hold overlaps a concurrent interface event's factory rebuild, a factory `-A` is lost
+        // and a factory rule goes missing — observed on real hardware as an SSH `:22` lockout after a
+        // flash and an FTP-over-USB reflash `:21` lockout (issue #145). Fix: insert a one-line shell shim
+        // right after the factory script's shebang that shadows `iptables` with a function injecting
+        // `--wait`, so every factory call BLOCKS for the lock instead of dropping a rule. Applied ONLY on
+        // the on-device camera path (the only image that adds a second writer), idempotent (skips a
+        // script that already carries the exact shim block right after the shebang, judged by
+        // IsFactoryFirewallHardened — not the marker comment), preserving the script's mode/owner.
+        private const string FactoryFirewallScriptPath = "/etc/network/if-pre-up.d/iptables";
+        // Human-readable marker used only to delimit the shim block in the script text (grep/read
+        // convenience). It is NOT what gates idempotency or validation — the marker comment could survive
+        // while the block was truncated or hand-edited. Those checks require the EXACT shim block
+        // immediately after the shebang (IsFactoryFirewallHardened) instead.
+        private const string FactoryFirewallShimMarker = "IntercomFirmwareTool #145";
+        // The OPERATIVE line of the shim: the exact `iptables` shell function that injects --wait. The
+        // FactoryFirewallShim block below is built from it (single source of truth). `command` reaches the
+        // real binary, bypassing the
+        // function, so there is no recursion. Bare `--wait` (no timeout) WAITS for the lock rather than
+        // failing, so a factory rule is never silently dropped under contention. In practice iptables
+        // holds the xtables lock only briefly per operation — it is a flock released when the process
+        // exits, so even a crashed holder frees it — so the wait is sub-second. A pathological iptables
+        // process wedged WHILE holding the lock could in theory block the wait longer, but nothing on the
+        // panel runs such a long-held iptables operation; the bounded alternative (`-w N`) is deliberately
+        // avoided because a timeout would re-introduce exactly the silent drop this shim removes.
+        private const string FactoryFirewallShimFn = "iptables() { command iptables -w \"$@\"; }";
+        // The shim block, spliced in immediately after the shebang so the function is defined before any
+        // factory `iptables` call runs. Built from FactoryFirewallShimFn so the operative line has a single
+        // source of truth. LF endings; the >>> / <<< lines carry FactoryFirewallShimMarker.
+        //
+        // This is a plain function shim — the standard, surgical way to inject a default flag into the calls
+        // of a KNOWN script: define the wrapper once at the top, and every subsequent bare `iptables` call in
+        // the hook picks it up. `command` reaches the real binary (no recursion). We deliberately do NOT try
+        // to make the shim tamper-proof against a hand-edited hook that later REDEFINES `iptables` — that is
+        // out of scope (the factory hook is a fixed, known script; the extracted C100X hook contains no such
+        // redefinition), and the mechanisms to attempt it (a `readonly -f` pin, or statically parsing the
+        // shell to prove no other definition exists) are non-portable and/or undecidable and caused more
+        // fragility than they removed.
+        private const string FactoryFirewallShim =
+            "# >>> " + FactoryFirewallShimMarker + ": make the factory firewall WAIT for the xtables lock >>>\n" +
+            "# The factory rebuilds INPUT with lock-less `iptables -A` calls (no -w). With the on-device\n" +
+            "# camera's go2rtc rule as a second iptables writer, a factory call that fires while we hold\n" +
+            "# the xtables lock fails SILENTLY and a factory rule (SSH :22, the FTP-over-USB reflash :21,\n" +
+            "# security DROPs) goes missing until the next clean rebuild — locking out SSH or the reflash.\n" +
+            "# Shadowing `iptables` with a function that injects --wait makes every factory call BLOCK for\n" +
+            "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
+            FactoryFirewallShimFn + "\n" +
+            "# <<< " + FactoryFirewallShimMarker + " <<<\n";
+        // The opener/closer marker-line prefixes of an installed shim block. Used to STRIP prior EXACT owned
+        // block(s) AT THE ANCHOR — stacked immediately after the shebang, the only place we ever write one —
+        // before re-inserting a fresh one, so a duplicated copy can't survive below the fresh block and
+        // override it (the shell uses the LAST definition of a function). Only a block whose inner lines are
+        // our comments and the EXACT function is stripped; a hand-altered or smuggled block fails CLOSED
+        // (throws) rather than being silently rewritten. A marker that has DRIFTED lower in the hook is
+        // deliberately left in place: we only remove content BETWEEN our own markers at the anchor, never
+        // foreign lines, so a legitimate here-document or conditional elsewhere is untouched.
+        // (IsFactoryFirewallHardened likewise certifies only the anchor.)
+        private const string FactoryFirewallBlockOpen = "# >>> " + FactoryFirewallShimMarker;
+        private const string FactoryFirewallBlockClose = "# <<< " + FactoryFirewallShimMarker;
+        // Interpreter basenames we recognize as a POSIX-ish shell that runs the `iptables()` function shim
+        // (function syntax + the `command` builtin). A firewall hook with a NON-shell shebang (say
+        // `#!/usr/bin/python`) must NOT get a shell shim spliced into it — it would corrupt the file — so
+        // such a hook is rejected as unhardenable. The real C100X hook is `#!/bin/bash`.
+        private static readonly string[] KnownShells =
+            { "sh", "bash", "dash", "ash", "ksh", "ksh93", "mksh", "pdksh", "lksh", "zsh", "yash" };
+
         /// <summary>A payload script: embedded resource, install path, and octal mode.</summary>
         private sealed record ScriptFile(string Resource, string Path, int Mode);
 
@@ -632,6 +703,12 @@ namespace IntercomFirmwareTool.Core
             WriteTextFile(fs, Go2RtcNetHookPath, go2rtcNetHook);
             fs.SetMode(Go2RtcNetHookPath, ToMode(755));
             fs.SetOwner(Go2RtcNetHookPath, 0, 0);
+
+            // Harden the factory firewall against the xtables-lock race (issue #145): make its lock-less
+            // INPUT rebuild WAIT for the lock, so our go2rtc :8554 rule (a second iptables writer) can
+            // never cause a factory rule (SSH :22, the FTP-over-USB reflash :21, security DROPs) to be
+            // dropped silently and lock the operator out. Idempotent; on-device camera path only.
+            PatchFactoryFirewallWaitForLock(fs);
 
             // Vendored media binaries (byte-exact, SHA-256 verified on read), 0775 root:root — the
             // same mode as the always-installed btmqttd. These are the two binaries 1c-1 embedded but
@@ -1289,6 +1366,44 @@ namespace IntercomFirmwareTool.Core
                     string go2rtcNetHook = fs.FileExists(Go2RtcNetHookPath) ? ReadAllText(fs, Go2RtcNetHookPath) : "";
                     checks.Add(new("go2rtc if-up.d hook matches the embedded script",
                         go2rtcNetHook == LoadScript(ResourcePrefix + "go2rtc-net-hook"), ""));
+
+                    // Factory firewall hardened against the xtables-lock race (issue #145): the factory
+                    // if-pre-up.d/iptables script must carry our --wait shim so its lock-less rebuild can
+                    // never silently drop a factory rule (SSH :22 / USB-reflash :21 / security DROPs) when
+                    // our go2rtc :8554 rule holds the lock. Only meaningful when the factory script exists
+                    // (a variant that ships none has no factory firewall to clobber → nothing to harden).
+                    if (fs.FileExists(FactoryFirewallScriptPath))
+                    {
+                        string factoryFw = ReadAllText(fs, FactoryFirewallScriptPath);
+                        // EFFECTIVE hardening: our exact shim block immediately after a `#!` shebang, LF
+                        // line endings (IsFactoryFirewallHardened checks all of that) — not merely the
+                        // marker comment or the shim text in some inert/quoted position. This is exactly
+                        // what the install-time gate wrote.
+                        checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
+                            IsFactoryFirewallHardened(factoryFw), ""));
+                        // The shim only runs if the hook's shebang interpreter actually exists AND is
+                        // executable in the image; otherwise Linux can't exec the hook and the firewall is
+                        // unprotected despite the marker being present. InterpreterExecutable follows symlinks
+                        // (e.g. `/bin/sh -> busybox`) and checks the execute bit.
+                        string? fwInterp = ShebangInterpreterPath(factoryFw);
+                        checks.Add(new("factory firewall shebang interpreter present and executable (#145)",
+                            fwInterp != null && InterpreterExecutable(fs, fwInterp), fwInterp ?? "(no shebang)"));
+                        // The hook file itself must be executable or ifupdown's run-parts skips it entirely, so
+                        // the shim never runs no matter how well-formed it is.
+                        uint fwMode = fs.GetMode(FactoryFirewallScriptPath);
+                        checks.Add(new("factory firewall hook is executable (run-parts runs it) (#145)",
+                            (fwMode & ExecuteBits) != 0, $"mode 0{Convert.ToString((long)(fwMode & 0xFFF), 8)}"));
+                    }
+                    else if (PathOccupied(fs, FactoryFirewallScriptPath))
+                    {
+                        // Present but NOT a regular file (e.g. a symlink) — FileExists is symlink-blind, so
+                        // the marker check above would silently skip. Report a FAILED check rather than a
+                        // false pass: the install path throws for this shape, so a passing validation here
+                        // would be inconsistent (#145).
+                        checks.Add(new("factory firewall is a regular, hardenable script (#145)", false,
+                            "present but not a regular file"));
+                    }
+                    // else genuinely absent — no factory firewall to harden, nothing to check.
                     foreach (var bin in new[] { PayloadBinaries.Ffmpeg, PayloadBinaries.Go2Rtc })
                     {
                         CheckFile(fs, checks, bin.InstallPath, 775);
@@ -1366,20 +1481,48 @@ namespace IntercomFirmwareTool.Core
         /// dangling symlink still fails (its chain never lands on a real file). The
         /// hop budget guards a symlink cycle.
         /// </summary>
-        private static bool DependencyPresent(ExtFileSystem fs, string path)
+        private static bool DependencyPresent(ExtFileSystem fs, string path) =>
+            ResolveToRegularFile(fs, path) != null;
+
+        /// <summary>
+        /// Resolves <paramref name="path"/> through up to 40 symlink hops to the real REGULAR FILE it names,
+        /// returning that resolved path, or null if the chain dangles, cycles, or never lands on a regular file.
+        /// The ext reader's <c>FileExists</c> is symlink-blind, so the walk follows <c>ReadSymLink</c> hops
+        /// (busybox applets, version links like <c>python -&gt; python2 -&gt; python2.7</c>) until it reaches a
+        /// real file. Shared by <see cref="DependencyPresent"/> and <see cref="InterpreterExecutable"/>.
+        /// </summary>
+        private static string? ResolveToRegularFile(ExtFileSystem fs, string path)
         {
             string current = path;
             for (int hops = 0; hops < 40; hops++)
             {
-                if (fs.FileExists(current)) return true;   // real file (executable / init script)
+                if (fs.FileExists(current)) return current;   // real file (executable / init script)
                 string target;
                 try { target = fs.ReadSymLink(current); } // throws if not a symlink (or absent)
-                catch { return false; }
-                if (string.IsNullOrEmpty(target)) return false;
+                catch { return null; }
+                if (string.IsNullOrEmpty(target)) return null;
                 current = ResolveLinkTarget(current, target);
             }
-            return false; // exceeded the hop budget (likely a cycle) — treat as absent
+            return null; // exceeded the hop budget (likely a cycle) — treat as absent
         }
+
+        /// <summary>
+        /// True when <paramref name="path"/> resolves (following symlinks) to a regular file with at least one
+        /// execute bit set (owner/group/other, i.e. <c>0111</c>) — an interpreter Linux could actually exec as
+        /// root. A present-but-non-executable interpreter, a dangling/cyclic link, or an absent path all read as
+        /// NOT runnable. Certifying the factory hook "hardened" promises it will RUN, so the interpreter must be
+        /// not merely present (<see cref="DependencyPresent"/>) but executable.
+        /// </summary>
+        private static bool InterpreterExecutable(ExtFileSystem fs, string path)
+        {
+            string? real = ResolveToRegularFile(fs, path);
+            return real != null && (fs.GetMode(real) & ExecuteBits) != 0;
+        }
+
+        /// <summary>The Unix execute permission bits (owner/group/other, <c>0111</c>). Root can exec a file
+        /// iff at least one is set, so this is the "is it runnable" mask for both the shebang interpreter and
+        /// the hook file itself.</summary>
+        private const uint ExecuteBits = 0x40u | 0x08u | 0x01u;   // 0111 octal
 
         /// <summary>
         /// Resolves a symlink target — absolute, or relative to the link's own
@@ -2568,6 +2711,287 @@ namespace IntercomFirmwareTool.Core
             WriteTextFile(fs, path, text);
             fs.SetMode(path, mode);
             if (owner != null) fs.SetOwner(path, owner.Item1, owner.Item2);
+        }
+
+        /// <summary>
+        /// Hardens the panel's FACTORY firewall against the xtables-lock race (issue #145) so the
+        /// on-device camera can never cause a factory INPUT rule to be dropped. The factory script
+        /// (<see cref="FactoryFirewallScriptPath"/>) rebuilds INPUT with ~40 LOCK-LESS <c>iptables -A</c>
+        /// calls on every interface bring-up; a call that overlaps another writer's xtables-lock hold
+        /// fails silently (the script never checks the exit code), so a factory rule — SSH <c>:22</c>, the
+        /// FTP-over-USB reflash <c>:21</c>, a security DROP — goes missing until the next clean rebuild,
+        /// locking out SSH or the MyHOME-Suite reflash. We insert a one-line shell shim right after the
+        /// script's shebang that shadows <c>iptables</c> with a function injecting <c>--wait</c>, so every
+        /// factory call BLOCKS for the lock instead of dropping a rule.
+        ///
+        /// <para>Idempotent: a script already carrying the exact shim block right after its shebang (see
+        /// <see cref="IsFactoryFirewallHardened"/>) is left untouched. Preserves the script's mode/owner
+        /// (<see cref="RewritePreservingMeta"/>). Best-effort
+        /// on shape: if the factory script is ABSENT (a variant that ships none — then there is no factory
+        /// firewall to clobber) we skip. Invoked ONLY on the on-device camera path, the sole image that
+        /// adds a second iptables writer.</para>
+        /// </summary>
+        private static void PatchFactoryFirewallWaitForLock(ExtFileSystem fs)
+        {
+            if (!fs.FileExists(FactoryFirewallScriptPath))
+            {
+                // FileExists is symlink-BLIND (like elsewhere in this file — see PathOccupied /
+                // DependencyPresent). A path that is OCCUPIED but not a regular file (a symlink on some
+                // variant, say) must NOT be silently skipped: that would leave the #145 race unfixed while
+                // ValidateMqtt still passed. Fail loudly. Only a GENUINELY ABSENT script (no factory
+                // firewall to clobber) is the skip case.
+                if (PathOccupied(fs, FactoryFirewallScriptPath))
+                    throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
+                return;                                              // genuinely absent — nothing to harden
+            }
+            // ifupdown runs if-pre-up.d hooks via run-parts, which SKIPS any entry without an execute bit. A
+            // mode-0644 factory script therefore never runs at all — the shim (and the whole factory firewall)
+            // would be inert while install/validate report "hardened". RewritePreservingMeta keeps the original
+            // mode, so we can't silently fix it; require the hook itself to be executable and fail closed if not.
+            if ((fs.GetMode(FactoryFirewallScriptPath) & ExecuteBits) == 0)
+                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
+            string original = ReadAllText(fs, FactoryFirewallScriptPath);
+            string patched = EnsureFactoryFirewallShim(original);
+            // The certification promises the hardened hook will actually RUN. A shell shebang whose interpreter
+            // is ABSENT from the image — a bogus `#!/opt/missing/bash`, or a dangling symlink — can't exec, so
+            // hardening it would be a false positive that leaves the firewall unprotected while ValidateMqtt
+            // still passes. Verify the interpreter resolves to a real EXECUTABLE (InterpreterExecutable follows
+            // symlinks, e.g. `/bin/sh -> busybox`, and checks the execute bit) before writing. The splice leaves
+            // the shebang unchanged, so checking `patched` is equivalent to checking `original`.
+            string? interp = ShebangInterpreterPath(patched);
+            if (interp is null || !InterpreterExecutable(fs, interp))
+                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
+            // Rewrite when the result differs from the original — either because we spliced the shim in,
+            // OR because we normalized CRLF endings to LF (a CRLF hook's `#!/bin/bash\r` shebang is
+            // unrunnable on Linux). An already-hardened LF script yields an identical string → no write.
+            if (!string.Equals(patched, original, StringComparison.Ordinal))
+                RewritePreservingMeta(fs, FactoryFirewallScriptPath, patched);
+        }
+
+        /// <summary>
+        /// Tokenizes shebang text on SPACE and TAB only — exactly what the Linux kernel's
+        /// <c>fs/binfmt_script.c</c> treats as a separator between the interpreter and its argument. The
+        /// framework's <c>string.Split((char[]?)null, …)</c> splits on ALL Unicode whitespace (vertical tab,
+        /// form feed, NBSP, …), which the kernel keeps as part of the token — so using it would extract a
+        /// DIFFERENT interpreter than the one Linux execs (e.g. <c>#!/bin/bash\v</c> → <c>/bin/bash</c> here
+        /// but <c>/bin/bash\v</c> to the kernel), certifying a hook that can't run. Space/tab only avoids that.
+        /// </summary>
+        private static string[] SplitShebangTokens(string text) =>
+            text.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+
+        /// <summary>
+        /// The interpreter path from a <c>#!</c> shebang — the first SPACE/TAB-delimited token after <c>#!</c>
+        /// on the first line (a trailing <c>\r</c> is trimmed), matching the kernel's parser
+        /// (<see cref="SplitShebangTokens"/>). Null when there is no shebang. For a hook we accept
+        /// (<see cref="HasShellShebang"/>) this is an ABSOLUTE path; the install/validate paths use it to
+        /// confirm the interpreter actually EXISTS as an executable in the image before certifying the hook
+        /// hardened. Pure — no I/O.
+        /// </summary>
+        internal static string? ShebangInterpreterPath(string script)
+        {
+            int nl = script.IndexOf('\n');
+            string first = (nl >= 0 ? script[..nl] : script).TrimEnd('\r');
+            if (!first.StartsWith("#!", StringComparison.Ordinal))
+                return null;
+            string[] toks = SplitShebangTokens(first[2..]);
+            return toks.Length > 0 ? toks[0] : null;
+        }
+
+        /// <summary>
+        /// Pure splice (issue #145): normalizes CRLF/CR to LF, strips any prior owned shim block(s), then
+        /// inserts ONE fresh <see cref="FactoryFirewallShim"/> block immediately AFTER the shebang line — so
+        /// the <c>iptables</c> function is defined before any factory <c>iptables</c> call runs and no stale
+        /// copy survives below it to override the fresh one. A file with no <c>#!</c> shebang is rejected. A
+        /// degenerate script with no newline gets the shim appended after its content. Idempotent BY VALUE:
+        /// an already-clean script strips to the same text and gets the same block back, so the output is
+        /// byte-identical to the input. Factored out with no I/O so it is unit-tested directly.
+        /// <c>internal</c> for the test project.
+        /// </summary>
+        internal static string EnsureFactoryFirewallShim(string script)
+        {
+            // Normalize CRLF/CR → LF FIRST. A factory hook with CRLF endings is UNRUNNABLE on Linux: the
+            // direct-exec interpreter path becomes `/bin/bash\r`, which does not exist, so ifupdown can't
+            // run the hook at all. We must therefore NOT preserve CRLF — normalizing repairs the hook and
+            // lets the shim splice cleanly (mirrors LoadScript, which LF-normalizes embedded scripts). The
+            // caller rewrites whenever the result differs from the original, so a CRLF file is re-emitted
+            // as LF even when it already carries the block.
+            string lf = script.Replace("\r\n", "\n").Replace("\r", "\n");
+            // The script must be a SHELL script — a `#!` first line naming a known shell (see KnownShells).
+            // A file with no shebang would run unusably as a directly-executed if-pre-up.d hook, and one with
+            // a NON-shell interpreter (say `#!/usr/bin/python`) cannot run the `iptables()` function shim or
+            // the factory's own shell commands — splicing shell into it would corrupt the file. Either is
+            // REJECTED. The shim is POSIX, so any real shell (bash, dash, BusyBox ash, …) runs it; we do not
+            // require bash.
+            if (!HasShellShebang(lf))
+                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
+            // STRIP a prior owned block ONLY at the ANCHOR — immediately after the shebang, the single place
+            // the installer ever writes it — then insert ONE fresh block there. Removing first makes re-patch
+            // idempotent by value: an already-hardened script strips to the same text and gets the same block
+            // back, so the output is byte-identical (the caller writes only when the result differs). We do
+            // NOT scan the rest of the hook for marker-looking lines: a complete marker pair could legitimately
+            // appear later as DATA (e.g. inside a quoted here-document), and deleting the content between them
+            // would corrupt the hook. We also do NOT defend against a hand-edit that adds its OWN `iptables()`
+            // redefinition after our block — out of scope (see the FactoryFirewallShim comment); the real
+            // factory hook has neither our markers as data nor a foreign redefinition.
+            string stripped = StripOwnedBlockAtAnchor(lf);
+            int firstNl = stripped.IndexOf('\n');
+            return firstNl >= 0
+                ? stripped[..(firstNl + 1)] + FactoryFirewallShim + stripped[(firstNl + 1)..]
+                : stripped + "\n" + FactoryFirewallShim;
+        }
+
+        /// <summary>
+        /// Remove installer-owned shim blocks <b>only while they sit at the ANCHOR</b> — as the very first
+        /// line after the shebang, which is the single place <see cref="EnsureFactoryFirewallShim"/> ever
+        /// writes it. While the first post-shebang line is a <see cref="FactoryFirewallBlockOpen"/> marker, the
+        /// contiguous run through its matching <see cref="FactoryFirewallBlockClose"/> is dropped and the check
+        /// repeats, so EVERY block stacked at the anchor is peeled off (a tampered input could carry two, and a
+        /// surviving second block could redefine <c>iptables()</c> below the fresh shim); otherwise the script
+        /// is returned unchanged. Marker-looking lines ELSEWHERE (a quoted here-document, a
+        /// conditional, the factory rules) are NEVER touched — deleting data between a marker pair that is not
+        /// our block could strip real firewall rules.
+        ///
+        /// <para>An opener at the anchor with NO matching closer before the next opener means a CORRUPT/
+        /// tampered block. We must NEVER return the partially-filtered result — that would silently drop every
+        /// factory rule after the opener (SSH <c>:22</c>, the FTP-reflash <c>:21</c>, the security DROPs) and
+        /// lock the unit out — so this FAILS the install loudly (throws), like the other shape guards. The
+        /// closer scan is also structure-checked: a genuine block holds only comment lines and the EXACT
+        /// <see cref="FactoryFirewallShimFn"/> line, so anything else before the closer — a real factory
+        /// command, a smuggled <c>iptables() {…}; iptables -A …</c>, or a hand-altered function — marks the
+        /// opener unterminated and a later <c># &lt;&lt;&lt; …</c> as coincidental DATA; we throw rather than
+        /// delete the rules between them. A tampered block therefore fails CLOSED instead of being rewritten.</para>
+        ///
+        /// <para>LF input; splits and rejoins on <c>'\n'</c> so the trailing newline is preserved. Pure —
+        /// no I/O.</para>
+        /// </summary>
+        private static string StripOwnedBlockAtAnchor(string script)
+        {
+            var lines = new List<string>(script.Split('\n'));
+            // Peel off EVERY owned block stacked at the anchor, not just the first. A tampered input could
+            // carry two back-to-back owned blocks; leaving the second in place would let it redefine
+            // iptables() (possibly WITHOUT -w) below the fresh shim, silently defeating the fix while
+            // IsFactoryFirewallHardened — which only inspects the block right after the shebang — still
+            // reads "hardened". Loop until line 1 is no longer an opener so the re-insert lands on a clean anchor.
+            while (lines.Count >= 2 &&
+                   lines[1].TrimStart().StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal))
+            {
+                // The anchor block runs from line 1 to its matching closer. A second opener before the closer
+                // means the anchor block is unterminated/corrupt.
+                int close = -1;
+                for (int i = 2; i < lines.Count; i++)
+                {
+                    string t = lines[i].TrimStart();
+                    if (t.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal)) { close = i; break; }
+                    if (t.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal)) break;
+                    // Fail closed against a SPOOFED closer. A genuine block holds only its own comment lines
+                    // (`#…`) and the EXACT `FactoryFirewallShimFn` line. Matching the function loosely (say
+                    // `StartsWith("iptables()")`) would accept a smuggled `iptables() { … }; iptables -A INPUT …`
+                    // and then delete that real rule when RemoveRange runs — so we require byte-exact equality.
+                    // Any other line — a real factory command, or a tampered/foreign function — means this
+                    // anchor opener is unterminated and any `# <<< …` below is coincidental marker text in data
+                    // (a here-document, say); stop scanning so we THROW below instead of deleting real rules. A
+                    // block whose function was hand-altered therefore fails CLOSED rather than being silently
+                    // rewritten — safer for a firewall hook than guessing.
+                    if (!t.StartsWith("#", StringComparison.Ordinal) &&
+                        !string.Equals(t, FactoryFirewallShimFn, StringComparison.Ordinal))
+                        break;
+                }
+                if (close < 0)
+                    throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
+                lines.RemoveRange(1, close);                     // drop lines[1..close] inclusive (opener→closer)
+            }
+            return string.Join('\n', lines);
+        }
+
+        /// <summary>
+        /// True iff <paramref name="script"/> is hardened (issue #145): a <c>#!</c> shebang naming a known
+        /// SHELL (see <see cref="KnownShells"/>), then our EXACT installer-owned
+        /// <see cref="FactoryFirewallShim"/> block IMMEDIATELY after the shebang line — which is exactly what
+        /// <see cref="EnsureFactoryFirewallShim"/> writes. Requiring the whole block (not merely the function
+        /// text somewhere) means it cannot be fooled by that text in a comment, an inactive
+        /// <c>if false; then … fi</c> branch, or a quoted here-document — none of which place our whole block
+        /// right after the shebang. The block is LF, so a CRLF script — unrunnable as a hook — correctly
+        /// reads as NOT hardened. This certifies that OUR shim is installed; it does not attempt to prove a
+        /// hand-edit lower in the hook can't redefine <c>iptables()</c> (out of scope — see the
+        /// <see cref="FactoryFirewallShim"/> comment). Used by the idempotency skip and <c>ValidateMqtt</c>.
+        /// </summary>
+        internal static bool IsFactoryFirewallHardened(string script)
+        {
+            if (!HasShellShebang(script))
+                return false;                                        // not a shell hook — never hardened
+            int firstNl = script.IndexOf('\n');
+            if (firstNl < 0)
+                return false;                                        // shebang only, no room for the block
+            // A genuinely hardened hook is pure LF: EnsureFactoryFirewallShim normalizes CRLF/CR to LF before
+            // writing, so ANY `\r` means this is not what we wrote and won't run as intended. A CRLF SHEBANG
+            // (`#!/bin/bash\r\n`) is unrunnable — the kernel takes `/bin/bash\r` as the interpreter — and a CRLF
+            // factory BODY passes trailing-`\r` arguments to the factory `iptables` calls (e.g. `INPUT\r`), so
+            // those rules fail. HasShellShebang tolerates a trailing `\r` (it also guards not-yet-normalized
+            // input), so enforce the LF-only contract HERE: the certification must never bless a hook that
+            // won't execute correctly.
+            if (script.Contains('\r'))
+                return false;
+            // The exact shim block must be the very next thing after the shebang line.
+            int afterShebang = firstNl + 1;
+            return script.AsSpan(afterShebang).StartsWith(FactoryFirewallShim.AsSpan());
+        }
+
+        /// <summary>
+        /// True iff the FIRST line is a <c>#!</c> shebang that runs a known shell (see
+        /// <see cref="KnownShells"/>): either a BARE DIRECT interpreter path — <c>#!/bin/bash</c>,
+        /// <c>#!/bin/sh</c>, <c>#!/usr/bin/dash</c> with NO interpreter arguments. The interpreter path must be
+        /// ABSOLUTE (leading <c>/</c>): the kernel resolves a relative <c>#!</c> interpreter against the process
+        /// CWD, never <c>$PATH</c>, so <c>#!bash</c> or <c>#!busybox sh</c> would not reliably exec as a hook.
+        /// (A `-c` argument would make
+        /// bash run the hook path as a command string, so the body never executes; safe options aren't worth
+        /// enumerating and the real hook is a bare <c>#!/bin/bash</c>) — or the BusyBox/Toybox multicall form
+        /// <c>#!/bin/busybox sh</c> / <c>#!/bin/busybox ash</c> (accepted only as the exact two-token
+        /// <c>&lt;multicall&gt; &lt;shell&gt;</c> the kernel can actually run). A non-shell interpreter
+        /// (<c>#!/usr/bin/python</c>) returns false, so
+        /// a shell shim is never spliced into a non-shell hook. The <c>#!/usr/bin/env &lt;shell&gt;</c>
+        /// indirection is intentionally NOT recognized: ifupdown <c>if-pre-up.d</c> hooks use a direct
+        /// interpreter path (the real C100X hook is <c>#!/bin/bash</c>), and <c>env</c>'s kernel
+        /// single-argument shebang semantics (only a bare <c>env &lt;word&gt;</c>, or <c>env -S …</c>, is even
+        /// runnable) are error-prone to reproduce — so an <c>env</c>-form hook is rejected as unhardenable
+        /// rather than mis-parsed. Pure — no I/O. LF or CRLF input tolerated (the first line's trailing
+        /// <c>\r</c> is trimmed).
+        /// </summary>
+        private static bool HasShellShebang(string script)
+        {
+            int nl = script.IndexOf('\n');
+            string first = (nl >= 0 ? script[..nl] : script).TrimEnd('\r');
+            if (!first.StartsWith("#!", StringComparison.Ordinal))
+                return false;
+            string[] toks = SplitShebangTokens(first[2..]);   // space/tab only, matching the kernel parser
+            if (toks.Length == 0)
+                return false;
+            // The interpreter must be an ABSOLUTE path. The kernel resolves a relative `#!` interpreter against
+            // the process CWD (never $PATH), so a bare `#!bash` or `#!busybox sh` would exec unpredictably — or
+            // not at all — as an ifupdown hook, yet its basename would still match a known shell. Requiring a
+            // leading '/' matches the real device hook (`#!/bin/bash`) and keeps validation fail-closed.
+            if (!toks[0].StartsWith('/'))
+                return false;
+            static string Base(string p) => p[(p.LastIndexOf('/') + 1)..];
+            string b0 = Base(toks[0]);
+            // A BARE direct shell-path shebang — the interpreter and NOTHING else. We deliberately reject
+            // interpreter arguments: most (`-e`, `-x`) are harmless, but some change execution semantics —
+            // `#!/bin/bash -c` makes bash treat the hook PATH as a command string, so the body never runs —
+            // and enumerating safe-vs-unsafe shell flags is not worth it. The real C100X hook is a bare
+            // `#!/bin/bash`, so this rejects nothing that ships on the device.
+            if (toks.Length == 1 && Array.IndexOf(KnownShells, b0) >= 0)
+                return true;
+            // BusyBox / Toybox multicall form: `#!/bin/busybox sh`, `#!/bin/busybox ash`. The kernel passes
+            // the applet name as the SINGLE shebang argument, so ONLY the exact two-token
+            // `<multicall> <shell>` form is runnable (`#!/bin/busybox sh -x` would pass "sh -x" as one arg,
+            // which busybox can't resolve). The applet is a BARE name resolved by the multicall binary — not
+            // a path — so compare toks[1] RAW (no basename) against the shells each actually ships: busybox
+            // provides `sh` and `ash`; toybox provides `sh`. This rejects a path applet (`busybox /bin/sh`),
+            // an absent applet (`busybox bash`, `toybox ash`), and non-shell applets (`busybox awk`).
+            if (toks.Length == 2 && b0 == "busybox")
+                return toks[1] is "sh" or "ash";
+            if (toks.Length == 2 && b0 == "toybox")
+                return toks[1] == "sh";
+            return false;
         }
 
         private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)
