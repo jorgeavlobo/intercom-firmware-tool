@@ -2782,6 +2782,22 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
+        /// Completes a <see cref="RewritePreservingMeta"/> swap that a previous run left interrupted between its
+        /// two renames: if the host died AFTER <c>original → .ift-bak</c> but BEFORE <c>temp → path</c>, then
+        /// <paramref name="path"/> is absent while <c>.ift-bak</c> still holds the intact original. Restore it so
+        /// the next run continues the swap instead of mistaking the file for genuinely absent — which for the
+        /// factory-firewall hook would silently skip hardening (and a later rewrite's sibling-cleanup would then
+        /// delete the orphaned backup, losing the original for good). Acts ONLY when <paramref name="path"/> is
+        /// truly absent (not a symlink/dir, which we must not overwrite) and the backup is a regular file.
+        /// </summary>
+        private static void RecoverInterruptedRewrite(IExtFs fs, string path)
+        {
+            string bak = path + ".ift-bak";
+            if (!fs.FileExists(path) && !PathOccupied(fs, path) && fs.FileExists(bak))
+                fs.RenameFile(bak, path);   // restores the original with its mode/owner (the inode moves back)
+        }
+
+        /// <summary>
         /// Appends the factory-firewall (#145) validation checks: when the hook exists as a regular file it
         /// must be EFFECTIVELY hardened — our exact shim block right after a <c>#!</c> shebang, LF endings
         /// (<see cref="IsFactoryFirewallHardened"/>) — its shebang interpreter must exist and be executable,
@@ -2842,6 +2858,10 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static void PatchFactoryFirewallWaitForLock(IExtFs fs)
         {
+            // If a previous run crashed mid-swap the hook may be sitting in its .ift-bak backup with the real
+            // path absent; restore it FIRST, before the absent-path check below could mistake the interrupted
+            // swap for a variant that ships no factory firewall and silently skip hardening (#151).
+            RecoverInterruptedRewrite(fs, FactoryFirewallScriptPath);
             if (!fs.FileExists(FactoryFirewallScriptPath))
             {
                 // FileExists is symlink-BLIND (like elsewhere in this file — see PathOccupied /

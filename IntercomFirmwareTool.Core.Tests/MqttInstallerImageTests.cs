@@ -194,6 +194,26 @@ public class MqttInstallerImageTests
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
     }
 
+    [Fact]
+    public void Install_recovers_a_swap_interrupted_after_the_original_was_backed_up()
+    {
+        // Simulate a crash between the two swap renames: the hook is absent while its ".ift-bak" backup still
+        // holds the intact original. A fresh install must RESTORE the backup (not treat the hook as absent and
+        // skip), then harden it — preserving the original's mode/owner through the recovery.
+        const uint uid = 4242, gid = 4343;
+        var fs = FsWithBash().AddFile(Hook + ".ift-bak", FactoryScript, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
+        Assert.False(fs.HasFile(Hook));                          // precondition: the real path is missing
+
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+
+        Assert.True(fs.HasFile(Hook));                           // original recovered from the backup
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+        Assert.Equal(InMemoryExtFs.Mode0755, fs.ModeOf(Hook));   // recovered with its mode
+        Assert.Equal((uid, gid), fs.OwnerOf(Hook)!.Value);       // and its owner
+        Assert.False(fs.HasFile(Hook + ".ift-bak"));             // backup consumed by the recovery
+        Assert.False(fs.HasFile(Hook + ".ift-tmp"));
+    }
+
     // ----------------------------- validate: CheckFactoryFirewall -----------------------------
 
     private static Ext4Check Named(IReadOnlyList<Ext4Check> checks, string fragment) =>
