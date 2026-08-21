@@ -214,35 +214,26 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Fact]
-    public void A_prior_owned_block_with_an_altered_function_is_stripped_not_layered()
+    public void An_owned_block_with_an_altered_function_fails_closed()
     {
-        // A previously-installed block whose function was hand-altered (here: `-w` removed) must be REMOVED
-        // on re-patch, not left below a fresh block — otherwise the shell's LAST definition (the altered,
-        // lock-less one) would win. The result must carry exactly one block with the correct -w function
-        // and no trace of the altered one.
+        // A previously-installed block whose function was hand-altered (here: `-w` removed) is NOT silently
+        // rewritten. The strip accepts only the EXACT FactoryFirewallShimFn line inside a block, so an altered
+        // function reads as a corrupt/unterminated block and the patch FAILS CLOSED (throws), leaving the
+        // on-disk hook untouched. Refusing a tampered firewall hook is safer than guessing at a rewrite.
         string tampered = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript)
             .Replace("command iptables -w \"$@\"", "command iptables \"$@\"");  // remove -w inside the block
         Assert.DoesNotContain("command iptables -w \"$@\"", tampered);          // sanity: it's really gone
-
-        string repatched = MqttInstaller.EnsureFactoryFirewallShim(tampered);
-        Assert.True(MqttInstaller.IsFactoryFirewallHardened(repatched));        // a clean block was restored
-        Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", repatched);  // correct function present
-        Assert.DoesNotContain("command iptables \"$@\"", repatched);            // altered function stripped
-        // Exactly one shim block: two marker lines (">>>" opener, "<<<" closer).
-        int count = 0, i = 0;
-        while ((i = repatched.IndexOf("IntercomFirmwareTool #145", i, System.StringComparison.Ordinal)) >= 0)
-        { count++; i += 1; }
-        Assert.Equal(2, count);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(tampered));
     }
 
     [Fact]
-    public void Two_stacked_owned_blocks_at_the_anchor_are_both_stripped_not_layered()
+    public void Two_stacked_clean_owned_blocks_at_the_anchor_are_both_stripped()
     {
-        // A tampered input could carry TWO back-to-back owned blocks right after the shebang, the second one
-        // altered to drop -w. Stripping only the first would leave the lock-less block below the fresh shim,
-        // where the shell's LAST iptables() definition wins — yet IsFactoryFirewallHardened, which only checks
-        // the block right after the shebang, would still read "hardened". Both anchor blocks must be peeled off
-        // so the re-patch lands on a clean anchor with exactly one, correct block.
+        // A re-patch could momentarily face TWO back-to-back owned blocks at the anchor (e.g. an interrupted
+        // earlier run). Both must be peeled off so exactly one clean block remains — the strip loops until the
+        // anchor is no longer an opener. (An ALTERED stacked block instead fails closed; see the altered-
+        // function test — so here both copies are the exact clean block, to exercise the peel loop itself.)
         string clean = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
         int nl = clean.IndexOf('\n');
         string shebang = clean[..(nl + 1)];
@@ -252,14 +243,12 @@ public class MqttFactoryFirewallShimTests
         int end = body.IndexOf(blockEnd, System.StringComparison.Ordinal) + blockEnd.Length;
         string ownedBlock = body[..end];
         string rest = body[end..];
-        string altered = ownedBlock.Replace("command iptables -w \"$@\"", "command iptables \"$@\"");
-        // shebang + [clean block] + [altered block] + factory rules — two owned blocks stacked at the anchor.
-        string stacked = shebang + ownedBlock + altered + rest;
+        // shebang + [clean block] + [clean block] + factory rules — two owned blocks stacked at the anchor.
+        string stacked = shebang + ownedBlock + ownedBlock + rest;
 
         string repatched = MqttInstaller.EnsureFactoryFirewallShim(stacked);
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(repatched));        // a clean anchor was restored
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", repatched);
-        Assert.DoesNotContain("command iptables \"$@\"", repatched);            // altered block fully stripped
         // Exactly one shim block survives: two marker lines (">>>" opener, "<<<" closer).
         int count = 0, i = 0;
         while ((i = repatched.IndexOf("IntercomFirmwareTool #145", i, System.StringComparison.Ordinal)) >= 0)
@@ -409,6 +398,23 @@ public class MqttFactoryFirewallShimTests
             "iptables -P INPUT DROP\n";
         Assert.Throws<System.InvalidOperationException>(
             () => MqttInstaller.EnsureFactoryFirewallShim(spoof));
+    }
+
+    [Fact]
+    public void A_smuggled_command_on_the_function_line_is_rejected_not_deleted()
+    {
+        // The block's function line must be EXACTLY our shim. If a real command is smuggled onto it
+        // (`iptables() { … }; iptables -A INPUT …`), accepting the line via a loose prefix check would let the
+        // strip run to the closer and RemoveRange DELETE that real rule. Byte-exact matching rejects it: the
+        // line is neither a comment nor the exact function, so the block reads unterminated and we fail closed.
+        string smuggle =
+            "#!/bin/bash\n" +
+            "# >>> IntercomFirmwareTool #145: make the factory firewall WAIT for the xtables lock >>>\n" +
+            "iptables() { command iptables -w \"$@\"; }; iptables -A INPUT -p tcp --dport 22 -j ACCEPT\n" +
+            "# <<< IntercomFirmwareTool #145 <<<\n" +
+            "iptables -P INPUT DROP\n";
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(smuggle));
     }
 
     [Fact]

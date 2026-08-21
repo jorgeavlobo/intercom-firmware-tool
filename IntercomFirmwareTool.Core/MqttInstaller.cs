@@ -488,13 +488,15 @@ namespace IntercomFirmwareTool.Core
             "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
             FactoryFirewallShimFn + "\n" +
             "# <<< " + FactoryFirewallShimMarker + " <<<\n";
-        // The opener/closer marker-line prefixes of an installed shim block. Used to STRIP prior owned
+        // The opener/closer marker-line prefixes of an installed shim block. Used to STRIP prior EXACT owned
         // block(s) AT THE ANCHOR — stacked immediately after the shebang, the only place we ever write one —
-        // before re-inserting a fresh one, so a stale or hand-altered copy — e.g. one whose `-w` was removed —
-        // can't survive below the fresh block and override it (the shell uses the LAST definition of a
-        // function). A marker that has DRIFTED lower in the hook is deliberately left in place: we only remove
-        // content BETWEEN our own markers at the anchor, never foreign lines, so a legitimate here-document or
-        // conditional elsewhere is untouched. (IsFactoryFirewallHardened likewise certifies only the anchor.)
+        // before re-inserting a fresh one, so a duplicated copy can't survive below the fresh block and
+        // override it (the shell uses the LAST definition of a function). Only a block whose inner lines are
+        // our comments and the EXACT function is stripped; a hand-altered or smuggled block fails CLOSED
+        // (throws) rather than being silently rewritten. A marker that has DRIFTED lower in the hook is
+        // deliberately left in place: we only remove content BETWEEN our own markers at the anchor, never
+        // foreign lines, so a legitimate here-document or conditional elsewhere is untouched.
+        // (IsFactoryFirewallHardened likewise certifies only the anchor.)
         private const string FactoryFirewallBlockOpen = "# >>> " + FactoryFirewallShimMarker;
         private const string FactoryFirewallBlockClose = "# <<< " + FactoryFirewallShimMarker;
         // Interpreter basenames we recognize as a POSIX-ish shell that runs the `iptables()` function shim
@@ -2853,10 +2855,11 @@ namespace IntercomFirmwareTool.Core
         /// tampered block. We must NEVER return the partially-filtered result — that would silently drop every
         /// factory rule after the opener (SSH <c>:22</c>, the FTP-reflash <c>:21</c>, the security DROPs) and
         /// lock the unit out — so this FAILS the install loudly (throws), like the other shape guards. The
-        /// closer scan is also structure-checked: a genuine block holds only comment lines and the single
-        /// <c>iptables()</c> function, so a real factory command before the closer marks the opener unterminated
-        /// and a later <c># &lt;&lt;&lt; …</c> as coincidental DATA — we throw rather than delete the rules
-        /// between them.</para>
+        /// closer scan is also structure-checked: a genuine block holds only comment lines and the EXACT
+        /// <see cref="FactoryFirewallShimFn"/> line, so anything else before the closer — a real factory
+        /// command, a smuggled <c>iptables() {…}; iptables -A …</c>, or a hand-altered function — marks the
+        /// opener unterminated and a later <c># &lt;&lt;&lt; …</c> as coincidental DATA; we throw rather than
+        /// delete the rules between them. A tampered block therefore fails CLOSED instead of being rewritten.</para>
         ///
         /// <para>LF input; splits and rejoins on <c>'\n'</c> so the trailing newline is preserved. Pure —
         /// no I/O.</para>
@@ -2881,13 +2884,16 @@ namespace IntercomFirmwareTool.Core
                     if (t.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal)) { close = i; break; }
                     if (t.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal)) break;
                     // Fail closed against a SPOOFED closer. A genuine block holds only its own comment lines
-                    // (`#…`) and the single `iptables()` function. If a line here is neither — a real factory
-                    // command such as `iptables -F INPUT` (note the space, not `()`) — then this anchor opener
-                    // is unterminated and any `# <<< …` further down is coincidental marker text in data (a
-                    // here-document, say). Stop scanning so we THROW below instead of RemoveRange deleting the
-                    // real firewall rules between the opener and that spurious closer.
+                    // (`#…`) and the EXACT `FactoryFirewallShimFn` line. Matching the function loosely (say
+                    // `StartsWith("iptables()")`) would accept a smuggled `iptables() { … }; iptables -A INPUT …`
+                    // and then delete that real rule when RemoveRange runs — so we require byte-exact equality.
+                    // Any other line — a real factory command, or a tampered/foreign function — means this
+                    // anchor opener is unterminated and any `# <<< …` below is coincidental marker text in data
+                    // (a here-document, say); stop scanning so we THROW below instead of deleting real rules. A
+                    // block whose function was hand-altered therefore fails CLOSED rather than being silently
+                    // rewritten — safer for a firewall hook than guessing.
                     if (!t.StartsWith("#", StringComparison.Ordinal) &&
-                        !t.StartsWith("iptables()", StringComparison.Ordinal))
+                        !string.Equals(t, FactoryFirewallShimFn, StringComparison.Ordinal))
                         break;
                 }
                 if (close < 0)
