@@ -488,11 +488,13 @@ namespace IntercomFirmwareTool.Core
             "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
             FactoryFirewallShimFn + "\n" +
             "# <<< " + FactoryFirewallShimMarker + " <<<\n";
-        // The opener/closer marker-line prefixes of an installed shim block. Used to STRIP any prior
-        // owned block(s) before re-inserting a fresh one, so a stale or hand-altered copy — e.g. one whose
-        // `-w` was removed — can't survive below the fresh block and override it (the shell uses the LAST
-        // definition of a function). We only ever remove content BETWEEN our own markers, never foreign
-        // lines, so a legitimate here-document or conditional elsewhere is untouched.
+        // The opener/closer marker-line prefixes of an installed shim block. Used to STRIP prior owned
+        // block(s) AT THE ANCHOR — stacked immediately after the shebang, the only place we ever write one —
+        // before re-inserting a fresh one, so a stale or hand-altered copy — e.g. one whose `-w` was removed —
+        // can't survive below the fresh block and override it (the shell uses the LAST definition of a
+        // function). A marker that has DRIFTED lower in the hook is deliberately left in place: we only remove
+        // content BETWEEN our own markers at the anchor, never foreign lines, so a legitimate here-document or
+        // conditional elsewhere is untouched. (IsFactoryFirewallHardened likewise certifies only the anchor.)
         private const string FactoryFirewallBlockOpen = "# >>> " + FactoryFirewallShimMarker;
         private const string FactoryFirewallBlockClose = "# <<< " + FactoryFirewallShimMarker;
         // Interpreter basenames we recognize as a POSIX-ish shell that runs the `iptables()` function shim
