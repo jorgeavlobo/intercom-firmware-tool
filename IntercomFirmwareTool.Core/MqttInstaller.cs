@@ -1379,6 +1379,12 @@ namespace IntercomFirmwareTool.Core
                         // what the install-time gate wrote.
                         checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
                             IsFactoryFirewallHardened(factoryFw), ""));
+                        // The shim only runs if the hook's shebang interpreter actually exists in the image;
+                        // otherwise Linux can't exec the hook and the firewall is unprotected despite the
+                        // marker being present. DependencyPresent follows symlinks (e.g. `/bin/sh -> busybox`).
+                        string? fwInterp = ShebangInterpreterPath(factoryFw);
+                        checks.Add(new("factory firewall shebang interpreter present in the image (#145)",
+                            fwInterp != null && DependencyPresent(fs, fwInterp), fwInterp ?? "(no shebang)"));
                     }
                     else if (PathOccupied(fs, FactoryFirewallScriptPath))
                     {
@@ -2689,6 +2695,23 @@ namespace IntercomFirmwareTool.Core
         /// firewall to clobber) we skip. Invoked ONLY on the on-device camera path, the sole image that
         /// adds a second iptables writer.</para>
         /// </summary>
+        /// <summary>
+        /// The interpreter path from a <c>#!</c> shebang — the first whitespace-delimited token after
+        /// <c>#!</c> on the first line (a trailing <c>\r</c> is trimmed). Null when there is no shebang. For a
+        /// hook we accept (<see cref="HasShellShebang"/>) this is an ABSOLUTE path; the install/validate paths
+        /// use it to confirm the interpreter actually EXISTS as an executable in the image before certifying
+        /// the hook hardened. Pure — no I/O.
+        /// </summary>
+        internal static string? ShebangInterpreterPath(string script)
+        {
+            int nl = script.IndexOf('\n');
+            string first = (nl >= 0 ? script[..nl] : script).TrimEnd('\r');
+            if (!first.StartsWith("#!", StringComparison.Ordinal))
+                return null;
+            string[] toks = first[2..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            return toks.Length > 0 ? toks[0] : null;
+        }
+
         private static void PatchFactoryFirewallWaitForLock(ExtFileSystem fs)
         {
             if (!fs.FileExists(FactoryFirewallScriptPath))
@@ -2704,6 +2727,15 @@ namespace IntercomFirmwareTool.Core
             }
             string original = ReadAllText(fs, FactoryFirewallScriptPath);
             string patched = EnsureFactoryFirewallShim(original);
+            // The certification promises the hardened hook will actually RUN. A shell shebang whose interpreter
+            // is ABSENT from the image — a bogus `#!/opt/missing/bash`, or a dangling symlink — can't exec, so
+            // hardening it would be a false positive that leaves the firewall unprotected while ValidateMqtt
+            // still passes. Verify the interpreter resolves to a real executable (DependencyPresent follows
+            // symlinks, e.g. `/bin/sh -> busybox`) before writing. The splice leaves the shebang unchanged, so
+            // checking `patched` is equivalent to checking `original`.
+            string? interp = ShebangInterpreterPath(patched);
+            if (interp is null || !DependencyPresent(fs, interp))
+                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             // Rewrite when the result differs from the original — either because we spliced the shim in,
             // OR because we normalized CRLF endings to LF (a CRLF hook's `#!/bin/bash\r` shebang is
             // unrunnable on Linux). An already-hardened LF script yields an identical string → no write.

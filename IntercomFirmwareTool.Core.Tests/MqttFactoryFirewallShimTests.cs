@@ -349,6 +349,29 @@ public class MqttFactoryFirewallShimTests
         Assert.False(MqttInstaller.IsFactoryFirewallHardened(script));
     }
 
+    [Theory]
+    // ShebangInterpreterPath extracts the FIRST token after `#!` — the interpreter path the install/validate
+    // paths then check actually EXISTS in the image (a bogus `#!/opt/missing/bash` must not certify hardened).
+    [InlineData("#!/bin/bash\niptables -F INPUT\n", "/bin/bash")]
+    [InlineData("#!/bin/sh\n", "/bin/sh")]
+    [InlineData("#!/usr/bin/dash\n", "/usr/bin/dash")]
+    [InlineData("#!/bin/busybox sh\n", "/bin/busybox")]     // multicall: the interpreter is the multicall binary
+    [InlineData("#!/bin/toybox sh\n", "/bin/toybox")]
+    [InlineData("#!/opt/missing/bash\n", "/opt/missing/bash")] // extracted verbatim; existence is checked later
+    [InlineData("#!  /bin/bash  \n", "/bin/bash")]          // leading/trailing spaces trimmed by the token split
+    [InlineData("#!/bin/bash\r\n", "/bin/bash")]            // trailing CR on the shebang line is stripped
+    public void Shebang_interpreter_path_is_the_first_token(string script, string expected)
+    {
+        Assert.Equal(expected, MqttInstaller.ShebangInterpreterPath(script));
+    }
+
+    [Fact]
+    public void Shebang_interpreter_path_is_null_without_a_shebang()
+    {
+        Assert.Null(MqttInstaller.ShebangInterpreterPath("iptables -F INPUT\n"));
+        Assert.Null(MqttInstaller.ShebangInterpreterPath(""));
+    }
+
     [Fact]
     public void An_unterminated_owned_block_is_rejected_not_silently_truncated()
     {

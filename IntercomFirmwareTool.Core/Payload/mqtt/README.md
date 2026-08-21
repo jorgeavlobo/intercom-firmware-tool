@@ -163,7 +163,7 @@ into something that can't run it as intended:
   rather than enumerate safe-vs-unsafe flags we reject all args — the real hook is a
   bare `#!/bin/bash`);
 - **every** `#!/usr/bin/env` form — even the runnable single-argument `#!/usr/bin/env
-  bash`. ifupdown `if-pre-up.d` hooks use a direct interpreter path, and Linux passes
+  bash`. The ifupdown `if-pre-up.d` hooks use a direct interpreter path, and Linux passes
   the whole post-`env` text as a *single* argument (so `env -S` would be needed just
   to split multi-token forms); rather than reproduce env's kernel shebang semantics,
   we don't recognize the `env` form at all.
@@ -185,7 +185,11 @@ whole block after the shebang, so such a script is re-patched. A file lacking a 
 shebang, a non-shell shebang, and an unterminated shim block are rejected outright,
 and a CRLF-lined script
 (unrunnable as a hook — Linux would try to exec the interpreter `/bin/bash\r`) is
-normalized to LF when patched. `ValidateMqtt` asserts the same. With the factory
+normalized to LF when patched. Because "hardened" means the hook will actually
+**run**, the shebang's interpreter path must resolve to an executable in the image
+(following symlinks, e.g. `/bin/sh -> busybox`); a dangling or bogus interpreter
+(`#!/opt/missing/bash`) is rejected rather than certified. `ValidateMqtt` asserts the
+same. With the factory
 calls now **waiting** (unbounded
 `-w`) instead of failing, a **factory** rule (SSH `:22`, the FTP-reflash `:21`, the
 security DROPs) is no longer dropped under lock contention. `go2rtcd`'s own mutating
