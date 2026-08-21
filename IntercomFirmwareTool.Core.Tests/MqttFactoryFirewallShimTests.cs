@@ -393,6 +393,25 @@ public class MqttFactoryFirewallShimTests
     }
 
     [Fact]
+    public void An_anchor_opener_with_only_a_spoofed_closer_in_data_is_rejected_not_deleted()
+    {
+        // The nastier variant: an UNTERMINATED opener AT THE ANCHOR, real factory commands right below it, and
+        // a line that LOOKS like our closer further down but is here-document DATA. The strip must not treat
+        // that data line as the terminator and RemoveRange the factory rules between — it must fail closed.
+        string spoof =
+            "#!/bin/bash\n" +
+            "# >>> IntercomFirmwareTool #145: make the factory firewall WAIT for the xtables lock >>>\n" +
+            "iptables -F INPUT\n" +                                    // REAL rule — must NOT be deleted
+            "iptables -A INPUT -p tcp -m tcp --dport 22 -j ACCEPT\n" + // REAL rule
+            "cat <<'EOF'\n" +
+            "# <<< IntercomFirmwareTool #145 <<<\n" +                  // spoofed closer: here-doc DATA
+            "EOF\n" +
+            "iptables -P INPUT DROP\n";
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(spoof));
+    }
+
+    [Fact]
     public void Marker_lines_that_are_heredoc_data_are_not_stripped_as_an_owned_block()
     {
         // A hook that carries a COMPLETE marker pair as DATA inside a quoted here-document (NOT at the anchor

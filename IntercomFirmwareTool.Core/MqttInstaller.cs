@@ -1386,6 +1386,11 @@ namespace IntercomFirmwareTool.Core
                         string? fwInterp = ShebangInterpreterPath(factoryFw);
                         checks.Add(new("factory firewall shebang interpreter present and executable (#145)",
                             fwInterp != null && InterpreterExecutable(fs, fwInterp), fwInterp ?? "(no shebang)"));
+                        // The hook file itself must be executable or ifupdown's run-parts skips it entirely, so
+                        // the shim never runs no matter how well-formed it is.
+                        uint fwMode = fs.GetMode(FactoryFirewallScriptPath);
+                        checks.Add(new("factory firewall hook is executable (run-parts runs it) (#145)",
+                            (fwMode & ExecuteBits) != 0, $"mode 0{Convert.ToString((long)(fwMode & 0xFFF), 8)}"));
                     }
                     else if (PathOccupied(fs, FactoryFirewallScriptPath))
                     {
@@ -1509,8 +1514,13 @@ namespace IntercomFirmwareTool.Core
         private static bool InterpreterExecutable(ExtFileSystem fs, string path)
         {
             string? real = ResolveToRegularFile(fs, path);
-            return real != null && (fs.GetMode(real) & 0x49u) != 0;  // 0x49 == 0111 (any execute bit)
+            return real != null && (fs.GetMode(real) & ExecuteBits) != 0;
         }
+
+        /// <summary>The Unix execute permission bits (owner/group/other, <c>0111</c>). Root can exec a file
+        /// iff at least one is set, so this is the "is it runnable" mask for both the shebang interpreter and
+        /// the hook file itself.</summary>
+        private const uint ExecuteBits = 0x40u | 0x08u | 0x01u;   // 0111 octal
 
         /// <summary>
         /// Resolves a symlink target — absolute, or relative to the link's own
@@ -2732,6 +2742,12 @@ namespace IntercomFirmwareTool.Core
                     throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
                 return;                                              // genuinely absent — nothing to harden
             }
+            // ifupdown runs if-pre-up.d hooks via run-parts, which SKIPS any entry without an execute bit. A
+            // mode-0644 factory script therefore never runs at all — the shim (and the whole factory firewall)
+            // would be inert while install/validate report "hardened". RewritePreservingMeta keeps the original
+            // mode, so we can't silently fix it; require the hook itself to be executable and fail closed if not.
+            if ((fs.GetMode(FactoryFirewallScriptPath) & ExecuteBits) == 0)
+                throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
             string original = ReadAllText(fs, FactoryFirewallScriptPath);
             string patched = EnsureFactoryFirewallShim(original);
             // The certification promises the hardened hook will actually RUN. A shell shebang whose interpreter
@@ -2836,7 +2852,11 @@ namespace IntercomFirmwareTool.Core
         /// <para>An opener at the anchor with NO matching closer before the next opener means a CORRUPT/
         /// tampered block. We must NEVER return the partially-filtered result — that would silently drop every
         /// factory rule after the opener (SSH <c>:22</c>, the FTP-reflash <c>:21</c>, the security DROPs) and
-        /// lock the unit out — so this FAILS the install loudly (throws), like the other shape guards.</para>
+        /// lock the unit out — so this FAILS the install loudly (throws), like the other shape guards. The
+        /// closer scan is also structure-checked: a genuine block holds only comment lines and the single
+        /// <c>iptables()</c> function, so a real factory command before the closer marks the opener unterminated
+        /// and a later <c># &lt;&lt;&lt; …</c> as coincidental DATA — we throw rather than delete the rules
+        /// between them.</para>
         ///
         /// <para>LF input; splits and rejoins on <c>'\n'</c> so the trailing newline is preserved. Pure —
         /// no I/O.</para>
@@ -2860,6 +2880,15 @@ namespace IntercomFirmwareTool.Core
                     string t = lines[i].TrimStart();
                     if (t.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal)) { close = i; break; }
                     if (t.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal)) break;
+                    // Fail closed against a SPOOFED closer. A genuine block holds only its own comment lines
+                    // (`#…`) and the single `iptables()` function. If a line here is neither — a real factory
+                    // command such as `iptables -F INPUT` (note the space, not `()`) — then this anchor opener
+                    // is unterminated and any `# <<< …` further down is coincidental marker text in data (a
+                    // here-document, say). Stop scanning so we THROW below instead of RemoveRange deleting the
+                    // real firewall rules between the opener and that spurious closer.
+                    if (!t.StartsWith("#", StringComparison.Ordinal) &&
+                        !t.StartsWith("iptables()", StringComparison.Ordinal))
+                        break;
                 }
                 if (close < 0)
                     throw new InvalidOperationException(CoreStrings.Get("Mqtt_FactoryFirewallUnhardenable"));
