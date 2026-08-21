@@ -554,10 +554,11 @@ namespace IntercomFirmwareTool.Core
         /// server (gated on the on-device camera option). Meant to run in the SAME fs
         /// session as <see cref="Ext4Probe.EnableSsh"/>'s edits.
         /// </summary>
-        public static void InstallMqtt(ExtFileSystem fs, MqttOptions opts)
+        public static void InstallMqtt(ExtFileSystem rawFs, MqttOptions opts)
         {
-            ArgumentNullException.ThrowIfNull(fs);
+            ArgumentNullException.ThrowIfNull(rawFs);
             ArgumentNullException.ThrowIfNull(opts);
+            IExtFs fs = new ExtFsAdapter(rawFs);   // seam: all fs work goes through IExtFs (see IExtFs.cs)
             Validate(opts);
 
             // Idempotency guard: refuse an image that already carries the bridge,
@@ -681,7 +682,7 @@ namespace IntercomFirmwareTool.Core
         /// Deterministic: the yaml/SDP come from <see cref="MqttOptions"/>, so <see cref="ValidateMqtt"/>
         /// re-generates and byte-compares them.
         /// </summary>
-        private static void InstallOnDeviceMediaServer(ExtFileSystem fs, MqttOptions opts)
+        private static void InstallOnDeviceMediaServer(IExtFs fs, MqttOptions opts)
         {
             if (!(opts.CameraEnabled && opts.CameraOnDevice)) return;
 
@@ -1201,10 +1202,11 @@ namespace IntercomFirmwareTool.Core
         /// reopen a sliced image and validate that. Check names stay English
         /// (diagnostic, like <c>ValidateSsh</c>).
         /// </summary>
-        public static IReadOnlyList<Ext4Check> ValidateMqtt(ExtFileSystem fs, MqttOptions opts)
+        public static IReadOnlyList<Ext4Check> ValidateMqtt(ExtFileSystem rawFs, MqttOptions opts)
         {
-            ArgumentNullException.ThrowIfNull(fs);
+            ArgumentNullException.ThrowIfNull(rawFs);
             ArgumentNullException.ThrowIfNull(opts);
+            IExtFs fs = new ExtFsAdapter(rawFs);   // seam: all fs work goes through IExtFs (see IExtFs.cs)
             Validate(opts);
             var checks = new List<Ext4Check>();
             {
@@ -1370,40 +1372,8 @@ namespace IntercomFirmwareTool.Core
                     // Factory firewall hardened against the xtables-lock race (issue #145): the factory
                     // if-pre-up.d/iptables script must carry our --wait shim so its lock-less rebuild can
                     // never silently drop a factory rule (SSH :22 / USB-reflash :21 / security DROPs) when
-                    // our go2rtc :8554 rule holds the lock. Only meaningful when the factory script exists
-                    // (a variant that ships none has no factory firewall to clobber → nothing to harden).
-                    if (fs.FileExists(FactoryFirewallScriptPath))
-                    {
-                        string factoryFw = ReadAllText(fs, FactoryFirewallScriptPath);
-                        // EFFECTIVE hardening: our exact shim block immediately after a `#!` shebang, LF
-                        // line endings (IsFactoryFirewallHardened checks all of that) — not merely the
-                        // marker comment or the shim text in some inert/quoted position. This is exactly
-                        // what the install-time gate wrote.
-                        checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
-                            IsFactoryFirewallHardened(factoryFw), ""));
-                        // The shim only runs if the hook's shebang interpreter actually exists AND is
-                        // executable in the image; otherwise Linux can't exec the hook and the firewall is
-                        // unprotected despite the marker being present. InterpreterExecutable follows symlinks
-                        // (e.g. `/bin/sh -> busybox`) and checks the execute bit.
-                        string? fwInterp = ShebangInterpreterPath(factoryFw);
-                        checks.Add(new("factory firewall shebang interpreter present and executable (#145)",
-                            fwInterp != null && InterpreterExecutable(fs, fwInterp), fwInterp ?? "(no shebang)"));
-                        // The hook file itself must be executable or ifupdown's run-parts skips it entirely, so
-                        // the shim never runs no matter how well-formed it is.
-                        uint fwMode = fs.GetMode(FactoryFirewallScriptPath);
-                        checks.Add(new("factory firewall hook is executable (run-parts runs it) (#145)",
-                            (fwMode & ExecuteBits) != 0, $"mode 0{Convert.ToString((long)(fwMode & 0xFFF), 8)}"));
-                    }
-                    else if (PathOccupied(fs, FactoryFirewallScriptPath))
-                    {
-                        // Present but NOT a regular file (e.g. a symlink) — FileExists is symlink-blind, so
-                        // the marker check above would silently skip. Report a FAILED check rather than a
-                        // false pass: the install path throws for this shape, so a passing validation here
-                        // would be inconsistent (#145).
-                        checks.Add(new("factory firewall is a regular, hardenable script (#145)", false,
-                            "present but not a regular file"));
-                    }
-                    // else genuinely absent — no factory firewall to harden, nothing to check.
+                    // our go2rtc :8554 rule holds the lock. Factored out so it is exercised directly by tests.
+                    CheckFactoryFirewall(fs, checks);
                     foreach (var bin in new[] { PayloadBinaries.Ffmpeg, PayloadBinaries.Go2Rtc })
                     {
                         CheckFile(fs, checks, bin.InstallPath, 775);
@@ -1466,7 +1436,7 @@ namespace IntercomFirmwareTool.Core
         /// false for a symlink), this is symmetric across all node types, so an "absent" assertion in
         /// <see cref="ValidateMqtt"/> can't be fooled by a stray symlink left at a media-artifact path.
         /// </summary>
-        private static bool PathOccupied(ExtFileSystem fs, string path)
+        private static bool PathOccupied(IExtFs fs, string path)
         {
             if (fs.FileExists(path) || fs.DirectoryExists(path)) return true;
             try { fs.ReadSymLink(path); return true; } catch { return false; }
@@ -1481,7 +1451,7 @@ namespace IntercomFirmwareTool.Core
         /// dangling symlink still fails (its chain never lands on a real file). The
         /// hop budget guards a symlink cycle.
         /// </summary>
-        private static bool DependencyPresent(ExtFileSystem fs, string path) =>
+        private static bool DependencyPresent(IExtFs fs, string path) =>
             ResolveToRegularFile(fs, path) != null;
 
         /// <summary>
@@ -1491,7 +1461,7 @@ namespace IntercomFirmwareTool.Core
         /// (busybox applets, version links like <c>python -&gt; python2 -&gt; python2.7</c>) until it reaches a
         /// real file. Shared by <see cref="DependencyPresent"/> and <see cref="InterpreterExecutable"/>.
         /// </summary>
-        private static string? ResolveToRegularFile(ExtFileSystem fs, string path)
+        private static string? ResolveToRegularFile(IExtFs fs, string path)
         {
             string current = path;
             for (int hops = 0; hops < 40; hops++)
@@ -1513,7 +1483,7 @@ namespace IntercomFirmwareTool.Core
         /// NOT runnable. Certifying the factory hook "hardened" promises it will RUN, so the interpreter must be
         /// not merely present (<see cref="DependencyPresent"/>) but executable.
         /// </summary>
-        private static bool InterpreterExecutable(ExtFileSystem fs, string path)
+        private static bool InterpreterExecutable(IExtFs fs, string path)
         {
             string? real = ResolveToRegularFile(fs, path);
             return real != null && (fs.GetMode(real) & ExecuteBits) != 0;
@@ -2572,7 +2542,7 @@ namespace IntercomFirmwareTool.Core
         /// file's existing owner+mode (on-device it is <c>bticino:bticino</c> 0775 —
         /// NOT root). Idempotent: does nothing if the marker is already present.
         /// </summary>
-        private static void PatchFlexisip(ExtFileSystem fs)
+        private static void PatchFlexisip(IExtFs fs)
         {
             const string path = "/etc/init.d/flexisipsh";
             if (!fs.FileExists(path))
@@ -2674,7 +2644,7 @@ namespace IntercomFirmwareTool.Core
         /// idempotency and owner/mode preservation the OTA-update block uses, so the
         /// two paths cannot drift.
         /// </summary>
-        private static void PatchHosts(ExtFileSystem fs, string host, string ip) =>
+        private static void PatchHosts(IExtFs fs, string host, string ip) =>
             BtDaemonAppsHosts.AddMappings(fs, new[] { (host, ip) });
 
         /// <summary>Resolves the broker hostname to an IPv4 for the hosts edit.</summary>
@@ -2704,13 +2674,54 @@ namespace IntercomFirmwareTool.Core
         // ---- fs helpers (mirror Ext4Probe's; kept local so the SSH path stays
         //      untouched — the two classes never share mutable state) -------------
 
-        private static void RewritePreservingMeta(ExtFileSystem fs, string path, string text)
+        private static void RewritePreservingMeta(IExtFs fs, string path, string text)
         {
             uint mode = fs.GetMode(path) & 0xFFF;
             var owner = fs.GetOwner(path);
             WriteTextFile(fs, path, text);
             fs.SetMode(path, mode);
             if (owner != null) fs.SetOwner(path, owner.Item1, owner.Item2);
+        }
+
+        /// <summary>
+        /// Appends the factory-firewall (#145) validation checks: when the hook exists as a regular file it
+        /// must be EFFECTIVELY hardened — our exact shim block right after a <c>#!</c> shebang, LF endings
+        /// (<see cref="IsFactoryFirewallHardened"/>) — its shebang interpreter must exist and be executable,
+        /// and the hook file itself must be executable (else ifupdown's run-parts skips it). A present-but-not-
+        /// regular hook (a symlink) is a FAILED check, matching the install path's throw; a genuinely absent
+        /// hook adds nothing. Factored out of <see cref="ValidateMqtt"/> so it is unit-tested directly.
+        /// </summary>
+        internal static void CheckFactoryFirewall(IExtFs fs, List<Ext4Check> checks)
+        {
+            if (fs.FileExists(FactoryFirewallScriptPath))
+            {
+                string factoryFw = ReadAllText(fs, FactoryFirewallScriptPath);
+                // EFFECTIVE hardening: our exact shim block immediately after a `#!` shebang, LF line endings
+                // (IsFactoryFirewallHardened checks all of that) — not merely the marker comment or the shim
+                // text in some inert/quoted position. This is exactly what the install-time gate wrote.
+                checks.Add(new("factory firewall hardened to wait for the xtables lock (#145)",
+                    IsFactoryFirewallHardened(factoryFw), ""));
+                // The shim only runs if the hook's shebang interpreter actually exists AND is executable in the
+                // image; otherwise Linux can't exec the hook and the firewall is unprotected despite the marker
+                // being present. InterpreterExecutable follows symlinks (e.g. `/bin/sh -> busybox`).
+                string? fwInterp = ShebangInterpreterPath(factoryFw);
+                checks.Add(new("factory firewall shebang interpreter present and executable (#145)",
+                    fwInterp != null && InterpreterExecutable(fs, fwInterp), fwInterp ?? "(no shebang)"));
+                // The hook file itself must be executable or ifupdown's run-parts skips it entirely, so the
+                // shim never runs no matter how well-formed it is.
+                uint fwMode = fs.GetMode(FactoryFirewallScriptPath);
+                checks.Add(new("factory firewall hook is executable (run-parts runs it) (#145)",
+                    (fwMode & ExecuteBits) != 0, $"mode 0{Convert.ToString((long)(fwMode & 0xFFF), 8)}"));
+            }
+            else if (PathOccupied(fs, FactoryFirewallScriptPath))
+            {
+                // Present but NOT a regular file (e.g. a symlink) — FileExists is symlink-blind, so the marker
+                // check above would silently skip. Report a FAILED check rather than a false pass: the install
+                // path throws for this shape, so a passing validation here would be inconsistent (#145).
+                checks.Add(new("factory firewall is a regular, hardenable script (#145)", false,
+                    "present but not a regular file"));
+            }
+            // else genuinely absent — no factory firewall to harden, nothing to check.
         }
 
         /// <summary>
@@ -2731,7 +2742,7 @@ namespace IntercomFirmwareTool.Core
         /// firewall to clobber) we skip. Invoked ONLY on the on-device camera path, the sole image that
         /// adds a second iptables writer.</para>
         /// </summary>
-        private static void PatchFactoryFirewallWaitForLock(ExtFileSystem fs)
+        internal static void PatchFactoryFirewallWaitForLock(IExtFs fs)
         {
             if (!fs.FileExists(FactoryFirewallScriptPath))
             {
@@ -2994,7 +3005,7 @@ namespace IntercomFirmwareTool.Core
             return false;
         }
 
-        private static void CreateSymLinkTolerant(ExtFileSystem fs, string linkPath, string linkTarget)
+        private static void CreateSymLinkTolerant(IExtFs fs, string linkPath, string linkTarget)
         {
             string? existing = null;
             try { existing = fs.ReadSymLink(linkPath); } catch { /* absent or not a symlink */ }
@@ -3031,14 +3042,14 @@ namespace IntercomFirmwareTool.Core
                 .Replace("\r\n", "\n").Replace('\r', '\n');
         }
 
-        private static void WriteConfigFile(ExtFileSystem fs, string path, string text, int mode)
+        private static void WriteConfigFile(IExtFs fs, string path, string text, int mode)
         {
             WriteTextFile(fs, path, text);
             fs.SetMode(path, ToMode(mode));
             fs.SetOwner(path, 0, 0);
         }
 
-        private static void WriteTextFile(ExtFileSystem fs, string path, string text)
+        private static void WriteTextFile(IExtFs fs, string path, string text)
         {
             byte[] bytes = Encoding.UTF8.GetBytes(text);
             using var f = fs.OpenFile(path, FileMode.Create, FileAccess.Write);
@@ -3050,7 +3061,7 @@ namespace IntercomFirmwareTool.Core
                 f.Write(bytes, 0, bytes.Length);
         }
 
-        private static void WriteBytesFile(ExtFileSystem fs, string path, byte[] bytes)
+        private static void WriteBytesFile(IExtFs fs, string path, byte[] bytes)
         {
             using var f = fs.OpenFile(path, FileMode.Create, FileAccess.Write);
             // See WriteTextFile: a zero-length Write throws in SharpExt4; FileMode.Create already
@@ -3059,7 +3070,7 @@ namespace IntercomFirmwareTool.Core
                 f.Write(bytes, 0, bytes.Length);
         }
 
-        private static void EnsureDir(ExtFileSystem fs, string path)
+        private static void EnsureDir(IExtFs fs, string path)
         {
             if (fs.DirectoryExists(path)) return;
             fs.CreateDirectory(path);
@@ -3067,7 +3078,7 @@ namespace IntercomFirmwareTool.Core
             fs.SetOwner(path, 0, 0);
         }
 
-        private static string ReadAllText(ExtFileSystem fs, string path)
+        private static string ReadAllText(IExtFs fs, string path)
         {
             using var file = fs.OpenFile(path, FileMode.Open, FileAccess.Read);
             long length = file.Length;
@@ -3091,7 +3102,7 @@ namespace IntercomFirmwareTool.Core
             return Encoding.UTF8.GetString(buf, 0, total);
         }
 
-        private static void CheckFile(ExtFileSystem fs, List<Ext4Check> checks, string path, int mode)
+        private static void CheckFile(IExtFs fs, List<Ext4Check> checks, string path, int mode)
         {
             bool exists = fs.FileExists(path);
             checks.Add(new($"{path} exists", exists, ""));
@@ -3112,7 +3123,7 @@ namespace IntercomFirmwareTool.Core
         /// would miss. Skips silently if the file is absent (existence is already
         /// reported by <see cref="CheckFile"/>).
         /// </summary>
-        private static void CheckBinaryBytes(ExtFileSystem fs, List<Ext4Check> checks, ArmBinary bin)
+        private static void CheckBinaryBytes(IExtFs fs, List<Ext4Check> checks, ArmBinary bin)
         {
             if (!fs.FileExists(bin.InstallPath)) return;
             using var file = fs.OpenFile(bin.InstallPath, FileMode.Open, FileAccess.Read);
