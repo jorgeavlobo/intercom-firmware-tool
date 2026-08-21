@@ -121,9 +121,11 @@ internal sealed class InMemoryExtFs : IExtFs
     public void RenameFile(string sourcePath, string destPath)
     {
         if (!_files.TryGetValue(sourcePath, out var e)) throw new FileNotFoundException(sourcePath);
-        // ExtFileSystem.RenameFile (lwext4 ext4_frename) refuses to overwrite an existing destination — model
-        // that throw so callers are forced to delete the destination first, exactly as on a real image.
-        if (_files.ContainsKey(destPath)) throw new IOException($"'{destPath}' already exists.");
+        // ExtFileSystem.RenameFile (lwext4 ext4_frename) refuses to overwrite an existing destination OF ANY
+        // KIND — regular file, directory, or symlink — so model all three, not just the regular-file map. A
+        // fake that only rejected a colliding regular file could let a test pass where the real image throws.
+        if (_files.ContainsKey(destPath) || _dirs.Contains(destPath) || _symlinks.ContainsKey(destPath))
+            throw new IOException($"'{destPath}' already exists.");
         _files.Remove(sourcePath);
         _files[destPath] = e;   // move the whole entry: bytes, mode and owner travel with the inode
     }
@@ -149,22 +151,38 @@ internal sealed class InMemoryExtFs : IExtFs
 }
 
 /// <summary>
-/// An <see cref="IExtFs"/> decorator that forwards everything to an inner filesystem but THROWS from
-/// <see cref="OpenFile"/> when a create-write targets a path matching a predicate — used to inject a mid-write
-/// failure and prove the safe-replace (issue #151) never damages the original file.
+/// An <see cref="IExtFs"/> decorator that forwards everything to an inner filesystem but can THROW from
+/// <see cref="OpenFile"/> (on a create-write) and/or <see cref="RenameFile"/> when the target matches an
+/// injected predicate — used to fault-inject the safe-replace (issue #151) and prove it never damages the
+/// original file: a mid-write failure leaves the original intact, and a failed swap rolls it back.
 /// </summary>
-internal sealed class FailOnCreateExtFs : IExtFs
+internal sealed class FaultyExtFs : IExtFs
 {
     private readonly IExtFs _inner;
-    private readonly Func<string, bool> _failWhen;
+    private readonly Func<string, bool>? _failCreate;
+    private readonly Func<string, string, bool>? _failRename;
 
-    public FailOnCreateExtFs(IExtFs inner, Func<string, bool> failWhen) { _inner = inner; _failWhen = failWhen; }
+    public FaultyExtFs(IExtFs inner,
+                       Func<string, bool>? failCreate = null,
+                       Func<string, string, bool>? failRename = null)
+    {
+        _inner = inner;
+        _failCreate = failCreate;
+        _failRename = failRename;
+    }
 
     public Stream OpenFile(string path, FileMode mode, FileAccess access)
     {
-        if (mode == FileMode.Create && _failWhen(path))
+        if (mode == FileMode.Create && _failCreate?.Invoke(path) == true)
             throw new IOException($"injected write failure for {path}");
         return _inner.OpenFile(path, mode, access);
+    }
+
+    public void RenameFile(string sourcePath, string destPath)
+    {
+        if (_failRename?.Invoke(sourcePath, destPath) == true)
+            throw new IOException($"injected rename failure for {sourcePath} -> {destPath}");
+        _inner.RenameFile(sourcePath, destPath);
     }
 
     public bool FileExists(string path) => _inner.FileExists(path);
@@ -176,6 +194,5 @@ internal sealed class FailOnCreateExtFs : IExtFs
     public string ReadSymLink(string path) => _inner.ReadSymLink(path);
     public void CreateSymLink(string linkTarget, string linkPath) => _inner.CreateSymLink(linkTarget, linkPath);
     public void CreateDirectory(string path) => _inner.CreateDirectory(path);
-    public void RenameFile(string sourcePath, string destPath) => _inner.RenameFile(sourcePath, destPath);
     public void DeleteFile(string path) => _inner.DeleteFile(path);
 }

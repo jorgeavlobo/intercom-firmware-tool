@@ -170,6 +170,9 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Mqtt_RewriteVerifyFailed" xml:space="preserve">
     <value>La verificación del archivo reescrito {0} falló: los bytes leídos de la imagen no coinciden con lo que se escribió. El archivo original se dejó intacto y se abortó la sustitución.</value>
   </data>
+  <data name="Mqtt_RewriteSiblingOccupied" xml:space="preserve">
+    <value>No se puede reescribir {0} de forma segura: la ruta temporal de intercambio {1} está ocupada por un archivo no regular (un enlace simbólico o un directorio). Se rechaza sobrescribirlo.</value>
+  </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>El host del broker MQTT no es una dirección IP ni un nombre de host válido.</value>
   </data>

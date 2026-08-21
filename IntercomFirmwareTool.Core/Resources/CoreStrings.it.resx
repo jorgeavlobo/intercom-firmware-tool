@@ -170,6 +170,9 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Mqtt_RewriteVerifyFailed" xml:space="preserve">
     <value>La verifica del file riscritto {0} non è riuscita: i byte riletti dall'immagine non corrispondono a quanto scritto. Il file originale è stato lasciato intatto e la sostituzione è stata annullata.</value>
   </data>
+  <data name="Mqtt_RewriteSiblingOccupied" xml:space="preserve">
+    <value>Impossibile riscrivere {0} in sicurezza: il percorso temporaneo di scambio {1} è occupato da un file non regolare (un collegamento simbolico o una directory). Sovrascrittura rifiutata.</value>
+  </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>L'host del broker MQTT non è un indirizzo IP né un nome host valido.</value>
   </data>

@@ -2687,9 +2687,13 @@ namespace IntercomFirmwareTool.Core
         /// swap it into place. The good original is never touched until a fully-written, verified replacement
         /// exists; on any earlier failure the original stays intact and the temp is removed.
         ///
-        /// <para>SharpExt4's <c>RenameFile</c> refuses to overwrite an existing destination, so the swap is
-        /// delete-then-rename. The only non-atomic residue is that sub-millisecond delete→rename gap, which
-        /// matters solely on host power-loss mid-swap — and this is a HOST-side image editor whose output is not
+        /// <para>SharpExt4's <c>RenameFile</c> refuses to overwrite an existing destination, so the swap goes
+        /// through a BACKUP rather than deleting the original outright: <c>original → .ift-bak</c>, then
+        /// <c>temp → path</c>, then delete the backup. If the second rename fails the original is rolled back
+        /// from <c>.ift-bak</c>, so <paramref name="path"/> always ends up holding either the verified new
+        /// content or the intact original — never nothing. The only non-atomic residue is the sub-millisecond
+        /// window between the two renames; it matters solely on host power-loss mid-swap, and even then the
+        /// original survives on disk under <c>.ift-bak</c>. This is a HOST-side image editor whose output is not
         /// flashed until the tool returns success, so a crash there simply means re-running against a fresh
         /// image, never a half-written device.</para>
         /// </summary>
@@ -2697,10 +2701,12 @@ namespace IntercomFirmwareTool.Core
         {
             uint mode = fs.GetMode(path) & 0xFFF;
             var owner = fs.GetOwner(path);
-            string tmp = path + ".ift-tmp";
-            // A leftover temp from a previously-interrupted run would make the no-overwrite RenameFile below
-            // throw; clear it so the write always starts from a clean slate.
-            if (fs.FileExists(tmp)) fs.DeleteFile(tmp);
+            string tmp = path + ".ift-tmp";   // staging for the new content
+            string bak = path + ".ift-bak";   // the original, moved aside during the swap
+            // Clear any siblings a previously-interrupted swap may have left behind; RenameFile refuses to
+            // overwrite, so a leftover here would break the swap.
+            ClearSwapSibling(fs, tmp, path);
+            ClearSwapSibling(fs, bak, path);
             try
             {
                 WriteTextFile(fs, tmp, text);
@@ -2717,14 +2723,60 @@ namespace IntercomFirmwareTool.Core
             }
             catch
             {
-                // Leave the original untouched; best-effort clean up the partial temp so a retry starts clean.
-                try { if (fs.FileExists(tmp)) fs.DeleteFile(tmp); } catch { /* nothing more we can do */ }
+                // Nothing has moved yet — the original is untouched. Best-effort clean up the partial temp.
+                TryDeleteRegular(fs, tmp);
                 throw;
             }
-            // Commit: drop the original and move the verified temp into its place. The delete must precede the
-            // rename because RenameFile will not overwrite (see the interface remark on IExtFs.RenameFile).
-            if (fs.FileExists(path)) fs.DeleteFile(path);
-            fs.RenameFile(tmp, path);
+            // Commit via a BACKUP so the original is never lost, even if a rename fails mid-swap. RenameFile
+            // will not overwrite (see IExtFs.RenameFile), so the destination must be free before each move:
+            //   1. original -> bak   (frees `path`; original now safe under `bak`)
+            //   2. tmp      -> path  (the verified replacement lands)
+            //   3. delete bak        (best-effort cleanup)
+            // If step 2 throws (an ext I/O error, say), we roll the original back from `bak`, so `path` always
+            // ends up holding either the new verified content or the intact original — never nothing.
+            try
+            {
+                fs.RenameFile(path, bak);
+            }
+            catch
+            {
+                TryDeleteRegular(fs, tmp);   // original still at `path`; drop the staged temp
+                throw;
+            }
+            try
+            {
+                fs.RenameFile(tmp, path);
+            }
+            catch
+            {
+                // Restore the original; if even this fails the original still exists on disk under `bak`.
+                try { fs.RenameFile(bak, path); } catch { /* original remains recoverable at bak */ }
+                TryDeleteRegular(fs, tmp);
+                throw;
+            }
+            TryDeleteRegular(fs, bak);
+        }
+
+        /// <summary>
+        /// Clears a swap sibling (<c>.ift-tmp</c> / <c>.ift-bak</c>) left over from an interrupted rewrite so the
+        /// no-overwrite <see cref="IExtFs.RenameFile"/> has a free destination. A regular file is deleted; a path
+        /// OCCUPIED by a non-regular node (a symlink or directory — which <see cref="IExtFs.FileExists"/> is blind
+        /// to) cannot be safely cleared and would make the swap rename over an unexpected shape, so we fail closed
+        /// rather than risk it, consistent with the rest of this installer (<see cref="PathOccupied"/>).
+        /// </summary>
+        private static void ClearSwapSibling(IExtFs fs, string sibling, string target)
+        {
+            if (fs.FileExists(sibling)) { fs.DeleteFile(sibling); return; }
+            if (PathOccupied(fs, sibling))
+                throw new InvalidOperationException(
+                    CoreStrings.Format("Mqtt_RewriteSiblingOccupied", target, sibling));
+        }
+
+        /// <summary>Best-effort removal of a regular file used only for cleanup on the failure/commit paths of
+        /// <see cref="RewritePreservingMeta"/> — swallows any error since there is nothing further to do.</summary>
+        private static void TryDeleteRegular(IExtFs fs, string path)
+        {
+            try { if (fs.FileExists(path)) fs.DeleteFile(path); } catch { /* best-effort */ }
         }
 
         /// <summary>

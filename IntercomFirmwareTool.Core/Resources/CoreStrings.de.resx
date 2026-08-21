@@ -170,6 +170,9 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Mqtt_RewriteVerifyFailed" xml:space="preserve">
     <value>Die Überprüfung der neu geschriebenen Datei {0} ist fehlgeschlagen: Die aus dem Abbild zurückgelesenen Bytes stimmen nicht mit dem Geschriebenen überein. Die Originaldatei blieb unverändert und die Ersetzung wurde abgebrochen.</value>
   </data>
+  <data name="Mqtt_RewriteSiblingOccupied" xml:space="preserve">
+    <value>{0} kann nicht sicher neu geschrieben werden: Der temporäre Auslagerungspfad {1} ist von einer nicht regulären Datei (einem Symlink oder Verzeichnis) belegt. Überschreiben wird abgelehnt.</value>
+  </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>Der MQTT-Broker-Host ist keine gültige IP-Adresse und kein gültiger Hostname.</value>
   </data>

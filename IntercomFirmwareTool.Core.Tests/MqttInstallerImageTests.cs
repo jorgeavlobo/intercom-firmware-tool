@@ -62,19 +62,23 @@ public class MqttInstallerImageTests
         var fs = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
         MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
         Assert.False(fs.HasFile(Hook + ".ift-tmp"));
+        Assert.False(fs.HasFile(Hook + ".ift-bak"));
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
     }
 
     [Fact]
     public void Install_recovers_when_a_stale_temp_file_is_present()
     {
-        // A prior run interrupted mid-swap could leave a ".ift-tmp"; because RenameFile refuses to overwrite,
-        // the replace must clear it first. Seed one and confirm the patch still succeeds and cleans it up.
+        // A prior run interrupted mid-swap could leave a ".ift-tmp" and/or ".ift-bak"; because RenameFile
+        // refuses to overwrite, the replace must clear both first. Seed both and confirm the patch still
+        // succeeds and cleans them up.
         var fs = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
-        fs.AddFile(Hook + ".ift-tmp", "leftover garbage from an interrupted run", InMemoryExtFs.Mode0644);
+        fs.AddFile(Hook + ".ift-tmp", "leftover staged content from an interrupted run", InMemoryExtFs.Mode0644);
+        fs.AddFile(Hook + ".ift-bak", "leftover backup from an interrupted run", InMemoryExtFs.Mode0644);
         MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
         Assert.False(fs.HasFile(Hook + ".ift-tmp"));
+        Assert.False(fs.HasFile(Hook + ".ift-bak"));
     }
 
     [Fact]
@@ -85,7 +89,7 @@ public class MqttInstallerImageTests
         // half-written temp left behind — the exact guarantee a bare truncating write cannot make.
         const uint uid = 4242, gid = 4343;
         var inner = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
-        var fs = new FailOnCreateExtFs(inner, path => path.EndsWith(".ift-tmp", System.StringComparison.Ordinal));
+        var fs = new FaultyExtFs(inner, failCreate: path => path.EndsWith(".ift-tmp", System.StringComparison.Ordinal));
 
         Assert.ThrowsAny<System.Exception>(() => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
 
@@ -93,6 +97,27 @@ public class MqttInstallerImageTests
         Assert.Equal(InMemoryExtFs.Mode0755, inner.ModeOf(Hook)); // original mode untouched
         Assert.Equal((uid, gid), inner.OwnerOf(Hook)!.Value);     // original owner untouched
         Assert.False(inner.HasFile(Hook + ".ift-tmp"));           // partial temp cleaned up
+    }
+
+    [Fact]
+    public void Install_rolls_the_original_back_when_the_final_swap_rename_fails()
+    {
+        // The crux the reviewers flagged: the commit is a backup-swap (original -> .ift-bak, temp -> hook), so
+        // if the temp -> hook rename fails after the original has been moved aside, the original must be ROLLED
+        // BACK from the backup — the hook can never be left absent. Inject a failure on exactly that rename.
+        const uint uid = 4242, gid = 4343;
+        var inner = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
+        var fs = new FaultyExtFs(inner, failRename: (src, dest) =>
+            src.EndsWith(".ift-tmp", System.StringComparison.Ordinal) &&
+            dest == Hook);
+
+        Assert.ThrowsAny<System.Exception>(() => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+
+        Assert.Equal(FactoryScript, inner.ReadText(Hook));        // original rolled back into place
+        Assert.Equal(InMemoryExtFs.Mode0755, inner.ModeOf(Hook)); // with its mode intact
+        Assert.Equal((uid, gid), inner.OwnerOf(Hook)!.Value);     // and its owner intact
+        Assert.False(inner.HasFile(Hook + ".ift-tmp"));           // staged temp cleaned up
+        Assert.False(inner.HasFile(Hook + ".ift-bak"));           // backup consumed by the rollback
     }
 
     [Fact]

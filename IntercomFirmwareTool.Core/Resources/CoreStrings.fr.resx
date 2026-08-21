@@ -170,6 +170,9 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_RewriteVerifyFailed" xml:space="preserve">
     <value>La vérification du fichier réécrit {0} a échoué : les octets relus depuis l'image ne correspondent pas à ce qui a été écrit. Le fichier d'origine a été laissé intact et le remplacement a été abandonné.</value>
   </data>
+  <data name="Mqtt_RewriteSiblingOccupied" xml:space="preserve">
+    <value>Impossible de réécrire {0} en toute sécurité : le chemin temporaire d'échange {1} est occupé par un fichier non régulier (un lien symbolique ou un répertoire). Refus de l'écraser.</value>
+  </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>L'hôte du broker MQTT n'est pas une adresse IP ni un nom d'hôte valide.</value>
   </data>
