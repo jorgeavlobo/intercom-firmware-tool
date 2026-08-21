@@ -29,15 +29,19 @@ public class MqttInstallerImageTests
     [Fact]
     public void Install_patches_a_clean_hook_and_preserves_mode_and_owner()
     {
-        var fs = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755, uid: 0, gid: 0);
+        // Seed a DISTINCTIVE mode (0755, exec) and a NON-root owner so the preservation assertions are real:
+        // the fake resets a rewritten file to mode 0644 / root, so surviving 0755 / (4242,4343) proves
+        // RewritePreservingMeta re-applied the captured metadata (a regression that dropped it would fail here).
+        const uint uid = 4242, gid = 4343;
+        var fs = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
         MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
 
         string patched = fs.ReadText(Hook)!;
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(patched));
         Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched);
         Assert.StartsWith("#!/bin/bash\n", patched);
-        Assert.Equal(InMemoryExtFs.Mode0755, fs.ModeOf(Hook));    // mode preserved (a fresh file would be 0644)
-        Assert.Equal((0u, 0u), fs.OwnerOf(Hook)!.Value);         // owner preserved
+        Assert.Equal(InMemoryExtFs.Mode0755, fs.ModeOf(Hook));    // mode preserved (a rewrite would leave 0644)
+        Assert.Equal((uid, gid), fs.OwnerOf(Hook)!.Value);       // owner preserved (a rewrite would leave 0,0)
     }
 
     [Fact]

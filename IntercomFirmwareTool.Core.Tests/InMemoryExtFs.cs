@@ -101,13 +101,19 @@ internal sealed class InMemoryExtFs : IExtFs
             if (!_files.TryGetValue(path, out var e)) throw new FileNotFoundException(path);
             return new MemoryStream(e.Bytes, writable: false);
         }
-        // FileMode.Create — truncate/replace. Keep an existing entry's mode/owner (the caller restores them via
-        // SetMode/SetOwner); create a default 0644 regular file if absent. Bytes are captured on dispose.
+        // FileMode.Create — truncate/replace AND DROP the mode/owner back to a fresh-file default (mode 0644,
+        // root-owned). This models a raw write that does not itself preserve metadata — which is exactly why
+        // RewritePreservingMeta captures mode/owner beforehand and re-applies them afterwards. Resetting here
+        // makes the "mode/owner preserved" assertions meaningful: if the installer ever stopped restoring, the
+        // rewritten file would be left at these defaults and the tests would catch it.
         if (!_files.TryGetValue(path, out var ent))
         {
-            ent = new Entry { Mode = SIfReg | Mode0644 };
+            ent = new Entry();
             _files[path] = ent;
         }
+        ent.Mode = SIfReg | Mode0644;
+        ent.Uid = 0;
+        ent.Gid = 0;
         ent.Bytes = Array.Empty<byte>();
         return new WriteBackStream(bytes => ent.Bytes = bytes);
     }
