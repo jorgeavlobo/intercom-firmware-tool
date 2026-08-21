@@ -360,6 +360,8 @@ public class MqttFactoryFirewallShimTests
     [InlineData("#!/opt/missing/bash\n", "/opt/missing/bash")] // extracted verbatim; existence is checked later
     [InlineData("#!  /bin/bash  \n", "/bin/bash")]          // leading/trailing spaces trimmed by the token split
     [InlineData("#!/bin/bash\r\n", "/bin/bash")]            // trailing CR on the shebang line is stripped
+    [InlineData("#!/bin/busybox\tsh\n", "/bin/busybox")]   // TAB separates interpreter from applet (kernel-legal)
+    [InlineData("#!/bin/bash\n", "/bin/bash")] // vertical tab is NOT a kernel separator — kept in the token
     public void Shebang_interpreter_path_is_the_first_token(string script, string expected)
     {
         Assert.Equal(expected, MqttInstaller.ShebangInterpreterPath(script));

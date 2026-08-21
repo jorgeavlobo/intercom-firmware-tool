@@ -2719,23 +2719,6 @@ namespace IntercomFirmwareTool.Core
         /// firewall to clobber) we skip. Invoked ONLY on the on-device camera path, the sole image that
         /// adds a second iptables writer.</para>
         /// </summary>
-        /// <summary>
-        /// The interpreter path from a <c>#!</c> shebang — the first whitespace-delimited token after
-        /// <c>#!</c> on the first line (a trailing <c>\r</c> is trimmed). Null when there is no shebang. For a
-        /// hook we accept (<see cref="HasShellShebang"/>) this is an ABSOLUTE path; the install/validate paths
-        /// use it to confirm the interpreter actually EXISTS as an executable in the image before certifying
-        /// the hook hardened. Pure — no I/O.
-        /// </summary>
-        internal static string? ShebangInterpreterPath(string script)
-        {
-            int nl = script.IndexOf('\n');
-            string first = (nl >= 0 ? script[..nl] : script).TrimEnd('\r');
-            if (!first.StartsWith("#!", StringComparison.Ordinal))
-                return null;
-            string[] toks = first[2..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            return toks.Length > 0 ? toks[0] : null;
-        }
-
         private static void PatchFactoryFirewallWaitForLock(ExtFileSystem fs)
         {
             if (!fs.FileExists(FactoryFirewallScriptPath))
@@ -2765,6 +2748,35 @@ namespace IntercomFirmwareTool.Core
             // unrunnable on Linux). An already-hardened LF script yields an identical string → no write.
             if (!string.Equals(patched, original, StringComparison.Ordinal))
                 RewritePreservingMeta(fs, FactoryFirewallScriptPath, patched);
+        }
+
+        /// <summary>
+        /// Tokenizes shebang text on SPACE and TAB only — exactly what the Linux kernel's
+        /// <c>fs/binfmt_script.c</c> treats as a separator between the interpreter and its argument. The
+        /// framework's <c>string.Split((char[]?)null, …)</c> splits on ALL Unicode whitespace (vertical tab,
+        /// form feed, NBSP, …), which the kernel keeps as part of the token — so using it would extract a
+        /// DIFFERENT interpreter than the one Linux execs (e.g. <c>#!/bin/bash\v</c> → <c>/bin/bash</c> here
+        /// but <c>/bin/bash\v</c> to the kernel), certifying a hook that can't run. Space/tab only avoids that.
+        /// </summary>
+        private static string[] SplitShebangTokens(string text) =>
+            text.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+
+        /// <summary>
+        /// The interpreter path from a <c>#!</c> shebang — the first SPACE/TAB-delimited token after <c>#!</c>
+        /// on the first line (a trailing <c>\r</c> is trimmed), matching the kernel's parser
+        /// (<see cref="SplitShebangTokens"/>). Null when there is no shebang. For a hook we accept
+        /// (<see cref="HasShellShebang"/>) this is an ABSOLUTE path; the install/validate paths use it to
+        /// confirm the interpreter actually EXISTS as an executable in the image before certifying the hook
+        /// hardened. Pure — no I/O.
+        /// </summary>
+        internal static string? ShebangInterpreterPath(string script)
+        {
+            int nl = script.IndexOf('\n');
+            string first = (nl >= 0 ? script[..nl] : script).TrimEnd('\r');
+            if (!first.StartsWith("#!", StringComparison.Ordinal))
+                return null;
+            string[] toks = SplitShebangTokens(first[2..]);
+            return toks.Length > 0 ? toks[0] : null;
         }
 
         /// <summary>
@@ -2915,7 +2927,7 @@ namespace IntercomFirmwareTool.Core
             string first = (nl >= 0 ? script[..nl] : script).TrimEnd('\r');
             if (!first.StartsWith("#!", StringComparison.Ordinal))
                 return false;
-            string[] toks = first[2..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            string[] toks = SplitShebangTokens(first[2..]);   // space/tab only, matching the kernel parser
             if (toks.Length == 0)
                 return false;
             // The interpreter must be an ABSOLUTE path. The kernel resolves a relative `#!` interpreter against
