@@ -2542,9 +2542,13 @@ namespace IntercomFirmwareTool.Core
         /// file's existing owner+mode (on-device it is <c>bticino:bticino</c> 0775 —
         /// NOT root). Idempotent: does nothing if the marker is already present.
         /// </summary>
-        private static void PatchFlexisip(IExtFs fs)
+        internal static void PatchFlexisip(IExtFs fs)
         {
             const string path = "/etc/init.d/flexisipsh";
+            // Complete a rewrite that a previous run left interrupted between its two renames (original moved to
+            // .ift-bak, target not yet promoted) BEFORE the missing-target check below — otherwise the preserved
+            // original stranded in .ift-bak would be unreachable and this would throw Mqtt_FileMissing (#151).
+            RecoverInterruptedRewrite(fs, path);
             if (!fs.FileExists(path))
                 throw new InvalidOperationException(CoreStrings.Format("Mqtt_FileMissing", path));
 

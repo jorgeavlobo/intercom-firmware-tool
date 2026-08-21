@@ -214,6 +214,38 @@ public class MqttInstallerImageTests
         Assert.False(fs.HasFile(Hook + ".ift-tmp"));
     }
 
+    // ----------------------------- recovery: other RewritePreservingMeta callers -----------------------------
+
+    [Fact]
+    public void Flexisip_recovers_a_swap_interrupted_after_the_original_was_backed_up()
+    {
+        // The recovery must guard EVERY rewrite entry path, not just the firewall: PatchFlexisip throws
+        // Mqtt_FileMissing if its target is absent, so without recovery an interrupted flexisip swap (original
+        // stranded in .ift-bak) would be unrecoverable. Seed that crash state and assert it recovers + patches,
+        // preserving the script's non-root mode/owner.
+        const string Flexisip = "/etc/init.d/flexisipsh";
+        const uint uid = 500, gid = 500;
+        const string script =
+            "#!/bin/sh\n" +
+            "case \"$1\" in\n" +
+            "start)\n" +
+            "\tstart-stop-daemon --start --exec /usr/bin/flexisip\n" +
+            "\t;;\n" +
+            "esac\n";
+        var fs = new InMemoryExtFs().AddFile(Flexisip + ".ift-bak", script, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
+        Assert.False(fs.HasFile(Flexisip));                       // precondition: target missing
+
+        MqttInstaller.PatchFlexisip(fs);
+
+        Assert.True(fs.HasFile(Flexisip));                        // recovered from .ift-bak, not thrown as missing
+        Assert.Contains("/bin/touch /tmp/flexisip_restarted", fs.ReadText(Flexisip)!);   // then patched
+        Assert.Equal(InMemoryExtFs.Mode0755, fs.ModeOf(Flexisip));// mode preserved through recovery + rewrite
+        Assert.Equal((uid, gid), fs.OwnerOf(Flexisip)!.Value);    // owner preserved
+        Assert.False(fs.HasFile(Flexisip + ".ift-bak"));          // transient swap backup consumed
+        Assert.False(fs.HasFile(Flexisip + ".ift-tmp"));
+        Assert.True(fs.HasFile(Flexisip + "_bak"));               // PatchFlexisip's persistent revert backup exists
+    }
+
     // ----------------------------- validate: CheckFactoryFirewall -----------------------------
 
     private static Ext4Check Named(IReadOnlyList<Ext4Check> checks, string fragment) =>
