@@ -2677,13 +2677,54 @@ namespace IntercomFirmwareTool.Core
         // ---- fs helpers (mirror Ext4Probe's; kept local so the SSH path stays
         //      untouched — the two classes never share mutable state) -------------
 
+        /// <summary>
+        /// Replaces <paramref name="path"/>'s contents with <paramref name="text"/> WITHOUT ever leaving the
+        /// original truncated on failure (issue #151). A bare <c>FileMode.Create</c> write truncates the target
+        /// to zero BEFORE the new bytes land, so a mid-write throw or crash would leave a partial — or empty —
+        /// script on the image; for a security-critical hook (the factory firewall, #145) that means flashing a
+        /// firewall that silently does nothing. Instead we write the new content to a sibling temp file, read it
+        /// back and require a byte-for-byte match, stamp the captured mode/owner onto the temp, and only THEN
+        /// swap it into place. The good original is never touched until a fully-written, verified replacement
+        /// exists; on any earlier failure the original stays intact and the temp is removed.
+        ///
+        /// <para>SharpExt4's <c>RenameFile</c> refuses to overwrite an existing destination, so the swap is
+        /// delete-then-rename. The only non-atomic residue is that sub-millisecond delete→rename gap, which
+        /// matters solely on host power-loss mid-swap — and this is a HOST-side image editor whose output is not
+        /// flashed until the tool returns success, so a crash there simply means re-running against a fresh
+        /// image, never a half-written device.</para>
+        /// </summary>
         private static void RewritePreservingMeta(IExtFs fs, string path, string text)
         {
             uint mode = fs.GetMode(path) & 0xFFF;
             var owner = fs.GetOwner(path);
-            WriteTextFile(fs, path, text);
-            fs.SetMode(path, mode);
-            if (owner != null) fs.SetOwner(path, owner.Item1, owner.Item2);
+            string tmp = path + ".ift-tmp";
+            // A leftover temp from a previously-interrupted run would make the no-overwrite RenameFile below
+            // throw; clear it so the write always starts from a clean slate.
+            if (fs.FileExists(tmp)) fs.DeleteFile(tmp);
+            try
+            {
+                WriteTextFile(fs, tmp, text);
+                // Read the just-written temp back and require an exact match before it is allowed to replace the
+                // original. A short/partial write that slipped past WriteTextFile is caught HERE — while the
+                // original is still in place and nothing has been destroyed. (ReadAllText normalizes nothing and
+                // fails loudly on a short read, so an equal comparison is a true byte-for-byte check.)
+                if (!string.Equals(ReadAllText(fs, tmp), text, StringComparison.Ordinal))
+                    throw new IOException(CoreStrings.Format("Mqtt_RewriteVerifyFailed", path));
+                // Stamp the captured metadata onto the temp; SharpExt4's rename moves the inode, so mode/owner
+                // travel with it into the final path.
+                fs.SetMode(tmp, mode);
+                if (owner != null) fs.SetOwner(tmp, owner.Item1, owner.Item2);
+            }
+            catch
+            {
+                // Leave the original untouched; best-effort clean up the partial temp so a retry starts clean.
+                try { if (fs.FileExists(tmp)) fs.DeleteFile(tmp); } catch { /* nothing more we can do */ }
+                throw;
+            }
+            // Commit: drop the original and move the verified temp into its place. The delete must precede the
+            // rename because RenameFile will not overwrite (see the interface remark on IExtFs.RenameFile).
+            if (fs.FileExists(path)) fs.DeleteFile(path);
+            fs.RenameFile(tmp, path);
         }
 
         /// <summary>

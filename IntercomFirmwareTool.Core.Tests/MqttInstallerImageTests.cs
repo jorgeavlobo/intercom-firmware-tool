@@ -55,6 +55,47 @@ public class MqttInstallerImageTests
     }
 
     [Fact]
+    public void Install_leaves_no_temp_file_behind()
+    {
+        // The safe-replace (#151) writes through a sibling ".ift-tmp" and swaps it in; a successful patch must
+        // not leave that temp on the image (it would look like a stray/dangling file to later validation).
+        var fs = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+        Assert.False(fs.HasFile(Hook + ".ift-tmp"));
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+    }
+
+    [Fact]
+    public void Install_recovers_when_a_stale_temp_file_is_present()
+    {
+        // A prior run interrupted mid-swap could leave a ".ift-tmp"; because RenameFile refuses to overwrite,
+        // the replace must clear it first. Seed one and confirm the patch still succeeds and cleans it up.
+        var fs = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        fs.AddFile(Hook + ".ift-tmp", "leftover garbage from an interrupted run", InMemoryExtFs.Mode0644);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+        Assert.False(fs.HasFile(Hook + ".ift-tmp"));
+    }
+
+    [Fact]
+    public void Install_leaves_the_original_intact_when_the_write_fails_midway()
+    {
+        // #151 crux: a failure while producing the replacement must NOT damage the good original. Inject a
+        // throw on the temp write; the hook's content, mode and owner must all survive untouched, with no
+        // half-written temp left behind — the exact guarantee a bare truncating write cannot make.
+        const uint uid = 4242, gid = 4343;
+        var inner = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
+        var fs = new FailOnCreateExtFs(inner, path => path.EndsWith(".ift-tmp", System.StringComparison.Ordinal));
+
+        Assert.ThrowsAny<System.Exception>(() => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+
+        Assert.Equal(FactoryScript, inner.ReadText(Hook));        // original content untouched
+        Assert.Equal(InMemoryExtFs.Mode0755, inner.ModeOf(Hook)); // original mode untouched
+        Assert.Equal((uid, gid), inner.OwnerOf(Hook)!.Value);     // original owner untouched
+        Assert.False(inner.HasFile(Hook + ".ift-tmp"));           // partial temp cleaned up
+    }
+
+    [Fact]
     public void Install_skips_when_the_hook_is_absent()
     {
         var fs = FsWithBash();

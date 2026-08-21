@@ -167,6 +167,9 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Mqtt_FactoryFirewallUnhardenable" xml:space="preserve">
     <value>Impossible de durcir le script du pare-feu d'usine /etc/network/if-pre-up.d/iptables contre la course au verrou xtables (issue #145) : son shebang #! n'est pas un simple interpréteur shell que l'installateur peut réécrire en toute sécurité (il est manquant, désigne un interpréteur non-shell, utilise un chemin d'interpréteur relatif, ou invoque un shell avec des arguments ou via /usr/bin/env), le fichier n'est pas un fichier ordinaire (tel qu'un lien symbolique) ou n'est pas exécutable, l'interpréteur du shebang est absent de l'image ou non exécutable, ou il contient un bloc de shim non terminé.</value>
   </data>
+  <data name="Mqtt_RewriteVerifyFailed" xml:space="preserve">
+    <value>La vérification du fichier réécrit {0} a échoué : les octets relus depuis l'image ne correspondent pas à ce qui a été écrit. Le fichier d'origine a été laissé intact et le remplacement a été abandonné.</value>
+  </data>
   <data name="Mqtt_InvalidHost" xml:space="preserve">
     <value>L'hôte du broker MQTT n'est pas une adresse IP ni un nom d'hôte valide.</value>
   </data>

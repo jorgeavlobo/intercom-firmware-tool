@@ -118,6 +118,21 @@ internal sealed class InMemoryExtFs : IExtFs
         return new WriteBackStream(bytes => ent.Bytes = bytes);
     }
 
+    public void RenameFile(string sourcePath, string destPath)
+    {
+        if (!_files.TryGetValue(sourcePath, out var e)) throw new FileNotFoundException(sourcePath);
+        // ExtFileSystem.RenameFile (lwext4 ext4_frename) refuses to overwrite an existing destination — model
+        // that throw so callers are forced to delete the destination first, exactly as on a real image.
+        if (_files.ContainsKey(destPath)) throw new IOException($"'{destPath}' already exists.");
+        _files.Remove(sourcePath);
+        _files[destPath] = e;   // move the whole entry: bytes, mode and owner travel with the inode
+    }
+
+    public void DeleteFile(string path)
+    {
+        if (!_files.Remove(path)) throw new FileNotFoundException(path);
+    }
+
     /// <summary>A writable stream that flushes its bytes back into the owning entry when disposed — models
     /// SharpExt4's ExtFileStream, which persists into the image on close.</summary>
     private sealed class WriteBackStream : MemoryStream
@@ -131,4 +146,36 @@ internal sealed class InMemoryExtFs : IExtFs
             base.Dispose(disposing);
         }
     }
+}
+
+/// <summary>
+/// An <see cref="IExtFs"/> decorator that forwards everything to an inner filesystem but THROWS from
+/// <see cref="OpenFile"/> when a create-write targets a path matching a predicate — used to inject a mid-write
+/// failure and prove the safe-replace (issue #151) never damages the original file.
+/// </summary>
+internal sealed class FailOnCreateExtFs : IExtFs
+{
+    private readonly IExtFs _inner;
+    private readonly Func<string, bool> _failWhen;
+
+    public FailOnCreateExtFs(IExtFs inner, Func<string, bool> failWhen) { _inner = inner; _failWhen = failWhen; }
+
+    public Stream OpenFile(string path, FileMode mode, FileAccess access)
+    {
+        if (mode == FileMode.Create && _failWhen(path))
+            throw new IOException($"injected write failure for {path}");
+        return _inner.OpenFile(path, mode, access);
+    }
+
+    public bool FileExists(string path) => _inner.FileExists(path);
+    public bool DirectoryExists(string path) => _inner.DirectoryExists(path);
+    public uint GetMode(string path) => _inner.GetMode(path);
+    public void SetMode(string path, uint mode) => _inner.SetMode(path, mode);
+    public Tuple<uint, uint>? GetOwner(string path) => _inner.GetOwner(path);
+    public void SetOwner(string path, uint uid, uint gid) => _inner.SetOwner(path, uid, gid);
+    public string ReadSymLink(string path) => _inner.ReadSymLink(path);
+    public void CreateSymLink(string linkTarget, string linkPath) => _inner.CreateSymLink(linkTarget, linkPath);
+    public void CreateDirectory(string path) => _inner.CreateDirectory(path);
+    public void RenameFile(string sourcePath, string destPath) => _inner.RenameFile(sourcePath, destPath);
+    public void DeleteFile(string path) => _inner.DeleteFile(path);
 }
