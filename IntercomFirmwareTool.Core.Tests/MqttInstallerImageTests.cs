@@ -214,6 +214,22 @@ public class MqttInstallerImageTests
         Assert.False(fs.HasFile(Hook + ".ift-tmp"));
     }
 
+    [Fact]
+    public void Install_deletes_a_stale_backup_left_by_a_completed_swap()
+    {
+        // Crash AFTER the swap promoted temp -> hook but BEFORE the backup was deleted: the hook is present and
+        // already hardened, so the idempotency check skips the rewrite. The stale (and executable) .ift-bak must
+        // still be cleaned up on the next run rather than lingering permanently in the image.
+        string hardened = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        var fs = FsWithBash().AddFile(Hook, hardened, InMemoryExtFs.Mode0755);
+        fs.AddFile(Hook + ".ift-bak", FactoryScript, InMemoryExtFs.Mode0755);   // stale backup of the pre-swap original
+
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+
+        Assert.False(fs.HasFile(Hook + ".ift-bak"));             // stale backup removed
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));   // hook itself untouched
+    }
+
     // ----------------------------- recovery: other RewritePreservingMeta callers -----------------------------
 
     [Fact]

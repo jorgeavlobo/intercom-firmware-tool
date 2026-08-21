@@ -2786,19 +2786,29 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Completes a <see cref="RewritePreservingMeta"/> swap that a previous run left interrupted between its
-        /// two renames: if the host died AFTER <c>original → .ift-bak</c> but BEFORE <c>temp → path</c>, then
-        /// <paramref name="path"/> is absent while <c>.ift-bak</c> still holds the intact original. Restore it so
-        /// the next run continues the swap instead of mistaking the file for genuinely absent — which for the
-        /// factory-firewall hook would silently skip hardening (and a later rewrite's sibling-cleanup would then
-        /// delete the orphaned backup, losing the original for good). Acts ONLY when <paramref name="path"/> is
-        /// truly absent (not a symlink/dir, which we must not overwrite) and the backup is a regular file.
+        /// Reconciles a <c>.ift-bak</c> that a previous <see cref="RewritePreservingMeta"/> run left behind when
+        /// the host died mid-swap, run BEFORE a caller's target-existence check so an interrupted swap never
+        /// looks like a missing (or already-done) file:
+        /// <list type="bullet">
+        /// <item>crash AFTER <c>original → .ift-bak</c> but BEFORE <c>temp → path</c> — <paramref name="path"/> is
+        /// absent while <c>.ift-bak</c> holds the intact original: restore it (<c>bak → path</c>, carrying
+        /// mode/owner), else the firewall hook would be treated as absent and hardening silently skipped.</item>
+        /// <item>crash AFTER <c>temp → path</c> but BEFORE the backup cleanup — the hardened target is present and
+        /// the idempotency check would skip the rewrite, so the stale (executable) <c>.ift-bak</c> would linger in
+        /// the image forever: delete it.</item>
+        /// </list>
+        /// A path OCCUPIED by a non-regular node (symlink/dir) is left untouched here — the backup is preserved
+        /// and the caller fails closed on that shape.
         /// </summary>
         private static void RecoverInterruptedRewrite(IExtFs fs, string path)
         {
             string bak = path + ".ift-bak";
-            if (!fs.FileExists(path) && !PathOccupied(fs, path) && fs.FileExists(bak))
-                fs.RenameFile(bak, path);   // restores the original with its mode/owner (the inode moves back)
+            if (!fs.FileExists(bak)) return;                 // nothing left behind
+            if (fs.FileExists(path))
+                TryDeleteRegular(fs, bak);                   // swap completed, crashed before cleanup: drop stale backup
+            else if (!PathOccupied(fs, path))
+                fs.RenameFile(bak, path);                    // swap crashed before promote: restore the original
+            // else path is a symlink/dir — leave the backup intact; the caller rejects that shape.
         }
 
         /// <summary>
