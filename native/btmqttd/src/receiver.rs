@@ -311,10 +311,15 @@ async fn handle_json(
                         return;
                     }
                     eprintln!("btmqttd: restore_firewall requested via MQTT");
-                    restore_firewall().await;
-                    // Feedback AFTER the (fast, non-terminal) recovery, like restore_ssh — the ack reflects a
-                    // completed action, not an imminent shutdown.
-                    publish_maintenance(client, cfg, "restore_firewall").await;
+                    // Publish the ack ONLY if the recovery was actually DISPATCHED (a child spawned). The ack
+                    // means "the recovery ran / is running" — a best-effort dispatch signal like the other
+                    // maintenance acks, NOT a success or completion guarantee: on the rare long lock wait the
+                    // rebuild detaches and is still finishing in the background when this publishes. When the
+                    // run was SKIPPED (no reap permit — run_maintenance_child already logged the retry hint),
+                    // withhold the ack so HA doesn't show a "done" for a press that did nothing.
+                    if restore_firewall().await {
+                        publish_maintenance(client, cfg, "restore_firewall").await;
+                    }
                 }
             }
             return;
@@ -467,8 +472,14 @@ const FIREWALL_REBUILD_TIMEOUT: Duration = Duration::from_secs(60);
 /// watchdog vs. the operator re-pressing), so it isn't baked in here. `kill_on_timeout` chooses what a
 /// timeout / wait-error does: `true` (restore_ssh) SIGKILLs the whole process group — a hung dropbear start
 /// should die and the watchdog retries; `false` (restore_firewall) NEVER kills — the firewall rebuild must run
-/// to completion, so the child is merely detached and reaped in the background. Best-effort — errors are logged,
-/// never fatal. Shared by [`start_dropbear`] and [`restore_firewall`].
+/// to completion, so the child is merely detached and reaped in the background. `kill_on_timeout` ALSO sets
+/// `kill_on_drop`: with `false`, dropping the `Child` (a runtime shutdown / re-exec cancelling the reaper task)
+/// must NOT SIGKILL the child either — a partial firewall rebuild has to be left to finish (it survives as an
+/// init-reaped orphan; the outstanding permit makes the shutdown path EXIT rather than re-exec, so it is
+/// collected — see [`outstanding_reapers`]). Returns `true` if a child was SPAWNED (the action was dispatched,
+/// even if it later times out and detaches), `false` if it was SKIPPED (no reap permit) or failed to spawn — so
+/// the caller can withhold a misleading "done" ack when nothing ran. Best-effort — errors are logged, never
+/// fatal. Shared by [`start_dropbear`] and [`restore_firewall`].
 async fn run_maintenance_child(
     program: &str,
     args: &[&str],
@@ -476,12 +487,12 @@ async fn run_maintenance_child(
     skip_hint: &str,
     kill_on_timeout: bool,
     timeout: Duration,
-) {
+) -> bool {
     let permit = match REAP_SLOTS.try_acquire() {
         Ok(p) => p,
         Err(_) => {
             eprintln!("btmqttd: {label}: too many outstanding children; skipping {program} ({skip_hint})");
-            return;
+            return false;
         }
     };
     let mut child = match tokio::process::Command::new(program)
@@ -490,14 +501,17 @@ async fn run_maintenance_child(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .process_group(0) // pgid == the script's pid, so (when allowed) a timeout can kill the whole group
-        .kill_on_drop(true)
+        // Tie kill-on-drop to kill-on-timeout: a firewall rebuild (`false`) must survive even a runtime
+        // shutdown that drops this Child / cancels the reaper, so it is never SIGKILLed mid-rebuild; a
+        // dropbear start (`true`) may die with us.
+        .kill_on_drop(kill_on_timeout)
         .spawn()
     {
         Ok(child) => child,
         Err(e) => {
             eprintln!("btmqttd: {label}: failed to run {program}: {e}");
             drop(permit); // nothing spawned — release the reserved slot
-            return;
+            return false;
         }
     };
     match tokio::time::timeout(timeout, child.wait()).await {
@@ -542,6 +556,7 @@ async fn run_maintenance_child(
             }
         }
     }
+    true // a child WAS spawned (the action was dispatched), even if it timed out and detached
 }
 
 /// (Re)start dropbear so sshd is listening on `:22` — the exec half of [`restore_ssh`] (issue #130). Runs the
@@ -588,7 +603,10 @@ async fn start_dropbear() {
 /// (the same eligibility the hardened hook and `:8554` rule require); see [`run_maintenance_child`] for the
 /// spawn/timeout/reap discipline. The command string is built only from the two fixed path consts (no
 /// external input), so the shell has no injection surface.
-async fn restore_firewall() {
+/// Returns `true` if the recovery child was DISPATCHED (spawned — it may still be completing in the background
+/// on the detach path), `false` if it was SKIPPED (no reap permit / spawn failure), so the caller withholds a
+/// misleading "done" ack when nothing ran.
+async fn restore_firewall() -> bool {
     let recovery = format!("{FACTORY_FIREWALL_SCRIPT}; {GO2RTCD_INIT} fw-reassert");
     run_maintenance_child(
         "sh",
@@ -598,7 +616,7 @@ async fn restore_firewall() {
         false, // never SIGKILL a partial factory rebuild; detach + reap on the rare long lock wait
         FIREWALL_REBUILD_TIMEOUT,
     )
-    .await;
+    .await
 }
 
 /// Is this an ON-DEVICE-CAMERA build — the only build where "Restore firewall" is safe to run? The
@@ -610,10 +628,15 @@ async fn restore_firewall() {
 /// signal — the SAME executable-presence check the `go2rtc-net-hook` if-up.d hook uses — and REJECT the MQTT
 /// action when it is false. Best-effort: any stat/permission error reads as NOT installed (fail-closed —
 /// refuse rather than risk the race). Async `tokio::fs` so a slow stat never stalls the runtime.
+///
+/// Uses `symlink_metadata` (NOT `metadata`, which FOLLOWS symlinks) and requires a REGULAR file: the installer
+/// writes `go2rtcd` as a plain 0755 file, so a SYMLINK at this path is not something we created — it must not be
+/// able to satisfy the gate by pointing at some other executable. `file_type().is_file()` is false for a
+/// symlink, so a planted symlink reads as NOT installed.
 async fn on_device_camera_installed() -> bool {
     use std::os::unix::fs::PermissionsExt;
-    match tokio::fs::metadata(GO2RTCD_INIT).await {
-        Ok(md) => md.is_file() && md.permissions().mode() & 0o111 != 0,
+    match tokio::fs::symlink_metadata(GO2RTCD_INIT).await {
+        Ok(md) => md.file_type().is_file() && md.permissions().mode() & 0o111 != 0,
         Err(_) => false,
     }
 }
