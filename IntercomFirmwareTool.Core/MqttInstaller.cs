@@ -469,18 +469,42 @@ namespace IntercomFirmwareTool.Core
         // panel runs such a long-held iptables operation; the bounded alternative (`-w N`) is deliberately
         // avoided because a timeout would re-introduce exactly the silent drop this shim removes.
         private const string FactoryFirewallShimFn = "iptables() { command iptables -w \"$@\"; }";
-        // The shim block, spliced in immediately after the shebang so the function is defined before any
-        // factory `iptables` call runs. Built from FactoryFirewallShimFn so the operative line has a single
-        // source of truth. LF endings; the >>> / <<< lines carry FactoryFirewallShimMarker.
+        // The whole-rebuild lock file (issue #147). A tmpfs path under /var/run — writable and present before
+        // networking, and the same runtime-lock convention the btmqttd/go2rtcd init scripts use
+        // (/var/run/*.lock). util-linux `flock FILE COMMAND` creates it (O_CREAT) on first use.
+        private const string FactoryFirewallLockPath = "/var/run/ift-factory-firewall.lock";
+        // The OPERATIVE flock line (issue #147): re-exec the WHOLE hook under an exclusive flock so only one
+        // factory rebuild runs at a time. The per-call `-w` shim below makes each `iptables` call wait for the
+        // xtables lock, but it does NOT make the whole rebuild (flush + ~40 appends) atomic — a second run of
+        // THIS hook (a concurrent interface bring-up, or the MQTT "Restore firewall" recovery which re-runs this
+        // same hook) could still interleave and flush a partial rebuild. The guard var stops the re-exec from
+        // recursing; `[ -x /usr/bin/flock ]` keeps the hook working (best-effort, per-call `-w` only) if flock
+        // is somehow absent, so a missing tool never blocks interface bring-up. Unbounded wait (no `-w N`),
+        // matching the per-call policy: a timeout would re-introduce the very partial rebuild it prevents; flock
+        // auto-releases on process exit (even a crash), so it cannot wedge boot. Kept as ONE line so the block's
+        // strip/validation whitelist stays a small set of exact operative lines.
+        // The `if` form (not `a || { … }`) so the line's exit status is 0 whenever it does NOT re-exec — a
+        // factory hook that runs under `set -e` must not abort here when the guard is already set or flock is
+        // absent (an `if` with a false condition returns 0; the condition is exempt from errexit).
+        private const string FactoryFirewallFlockLine =
+            "if [ \"${__IFT_FW_LOCKED:-}\" != 1 ] && [ -x /usr/bin/flock ]; then __IFT_FW_LOCKED=1 exec /usr/bin/flock "
+            + FactoryFirewallLockPath + " \"$0\" \"$@\"; fi";
+        // The shim block, spliced in immediately after the shebang so the flock re-exec and the `iptables`
+        // function are in force before any factory `iptables` call runs. Built from FactoryFirewallFlockLine +
+        // FactoryFirewallShimFn so the operative lines have a single source of truth. LF endings; the >>> / <<<
+        // lines carry FactoryFirewallShimMarker.
         //
-        // This is a plain function shim — the standard, surgical way to inject a default flag into the calls
-        // of a KNOWN script: define the wrapper once at the top, and every subsequent bare `iptables` call in
-        // the hook picks it up. `command` reaches the real binary (no recursion). We deliberately do NOT try
-        // to make the shim tamper-proof against a hand-edited hook that later REDEFINES `iptables` — that is
-        // out of scope (the factory hook is a fixed, known script; the extracted C100X hook contains no such
-        // redefinition), and the mechanisms to attempt it (a `readonly -f` pin, or statically parsing the
-        // shell to prove no other definition exists) are non-portable and/or undecidable and caused more
-        // fragility than they removed.
+        // Two layers, both defense against dropping a factory rule (SSH :22, the FTP-over-USB reflash :21,
+        // security DROPs) under a concurrent iptables writer:
+        //   * a whole-rebuild flock (#147) that serializes an ENTIRE run of this hook against another run of it;
+        //   * a per-call `iptables -w` function shim (#145) so any OTHER iptables writer (the go2rtc :8554
+        //     re-assert) that overlaps a single factory call blocks for the lock rather than dropping a rule.
+        // Both are plain, surgical shell — the standard way to wrap a KNOWN script: `command` reaches the real
+        // binary (no recursion). We deliberately do NOT try to make the shim tamper-proof against a hand-edited
+        // hook that later REDEFINES `iptables` — that is out of scope (the factory hook is a fixed, known
+        // script; the extracted C100X hook contains no such redefinition), and the mechanisms to attempt it (a
+        // `readonly -f` pin, or statically parsing the shell to prove no other definition exists) are
+        // non-portable and/or undecidable and caused more fragility than they removed.
         private const string FactoryFirewallShim =
             "# >>> " + FactoryFirewallShimMarker + ": make the factory firewall WAIT for the xtables lock >>>\n" +
             "# The factory rebuilds INPUT with lock-less `iptables -A` calls (no -w). With the on-device\n" +
@@ -489,6 +513,11 @@ namespace IntercomFirmwareTool.Core
             "# security DROPs) goes missing until the next clean rebuild — locking out SSH or the reflash.\n" +
             "# Shadowing `iptables` with a function that injects --wait makes every factory call BLOCK for\n" +
             "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
+            "# The per-call --wait does not make the WHOLE rebuild (flush + ~40 appends) atomic, so re-exec the\n" +
+            "# whole hook under an exclusive flock (issue #147): only one rebuild runs at a time, even when the\n" +
+            "# MQTT \"Restore firewall\" recovery re-runs this hook or an interface bring-up overlaps. The guard\n" +
+            "# var stops the re-exec recursing; a missing /usr/bin/flock falls back to the per-call --wait only.\n" +
+            FactoryFirewallFlockLine + "\n" +
             FactoryFirewallShimFn + "\n" +
             "# <<< " + FactoryFirewallShimMarker + " <<<\n";
         // The opener/closer marker-line prefixes of an installed shim block. Used to STRIP prior EXACT owned
@@ -2973,7 +3002,8 @@ namespace IntercomFirmwareTool.Core
         /// factory rule after the opener (SSH <c>:22</c>, the FTP-reflash <c>:21</c>, the security DROPs) and
         /// lock the unit out — so this FAILS the install loudly (throws), like the other shape guards. The
         /// closer scan is also structure-checked: a genuine block holds only comment lines and the EXACT
-        /// <see cref="FactoryFirewallShimFn"/> line, so anything else before the closer — a real factory
+        /// operative lines (<see cref="FactoryFirewallFlockLine"/> and <see cref="FactoryFirewallShimFn"/>), so
+        /// anything else before the closer — a real factory
         /// command, a smuggled <c>iptables() {…}; iptables -A …</c>, or a hand-altered function — marks the
         /// opener unterminated and a later <c># &lt;&lt;&lt; …</c> as coincidental DATA; we throw rather than
         /// delete the rules between them. A tampered block therefore fails CLOSED instead of being rewritten.</para>
@@ -3001,15 +3031,17 @@ namespace IntercomFirmwareTool.Core
                     if (t.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal)) { close = i; break; }
                     if (t.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal)) break;
                     // Fail closed against a SPOOFED closer. A genuine block holds only its own comment lines
-                    // (`#…`) and the EXACT `FactoryFirewallShimFn` line. Matching the function loosely (say
+                    // (`#…`) and the EXACT operative lines — the `FactoryFirewallFlockLine` re-exec (#147) and
+                    // the `FactoryFirewallShimFn` function (#145). Matching either loosely (say
                     // `StartsWith("iptables()")`) would accept a smuggled `iptables() { … }; iptables -A INPUT …`
                     // and then delete that real rule when RemoveRange runs — so we require byte-exact equality.
-                    // Any other line — a real factory command, or a tampered/foreign function — means this
+                    // Any other line — a real factory command, or a tampered/foreign operative line — means this
                     // anchor opener is unterminated and any `# <<< …` below is coincidental marker text in data
                     // (a here-document, say); stop scanning so we THROW below instead of deleting real rules. A
-                    // block whose function was hand-altered therefore fails CLOSED rather than being silently
-                    // rewritten — safer for a firewall hook than guessing.
+                    // block whose operative lines were hand-altered therefore fails CLOSED rather than being
+                    // silently rewritten — safer for a firewall hook than guessing.
                     if (!t.StartsWith("#", StringComparison.Ordinal) &&
+                        !string.Equals(t, FactoryFirewallFlockLine, StringComparison.Ordinal) &&
                         !string.Equals(t, FactoryFirewallShimFn, StringComparison.Ordinal))
                         break;
                 }
