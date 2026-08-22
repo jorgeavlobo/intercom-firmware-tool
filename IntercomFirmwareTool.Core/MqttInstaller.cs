@@ -552,7 +552,7 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// Installs the bridge on an open, writable filesystem, in order:
-        /// idempotency guard → payload scripts → ARM binaries → TLS material →
+        /// interrupted-swap recovery → idempotency guard → payload scripts → ARM binaries → TLS material →
         /// generated config → init-script patches → boot symlinks → on-device media
         /// server (gated on the on-device camera option). Meant to run in the SAME fs
         /// session as <see cref="Ext4Probe.EnableSsh"/>'s edits.
