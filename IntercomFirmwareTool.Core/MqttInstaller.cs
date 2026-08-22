@@ -655,9 +655,9 @@ namespace IntercomFirmwareTool.Core
                 // device-only names — and don't append a duplicate line. An
                 // explicit HostIpForHosts override is always honored (ValidateMqtt
                 // then asserts that exact mapping).
-                bool alreadyMapped = BtDaemonAppsHosts.HasHostMapping(rawFs, opts.MqttHost);
+                bool alreadyMapped = BtDaemonAppsHosts.HasHostMapping(fs, opts.MqttHost);
                 if (!(alreadyMapped && string.IsNullOrWhiteSpace(opts.HostIpForHosts)))
-                    PatchHosts(rawFs, opts.MqttHost, ResolveHostIp(opts));
+                    PatchHosts(fs, opts.MqttHost, ResolveHostIp(opts));
             }
 
             // --- boot symlinks --------------------------------------------------
@@ -1308,8 +1308,8 @@ namespace IntercomFirmwareTool.Core
                 // Both go through the shared whole-line matcher (a commented line
                 // does not count).
                 bool hostLine = (!opts.HostIsIp && !string.IsNullOrWhiteSpace(opts.HostIpForHosts))
-                    ? BtDaemonAppsHosts.HasMapping(rawFs, opts.MqttHost, opts.HostIpForHosts!)
-                    : BtDaemonAppsHosts.HasHostMapping(rawFs, opts.MqttHost);
+                    ? BtDaemonAppsHosts.HasMapping(fs, opts.MqttHost, opts.HostIpForHosts!)
+                    : BtDaemonAppsHosts.HasHostMapping(fs, opts.MqttHost);
                 checks.Add(new("bt_daemon-apps.sh host line present iff hostname",
                     opts.HostIsIp ? !hostLine : hostLine, ""));
 
@@ -1436,11 +1436,8 @@ namespace IntercomFirmwareTool.Core
         /// false for a symlink), this is symmetric across all node types, so an "absent" assertion in
         /// <see cref="ValidateMqtt"/> can't be fooled by a stray symlink left at a media-artifact path.
         /// </summary>
-        private static bool PathOccupied(IExtFs fs, string path)
-        {
-            if (fs.FileExists(path) || fs.DirectoryExists(path)) return true;
-            try { fs.ReadSymLink(path); return true; } catch { return false; }
-        }
+        // Occupancy check (file/dir/symlink) shared with the rewrite primitive; see ExtFsRewrite.PathOccupied.
+        private static bool PathOccupied(IExtFs fs, string path) => ExtFsRewrite.PathOccupied(fs, path);
 
         /// <summary>
         /// True when <paramref name="path"/> resolves to an existing regular file,
@@ -2548,7 +2545,7 @@ namespace IntercomFirmwareTool.Core
             // Complete a rewrite that a previous run left interrupted between its two renames (original moved to
             // .ift-bak, target not yet promoted) BEFORE the missing-target check below — otherwise the preserved
             // original stranded in .ift-bak would be unreachable and this would throw Mqtt_FileMissing (#151).
-            RecoverInterruptedRewrite(fs, path);
+            ExtFsRewrite.RecoverInterruptedRewrite(fs, path);
             if (!fs.FileExists(path))
                 throw new InvalidOperationException(CoreStrings.Format("Mqtt_FileMissing", path));
 
@@ -2586,7 +2583,7 @@ namespace IntercomFirmwareTool.Core
 
             var patched = new List<string>(lines);
             patched.Insert(anchor + 1, "\t" + marker);
-            RewritePreservingMeta(fs, path, string.Join("\n", patched));
+            ExtFsRewrite.RewritePreservingMeta(fs, path, string.Join("\n", patched));
         }
 
         /// <summary>
@@ -2648,10 +2645,9 @@ namespace IntercomFirmwareTool.Core
         /// idempotency and owner/mode preservation the OTA-update block uses, so the
         /// two paths cannot drift.
         /// </summary>
-        // Takes the raw ExtFileSystem (not IExtFs): it only delegates to BtDaemonAppsHosts, a separate
-        // collaborator that owns the /etc/hosts editing and works on ExtFileSystem directly — outside the
-        // factory-firewall seam under test (#150). Callers pass rawFs.
-        private static void PatchHosts(ExtFileSystem fs, string host, string ip) =>
+        // Delegates to BtDaemonAppsHosts, which owns the /etc/hosts seeding. Since #154 that patcher works
+        // through the same IExtFs seam and crash-safe rewrite primitive as the rest of the installer.
+        private static void PatchHosts(IExtFs fs, string host, string ip) =>
             BtDaemonAppsHosts.AddMappings(fs, new[] { (host, ip) });
 
         /// <summary>Resolves the broker hostname to an IPv4 for the hosts edit.</summary>
@@ -2676,154 +2672,6 @@ namespace IntercomFirmwareTool.Core
             catch { /* resolution failed or timed out — fall through to a clear error */ }
             throw new InvalidOperationException(
                 CoreStrings.Format("Mqtt_HostUnresolved", opts.MqttHost));
-        }
-
-        // ---- fs helpers (mirror Ext4Probe's; kept local so the SSH path stays
-        //      untouched — the two classes never share mutable state) -------------
-
-        /// <summary>
-        /// Replaces <paramref name="path"/>'s contents with <paramref name="text"/> WITHOUT ever leaving the
-        /// original truncated on failure (issue #151). A bare <c>FileMode.Create</c> write truncates the target
-        /// to zero BEFORE the new bytes land, so a mid-write throw or crash would leave a partial — or empty —
-        /// script on the image; for a security-critical hook (the factory firewall, #145) that means flashing a
-        /// firewall that silently does nothing. Instead we write the new content to a sibling temp file, read it
-        /// back and require a byte-for-byte match, stamp the captured mode/owner onto the temp, and only THEN
-        /// swap it into place. The good original is never touched until a fully-written, verified replacement
-        /// exists; on any earlier failure the original stays intact and the temp is removed.
-        ///
-        /// <para>SharpExt4's <c>RenameFile</c> refuses to overwrite an existing destination, so the swap goes
-        /// through a BACKUP rather than deleting the original outright: <c>original → .ift-bak</c>, then
-        /// <c>temp → path</c>, then delete the backup. If the second rename fails the original is rolled back
-        /// from <c>.ift-bak</c>, so <paramref name="path"/> always ends up holding either the verified new
-        /// content or the intact original — never nothing. The only non-atomic residue is the sub-millisecond
-        /// window between the two renames; it matters solely on host power-loss mid-swap, and even then the
-        /// original survives on disk under <c>.ift-bak</c>. This is a HOST-side image editor whose output is not
-        /// flashed until the tool returns success, so a crash there simply means re-running against a fresh
-        /// image, never a half-written device.</para>
-        /// </summary>
-        private static void RewritePreservingMeta(IExtFs fs, string path, string text)
-        {
-            uint mode = fs.GetMode(path) & 0xFFF;
-            var owner = fs.GetOwner(path);
-            string tmp = path + ".ift-tmp";   // staging for the new content
-            string bak = path + ".ift-bak";   // the original, moved aside during the swap
-            // Clear any siblings a previously-interrupted swap may have left behind; RenameFile refuses to
-            // overwrite, so a leftover here would break the swap.
-            ClearSwapSibling(fs, tmp, path);
-            ClearSwapSibling(fs, bak, path);
-            try
-            {
-                byte[] expected = Encoding.UTF8.GetBytes(text);
-                WriteTextFile(fs, tmp, text);
-                // Read the just-written temp back and require an exact match before it is allowed to replace the
-                // original. A short/partial write that slipped past WriteTextFile is caught HERE — while the
-                // original is still in place and nothing has been destroyed. Compare RAW BYTES (not decoded
-                // text): UTF-8 decoding maps malformed sequences to U+FFFD, so a decoded-string compare could let
-                // a corrupted temp pass; ReadAllBytes also fails loudly on a short read.
-                if (!ReadAllBytes(fs, tmp).AsSpan().SequenceEqual(expected))
-                    throw new IOException(CoreStrings.Format("Mqtt_RewriteVerifyFailed", path));
-                // Stamp the captured metadata onto the temp; SharpExt4's rename moves the inode, so mode/owner
-                // travel with it into the final path.
-                fs.SetMode(tmp, mode);
-                if (owner != null) fs.SetOwner(tmp, owner.Item1, owner.Item2);
-            }
-            catch
-            {
-                // Nothing has moved yet — the original is untouched. Best-effort clean up the partial temp.
-                TryDeleteRegular(fs, tmp);
-                throw;
-            }
-            // Commit via a BACKUP so the original is never lost, even if a rename fails mid-swap. RenameFile
-            // will not overwrite (see IExtFs.RenameFile), so the destination must be free before each move:
-            //   1. original -> bak   (frees `path`; original now safe under `bak`)
-            //   2. tmp      -> path  (the verified replacement lands)
-            //   3. delete bak        (best-effort cleanup)
-            // If step 2 throws (an ext I/O error, say), we roll the original back from `bak`, so `path` always
-            // ends up holding either the new verified content or the intact original — never nothing.
-            try
-            {
-                fs.RenameFile(path, bak);
-            }
-            catch
-            {
-                TryDeleteRegular(fs, tmp);   // original still at `path`; drop the staged temp
-                throw;
-            }
-            try
-            {
-                fs.RenameFile(tmp, path);
-            }
-            catch
-            {
-                // Restore the original; if even this fails the original still exists on disk under `bak`.
-                try { fs.RenameFile(bak, path); } catch { /* original remains recoverable at bak */ }
-                TryDeleteRegular(fs, tmp);
-                throw;
-            }
-            TryDeleteRegular(fs, bak);
-        }
-
-        /// <summary>
-        /// Clears a swap sibling (<c>.ift-tmp</c> / <c>.ift-bak</c>) left over from an interrupted rewrite so the
-        /// no-overwrite <see cref="IExtFs.RenameFile"/> has a free destination. A regular file is deleted; a path
-        /// OCCUPIED by a non-regular node (a symlink or directory — which <see cref="IExtFs.FileExists"/> is blind
-        /// to) cannot be safely cleared and would make the swap rename over an unexpected shape, so we fail closed
-        /// rather than risk it, consistent with the rest of this installer (<see cref="PathOccupied"/>).
-        /// </summary>
-        private static void ClearSwapSibling(IExtFs fs, string sibling, string target)
-        {
-            if (fs.FileExists(sibling)) { fs.DeleteFile(sibling); return; }
-            if (PathOccupied(fs, sibling))
-                throw new InvalidOperationException(
-                    CoreStrings.Format("Mqtt_RewriteSiblingOccupied", target, sibling));
-        }
-
-        /// <summary>Best-effort removal of a regular file used only for cleanup on the failure/commit paths of
-        /// <see cref="RewritePreservingMeta"/> — swallows any error since there is nothing further to do.</summary>
-        private static void TryDeleteRegular(IExtFs fs, string path)
-        {
-            try { if (fs.FileExists(path)) fs.DeleteFile(path); } catch { /* best-effort */ }
-        }
-
-        /// <summary>
-        /// Reconciles a <c>.ift-bak</c> that a previous <see cref="RewritePreservingMeta"/> run left behind when
-        /// the host died mid-swap, run BEFORE a caller's target-existence check so an interrupted swap never
-        /// looks like a missing (or already-done) file:
-        /// <list type="bullet">
-        /// <item>crash AFTER <c>original → .ift-bak</c> but BEFORE <c>temp → path</c> — <paramref name="path"/> is
-        /// absent while <c>.ift-bak</c> holds the intact original: restore it (<c>bak → path</c>, carrying
-        /// mode/owner), else the firewall hook would be treated as absent and hardening silently skipped.</item>
-        /// <item>crash AFTER <c>temp → path</c> but BEFORE the backup cleanup — the target is present and the
-        /// idempotency check may skip the rewrite, so a stale (executable) <c>.ift-bak</c> or leftover
-        /// <c>.ift-tmp</c> would linger forever.</item>
-        /// </list>
-        /// After any restore, it reconciles BOTH swap siblings via <see cref="ClearSwapSibling"/> in every case —
-        /// target present, restored, or genuinely absent — which deletes a regular leftover and FAILS CLOSED on a
-        /// non-regular node (symlink/dir) at these tool-reserved paths, so an unexpected shape can't slip through
-        /// the idempotent-skip path or the absent-target no-op. Only when the TARGET itself is a non-regular node
-        /// are the siblings left intact — the caller fails closed on that target shape.
-        /// </summary>
-        private static void RecoverInterruptedRewrite(IExtFs fs, string path)
-        {
-            string tmp = path + ".ift-tmp";
-            string bak = path + ".ift-bak";
-
-            // If the TARGET itself is a non-regular node (symlink/dir), leave everything as-is; the caller fails
-            // closed on that target shape. (FileExists is symlink-blind, so "absent AND occupied" == non-regular.)
-            if (!fs.FileExists(path) && PathOccupied(fs, path))
-                return;
-
-            // Swap crashed AFTER original -> .ift-bak but BEFORE the promote: the target is absent while a regular
-            // backup holds the original — restore it so the caller doesn't mistake the file for genuinely absent.
-            if (!fs.FileExists(path) && fs.FileExists(bak))
-                fs.RenameFile(bak, path);
-
-            // Reconcile any remaining swap siblings in EVERY case (target present, restored, or genuinely absent).
-            // ClearSwapSibling deletes a regular leftover and FAILS CLOSED on a non-regular node at these
-            // tool-reserved paths — so a symlink/dir at .ift-tmp/.ift-bak can't slip through the idempotent-skip
-            // path or the absent-target no-op.
-            ClearSwapSibling(fs, tmp, path);
-            ClearSwapSibling(fs, bak, path);
         }
 
         /// <summary>
@@ -2880,7 +2728,7 @@ namespace IntercomFirmwareTool.Core
         ///
         /// <para>Idempotent: a script already carrying the exact shim block right after its shebang (see
         /// <see cref="IsFactoryFirewallHardened"/>) is left untouched. Preserves the script's mode/owner
-        /// (<see cref="RewritePreservingMeta"/>). Best-effort
+        /// (<see cref="ExtFsRewrite.RewritePreservingMeta"/>). Best-effort
         /// on shape: if the factory script is ABSENT (a variant that ships none — then there is no factory
         /// firewall to clobber) we skip. Invoked ONLY on the on-device camera path, the sole image that
         /// adds a second iptables writer.</para>
@@ -2890,7 +2738,7 @@ namespace IntercomFirmwareTool.Core
             // If a previous run crashed mid-swap the hook may be sitting in its .ift-bak backup with the real
             // path absent; restore it FIRST, before the absent-path check below could mistake the interrupted
             // swap for a variant that ships no factory firewall and silently skip hardening (#151).
-            RecoverInterruptedRewrite(fs, FactoryFirewallScriptPath);
+            ExtFsRewrite.RecoverInterruptedRewrite(fs, FactoryFirewallScriptPath);
             if (!fs.FileExists(FactoryFirewallScriptPath))
             {
                 // FileExists is symlink-BLIND (like elsewhere in this file — see PathOccupied /
@@ -2923,7 +2771,7 @@ namespace IntercomFirmwareTool.Core
             // OR because we normalized CRLF endings to LF (a CRLF hook's `#!/bin/bash\r` shebang is
             // unrunnable on Linux). An already-hardened LF script yields an identical string → no write.
             if (!string.Equals(patched, original, StringComparison.Ordinal))
-                RewritePreservingMeta(fs, FactoryFirewallScriptPath, patched);
+                ExtFsRewrite.RewritePreservingMeta(fs, FactoryFirewallScriptPath, patched);
         }
 
         /// <summary>

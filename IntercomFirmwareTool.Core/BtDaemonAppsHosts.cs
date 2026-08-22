@@ -1,4 +1,3 @@
-using SharpExt4;
 using System.Text;
 using IntercomFirmwareTool.Core.Localization;
 
@@ -51,7 +50,7 @@ namespace IntercomFirmwareTool.Core
         /// <paramref name="ip"/> mapping as a whole line (ignoring the leading tab /
         /// trailing space). A commented or superset line does not count.
         /// </summary>
-        internal static bool HasMapping(ExtFileSystem fs, string host, string ip)
+        internal static bool HasMapping(IExtFs fs, string host, string ip)
         {
             if (!fs.FileExists(ScriptPath)) return false;
             string expected = MappingLine(host, ip);
@@ -64,7 +63,7 @@ namespace IntercomFirmwareTool.Core
         /// line (trimmed, it starts with <c>#</c>) does not match. Used where only the
         /// presence of a mapping for the name matters, not its exact IP.
         /// </summary>
-        internal static bool HasHostMapping(ExtFileSystem fs, string host)
+        internal static bool HasHostMapping(IExtFs fs, string host)
         {
             if (!fs.FileExists(ScriptPath)) return false;
             string prefix = $"/bin/bt_hosts.sh add {host} ";
@@ -84,8 +83,12 @@ namespace IntercomFirmwareTool.Core
         /// the file is missing, or if a mapping must be inserted but the anchor is
         /// absent.
         /// </summary>
-        internal static void AddMappings(ExtFileSystem fs, IReadOnlyList<(string Host, string Ip)> mappings)
+        internal static void AddMappings(IExtFs fs, IReadOnlyList<(string Host, string Ip)> mappings)
         {
+            // Complete a rewrite a previous run left interrupted mid-swap (original moved to .ift-bak, target not
+            // yet promoted) BEFORE the missing-target check, so the preserved original is restored rather than
+            // the script being wrongly reported as missing (#151 / #154).
+            ExtFsRewrite.RecoverInterruptedRewrite(fs, ScriptPath);
             if (!fs.FileExists(ScriptPath))
                 throw new InvalidOperationException(CoreStrings.Format("Hosts_FileMissing", ScriptPath));
 
@@ -124,7 +127,9 @@ namespace IntercomFirmwareTool.Core
                 lines.Insert(anchor + 1, "\t" + desired);
                 changed = true;
             }
-            if (changed) RewritePreservingMeta(fs, string.Join("\n", lines));
+            // Crash-safe in-place replace (verified temp + backup swap + rollback), shared with the rest of the
+            // installer so bt_hosts.sh can't be left truncated by an interrupted write (#154).
+            if (changed) ExtFsRewrite.RewritePreservingMeta(fs, ScriptPath, string.Join("\n", lines));
         }
 
         // ---- fs plumbing (the drift-prone logic is above; this is trivial I/O) ---
@@ -144,7 +149,7 @@ namespace IntercomFirmwareTool.Core
         private static bool LineStarts(string line, string prefix) =>
             line.Trim().StartsWith(prefix, StringComparison.OrdinalIgnoreCase);
 
-        private static string ReadAllText(ExtFileSystem fs)
+        private static string ReadAllText(IExtFs fs)
         {
             using var file = fs.OpenFile(ScriptPath, FileMode.Open, FileAccess.Read);
             long length = file.Length;
@@ -163,17 +168,6 @@ namespace IntercomFirmwareTool.Core
             if (total != len)
                 throw new IOException(CoreStrings.Format("Ext4_IncompleteRead", len, total));
             return Encoding.UTF8.GetString(buf, 0, total);
-        }
-
-        private static void RewritePreservingMeta(ExtFileSystem fs, string text)
-        {
-            uint mode = fs.GetMode(ScriptPath) & 0xFFF;
-            var owner = fs.GetOwner(ScriptPath);
-            byte[] bytes = Encoding.UTF8.GetBytes(text);
-            using (var f = fs.OpenFile(ScriptPath, FileMode.Create, FileAccess.Write))
-                f.Write(bytes, 0, bytes.Length);
-            fs.SetMode(ScriptPath, mode);
-            if (owner != null) fs.SetOwner(ScriptPath, owner.Item1, owner.Item2);
         }
     }
 }

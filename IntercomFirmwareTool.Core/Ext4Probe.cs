@@ -619,7 +619,7 @@ namespace IntercomFirmwareTool.Core
         /// <c>disable_notify_new_firmware</c>.
         /// </summary>
         private static void BlockFirmwareUpdates(ExtFileSystem fs) =>
-            BtDaemonAppsHosts.AddMappings(fs,
+            BtDaemonAppsHosts.AddMappings(new ExtFsAdapter(fs),
                 FirmwareUpdateHosts.Select(h => (h, "127.0.0.1")).ToList());
 
         /// <summary>Absolute path of the ECDSA host key baked into the image (issue #37).</summary>
@@ -802,9 +802,12 @@ namespace IntercomFirmwareTool.Core
                 // would wrongly fail cross-validation of an image that happens to
                 // carry other host mappings).
                 if (opts.BlockFirmwareUpdates)
+                {
+                    var hostsFs = new ExtFsAdapter(fs);
                     foreach (var host in FirmwareUpdateHosts)
                         checks.Add(new($"firmware-update host {host} -> 127.0.0.1 (OTA blocked)",
-                            BtDaemonAppsHosts.HasMapping(fs, host, "127.0.0.1"), ""));
+                            BtDaemonAppsHosts.HasMapping(hostsFs, host, "127.0.0.1"), ""));
+                }
 
                 // Modern host key (issue #37): only asserted when requested. Verify
                 // the ECDSA host key is present and non-empty, and that
