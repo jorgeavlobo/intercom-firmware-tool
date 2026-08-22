@@ -61,31 +61,15 @@ jobs:
           # btmqttd compiles in as CARGO_PKG_VERSION — is the single source of truth, and the C#
           # installer mirrors it in PayloadBinaries.BridgeVersion to bake sw_version into the HA
           # discovery device block WITHOUT reading the binary. If the two drift, HA would advertise
-          # a version the running daemon isn't. Extract each from its DECLARATION (not any comment or
-          # doc example that merely quotes it), so a stray literal can't make the guard read the wrong
-          # value and miss a real mismatch.
+          # a version the running daemon isn't.
           #
-          # Cargo.toml: only the [package] table's version — not a [dependencies.*] sub-table version.
-          cargo_ver="$(awk '
-            /^[[:space:]]*\[/ { in_pkg = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/) }
-            in_pkg && /^[[:space:]]*version[[:space:]]*=/ {
-              if (match($0, /"[^"]*"/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
-            }
-          ' native/btmqttd/Cargo.toml)"
-          # PayloadBinaries.cs: anchored to the actual `public const string BridgeVersion = "…";`
-          # declaration line (leading-whitespace only), so a prose mention never matches.
-          cs_ver="$(grep -oP '^\s*public\s+const\s+string\s+BridgeVersion\s*=\s*"\K[^"]+(?=")' IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs | head -n1 || true)"
-          echo "Cargo.toml version:            '${cargo_ver}'"
-          echo "PayloadBinaries.BridgeVersion: '${cs_ver}'"
-          if [ -z "$cargo_ver" ] || [ -z "$cs_ver" ]; then
-            echo "::error::could not read the bridge version from Cargo.toml and/or PayloadBinaries.cs"
-            exit 1
-          fi
-          if [ "$cargo_ver" != "$cs_ver" ]; then
-            echo "::error::bridge version drift — native/btmqttd/Cargo.toml is '${cargo_ver}' but PayloadBinaries.BridgeVersion is '${cs_ver}'. Bump BOTH together."
-            exit 1
-          fi
-          echo "bridge version in sync: ${cargo_ver}"
+          # The checker parses each source SYNTAX-AWARE (tomllib for the TOML; comment-stripped
+          # matching for the C#), so a stale literal in a comment or a multiline/verbatim string
+          # can't be read and mask a real mismatch. Its --selftest exercises those exact vectors as
+          # a regression guard before the real comparison runs.
+          python3 native/btmqttd/ci/check-bridge-version.py --selftest
+          python3 native/btmqttd/ci/check-bridge-version.py \
+            native/btmqttd/Cargo.toml IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
 
       - name: Install the pinned ARM cross C compiler (Ubuntu archive snapshot)
         env:
