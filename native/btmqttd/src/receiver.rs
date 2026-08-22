@@ -591,9 +591,12 @@ async fn start_dropbear() {
 /// the `:8554` rule the reassert just added, leaving the port closed despite the ack. Chained in one shell,
 /// step 2 begins only after step 1's process EXITS (releasing the xtables lock), so the ordering holds even
 /// when the whole child is detached; the single child also reserves a SINGLE [`REAP_SLOTS`] permit, so the
-/// reassert can never be starved by the rebuild holding the last permit. `;` (not `&&`) so the reassert runs
-/// even if the factory rebuild exited non-zero — a recovery must always end with `:8554` asserted (so the
-/// child's exit status reflects the reassert, the last command).
+/// reassert can never be starved by the rebuild holding the last permit. `&&` (not `;`) so the `:8554`
+/// re-assert runs ONLY after the factory rebuild SUCCEEDS: this mirrors the real ifupdown flow (a failed
+/// `if-pre-up.d/iptables` ABORTS the bring-up, so the `if-up.d` `fw-reassert` never runs) and avoids opening
+/// the camera port on top of a factory `INPUT` that did not fully rebuild (SSH `:22` / security DROPs possibly
+/// missing). On a factory failure the recovery leaves `:8554` closed, and the operator sees the camera down as
+/// the signal to retry rather than a half-open firewall that looks recovered.
 ///
 /// NO kill deadline (`kill_on_timeout=false`, [`FIREWALL_REBUILD_TIMEOUT`]): #145's `-w` shim makes the
 /// factory rebuild WAIT on the xtables lock, and SIGKILLing a partial rebuild would leave exactly the broken
@@ -607,7 +610,7 @@ async fn start_dropbear() {
 /// on the detach path), `false` if it was SKIPPED (no reap permit / spawn failure), so the caller withholds a
 /// misleading "done" ack when nothing ran.
 async fn restore_firewall() -> bool {
-    let recovery = format!("{FACTORY_FIREWALL_SCRIPT}; {GO2RTCD_INIT} fw-reassert");
+    let recovery = format!("{FACTORY_FIREWALL_SCRIPT} && {GO2RTCD_INIT} fw-reassert");
     run_maintenance_child(
         "sh",
         &["-c", &recovery],
