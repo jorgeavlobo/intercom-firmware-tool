@@ -432,14 +432,16 @@ const FACTORY_FIREWALL_SCRIPT: &str = "/etc/network/if-pre-up.d/iptables";
 /// (D-state) won't return from `wait()` even after SIGKILL, and awaiting it here would pin the single ordered
 /// command worker (and delay the maintenance ack). If no reap permit is free the run is SKIPPED rather than
 /// spawning a child we couldn't hand off. `label` tags the log lines to the calling action
-/// (`restore_ssh` / `restore_firewall`). Best-effort — errors are logged, never fatal. Shared by
+/// (`restore_ssh` / `restore_firewall`); `skip_hint` states what recovers a slot-exhausted SKIP — the action
+/// has no auto-retry of its own, and that recovery differs per caller (a watchdog vs. the operator re-pressing),
+/// so it must not be baked into this shared runner. Best-effort — errors are logged, never fatal. Shared by
 /// [`start_dropbear`] and [`restore_firewall`].
-async fn run_maintenance_child(program: &str, args: &[&str], label: &str, timeout: Duration) {
+async fn run_maintenance_child(program: &str, args: &[&str], label: &str, skip_hint: &str, timeout: Duration) {
     let permit = match REAP_SLOTS.try_acquire() {
         Ok(p) => p,
         Err(_) => {
             eprintln!(
-                "btmqttd: {label}: too many outstanding children; skipping {program} (watchdog will retry)"
+                "btmqttd: {label}: too many outstanding children; skipping {program} ({skip_hint})"
             );
             return;
         }
@@ -497,6 +499,7 @@ async fn start_dropbear() {
         "/etc/init.d/dropbear",
         &["start"],
         "restore_ssh",
+        "bt_service_watchdog will retry within 60s",
         MAINTENANCE_CHILD_TIMEOUT,
     )
     .await;
@@ -509,7 +512,14 @@ async fn start_dropbear() {
 /// is no rootfs-`ro` gate — the firewall script is not sensitive to the mount mode. Best-effort and
 /// idempotent; see [`run_maintenance_child`] for the spawn/timeout/reap discipline.
 async fn restore_firewall() {
-    run_maintenance_child(FACTORY_FIREWALL_SCRIPT, &[], "restore_firewall", MAINTENANCE_CHILD_TIMEOUT).await;
+    run_maintenance_child(
+        FACTORY_FIREWALL_SCRIPT,
+        &[],
+        "restore_firewall",
+        "press Restore firewall again to retry",
+        MAINTENANCE_CHILD_TIMEOUT,
+    )
+    .await;
 }
 
 /// SIGKILL a bounded child's WHOLE process group, then hand it (with its cleanup permit) to the detached
