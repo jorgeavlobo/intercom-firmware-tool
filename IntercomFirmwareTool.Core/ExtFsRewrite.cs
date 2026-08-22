@@ -6,17 +6,19 @@ using IntercomFirmwareTool.Core.Localization;
 namespace IntercomFirmwareTool.Core
 {
     /// <summary>
-    /// The shared crash-safe in-place file rewrite for ext-image editing (issue #151 / #154). The in-place script
-    /// edits that go through it replace an EXISTING file's contents while preserving its mode/owner — the
-    /// factory-firewall hook and flexisip init script (<see cref="MqttInstaller"/>) and the boot-time hosts script
-    /// (<see cref="BtDaemonAppsHosts"/>). Keeping the swap protocol in ONE place means the correctness the #151
-    /// review rounds established (verified raw-byte write, backup + rollback, recover-on-next-run, fail-closed on
-    /// odd sibling shapes) cannot drift between callers, and it is exercised by one shared test suite through the
-    /// in-memory <c>IExtFs</c> fake — no native SharpExt4 or ext4 fixture required.
+    /// The shared crash-safe in-place file rewrite for ext-image editing (issues #151 / #154 / #156). Every
+    /// in-place edit that replaces an EXISTING file's contents while preserving its mode/owner routes through
+    /// here — the factory-firewall hook and flexisip init script (<see cref="MqttInstaller"/>), the boot-time
+    /// hosts script (<see cref="BtDaemonAppsHosts"/>), and the SSH-enable edits in <see cref="Ext4Probe"/>
+    /// (<c>/etc/passwd</c>, <c>/etc/shadow</c>, and <c>/etc/default/dropbear</c>). Keeping the swap protocol in
+    /// ONE place means the correctness the #151 review rounds established (verified raw-byte write, backup +
+    /// rollback, recover-on-next-run, fail-closed on odd sibling shapes) cannot drift between callers, and it is
+    /// exercised by one shared test suite through the in-memory <c>IExtFs</c> fake — no native SharpExt4 or ext4
+    /// fixture required.
     ///
-    /// <para>NOT every in-place rewrite in the codebase routes through here yet: <see cref="Ext4Probe"/>'s
-    /// <c>/etc/passwd</c> + <c>/etc/shadow</c> SSH edits still use a truncating write and lack an
-    /// <c>IExtFs</c> seam; migrating them is tracked in issue #156.</para>
+    /// <para>Only FRESH-file writes stay outside this primitive, by design: files the tool GENERATES and then
+    /// validates after the build (go2rtc config and the SDP, <c>authorized_keys</c>, the baked ECDSA host key)
+    /// have no precious in-place original that a truncation could destroy, so a plain create is safe for them.</para>
     /// </summary>
     internal static class ExtFsRewrite
     {
