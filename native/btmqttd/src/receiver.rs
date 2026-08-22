@@ -280,10 +280,14 @@ async fn handle_json(
                     // outbound), so this brings SSH back without a reboot or power-cycle. It never touches
                     // the firewall (see `restore_ssh`). Idempotent; safe to repeat.
                     eprintln!("btmqttd: restore_ssh requested via MQTT");
-                    restore_ssh().await;
-                    // Publish the HA feedback AFTER the (fast, non-terminal) recovery so the ack reflects a
-                    // completed action — unlike reboot/restart, which flush their feedback before going down.
-                    publish_maintenance(client, cfg, "restore_ssh").await;
+                    // Publish the HA feedback AFTER the (fast, non-terminal) recovery, and ONLY if dropbear was
+                    // actually (re)started — a best-effort "ran" dispatch signal like restore_firewall, not a
+                    // completion guarantee. When restore_ssh took no action (rootfs not read-only, or the reap
+                    // slots were exhausted), it already logged why; withholding the ack avoids a misleading
+                    // "done" in HA for a press that did nothing.
+                    if restore_ssh().await {
+                        publish_maintenance(client, cfg, "restore_ssh").await;
+                    }
                 }
                 Maintenance::RestoreFirewall => {
                     // One-click firewall recovery net (issue #147): rebuild the whole factory INPUT ruleset
@@ -395,8 +399,9 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
 /// "at":"<iso>"}`. RETAINED so Home Assistant still shows it across the reboot / bridge re-exec that
 /// immediately follows (HA re-reads the retained value on reconnect). Published BEFORE the action so a
 /// restart's clean MQTT shutdown flushes it; for a reboot the unit's own offline blip is the primary
-/// feedback if this last publish doesn't reach the broker before the box goes down (`restore_ssh`, which
-/// doesn't restart anything, publishes AFTER it acts so the ack reflects a completed recovery). Best-effort
+/// feedback if this last publish doesn't reach the broker before the box goes down (`restore_ssh` /
+/// `restore_firewall`, which don't take the daemon down, publish AFTER acting and ONLY when a child was
+/// actually dispatched, so the ack reflects a recovery that ran — not a no-op). Best-effort
 /// — a publish error is logged. `action` is a fixed internal token
 /// (`reboot`/`restart_bridge`/`restore_ssh`/`restore_firewall`) and the ISO timestamp has no JSON-special
 /// characters, so the hand-built object needs no escaping.
@@ -425,16 +430,25 @@ async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &s
 /// lockout it is meant to fix (task #42; see `go2rtc-net-hook`). So the factory `:22` rule stays entirely
 /// the shell layer's concern: #129 keeps it intact, and the "Reboot device" button rebuilds the whole
 /// factory firewall on boot if it is ever lost. This action's job is strictly to bring dropbear back.
-async fn restore_ssh() {
+/// Returns `true` if dropbear was actually (re)started (a child was dispatched), `false` if the action took no
+/// action — rootfs not read-only, `/proc/mounts` unreadable, or the reap slots were exhausted — so the caller
+/// withholds a misleading "done" ack when nothing ran.
+async fn restore_ssh() -> bool {
     match tokio::fs::read_to_string("/proc/mounts").await {
         Ok(mounts) if rootfs_is_ro(&mounts) => start_dropbear().await,
-        Ok(_) => eprintln!(
-            "btmqttd: restore_ssh: rootfs is not mounted read-only; skipping dropbear start to avoid the \
-             fragile rw host-key path (never remounting)"
-        ),
-        Err(e) => eprintln!(
-            "btmqttd: restore_ssh: could not read /proc/mounts ({e}); skipping dropbear start to stay safe"
-        ),
+        Ok(_) => {
+            eprintln!(
+                "btmqttd: restore_ssh: rootfs is not mounted read-only; skipping dropbear start to avoid the \
+                 fragile rw host-key path (never remounting)"
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!(
+                "btmqttd: restore_ssh: could not read /proc/mounts ({e}); skipping dropbear start to stay safe"
+            );
+            false
+        }
     }
 }
 
@@ -564,8 +578,9 @@ async fn run_maintenance_child(
 
 /// (Re)start dropbear so sshd is listening on `:22` — the exec half of [`restore_ssh`] (issue #130). Runs the
 /// same idempotent `/etc/init.d/dropbear start` `bt_service_watchdog` uses (a no-op if dropbear is already
-/// listening). See [`run_maintenance_child`] for the spawn/timeout/reap discipline.
-async fn start_dropbear() {
+/// listening). Returns whether the start child was DISPATCHED (see [`run_maintenance_child`] for the
+/// spawn/timeout/reap discipline).
+async fn start_dropbear() -> bool {
     run_maintenance_child(
         "/etc/init.d/dropbear",
         &["start"],
@@ -574,7 +589,7 @@ async fn start_dropbear() {
         true, // a hung dropbear start should die; bt_service_watchdog retries
         MAINTENANCE_CHILD_TIMEOUT,
     )
-    .await;
+    .await
 }
 
 /// Perform the "Restore firewall" recovery (issue #147) in the SAME two steps the on-device-camera bring-up
