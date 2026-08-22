@@ -134,6 +134,9 @@ La build verificata è stata conservata qui — spostala/rinominala manualmente:
   <data name="Ext4_SymlinkNotSymlink" xml:space="preserve">
     <value>{0} esiste già ma non è un collegamento simbolico; sovrascrittura rifiutata.</value>
   </data>
+  <data name="Ext4_DropbearDefaultsNotRegular" xml:space="preserve">
+    <value>{0} esiste ma non è un file regolare (un collegamento simbolico o una directory); modifica rifiutata.</value>
+  </data>
   <data name="Ext4_FindingPwEnabled" xml:space="preserve">
     <value>Accesso password : ABILITATO  (root2 ha un hash MD5-crypt $1$ in /etc/shadow)</value>
   </data>

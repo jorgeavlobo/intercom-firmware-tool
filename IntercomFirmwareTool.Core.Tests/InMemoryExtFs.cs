@@ -18,6 +18,7 @@ internal sealed class InMemoryExtFs : IExtFs
 {
     // Octal file modes as the low 12 bits GetMode returns (type bits live above 0xFFF and don't affect the
     // installer, which only masks perms/execute bits).
+    internal const uint Mode0600 = 0x180;   // rw------- (e.g. /etc/shadow)
     internal const uint Mode0644 = 0x1A4;   // rw-r--r--
     internal const uint Mode0755 = 0x1ED;   // rwxr-xr-x
     internal const uint Mode0777 = 0x1FF;   // rwxrwxrwx

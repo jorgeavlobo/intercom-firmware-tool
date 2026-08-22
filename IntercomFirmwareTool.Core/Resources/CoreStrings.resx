@@ -134,6 +134,9 @@ The verified build was kept here — move/rename it manually:
   <data name="Ext4_SymlinkNotSymlink" xml:space="preserve">
     <value>{0} already exists but is not a symlink; refusing to overwrite it.</value>
   </data>
+  <data name="Ext4_DropbearDefaultsNotRegular" xml:space="preserve">
+    <value>{0} exists but is not a regular file (a symlink or directory); refusing to edit it.</value>
+  </data>
   <data name="Ext4_FindingPwEnabled" xml:space="preserve">
     <value>Password login : ENABLED  (root2 has an MD5-crypt $1$ hash in /etc/shadow)</value>
   </data>

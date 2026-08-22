@@ -146,7 +146,13 @@ namespace IntercomFirmwareTool.Core
         /// Reads a whole file from an already-open filesystem as text, with a
         /// bounded size so a huge file can't exhaust memory.
         /// </summary>
-        private static string ReadAllTextFromFs(ExtFileSystem fs, string fileInsideImage)
+        private static string ReadAllTextFromFs(ExtFileSystem fs, string fileInsideImage) =>
+            ReadAllTextFromFs(new ExtFsAdapter(fs), fileInsideImage);
+
+        /// <summary><see cref="IExtFs"/> overload of <see cref="ReadAllTextFromFs(ExtFileSystem, string)"/> —
+        /// the single implementation, used directly by the crash-safe write paths (which operate through the
+        /// seam) and via the pure-delegation adapter by every read/validation caller.</summary>
+        private static string ReadAllTextFromFs(IExtFs fs, string fileInsideImage)
         {
             using var file = fs.OpenFile(fileInsideImage, FileMode.Open, FileAccess.Read);
 
@@ -472,6 +478,19 @@ namespace IntercomFirmwareTool.Core
         /// <summary>Applies the ordered Phase A–D edits on an open, writable fs.</summary>
         private static void ApplySshEnable(ExtFileSystem fs, EnableSshOptions opts)
         {
+            // The auth-file edits go through the shared crash-safe rewrite, which operates on the IExtFs seam so
+            // its swap protocol (verified temp + backup + rollback + recover) is one implementation across the
+            // whole tool and is unit-testable through the in-memory fake.
+            var authFs = new ExtFsAdapter(fs);
+
+            // Reconcile any swap a previous interrupted run left behind (original moved to .ift-bak, new content
+            // not yet promoted) BEFORE the already-modified guard reads /etc/passwd — otherwise an interrupted
+            // passwd swap could look unmodified-and-absent, or a completed one could leave a stale .ift-bak
+            // sibling that the guard's early return would never clean up (#156, mirroring the InstallMqtt
+            // pre-guard recovery pass from #154). Recovery is an idempotent no-op when there is no swap residue.
+            foreach (var swapPath in new[] { "/etc/passwd", "/etc/shadow", DropbearDefaultsPath })
+                ExtFsRewrite.RecoverInterruptedRewrite(authFs, swapPath);
+
             // Guard: the edits are meant for an ORIGINAL firmware. Appending the
             // accounts is not idempotent, so refuse an image that already has a
             // "root2" account (e.g. a previously-modified .fwz) rather than
@@ -487,12 +506,12 @@ namespace IntercomFirmwareTool.Core
             // one was given; otherwise the shadow field is "*" (password login
             // disabled — key-only). At least one credential is guaranteed above.
             string secret = opts.HasPassword ? Md5Crypt.Crypt(opts.RootPassword!, "root") : "*";
-            AppendLines(fs, "/etc/passwd", new[]
+            AppendLines(authFs, "/etc/passwd", new[]
             {
                 "root2:x:0:0:root:/home/root:/bin/sh",
                 "bticino2:x:1000:1000::/home/bticino:/bin/sh",
             });
-            AppendLines(fs, "/etc/shadow", new[]
+            AppendLines(authFs, "/etc/shadow", new[]
             {
                 $"root2:{secret}:18033:0:99999:7:::",
                 $"bticino2:{secret}:18033:0:99999:7:::",
@@ -673,7 +692,7 @@ namespace IntercomFirmwareTool.Core
             // non-standard image without it isn't left pointing DROPBEAR_RSAKEY at a
             // missing file (which the init would then try to regenerate on the ro rootfs).
             bool pinRsa = FileNonEmpty(fs, RsaHostKeyPath);
-            PatchDropbearDefaults(fs, pinRsa);
+            PatchDropbearDefaults(new ExtFsAdapter(fs), pinRsa);
         }
 
         /// <summary>
@@ -702,15 +721,29 @@ namespace IntercomFirmwareTool.Core
         /// previous value compose with the factory ones. Each directive is added only when
         /// an ACTIVE (non-comment) line doesn't already carry it — matched with token
         /// boundaries so a commented occurrence or a look-alike path (…host_key.old) never
-        /// suppresses the patch. If the file is absent (a non-factory image) it is created;
-        /// mode/owner are set to the factory 0644 root:root (WriteTextFile truncates via
-        /// FileMode.Create, so the canonical mode must be asserted for this init-sourced file).
+        /// suppresses the patch. An existing factory file is edited through the shared crash-safe rewrite
+        /// (<see cref="ExtFsRewrite.RewritePreservingMeta"/>) so an interrupted write can't truncate it (#156); an
+        /// absent (non-factory) image is a fresh create. mode/owner are then set to the factory 0644 root:root —
+        /// asserted explicitly because this file is init-sourced and the rewrite would otherwise carry a
+        /// non-standard prior mode forward.
         /// </summary>
-        private static void PatchDropbearDefaults(ExtFileSystem fs, bool pinRsa)
+        internal static void PatchDropbearDefaults(IExtFs fs, bool pinRsa)
         {
-            string existing = PathPresent(fs, DropbearDefaultsPath)
-                ? ReadAllTextFromFs(fs, DropbearDefaultsPath)
-                : "";
+            // Complete a swap a previous interrupted run left behind before deciding present-vs-absent, so a crash
+            // between the backup and the promote doesn't make this factory file look absent (#156).
+            ExtFsRewrite.RecoverInterruptedRewrite(fs, DropbearDefaultsPath);
+
+            // The factory /etc/default/dropbear is a REGULAR file. Fail CLOSED on a path OCCUPIED by a non-regular
+            // node — a symlink or directory (FileExists is symlink-blind, so "not regular AND occupied" == one of
+            // those): editing it would either truncate a symlinked config through the fresh-create path or clobber
+            // an unexpected shape. That leaves exactly two cases below — a regular file (edited crash-safely in
+            // place) or a genuinely absent path (a fresh create with no precious original to lose).
+            bool regular = fs.FileExists(DropbearDefaultsPath);
+            if (!regular && PathPresent(fs, DropbearDefaultsPath))
+                throw new InvalidOperationException(
+                    CoreStrings.Format("Ext4_DropbearDefaultsNotRegular", DropbearDefaultsPath));
+
+            string existing = regular ? ReadAllTextFromFs(fs, DropbearDefaultsPath) : "";
 
             var toAppend = new System.Text.StringBuilder();
             // #38 first, so the RSA pin is set before anything that might read it.
@@ -728,7 +761,16 @@ namespace IntercomFirmwareTool.Core
                 ? toAppend.ToString()
                 : (existing.EndsWith("\n", StringComparison.Ordinal) ? existing : existing + "\n")
                   + toAppend;
-            WriteTextFile(fs, DropbearDefaultsPath, updated);
+
+            // In-place edit of the existing factory file → crash-safe rewrite (verified temp + backup swap +
+            // rollback), so an interrupted write can't truncate /etc/default/dropbear and strip its factory
+            // config; an absent (non-factory) image is a fresh create with no precious original to lose (#156).
+            if (regular)
+                ExtFsRewrite.RewritePreservingMeta(fs, DropbearDefaultsPath, updated);
+            else
+                WriteTextFile(fs, DropbearDefaultsPath, updated);
+            // This file is init-sourced: assert the canonical factory 0644 root:root regardless of the prior mode
+            // (the crash-safe rewrite would otherwise carry a non-standard mode forward).
             fs.SetMode(DropbearDefaultsPath, ToMode(644));
             fs.SetOwner(DropbearDefaultsPath, 0, 0);
         }
@@ -1123,8 +1165,22 @@ namespace IntercomFirmwareTool.Core
         private static bool HasExactLine(string content, string expected) =>
             content.Replace("\r\n", "\n").Split('\n').Count(line => line == expected) == 1;
 
-        private static void AppendLines(ExtFileSystem fs, string path, string[] lines)
+        /// <summary>
+        /// Appends <paramref name="lines"/> to an EXISTING file — read the current contents, append, and replace
+        /// the file through the shared crash-safe rewrite (<see cref="ExtFsRewrite.RewritePreservingMeta"/>: a
+        /// verified temp write + backup swap + rollback) so <c>/etc/passwd</c> and <c>/etc/shadow</c> can never be
+        /// left truncated by an interrupted write (#156). A truncated <c>/etc/shadow</c> is the highest-blast-radius
+        /// corruption in the whole image — it can lock every account out of login — so this path must never leave a
+        /// partial. The rewrite captures and re-applies the original mode/owner, keeping <c>/etc/shadow</c> at its
+        /// factory <c>0600 root:root</c> without any manual re-stamp here.
+        /// </summary>
+        internal static void AppendLines(IExtFs fs, string path, string[] lines)
         {
+            // Complete a rewrite that a previous run left interrupted mid-swap (original moved to .ift-bak, target
+            // not yet promoted) BEFORE the missing-target check, so the preserved original is restored rather than
+            // the auth file being wrongly reported as missing (#151 / #156).
+            ExtFsRewrite.RecoverInterruptedRewrite(fs, path);
+
             // /etc/passwd and /etc/shadow must already exist: creating them here
             // would give them unknown metadata, so refuse if they are missing.
             if (!fs.FileExists(path))
@@ -1136,22 +1192,20 @@ namespace IntercomFirmwareTool.Core
             if (sb.Length > 0 && sb[sb.Length - 1] != '\n') sb.Append('\n');
             foreach (var line in lines) sb.Append(line).Append('\n');
 
-            // Capture the existing mode/owner and re-apply them after the rewrite.
-            // WriteTextFile truncates via FileMode.Create; lwext4 truncates in
-            // place, but re-applying makes the perms/owner independent of that
-            // behaviour — important for /etc/shadow, which must stay 0600 root:root.
-            uint mode = fs.GetMode(path) & 0xFFF;
-            var owner = fs.GetOwner(path);
-            WriteTextFile(fs, path, sb.ToString());
-            fs.SetMode(path, mode);
-            if (owner != null) fs.SetOwner(path, owner.Item1, owner.Item2);
+            ExtFsRewrite.RewritePreservingMeta(fs, path, sb.ToString());
         }
 
-        private static void WriteTextFile(ExtFileSystem fs, string path, string text)
+        private static void WriteTextFile(ExtFileSystem fs, string path, string text) =>
+            WriteTextFile(new ExtFsAdapter(fs), path, text);
+
+        private static void WriteTextFile(IExtFs fs, string path, string text)
         {
             byte[] bytes = Encoding.UTF8.GetBytes(text);
             using var f = fs.OpenFile(path, FileMode.Create, FileAccess.Write);
-            f.Write(bytes, 0, bytes.Length);
+            // A zero-length write throws inside SharpExt4's ExtFileStream (empty-buffer edge) and Create has
+            // already left a correct 0-byte file, so an empty payload skips the write (mirrors ExtFsRewrite).
+            if (bytes.Length > 0)
+                f.Write(bytes, 0, bytes.Length);
         }
 
         /// <summary>
@@ -1184,7 +1238,10 @@ namespace IntercomFirmwareTool.Core
         /// The factory <c>/etc/default/dropbear</c> is a regular file, so
         /// this is defensive against a non-standard image shape.
         /// </summary>
-        private static bool PathPresent(ExtFileSystem fs, string path)
+        private static bool PathPresent(ExtFileSystem fs, string path) =>
+            PathPresent(new ExtFsAdapter(fs), path);
+
+        private static bool PathPresent(IExtFs fs, string path)
         {
             if (fs.FileExists(path) || fs.DirectoryExists(path)) return true;
             try { fs.ReadSymLink(path); return true; } catch { return false; }
