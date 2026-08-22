@@ -6,13 +6,17 @@ using IntercomFirmwareTool.Core.Localization;
 namespace IntercomFirmwareTool.Core
 {
     /// <summary>
-    /// The shared crash-safe in-place file rewrite for ext-image editing (issue #151 / #154), used by every
-    /// caller that replaces an EXISTING file's contents while preserving its mode/owner — the factory-firewall
-    /// hook and flexisip init script (<see cref="MqttInstaller"/>) and the boot-time hosts script
+    /// The shared crash-safe in-place file rewrite for ext-image editing (issue #151 / #154). The in-place script
+    /// edits that go through it replace an EXISTING file's contents while preserving its mode/owner — the
+    /// factory-firewall hook and flexisip init script (<see cref="MqttInstaller"/>) and the boot-time hosts script
     /// (<see cref="BtDaemonAppsHosts"/>). Keeping the swap protocol in ONE place means the correctness the #151
     /// review rounds established (verified raw-byte write, backup + rollback, recover-on-next-run, fail-closed on
     /// odd sibling shapes) cannot drift between callers, and it is exercised by one shared test suite through the
     /// in-memory <c>IExtFs</c> fake — no native SharpExt4 or ext4 fixture required.
+    ///
+    /// <para>NOT every in-place rewrite in the codebase routes through here yet: <see cref="Ext4Probe"/>'s
+    /// <c>/etc/passwd</c> + <c>/etc/shadow</c> SSH edits still use a truncating write and lack an
+    /// <c>IExtFs</c> seam; migrating them is tracked in issue #156.</para>
     /// </summary>
     internal static class ExtFsRewrite
     {
