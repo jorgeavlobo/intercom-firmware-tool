@@ -359,4 +359,61 @@ public class MqttInstallerImageTests
     {
         Assert.Empty(Validate(FsWithBash()));
     }
+
+    // ----------------------------- #149: interpreter reached through a SYMLINKED PARENT -----------------------------
+
+    // A merged-/usr layout: `/bin` is a SYMLINK to `usr/bin`, and the real interpreter lives at
+    // `/usr/bin/bash`. A `#!/bin/bash` hook must still resolve — the resolver has to follow the intermediate
+    // `/bin` symlink, which the ext reader never traverses on the whole path (so a plain FileExists/ReadSymLink
+    // on `/bin/bash` both fail). Before #149 this false-failed as an absent interpreter and aborted the install.
+    private static InMemoryExtFs FsWithMergedUsrBash() =>
+        new InMemoryExtFs().AddSymlink("/bin", "usr/bin").AddExecutable("/usr/bin/bash");
+
+    [Fact]
+    public void Install_hardens_when_the_interpreter_is_reached_through_a_symlinked_parent()
+    {
+        var fs = FsWithMergedUsrBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);           // must NOT throw Unhardenable (#149)
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+    }
+
+    [Fact]
+    public void Validate_passes_when_the_interpreter_is_reached_through_a_symlinked_parent()
+    {
+        var fs = FsWithMergedUsrBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+        Assert.True(Named(Validate(fs), "interpreter present and executable").Pass);
+    }
+
+    [Fact]
+    public void Validate_passes_when_the_symlinked_parent_target_is_absolute()
+    {
+        // Same, but the parent symlink target is ABSOLUTE (`/bin -> /usr/bin`): resolution restarts from the root.
+        var fs = new InMemoryExtFs().AddSymlink("/bin", "/usr/bin").AddExecutable("/usr/bin/bash")
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+        Assert.True(Named(Validate(fs), "interpreter present and executable").Pass);
+    }
+
+    [Fact]
+    public void Install_still_fails_closed_when_a_symlinked_parent_leads_to_a_non_executable_interpreter()
+    {
+        // Fail-safe preserved: resolving the parent must not paper over a real problem — a present-but-
+        // NON-executable interpreter (0644) is still unhardenable.
+        var fs = new InMemoryExtFs().AddSymlink("/bin", "usr/bin")
+            .AddFile("/usr/bin/bash", "elf", InMemoryExtFs.Mode0644)  // reachable via the symlinked parent, but 0644
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
+
+    [Fact]
+    public void Validate_still_flags_a_dangling_symlinked_parent_interpreter()
+    {
+        // `/bin -> usr/bin` but nothing at `/usr/bin/bash`: the interpreter is genuinely absent → not hardened.
+        string hardened = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        var fs = new InMemoryExtFs().AddSymlink("/bin", "usr/bin")
+            .AddFile(Hook, hardened, InMemoryExtFs.Mode0755);         // no /usr/bin/bash anywhere
+        Assert.False(Named(Validate(fs), "interpreter present and executable").Pass);
+    }
 }
