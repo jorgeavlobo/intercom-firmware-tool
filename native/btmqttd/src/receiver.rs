@@ -430,15 +430,18 @@ async fn restore_ssh() {
     }
 }
 
-/// Wall-clock cap for a maintenance child (the `/etc/init.d/dropbear start` of restore_ssh, the factory
-/// firewall re-run of restore_firewall), so a hung script can't stall the single command worker or delay the
-/// maintenance ack. Generous — both finish well under a second.
+/// Wall-clock cap for the restore_ssh maintenance child (the `/etc/init.d/dropbear start`), so a hung script
+/// can't stall the single command worker or delay the maintenance ack. Generous — dropbear start finishes
+/// well under a second. (restore_firewall uses its own, longer [`FIREWALL_REBUILD_TIMEOUT`] with
+/// completion — not kill — semantics.)
 const MAINTENANCE_CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The factory firewall hook — issue #145's single source of truth for the `INPUT` ruleset (factory rules +
-/// our camera `:8554`). `restore_firewall` (#147) RE-RUNS this script rather than carrying its own copy, so
-/// one press restores everything at once; after #145 the script waits for the xtables lock, so re-running it
-/// can't clobber a concurrent bring-up.
+/// The factory firewall hook — issue #145's single source of truth for the FACTORY `INPUT` rules (SSH `:22`,
+/// the Mini-USB reflash `:21`, the security DROPs). It FLUSHES `INPUT` and rebuilds those rules; it does NOT
+/// own the camera `:8554` rule, which `go2rtc-net-hook` adds separately via `go2rtcd fw-reassert` (see
+/// [`GO2RTCD_INIT`]). `restore_firewall` (#147) RE-RUNS this script rather than carrying its own copy, so the
+/// factory set is restored from its authoritative source; after #145 the script waits for the xtables lock,
+/// so re-running it can't clobber a concurrent bring-up.
 const FACTORY_FIREWALL_SCRIPT: &str = "/etc/network/if-pre-up.d/iptables";
 
 /// The go2rtc init script. Its presence-as-EXECUTABLE is restore_firewall's eligibility signal — it is
@@ -565,32 +568,34 @@ async fn start_dropbear() {
 ///      if-up.d hook makes after the factory rebuild). Without this second step the rebuild would leave the
 ///      camera port CLOSED — the failure the #147 review caught.
 ///
-/// btmqttd keeps NO copy of either ruleset — it only INVOKES the two scripts that own them. Both run with
+/// btmqttd keeps NO copy of either ruleset — it only INVOKES the two scripts that own them, and does so in
+/// ONE child: `sh -c '<factory>; <go2rtcd> fw-reassert'`. A single shell is load-bearing for correctness on
+/// the detach path (the #147 review caught this): with `kill_on_timeout=false` a long factory rebuild is
+/// DETACHED to finish rather than killed, and if the two steps were separate children the reassert would
+/// start CONCURRENTLY with the still-running detached rebuild — whose `iptables -F INPUT` would then flush
+/// the `:8554` rule the reassert just added, leaving the port closed despite the ack. Chained in one shell,
+/// step 2 begins only after step 1's process EXITS (releasing the xtables lock), so the ordering holds even
+/// when the whole child is detached; the single child also reserves a SINGLE [`REAP_SLOTS`] permit, so the
+/// reassert can never be starved by the rebuild holding the last permit. `;` (not `&&`) so the reassert runs
+/// even if the factory rebuild exited non-zero — a recovery must always end with `:8554` asserted (so the
+/// child's exit status reflects the reassert, the last command).
+///
 /// NO kill deadline (`kill_on_timeout=false`, [`FIREWALL_REBUILD_TIMEOUT`]): #145's `-w` shim makes the
 /// factory rebuild WAIT on the xtables lock, and SIGKILLing a partial rebuild would leave exactly the broken
 /// ruleset this action repairs — so on the rare long wait the child is detached to finish, never killed.
-/// Step 2 runs even if step 1 timed out and detached: `fw-reassert` is idempotent and itself takes the
-/// xtables lock, so it serialises safely behind the detached rebuild. Unlike [`restore_ssh`] there is no
-/// rootfs-`ro` gate — neither script is sensitive to the mount mode. This is invoked ONLY after the caller
-/// has confirmed the on-device-camera build via [`on_device_camera_installed`] (the same eligibility the
-/// hardened hook and `:8554` rule require); see [`run_maintenance_child`] for the spawn/timeout/reap
-/// discipline.
+/// Unlike [`restore_ssh`] there is no rootfs-`ro` gate — neither script is sensitive to the mount mode. This
+/// is invoked ONLY after the caller has confirmed the on-device-camera build via [`on_device_camera_installed`]
+/// (the same eligibility the hardened hook and `:8554` rule require); see [`run_maintenance_child`] for the
+/// spawn/timeout/reap discipline. The command string is built only from the two fixed path consts (no
+/// external input), so the shell has no injection surface.
 async fn restore_firewall() {
+    let recovery = format!("{FACTORY_FIREWALL_SCRIPT}; {GO2RTCD_INIT} fw-reassert");
     run_maintenance_child(
-        FACTORY_FIREWALL_SCRIPT,
-        &[],
+        "sh",
+        &["-c", &recovery],
         "restore_firewall",
         "press Restore firewall again to retry",
         false, // never SIGKILL a partial factory rebuild; detach + reap on the rare long lock wait
-        FIREWALL_REBUILD_TIMEOUT,
-    )
-    .await;
-    run_maintenance_child(
-        GO2RTCD_INIT,
-        &["fw-reassert"],
-        "restore_firewall",
-        "press Restore firewall again to retry",
-        false, // idempotent, lock-taking re-assert; let it finish rather than kill it
         FIREWALL_REBUILD_TIMEOUT,
     )
     .await;
