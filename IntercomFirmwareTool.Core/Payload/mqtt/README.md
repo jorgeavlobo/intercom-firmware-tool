@@ -146,8 +146,32 @@ Shadowing `iptables` with a function that injects `--wait` makes **every**
 subsequent factory call **block** for the xtables lock instead of dropping a rule
 (`command` reaches the real binary, so there is no recursion). This is the standard,
 surgical way to inject a default flag into a *known* script's calls: define the
-wrapper once at the top; every bare `iptables` call below picks it up. Because the
-shim is a POSIX function, a hook with a **recognized bare direct shell-path shebang**
+wrapper once at the top; every bare `iptables` call below picks it up.
+
+**Whole-rebuild serialization (issue #147).** The per-call `-w` makes each `iptables`
+call wait for the xtables lock, but it does **not** make the *whole* rebuild atomic —
+the `-F INPUT` flush plus the ~40 `-A` appends are separate processes, so a **second
+run of the hook itself** (a concurrent interface bring-up, or the MQTT **"Restore
+firewall"** recovery, which re-runs this same hook) could still interleave and flush
+the other's partial `INPUT`. So the same shim block also re-execs the entire hook under
+an exclusive `flock`, ahead of the `-w` function:
+
+```sh
+if [ "${__IFT_FW_LOCKED:-}" != 1 ] && [ -x /usr/bin/flock ]; then __IFT_FW_LOCKED=1 exec /usr/bin/flock /var/run/ift-factory-firewall.lock "$0" "$@"; fi
+```
+
+Only one rebuild runs at a time; the guard var stops the re-exec from recursing, the
+wait is **unbounded** (a timeout would re-introduce the partial rebuild it prevents,
+matching the `-w` policy), and `flock` auto-releases on process exit — even a crash —
+so it can never wedge interface bring-up. The lock file lives on the `/var/run` tmpfs
+(the same convention `btmqttd`/`go2rtcd` use) and `flock` creates it on first use. If
+`/usr/bin/flock` is somehow absent the hook still runs (best-effort, per-call `-w`
+only), and the `if` form keeps the line's exit status `0` so a hook under `set -e`
+never aborts here. `restore_firewall` (in `btmqttd`) invokes **this** hook, so it
+serializes for free — no separate lock in the daemon; the daemon's single ordered
+command worker also prevents two of its own presses from overlapping.
+
+Because the shim is a POSIX function, a hook with a **recognized bare direct shell-path shebang**
 — the interpreter and nothing else: `#!/bin/bash`, `#!/bin/sh`, `#!/bin/dash`,
 `#!/bin/ash`, `#!/bin/ksh`, `#!/bin/zsh`, … — runs it, as does the BusyBox/Toybox
 multicall form `#!/bin/busybox sh` (accepted only as the exact `<multicall> <shell>`

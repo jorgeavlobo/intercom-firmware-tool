@@ -469,18 +469,42 @@ namespace IntercomFirmwareTool.Core
         // panel runs such a long-held iptables operation; the bounded alternative (`-w N`) is deliberately
         // avoided because a timeout would re-introduce exactly the silent drop this shim removes.
         private const string FactoryFirewallShimFn = "iptables() { command iptables -w \"$@\"; }";
-        // The shim block, spliced in immediately after the shebang so the function is defined before any
-        // factory `iptables` call runs. Built from FactoryFirewallShimFn so the operative line has a single
-        // source of truth. LF endings; the >>> / <<< lines carry FactoryFirewallShimMarker.
+        // The whole-rebuild lock file (issue #147). A tmpfs path under /var/run — writable and present before
+        // networking, and the same runtime-lock convention the btmqttd/go2rtcd init scripts use
+        // (/var/run/*.lock). util-linux `flock FILE COMMAND` creates it (O_CREAT) on first use.
+        private const string FactoryFirewallLockPath = "/var/run/ift-factory-firewall.lock";
+        // The OPERATIVE flock line (issue #147): re-exec the WHOLE hook under an exclusive flock so only one
+        // factory rebuild runs at a time. The per-call `-w` shim below makes each `iptables` call wait for the
+        // xtables lock, but it does NOT make the whole rebuild (flush + ~40 appends) atomic — a second run of
+        // THIS hook (a concurrent interface bring-up, or the MQTT "Restore firewall" recovery which re-runs this
+        // same hook) could still interleave and flush a partial rebuild. The guard var stops the re-exec from
+        // recursing; `[ -x /usr/bin/flock ]` keeps the hook working (best-effort, per-call `-w` only) if flock
+        // is somehow absent, so a missing tool never blocks interface bring-up. Unbounded wait (no `-w N`),
+        // matching the per-call policy: a timeout would re-introduce the very partial rebuild it prevents; flock
+        // auto-releases on process exit (even a crash), so it cannot wedge boot. Kept as ONE line so the block's
+        // strip/validation whitelist stays a small set of exact operative lines.
+        // The `if` form (not `a || { … }`) so the line's exit status is 0 whenever it does NOT re-exec — a
+        // factory hook that runs under `set -e` must not abort here when the guard is already set or flock is
+        // absent (an `if` with a false condition returns 0; the condition is exempt from errexit).
+        private const string FactoryFirewallFlockLine =
+            "if [ \"${__IFT_FW_LOCKED:-}\" != 1 ] && [ -x /usr/bin/flock ]; then __IFT_FW_LOCKED=1 exec /usr/bin/flock "
+            + FactoryFirewallLockPath + " \"$0\" \"$@\"; fi";
+        // The shim block, spliced in immediately after the shebang so the flock re-exec and the `iptables`
+        // function are in force before any factory `iptables` call runs. Built from FactoryFirewallFlockLine +
+        // FactoryFirewallShimFn so the operative lines have a single source of truth. LF endings; the >>> / <<<
+        // lines carry FactoryFirewallShimMarker.
         //
-        // This is a plain function shim — the standard, surgical way to inject a default flag into the calls
-        // of a KNOWN script: define the wrapper once at the top, and every subsequent bare `iptables` call in
-        // the hook picks it up. `command` reaches the real binary (no recursion). We deliberately do NOT try
-        // to make the shim tamper-proof against a hand-edited hook that later REDEFINES `iptables` — that is
-        // out of scope (the factory hook is a fixed, known script; the extracted C100X hook contains no such
-        // redefinition), and the mechanisms to attempt it (a `readonly -f` pin, or statically parsing the
-        // shell to prove no other definition exists) are non-portable and/or undecidable and caused more
-        // fragility than they removed.
+        // Two layers, both defense against dropping a factory rule (SSH :22, the FTP-over-USB reflash :21,
+        // security DROPs) under a concurrent iptables writer:
+        //   * a whole-rebuild flock (#147) that serializes an ENTIRE run of this hook against another run of it;
+        //   * a per-call `iptables -w` function shim (#145) so any OTHER iptables writer (the go2rtc :8554
+        //     re-assert) that overlaps a single factory call blocks for the lock rather than dropping a rule.
+        // Both are plain, surgical shell — the standard way to wrap a KNOWN script: `command` reaches the real
+        // binary (no recursion). We deliberately do NOT try to make the shim tamper-proof against a hand-edited
+        // hook that later REDEFINES `iptables` — that is out of scope (the factory hook is a fixed, known
+        // script; the extracted C100X hook contains no such redefinition), and the mechanisms to attempt it (a
+        // `readonly -f` pin, or statically parsing the shell to prove no other definition exists) are
+        // non-portable and/or undecidable and caused more fragility than they removed.
         private const string FactoryFirewallShim =
             "# >>> " + FactoryFirewallShimMarker + ": make the factory firewall WAIT for the xtables lock >>>\n" +
             "# The factory rebuilds INPUT with lock-less `iptables -A` calls (no -w). With the on-device\n" +
@@ -489,6 +513,11 @@ namespace IntercomFirmwareTool.Core
             "# security DROPs) goes missing until the next clean rebuild — locking out SSH or the reflash.\n" +
             "# Shadowing `iptables` with a function that injects --wait makes every factory call BLOCK for\n" +
             "# the lock instead of dropping a rule; `command` reaches the real binary (no recursion).\n" +
+            "# The per-call --wait does not make the WHOLE rebuild (flush + ~40 appends) atomic, so re-exec the\n" +
+            "# whole hook under an exclusive flock (issue #147): only one rebuild runs at a time, even when the\n" +
+            "# MQTT \"Restore firewall\" recovery re-runs this hook or an interface bring-up overlaps. The guard\n" +
+            "# var stops the re-exec recursing; a missing /usr/bin/flock falls back to the per-call --wait only.\n" +
+            FactoryFirewallFlockLine + "\n" +
             FactoryFirewallShimFn + "\n" +
             "# <<< " + FactoryFirewallShimMarker + " <<<\n";
         // The opener/closer marker-line prefixes of an installed shim block. Used to STRIP prior EXACT owned
@@ -623,38 +652,6 @@ namespace IntercomFirmwareTool.Core
             // --- generated config (0600 — holds MQTT_PASS) ----------------------
             WriteConfigFile(fs, EtcDir + "/btmqttd.conf", GenerateConf(opts), 600);
 
-            // --- Home Assistant discovery configs -------------------------------
-            // One retained-config JSON per entity + a manifest of
-            // "config-topic<TAB>filename". Written ALWAYS (not only when enabled):
-            // btmqttd publishes them retained when HA_DISCOVERY=1, and
-            // CLEARS the retained configs (empty payload) when HA_DISCOVERY=0 — so a
-            // rebuild that unticks discovery actually removes the HA entities from a
-            // broker that already saw them, instead of leaving them orphaned.
-            {
-                EnsureDir(fs, HaDir);
-                fs.SetMode(HaDir, ToMode(755));
-                fs.SetOwner(HaDir, 0, 0);
-                var manifest = new StringBuilder();
-                foreach (var e in GenerateHaDiscovery(opts))
-                {
-                    // Wrap the ext4 write so a SharpExt4 failure names the offending entity — its
-                    // native exceptions (e.g. IndexOutOfRangeException from ExtFileStream) carry no
-                    // path, which otherwise makes a bad entity impossible to identify from the trace.
-                    try
-                    {
-                        WriteConfigFile(fs, HaDir + "/" + e.FileName, e.Json, 644);
-                    }
-                    catch (Exception ex)
-                    {
-                        throw new InvalidOperationException(
-                            $"Failed writing HA discovery config '{e.FileName}' (payload {Encoding.UTF8.GetByteCount(e.Json)} bytes): {ex.Message}",
-                            ex);
-                    }
-                    manifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
-                }
-                WriteConfigFile(fs, HaDir + "/manifest", manifest.ToString(), 644);
-            }
-
             // --- idempotent init-script patches ---------------------------------
             PatchFlexisip(fs);
             if (!opts.HostIsIp)
@@ -685,6 +682,43 @@ namespace IntercomFirmwareTool.Core
 
             // --- on-device media server (gated: on-device camera only) ----------
             InstallOnDeviceMediaServer(fs, opts);
+
+            // --- Home Assistant discovery configs -------------------------------
+            // One retained-config JSON per entity + a manifest of
+            // "config-topic<TAB>filename". Written ALWAYS (not only when enabled):
+            // btmqttd publishes them retained when HA_DISCOVERY=1, and
+            // CLEARS the retained configs (empty payload) when HA_DISCOVERY=0 — so a
+            // rebuild that unticks discovery actually removes the HA entities from a
+            // broker that already saw them, instead of leaving them orphaned.
+            //
+            // Generated AFTER InstallOnDeviceMediaServer so the restore_firewall eligibility
+            // (RestoreFirewallInstallEligible) sees the FINAL image — go2rtcd has been written by
+            // then — and mirrors the daemon's gate exactly (both go2rtcd + the factory hook). ValidateMqtt
+            // re-checks the same installed image, so the discovery set stays deterministic for its byte-compare.
+            {
+                EnsureDir(fs, HaDir);
+                fs.SetMode(HaDir, ToMode(755));
+                fs.SetOwner(HaDir, 0, 0);
+                var manifest = new StringBuilder();
+                foreach (var e in GenerateHaDiscovery(opts, RestoreFirewallInstallEligible(fs)))
+                {
+                    // Wrap the ext4 write so a SharpExt4 failure names the offending entity — its
+                    // native exceptions (e.g. IndexOutOfRangeException from ExtFileStream) carry no
+                    // path, which otherwise makes a bad entity impossible to identify from the trace.
+                    try
+                    {
+                        WriteConfigFile(fs, HaDir + "/" + e.FileName, e.Json, 644);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidOperationException(
+                            $"Failed writing HA discovery config '{e.FileName}' (payload {Encoding.UTF8.GetByteCount(e.Json)} bytes): {ex.Message}",
+                            ex);
+                    }
+                    manifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
+                }
+                WriteConfigFile(fs, HaDir + "/manifest", manifest.ToString(), 644);
+            }
         }
 
         /// <summary>
@@ -1252,7 +1286,7 @@ namespace IntercomFirmwareTool.Core
                 // comparing to what these options generate (a true read-back, like
                 // the .conf check above).
                 {
-                    var expected = GenerateHaDiscovery(opts);
+                    var expected = GenerateHaDiscovery(opts, RestoreFirewallInstallEligible(fs));
                     var expectedManifest = new StringBuilder();
                     foreach (var e in expected) expectedManifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
                     CheckFile(fs, checks, HaDir + "/manifest", 644);
@@ -1787,6 +1821,7 @@ namespace IntercomFirmwareTool.Core
             ("reboot_device.json", "button", "reboot_device"),
             ("restart_bridge.json", "button", "restart_bridge"),
             ("restore_ssh.json", "button", "restore_ssh"),
+            ("restore_firewall.json", "button", "restore_firewall"),
             // The maintenance FEEDBACK sensor (issue #43) — a read-only diagnostic, but it only makes
             // sense alongside the buttons, so it is tombstoned with them when there is no command topic.
             ("maintenance_action.json", "sensor", "maintenance_action"),
@@ -1828,8 +1863,16 @@ namespace IntercomFirmwareTool.Core
         /// (<see cref="MqttOptions.EnableHaDiscovery"/>): when off, btmqttd CLEARS
         /// these retained configs. Topics/prefix/node are baked in here, so the
         /// on-device publisher just sends each payload retained.
+        ///
+        /// <paramref name="restoreFirewallEligible"/> gates the "Restore firewall" button (#147): it is the
+        /// installer-side mirror of the daemon's <c>restore_firewall_eligible</c> — the button is emitted only
+        /// when the image carries BOTH files the recovery uses (the go2rtcd init and the factory hook) as
+        /// executable regular files, so a build missing either does not surface a button whose every press the
+        /// daemon rejects. Threaded in (rather than read from <c>fs</c> here) so this stays a pure function of
+        /// its inputs and <see cref="ValidateMqtt"/> can re-generate the identical set for the byte-compare;
+        /// the caller computes it via <see cref="RestoreFirewallInstallEligible"/> from the installed image.
         /// </summary>
-        private static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts)
+        private static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts, bool restoreFirewallEligible)
         {
             string prefix = opts.HaDiscoveryPrefix;
             string node = opts.HaNodeId;
@@ -2405,6 +2448,53 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
+            // One-click firewall recovery button (issue #147): rebuilds the whole factory INPUT ruleset then
+            // re-asserts our camera :8554 rule on the panel, restoring both in one shot. It is a recovery net
+            // for a dropped rule (SSH :22, the Mini-USB reflash :21, a security DROP) while btmqttd/MQTT is
+            // still up — faster and less disruptive than the Reboot button, and more surgical (no reboot
+            // re-rolling the clobber race on the way back up). btmqttd carries NO copy of either ruleset — it
+            // only INVOKES the factory script (#145's single source of truth) then `go2rtcd fw-reassert`.
+            //
+            // CAMERA-ON-DEVICE + FACTORY-HOOK PRESENT (#147 review): the camera-on-device build is the only one
+            // that HARDENS the factory hook to wait for the xtables lock (#145's -w shim) and installs the :8554
+            // rule the second step re-asserts. On any other build the factory hook is still the lock-LESS factory
+            // original, so a press re-running it could race the interface-up rebuild and silently drop rules —
+            // recreating the very lockout it is meant to fix. AND a build missing EITHER recovery file — the
+            // go2rtcd init or the factory hook — would surface a button whose every press the daemon rejects
+            // (restore_firewall_eligible requires both) — a silently-failing control. So `restoreFirewallEligible`
+            // mirrors the daemon gate here (both files present + executable in the FINAL image, checked after the
+            // media server install); the button exists only then, and elsewhere we TOMBSTONE it (empty retained)
+            // so a build that had it and later loses it drops the stale entity. config + disabled-by-default like
+            // the other maintenance buttons — discovered but hidden until the operator enables it, no reflash to
+            // arm. Same QoS-0 fire-and-forget and TOPIC_RX trust boundary (a fixed two-step recovery, no
+            // free-form input) as the reboot/restart/restore-ssh buttons.
+            if (opts.CameraEnabled && opts.CameraOnDevice && restoreFirewallEligible)
+            {
+                entities.Add(new HaEntity(
+                    "restore_firewall.json",
+                    Topic("button", "restore_firewall"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Restore firewall",
+                        unique_id = $"{node}_restore_firewall",
+                        default_entity_id = EntId("button", "restore_firewall"),
+                        command_topic = controlTopic,
+                        qos = 0,
+                        payload_press = "{\"action\":\"restore_firewall\"}",
+                        icon = "mdi:wall-fire",
+                        entity_category = "config",
+                        enabled_by_default = false,
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            }
+            else
+            {
+                entities.Add(new HaEntity("restore_firewall.json", Topic("button", "restore_firewall"), ""));
+            }
+
             // Maintenance FEEDBACK sensor (issue #43): the visible ack for the otherwise-stateless
             // buttons. btmqttd publishes a retained {"action":…,"at":…} to EffectiveTopicMaintenance on
             // each accepted press; the sensor shows the last action's name, with the ISO timestamp as an
@@ -2782,6 +2872,30 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
+        /// Is <paramref name="path"/> a present, executable REGULAR file in the image? <c>FileExists</c> is
+        /// symlink-blind (regular files only), matching the daemon's <c>symlink_metadata</c> + regular-file
+        /// requirement, so a symlink at the path does not satisfy the check.
+        /// </summary>
+        private static bool IsRegularExecutable(IExtFs fs, string path) =>
+            fs.FileExists(path) && (fs.GetMode(path) & ExecuteBits) != 0;
+
+        /// <summary>
+        /// Is the on-device "Restore firewall" recovery eligible for THIS image — the installer-side mirror of
+        /// the daemon's <c>restore_firewall_eligible</c> gate? Requires BOTH files the recovery uses to be
+        /// present, executable, regular files: the go2rtc init script (<see cref="Go2RtcdInitPath"/>) and the
+        /// factory firewall hook (<see cref="FactoryFirewallScriptPath"/>). Both are needed because the
+        /// recovery runs `factory-hook &amp;&amp; go2rtcd fw-reassert`; if either is missing the button would be a
+        /// silently-failing control the daemon rejects. Callers must invoke this AFTER
+        /// <see cref="InstallOnDeviceMediaServer"/> has (conditionally) written <c>go2rtcd</c>, so the check
+        /// reflects the final image — and <see cref="ValidateMqtt"/> re-checks the same installed image, keeping
+        /// the discovery set deterministic for the byte-compare. (On a build that ships the factory hook,
+        /// <see cref="PatchFactoryFirewallWaitForLock"/> has hardened it — it THROWS otherwise — so present +
+        /// executable implies hardened.) <c>internal</c> for the test project.
+        /// </summary>
+        internal static bool RestoreFirewallInstallEligible(IExtFs fs) =>
+            IsRegularExecutable(fs, Go2RtcdInitPath) && IsRegularExecutable(fs, FactoryFirewallScriptPath);
+
+        /// <summary>
         /// Hardens the panel's FACTORY firewall against the xtables-lock race (issue #145) so the
         /// on-device camera can never cause a factory INPUT rule to be dropped. The factory script
         /// (<see cref="FactoryFirewallScriptPath"/>) rebuilds INPUT with ~40 LOCK-LESS <c>iptables -A</c>
@@ -2928,7 +3042,8 @@ namespace IntercomFirmwareTool.Core
         /// factory rule after the opener (SSH <c>:22</c>, the FTP-reflash <c>:21</c>, the security DROPs) and
         /// lock the unit out — so this FAILS the install loudly (throws), like the other shape guards. The
         /// closer scan is also structure-checked: a genuine block holds only comment lines and the EXACT
-        /// <see cref="FactoryFirewallShimFn"/> line, so anything else before the closer — a real factory
+        /// operative lines (<see cref="FactoryFirewallFlockLine"/> and <see cref="FactoryFirewallShimFn"/>), so
+        /// anything else before the closer — a real factory
         /// command, a smuggled <c>iptables() {…}; iptables -A …</c>, or a hand-altered function — marks the
         /// opener unterminated and a later <c># &lt;&lt;&lt; …</c> as coincidental DATA; we throw rather than
         /// delete the rules between them. A tampered block therefore fails CLOSED instead of being rewritten.</para>
@@ -2956,15 +3071,17 @@ namespace IntercomFirmwareTool.Core
                     if (t.StartsWith(FactoryFirewallBlockClose, StringComparison.Ordinal)) { close = i; break; }
                     if (t.StartsWith(FactoryFirewallBlockOpen, StringComparison.Ordinal)) break;
                     // Fail closed against a SPOOFED closer. A genuine block holds only its own comment lines
-                    // (`#…`) and the EXACT `FactoryFirewallShimFn` line. Matching the function loosely (say
+                    // (`#…`) and the EXACT operative lines — the `FactoryFirewallFlockLine` re-exec (#147) and
+                    // the `FactoryFirewallShimFn` function (#145). Matching either loosely (say
                     // `StartsWith("iptables()")`) would accept a smuggled `iptables() { … }; iptables -A INPUT …`
                     // and then delete that real rule when RemoveRange runs — so we require byte-exact equality.
-                    // Any other line — a real factory command, or a tampered/foreign function — means this
+                    // Any other line — a real factory command, or a tampered/foreign operative line — means this
                     // anchor opener is unterminated and any `# <<< …` below is coincidental marker text in data
                     // (a here-document, say); stop scanning so we THROW below instead of deleting real rules. A
-                    // block whose function was hand-altered therefore fails CLOSED rather than being silently
-                    // rewritten — safer for a firewall hook than guessing.
+                    // block whose operative lines were hand-altered therefore fails CLOSED rather than being
+                    // silently rewritten — safer for a firewall hook than guessing.
                     if (!t.StartsWith("#", StringComparison.Ordinal) &&
+                        !string.Equals(t, FactoryFirewallFlockLine, StringComparison.Ordinal) &&
                         !string.Equals(t, FactoryFirewallShimFn, StringComparison.Ordinal))
                         break;
                 }

@@ -14,9 +14,14 @@ namespace IntercomFirmwareTool.Core.Tests;
 /// POSIX function shim (works under any POSIX shell — sh/dash/ash/bash — not shell-specific, which is why the
 /// installer accepts only a shell shebang) and is deliberately NOT tamper-proofed against a hand-edit that
 /// later redefines <c>iptables</c> — that is out of scope for a fixed, known factory hook.
-/// These tests pin the pure splice (<see cref="MqttInstaller.EnsureFactoryFirewallShim"/>): placement,
-/// content, idempotency, CRLF normalization, tolerance of later redefinitions, and rejection of a malformed
-/// (no-shebang or unterminated-block) script.
+/// Issue #147 adds a second layer to the SAME block: because the per-call <c>-w</c> does not make the WHOLE
+/// rebuild (flush + ~40 appends) atomic, the shim also re-execs the entire hook under an exclusive
+/// <c>/usr/bin/flock</c> on a <c>/var/run</c> lock, so a second run of this hook — a concurrent interface
+/// bring-up, or the MQTT "Restore firewall" recovery which re-runs this same hook — serializes instead of
+/// interleaving. These tests pin the pure splice (<see cref="MqttInstaller.EnsureFactoryFirewallShim"/>):
+/// placement, both operative lines (the flock re-exec and the <c>-w</c> function), idempotency, upgrade of a
+/// prior #145-only block, CRLF normalization, tolerance of later redefinitions, and rejection of a malformed
+/// (no-shebang or unterminated-block) or hand-altered script.
 /// </summary>
 public class MqttFactoryFirewallShimTests
 {
@@ -46,6 +51,70 @@ public class MqttFactoryFirewallShimTests
         // shim — so a regression that dropped or reordered any factory rule would fail, not just these two.
         int shebangEnd = FactoryScript.IndexOf('\n') + 1;
         Assert.EndsWith(FactoryScript[shebangEnd..], patched);
+    }
+
+    // The exact whole-rebuild flock re-exec line (issue #147) the shim splices in. Kept in sync with
+    // MqttInstaller.FactoryFirewallFlockLine by these tests (byte-for-byte).
+    private const string FlockLine =
+        "if [ \"${__IFT_FW_LOCKED:-}\" != 1 ] && [ -x /usr/bin/flock ]; then __IFT_FW_LOCKED=1 exec /usr/bin/flock /var/run/ift-factory-firewall.lock \"$0\" \"$@\"; fi";
+
+    [Fact]
+    public void Shim_serializes_the_whole_rebuild_under_an_flock_re_exec()
+    {
+        // #145's per-call `-w` makes each iptables call wait for the xtables lock, but does NOT make the whole
+        // rebuild (flush + ~40 appends) atomic. #147 adds a whole-rebuild flock: re-exec the entire hook under
+        // an exclusive /var/run lock so a second run of THIS hook (a concurrent interface bring-up, or the MQTT
+        // "Restore firewall" recovery which re-runs this same hook) can't interleave and flush a partial rebuild.
+        string patched = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        Assert.Contains(FlockLine + "\n", patched);
+        // The re-exec must be armed BEFORE the first factory call (and before the -w function, though either
+        // order is safe on the re-exec'd pass), so no rebuild ever runs outside the lock.
+        int flock = patched.IndexOf(FlockLine, System.StringComparison.Ordinal);
+        int firstCall = patched.IndexOf("iptables -F INPUT", System.StringComparison.Ordinal);
+        Assert.True(flock >= 0 && firstCall >= 0);
+        Assert.True(flock < firstCall, "the flock re-exec must be armed before the first factory call");
+        // Unbounded wait (no `-w N`) — a timeout would re-introduce the partial rebuild it prevents (matches
+        // #145's bare --wait policy) — and a guard var so the re-exec can't recurse.
+        Assert.DoesNotContain("flock -w", patched);
+        Assert.Contains("__IFT_FW_LOCKED", patched);
+    }
+
+    [Fact]
+    public void A_hook_with_the_wait_function_but_no_flock_is_not_hardened_and_is_upgraded()
+    {
+        // A hook hardened by the #145-only shim (the -w function but no whole-rebuild flock) is NOT the exact
+        // current block, so it reads as NOT hardened and is re-patched (upgraded) — the old block strips cleanly
+        // (its inner lines are our comments + the exact function) and the fresh block (flock + function) lands.
+        string oldOnly =
+            "#!/bin/bash\n" +
+            "# >>> IntercomFirmwareTool #145: make the factory firewall WAIT for the xtables lock >>>\n" +
+            "# (a prior #145-only block: the -w function, no whole-rebuild flock)\n" +
+            "iptables() { command iptables -w \"$@\"; }\n" +
+            "# <<< IntercomFirmwareTool #145 <<<\n" +
+            "iptables -F INPUT\n";
+        Assert.False(MqttInstaller.IsFactoryFirewallHardened(oldOnly));   // missing the flock line
+        string patched = MqttInstaller.EnsureFactoryFirewallShim(oldOnly);
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(patched));    // upgraded to the current block
+        Assert.Contains(FlockLine + "\n", patched);
+        Assert.Contains("iptables() { command iptables -w \"$@\"; }\n", patched);
+        // Exactly one block survives (opener + closer = two marker lines) — no stale second block.
+        int count = 0, i = 0;
+        while ((i = patched.IndexOf("IntercomFirmwareTool #145", i, System.StringComparison.Ordinal)) >= 0)
+        { count++; i += 1; }
+        Assert.Equal(2, count);
+    }
+
+    [Fact]
+    public void An_owned_block_with_an_altered_flock_line_fails_closed()
+    {
+        // The whole-rebuild flock line, like the -w function, must be EXACTLY ours. A block whose flock line was
+        // hand-altered (here: the lock path changed) is not silently rewritten — the strip accepts only the exact
+        // operative lines, so the altered line reads as a corrupt/unterminated block and the patch FAILS CLOSED.
+        string tampered = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript)
+            .Replace("/var/run/ift-factory-firewall.lock", "/tmp/evil.lock");
+        Assert.DoesNotContain("/var/run/ift-factory-firewall.lock", tampered);   // sanity: really altered
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.EnsureFactoryFirewallShim(tampered));
     }
 
     [Fact]
