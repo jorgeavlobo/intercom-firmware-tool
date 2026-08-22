@@ -171,8 +171,7 @@ never aborts here. `restore_firewall` (in `btmqttd`) invokes **this** hook, so i
 serializes for free — no separate lock in the daemon; the daemon's single ordered
 command worker also prevents two of its own presses from overlapping.
 
-Because the
-shim is a POSIX function, a hook with a **recognized bare direct shell-path shebang**
+Because the shim is a POSIX function, a hook with a **recognized bare direct shell-path shebang**
 — the interpreter and nothing else: `#!/bin/bash`, `#!/bin/sh`, `#!/bin/dash`,
 `#!/bin/ash`, `#!/bin/ksh`, `#!/bin/zsh`, … — runs it, as does the BusyBox/Toybox
 multicall form `#!/bin/busybox sh` (accepted only as the exact `<multicall> <shell>`
