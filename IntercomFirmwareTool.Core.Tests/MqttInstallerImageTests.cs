@@ -459,4 +459,18 @@ public class MqttInstallerImageTests
         Assert.Throws<System.InvalidOperationException>(
             () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
     }
+
+    [Fact]
+    public void Install_fails_closed_when_a_symlink_target_has_a_trailing_slash_on_a_regular_file()
+    {
+        // POSIX: a trailing `/` requires the target to be a directory. `/bin/bash -> /bin/sh/` where /bin/sh is a
+        // regular file is ENOTDIR; dropping the trailing slash lexically would resolve to the executable /bin/sh
+        // and falsely certify — the resolver must honor the trailing slash and fail closed (#149).
+        var fs = new InMemoryExtFs()
+            .AddSymlink("/bin/bash", "/bin/sh/")        // `#!/bin/bash` → /bin/sh/ (trailing slash)
+            .AddExecutable("/bin/sh")                   // a real file, but `/bin/sh/` requires a directory
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
 }

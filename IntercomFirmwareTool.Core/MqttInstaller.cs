@@ -1496,7 +1496,8 @@ namespace IntercomFirmwareTool.Core
         /// <para><c>.</c> and <c>..</c> are applied like the kernel, not lexically: both assert the current path is
         /// really a directory before collapsing, so a crafted <c>nonexistent/../x</c> or <c>regular-file/.</c>
         /// target (which Linux rejects with ENOENT/ENOTDIR) can't bypass the non-directory and falsely certify an
-        /// unrunnable hook — it fails closed (null) instead.</para>
+        /// unrunnable hook — it fails closed (null) instead. A trailing slash is honored the same way (POSIX makes
+        /// <c>foo/</c> require <c>foo</c> to be a directory; see <see cref="SplitPathComponents"/>).</para>
         /// Returns null when the symlink chain cycles or exceeds <see cref="MaxSymlinkHops"/>, or when a
         /// <c>.</c>/<c>..</c> would resolve against a non-directory.
         /// </summary>
@@ -1507,9 +1508,7 @@ namespace IntercomFirmwareTool.Core
             // authoritative "is this a symlink" test, since FileExists/DirectoryExists are symlink-blind: a link
             // splices its target's components in at the cursor (relative → resolved against `resolved`, the link's
             // own directory; absolute → from the root).
-            var pending = new List<string>();
-            foreach (var seg in path.Split('/'))
-                if (seg.Length != 0) pending.Add(seg);
+            var pending = SplitPathComponents(path);
 
             var resolved = new List<string>();
             int i = 0, hops = 0;
@@ -1547,10 +1546,27 @@ namespace IntercomFirmwareTool.Core
                 // Splice the target's components in AT the cursor, preserving order, so they resolve next against
                 // `resolved` (the symlink's own directory, for a relative target).
                 int at = i;
-                foreach (var t in target.Split('/'))
-                    if (t.Length != 0) pending.Insert(at++, t);
+                foreach (var t in SplitPathComponents(target))
+                    pending.Insert(at++, t);
             }
             return "/" + string.Join("/", resolved);
+        }
+
+        /// <summary>
+        /// Splits <paramref name="p"/> into path components, dropping empty ones (POSIX collapses repeated
+        /// slashes) — EXCEPT a trailing slash, which POSIX makes significant: a path ending in <c>/</c> must name
+        /// a directory (equivalent to a trailing <c>/.</c>). We model that by appending a <c>.</c> component, so
+        /// <see cref="RealPath"/>'s directory check rejects e.g. <c>/bin/sh/</c> when <c>/bin/sh</c> is a regular
+        /// file (ENOTDIR) instead of silently resolving to it and certifying an unrunnable interpreter (#149).
+        /// </summary>
+        private static List<string> SplitPathComponents(string p)
+        {
+            var parts = new List<string>();
+            foreach (var seg in p.Split('/'))
+                if (seg.Length != 0) parts.Add(seg);
+            if (parts.Count > 0 && p.EndsWith("/", StringComparison.Ordinal))
+                parts.Add(".");
+            return parts;
         }
 
         /// <summary>
