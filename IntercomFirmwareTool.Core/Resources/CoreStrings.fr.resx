@@ -134,6 +134,9 @@ La génération vérifiée a été conservée ici — déplacez-la/renommez-la m
   <data name="Ext4_SymlinkNotSymlink" xml:space="preserve">
     <value>{0} existe déjà mais n'est pas un lien symbolique ; refus de l'écraser.</value>
   </data>
+  <data name="Ext4_DropbearDefaultsNotRegular" xml:space="preserve">
+    <value>{0} existe mais n'est pas un fichier régulier (un lien symbolique ou un répertoire) ; refus de le modifier.</value>
+  </data>
   <data name="Ext4_FindingPwEnabled" xml:space="preserve">
     <value>Connexion par mot de passe : ACTIVÉE  (root2 a une empreinte MD5-crypt $1$ dans /etc/shadow)</value>
   </data>

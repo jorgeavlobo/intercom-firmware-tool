@@ -733,13 +733,17 @@ namespace IntercomFirmwareTool.Core
             // between the backup and the promote doesn't make this factory file look absent (#156).
             ExtFsRewrite.RecoverInterruptedRewrite(fs, DropbearDefaultsPath);
 
-            // A REGULAR file is edited in place (crash-safe); a non-regular/absent path is a fresh create. Read the
-            // current contents via PathPresent (which also follows a symlinked target) so an existing config is
-            // extended, never discarded.
+            // The factory /etc/default/dropbear is a REGULAR file. Fail CLOSED on a path OCCUPIED by a non-regular
+            // node — a symlink or directory (FileExists is symlink-blind, so "not regular AND occupied" == one of
+            // those): editing it would either truncate a symlinked config through the fresh-create path or clobber
+            // an unexpected shape. That leaves exactly two cases below — a regular file (edited crash-safely in
+            // place) or a genuinely absent path (a fresh create with no precious original to lose).
             bool regular = fs.FileExists(DropbearDefaultsPath);
-            string existing = PathPresent(fs, DropbearDefaultsPath)
-                ? ReadAllTextFromFs(fs, DropbearDefaultsPath)
-                : "";
+            if (!regular && PathPresent(fs, DropbearDefaultsPath))
+                throw new InvalidOperationException(
+                    CoreStrings.Format("Ext4_DropbearDefaultsNotRegular", DropbearDefaultsPath));
+
+            string existing = regular ? ReadAllTextFromFs(fs, DropbearDefaultsPath) : "";
 
             var toAppend = new System.Text.StringBuilder();
             // #38 first, so the RSA pin is set before anything that might read it.

@@ -134,6 +134,9 @@ La compilación verificada se conservó aquí — muévala o renómbrela manualm
   <data name="Ext4_SymlinkNotSymlink" xml:space="preserve">
     <value>{0} ya existe pero no es un enlace simbólico; se rechaza sobrescribirlo.</value>
   </data>
+  <data name="Ext4_DropbearDefaultsNotRegular" xml:space="preserve">
+    <value>{0} existe pero no es un archivo regular (un enlace simbólico o directorio); se rechaza editarlo.</value>
+  </data>
   <data name="Ext4_FindingPwEnabled" xml:space="preserve">
     <value>Inicio de sesión con contraseña : HABILITADO  (root2 tiene un hash MD5-crypt $1$ en /etc/shadow)</value>
   </data>

@@ -134,6 +134,9 @@ A compilação verificada foi mantida aqui — mova/mude o nome manualmente:
   <data name="Ext4_SymlinkNotSymlink" xml:space="preserve">
     <value>{0} já existe mas não é uma ligação simbólica; recusada a sua substituição.</value>
   </data>
+  <data name="Ext4_DropbearDefaultsNotRegular" xml:space="preserve">
+    <value>{0} existe mas não é um ficheiro regular (uma ligação simbólica ou diretório); recusada a sua edição.</value>
+  </data>
   <data name="Ext4_FindingPwEnabled" xml:space="preserve">
     <value>Início de sessão por palavra-passe : ATIVADO  (root2 tem um hash MD5-crypt $1$ em /etc/shadow)</value>
   </data>

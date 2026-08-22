@@ -145,6 +145,20 @@ public class Ext4ProbeAuthRewriteTests
     }
 
     [Fact]
+    public void PatchDropbearDefaults_fails_closed_on_a_non_regular_node()
+    {
+        // A symlink (or directory) occupying the path is a non-standard/tampered image: refuse rather than
+        // truncating a symlinked config through the fresh-create path or clobbering an unexpected shape.
+        var fs = new InMemoryExtFs().AddSymlink(DropbearDefaults, "/some/other/target");
+
+        Assert.Throws<InvalidOperationException>(() => Ext4Probe.PatchDropbearDefaults(fs, pinRsa: true));
+
+        Assert.False(fs.HasFile(DropbearDefaults));               // nothing written over the symlink
+        Assert.False(fs.HasFile(DropbearDefaults + ".ift-tmp"));
+        Assert.False(fs.HasFile(DropbearDefaults + ".ift-bak"));
+    }
+
+    [Fact]
     public void PatchDropbearDefaults_creates_the_file_when_absent()
     {
         var fs = new InMemoryExtFs();   // non-factory image: no /etc/default/dropbear

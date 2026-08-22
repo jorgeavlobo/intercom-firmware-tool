@@ -134,6 +134,9 @@ Die verifizierte Erstellung wurde hier aufbewahrt — verschieben/umbenennen Sie
   <data name="Ext4_SymlinkNotSymlink" xml:space="preserve">
     <value>{0} existiert bereits, ist aber kein Symlink; Überschreiben wird verweigert.</value>
   </data>
+  <data name="Ext4_DropbearDefaultsNotRegular" xml:space="preserve">
+    <value>{0} existiert, ist aber keine reguläre Datei (ein Symlink oder Verzeichnis); Bearbeitung wird verweigert.</value>
+  </data>
   <data name="Ext4_FindingPwEnabled" xml:space="preserve">
     <value>Passwort-Anmeldung : AKTIVIERT  (root2 hat einen MD5-crypt-$1$-Hash in /etc/shadow)</value>
   </data>
