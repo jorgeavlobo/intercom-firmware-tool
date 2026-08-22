@@ -664,7 +664,7 @@ namespace IntercomFirmwareTool.Core
                 fs.SetMode(HaDir, ToMode(755));
                 fs.SetOwner(HaDir, 0, 0);
                 var manifest = new StringBuilder();
-                foreach (var e in GenerateHaDiscovery(opts))
+                foreach (var e in GenerateHaDiscovery(opts, FactoryFirewallHookInstalled(fs)))
                 {
                     // Wrap the ext4 write so a SharpExt4 failure names the offending entity — its
                     // native exceptions (e.g. IndexOutOfRangeException from ExtFileStream) carry no
@@ -1281,7 +1281,7 @@ namespace IntercomFirmwareTool.Core
                 // comparing to what these options generate (a true read-back, like
                 // the .conf check above).
                 {
-                    var expected = GenerateHaDiscovery(opts);
+                    var expected = GenerateHaDiscovery(opts, FactoryFirewallHookInstalled(fs));
                     var expectedManifest = new StringBuilder();
                     foreach (var e in expected) expectedManifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
                     CheckFile(fs, checks, HaDir + "/manifest", 644);
@@ -1858,8 +1858,15 @@ namespace IntercomFirmwareTool.Core
         /// (<see cref="MqttOptions.EnableHaDiscovery"/>): when off, btmqttd CLEARS
         /// these retained configs. Topics/prefix/node are baked in here, so the
         /// on-device publisher just sends each payload retained.
+        ///
+        /// <paramref name="factoryFirewallInstalled"/> gates the "Restore firewall" button (#147): it is the
+        /// installer-side mirror of the daemon's <c>restore_firewall_eligible</c> — the button is emitted only
+        /// when the image actually carries the factory hook, so a supported on-device-camera variant that ships
+        /// none does not surface a button whose every press the daemon rejects. Threaded in (rather than read
+        /// from <c>fs</c> here) so this stays a pure function of its inputs and <see cref="ValidateMqtt"/> can
+        /// re-generate the identical set for the byte-compare.
         /// </summary>
-        private static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts)
+        private static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts, bool factoryFirewallInstalled)
         {
             string prefix = opts.HaDiscoveryPrefix;
             string node = opts.HaNodeId;
@@ -2442,17 +2449,19 @@ namespace IntercomFirmwareTool.Core
             // re-rolling the clobber race on the way back up). btmqttd carries NO copy of either ruleset — it
             // only INVOKES the factory script (#145's single source of truth) then `go2rtcd fw-reassert`.
             //
-            // CAMERA-ON-DEVICE ONLY (#147 review): that build is the only one that HARDENS the factory hook to
-            // wait for the xtables lock (#145's -w shim) and installs the :8554 rule the second step
-            // re-asserts. On any other build the factory hook is still the lock-LESS factory original, so a
-            // press re-running it could race the interface-up rebuild and silently drop rules — recreating the
-            // very lockout it is meant to fix. So the button (and the daemon action, gated identically in
-            // receiver.rs) exist only here; elsewhere we TOMBSTONE it (empty retained) so a build that had
-            // camera-on-device and later loses it drops the stale entity. config + disabled-by-default like the
-            // other maintenance buttons — discovered but hidden until the operator enables it, no reflash to
-            // arm. Same QoS-0 fire-and-forget and TOPIC_RX trust boundary (a fixed two-step recovery, no
-            // free-form input) as the reboot/restart/restore-ssh buttons.
-            if (opts.CameraEnabled && opts.CameraOnDevice)
+            // CAMERA-ON-DEVICE + FACTORY-HOOK PRESENT (#147 review): the camera-on-device build is the only one
+            // that HARDENS the factory hook to wait for the xtables lock (#145's -w shim) and installs the :8554
+            // rule the second step re-asserts. On any other build the factory hook is still the lock-LESS factory
+            // original, so a press re-running it could race the interface-up rebuild and silently drop rules —
+            // recreating the very lockout it is meant to fix. AND a variant that ships go2rtcd but NO factory
+            // hook would surface a button whose every press the daemon rejects (restore_firewall_eligible also
+            // requires the hook) — a silently-failing control. So `factoryFirewallInstalled` mirrors the daemon
+            // gate here: the button exists only when the image carries the (hardened) hook; elsewhere we
+            // TOMBSTONE it (empty retained) so a build that had it and later loses it drops the stale entity.
+            // config + disabled-by-default like the other maintenance buttons — discovered but hidden until the
+            // operator enables it, no reflash to arm. Same QoS-0 fire-and-forget and TOPIC_RX trust boundary (a
+            // fixed two-step recovery, no free-form input) as the reboot/restart/restore-ssh buttons.
+            if (opts.CameraEnabled && opts.CameraOnDevice && factoryFirewallInstalled)
             {
                 entities.Add(new HaEntity(
                     "restore_firewall.json",
@@ -2854,6 +2863,21 @@ namespace IntercomFirmwareTool.Core
             }
             // else genuinely absent — no factory firewall to harden, nothing to check.
         }
+
+        /// <summary>
+        /// Does the image carry the factory firewall hook as a present, executable regular file
+        /// (<see cref="FactoryFirewallScriptPath"/>)? The installer-side mirror of the daemon's
+        /// <c>restore_firewall_eligible</c> gate: the on-device "Restore firewall" recovery RE-RUNS this hook, so
+        /// the HA button is meaningful only when the image actually carries it. A supported on-device-camera
+        /// variant that ships NO factory hook still installs go2rtcd, and
+        /// <see cref="PatchFactoryFirewallWaitForLock"/> no-ops in that case — so without this the button would be
+        /// published but every press rejected daemon-side, a silently-failing control. On a build that DOES ship
+        /// the hook, <see cref="PatchFactoryFirewallWaitForLock"/> has hardened it (it THROWS otherwise), so
+        /// present + executable here implies hardened. <c>FileExists</c> is symlink-blind (regular files only),
+        /// matching the daemon's regular-file requirement. <c>internal</c> for the test project.
+        /// </summary>
+        internal static bool FactoryFirewallHookInstalled(IExtFs fs) =>
+            fs.FileExists(FactoryFirewallScriptPath) && (fs.GetMode(FactoryFirewallScriptPath) & ExecuteBits) != 0;
 
         /// <summary>
         /// Hardens the panel's FACTORY firewall against the xtables-lock race (issue #145) so the
