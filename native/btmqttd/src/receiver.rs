@@ -584,7 +584,7 @@ async fn start_dropbear() {
 ///      camera port CLOSED — the failure the #147 review caught.
 ///
 /// btmqttd keeps NO copy of either ruleset — it only INVOKES the two scripts that own them, and does so in
-/// ONE child: `sh -c '<factory>; <go2rtcd> fw-reassert'`. A single shell is load-bearing for correctness on
+/// ONE child: `sh -c '<factory> && <go2rtcd> fw-reassert'`. A single shell is load-bearing for correctness on
 /// the detach path (the #147 review caught this): with `kill_on_timeout=false` a long factory rebuild is
 /// DETACHED to finish rather than killed, and if the two steps were separate children the reassert would
 /// start CONCURRENTLY with the still-running detached rebuild — whose `iptables -F INPUT` would then flush
