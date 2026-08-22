@@ -430,4 +430,19 @@ public class MqttInstallerImageTests
         Assert.Throws<System.InvalidOperationException>(
             () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
     }
+
+    [Fact]
+    public void Install_fails_closed_when_dotdot_escapes_a_regular_file_component()
+    {
+        // ENOTDIR: `/bin -> /not-a-directory/../usr/bin` where `/not-a-directory` is a regular FILE. Linux can't
+        // descend a file, and `..` can't escape one, so resolution fails there; the resolver must not lexically
+        // pop the file to reach the real `/usr/bin/bash` and falsely certify the hook — it fails closed (#149).
+        var fs = new InMemoryExtFs()
+            .AddSymlink("/bin", "/not-a-directory/../usr/bin")
+            .AddFile("/not-a-directory", "regular file, not a dir", InMemoryExtFs.Mode0644)
+            .AddExecutable("/usr/bin/bash")             // the real interpreter the `..` would wrongly reach
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
 }
