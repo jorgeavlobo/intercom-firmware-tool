@@ -445,4 +445,18 @@ public class MqttInstallerImageTests
         Assert.Throws<System.InvalidOperationException>(
             () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
     }
+
+    [Fact]
+    public void Install_fails_closed_when_a_trailing_dot_follows_a_regular_file()
+    {
+        // ENOTDIR: `/bin/bash -> /bin/sh/.` where `/bin/sh` is a regular file. `x/.` requires x to be a
+        // directory; Linux rejects it, so the interpreter is unrunnable. A lexical `.` discard would resolve to
+        // the executable `/bin/sh` and falsely certify — the resolver must fail closed (#149).
+        var fs = new InMemoryExtFs()
+            .AddSymlink("/bin/bash", "/bin/sh/.")       // `#!/bin/bash` → /bin/sh/.
+            .AddExecutable("/bin/sh")                   // a real file, but `/bin/sh/.` is ENOTDIR
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
 }

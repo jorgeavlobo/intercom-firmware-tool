@@ -1493,11 +1493,12 @@ namespace IntercomFirmwareTool.Core
         /// symlink so a whole-path <c>FileExists</c>/<c>ReadSymLink</c> both fail (#149). A component that is NOT a
         /// symlink (a real dir/file, or absent) is kept literally, so the caller's <c>FileExists</c>/<c>GetMode</c>
         /// on the result decides real-ness — a dangling or absent target simply fails that later check (fail-safe).
-        /// <para><c>..</c> is applied like the kernel, not lexically: escaping a directory requires it to REALLY be
-        /// a directory, so a crafted <c>nonexistent/../x</c> target (which Linux rejects at <c>nonexistent</c>)
-        /// can't collapse to <c>x</c> and falsely certify an unrunnable hook — it fails closed (null) instead.</para>
+        /// <para><c>.</c> and <c>..</c> are applied like the kernel, not lexically: both assert the current path is
+        /// really a directory before collapsing, so a crafted <c>nonexistent/../x</c> or <c>regular-file/.</c>
+        /// target (which Linux rejects with ENOENT/ENOTDIR) can't bypass the non-directory and falsely certify an
+        /// unrunnable hook — it fails closed (null) instead.</para>
         /// Returns null when the symlink chain cycles or exceeds <see cref="MaxSymlinkHops"/>, or when a
-        /// <c>..</c> would escape a non-directory.
+        /// <c>.</c>/<c>..</c> would resolve against a non-directory.
         /// </summary>
         private static string? RealPath(IExtFs fs, string path)
         {
@@ -1515,17 +1516,19 @@ namespace IntercomFirmwareTool.Core
             while (i < pending.Count)
             {
                 string seg = pending[i++];
-                if (seg == ".") continue;
-                if (seg == "..")
+                if (seg == "." || seg == "..")
                 {
-                    // Linux fails resolution AT a nonexistent (or non-directory) component; a purely lexical pop
-                    // would instead let `nonexistent/../x` collapse to `x` and could FALSELY certify an unrunnable
-                    // hook. So before escaping the current directory, require it to be a real directory; if it is
-                    // not, fail closed (null → treated as absent → the hook is rejected — the safe direction).
+                    // Both `.` and `..` assert the CURRENT directory really is a directory — the kernel rejects
+                    // `x/.` and `x/..` with ENOTDIR when x is a regular file (and ENOENT when x is absent). A
+                    // purely lexical collapse would instead let a crafted target like `/bin/sh/.` or
+                    // `missing/../sh` bypass the non-directory and FALSELY certify an unrunnable hook. So verify
+                    // the current path before collapsing; if it is not a real directory, fail closed (null →
+                    // treated as absent → the hook is rejected — the safe direction). At the root ("resolved"
+                    // empty) there is nothing to verify or pop: `/.` and `/..` both stay at the root.
                     if (resolved.Count > 0)
                     {
                         if (!fs.DirectoryExists("/" + string.Join("/", resolved))) return null;
-                        resolved.RemoveAt(resolved.Count - 1);
+                        if (seg == "..") resolved.RemoveAt(resolved.Count - 1);
                     }
                     continue;
                 }
