@@ -286,13 +286,30 @@ async fn handle_json(
                     publish_maintenance(client, cfg, "restore_ssh").await;
                 }
                 Maintenance::RestoreFirewall => {
-                    // One-click firewall recovery net (issue #147): re-run the factory firewall script so the
-                    // full factory INPUT ruleset (SSH :22, the Mini-USB reflash :21, the security DROPs) plus
-                    // our camera :8554 rule are restored in one shot — no reboot, no SSH — for the case where a
-                    // rule was dropped while btmqttd/MQTT stayed up. btmqttd keeps NO copy of the ruleset: it
-                    // only INVOKES the factory script (#145's single source of truth), which after #145 waits
-                    // for the xtables lock (`iptables -w`), so this extra write can't fall into the clobber race
-                    // it recovers from. Idempotent; safe to repeat.
+                    // One-click firewall recovery net (issue #147): rebuild the whole factory INPUT ruleset
+                    // (SSH :22, the Mini-USB reflash :21, the security DROPs) then re-assert our camera :8554
+                    // rule — no reboot, no SSH — for the case where a rule was dropped while btmqttd/MQTT
+                    // stayed up. btmqttd keeps NO copy of either ruleset; it only INVOKES the two scripts that
+                    // own them (see restore_firewall).
+                    //
+                    // GATED on the on-device-camera build (#147 review): that path is the only one that
+                    // HARDENS the factory hook to take the xtables lock (#145) and creates the :8554 rule the
+                    // second step re-asserts. On any other build the factory hook is still lock-LESS, so
+                    // re-running it from this MQTT press could race the interface-up rebuild and silently drop
+                    // rules — recreating the very lockout this action fixes. When ineligible we REJECT the
+                    // action: log and return WITHOUT publishing an ack (the installer also omits the button on
+                    // those builds, so the press shouldn't arrive; this is defence in depth for a hand-crafted
+                    // payload on TOPIC_RX). Unlike the other maintenance actions, whose capability a raw frame
+                    // on this topic already has, this one CAN drop rules on the wrong build, so it is the one
+                    // maintenance action with a build-eligibility gate.
+                    if !on_device_camera_installed().await {
+                        eprintln!(
+                            "btmqttd: ignored restore_firewall: not an on-device-camera build \
+                             (the hardened factory hook and :8554 rule are absent; re-running the lock-less \
+                             factory hook here could race interface-up and drop rules)"
+                        );
+                        return;
+                    }
                     eprintln!("btmqttd: restore_firewall requested via MQTT");
                     restore_firewall().await;
                     // Feedback AFTER the (fast, non-terminal) recovery, like restore_ssh — the ack reflects a
@@ -424,25 +441,43 @@ const MAINTENANCE_CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 /// can't clobber a concurrent bring-up.
 const FACTORY_FIREWALL_SCRIPT: &str = "/etc/network/if-pre-up.d/iptables";
 
-/// Run a FIXED maintenance command (`program` + `args`) with the same bounded, group-killed, off-worker-reaped
-/// discipline as `execute_command`: std streams nulled off btmqttd's inherited fds; its OWN process group
-/// (`process_group(0)`) so a timeout SIGKILLs the WHOLE group — the script AND anything it spawned — not just
-/// the interpreter; a cleanup permit reserved BEFORE spawning and, on timeout/wait-error, handed to the
-/// detached bounded [`reap`] task rather than awaited inline — a child stuck in uninterruptible kernel I/O
-/// (D-state) won't return from `wait()` even after SIGKILL, and awaiting it here would pin the single ordered
-/// command worker (and delay the maintenance ack). If no reap permit is free the run is SKIPPED rather than
-/// spawning a child we couldn't hand off. `label` tags the log lines to the calling action
-/// (`restore_ssh` / `restore_firewall`); `skip_hint` states what recovers a slot-exhausted SKIP — the action
-/// has no auto-retry of its own, and that recovery differs per caller (a watchdog vs. the operator re-pressing),
-/// so it must not be baked into this shared runner. Best-effort — errors are logged, never fatal. Shared by
-/// [`start_dropbear`] and [`restore_firewall`].
-async fn run_maintenance_child(program: &str, args: &[&str], label: &str, skip_hint: &str, timeout: Duration) {
+/// The go2rtc init script. Its presence-as-EXECUTABLE is restore_firewall's eligibility signal — it is
+/// installed only by the on-device-camera path (which is also the only build that hardens the factory hook and
+/// creates the `:8554` rule), so it is the same gate the if-up.d hook uses. `go2rtcd fw-reassert` re-adds the
+/// GO2RTC `:8554` rule that the factory INPUT rebuild flushes (task #42).
+const GO2RTCD_INIT: &str = "/etc/init.d/go2rtcd";
+
+/// Wall-clock cap for the firewall rebuild + fw-reassert. UNLIKE the dropbear start this is NOT a kill deadline
+/// (`kill_on_timeout=false`): the factory rebuild deliberately WAITS on the xtables lock via #145's `-w` shim,
+/// and SIGKILLing it mid-rebuild would leave the partial ruleset restore_firewall exists to repair. If the wait
+/// ever exceeds this, the child is DETACHED to finish on its own and reaped in the background (freeing the
+/// command worker) — never killed. Generous, so normal lock contention never trips it.
+const FIREWALL_REBUILD_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Run a FIXED maintenance command (`program` + `args`) with the same bounded, off-worker-reaped discipline as
+/// `execute_command`: std streams nulled off btmqttd's inherited fds; its OWN process group (`process_group(0)`);
+/// a cleanup permit reserved BEFORE spawning and handed to the detached bounded [`reap`] task rather than awaited
+/// inline — a child stuck in uninterruptible kernel I/O (D-state) won't return from `wait()`, and awaiting it
+/// here would pin the single ordered command worker (and delay the maintenance ack). If no reap permit is free
+/// the run is SKIPPED. `label` tags the log lines to the calling action; `skip_hint` states what recovers a
+/// slot-exhausted SKIP — the action has no auto-retry of its own, and that recovery differs per caller (a
+/// watchdog vs. the operator re-pressing), so it isn't baked in here. `kill_on_timeout` chooses what a
+/// timeout / wait-error does: `true` (restore_ssh) SIGKILLs the whole process group — a hung dropbear start
+/// should die and the watchdog retries; `false` (restore_firewall) NEVER kills — the firewall rebuild must run
+/// to completion, so the child is merely detached and reaped in the background. Best-effort — errors are logged,
+/// never fatal. Shared by [`start_dropbear`] and [`restore_firewall`].
+async fn run_maintenance_child(
+    program: &str,
+    args: &[&str],
+    label: &str,
+    skip_hint: &str,
+    kill_on_timeout: bool,
+    timeout: Duration,
+) {
     let permit = match REAP_SLOTS.try_acquire() {
         Ok(p) => p,
         Err(_) => {
-            eprintln!(
-                "btmqttd: {label}: too many outstanding children; skipping {program} ({skip_hint})"
-            );
+            eprintln!("btmqttd: {label}: too many outstanding children; skipping {program} ({skip_hint})");
             return;
         }
     };
@@ -451,7 +486,7 @@ async fn run_maintenance_child(program: &str, args: &[&str], label: &str, skip_h
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .process_group(0) // pgid == the script's pid, so a timeout can kill the whole group
+        .process_group(0) // pgid == the script's pid, so (when allowed) a timeout can kill the whole group
         .kill_on_drop(true)
         .spawn()
     {
@@ -474,19 +509,34 @@ async fn run_maintenance_child(program: &str, args: &[&str], label: &str, skip_h
             drop(permit);
         }
         Ok(Err(e)) => {
-            // We could NOT confirm the child exited (waitpid itself failed), so it may still be alive and
-            // UNREAPED — treat it exactly like the timeout: kill its group and hand it to the detached
-            // reaper, never a bare `drop` (kill_on_drop only SIGKILLs the direct child and does not reap,
-            // which would leak the process while still freeing the permit).
-            eprintln!("btmqttd: {label}: waiting on {program} failed: {e}; killing its process group");
-            kill_group_and_reap(child, permit, label);
+            // waitpid itself failed — the child may still be alive and UNREAPED. Never a bare `drop`
+            // (kill_on_drop SIGKILLs only the direct child and does not reap). Kill the group only when the
+            // caller allows it; otherwise detach + reap so a firewall rebuild is never killed mid-flight.
+            if kill_on_timeout {
+                eprintln!("btmqttd: {label}: waiting on {program} failed: {e}; killing its process group");
+                kill_group_and_reap(child, permit, label);
+            } else {
+                eprintln!(
+                    "btmqttd: {label}: waiting on {program} failed: {e}; detaching it to finish and reaping in the background"
+                );
+                reap(child, permit);
+            }
         }
         Err(_) => {
-            eprintln!(
-                "btmqttd: {label}: {program} did not finish within {}s; killing its process group",
-                timeout.as_secs()
-            );
-            kill_group_and_reap(child, permit, label);
+            if kill_on_timeout {
+                eprintln!(
+                    "btmqttd: {label}: {program} did not finish within {}s; killing its process group",
+                    timeout.as_secs()
+                );
+                kill_group_and_reap(child, permit, label);
+            } else {
+                eprintln!(
+                    "btmqttd: {label}: {program} still running after {}s (waiting on the xtables lock?); \
+                     letting it finish in the background rather than killing a partial firewall rebuild",
+                    timeout.as_secs()
+                );
+                reap(child, permit);
+            }
         }
     }
 }
@@ -500,26 +550,67 @@ async fn start_dropbear() {
         &["start"],
         "restore_ssh",
         "bt_service_watchdog will retry within 60s",
+        true, // a hung dropbear start should die; bt_service_watchdog retries
         MAINTENANCE_CHILD_TIMEOUT,
     )
     .await;
 }
 
-/// Re-run the factory firewall script (issue #147) so the full factory `INPUT` ruleset + our camera `:8554`
-/// rule are restored in one shot. btmqttd keeps NO copy of the rules — it only INVOKES
-/// [`FACTORY_FIREWALL_SCRIPT`], the #145 single source of truth (which waits for the xtables lock, so the
-/// re-run can't clobber). Run with NO args, exactly as ifupdown execs the hook. Unlike [`restore_ssh`] there
-/// is no rootfs-`ro` gate — the firewall script is not sensitive to the mount mode. Best-effort and
-/// idempotent; see [`run_maintenance_child`] for the spawn/timeout/reap discipline.
+/// Perform the "Restore firewall" recovery (issue #147) in the SAME two steps the on-device-camera bring-up
+/// uses, in the SAME order, so the result is identical to a fresh interface-up:
+///   1. Re-run [`FACTORY_FIREWALL_SCRIPT`] — #145's single source of truth — to rebuild the whole factory
+///      `INPUT` ruleset (SSH `:22`, the Mini-USB reflash `:21`, the security DROPs). This step FLUSHES
+///      `INPUT`, so it also drops the camera `:8554` rule, which the factory script does not own.
+///   2. Re-assert the camera `:8554` rule via `go2rtcd fw-reassert` (the exact call the `go2rtc-net-hook`
+///      if-up.d hook makes after the factory rebuild). Without this second step the rebuild would leave the
+///      camera port CLOSED — the failure the #147 review caught.
+///
+/// btmqttd keeps NO copy of either ruleset — it only INVOKES the two scripts that own them. Both run with
+/// NO kill deadline (`kill_on_timeout=false`, [`FIREWALL_REBUILD_TIMEOUT`]): #145's `-w` shim makes the
+/// factory rebuild WAIT on the xtables lock, and SIGKILLing a partial rebuild would leave exactly the broken
+/// ruleset this action repairs — so on the rare long wait the child is detached to finish, never killed.
+/// Step 2 runs even if step 1 timed out and detached: `fw-reassert` is idempotent and itself takes the
+/// xtables lock, so it serialises safely behind the detached rebuild. Unlike [`restore_ssh`] there is no
+/// rootfs-`ro` gate — neither script is sensitive to the mount mode. This is invoked ONLY after the caller
+/// has confirmed the on-device-camera build via [`on_device_camera_installed`] (the same eligibility the
+/// hardened hook and `:8554` rule require); see [`run_maintenance_child`] for the spawn/timeout/reap
+/// discipline.
 async fn restore_firewall() {
     run_maintenance_child(
         FACTORY_FIREWALL_SCRIPT,
         &[],
         "restore_firewall",
         "press Restore firewall again to retry",
-        MAINTENANCE_CHILD_TIMEOUT,
+        false, // never SIGKILL a partial factory rebuild; detach + reap on the rare long lock wait
+        FIREWALL_REBUILD_TIMEOUT,
     )
     .await;
+    run_maintenance_child(
+        GO2RTCD_INIT,
+        &["fw-reassert"],
+        "restore_firewall",
+        "press Restore firewall again to retry",
+        false, // idempotent, lock-taking re-assert; let it finish rather than kill it
+        FIREWALL_REBUILD_TIMEOUT,
+    )
+    .await;
+}
+
+/// Is this an ON-DEVICE-CAMERA build — the only build where "Restore firewall" is safe to run? The
+/// go2rtc init script ([`GO2RTCD_INIT`]) is installed EXECUTABLE only by that path, which is also the only
+/// path that (a) HARDENS the factory hook to take the xtables lock (`iptables -w`, #145) and (b) creates the
+/// camera `:8554` rule the second recovery step re-asserts. On any other build the factory hook is still the
+/// lock-LESS factory original, so re-running it from an MQTT press could race the interface-up rebuild and
+/// silently drop rules — the very lockout the action exists to fix. We therefore gate the action on this
+/// signal — the SAME executable-presence check the `go2rtc-net-hook` if-up.d hook uses — and REJECT the MQTT
+/// action when it is false. Best-effort: any stat/permission error reads as NOT installed (fail-closed —
+/// refuse rather than risk the race). Async `tokio::fs` so a slow stat never stalls the runtime.
+async fn on_device_camera_installed() -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    match tokio::fs::metadata(GO2RTCD_INIT).await {
+        Ok(md) => md.is_file() && md.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
 }
 
 /// SIGKILL a bounded child's WHOLE process group, then hand it (with its cleanup permit) to the detached

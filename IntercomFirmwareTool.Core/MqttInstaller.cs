@@ -2406,35 +2406,49 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
-            // One-click firewall recovery button (issue #147): re-runs the factory firewall script on the
-            // panel, restoring the full factory INPUT ruleset PLUS our camera :8554 rule in one shot. It is a
-            // recovery net for a dropped rule (SSH :22, the Mini-USB reflash :21, a security DROP) while
-            // btmqttd/MQTT is still up — faster and less disruptive than the Reboot button, and more surgical
-            // (no reboot re-rolling the clobber race on the way back up). btmqttd carries NO copy of the rules
-            // — it only INVOKES the factory script (#145's single source of truth). Safe once #145's lock-wait
-            // shim is in (the re-run waits for the xtables lock). config + disabled-by-default like the other
-            // maintenance buttons, so it is discovered but hidden until the operator enables it — no reflash to
-            // arm it. Same QoS-0 fire-and-forget and TOPIC_RX trust boundary (a fixed re-run of one known
-            // script, no free-form input) as the reboot/restart/restore-ssh buttons.
-            entities.Add(new HaEntity(
-                "restore_firewall.json",
-                Topic("button", "restore_firewall"),
-                JsonSerializer.Serialize(new
-                {
-                    name = "Restore firewall",
-                    unique_id = $"{node}_restore_firewall",
-                    default_entity_id = EntId("button", "restore_firewall"),
-                    command_topic = controlTopic,
-                    qos = 0,
-                    payload_press = "{\"action\":\"restore_firewall\"}",
-                    icon = "mdi:wall-fire",
-                    entity_category = "config",
-                    enabled_by_default = false,
-                    availability_topic = opts.TopicLastWill,
-                    payload_available = "online",
-                    payload_not_available = "offline",
-                    device,
-                }, HaJson)));
+            // One-click firewall recovery button (issue #147): rebuilds the whole factory INPUT ruleset then
+            // re-asserts our camera :8554 rule on the panel, restoring both in one shot. It is a recovery net
+            // for a dropped rule (SSH :22, the Mini-USB reflash :21, a security DROP) while btmqttd/MQTT is
+            // still up — faster and less disruptive than the Reboot button, and more surgical (no reboot
+            // re-rolling the clobber race on the way back up). btmqttd carries NO copy of either ruleset — it
+            // only INVOKES the factory script (#145's single source of truth) then `go2rtcd fw-reassert`.
+            //
+            // CAMERA-ON-DEVICE ONLY (#147 review): that build is the only one that HARDENS the factory hook to
+            // wait for the xtables lock (#145's -w shim) and installs the :8554 rule the second step
+            // re-asserts. On any other build the factory hook is still the lock-LESS factory original, so a
+            // press re-running it could race the interface-up rebuild and silently drop rules — recreating the
+            // very lockout it is meant to fix. So the button (and the daemon action, gated identically in
+            // receiver.rs) exist only here; elsewhere we TOMBSTONE it (empty retained) so a build that had
+            // camera-on-device and later loses it drops the stale entity. config + disabled-by-default like the
+            // other maintenance buttons — discovered but hidden until the operator enables it, no reflash to
+            // arm. Same QoS-0 fire-and-forget and TOPIC_RX trust boundary (a fixed two-step recovery, no
+            // free-form input) as the reboot/restart/restore-ssh buttons.
+            if (opts.CameraEnabled && opts.CameraOnDevice)
+            {
+                entities.Add(new HaEntity(
+                    "restore_firewall.json",
+                    Topic("button", "restore_firewall"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Restore firewall",
+                        unique_id = $"{node}_restore_firewall",
+                        default_entity_id = EntId("button", "restore_firewall"),
+                        command_topic = controlTopic,
+                        qos = 0,
+                        payload_press = "{\"action\":\"restore_firewall\"}",
+                        icon = "mdi:wall-fire",
+                        entity_category = "config",
+                        enabled_by_default = false,
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            }
+            else
+            {
+                entities.Add(new HaEntity("restore_firewall.json", Topic("button", "restore_firewall"), ""));
+            }
 
             // Maintenance FEEDBACK sensor (issue #43): the visible ack for the otherwise-stateless
             // buttons. btmqttd publishes a retained {"action":…,"at":…} to EffectiveTopicMaintenance on
