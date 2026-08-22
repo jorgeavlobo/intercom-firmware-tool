@@ -298,7 +298,7 @@ async fn handle_json(
                     // re-running it from this MQTT press could race the interface-up rebuild and silently drop
                     // rules — recreating the very lockout this action fixes. When ineligible we REJECT the
                     // action: log and return WITHOUT publishing an ack (the installer also omits the button on
-                    // those builds, so the press shouldn't arrive; this is defence in depth for a hand-crafted
+                    // those builds, so the press shouldn't arrive; this is defense in depth for a hand-crafted
                     // payload on TOPIC_RX). Unlike the other maintenance actions, whose capability a raw frame
                     // on this topic already has, this one CAN drop rules on the wrong build, so it is the one
                     // maintenance action with a build-eligibility gate.
