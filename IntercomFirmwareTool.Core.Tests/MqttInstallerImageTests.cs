@@ -461,6 +461,21 @@ public class MqttInstallerImageTests
     }
 
     [Fact]
+    public void Install_hardens_when_dotdot_resolves_through_a_real_directory()
+    {
+        // Positive `..`: `/bin/bash -> ../usr/bin/bash`. `/bin` is a REAL directory, so `..` legitimately climbs
+        // to the root and resolves to the executable `/usr/bin/bash`. The directory check must ALLOW this — it
+        // fails closed only on a non-directory, not on every `..` — so the resolver isn't merely always-rejecting.
+        var fs = new InMemoryExtFs()
+            .AddDir("/bin")                             // a real directory, so `..` may escape it
+            .AddSymlink("/bin/bash", "../usr/bin/bash")
+            .AddExecutable("/usr/bin/bash")
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);       // must NOT throw — `..` resolves through a real dir
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+    }
+
+    [Fact]
     public void Install_fails_closed_when_a_symlink_target_has_a_trailing_slash_on_a_regular_file()
     {
         // POSIX: a trailing `/` requires the target to be a directory. `/bin/bash -> /bin/sh/` where /bin/sh is a
