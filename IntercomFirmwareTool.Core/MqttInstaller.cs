@@ -652,38 +652,6 @@ namespace IntercomFirmwareTool.Core
             // --- generated config (0600 — holds MQTT_PASS) ----------------------
             WriteConfigFile(fs, EtcDir + "/btmqttd.conf", GenerateConf(opts), 600);
 
-            // --- Home Assistant discovery configs -------------------------------
-            // One retained-config JSON per entity + a manifest of
-            // "config-topic<TAB>filename". Written ALWAYS (not only when enabled):
-            // btmqttd publishes them retained when HA_DISCOVERY=1, and
-            // CLEARS the retained configs (empty payload) when HA_DISCOVERY=0 — so a
-            // rebuild that unticks discovery actually removes the HA entities from a
-            // broker that already saw them, instead of leaving them orphaned.
-            {
-                EnsureDir(fs, HaDir);
-                fs.SetMode(HaDir, ToMode(755));
-                fs.SetOwner(HaDir, 0, 0);
-                var manifest = new StringBuilder();
-                foreach (var e in GenerateHaDiscovery(opts, FactoryFirewallHookInstalled(fs)))
-                {
-                    // Wrap the ext4 write so a SharpExt4 failure names the offending entity — its
-                    // native exceptions (e.g. IndexOutOfRangeException from ExtFileStream) carry no
-                    // path, which otherwise makes a bad entity impossible to identify from the trace.
-                    try
-                    {
-                        WriteConfigFile(fs, HaDir + "/" + e.FileName, e.Json, 644);
-                    }
-                    catch (Exception ex)
-                    {
-                        throw new InvalidOperationException(
-                            $"Failed writing HA discovery config '{e.FileName}' (payload {Encoding.UTF8.GetByteCount(e.Json)} bytes): {ex.Message}",
-                            ex);
-                    }
-                    manifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
-                }
-                WriteConfigFile(fs, HaDir + "/manifest", manifest.ToString(), 644);
-            }
-
             // --- idempotent init-script patches ---------------------------------
             PatchFlexisip(fs);
             if (!opts.HostIsIp)
@@ -714,6 +682,43 @@ namespace IntercomFirmwareTool.Core
 
             // --- on-device media server (gated: on-device camera only) ----------
             InstallOnDeviceMediaServer(fs, opts);
+
+            // --- Home Assistant discovery configs -------------------------------
+            // One retained-config JSON per entity + a manifest of
+            // "config-topic<TAB>filename". Written ALWAYS (not only when enabled):
+            // btmqttd publishes them retained when HA_DISCOVERY=1, and
+            // CLEARS the retained configs (empty payload) when HA_DISCOVERY=0 — so a
+            // rebuild that unticks discovery actually removes the HA entities from a
+            // broker that already saw them, instead of leaving them orphaned.
+            //
+            // Generated AFTER InstallOnDeviceMediaServer so the restore_firewall eligibility
+            // (RestoreFirewallInstallEligible) sees the FINAL image — go2rtcd has been written by
+            // then — and mirrors the daemon's gate exactly (both go2rtcd + the factory hook). ValidateMqtt
+            // re-checks the same installed image, so the discovery set stays deterministic for its byte-compare.
+            {
+                EnsureDir(fs, HaDir);
+                fs.SetMode(HaDir, ToMode(755));
+                fs.SetOwner(HaDir, 0, 0);
+                var manifest = new StringBuilder();
+                foreach (var e in GenerateHaDiscovery(opts, RestoreFirewallInstallEligible(fs)))
+                {
+                    // Wrap the ext4 write so a SharpExt4 failure names the offending entity — its
+                    // native exceptions (e.g. IndexOutOfRangeException from ExtFileStream) carry no
+                    // path, which otherwise makes a bad entity impossible to identify from the trace.
+                    try
+                    {
+                        WriteConfigFile(fs, HaDir + "/" + e.FileName, e.Json, 644);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidOperationException(
+                            $"Failed writing HA discovery config '{e.FileName}' (payload {Encoding.UTF8.GetByteCount(e.Json)} bytes): {ex.Message}",
+                            ex);
+                    }
+                    manifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
+                }
+                WriteConfigFile(fs, HaDir + "/manifest", manifest.ToString(), 644);
+            }
         }
 
         /// <summary>
@@ -1281,7 +1286,7 @@ namespace IntercomFirmwareTool.Core
                 // comparing to what these options generate (a true read-back, like
                 // the .conf check above).
                 {
-                    var expected = GenerateHaDiscovery(opts, FactoryFirewallHookInstalled(fs));
+                    var expected = GenerateHaDiscovery(opts, RestoreFirewallInstallEligible(fs));
                     var expectedManifest = new StringBuilder();
                     foreach (var e in expected) expectedManifest.Append(e.ConfigTopic).Append('\t').Append(e.FileName).Append('\n');
                     CheckFile(fs, checks, HaDir + "/manifest", 644);
@@ -1859,14 +1864,15 @@ namespace IntercomFirmwareTool.Core
         /// these retained configs. Topics/prefix/node are baked in here, so the
         /// on-device publisher just sends each payload retained.
         ///
-        /// <paramref name="factoryFirewallInstalled"/> gates the "Restore firewall" button (#147): it is the
+        /// <paramref name="restoreFirewallEligible"/> gates the "Restore firewall" button (#147): it is the
         /// installer-side mirror of the daemon's <c>restore_firewall_eligible</c> — the button is emitted only
-        /// when the image actually carries the factory hook, so a supported on-device-camera variant that ships
-        /// none does not surface a button whose every press the daemon rejects. Threaded in (rather than read
-        /// from <c>fs</c> here) so this stays a pure function of its inputs and <see cref="ValidateMqtt"/> can
-        /// re-generate the identical set for the byte-compare.
+        /// when the image carries BOTH files the recovery uses (the go2rtcd init and the factory hook) as
+        /// executable regular files, so a build missing either does not surface a button whose every press the
+        /// daemon rejects. Threaded in (rather than read from <c>fs</c> here) so this stays a pure function of
+        /// its inputs and <see cref="ValidateMqtt"/> can re-generate the identical set for the byte-compare;
+        /// the caller computes it via <see cref="RestoreFirewallInstallEligible"/> from the installed image.
         /// </summary>
-        private static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts, bool factoryFirewallInstalled)
+        private static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts, bool restoreFirewallEligible)
         {
             string prefix = opts.HaDiscoveryPrefix;
             string node = opts.HaNodeId;
@@ -2453,15 +2459,16 @@ namespace IntercomFirmwareTool.Core
             // that HARDENS the factory hook to wait for the xtables lock (#145's -w shim) and installs the :8554
             // rule the second step re-asserts. On any other build the factory hook is still the lock-LESS factory
             // original, so a press re-running it could race the interface-up rebuild and silently drop rules —
-            // recreating the very lockout it is meant to fix. AND a variant that ships go2rtcd but NO factory
-            // hook would surface a button whose every press the daemon rejects (restore_firewall_eligible also
-            // requires the hook) — a silently-failing control. So `factoryFirewallInstalled` mirrors the daemon
-            // gate here: the button exists only when the image carries the (hardened) hook; elsewhere we
-            // TOMBSTONE it (empty retained) so a build that had it and later loses it drops the stale entity.
-            // config + disabled-by-default like the other maintenance buttons — discovered but hidden until the
-            // operator enables it, no reflash to arm. Same QoS-0 fire-and-forget and TOPIC_RX trust boundary (a
-            // fixed two-step recovery, no free-form input) as the reboot/restart/restore-ssh buttons.
-            if (opts.CameraEnabled && opts.CameraOnDevice && factoryFirewallInstalled)
+            // recreating the very lockout it is meant to fix. AND a build missing EITHER recovery file — the
+            // go2rtcd init or the factory hook — would surface a button whose every press the daemon rejects
+            // (restore_firewall_eligible requires both) — a silently-failing control. So `restoreFirewallEligible`
+            // mirrors the daemon gate here (both files present + executable in the FINAL image, checked after the
+            // media server install); the button exists only then, and elsewhere we TOMBSTONE it (empty retained)
+            // so a build that had it and later loses it drops the stale entity. config + disabled-by-default like
+            // the other maintenance buttons — discovered but hidden until the operator enables it, no reflash to
+            // arm. Same QoS-0 fire-and-forget and TOPIC_RX trust boundary (a fixed two-step recovery, no
+            // free-form input) as the reboot/restart/restore-ssh buttons.
+            if (opts.CameraEnabled && opts.CameraOnDevice && restoreFirewallEligible)
             {
                 entities.Add(new HaEntity(
                     "restore_firewall.json",
@@ -2865,19 +2872,28 @@ namespace IntercomFirmwareTool.Core
         }
 
         /// <summary>
-        /// Does the image carry the factory firewall hook as a present, executable regular file
-        /// (<see cref="FactoryFirewallScriptPath"/>)? The installer-side mirror of the daemon's
-        /// <c>restore_firewall_eligible</c> gate: the on-device "Restore firewall" recovery RE-RUNS this hook, so
-        /// the HA button is meaningful only when the image actually carries it. A supported on-device-camera
-        /// variant that ships NO factory hook still installs go2rtcd, and
-        /// <see cref="PatchFactoryFirewallWaitForLock"/> no-ops in that case — so without this the button would be
-        /// published but every press rejected daemon-side, a silently-failing control. On a build that DOES ship
-        /// the hook, <see cref="PatchFactoryFirewallWaitForLock"/> has hardened it (it THROWS otherwise), so
-        /// present + executable here implies hardened. <c>FileExists</c> is symlink-blind (regular files only),
-        /// matching the daemon's regular-file requirement. <c>internal</c> for the test project.
+        /// Is <paramref name="path"/> a present, executable REGULAR file in the image? <c>FileExists</c> is
+        /// symlink-blind (regular files only), matching the daemon's <c>symlink_metadata</c> + regular-file
+        /// requirement, so a symlink at the path does not satisfy the check.
         /// </summary>
-        internal static bool FactoryFirewallHookInstalled(IExtFs fs) =>
-            fs.FileExists(FactoryFirewallScriptPath) && (fs.GetMode(FactoryFirewallScriptPath) & ExecuteBits) != 0;
+        private static bool IsRegularExecutable(IExtFs fs, string path) =>
+            fs.FileExists(path) && (fs.GetMode(path) & ExecuteBits) != 0;
+
+        /// <summary>
+        /// Is the on-device "Restore firewall" recovery eligible for THIS image — the installer-side mirror of
+        /// the daemon's <c>restore_firewall_eligible</c> gate? Requires BOTH files the recovery uses to be
+        /// present, executable, regular files: the go2rtc init script (<see cref="Go2RtcdInitPath"/>) and the
+        /// factory firewall hook (<see cref="FactoryFirewallScriptPath"/>). Both are needed because the
+        /// recovery runs `factory-hook &amp;&amp; go2rtcd fw-reassert`; if either is missing the button would be a
+        /// silently-failing control the daemon rejects. Callers must invoke this AFTER
+        /// <see cref="InstallOnDeviceMediaServer"/> has (conditionally) written <c>go2rtcd</c>, so the check
+        /// reflects the final image — and <see cref="ValidateMqtt"/> re-checks the same installed image, keeping
+        /// the discovery set deterministic for the byte-compare. (On a build that ships the factory hook,
+        /// <see cref="PatchFactoryFirewallWaitForLock"/> has hardened it — it THROWS otherwise — so present +
+        /// executable implies hardened.) <c>internal</c> for the test project.
+        /// </summary>
+        internal static bool RestoreFirewallInstallEligible(IExtFs fs) =>
+            IsRegularExecutable(fs, Go2RtcdInitPath) && IsRegularExecutable(fs, FactoryFirewallScriptPath);
 
         /// <summary>
         /// Hardens the panel's FACTORY firewall against the xtables-lock race (issue #145) so the

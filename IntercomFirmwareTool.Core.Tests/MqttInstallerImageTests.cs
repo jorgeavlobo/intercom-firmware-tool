@@ -489,34 +489,57 @@ public class MqttInstallerImageTests
             () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
     }
 
-    // ---------------------- discovery gate: FactoryFirewallHookInstalled (#147) ----------------------
+    // ---------------------- discovery gate: RestoreFirewallInstallEligible (#147) ----------------------
     // The installer-side mirror of the daemon's restore_firewall_eligible gate: the "Restore firewall" HA
-    // button is published only when the image carries the factory hook as a present, executable regular file,
-    // so an on-device-camera variant that ships none doesn't surface a button whose every press the daemon
-    // rejects.
+    // button is published only when the image carries BOTH recovery files — the go2rtcd init and the factory
+    // hook — as present, executable regular files. A build missing either would surface a button whose every
+    // press the daemon rejects, so discovery must tombstone it. (Computed AFTER the media-server install so
+    // go2rtcd is present; both install and ValidateMqtt read the same final image → deterministic.)
+    private const string Go2Rtcd = "/etc/init.d/go2rtcd";
 
     [Fact]
-    public void Factory_hook_present_and_executable_is_installed()
+    public void Restore_firewall_eligible_when_both_files_present_and_executable()
     {
+        var fs = new InMemoryExtFs()
+            .AddExecutable(Go2Rtcd)
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.True(MqttInstaller.RestoreFirewallInstallEligible(fs));
+    }
+
+    [Fact]
+    public void Restore_firewall_ineligible_when_go2rtcd_absent()
+    {
+        // Not a camera-on-device image (go2rtcd never installed): the button must be tombstoned.
         var fs = new InMemoryExtFs().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
-        Assert.True(MqttInstaller.FactoryFirewallHookInstalled(fs));
+        Assert.False(MqttInstaller.RestoreFirewallInstallEligible(fs));
     }
 
     [Fact]
-    public void Factory_hook_absent_is_not_installed()
+    public void Restore_firewall_ineligible_when_factory_hook_absent()
     {
-        // The camera-on-device-but-no-factory-hook variant: go2rtcd would be present, but the hook is not, so
-        // the recovery would be a no-op — the button must be tombstoned (this predicate is false).
-        var fs = new InMemoryExtFs().AddExecutable("/etc/init.d/go2rtcd");
-        Assert.False(MqttInstaller.FactoryFirewallHookInstalled(fs));
+        // The camera-on-device-but-no-factory-hook variant: go2rtcd present, hook not — the recovery would be a
+        // no-op, so the button must be tombstoned.
+        var fs = new InMemoryExtFs().AddExecutable(Go2Rtcd);
+        Assert.False(MqttInstaller.RestoreFirewallInstallEligible(fs));
     }
 
     [Fact]
-    public void Factory_hook_present_but_not_executable_is_not_installed()
+    public void Restore_firewall_ineligible_when_go2rtcd_not_executable()
+    {
+        var fs = new InMemoryExtFs()
+            .AddFile(Go2Rtcd, "init", InMemoryExtFs.Mode0644)   // present but not executable
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.False(MqttInstaller.RestoreFirewallInstallEligible(fs));
+    }
+
+    [Fact]
+    public void Restore_firewall_ineligible_when_factory_hook_not_executable()
     {
         // A non-executable hook is skipped by ifupdown's run-parts (and PatchFactoryFirewallWaitForLock would
-        // throw), so it does not count as installed.
-        var fs = new InMemoryExtFs().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0644);
-        Assert.False(MqttInstaller.FactoryFirewallHookInstalled(fs));
+        // throw), so it does not count as eligible.
+        var fs = new InMemoryExtFs()
+            .AddExecutable(Go2Rtcd)
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0644);
+        Assert.False(MqttInstaller.RestoreFirewallInstallEligible(fs));
     }
 }
