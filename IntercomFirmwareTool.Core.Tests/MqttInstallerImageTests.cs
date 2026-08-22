@@ -55,6 +55,91 @@ public class MqttInstallerImageTests
     }
 
     [Fact]
+    public void Install_leaves_no_temp_file_behind()
+    {
+        // The safe-replace (#151) writes through a sibling ".ift-tmp" and swaps it in; a successful patch must
+        // not leave that temp on the image (it would look like a stray/dangling file to later validation).
+        var fs = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+        Assert.False(fs.HasFile(Hook + ".ift-tmp"));
+        Assert.False(fs.HasFile(Hook + ".ift-bak"));
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+    }
+
+    [Fact]
+    public void Install_recovers_when_a_stale_temp_file_is_present()
+    {
+        // A prior run interrupted mid-swap could leave a ".ift-tmp" and/or ".ift-bak"; because RenameFile
+        // refuses to overwrite, the replace must clear both first. Seed both and confirm the patch still
+        // succeeds and cleans them up.
+        var fs = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        fs.AddFile(Hook + ".ift-tmp", "leftover staged content from an interrupted run", InMemoryExtFs.Mode0644);
+        fs.AddFile(Hook + ".ift-bak", "leftover backup from an interrupted run", InMemoryExtFs.Mode0644);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+        Assert.False(fs.HasFile(Hook + ".ift-tmp"));
+        Assert.False(fs.HasFile(Hook + ".ift-bak"));
+    }
+
+    [Fact]
+    public void Install_leaves_the_original_intact_when_the_write_fails_midway()
+    {
+        // #151 crux: a failure while producing the replacement must NOT damage the good original. Inject a
+        // throw on the temp write; the hook's content, mode and owner must all survive untouched, with no
+        // half-written temp left behind — the exact guarantee a bare truncating write cannot make.
+        const uint uid = 4242, gid = 4343;
+        var inner = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
+        var fs = new FaultyExtFs(inner, failCreate: path => path.EndsWith(".ift-tmp", System.StringComparison.Ordinal));
+
+        Assert.ThrowsAny<System.Exception>(() => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+
+        Assert.Equal(FactoryScript, inner.ReadText(Hook));        // original content untouched
+        Assert.Equal(InMemoryExtFs.Mode0755, inner.ModeOf(Hook)); // original mode untouched
+        Assert.Equal((uid, gid), inner.OwnerOf(Hook)!.Value);     // original owner untouched
+        Assert.False(inner.HasFile(Hook + ".ift-tmp"));           // no temp was ever created
+    }
+
+    [Fact]
+    public void Install_cleans_up_a_partially_written_temp_and_keeps_the_original()
+    {
+        // The scenario #151 targets: the write CREATES the temp, lands a prefix, then dies — leaving a partial
+        // temp on the image. The original must be untouched (nothing has moved yet) and the partial temp must be
+        // removed, not left dangling for the next run.
+        const uint uid = 4242, gid = 4343;
+        var inner = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
+        var fs = new FaultyExtFs(inner,
+            failPartialWrite: path => path.EndsWith(".ift-tmp", System.StringComparison.Ordinal));
+
+        Assert.ThrowsAny<System.Exception>(() => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+
+        Assert.Equal(FactoryScript, inner.ReadText(Hook));        // original content untouched
+        Assert.Equal(InMemoryExtFs.Mode0755, inner.ModeOf(Hook)); // original mode untouched
+        Assert.Equal((uid, gid), inner.OwnerOf(Hook)!.Value);     // original owner untouched
+        Assert.False(inner.HasFile(Hook + ".ift-tmp"));           // the PARTIAL temp was cleaned up
+    }
+
+    [Fact]
+    public void Install_rolls_the_original_back_when_the_final_swap_rename_fails()
+    {
+        // The crux the reviewers flagged: the commit is a backup-swap (original -> .ift-bak, temp -> hook), so
+        // if the temp -> hook rename fails after the original has been moved aside, the original must be ROLLED
+        // BACK from the backup — the hook can never be left absent. Inject a failure on exactly that rename.
+        const uint uid = 4242, gid = 4343;
+        var inner = FsWithBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
+        var fs = new FaultyExtFs(inner, failRename: (src, dest) =>
+            src.EndsWith(".ift-tmp", System.StringComparison.Ordinal) &&
+            dest == Hook);
+
+        Assert.ThrowsAny<System.Exception>(() => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+
+        Assert.Equal(FactoryScript, inner.ReadText(Hook));        // original rolled back into place
+        Assert.Equal(InMemoryExtFs.Mode0755, inner.ModeOf(Hook)); // with its mode intact
+        Assert.Equal((uid, gid), inner.OwnerOf(Hook)!.Value);     // and its owner intact
+        Assert.False(inner.HasFile(Hook + ".ift-tmp"));           // staged temp cleaned up
+        Assert.False(inner.HasFile(Hook + ".ift-bak"));           // backup consumed by the rollback
+    }
+
+    [Fact]
     public void Install_skips_when_the_hook_is_absent()
     {
         var fs = FsWithBash();
@@ -107,6 +192,115 @@ public class MqttInstallerImageTests
             .AddFile(Hook, "#!/bin/sh\niptables -F INPUT\n", InMemoryExtFs.Mode0755);
         MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
         Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+    }
+
+    [Fact]
+    public void Install_recovers_a_swap_interrupted_after_the_original_was_backed_up()
+    {
+        // Simulate a crash between the two swap renames: the hook is absent while its ".ift-bak" backup still
+        // holds the intact original. A fresh install must RESTORE the backup (not treat the hook as absent and
+        // skip), then harden it — preserving the original's mode/owner through the recovery.
+        const uint uid = 4242, gid = 4343;
+        var fs = FsWithBash().AddFile(Hook + ".ift-bak", FactoryScript, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
+        Assert.False(fs.HasFile(Hook));                          // precondition: the real path is missing
+
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+
+        Assert.True(fs.HasFile(Hook));                           // original recovered from the backup
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+        Assert.Equal(InMemoryExtFs.Mode0755, fs.ModeOf(Hook));   // recovered with its mode
+        Assert.Equal((uid, gid), fs.OwnerOf(Hook)!.Value);       // and its owner
+        Assert.False(fs.HasFile(Hook + ".ift-bak"));             // backup consumed by the recovery
+        Assert.False(fs.HasFile(Hook + ".ift-tmp"));
+    }
+
+    [Fact]
+    public void Install_deletes_a_stale_backup_left_by_a_completed_swap()
+    {
+        // Crash AFTER the swap promoted temp -> hook but BEFORE the backup was deleted: the hook is present and
+        // already hardened, so the idempotency check skips the rewrite. The stale (and executable) .ift-bak must
+        // still be cleaned up on the next run rather than lingering permanently in the image.
+        string hardened = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        var fs = FsWithBash().AddFile(Hook, hardened, InMemoryExtFs.Mode0755);
+        fs.AddFile(Hook + ".ift-bak", FactoryScript, InMemoryExtFs.Mode0755);   // stale backup of the pre-swap original
+
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+
+        Assert.False(fs.HasFile(Hook + ".ift-bak"));             // stale backup removed
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));   // hook itself untouched
+    }
+
+    [Fact]
+    public void Install_deletes_a_stale_temp_when_the_target_is_already_hardened()
+    {
+        // Same completed-but-uncleaned shape, for the OTHER sibling: an already-hardened hook makes the
+        // idempotency check skip the rewrite (and its ClearSwapSibling cleanup), so a stale .ift-tmp must be
+        // dropped by recovery rather than left in the image.
+        string hardened = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        var fs = FsWithBash().AddFile(Hook, hardened, InMemoryExtFs.Mode0755);
+        fs.AddFile(Hook + ".ift-tmp", "leftover staged content from an interrupted run", InMemoryExtFs.Mode0644);
+
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+
+        Assert.False(fs.HasFile(Hook + ".ift-tmp"));             // stale temp removed
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));   // hook itself untouched
+    }
+
+    [Fact]
+    public void Install_fails_closed_when_a_swap_sibling_is_a_non_regular_node()
+    {
+        // A symlink/dir at a tool-reserved swap path is an anomaly. Recovery clears siblings via
+        // ClearSwapSibling, which FAILS CLOSED on a non-regular node — so even an otherwise-idempotent run
+        // (hook already hardened) must throw rather than silently leave the unexpected shape in the image.
+        string hardened = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        var fs = FsWithBash().AddFile(Hook, hardened, InMemoryExtFs.Mode0755);
+        fs.AddSymlink(Hook + ".ift-tmp", "/some/target");
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
+
+    [Fact]
+    public void Install_fails_closed_on_a_non_regular_sibling_even_when_the_target_is_absent()
+    {
+        // The absent-hook ("no factory firewall" variant) no-op must not become a loophole: a non-regular node
+        // at a reserved swap path still fails closed, since recovery reconciles both siblings before the caller
+        // decides the target is genuinely absent.
+        var fs = FsWithBash();                                    // no hook present
+        fs.AddSymlink(Hook + ".ift-bak", "/some/target");
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
+
+    // ----------------------------- recovery: other RewritePreservingMeta callers -----------------------------
+
+    [Fact]
+    public void Flexisip_recovers_a_swap_interrupted_after_the_original_was_backed_up()
+    {
+        // The recovery must guard EVERY rewrite entry path, not just the firewall: PatchFlexisip throws
+        // Mqtt_FileMissing if its target is absent, so without recovery an interrupted flexisip swap (original
+        // stranded in .ift-bak) would be unrecoverable. Seed that crash state and assert it recovers + patches,
+        // preserving the script's non-root mode/owner.
+        const string Flexisip = "/etc/init.d/flexisipsh";
+        const uint uid = 500, gid = 500;
+        const string script =
+            "#!/bin/sh\n" +
+            "case \"$1\" in\n" +
+            "start)\n" +
+            "\tstart-stop-daemon --start --exec /usr/bin/flexisip\n" +
+            "\t;;\n" +
+            "esac\n";
+        var fs = new InMemoryExtFs().AddFile(Flexisip + ".ift-bak", script, InMemoryExtFs.Mode0755, uid: uid, gid: gid);
+        Assert.False(fs.HasFile(Flexisip));                       // precondition: target missing
+
+        MqttInstaller.PatchFlexisip(fs);
+
+        Assert.True(fs.HasFile(Flexisip));                        // recovered from .ift-bak, not thrown as missing
+        Assert.Contains("/bin/touch /tmp/flexisip_restarted", fs.ReadText(Flexisip)!);   // then patched
+        Assert.Equal(InMemoryExtFs.Mode0755, fs.ModeOf(Flexisip));// mode preserved through recovery + rewrite
+        Assert.Equal((uid, gid), fs.OwnerOf(Flexisip)!.Value);    // owner preserved
+        Assert.False(fs.HasFile(Flexisip + ".ift-bak"));          // transient swap backup consumed
+        Assert.False(fs.HasFile(Flexisip + ".ift-tmp"));
+        Assert.True(fs.HasFile(Flexisip + "_bak"));               // PatchFlexisip's persistent revert backup exists
     }
 
     // ----------------------------- validate: CheckFactoryFirewall -----------------------------

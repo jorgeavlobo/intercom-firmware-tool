@@ -45,6 +45,16 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>Opens <paramref name="path"/> as a stream. The returned stream is disposed by the caller.</summary>
         Stream OpenFile(string path, FileMode mode, FileAccess access);
+
+        /// <summary>Renames <paramref name="sourcePath"/> to <paramref name="destPath"/>. Mirrors
+        /// <see cref="ExtFileSystem.RenameFile"/>, which maps to lwext4's <c>ext4_frename</c> and THROWS if
+        /// <paramref name="destPath"/> already exists (it will not overwrite) — so a replace-in-place must delete
+        /// the destination first.</summary>
+        void RenameFile(string sourcePath, string destPath);
+
+        /// <summary>Deletes the regular file at <paramref name="path"/>, mirroring
+        /// <see cref="ExtFileSystem.DeleteFile"/>.</summary>
+        void DeleteFile(string path);
     }
 
     /// <summary>
@@ -68,5 +78,7 @@ namespace IntercomFirmwareTool.Core
         public void CreateSymLink(string linkTarget, string linkPath) => _fs.CreateSymLink(linkTarget, linkPath);
         public void CreateDirectory(string path) => _fs.CreateDirectory(path);
         public Stream OpenFile(string path, FileMode mode, FileAccess access) => _fs.OpenFile(path, mode, access);
+        public void RenameFile(string sourcePath, string destPath) => _fs.RenameFile(sourcePath, destPath);
+        public void DeleteFile(string path) => _fs.DeleteFile(path);
     }
 }

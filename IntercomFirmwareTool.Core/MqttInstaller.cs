@@ -2542,9 +2542,13 @@ namespace IntercomFirmwareTool.Core
         /// file's existing owner+mode (on-device it is <c>bticino:bticino</c> 0775 —
         /// NOT root). Idempotent: does nothing if the marker is already present.
         /// </summary>
-        private static void PatchFlexisip(IExtFs fs)
+        internal static void PatchFlexisip(IExtFs fs)
         {
             const string path = "/etc/init.d/flexisipsh";
+            // Complete a rewrite that a previous run left interrupted between its two renames (original moved to
+            // .ift-bak, target not yet promoted) BEFORE the missing-target check below — otherwise the preserved
+            // original stranded in .ift-bak would be unreachable and this would throw Mqtt_FileMissing (#151).
+            RecoverInterruptedRewrite(fs, path);
             if (!fs.FileExists(path))
                 throw new InvalidOperationException(CoreStrings.Format("Mqtt_FileMissing", path));
 
@@ -2677,13 +2681,149 @@ namespace IntercomFirmwareTool.Core
         // ---- fs helpers (mirror Ext4Probe's; kept local so the SSH path stays
         //      untouched — the two classes never share mutable state) -------------
 
+        /// <summary>
+        /// Replaces <paramref name="path"/>'s contents with <paramref name="text"/> WITHOUT ever leaving the
+        /// original truncated on failure (issue #151). A bare <c>FileMode.Create</c> write truncates the target
+        /// to zero BEFORE the new bytes land, so a mid-write throw or crash would leave a partial — or empty —
+        /// script on the image; for a security-critical hook (the factory firewall, #145) that means flashing a
+        /// firewall that silently does nothing. Instead we write the new content to a sibling temp file, read it
+        /// back and require a byte-for-byte match, stamp the captured mode/owner onto the temp, and only THEN
+        /// swap it into place. The good original is never touched until a fully-written, verified replacement
+        /// exists; on any earlier failure the original stays intact and the temp is removed.
+        ///
+        /// <para>SharpExt4's <c>RenameFile</c> refuses to overwrite an existing destination, so the swap goes
+        /// through a BACKUP rather than deleting the original outright: <c>original → .ift-bak</c>, then
+        /// <c>temp → path</c>, then delete the backup. If the second rename fails the original is rolled back
+        /// from <c>.ift-bak</c>, so <paramref name="path"/> always ends up holding either the verified new
+        /// content or the intact original — never nothing. The only non-atomic residue is the sub-millisecond
+        /// window between the two renames; it matters solely on host power-loss mid-swap, and even then the
+        /// original survives on disk under <c>.ift-bak</c>. This is a HOST-side image editor whose output is not
+        /// flashed until the tool returns success, so a crash there simply means re-running against a fresh
+        /// image, never a half-written device.</para>
+        /// </summary>
         private static void RewritePreservingMeta(IExtFs fs, string path, string text)
         {
             uint mode = fs.GetMode(path) & 0xFFF;
             var owner = fs.GetOwner(path);
-            WriteTextFile(fs, path, text);
-            fs.SetMode(path, mode);
-            if (owner != null) fs.SetOwner(path, owner.Item1, owner.Item2);
+            string tmp = path + ".ift-tmp";   // staging for the new content
+            string bak = path + ".ift-bak";   // the original, moved aside during the swap
+            // Clear any siblings a previously-interrupted swap may have left behind; RenameFile refuses to
+            // overwrite, so a leftover here would break the swap.
+            ClearSwapSibling(fs, tmp, path);
+            ClearSwapSibling(fs, bak, path);
+            try
+            {
+                byte[] expected = Encoding.UTF8.GetBytes(text);
+                WriteTextFile(fs, tmp, text);
+                // Read the just-written temp back and require an exact match before it is allowed to replace the
+                // original. A short/partial write that slipped past WriteTextFile is caught HERE — while the
+                // original is still in place and nothing has been destroyed. Compare RAW BYTES (not decoded
+                // text): UTF-8 decoding maps malformed sequences to U+FFFD, so a decoded-string compare could let
+                // a corrupted temp pass; ReadAllBytes also fails loudly on a short read.
+                if (!ReadAllBytes(fs, tmp).AsSpan().SequenceEqual(expected))
+                    throw new IOException(CoreStrings.Format("Mqtt_RewriteVerifyFailed", path));
+                // Stamp the captured metadata onto the temp; SharpExt4's rename moves the inode, so mode/owner
+                // travel with it into the final path.
+                fs.SetMode(tmp, mode);
+                if (owner != null) fs.SetOwner(tmp, owner.Item1, owner.Item2);
+            }
+            catch
+            {
+                // Nothing has moved yet — the original is untouched. Best-effort clean up the partial temp.
+                TryDeleteRegular(fs, tmp);
+                throw;
+            }
+            // Commit via a BACKUP so the original is never lost, even if a rename fails mid-swap. RenameFile
+            // will not overwrite (see IExtFs.RenameFile), so the destination must be free before each move:
+            //   1. original -> bak   (frees `path`; original now safe under `bak`)
+            //   2. tmp      -> path  (the verified replacement lands)
+            //   3. delete bak        (best-effort cleanup)
+            // If step 2 throws (an ext I/O error, say), we roll the original back from `bak`, so `path` always
+            // ends up holding either the new verified content or the intact original — never nothing.
+            try
+            {
+                fs.RenameFile(path, bak);
+            }
+            catch
+            {
+                TryDeleteRegular(fs, tmp);   // original still at `path`; drop the staged temp
+                throw;
+            }
+            try
+            {
+                fs.RenameFile(tmp, path);
+            }
+            catch
+            {
+                // Restore the original; if even this fails the original still exists on disk under `bak`.
+                try { fs.RenameFile(bak, path); } catch { /* original remains recoverable at bak */ }
+                TryDeleteRegular(fs, tmp);
+                throw;
+            }
+            TryDeleteRegular(fs, bak);
+        }
+
+        /// <summary>
+        /// Clears a swap sibling (<c>.ift-tmp</c> / <c>.ift-bak</c>) left over from an interrupted rewrite so the
+        /// no-overwrite <see cref="IExtFs.RenameFile"/> has a free destination. A regular file is deleted; a path
+        /// OCCUPIED by a non-regular node (a symlink or directory — which <see cref="IExtFs.FileExists"/> is blind
+        /// to) cannot be safely cleared and would make the swap rename over an unexpected shape, so we fail closed
+        /// rather than risk it, consistent with the rest of this installer (<see cref="PathOccupied"/>).
+        /// </summary>
+        private static void ClearSwapSibling(IExtFs fs, string sibling, string target)
+        {
+            if (fs.FileExists(sibling)) { fs.DeleteFile(sibling); return; }
+            if (PathOccupied(fs, sibling))
+                throw new InvalidOperationException(
+                    CoreStrings.Format("Mqtt_RewriteSiblingOccupied", target, sibling));
+        }
+
+        /// <summary>Best-effort removal of a regular file used only for cleanup on the failure/commit paths of
+        /// <see cref="RewritePreservingMeta"/> — swallows any error since there is nothing further to do.</summary>
+        private static void TryDeleteRegular(IExtFs fs, string path)
+        {
+            try { if (fs.FileExists(path)) fs.DeleteFile(path); } catch { /* best-effort */ }
+        }
+
+        /// <summary>
+        /// Reconciles a <c>.ift-bak</c> that a previous <see cref="RewritePreservingMeta"/> run left behind when
+        /// the host died mid-swap, run BEFORE a caller's target-existence check so an interrupted swap never
+        /// looks like a missing (or already-done) file:
+        /// <list type="bullet">
+        /// <item>crash AFTER <c>original → .ift-bak</c> but BEFORE <c>temp → path</c> — <paramref name="path"/> is
+        /// absent while <c>.ift-bak</c> holds the intact original: restore it (<c>bak → path</c>, carrying
+        /// mode/owner), else the firewall hook would be treated as absent and hardening silently skipped.</item>
+        /// <item>crash AFTER <c>temp → path</c> but BEFORE the backup cleanup — the target is present and the
+        /// idempotency check may skip the rewrite, so a stale (executable) <c>.ift-bak</c> or leftover
+        /// <c>.ift-tmp</c> would linger forever.</item>
+        /// </list>
+        /// After any restore, it reconciles BOTH swap siblings via <see cref="ClearSwapSibling"/> in every case —
+        /// target present, restored, or genuinely absent — which deletes a regular leftover and FAILS CLOSED on a
+        /// non-regular node (symlink/dir) at these tool-reserved paths, so an unexpected shape can't slip through
+        /// the idempotent-skip path or the absent-target no-op. Only when the TARGET itself is a non-regular node
+        /// are the siblings left intact — the caller fails closed on that target shape.
+        /// </summary>
+        private static void RecoverInterruptedRewrite(IExtFs fs, string path)
+        {
+            string tmp = path + ".ift-tmp";
+            string bak = path + ".ift-bak";
+
+            // If the TARGET itself is a non-regular node (symlink/dir), leave everything as-is; the caller fails
+            // closed on that target shape. (FileExists is symlink-blind, so "absent AND occupied" == non-regular.)
+            if (!fs.FileExists(path) && PathOccupied(fs, path))
+                return;
+
+            // Swap crashed AFTER original -> .ift-bak but BEFORE the promote: the target is absent while a regular
+            // backup holds the original — restore it so the caller doesn't mistake the file for genuinely absent.
+            if (!fs.FileExists(path) && fs.FileExists(bak))
+                fs.RenameFile(bak, path);
+
+            // Reconcile any remaining swap siblings in EVERY case (target present, restored, or genuinely absent).
+            // ClearSwapSibling deletes a regular leftover and FAILS CLOSED on a non-regular node at these
+            // tool-reserved paths — so a symlink/dir at .ift-tmp/.ift-bak can't slip through the idempotent-skip
+            // path or the absent-target no-op.
+            ClearSwapSibling(fs, tmp, path);
+            ClearSwapSibling(fs, bak, path);
         }
 
         /// <summary>
@@ -2747,6 +2887,10 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static void PatchFactoryFirewallWaitForLock(IExtFs fs)
         {
+            // If a previous run crashed mid-swap the hook may be sitting in its .ift-bak backup with the real
+            // path absent; restore it FIRST, before the absent-path check below could mistake the interrupted
+            // swap for a variant that ships no factory firewall and silently skip hardening (#151).
+            RecoverInterruptedRewrite(fs, FactoryFirewallScriptPath);
             if (!fs.FileExists(FactoryFirewallScriptPath))
             {
                 // FileExists is symlink-BLIND (like elsewhere in this file — see PathOccupied /
@@ -3081,7 +3225,10 @@ namespace IntercomFirmwareTool.Core
             fs.SetOwner(path, 0, 0);
         }
 
-        private static string ReadAllText(IExtFs fs, string path)
+        private static string ReadAllText(IExtFs fs, string path) =>
+            Encoding.UTF8.GetString(ReadAllBytes(fs, path));
+
+        private static byte[] ReadAllBytes(IExtFs fs, string path)
         {
             using var file = fs.OpenFile(path, FileMode.Open, FileAccess.Read);
             long length = file.Length;
@@ -3098,11 +3245,11 @@ namespace IntercomFirmwareTool.Core
                 total += n;
             }
             // A short read must fail loudly, not silently return a truncated
-            // string — patching/validation on partial content could rewrite an
+            // buffer — patching/validation on partial content could rewrite an
             // init script incorrectly. (Mirrors Ext4Probe's read helper.)
             if (total != len)
                 throw new IOException(CoreStrings.Format("Ext4_IncompleteRead", len, total));
-            return Encoding.UTF8.GetString(buf, 0, total);
+            return buf;
         }
 
         private static void CheckFile(IExtFs fs, List<Ext4Check> checks, string path, int mode)

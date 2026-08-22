@@ -118,6 +118,23 @@ internal sealed class InMemoryExtFs : IExtFs
         return new WriteBackStream(bytes => ent.Bytes = bytes);
     }
 
+    public void RenameFile(string sourcePath, string destPath)
+    {
+        if (!_files.TryGetValue(sourcePath, out var e)) throw new FileNotFoundException(sourcePath);
+        // ExtFileSystem.RenameFile (lwext4 ext4_frename) refuses to overwrite an existing destination OF ANY
+        // KIND — regular file, directory, or symlink — so model all three, not just the regular-file map. A
+        // fake that only rejected a colliding regular file could let a test pass where the real image throws.
+        if (_files.ContainsKey(destPath) || _dirs.Contains(destPath) || _symlinks.ContainsKey(destPath))
+            throw new IOException($"'{destPath}' already exists.");
+        _files.Remove(sourcePath);
+        _files[destPath] = e;   // move the whole entry: bytes, mode and owner travel with the inode
+    }
+
+    public void DeleteFile(string path)
+    {
+        if (!_files.Remove(path)) throw new FileNotFoundException(path);
+    }
+
     /// <summary>A writable stream that flushes its bytes back into the owning entry when disposed — models
     /// SharpExt4's ExtFileStream, which persists into the image on close.</summary>
     private sealed class WriteBackStream : MemoryStream
@@ -128,6 +145,91 @@ internal sealed class InMemoryExtFs : IExtFs
         protected override void Dispose(bool disposing)
         {
             if (!_flushed) { _flushed = true; _onClose(ToArray()); }
+            base.Dispose(disposing);
+        }
+    }
+}
+
+/// <summary>
+/// An <see cref="IExtFs"/> decorator that forwards everything to an inner filesystem but can THROW from
+/// <see cref="OpenFile"/> (on a create-write) and/or <see cref="RenameFile"/> when the target matches an
+/// injected predicate — used to fault-inject the safe-replace (issue #151) and prove it never damages the
+/// original file: a mid-write failure leaves the original intact, and a failed swap rolls it back.
+/// </summary>
+internal sealed class FaultyExtFs : IExtFs
+{
+    private readonly IExtFs _inner;
+    private readonly Func<string, bool>? _failCreate;
+    private readonly Func<string, bool>? _failPartialWrite;
+    private readonly Func<string, string, bool>? _failRename;
+
+    public FaultyExtFs(IExtFs inner,
+                       Func<string, bool>? failCreate = null,
+                       Func<string, bool>? failPartialWrite = null,
+                       Func<string, string, bool>? failRename = null)
+    {
+        _inner = inner;
+        _failCreate = failCreate;
+        _failPartialWrite = failPartialWrite;
+        _failRename = failRename;
+    }
+
+    public Stream OpenFile(string path, FileMode mode, FileAccess access)
+    {
+        if (mode == FileMode.Create && _failCreate?.Invoke(path) == true)
+            throw new IOException($"injected write failure for {path}");
+        // Model a write that creates the file, lands a PREFIX, then dies — leaving a partially-written temp on
+        // the image that the cleanup path must remove.
+        if (mode == FileMode.Create && _failPartialWrite?.Invoke(path) == true)
+            return new PartialWriteThenThrowStream(_inner.OpenFile(path, mode, access));
+        return _inner.OpenFile(path, mode, access);
+    }
+
+    public void RenameFile(string sourcePath, string destPath)
+    {
+        if (_failRename?.Invoke(sourcePath, destPath) == true)
+            throw new IOException($"injected rename failure for {sourcePath} -> {destPath}");
+        _inner.RenameFile(sourcePath, destPath);
+    }
+
+    public bool FileExists(string path) => _inner.FileExists(path);
+    public bool DirectoryExists(string path) => _inner.DirectoryExists(path);
+    public uint GetMode(string path) => _inner.GetMode(path);
+    public void SetMode(string path, uint mode) => _inner.SetMode(path, mode);
+    public Tuple<uint, uint>? GetOwner(string path) => _inner.GetOwner(path);
+    public void SetOwner(string path, uint uid, uint gid) => _inner.SetOwner(path, uid, gid);
+    public string ReadSymLink(string path) => _inner.ReadSymLink(path);
+    public void CreateSymLink(string linkTarget, string linkPath) => _inner.CreateSymLink(linkTarget, linkPath);
+    public void CreateDirectory(string path) => _inner.CreateDirectory(path);
+    public void DeleteFile(string path) => _inner.DeleteFile(path);
+
+    /// <summary>A write stream that flushes a PREFIX of the first write into the wrapped stream and then throws,
+    /// modelling a create-write that leaves a partially-written file behind (the wrapped stream persists what it
+    /// received when disposed).</summary>
+    private sealed class PartialWriteThenThrowStream : Stream
+    {
+        private readonly Stream _inner;
+        public PartialWriteThenThrowStream(Stream inner) => _inner = inner;
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            int partial = count > 1 ? count / 2 : count;   // land a real prefix, then fail mid-write
+            _inner.Write(buffer, offset, partial);
+            throw new IOException("injected partial-write failure");
+        }
+
+        public override bool CanRead => false;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => _inner.Length;
+        public override long Position { get => _inner.Position; set => _inner.Position = value; }
+        public override void Flush() => _inner.Flush();
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
             base.Dispose(disposing);
         }
     }
