@@ -648,6 +648,11 @@ namespace IntercomFirmwareTool.Core
             PatchFlexisip(fs);
             if (!opts.HostIsIp)
             {
+                // Complete any hosts-script swap a previous run left interrupted BEFORE the preflight below reads
+                // it. Otherwise an absent target (its original stranded in .ift-bak) reads as unmapped, sending a
+                // device-only broker name into ResolveHostIp's DNS lookup — which throws — so the install fails
+                // and never reaches AddMappings' own recovery, leaving the script stranded (#154, Codex #155).
+                ExtFsRewrite.RecoverInterruptedRewrite(fs, BtDaemonAppsHosts.ScriptPath);
                 // If the broker name is already resolvable via the device's hosts
                 // file (the built-in "openserver" → 127.0.0.1 alias, or a mapping
                 // from a prior run) and the caller gave no explicit IP override,
