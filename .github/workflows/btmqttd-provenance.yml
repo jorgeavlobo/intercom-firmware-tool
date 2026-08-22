@@ -54,6 +54,28 @@ jobs:
           # .git/config — avoids credential leakage via the checkout (zizmor artipacked).
           persist-credentials: false
 
+      - name: Bridge version in sync (Cargo.toml == PayloadBinaries.BridgeVersion)
+        run: |
+          set -euo pipefail
+          # Fatal, fast pre-check (issue #114): the daemon's Cargo.toml [package] version — which
+          # btmqttd compiles in as CARGO_PKG_VERSION — is the single source of truth, and the C#
+          # installer mirrors it in PayloadBinaries.BridgeVersion to bake sw_version into the HA
+          # discovery device block WITHOUT reading the binary. If the two drift, HA would advertise
+          # a version the running daemon isn't. Extract each with a whole-line regex and compare.
+          cargo_ver="$(grep -oP '^\s*version\s*=\s*"\K[^"]+' native/btmqttd/Cargo.toml | head -n1 || true)"
+          cs_ver="$(grep -oP 'BridgeVersion\s*=\s*"\K[^"]+' IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs | head -n1 || true)"
+          echo "Cargo.toml version:            '${cargo_ver}'"
+          echo "PayloadBinaries.BridgeVersion: '${cs_ver}'"
+          if [ -z "$cargo_ver" ] || [ -z "$cs_ver" ]; then
+            echo "::error::could not read the bridge version from Cargo.toml and/or PayloadBinaries.cs"
+            exit 1
+          fi
+          if [ "$cargo_ver" != "$cs_ver" ]; then
+            echo "::error::bridge version drift — native/btmqttd/Cargo.toml is '${cargo_ver}' but PayloadBinaries.BridgeVersion is '${cs_ver}'. Bump BOTH together."
+            exit 1
+          fi
+          echo "bridge version in sync: ${cargo_ver}"
+
       - name: Install the pinned ARM cross C compiler (Ubuntu archive snapshot)
         env:
           # Immutable Ubuntu archive snapshot that pins ring's C/asm cross-gcc (issue #76).

@@ -1775,7 +1775,7 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>A discovery entity: its retained-config topic, the on-device
         /// JSON filename (under <see cref="HaDir"/>), and the JSON payload.</summary>
-        private readonly record struct HaEntity(string FileName, string ConfigTopic, string Json);
+        internal readonly record struct HaEntity(string FileName, string ConfigTopic, string Json);
 
         // Default STJ encoder: it does NOT escape the '{'/'}' of value_template
         // (only '<' '>' '&' '+' and non-ASCII, none of which appear in the default
@@ -1872,7 +1872,7 @@ namespace IntercomFirmwareTool.Core
         /// its inputs and <see cref="ValidateMqtt"/> can re-generate the identical set for the byte-compare;
         /// the caller computes it via <see cref="RestoreFirewallInstallEligible"/> from the installed image.
         /// </summary>
-        private static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts, bool restoreFirewallEligible)
+        internal static IReadOnlyList<HaEntity> GenerateHaDiscovery(MqttOptions opts, bool restoreFirewallEligible)
         {
             string prefix = opts.HaDiscoveryPrefix;
             string node = opts.HaNodeId;
@@ -1886,6 +1886,12 @@ namespace IntercomFirmwareTool.Core
                 name = opts.HaDeviceName,
                 manufacturer = "BTicino",
                 model = "OpenWebNet MQTT bridge",
+                // The installed bridge daemon's version (issue #114). HA merges the device block
+                // across this bridge's entities and shows it on the C100X device page, so an
+                // operator can tell which btmqttd is running. Baked in from PayloadBinaries, which
+                // mirrors native/btmqttd/Cargo.toml (kept in step by btmqttd-provenance.yml) — a
+                // pure function of the build, so ValidateMqtt re-generates the identical JSON.
+                sw_version = PayloadBinaries.BridgeVersion,
             };
 
             string Topic(string component, string objectId) =>

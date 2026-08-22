@@ -88,6 +88,21 @@ namespace IntercomFirmwareTool.Core
         };
 
         /// <summary>
+        /// The bridge daemon's Semantic Version (issue #114) — the version of the vendored
+        /// <see cref="Btmqttd"/> binary this build installs. Surfaced to Home Assistant as the
+        /// C100X device's <c>sw_version</c> (see <c>MqttInstaller.GenerateHaDiscovery</c>), so an
+        /// operator can see which bridge is running on the panel's device page.
+        ///
+        /// SINGLE SOURCE OF TRUTH is <c>native/btmqttd/Cargo.toml</c>'s <c>[package] version</c>
+        /// (which the daemon also compiles in as <c>CARGO_PKG_VERSION</c>); this constant MIRRORS
+        /// it so the installer can bake the value into the discovery JSON without reading the
+        /// binary. The two MUST stay equal — <c>btmqttd-provenance.yml</c> fails the build if they
+        /// drift (and <c>PayloadBinariesTests</c> pins this to a valid SemVer). Bump BOTH together
+        /// when the daemon's version changes.
+        /// </summary>
+        public const string BridgeVersion = "0.1.0";
+
+        /// <summary>
         /// <c>ffmpeg</c> — a minimal, LGPL, statically-linked armv7 hard-float (musl) build for the
         /// on-device media server (issue #120): the on-device go2rtc runs it to read the panel's
         /// cleartext RTP via an SDP and <b>copy</b> the H.264 into RTSP — no decode/encode. Unlike
