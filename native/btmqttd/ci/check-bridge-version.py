@@ -31,15 +31,20 @@ import tomllib
 # One declaration form only: `public const string BridgeVersion = "…";`.
 _DECL = re.compile(r'\bpublic\s+const\s+string\s+BridgeVersion\s*=\s*"([^"]*)"\s*;')
 
-# Alternation that matches, in priority order, a C# verbatim string, a regular string, a
-# char literal, a line comment, or a block comment. Matching strings/chars FIRST means a
-# `//` or `/*` occurring inside a literal is consumed as part of that literal (and kept),
-# so only genuine comments are stripped. (Standard comment-stripping technique.)
+# Alternation that matches, in priority order, a C# raw string, a verbatim string, a
+# regular string, a char literal, a line comment, or a block comment. Matching literals
+# and comments as whole tokens (raw string FIRST, so `"""…"""` is not mis-split into
+# `""` + `"…"`) means a `//`, `/*`, or a decoy declaration occurring INSIDE any literal is
+# consumed as part of that literal, never treated as code. `_strip_cs_comments` then drops
+# comments and the string forms that can carry UNESCAPED text (raw `"""…"""` and verbatim
+# `@"…"`), while keeping regular `"…"` strings — whose inner quotes must be escaped `\"`,
+# so a decoy `= "…";` can't form there, and where the real constant's value lives.
 _CS_TOKENS = re.compile(
     r'''
-      @"(?:[^"]|"")*"          # verbatim string  @"…"  ("" is an escaped quote)
-    | "(?:\\.|[^"\\])*"        # regular string   "…"
-    | '(?:\\.|[^'\\])*'        # char literal     '…'
+      ("{3,})(?s:.*?)\1        # raw string literal   """…"""  (C# 11+, N-quote delimited)
+    | @"(?:[^"]|"")*"          # verbatim string      @"…"     ("" is an escaped quote)
+    | "(?:\\.|[^"\\])*"        # regular string       "…"
+    | '(?:\\.|[^'\\])*'        # char literal         '…'
     | //[^\n]*                 # line comment
     | /\*.*?\*/                # block comment
     ''',
@@ -63,8 +68,14 @@ def cargo_version(toml_text: str) -> str | None:
 def _strip_cs_comments(src: str) -> str:
     def repl(match: re.Match[str]) -> str:
         token = match.group(0)
-        # Drop comments; keep string/char literals verbatim.
-        return " " if token.startswith("//") or token.startswith("/*") else token
+        # Drop comments and the string forms that can carry UNESCAPED text (a raw string
+        # `"""…"""` or a verbatim string `@"…"`), so a decoy declaration hidden in one of
+        # them is removed. Keep regular `"…"` strings and char literals: their inner quotes
+        # are escaped (`\"`), so a decoy `= "…";` can't form there, and the real constant's
+        # value is a regular string that must survive for the match.
+        if token.startswith(("//", "/*", '"""', '@"')):
+            return " "
+        return token
 
     return _CS_TOKENS.sub(repl, src)
 
@@ -104,10 +115,24 @@ def _selftest() -> int:
         '        public const string Docs = "https://example.test/path";\n'
         '        public const string BridgeVersion = "1.2.3";\n'
     )
+    # A decoy declaration inside a C# 11 raw string literal must not be picked up.
+    cs_raw_fixture = (
+        '        string doc = """\n'
+        '            public const string BridgeVersion = "0.1.0";\n'
+        '            """;\n'
+        '        public const string BridgeVersion = "9.9.9";\n'
+    )
+    # A decoy declaration inside a verbatim string ("" escapes a quote) must not either.
+    cs_verbatim_fixture = (
+        '        string doc = @"public const string BridgeVersion = ""0.1.0"";";\n'
+        '        public const string BridgeVersion = "9.9.9";\n'
+    )
     cases = [
         ("cargo/ multiline-string", cargo_version(toml_fixture), "9.9.9"),
         ("cs/ block+line comment", cs_version(cs_fixture), "9.9.9"),
         ("cs/ url-in-string", cs_version(cs_url_fixture), "1.2.3"),
+        ("cs/ raw-string decoy", cs_version(cs_raw_fixture), "9.9.9"),
+        ("cs/ verbatim-string decoy", cs_version(cs_verbatim_fixture), "9.9.9"),
     ]
     ok = True
     for name, got, want in cases:
