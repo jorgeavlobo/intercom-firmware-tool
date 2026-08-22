@@ -292,21 +292,24 @@ async fn handle_json(
                     // stayed up. btmqttd keeps NO copy of either ruleset; it only INVOKES the two scripts that
                     // own them (see restore_firewall).
                     //
-                    // GATED on the on-device-camera build (#147 review): that path is the only one that
-                    // HARDENS the factory hook to take the xtables lock (#145) and creates the :8554 rule the
-                    // second step re-asserts. On any other build the factory hook is still lock-LESS, so
-                    // re-running it from this MQTT press could race the interface-up rebuild and silently drop
-                    // rules — recreating the very lockout this action fixes. When ineligible we REJECT the
-                    // action: log and return WITHOUT publishing an ack (the installer also omits the button on
-                    // those builds, so the press shouldn't arrive; this is defense in depth for a hand-crafted
-                    // payload on TOPIC_RX). Unlike the other maintenance actions, whose capability a raw frame
-                    // on this topic already has, this one CAN drop rules on the wrong build, so it is the one
-                    // maintenance action with a build-eligibility gate.
-                    if !on_device_camera_installed().await {
+                    // GATED on eligibility (#147 review): the action is safe only on an on-device-camera build
+                    // that ALSO ships the factory hook. That path is the only one that HARDENS the factory hook
+                    // to take the xtables lock (#145) and creates the :8554 rule the second step re-asserts; on
+                    // any other build the hook is lock-LESS, so re-running it could race interface-up and drop
+                    // rules — the very lockout this action fixes. And a variant that ships go2rtcd but NO factory
+                    // hook would make the recovery a no-op (the `&&` short-circuits) while still spawning a child
+                    // — a misleading ack. When ineligible we REJECT the action: log and return WITHOUT
+                    // publishing an ack (the installer also omits the button on those builds, so the press
+                    // shouldn't arrive; this is defense in depth for a hand-crafted payload on TOPIC_RX). Unlike
+                    // the other maintenance actions, whose capability a raw frame on this topic already has,
+                    // this one CAN drop rules on the wrong build, so it is the one maintenance action with a
+                    // build-eligibility gate.
+                    if !restore_firewall_eligible().await {
                         eprintln!(
-                            "btmqttd: ignored restore_firewall: not an on-device-camera build \
-                             (the hardened factory hook and :8554 rule are absent; re-running the lock-less \
-                             factory hook here could race interface-up and drop rules)"
+                            "btmqttd: ignored restore_firewall: build not eligible \
+                             (needs the on-device-camera go2rtcd init and the factory firewall hook, both \
+                             present and executable; re-running a lock-less or absent hook here could race \
+                             interface-up, drop rules, or restore nothing)"
                         );
                         return;
                     }
@@ -602,8 +605,8 @@ async fn start_dropbear() {
 /// factory rebuild WAIT on the xtables lock, and SIGKILLing a partial rebuild would leave exactly the broken
 /// ruleset this action repairs — so on the rare long wait the child is detached to finish, never killed.
 /// Unlike [`restore_ssh`] there is no rootfs-`ro` gate — neither script is sensitive to the mount mode. This
-/// is invoked ONLY after the caller has confirmed the on-device-camera build via [`on_device_camera_installed`]
-/// (the same eligibility the hardened hook and `:8554` rule require); see [`run_maintenance_child`] for the
+/// is invoked ONLY after the caller has confirmed eligibility via [`restore_firewall_eligible`] (both the
+/// on-device-camera go2rtcd init and the factory hook present + executable); see [`run_maintenance_child`] for the
 /// spawn/timeout/reap discipline. The command string is built only from the two fixed path consts (no
 /// external input), so the shell has no injection surface.
 /// Returns `true` if the recovery child was DISPATCHED (spawned — it may still be completing in the background
@@ -622,23 +625,35 @@ async fn restore_firewall() -> bool {
     .await
 }
 
-/// Is this an ON-DEVICE-CAMERA build — the only build where "Restore firewall" is safe to run? The
-/// go2rtc init script ([`GO2RTCD_INIT`]) is installed EXECUTABLE only by that path, which is also the only
-/// path that (a) HARDENS the factory hook to take the xtables lock (`iptables -w`, #145) and (b) creates the
-/// camera `:8554` rule the second recovery step re-asserts. On any other build the factory hook is still the
-/// lock-LESS factory original, so re-running it from an MQTT press could race the interface-up rebuild and
-/// silently drop rules — the very lockout the action exists to fix. We therefore gate the action on this
-/// signal — the SAME executable-presence check the `go2rtc-net-hook` if-up.d hook uses — and REJECT the MQTT
-/// action when it is false. Best-effort: any stat/permission error reads as NOT installed (fail-closed —
-/// refuse rather than risk the race). Async `tokio::fs` so a slow stat never stalls the runtime.
+/// Is "Restore firewall" safe to run on THIS build? Requires BOTH:
+///   * the go2rtc init script ([`GO2RTCD_INIT`]) — installed EXECUTABLE only by the on-device-camera path,
+///     which is the only path that HARDENS the factory hook to take the xtables lock (`iptables -w`, #145) and
+///     creates the camera `:8554` rule the second recovery step re-asserts. On any other build the factory
+///     hook is still the lock-LESS factory original, so re-running it from an MQTT press could race the
+///     interface-up rebuild and drop rules — the very lockout the action exists to fix; AND
+///   * the factory firewall hook ([`FACTORY_FIREWALL_SCRIPT`]) itself — present and EXECUTABLE. A supported
+///     on-device-camera variant that ships NO factory hook still installs `go2rtcd`, and
+///     `PatchFactoryFirewallWaitForLock` silently no-ops when the hook is absent (#147 review); without this
+///     second check the gate would pass, `sh -c '<factory> && …'` would fail at the missing hook, nothing
+///     would be restored, and the child still spawned so an ack would be published for a no-op. Requiring the
+///     hook here rejects that case up front. On an on-device-camera build that DOES ship the hook,
+///     `PatchFactoryFirewallWaitForLock` has hardened it (it FAILS the install otherwise), so present +
+///     executable here implies hardened — no need to re-parse the shim from the daemon.
 ///
-/// Uses `symlink_metadata` (NOT `metadata`, which FOLLOWS symlinks) and requires a REGULAR file: the installer
-/// writes `go2rtcd` as a plain 0755 file, so a SYMLINK at this path is not something we created — it must not be
-/// able to satisfy the gate by pointing at some other executable. `file_type().is_file()` is false for a
-/// symlink, so a planted symlink reads as NOT installed.
-async fn on_device_camera_installed() -> bool {
+/// We REJECT the MQTT action when either is false. Best-effort: any stat/permission error reads as NOT
+/// eligible (fail-closed — refuse rather than risk a race or a misleading ack). Async `tokio::fs` so a slow
+/// stat never stalls the runtime.
+async fn restore_firewall_eligible() -> bool {
+    is_regular_executable(GO2RTCD_INIT).await && is_regular_executable(FACTORY_FIREWALL_SCRIPT).await
+}
+
+/// Is `path` a REGULAR, executable file? Uses `symlink_metadata` (NOT `metadata`, which FOLLOWS symlinks) and
+/// requires `file_type().is_file()`: the installer writes these as plain files, so a SYMLINK at the path is not
+/// something we created and must not satisfy the check by pointing at some other executable (a symlink's own
+/// `file_type().is_file()` is false). Any stat error → `false` (fail-closed).
+async fn is_regular_executable(path: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
-    match tokio::fs::symlink_metadata(GO2RTCD_INIT).await {
+    match tokio::fs::symlink_metadata(path).await {
         Ok(md) => md.file_type().is_file() && md.permissions().mode() & 0o111 != 0,
         Err(_) => false,
     }
