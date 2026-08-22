@@ -80,10 +80,22 @@ def _strip_cs_comments(src: str) -> str:
     return _CS_TOKENS.sub(repl, src)
 
 
+def cs_declarations(cs_text: str) -> list[str]:
+    """Every ``BridgeVersion`` declaration value in the (comment/raw/verbatim-stripped) text."""
+    return _DECL.findall(_strip_cs_comments(cs_text))
+
+
 def cs_version(cs_text: str) -> str | None:
-    """The ``BridgeVersion`` constant value, ignoring comments, or None if not found."""
-    match = _DECL.search(_strip_cs_comments(cs_text))
-    return match.group(1) if match else None
+    """The BridgeVersion value IFF there is exactly one declaration, else None.
+
+    Returning None for >1 match is deliberate: rather than model every C# construct that
+    could hide a decoy the stripper doesn't remove (an inactive ``#if false`` region, some
+    future literal form), we refuse to guess when more than one declaration survives — the
+    real file has exactly one, so any extra means "stop and look", not "silently pick the
+    first". The caller turns 0 or >1 into a fatal, explained error.
+    """
+    found = cs_declarations(cs_text)
+    return found[0] if len(found) == 1 else None
 
 
 def _read(path: str) -> str:
@@ -127,19 +139,37 @@ def _selftest() -> int:
         '        string doc = @"public const string BridgeVersion = ""0.1.0"";";\n'
         '        public const string BridgeVersion = "9.9.9";\n'
     )
-    cases = [
+    # A decoy in an inactive #if false region is NOT a comment/string, so it survives the
+    # strip — the guard must refuse to guess (two declarations) rather than pick the first.
+    cs_preproc_fixture = (
+        "#if false\n"
+        '        public const string BridgeVersion = "0.1.0";\n'
+        "#endif\n"
+        '        public const string BridgeVersion = "9.9.9";\n'
+    )
+    # Value cases: exactly one real declaration must be extracted.
+    value_cases = [
         ("cargo/ multiline-string", cargo_version(toml_fixture), "9.9.9"),
         ("cs/ block+line comment", cs_version(cs_fixture), "9.9.9"),
         ("cs/ url-in-string", cs_version(cs_url_fixture), "1.2.3"),
         ("cs/ raw-string decoy", cs_version(cs_raw_fixture), "9.9.9"),
         ("cs/ verbatim-string decoy", cs_version(cs_verbatim_fixture), "9.9.9"),
     ]
+    # Ambiguity case: more than one surviving declaration ⇒ refuse to guess (cs_version None,
+    # and >1 raw declarations so the caller emits a fatal, explained error).
+    ambiguous_decls = cs_declarations(cs_preproc_fixture)
     ok = True
-    for name, got, want in cases:
+    for name, got, want in value_cases:
         status = "OK" if got == want else "FAIL"
         if got != want:
             ok = False
         print(f"  [{status}] {name}: got {got!r}, want {want!r}")
+    amb_ok = cs_version(cs_preproc_fixture) is None and len(ambiguous_decls) == 2
+    ok = ok and amb_ok
+    print(
+        f"  [{'OK' if amb_ok else 'FAIL'}] cs/ preprocessor decoy (ambiguous): "
+        f"declarations={ambiguous_decls!r}, refuse-to-guess={cs_version(cs_preproc_fixture) is None}"
+    )
     if not ok:
         print("::error::bridge-version extractor self-test FAILED", file=sys.stderr)
         return 1
@@ -159,10 +189,19 @@ def main(argv: list[str]) -> int:
         return 2
 
     cargo_ver = cargo_version(_read(argv[0]))
-    cs_ver = cs_version(_read(argv[1]))
+    cs_decls = cs_declarations(_read(argv[1]))
+    cs_ver = cs_decls[0] if len(cs_decls) == 1 else None
     print(f"Cargo.toml [package] version:  {cargo_ver!r}")
     print(f"PayloadBinaries.BridgeVersion: {cs_ver!r}")
 
+    if len(cs_decls) > 1:
+        print(
+            f"::error::found {len(cs_decls)} `public const string BridgeVersion` "
+            f"declarations in PayloadBinaries.cs ({cs_decls}); refusing to guess which is "
+            f"active (an inactive #if region or a duplicate?). Leave exactly one.",
+            file=sys.stderr,
+        )
+        return 1
     if not cargo_ver or not cs_ver:
         print(
             "::error::could not read the bridge version from Cargo.toml and/or "
