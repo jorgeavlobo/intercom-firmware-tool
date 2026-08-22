@@ -450,6 +450,9 @@ namespace IntercomFirmwareTool.Core
         // script that already carries the exact shim block right after the shebang, judged by
         // IsFactoryFirewallHardened — not the marker comment), preserving the script's mode/owner.
         private const string FactoryFirewallScriptPath = "/etc/network/if-pre-up.d/iptables";
+        // The flexisip init script PatchFlexisip edits in place (shared so the pre-guard swap-recovery in
+        // InstallMqtt and PatchFlexisip name the same path).
+        private const string FlexisipScriptPath = "/etc/init.d/flexisipsh";
         // Human-readable marker used only to delimit the shim block in the script text (grep/read
         // convenience). It is NOT what gates idempotency or validation — the marker comment could survive
         // while the block was truncated or hand-edited. Those checks require the EXACT shim block
@@ -561,6 +564,14 @@ namespace IntercomFirmwareTool.Core
             IExtFs fs = new ExtFsAdapter(rawFs);   // seam: all fs work goes through IExtFs (see IExtFs.cs)
             Validate(opts);
 
+            // Reconcile any crash-safe rewrite a previous (crashed) run left interrupted, BEFORE the idempotency
+            // guard can short-circuit this retry. Otherwise a crash during one of these swaps leaves the target
+            // in its .ift-bak while the guard throws Mqtt_AlreadyInstalled here, so the per-file recovery deeper
+            // in the install (PatchFlexisip, the hosts block, the factory-firewall patch) is never reached and
+            // the script stays stranded (#154). Recovery is an idempotent no-op when there is no swap residue.
+            foreach (var swapPath in new[] { BtDaemonAppsHosts.ScriptPath, FlexisipScriptPath, FactoryFirewallScriptPath })
+                ExtFsRewrite.RecoverInterruptedRewrite(fs, swapPath);
+
             // Idempotency guard: refuse an image that already carries the bridge,
             // rather than half-overwriting a previous install (the init-script
             // patches are the only idempotent parts; the rest is a fresh layout).
@@ -648,11 +659,9 @@ namespace IntercomFirmwareTool.Core
             PatchFlexisip(fs);
             if (!opts.HostIsIp)
             {
-                // Complete any hosts-script swap a previous run left interrupted BEFORE the preflight below reads
-                // it. Otherwise an absent target (its original stranded in .ift-bak) reads as unmapped, sending a
-                // device-only broker name into ResolveHostIp's DNS lookup — which throws — so the install fails
-                // and never reaches AddMappings' own recovery, leaving the script stranded (#154).
-                ExtFsRewrite.RecoverInterruptedRewrite(fs, BtDaemonAppsHosts.ScriptPath);
+                // The hosts script's interrupted-swap recovery already ran before the idempotency guard above,
+                // so by here HasHostMapping reads the reconciled script (not an absent target whose original is
+                // stranded in .ift-bak, which would send a device-only name into a failing DNS lookup) (#154).
                 // If the broker name is already resolvable via the device's hosts
                 // file (the built-in "openserver" → 127.0.0.1 alias, or a mapping
                 // from a prior run) and the caller gave no explicit IP override,
@@ -2546,7 +2555,7 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static void PatchFlexisip(IExtFs fs)
         {
-            const string path = "/etc/init.d/flexisipsh";
+            const string path = FlexisipScriptPath;
             // Complete a rewrite that a previous run left interrupted between its two renames (original moved to
             // .ift-bak, target not yet promoted) BEFORE the missing-target check below — otherwise the preserved
             // original stranded in .ift-bak would be unreachable and this would throw Mqtt_FileMissing (#151).
