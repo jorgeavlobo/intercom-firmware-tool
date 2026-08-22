@@ -416,4 +416,18 @@ public class MqttInstallerImageTests
             .AddFile(Hook, hardened, InMemoryExtFs.Mode0755);         // no /usr/bin/bash anywhere
         Assert.False(Named(Validate(fs), "interpreter present and executable").Pass);
     }
+
+    [Fact]
+    public void Install_fails_closed_when_a_symlink_target_uses_dotdot_to_escape_a_nonexistent_component()
+    {
+        // A crafted target `missing/../sh` where `missing` does NOT exist: Linux fails resolution AT `missing`,
+        // so the interpreter is unrunnable. The resolver must NOT collapse `..` lexically to reach the real
+        // `/bin/sh` and falsely certify the hook — it must fail closed (#149, kernel-faithful `..`).
+        var fs = new InMemoryExtFs()
+            .AddSymlink("/bin/bash", "missing/../sh")   // `#!/bin/bash` → missing/../sh (relative to /bin)
+            .AddExecutable("/bin/sh")                   // the real shell the `..` would wrongly reach
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
 }

@@ -1493,7 +1493,11 @@ namespace IntercomFirmwareTool.Core
         /// symlink so a whole-path <c>FileExists</c>/<c>ReadSymLink</c> both fail (#149). A component that is NOT a
         /// symlink (a real dir/file, or absent) is kept literally, so the caller's <c>FileExists</c>/<c>GetMode</c>
         /// on the result decides real-ness — a dangling or absent target simply fails that later check (fail-safe).
-        /// Returns null only when the symlink chain cycles or exceeds <see cref="MaxSymlinkHops"/>.
+        /// <para><c>..</c> is applied like the kernel, not lexically: escaping a directory requires it to REALLY be
+        /// a directory, so a crafted <c>nonexistent/../x</c> target (which Linux rejects at <c>nonexistent</c>)
+        /// can't collapse to <c>x</c> and falsely certify an unrunnable hook — it fails closed (null) instead.</para>
+        /// Returns null when the symlink chain cycles or exceeds <see cref="MaxSymlinkHops"/>, or when a
+        /// <c>..</c> would escape a non-directory.
         /// </summary>
         private static string? RealPath(IExtFs fs, string path)
         {
@@ -1512,7 +1516,19 @@ namespace IntercomFirmwareTool.Core
             {
                 string seg = pending[i++];
                 if (seg == ".") continue;
-                if (seg == "..") { if (resolved.Count > 0) resolved.RemoveAt(resolved.Count - 1); continue; }
+                if (seg == "..")
+                {
+                    // Linux fails resolution AT a nonexistent (or non-directory) component; a purely lexical pop
+                    // would instead let `nonexistent/../x` collapse to `x` and could FALSELY certify an unrunnable
+                    // hook. So before escaping the current directory, require it to be a real directory; if it is
+                    // not, fail closed (null → treated as absent → the hook is rejected — the safe direction).
+                    if (resolved.Count > 0)
+                    {
+                        if (!fs.DirectoryExists("/" + string.Join("/", resolved))) return null;
+                        resolved.RemoveAt(resolved.Count - 1);
+                    }
+                    continue;
+                }
 
                 string prefix = string.Join("/", resolved);
                 string candidate = prefix.Length == 0 ? "/" + seg : "/" + prefix + "/" + seg;
