@@ -85,7 +85,7 @@ namespace IntercomFirmwareTool.Core
         /// </summary>
         internal static void AddMappings(IExtFs fs, IReadOnlyList<(string Host, string Ip)> mappings)
         {
-            // Complete a rewrite a previous run left interrupted mid-swap (original moved to .ift-bak, target not
+            // Complete a rewrite that a previous run left interrupted mid-swap (original moved to .ift-bak, target not
             // yet promoted) BEFORE the missing-target check, so the preserved original is restored rather than
             // the script being wrongly reported as missing (#151 / #154).
             ExtFsRewrite.RecoverInterruptedRewrite(fs, ScriptPath);
