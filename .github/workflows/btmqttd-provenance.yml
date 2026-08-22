@@ -63,7 +63,7 @@ jobs:
           # discovery device block WITHOUT reading the binary. If the two drift, HA would advertise
           # a version the running daemon isn't. Extract each with a whole-line regex and compare.
           cargo_ver="$(grep -oP '^\s*version\s*=\s*"\K[^"]+' native/btmqttd/Cargo.toml | head -n1 || true)"
-          cs_ver="$(grep -oP 'BridgeVersion\s*=\s*"\K[^"]+' IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs | head -n1 || true)"
+          cs_ver="$(grep -oP 'const\s+string\s+BridgeVersion\s*=\s*"\K[^"]+' IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs | head -n1 || true)"
           echo "Cargo.toml version:            '${cargo_ver}'"
           echo "PayloadBinaries.BridgeVersion: '${cs_ver}'"
           if [ -z "$cargo_ver" ] || [ -z "$cs_ver" ]; then

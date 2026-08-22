@@ -1887,8 +1887,8 @@ namespace IntercomFirmwareTool.Core
                 manufacturer = "BTicino",
                 model = "OpenWebNet MQTT bridge",
                 // The installed bridge daemon's version (issue #114). HA merges the device block
-                // across this bridge's entities and shows it on the C100X device page, so an
-                // operator can tell which btmqttd is running. Baked in from PayloadBinaries, which
+                // across this bridge's entities and shows it on the intercom's device page (whatever
+                // the model), so an operator can tell which btmqttd is running. Baked in from PayloadBinaries, which
                 // mirrors native/btmqttd/Cargo.toml (kept in step by btmqttd-provenance.yml) — a
                 // pure function of the build, so ValidateMqtt re-generates the identical JSON.
                 sw_version = PayloadBinaries.BridgeVersion,

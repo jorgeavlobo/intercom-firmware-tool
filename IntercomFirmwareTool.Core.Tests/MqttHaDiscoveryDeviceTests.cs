@@ -8,8 +8,8 @@ namespace IntercomFirmwareTool.Core.Tests;
 
 /// <summary>
 /// The Home Assistant discovery <c>device</c> block's <c>sw_version</c> (issue #114): every entity that
-/// groups under the C100X device carries the installed bridge daemon's version, so HA shows it on the
-/// device page. The value is <see cref="PayloadBinaries.BridgeVersion"/>, which mirrors
+/// groups under the intercom device (any supported model) carries the installed bridge daemon's version,
+/// so HA shows it on the device page. The value is <see cref="PayloadBinaries.BridgeVersion"/>, which mirrors
 /// <c>native/btmqttd/Cargo.toml</c> (the daemon's <c>CARGO_PKG_VERSION</c>); the two are kept in step by
 /// <c>btmqttd-provenance.yml</c>. Because the installer bakes it into the JSON and btmqttd only republishes
 /// those files, it must be a pure function of the build — <see cref="MqttInstaller.ValidateMqtt"/> re-generates
