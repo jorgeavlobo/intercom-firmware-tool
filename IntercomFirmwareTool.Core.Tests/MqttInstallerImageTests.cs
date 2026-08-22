@@ -359,4 +359,133 @@ public class MqttInstallerImageTests
     {
         Assert.Empty(Validate(FsWithBash()));
     }
+
+    // ----------------------------- #149: interpreter reached through a SYMLINKED PARENT -----------------------------
+
+    // A merged-/usr layout: `/bin` is a SYMLINK to `usr/bin`, and the real interpreter lives at
+    // `/usr/bin/bash`. A `#!/bin/bash` hook must still resolve — the resolver has to follow the intermediate
+    // `/bin` symlink, which the ext reader never traverses on the whole path (so a plain FileExists/ReadSymLink
+    // on `/bin/bash` both fail). Before #149 this false-failed as an absent interpreter and aborted the install.
+    private static InMemoryExtFs FsWithMergedUsrBash() =>
+        new InMemoryExtFs().AddSymlink("/bin", "usr/bin").AddExecutable("/usr/bin/bash");
+
+    [Fact]
+    public void Install_hardens_when_the_interpreter_is_reached_through_a_symlinked_parent()
+    {
+        var fs = FsWithMergedUsrBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);           // must NOT throw Unhardenable (#149)
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+    }
+
+    [Fact]
+    public void Validate_passes_when_the_interpreter_is_reached_through_a_symlinked_parent()
+    {
+        var fs = FsWithMergedUsrBash().AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+        Assert.True(Named(Validate(fs), "interpreter present and executable").Pass);
+    }
+
+    [Fact]
+    public void Validate_passes_when_the_symlinked_parent_target_is_absolute()
+    {
+        // Same, but the parent symlink target is ABSOLUTE (`/bin -> /usr/bin`): resolution restarts from the root.
+        var fs = new InMemoryExtFs().AddSymlink("/bin", "/usr/bin").AddExecutable("/usr/bin/bash")
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);
+        Assert.True(Named(Validate(fs), "interpreter present and executable").Pass);
+    }
+
+    [Fact]
+    public void Install_still_fails_closed_when_a_symlinked_parent_leads_to_a_non_executable_interpreter()
+    {
+        // Fail-safe preserved: resolving the parent must not paper over a real problem — a present-but-
+        // NON-executable interpreter (0644) is still unhardenable.
+        var fs = new InMemoryExtFs().AddSymlink("/bin", "usr/bin")
+            .AddFile("/usr/bin/bash", "elf", InMemoryExtFs.Mode0644)  // reachable via the symlinked parent, but 0644
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
+
+    [Fact]
+    public void Validate_still_flags_a_dangling_symlinked_parent_interpreter()
+    {
+        // `/bin -> usr/bin` but nothing at `/usr/bin/bash`: the interpreter is genuinely absent → not hardened.
+        string hardened = MqttInstaller.EnsureFactoryFirewallShim(FactoryScript);
+        var fs = new InMemoryExtFs().AddSymlink("/bin", "usr/bin")
+            .AddFile(Hook, hardened, InMemoryExtFs.Mode0755);         // no /usr/bin/bash anywhere
+        Assert.False(Named(Validate(fs), "interpreter present and executable").Pass);
+    }
+
+    [Fact]
+    public void Install_fails_closed_when_a_symlink_target_uses_dotdot_to_escape_a_nonexistent_component()
+    {
+        // A crafted target `missing/../sh` where `missing` does NOT exist: Linux fails resolution AT `missing`,
+        // so the interpreter is unrunnable. The resolver must NOT collapse `..` lexically to reach the real
+        // `/bin/sh` and falsely certify the hook — it must fail closed (#149, kernel-faithful `..`).
+        var fs = new InMemoryExtFs()
+            .AddSymlink("/bin/bash", "missing/../sh")   // `#!/bin/bash` → missing/../sh (relative to /bin)
+            .AddExecutable("/bin/sh")                   // the real shell the `..` would wrongly reach
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
+
+    [Fact]
+    public void Install_fails_closed_when_dotdot_escapes_a_regular_file_component()
+    {
+        // ENOTDIR: `/bin -> /not-a-directory/../usr/bin` where `/not-a-directory` is a regular FILE. Linux can't
+        // descend a file, and `..` can't escape one, so resolution fails there; the resolver must not lexically
+        // pop the file to reach the real `/usr/bin/bash` and falsely certify the hook — it fails closed (#149).
+        var fs = new InMemoryExtFs()
+            .AddSymlink("/bin", "/not-a-directory/../usr/bin")
+            .AddFile("/not-a-directory", "regular file, not a dir", InMemoryExtFs.Mode0644)
+            .AddExecutable("/usr/bin/bash")             // the real interpreter the `..` would wrongly reach
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
+
+    [Fact]
+    public void Install_fails_closed_when_a_trailing_dot_follows_a_regular_file()
+    {
+        // ENOTDIR: `/bin/bash -> /bin/sh/.` where `/bin/sh` is a regular file. `x/.` requires x to be a
+        // directory; Linux rejects it, so the interpreter is unrunnable. A lexical `.` discard would resolve to
+        // the executable `/bin/sh` and falsely certify — the resolver must fail closed (#149).
+        var fs = new InMemoryExtFs()
+            .AddSymlink("/bin/bash", "/bin/sh/.")       // `#!/bin/bash` → /bin/sh/.
+            .AddExecutable("/bin/sh")                   // a real file, but `/bin/sh/.` is ENOTDIR
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
+
+    [Fact]
+    public void Install_hardens_when_dotdot_resolves_through_a_real_directory()
+    {
+        // Positive `..`: `/bin/bash -> ../usr/bin/bash`. `/bin` is a REAL directory, so `..` legitimately climbs
+        // to the root and resolves to the executable `/usr/bin/bash`. The directory check must ALLOW this — it
+        // fails closed only on a non-directory, not on every `..` — so the resolver isn't merely always-rejecting.
+        var fs = new InMemoryExtFs()
+            .AddDir("/bin")                             // a real directory, so `..` may escape it
+            .AddSymlink("/bin/bash", "../usr/bin/bash")
+            .AddExecutable("/usr/bin/bash")
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        MqttInstaller.PatchFactoryFirewallWaitForLock(fs);       // must NOT throw — `..` resolves through a real dir
+        Assert.True(MqttInstaller.IsFactoryFirewallHardened(fs.ReadText(Hook)!));
+    }
+
+    [Fact]
+    public void Install_fails_closed_when_a_symlink_target_has_a_trailing_slash_on_a_regular_file()
+    {
+        // POSIX: a trailing `/` requires the target to be a directory. `/bin/bash -> /bin/sh/` where /bin/sh is a
+        // regular file is ENOTDIR; dropping the trailing slash lexically would resolve to the executable /bin/sh
+        // and falsely certify — the resolver must honor the trailing slash and fail closed (#149).
+        var fs = new InMemoryExtFs()
+            .AddSymlink("/bin/bash", "/bin/sh/")        // `#!/bin/bash` → /bin/sh/ (trailing slash)
+            .AddExecutable("/bin/sh")                   // a real file, but `/bin/sh/` requires a directory
+            .AddFile(Hook, FactoryScript, InMemoryExtFs.Mode0755);
+        Assert.Throws<System.InvalidOperationException>(
+            () => MqttInstaller.PatchFactoryFirewallWaitForLock(fs));
+    }
 }

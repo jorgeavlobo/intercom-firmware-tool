@@ -1466,25 +1466,107 @@ namespace IntercomFirmwareTool.Core
             ResolveToRegularFile(fs, path) != null;
 
         /// <summary>
-        /// Resolves <paramref name="path"/> through up to 40 symlink hops to the real REGULAR FILE it names,
-        /// returning that resolved path, or null if the chain dangles, cycles, or never lands on a regular file.
-        /// The ext reader's <c>FileExists</c> is symlink-blind, so the walk follows <c>ReadSymLink</c> hops
-        /// (busybox applets, version links like <c>python -&gt; python2 -&gt; python2.7</c>) until it reaches a
-        /// real file. Shared by <see cref="DependencyPresent"/> and <see cref="InterpreterExecutable"/>.
+        /// Resolves <paramref name="path"/> to the real REGULAR FILE it names, following symlinks, or null if it
+        /// does not land on a regular file (a dangling/cyclic link, or an absent path). Shared by
+        /// <see cref="DependencyPresent"/> and <see cref="InterpreterExecutable"/>. Resolution is realpath-style —
+        /// EVERY path component is followed, parent directories included (see <see cref="RealPath"/>) — so a
+        /// symlinked PARENT such as a merged-<c>/usr</c> layout (<c>/bin -&gt; usr/bin</c>) resolves correctly;
+        /// there the ext reader's <c>FileExists</c>/<c>ReadSymLink</c> on the whole path would both fail because
+        /// the intermediate symlink is never traversed (#149).
         /// </summary>
         private static string? ResolveToRegularFile(IExtFs fs, string path)
         {
-            string current = path;
-            for (int hops = 0; hops < 40; hops++)
+            string? real = RealPath(fs, path);
+            return real != null && fs.FileExists(real) ? real : null;
+        }
+
+        /// <summary>The symlink hop budget for <see cref="RealPath"/> — generous for real chains (busybox applets,
+        /// version links, a symlinked <c>/bin</c>) and also the cycle guard: a loop exceeds it and resolves to
+        /// null.</summary>
+        private const int MaxSymlinkHops = 40;
+
+        /// <summary>
+        /// Realpath-style resolution: normalizes <paramref name="path"/> to an absolute path with EVERY component
+        /// resolved — parent directories included — following symlinks (absolute, and relative against the link's
+        /// own directory) and collapsing <c>.</c>/<c>..</c>. Unlike a final-component-only resolver, this handles a
+        /// symlinked PARENT (e.g. <c>/bin -&gt; usr/bin</c>), where the ext reader never traverses the intermediate
+        /// symlink so a whole-path <c>FileExists</c>/<c>ReadSymLink</c> both fail (#149). A component that is NOT a
+        /// symlink (a real dir/file, or absent) is kept literally, so the caller's <c>FileExists</c>/<c>GetMode</c>
+        /// on the result decides real-ness — a dangling or absent target simply fails that later check (fail-safe).
+        /// <para><c>.</c> and <c>..</c> are applied like the kernel, not lexically: both assert the current path is
+        /// really a directory before collapsing, so a crafted <c>nonexistent/../x</c> or <c>regular-file/.</c>
+        /// target (which Linux rejects with ENOENT/ENOTDIR) can't bypass the non-directory and falsely certify an
+        /// unrunnable hook — it fails closed (null) instead. A trailing slash is honored the same way (POSIX makes
+        /// <c>foo/</c> require <c>foo</c> to be a directory; see <see cref="SplitPathComponents"/>).</para>
+        /// Returns null when the symlink chain cycles or exceeds <see cref="MaxSymlinkHops"/>, or when a
+        /// <c>.</c>/<c>..</c> would resolve against a non-directory.
+        /// </summary>
+        private static string? RealPath(IExtFs fs, string path)
+        {
+            // `resolved` holds the already-resolved, real (non-symlink) leading components; `pending` the ones
+            // still to consume, in order, with `i` the cursor. Each component is probed with ReadSymLink — the
+            // authoritative "is this a symlink" test, since FileExists/DirectoryExists are symlink-blind: a link
+            // splices its target's components in at the cursor (relative → resolved against `resolved`, the link's
+            // own directory; absolute → from the root).
+            var pending = SplitPathComponents(path);
+
+            var resolved = new List<string>();
+            int i = 0, hops = 0;
+            while (i < pending.Count)
             {
-                if (fs.FileExists(current)) return current;   // real file (executable / init script)
+                string seg = pending[i++];
+                if (seg == "." || seg == "..")
+                {
+                    // Both `.` and `..` assert the CURRENT directory really is a directory — the kernel rejects
+                    // `x/.` and `x/..` with ENOTDIR when x is a regular file (and ENOENT when x is absent). A
+                    // purely lexical collapse would instead let a crafted target like `/bin/sh/.` or
+                    // `missing/../sh` bypass the non-directory and FALSELY certify an unrunnable hook. So verify
+                    // the current path before collapsing; if it is not a real directory, fail closed (null →
+                    // treated as absent → the hook is rejected — the safe direction). At the root ("resolved"
+                    // empty) there is nothing to verify or pop: `/.` and `/..` both stay at the root.
+                    if (resolved.Count > 0)
+                    {
+                        if (!fs.DirectoryExists("/" + string.Join("/", resolved))) return null;
+                        if (seg == "..") resolved.RemoveAt(resolved.Count - 1);
+                    }
+                    continue;
+                }
+
+                string prefix = string.Join("/", resolved);
+                string candidate = prefix.Length == 0 ? "/" + seg : "/" + prefix + "/" + seg;
+
                 string target;
-                try { target = fs.ReadSymLink(current); } // throws if not a symlink (or absent)
-                catch { return null; }
+                try { target = fs.ReadSymLink(candidate); }
+                catch { resolved.Add(seg); continue; }   // not a symlink (real dir/file, or absent) → keep literal
+                if (++hops > MaxSymlinkHops) return null; // cycle / too deep
                 if (string.IsNullOrEmpty(target)) return null;
-                current = ResolveLinkTarget(current, target);
+
+                if (target.StartsWith("/", StringComparison.Ordinal))
+                    resolved.Clear();                    // absolute target → resolve from the root
+                // Splice the target's components in AT the cursor, preserving order, so they resolve next against
+                // `resolved` (the symlink's own directory, for a relative target).
+                int at = i;
+                foreach (var t in SplitPathComponents(target))
+                    pending.Insert(at++, t);
             }
-            return null; // exceeded the hop budget (likely a cycle) — treat as absent
+            return "/" + string.Join("/", resolved);
+        }
+
+        /// <summary>
+        /// Splits <paramref name="p"/> into path components, dropping empty ones (POSIX collapses repeated
+        /// slashes) — EXCEPT a trailing slash, which POSIX makes significant: a path ending in <c>/</c> must name
+        /// a directory (equivalent to a trailing <c>/.</c>). We model that by appending a <c>.</c> component, so
+        /// <see cref="RealPath"/>'s directory check rejects e.g. <c>/bin/sh/</c> when <c>/bin/sh</c> is a regular
+        /// file (ENOTDIR) instead of silently resolving to it and certifying an unrunnable interpreter (#149).
+        /// </summary>
+        private static List<string> SplitPathComponents(string p)
+        {
+            var parts = new List<string>();
+            foreach (var seg in p.Split('/'))
+                if (seg.Length != 0) parts.Add(seg);
+            if (parts.Count > 0 && p.EndsWith("/", StringComparison.Ordinal))
+                parts.Add(".");
+            return parts;
         }
 
         /// <summary>
@@ -1504,36 +1586,6 @@ namespace IntercomFirmwareTool.Core
         /// iff at least one is set, so this is the "is it runnable" mask for both the shebang interpreter and
         /// the hook file itself.</summary>
         private const uint ExecuteBits = 0x40u | 0x08u | 0x01u;   // 0111 octal
-
-        /// <summary>
-        /// Resolves a symlink target — absolute, or relative to the link's own
-        /// directory — to a normalized absolute path, collapsing <c>.</c> and
-        /// <c>..</c> segments. (Parent components are assumed to be real directories,
-        /// which holds for the runtime-dep paths we check.)
-        /// </summary>
-        private static string ResolveLinkTarget(string linkPath, string target)
-        {
-            string combined;
-            if (target.StartsWith("/", StringComparison.Ordinal))
-            {
-                combined = target;
-            }
-            else
-            {
-                int slash = linkPath.LastIndexOf('/');
-                string dir = slash > 0 ? linkPath.Substring(0, slash) : "";
-                combined = dir + "/" + target;
-            }
-
-            var parts = new List<string>();
-            foreach (var seg in combined.Split('/'))
-            {
-                if (seg.Length == 0 || seg == ".") continue;
-                if (seg == "..") { if (parts.Count > 0) parts.RemoveAt(parts.Count - 1); }
-                else parts.Add(seg);
-            }
-            return "/" + string.Join("/", parts);
-        }
 
         // ---- config generation --------------------------------------------------
 
