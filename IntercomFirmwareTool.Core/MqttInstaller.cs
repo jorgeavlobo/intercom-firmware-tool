@@ -1787,6 +1787,7 @@ namespace IntercomFirmwareTool.Core
             ("reboot_device.json", "button", "reboot_device"),
             ("restart_bridge.json", "button", "restart_bridge"),
             ("restore_ssh.json", "button", "restore_ssh"),
+            ("restore_firewall.json", "button", "restore_firewall"),
             // The maintenance FEEDBACK sensor (issue #43) — a read-only diagnostic, but it only makes
             // sense alongside the buttons, so it is tombstoned with them when there is no command topic.
             ("maintenance_action.json", "sensor", "maintenance_action"),
@@ -2397,6 +2398,36 @@ namespace IntercomFirmwareTool.Core
                     qos = 0,
                     payload_press = "{\"action\":\"restore_ssh\"}",
                     icon = "mdi:ssh",
+                    entity_category = "config",
+                    enabled_by_default = false,
+                    availability_topic = opts.TopicLastWill,
+                    payload_available = "online",
+                    payload_not_available = "offline",
+                    device,
+                }, HaJson)));
+
+            // One-click firewall recovery button (issue #147): re-runs the factory firewall script on the
+            // panel, restoring the full factory INPUT ruleset PLUS our camera :8554 rule in one shot. It is a
+            // recovery net for a dropped rule (SSH :22, the Mini-USB reflash :21, a security DROP) while
+            // btmqttd/MQTT is still up — faster and less disruptive than the Reboot button, and more surgical
+            // (no reboot re-rolling the clobber race on the way back up). btmqttd carries NO copy of the rules
+            // — it only INVOKES the factory script (#145's single source of truth). Safe once #145's lock-wait
+            // shim is in (the re-run waits for the xtables lock). config + disabled-by-default like the other
+            // maintenance buttons, so it is discovered but hidden until the operator enables it — no reflash to
+            // arm it. Same QoS-0 fire-and-forget and TOPIC_RX trust boundary (a fixed re-run of one known
+            // script, no free-form input) as the reboot/restart/restore-ssh buttons.
+            entities.Add(new HaEntity(
+                "restore_firewall.json",
+                Topic("button", "restore_firewall"),
+                JsonSerializer.Serialize(new
+                {
+                    name = "Restore firewall",
+                    unique_id = $"{node}_restore_firewall",
+                    default_entity_id = EntId("button", "restore_firewall"),
+                    command_topic = controlTopic,
+                    qos = 0,
+                    payload_press = "{\"action\":\"restore_firewall\"}",
+                    icon = "mdi:wall-fire",
                     entity_category = "config",
                     enabled_by_default = false,
                     availability_topic = opts.TopicLastWill,

@@ -285,6 +285,20 @@ async fn handle_json(
                     // completed action — unlike reboot/restart, which flush their feedback before going down.
                     publish_maintenance(client, cfg, "restore_ssh").await;
                 }
+                Maintenance::RestoreFirewall => {
+                    // One-click firewall recovery net (issue #147): re-run the factory firewall script so the
+                    // full factory INPUT ruleset (SSH :22, the Mini-USB reflash :21, the security DROPs) plus
+                    // our camera :8554 rule are restored in one shot — no reboot, no SSH — for the case where a
+                    // rule was dropped while btmqttd/MQTT stayed up. btmqttd keeps NO copy of the ruleset: it
+                    // only INVOKES the factory script (#145's single source of truth), which after #145 waits
+                    // for the xtables lock (`iptables -w`), so this extra write can't fall into the clobber race
+                    // it recovers from. Idempotent; safe to repeat.
+                    eprintln!("btmqttd: restore_firewall requested via MQTT");
+                    restore_firewall().await;
+                    // Feedback AFTER the (fast, non-terminal) recovery, like restore_ssh — the ack reflects a
+                    // completed action, not an imminent shutdown.
+                    publish_maintenance(client, cfg, "restore_firewall").await;
+                }
             }
             return;
         }
@@ -322,11 +336,11 @@ async fn handle_json(
     }
 }
 
-/// A parsed MAINTENANCE action (issues #43, #130) — the HA "Reboot device" / "Restart bridge" /
-/// "Restore SSH" buttons. These have a SIDE EFFECT outside the vol/lock/light surface `handle_action`
-/// covers (a process spawn, a re-exec signal, or a dropbear start), so they are classified here and
-/// dispatched inline in `handle_json`. Pure classifier, separated so the action-name mapping is
-/// unit-testable without spawning a reboot, re-execing, or touching dropbear.
+/// A parsed MAINTENANCE action (issues #43, #130, #147) — the HA "Reboot device" / "Restart bridge" /
+/// "Restore SSH" / "Restore firewall" buttons. These have a SIDE EFFECT outside the vol/lock/light surface
+/// `handle_action` covers (a process spawn, a re-exec signal, a dropbear start, or a firewall-script re-run),
+/// so they are classified here and dispatched inline in `handle_json`. Pure classifier, separated so the
+/// action-name mapping is unit-testable without spawning a reboot, re-execing, or running a script.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum Maintenance {
     /// Reboot the whole device (`{"action":"reboot"}`).
@@ -335,6 +349,9 @@ enum Maintenance {
     RestartBridge,
     /// On-demand SSH recovery — (re)start dropbear so sshd listens on `:22` (`{"action":"restore_ssh"}`).
     RestoreSsh,
+    /// One-click firewall recovery — re-run the factory firewall script to restore the factory INPUT ruleset
+    /// plus our camera `:8554` rule (`{"action":"restore_firewall"}`, issue #147).
+    RestoreFirewall,
 }
 
 /// Map an `action` string to a [`Maintenance`] variant, or `None` if it isn't a maintenance action.
@@ -343,6 +360,7 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
         "reboot" => Some(Maintenance::Reboot),
         "restart_bridge" => Some(Maintenance::RestartBridge),
         "restore_ssh" => Some(Maintenance::RestoreSsh),
+        "restore_firewall" => Some(Maintenance::RestoreFirewall),
         _ => None,
     }
 }
@@ -354,8 +372,9 @@ fn parse_maintenance(action: &str) -> Option<Maintenance> {
 /// restart's clean MQTT shutdown flushes it; for a reboot the unit's own offline blip is the primary
 /// feedback if this last publish doesn't reach the broker before the box goes down (`restore_ssh`, which
 /// doesn't restart anything, publishes AFTER it acts so the ack reflects a completed recovery). Best-effort
-/// — a publish error is logged. `action` is a fixed internal token (`reboot`/`restart_bridge`/`restore_ssh`)
-/// and the ISO timestamp has no JSON-special characters, so the hand-built object needs no escaping.
+/// — a publish error is logged. `action` is a fixed internal token
+/// (`reboot`/`restart_bridge`/`restore_ssh`/`restore_firewall`) and the ISO timestamp has no JSON-special
+/// characters, so the hand-built object needs no escaping.
 async fn publish_maintenance(client: &AsyncClient, cfg: &Arc<Config>, action: &str) {
     let payload = format!("{{\"action\":\"{action}\",\"at\":\"{}\"}}", own::utc_now_iso());
     if let Err(e) = client
@@ -394,38 +413,39 @@ async fn restore_ssh() {
     }
 }
 
-/// Wall-clock cap for the `/etc/init.d/dropbear start` child, so a hung init script can't stall the single
-/// command worker or delay the maintenance ack. Generous — a normal start is well under a second.
-const DROPBEAR_START_TIMEOUT: Duration = Duration::from_secs(10);
+/// Wall-clock cap for a maintenance child (the `/etc/init.d/dropbear start` of restore_ssh, the factory
+/// firewall re-run of restore_firewall), so a hung script can't stall the single command worker or delay the
+/// maintenance ack. Generous — both finish well under a second.
+const MAINTENANCE_CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Run `/etc/init.d/dropbear start` — the same idempotent command `bt_service_watchdog` uses to bring sshd
-/// back (a no-op if dropbear is already listening). Std streams nulled off btmqttd's inherited fds. Spawned
-/// in its OWN process group (`process_group(0)`) so a timeout can SIGKILL the WHOLE group — the init script
-/// AND anything it spawned — not just the script interpreter, which would otherwise leave a reparented
-/// descendant running and let repeated presses pile up stuck processes (same idiom as
-/// `execute_command`). The wait is bounded by [`DROPBEAR_START_TIMEOUT`]; on expiry the group is killed and
-/// the direct child handed to the detached, bounded [`reap`] task rather than awaited inline — a child stuck
-/// in uninterruptible kernel I/O (D-state) won't return from `wait()` even after SIGKILL until its syscall
-/// completes, and awaiting that here would pin the single ordered command worker (and delay the maintenance
-/// ack) indefinitely. So a cleanup permit is reserved BEFORE spawning (skip if none free, like
-/// `execute_command`): the reaper owns the killed child + permit off-worker, `start_dropbear` returns at
-/// once, and the caller publishes the ack immediately. Best-effort — errors are logged, never fatal.
-async fn start_dropbear() {
-    // Reserve a cleanup permit BEFORE spawning so a child that must be killed can be reaped OFF the command
-    // worker without the reaper count growing unbounded — same discipline as `execute_command`. If none is
-    // free (that many children still outstanding, e.g. an earlier kill stuck in D-state) skip rather than
-    // spawn a child we couldn't hand off; `bt_service_watchdog` still brings dropbear back within 60s.
+/// The factory firewall hook — issue #145's single source of truth for the `INPUT` ruleset (factory rules +
+/// our camera `:8554`). `restore_firewall` (#147) RE-RUNS this script rather than carrying its own copy, so
+/// one press restores everything at once; after #145 the script waits for the xtables lock, so re-running it
+/// can't clobber a concurrent bring-up.
+const FACTORY_FIREWALL_SCRIPT: &str = "/etc/network/if-pre-up.d/iptables";
+
+/// Run a FIXED maintenance command (`program` + `args`) with the same bounded, group-killed, off-worker-reaped
+/// discipline as `execute_command`: std streams nulled off btmqttd's inherited fds; its OWN process group
+/// (`process_group(0)`) so a timeout SIGKILLs the WHOLE group — the script AND anything it spawned — not just
+/// the interpreter; a cleanup permit reserved BEFORE spawning and, on timeout/wait-error, handed to the
+/// detached bounded [`reap`] task rather than awaited inline — a child stuck in uninterruptible kernel I/O
+/// (D-state) won't return from `wait()` even after SIGKILL, and awaiting it here would pin the single ordered
+/// command worker (and delay the maintenance ack). If no reap permit is free the run is SKIPPED rather than
+/// spawning a child we couldn't hand off. `label` tags the log lines to the calling action
+/// (`restore_ssh` / `restore_firewall`). Best-effort — errors are logged, never fatal. Shared by
+/// [`start_dropbear`] and [`restore_firewall`].
+async fn run_maintenance_child(program: &str, args: &[&str], label: &str, timeout: Duration) {
     let permit = match REAP_SLOTS.try_acquire() {
         Ok(p) => p,
         Err(_) => {
             eprintln!(
-                "btmqttd: restore_ssh: too many outstanding children; skipping dropbear start (watchdog will retry)"
+                "btmqttd: {label}: too many outstanding children; skipping {program} (watchdog will retry)"
             );
             return;
         }
     };
-    let mut child = match tokio::process::Command::new("/etc/init.d/dropbear")
-        .arg("start")
+    let mut child = match tokio::process::Command::new(program)
+        .args(args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -435,19 +455,19 @@ async fn start_dropbear() {
     {
         Ok(child) => child,
         Err(e) => {
-            eprintln!("btmqttd: restore_ssh: failed to run /etc/init.d/dropbear start: {e}");
+            eprintln!("btmqttd: {label}: failed to run {program}: {e}");
             drop(permit); // nothing spawned — release the reserved slot
             return;
         }
     };
-    match tokio::time::timeout(DROPBEAR_START_TIMEOUT, child.wait()).await {
+    match tokio::time::timeout(timeout, child.wait()).await {
         Ok(Ok(status)) if status.success() => {
-            eprintln!("btmqttd: restore_ssh: dropbear start ok");
+            eprintln!("btmqttd: {label}: {program} ok");
             drop(child);
             drop(permit); // clean exit: child already reaped by child.wait() — release the slot
         }
         Ok(Ok(status)) => {
-            eprintln!("btmqttd: restore_ssh: dropbear start exited {status}");
+            eprintln!("btmqttd: {label}: {program} exited {status}");
             drop(child);
             drop(permit);
         }
@@ -456,28 +476,55 @@ async fn start_dropbear() {
             // UNREAPED — treat it exactly like the timeout: kill its group and hand it to the detached
             // reaper, never a bare `drop` (kill_on_drop only SIGKILLs the direct child and does not reap,
             // which would leak the process while still freeing the permit).
-            eprintln!("btmqttd: restore_ssh: waiting on dropbear start failed: {e}; killing its process group");
-            kill_group_and_reap(child, permit);
+            eprintln!("btmqttd: {label}: waiting on {program} failed: {e}; killing its process group");
+            kill_group_and_reap(child, permit, label);
         }
         Err(_) => {
             eprintln!(
-                "btmqttd: restore_ssh: dropbear start did not finish within {}s; killing its process group",
-                DROPBEAR_START_TIMEOUT.as_secs()
+                "btmqttd: {label}: {program} did not finish within {}s; killing its process group",
+                timeout.as_secs()
             );
-            kill_group_and_reap(child, permit);
+            kill_group_and_reap(child, permit, label);
         }
     }
 }
 
+/// (Re)start dropbear so sshd is listening on `:22` — the exec half of [`restore_ssh`] (issue #130). Runs the
+/// same idempotent `/etc/init.d/dropbear start` `bt_service_watchdog` uses (a no-op if dropbear is already
+/// listening). See [`run_maintenance_child`] for the spawn/timeout/reap discipline.
+async fn start_dropbear() {
+    run_maintenance_child(
+        "/etc/init.d/dropbear",
+        &["start"],
+        "restore_ssh",
+        MAINTENANCE_CHILD_TIMEOUT,
+    )
+    .await;
+}
+
+/// Re-run the factory firewall script (issue #147) so the full factory `INPUT` ruleset + our camera `:8554`
+/// rule are restored in one shot. btmqttd keeps NO copy of the rules — it only INVOKES
+/// [`FACTORY_FIREWALL_SCRIPT`], the #145 single source of truth (which waits for the xtables lock, so the
+/// re-run can't clobber). Run with NO args, exactly as ifupdown execs the hook. Unlike [`restore_ssh`] there
+/// is no rootfs-`ro` gate — the firewall script is not sensitive to the mount mode. Best-effort and
+/// idempotent; see [`run_maintenance_child`] for the spawn/timeout/reap discipline.
+async fn restore_firewall() {
+    run_maintenance_child(FACTORY_FIREWALL_SCRIPT, &[], "restore_firewall", MAINTENANCE_CHILD_TIMEOUT).await;
+}
+
 /// SIGKILL a bounded child's WHOLE process group, then hand it (with its cleanup permit) to the detached
-/// [`reap`] task. Shared by `start_dropbear`'s timeout and wait-error arms — both cases where the child may
-/// still be alive and must be collected OFF the command worker (an inline `child.wait().await` on a D-state
-/// child would pin the single ordered worker; see `start_dropbear`). Killing the GROUP (pgid == the script's
+/// [`reap`] task. Shared by [`run_maintenance_child`]'s timeout and wait-error arms — both cases where the
+/// child may still be alive and must be collected OFF the command worker (an inline `child.wait().await` on a
+/// D-state child would pin the single ordered worker; see [`run_maintenance_child`]). Killing the GROUP (pgid == the script's
 /// pid, set via `process_group(0)`) reaches any descendant the init script spawned, not just the interpreter.
 /// ESRCH means the group is already gone (benign); any OTHER `killpg` error falls back to the direct child so
 /// nothing lingers. The reaper collects our direct child and releases the permit; init reaps the group's
 /// reparented descendants.
-fn kill_group_and_reap(mut child: tokio::process::Child, permit: tokio::sync::SemaphorePermit<'static>) {
+fn kill_group_and_reap(
+    mut child: tokio::process::Child,
+    permit: tokio::sync::SemaphorePermit<'static>,
+    label: &str,
+) {
     match child.id() {
         Some(pid) => {
             let rc = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
@@ -485,7 +532,7 @@ fn kill_group_and_reap(mut child: tokio::process::Child, permit: tokio::sync::Se
                 let err = std::io::Error::last_os_error();
                 if err.raw_os_error() != Some(libc::ESRCH) {
                     eprintln!(
-                        "btmqttd: restore_ssh: killpg({pid}) failed: {err}; killing the script directly"
+                        "btmqttd: {label}: killpg({pid}) failed: {err}; killing the script directly"
                     );
                     let _ = child.start_kill();
                 }
@@ -1217,6 +1264,7 @@ mod tests {
         assert_eq!(parse_maintenance("reboot"), Some(Maintenance::Reboot));
         assert_eq!(parse_maintenance("restart_bridge"), Some(Maintenance::RestartBridge));
         assert_eq!(parse_maintenance("restore_ssh"), Some(Maintenance::RestoreSsh));
+        assert_eq!(parse_maintenance("restore_firewall"), Some(Maintenance::RestoreFirewall));
         // Anything else is not a maintenance action (falls through to handle_action).
         assert_eq!(parse_maintenance(""), None);
         assert_eq!(parse_maintenance("restart"), None); // must be exactly `restart_bridge`
