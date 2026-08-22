@@ -61,9 +61,20 @@ jobs:
           # btmqttd compiles in as CARGO_PKG_VERSION — is the single source of truth, and the C#
           # installer mirrors it in PayloadBinaries.BridgeVersion to bake sw_version into the HA
           # discovery device block WITHOUT reading the binary. If the two drift, HA would advertise
-          # a version the running daemon isn't. Extract each with a whole-line regex and compare.
-          cargo_ver="$(grep -oP '^\s*version\s*=\s*"\K[^"]+' native/btmqttd/Cargo.toml | head -n1 || true)"
-          cs_ver="$(grep -oP 'const\s+string\s+BridgeVersion\s*=\s*"\K[^"]+' IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs | head -n1 || true)"
+          # a version the running daemon isn't. Extract each from its DECLARATION (not any comment or
+          # doc example that merely quotes it), so a stray literal can't make the guard read the wrong
+          # value and miss a real mismatch.
+          #
+          # Cargo.toml: only the [package] table's version — not a [dependencies.*] sub-table version.
+          cargo_ver="$(awk '
+            /^[[:space:]]*\[/ { in_pkg = ($0 ~ /^[[:space:]]*\[package\][[:space:]]*$/) }
+            in_pkg && /^[[:space:]]*version[[:space:]]*=/ {
+              if (match($0, /"[^"]*"/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
+            }
+          ' native/btmqttd/Cargo.toml)"
+          # PayloadBinaries.cs: anchored to the actual `public const string BridgeVersion = "…";`
+          # declaration line (leading-whitespace only), so a prose mention never matches.
+          cs_ver="$(grep -oP '^\s*public\s+const\s+string\s+BridgeVersion\s*=\s*"\K[^"]+(?=")' IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs | head -n1 || true)"
           echo "Cargo.toml version:            '${cargo_ver}'"
           echo "PayloadBinaries.BridgeVersion: '${cs_ver}'"
           if [ -z "$cargo_ver" ] || [ -z "$cs_ver" ]; then
