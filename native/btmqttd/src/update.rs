@@ -188,12 +188,11 @@ async fn fetch(url: &str) -> Result<String, String> {
         .await
         .map_err(|e| format!("TLS handshake with {host}: {e}"))?;
 
+    // Request line + headers on a single literal (no `\`-continuation) so it is unmistakable that
+    // no leading whitespace leaks into a header name. Each field is CRLF-terminated; the blank line
+    // ends the headers.
     let request = format!(
-        "GET {path} HTTP/1.1\r\n\
-         Host: {host}\r\n\
-         User-Agent: btmqttd-update-check\r\n\
-         Accept: application/json\r\n\
-         Connection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: btmqttd-update-check\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())
