@@ -115,6 +115,37 @@ in two tiers:
   bump can no longer change the object code. A mismatch means the vendored binary is out
   of sync with the source: rebuild and re-sync per the steps above. (Resolves **#76**.)
 
+## Bumping the bridge version (issue #114)
+
+The daemon compiles its own version in (`env!("CARGO_PKG_VERSION")`), which surfaces to Home
+Assistant as the device `sw_version` and drives the update-check comparison. That version lives
+in **three files that CI keeps equal**, so bumping it is a small provenance chore, not a one-line
+edit. To release e.g. `0.1.0 → 0.2.0`:
+
+1. Set the new version in all three sources:
+   - `native/btmqttd/Cargo.toml` — `[package] version` (the source of truth; also updates the
+     package's own entry in `Cargo.lock`).
+   - `IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs` — `BridgeVersion`.
+   - `.well-known/bridge.json` — `latestVersion`.
+2. Reproducibly rebuild (see **Build** above) — the baked-in version changes the binary.
+3. Re-sync the vendored binary + provenance exactly as in **Verify** above (copy the binary,
+   update `Length`/`Sha256Hex` and `THIRD_PARTY.md`, run `verify-provenance.sh --rebuilt`).
+4. Confirm the three versions agree:
+
+   ```sh
+   native/btmqttd/ci/check-bridge-version.py \
+     native/btmqttd/Cargo.toml \
+     IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs \
+     .well-known/bridge.json
+   ```
+
+The guardrails make this hard to get wrong: `btmqttd-provenance.yml` fails the PR if the three
+versions disagree (**"bridge version drift"**) **or** if the committed binary doesn't reproduce
+bit-for-bit. After merge, master's `bridge.json` immediately advertises the new version (so
+already-deployed panels show "update available"); the new binary itself reaches a panel on its
+next USB reflash, at which point its `sw_version` updates. The SemVer bump size is a judgement
+call based on what changed in the daemon.
+
 ## Host checks (fast iteration)
 
 Run these on a **Linux host (or WSL)**. btmqttd depends on Linux-specific APIs
