@@ -175,7 +175,12 @@ async fn fetch(url: &str) -> Result<String, String> {
         .map_err(|_| format!("connect to {host}:443 timed out"))?
         .map_err(|e| format!("connect to {host}:443: {e}"))?;
 
-    let connector = tls_connector()?;
+    // Build the TLS connector on a blocking thread: rustls-native-certs reads the device's cert
+    // store from disk, and this daemon runs a single-threaded Tokio runtime — doing that sync I/O
+    // on the async path would briefly stall every other task.
+    let connector = tokio::task::spawn_blocking(tls_connector)
+        .await
+        .map_err(|e| format!("tls setup task failed: {e}"))??;
     let server_name = rustls::pki_types::ServerName::try_from(host.clone())
         .map_err(|e| format!("invalid server name {host:?}: {e}"))?;
     let mut stream = connector
@@ -224,8 +229,17 @@ fn split_https_url(url: &str) -> Result<(String, String), String> {
         Some((h, p)) => (h.to_string(), format!("/{p}")),
         None => (rest.to_string(), "/".to_string()),
     };
-    if host.is_empty() || host.contains(['@', ':']) {
-        return Err(format!("unsupported host in URL: {host:?}"));
+    // Reject a userinfo/port host, and ANY ASCII control or whitespace byte in either the host
+    // or the path: UPDATE_MANIFEST_URL is operator-configurable, and a CR/LF in the path would
+    // otherwise be spliced into the hand-built request line and inject extra headers (request
+    // splitting). 0x20 covers space; <0x20 covers CR/LF/TAB and friends; 0x7f covers DEL.
+    let has_ctrl_or_ws = |s: &str| s.bytes().any(|b| b <= 0x20 || b == 0x7f);
+    if host.is_empty()
+        || host.contains(['@', ':'])
+        || has_ctrl_or_ws(&host)
+        || has_ctrl_or_ws(&path)
+    {
+        return Err(format!("unsupported host/path in URL: host={host:?} path={path:?}"));
     }
     Ok((host, path))
 }
@@ -344,6 +358,15 @@ mod tests {
         assert!(split_https_url("https://host:8443/x").is_err());
         assert!(split_https_url("https://user@host/x").is_err());
         assert!(split_https_url("ftp://host/x").is_err());
+    }
+
+    #[test]
+    fn rejects_control_chars_and_whitespace_in_url() {
+        // CR/LF in the path must not be splice-able into the request line (header injection).
+        assert!(split_https_url("https://host/a\r\nX-Evil: 1").is_err());
+        assert!(split_https_url("https://ho\nst/a").is_err());
+        assert!(split_https_url("https://host/a b").is_err());
+        assert!(split_https_url("https://host/a\tb").is_err());
     }
 
     #[test]
