@@ -22,6 +22,14 @@ tokio = { version = "1", default-features = false, features = [
 rumqttc = { version = "0.24", default-features = false, features = ["use-rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# HTTPS for the bridge update check (issue #114): a single GET of a small version manifest.
+# These crates are ALREADY in the tree via rumqttc's use-rustls (rustls 0.22 + ring), so
+# depending on them directly adds no new crate and no new license — it just exposes the API
+# for a hand-written GET. `rustls-native-certs` trusts the device's own root store (the same
+# anchors the firmware's curl uses), so no copyleft webpki-roots bundle is pulled (THIRD_PARTY.md).
+rustls = { version = "0.22", default-features = false, features = ["ring", "tls12", "logging"] }
+tokio-rustls = { version = "0.25", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-native-certs = "0.7"
 # Physical key reading (front panel) via the kernel evdev interface — pure Rust
 # (libc bindings, no C to compile), replacing the evtest+jq keypress.sh.
 evdev = { version = "0.12", features = ["tokio"] }

@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
-"""Verify the bridge daemon's SemVer is in sync between its two sources (issue #114).
+"""Verify the bridge daemon's SemVer is in sync across its sources (issue #114).
 
 ``native/btmqttd/Cargo.toml``'s ``[package] version`` is the single source of truth
-— the daemon compiles it in as ``CARGO_PKG_VERSION``. The C# installer mirrors it in
-``PayloadBinaries.BridgeVersion`` so it can bake ``sw_version`` into the Home Assistant
-discovery ``device`` block WITHOUT reading the binary. If the two drift, HA advertises a
-version the running daemon isn't.
+— the daemon compiles it in as ``CARGO_PKG_VERSION``. Two other files must MIRROR it:
+
+  * ``PayloadBinaries.BridgeVersion`` (C#) — so the installer can bake ``sw_version`` into
+    the Home Assistant discovery ``device`` block WITHOUT reading the binary.
+  * ``.well-known/bridge.json``'s ``latestVersion`` — the update-check manifest the panel
+    fetches from ``master``. Because master's manifest always equals master's bridge
+    version (enforced here), the "latest available" version is always correct with no
+    release-time bump.
+
+If any drift, HA would advertise or offer a version the running daemon isn't.
 
 Extraction is SYNTAX-AWARE so a stale literal sitting in a comment or a string can never
 be picked up and mask a real mismatch (the failure mode of a naive line grep):
@@ -22,11 +28,12 @@ be picked up and mask a real mismatch (the failure mode of a naive line grep):
     when more than one is left (e.g. a decoy in an inactive ``#if`` region).
 
 Usage:
-  check-bridge-version.py <Cargo.toml> <PayloadBinaries.cs>   # compare; exit 1 on drift
-  check-bridge-version.py --selftest                          # run regression fixtures
+  check-bridge-version.py <Cargo.toml> <PayloadBinaries.cs> [bridge.json]  # compare; exit 1 on drift
+  check-bridge-version.py --selftest                                       # run regression fixtures
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import tomllib
@@ -65,6 +72,18 @@ def cargo_version(toml_text: str) -> str | None:
     if not isinstance(pkg, dict):
         return None
     version = pkg.get("version")
+    return version if isinstance(version, str) else None
+
+
+def manifest_version(json_text: str) -> str | None:
+    """The ``latestVersion`` string from the bridge.json manifest, or None if absent/malformed."""
+    try:
+        data = json.loads(json_text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    version = data.get("latestVersion")
     return version if isinstance(version, str) else None
 
 
@@ -157,6 +176,10 @@ def _selftest() -> int:
         ("cs/ url-in-string", cs_version(cs_url_fixture), "1.2.3"),
         ("cs/ raw-string decoy", cs_version(cs_raw_fixture), "9.9.9"),
         ("cs/ verbatim-string decoy", cs_version(cs_verbatim_fixture), "9.9.9"),
+        ("manifest/ latestVersion", manifest_version('{"schemaVersion":1,"latestVersion":"9.9.9"}'), "9.9.9"),
+        ("manifest/ not json", manifest_version("nope"), None),
+        ("manifest/ missing key", manifest_version('{"schemaVersion":1}'), None),
+        ("manifest/ non-string", manifest_version('{"latestVersion":5}'), None),
     ]
     # Ambiguity case: more than one surviving declaration ⇒ refuse to guess (cs_version None,
     # and >1 raw declarations so the caller emits a fatal, explained error).
@@ -183,9 +206,9 @@ def _selftest() -> int:
 def main(argv: list[str]) -> int:
     if argv == ["--selftest"]:
         return _selftest()
-    if len(argv) != 2:
+    if len(argv) not in (2, 3):
         print(
-            "usage: check-bridge-version.py <Cargo.toml> <PayloadBinaries.cs>\n"
+            "usage: check-bridge-version.py <Cargo.toml> <PayloadBinaries.cs> [bridge.json]\n"
             "       check-bridge-version.py --selftest",
             file=sys.stderr,
         )
@@ -194,8 +217,11 @@ def main(argv: list[str]) -> int:
     cargo_ver = cargo_version(_read(argv[0]))
     cs_decls = cs_declarations(_read(argv[1]))
     cs_ver = cs_decls[0] if len(cs_decls) == 1 else None
-    print(f"Cargo.toml [package] version:  {cargo_ver!r}")
-    print(f"PayloadBinaries.BridgeVersion: {cs_ver!r}")
+    manifest_ver = manifest_version(_read(argv[2])) if len(argv) == 3 else None
+    print(f"Cargo.toml [package] version:   {cargo_ver!r}")
+    print(f"PayloadBinaries.BridgeVersion:  {cs_ver!r}")
+    if len(argv) == 3:
+        print(f"bridge.json latestVersion:      {manifest_ver!r}")
 
     if len(cs_decls) > 1:
         print(
@@ -205,10 +231,10 @@ def main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 1
-    if not cargo_ver or not cs_ver:
+    if not cargo_ver or not cs_ver or (len(argv) == 3 and not manifest_ver):
         print(
-            "::error::could not read the bridge version from Cargo.toml and/or "
-            "PayloadBinaries.cs",
+            "::error::could not read the bridge version from Cargo.toml, "
+            "PayloadBinaries.cs, and/or bridge.json",
             file=sys.stderr,
         )
         return 1
@@ -216,7 +242,15 @@ def main(argv: list[str]) -> int:
         print(
             f"::error::bridge version drift — native/btmqttd/Cargo.toml is "
             f"'{cargo_ver}' but PayloadBinaries.BridgeVersion is '{cs_ver}'. "
-            f"Bump BOTH together.",
+            f"Bump ALL sources together.",
+            file=sys.stderr,
+        )
+        return 1
+    if len(argv) == 3 and cargo_ver != manifest_ver:
+        print(
+            f"::error::bridge version drift — native/btmqttd/Cargo.toml is "
+            f"'{cargo_ver}' but .well-known/bridge.json latestVersion is '{manifest_ver}'. "
+            f"Bump ALL sources together.",
             file=sys.stderr,
         )
         return 1

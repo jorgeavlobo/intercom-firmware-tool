@@ -1,0 +1,5 @@
+{
+  "_comment": "Bridge daemon (btmqttd) version manifest for the panel's update check (issue #114). 'latestVersion' is the btmqttd version shipped in the latest firmware the App produces; the update-manifest workflow bumps it automatically from native/btmqttd/Cargo.toml when a GitHub Release is published. Each panel's btmqttd fetches this over HTTPS, compares it to its own compiled-in version, and surfaces a notify-only Home Assistant 'update' entity (the panel can't self-flash; firmware is applied over USB). Before the first release it tracks the in-repo Cargo.toml version.",
+  "schemaVersion": 1,
+  "latestVersion": "0.1.0"
+}

@@ -77,7 +77,8 @@ namespace IntercomFirmwareTool.Core
         bool EnableHaDiscovery = false,
         bool UseJsonPayload = true,
         bool MqttRediscovery = true,
-        string? MqttBrokerMac = null)
+        string? MqttBrokerMac = null,
+        bool UpdateCheckEnabled = true)
     {
         // A record's synthesized ToString() prints EVERY property — which would
         // leak MqttPass and the TLS private key (ClientKeyPem) into any log line
@@ -89,6 +90,7 @@ namespace IntercomFirmwareTool.Core
             $"AllowRemoteShell = {AllowRemoteShell}, " +
             $"Payload = {(UseJsonPayload ? "json" : "raw")}, " +
             $"HaDiscovery = {EnableHaDiscovery}, " +
+            $"UpdateCheck = {UpdateCheckEnabled}, " +
             $"Rediscovery = {MqttRediscovery}, " +
             // The MAC is not a secret (any LAN host can ARP it), so print it — it
             // aids diagnosing a rediscovery-anchor mismatch. "(none)" when unset.
@@ -348,6 +350,12 @@ namespace IntercomFirmwareTool.Core
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicMaintenance"/>.</summary>
         public string? TopicMaintenance { get; init; }
 
+        /// <summary>Retained state topic for the HA <c>update</c> entity (issue #114): btmqttd
+        /// publishes <c>{"installed_version":…,"latest_version":…}</c> here. NULL (default)
+        /// derives from the <see cref="TopicLastWill"/> namespace — see <see cref="TopicVolume"/>
+        /// and <see cref="EffectiveTopicUpdate"/>.</summary>
+        public string? TopicUpdate { get; init; }
+
         /// <summary>The volume state topic actually used: the explicit
         /// <see cref="TopicVolume"/>, or one derived from the <see cref="TopicLastWill"/>
         /// namespace so multi-unit deployments auto-scope without extra UI.</summary>
@@ -370,6 +378,9 @@ namespace IntercomFirmwareTool.Core
         /// reboot / restart-bridge buttons (issue #43). Defaults from the LWT namespace like the other
         /// state topics; btmqttd's default key must match (TOPIC_MAINTENANCE).</summary>
         public string EffectiveTopicMaintenance => TopicMaintenance ?? (TopicNamespace(TopicLastWill) + "maintenance");
+        /// <summary>The retained state topic for the HA <c>update</c> entity (issue #114). Defaults from
+        /// the LWT namespace like the other state topics; btmqttd's default key must match (TOPIC_UPDATE).</summary>
+        public string EffectiveTopicUpdate => TopicUpdate ?? (TopicNamespace(TopicLastWill) + "update");
         /// <summary>Whether the exterior-light subsystem is present at all — the "has exterior
         /// light" opt-in. When true the switch + resync + learn entities ship; the WHERE may be
         /// known (from the build) or LEARNED at runtime (<see cref="LightLearnMode"/>).</summary>
@@ -1023,7 +1034,8 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
                                       opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance })
+                                      opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
+                                      opts.EffectiveTopicUpdate })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
@@ -1036,7 +1048,8 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                       opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance })
+                                      opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
+                                      opts.EffectiveTopicUpdate })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
                 // prefix — both are subscription-only and invalid to PUBLISH to (a broker
                 // rejects the publish), so no publish topic (including the derived volume/
@@ -1074,6 +1087,9 @@ namespace IntercomFirmwareTool.Core
             // must be in the collision set for either mode — otherwise a momentary seed could delete
             // an aliased retained stream.
             if (opts.LightEnabled) publishTopics.Add(opts.EffectiveTopicLight);
+            // The update topic is published only when the check is enabled (issue #114) — include it in
+            // the collision set only then, mirroring the light STATE topic.
+            if (opts.UpdateCheckEnabled) publishTopics.Add(opts.EffectiveTopicUpdate);
             if (publishTopics.Distinct(StringComparer.Ordinal).Count() != publishTopics.Count)
                 throw new ArgumentException(CoreStrings.Get("Mqtt_PublishTopicsMustDiffer"), nameof(opts));
 
@@ -1147,6 +1163,11 @@ namespace IntercomFirmwareTool.Core
             // excluded there (else a valid opt-out config whose namespace happens to derive a
             // colliding light topic would fail validation).
             if (opts.LightEnabled && TopicFilterMatches(rxFilter, opts.EffectiveTopicLight))
+                throw new ArgumentException(
+                    CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
+            // The update topic is PUBLISHED only when the check is enabled (issue #114) — check its
+            // self-loop with TopicRx only then, like the light STATE topic.
+            if (opts.UpdateCheckEnabled && TopicFilterMatches(rxFilter, opts.EffectiveTopicUpdate))
                 throw new ArgumentException(
                     CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
             // The AVAILABILITY topic is published in EVERY state (including the disabled-path
@@ -1679,6 +1700,7 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_LIGHT", opts.EffectiveTopicLight));
             sb.Append(Conf("TOPIC_LIGHT_AVAIL", opts.EffectiveTopicLightAvail));
             sb.Append(Conf("TOPIC_MAINTENANCE", opts.EffectiveTopicMaintenance));
+            sb.Append(Conf("TOPIC_UPDATE", opts.EffectiveTopicUpdate));
 
             // Live doorbell camera (#103): opt-in. When enabled, av.rs adds a UDP client to the
             // on-board bt_av_media daemon on every A/V session and fans the cleartext RTP to
@@ -1747,6 +1769,12 @@ namespace IntercomFirmwareTool.Core
             // discovery configs (from the installer-generated manifest under HaDir) on
             // every connect; when 0 it clears them. Reconciled natively (no ha_discovery.sh).
             sb.Append("HA_DISCOVERY=").Append(opts.EnableHaDiscovery ? '1' : '0').Append('\n');
+
+            // Bridge update check (issue #114): when 1, btmqttd does a daily HTTPS GET of the version
+            // manifest and publishes installed/latest to TOPIC_UPDATE for the HA `update` entity; when
+            // 0 it makes NO network call and no publish. Opt-out (default 1) — written authoritatively
+            // so unticking reliably disables the panel's only outbound-internet call.
+            sb.Append("UPDATE_CHECK=").Append(opts.UpdateCheckEnabled ? '1' : '0').Append('\n');
 
             // Broker rediscovery (#43/#44): when 1, btmqttd recovers the broker after its LAN
             // IP changes by scanning the broker name's /24 and repointing its /etc/hosts
@@ -2525,6 +2553,38 @@ namespace IntercomFirmwareTool.Core
                     payload_not_available = "offline",
                     device,
                 }, HaJson)));
+
+            // Bridge UPDATE entity (issue #114): HA's native Update card. btmqttd publishes a retained
+            // {"installed_version":…,"latest_version":…} to EffectiveTopicUpdate (installed = the daemon's
+            // own version; latest = the version manifest it fetched); HA reads those keys directly and shows
+            // an "update available" badge when latest > installed. NOTIFY-ONLY: the panel can't self-flash
+            // (firmware is applied over USB), so there is deliberately NO command_topic / Install button —
+            // release_url just points at the GitHub Releases page. device_class "firmware" so HA files it
+            // under the device's firmware updates. Emitted only when the update check is ENABLED; otherwise
+            // TOMBSTONE the config (empty retained) so turning it off in a later build drops the stale entity.
+            if (opts.UpdateCheckEnabled)
+            {
+                entities.Add(new HaEntity(
+                    "bridge_update.json",
+                    Topic("update", "bridge"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Bridge update",
+                        unique_id = $"{node}_bridge_update",
+                        default_entity_id = EntId("update", "bridge"),
+                        device_class = "firmware",
+                        state_topic = opts.EffectiveTopicUpdate,
+                        release_url = "https://github.com/jorgeavlobo/intercom-firmware-tool/releases",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            }
+            else
+            {
+                entities.Add(new HaEntity("bridge_update.json", Topic("update", "bridge"), ""));
+            }
 
             // Stair-light SWITCH (opt-in). The actuator is a stateless TOGGLE with no readable
             // state (firmware-confirmed), so btmqttd tracks the on/off and publishes it retained
