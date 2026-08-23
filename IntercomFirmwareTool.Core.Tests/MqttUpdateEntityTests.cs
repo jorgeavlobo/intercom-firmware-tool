@@ -100,6 +100,31 @@ public class MqttUpdateEntityTests
     }
 
     [Fact]
+    public void Update_entity_ships_even_with_a_wildcard_command_topic()
+    {
+        // A wildcard TopicRx has no concrete command topic, so GenerateHaDiscovery tombstones the
+        // COMMAND entities and returns early. The read-only update entity must still be emitted
+        // (enabled) — it has no command_topic and doesn't depend on a concrete TopicRx.
+        var opts = new MqttOptions("broker.lan") { TopicRx = "commands/#" };
+        var e = MqttInstaller.GenerateHaDiscovery(opts, restoreFirewallEligible: false)
+            .Single(x => x.FileName == "bridge_update.json");
+        Assert.NotEqual("", e.Json);
+        using var doc = JsonDocument.Parse(e.Json);
+        Assert.Equal(opts.EffectiveTopicUpdate, doc.RootElement.GetProperty("state_topic").GetString());
+    }
+
+    [Fact]
+    public void Update_entity_is_tombstoned_with_a_wildcard_command_topic_when_opted_out()
+    {
+        // The opt-out tombstone must ALSO survive the wildcard early return, so disabling the check
+        // on a wildcard-TopicRx build still clears a previously published entity.
+        var opts = new MqttOptions("broker.lan") { TopicRx = "commands/#", UpdateCheckEnabled = false };
+        var e = MqttInstaller.GenerateHaDiscovery(opts, restoreFirewallEligible: false)
+            .Single(x => x.FileName == "bridge_update.json");
+        Assert.Equal("", e.Json);
+    }
+
+    [Fact]
     public void Update_entity_is_deterministic()
     {
         // ValidateMqtt re-generates discovery and byte-compares; the update entity must be identical

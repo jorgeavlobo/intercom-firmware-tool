@@ -54,9 +54,14 @@ pub type LatestVersion = Arc<Mutex<Option<String>>>;
 
 /// Build the retained JSON payload HA's `update` entity reads: it parses these keys directly.
 fn payload(latest: &str) -> String {
-    // Hand-built (both values are validated SemVers with no characters needing escaping), so
-    // no serializer round-trip is required for two short fields.
-    format!(r#"{{"installed_version":"{INSTALLED_VERSION}","latest_version":"{latest}"}}"#)
+    // Serialize through serde_json so BOTH values are correctly escaped — belt-and-suspenders
+    // with `is_plausible_semver` (which already rejects characters needing escaping): the
+    // published state is always valid JSON even if a future caller relaxes validation.
+    serde_json::json!({
+        "installed_version": INSTALLED_VERSION,
+        "latest_version": latest,
+    })
+    .to_string()
 }
 
 /// Publish the installed/latest pair retained (QoS 0, like the HA discovery configs). Best
@@ -127,17 +132,35 @@ fn parse_latest_version(body: &str) -> Result<String, String> {
         .ok_or_else(|| "manifest has no string latestVersion".to_string())
 }
 
-/// A minimal, dependency-free plausibility check: `MAJOR.MINOR.PATCH` with optional
-/// `-prerelease`/`+build`, each core part all-ASCII-digits and non-empty. Not a full SemVer
-/// validator — just enough that we never publish arbitrary text as a version, and HA (which
-/// does the real installed-vs-latest comparison) gets a well-formed value.
+/// A dependency-free SemVer plausibility check validating the WHOLE string — not just the
+/// numeric core — so no stray character (e.g. a quote in `1.2.3-"`) can reach `payload()`.
+/// `MAJOR.MINOR.PATCH` (each part non-empty ASCII digits) with an optional `-prerelease` and
+/// `+build`, each a dot-separated run of non-empty `[0-9A-Za-z-]` identifiers (SemVer §9/§10).
+/// Not a full spec validator (it doesn't reject a numeric prerelease identifier with a leading
+/// zero), but strict enough that we never publish arbitrary text as a version; HA does the real
+/// installed-vs-latest comparison on the well-formed value.
 fn is_plausible_semver(v: &str) -> bool {
-    let core = v.split(['-', '+']).next().unwrap_or("");
-    let parts: Vec<&str> = core.split('.').collect();
-    parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    // Peel `+build` first (it follows any `-prerelease`), then `-prerelease` off the remainder.
+    let (rest, build) = match v.split_once('+') {
+        Some((r, b)) => (r, Some(b)),
+        None => (v, None),
+    };
+    let (core, pre) = match rest.split_once('-') {
+        Some((c, p)) => (c, Some(p)),
+        None => (rest, None),
+    };
+
+    let core_ok = {
+        let parts: Vec<&str> = core.split('.').collect();
+        parts.len() == 3
+            && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    };
+    // Dot-separated identifiers, each non-empty and only [0-9A-Za-z-].
+    let idents_ok = |s: &str| {
+        s.split('.')
+            .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    };
+    core_ok && pre.is_none_or(idents_ok) && build.is_none_or(idents_ok)
 }
 
 /// Fetch the manifest over HTTPS. Parses `https://host/path` (port 443 only), does a single
@@ -270,7 +293,12 @@ mod tests {
 
     #[test]
     fn plausible_semver_rejects_junk() {
-        for v in ["", "1", "1.2", "v1.2.3", "1.2.x", "latest", "1.2.3.4", "a.b.c", " 1.2.3"] {
+        for v in [
+            "", "1", "1.2", "v1.2.3", "1.2.x", "latest", "1.2.3.4", "a.b.c", " 1.2.3",
+            // Malformed prerelease/build must be rejected whole — not silently ignored.
+            "1.2.3-", "1.2.3+", "1.2.3-\"", "1.2.3-rc.", "1.2.3+ meta", "1.2.3-a..b",
+            "1.2.3-rc.1\"; drop", "1.2.3+build meta",
+        ] {
             assert!(!is_plausible_semver(v), "should reject {v:?}");
         }
     }

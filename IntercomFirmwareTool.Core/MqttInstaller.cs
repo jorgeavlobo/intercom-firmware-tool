@@ -2157,6 +2157,40 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
+            // Bridge UPDATE entity (issue #114): HA's native Update card. btmqttd publishes a retained
+            // {"installed_version":…,"latest_version":…} to EffectiveTopicUpdate (installed = the daemon's
+            // own version; latest = the version manifest it fetched); HA reads those keys directly and shows
+            // an "update available" badge when latest > installed. NOTIFY-ONLY: the panel can't self-flash
+            // (firmware is applied over USB), so there is deliberately NO command_topic / Install button —
+            // release_url just points at the GitHub Releases page. device_class "firmware" so HA files it
+            // under the device's firmware updates. READ-ONLY (no command channel), so it ships REGARDLESS of
+            // whether TopicRx is concrete — emitted BEFORE the control-topic early return below, alongside
+            // the other read-only sensors. Emitted only when the update check is ENABLED; otherwise TOMBSTONE
+            // the config (empty retained) so turning it off in a later build drops the stale entity.
+            if (opts.UpdateCheckEnabled)
+            {
+                entities.Add(new HaEntity(
+                    "bridge_update.json",
+                    Topic("update", "bridge"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Bridge update",
+                        unique_id = $"{node}_bridge_update",
+                        default_entity_id = EntId("update", "bridge"),
+                        device_class = "firmware",
+                        state_topic = opts.EffectiveTopicUpdate,
+                        release_url = "https://github.com/jorgeavlobo/intercom-firmware-tool/releases",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            }
+            else
+            {
+                entities.Add(new HaEntity("bridge_update.json", Topic("update", "bridge"), ""));
+            }
+
             // ---- Volume control (#40) + gate (#41) — COMMAND entities ---------------
             // These publish JSON actions to the command channel; btmqttd routes volume/
             // mute/step to the openserver dimension session (:20000) and gate to :30006,
@@ -2553,38 +2587,6 @@ namespace IntercomFirmwareTool.Core
                     payload_not_available = "offline",
                     device,
                 }, HaJson)));
-
-            // Bridge UPDATE entity (issue #114): HA's native Update card. btmqttd publishes a retained
-            // {"installed_version":…,"latest_version":…} to EffectiveTopicUpdate (installed = the daemon's
-            // own version; latest = the version manifest it fetched); HA reads those keys directly and shows
-            // an "update available" badge when latest > installed. NOTIFY-ONLY: the panel can't self-flash
-            // (firmware is applied over USB), so there is deliberately NO command_topic / Install button —
-            // release_url just points at the GitHub Releases page. device_class "firmware" so HA files it
-            // under the device's firmware updates. Emitted only when the update check is ENABLED; otherwise
-            // TOMBSTONE the config (empty retained) so turning it off in a later build drops the stale entity.
-            if (opts.UpdateCheckEnabled)
-            {
-                entities.Add(new HaEntity(
-                    "bridge_update.json",
-                    Topic("update", "bridge"),
-                    JsonSerializer.Serialize(new
-                    {
-                        name = "Bridge update",
-                        unique_id = $"{node}_bridge_update",
-                        default_entity_id = EntId("update", "bridge"),
-                        device_class = "firmware",
-                        state_topic = opts.EffectiveTopicUpdate,
-                        release_url = "https://github.com/jorgeavlobo/intercom-firmware-tool/releases",
-                        availability_topic = opts.TopicLastWill,
-                        payload_available = "online",
-                        payload_not_available = "offline",
-                        device,
-                    }, HaJson)));
-            }
-            else
-            {
-                entities.Add(new HaEntity("bridge_update.json", Topic("update", "bridge"), ""));
-            }
 
             // Stair-light SWITCH (opt-in). The actuator is a stateless TOGGLE with no readable
             // state (firmware-confirmed), so btmqttd tracks the on/off and publishes it retained
