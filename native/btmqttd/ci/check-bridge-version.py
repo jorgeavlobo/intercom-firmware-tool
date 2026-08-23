@@ -13,10 +13,13 @@ be picked up and mask a real mismatch (the failure mode of a naive line grep):
   * Cargo.toml is parsed with :mod:`tomllib`, so a ``version = "…"`` line inside a
     multiline string (e.g. a ``description = \"\"\"…\"\"\"``) is never mistaken for the
     package version.
-  * PayloadBinaries.cs has its ``//`` and ``/* … */`` comments removed — while string
-    and char literals are preserved, so a ``//`` inside a URL string is not mistaken for
-    a comment — before the ``public const string BridgeVersion = "…";`` declaration is
-    matched.
+  * PayloadBinaries.cs has its comments and the string forms that can carry UNESCAPED
+    text removed — ``//`` and ``/* … */`` comments, raw strings (``"""…"""``) and verbatim
+    strings (``@"…"``) — while regular ``"…"`` strings and char literals are preserved
+    (their inner quotes are escaped, so no decoy declaration forms there, and a ``//``
+    inside a URL string is not mistaken for a comment). It then requires EXACTLY ONE
+    surviving ``public const string BridgeVersion = "…";`` declaration, refusing to guess
+    when more than one is left (e.g. a decoy in an inactive ``#if`` region).
 
 Usage:
   check-bridge-version.py <Cargo.toml> <PayloadBinaries.cs>   # compare; exit 1 on drift
