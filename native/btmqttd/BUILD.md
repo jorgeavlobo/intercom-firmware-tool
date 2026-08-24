@@ -123,14 +123,19 @@ in **three files that CI keeps equal**, so bumping it is a small provenance chor
 edit. To release e.g. `0.1.0 → 0.2.0`:
 
 1. Set the new version in all three sources:
-   - `native/btmqttd/Cargo.toml` — `[package] version` (the source of truth; also updates the
-     package's own entry in `Cargo.lock`).
+   - `native/btmqttd/Cargo.toml` — `[package] version` (the source of truth).
    - `IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs` — `BridgeVersion`.
    - `.well-known/bridge.json` — `latestVersion`.
-2. Reproducibly rebuild (see **Build** above) — the baked-in version changes the binary.
-3. Re-sync the vendored binary + provenance exactly as in **Verify** above (copy the binary,
+2. Refresh `Cargo.lock` so it records the new `btmqttd` version — otherwise the `--locked`
+   build in the next step fails with "Cargo.lock needs to be updated":
+
+   ```sh
+   cd native/btmqttd && cargo update -p btmqttd --precise 0.2.0   # use the new version
+   ```
+3. Reproducibly rebuild (see **Build** above) — the baked-in version changes the binary.
+4. Re-sync the vendored binary + provenance exactly as in **Verify** above (copy the binary,
    update `Length`/`Sha256Hex` and `THIRD_PARTY.md`, run `verify-provenance.sh --rebuilt`).
-4. Confirm the three versions agree:
+5. Confirm the three versions agree:
 
    ```sh
    native/btmqttd/ci/check-bridge-version.py \
