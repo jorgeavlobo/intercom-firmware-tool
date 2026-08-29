@@ -86,8 +86,13 @@ pub async fn announce(cfg: &Config, client: &AsyncClient, latest: &LatestVersion
     if !cfg.update_check {
         return;
     }
-    if let Some(latest) = latest.lock().await.clone() {
-        publish(cfg, client, &latest).await;
+    // Hold the cache lock ACROSS the publish so this birth re-assert can't interleave with the
+    // daily task's fetch+publish and land an older value last (which would leave HA showing a
+    // stale "latest"). tokio's Mutex is meant to be held across await; rumqttc's publish is a
+    // cheap enqueue and both publishers are rare, so serializing them here is free.
+    let guard = latest.lock().await;
+    if let Some(latest) = guard.as_deref() {
+        publish(cfg, client, latest).await;
     }
 }
 
@@ -101,7 +106,12 @@ pub async fn run(cfg: Arc<Config>, client: AsyncClient, latest: LatestVersion) {
     loop {
         match check_once(&cfg).await {
             Ok(v) => {
-                *latest.lock().await = Some(v.clone());
+                // Update the cache and publish while holding the lock, so a concurrent birth
+                // announce() serializes behind this and can never republish an older value after
+                // this newer one (see announce()). The retained topic always ends on the newest
+                // fetched value.
+                let mut guard = latest.lock().await;
+                *guard = Some(v.clone());
                 publish(&cfg, &client, &v).await;
             }
             Err(e) => {
