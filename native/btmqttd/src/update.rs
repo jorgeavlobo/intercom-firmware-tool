@@ -10,9 +10,11 @@
 //!     discovery `device` block's `sw_version` (the installer mirrors it in
 //!     `PayloadBinaries.BridgeVersion`, kept in step by `btmqttd-provenance.yml`).
 //!   * LATEST version comes from `UPDATE_MANIFEST_URL` (default: the repo's
-//!     `.well-known/bridge.json` on `raw.githubusercontent.com`). Before the first success
-//!     we report `latest = installed` ("up to date"); a later failure keeps the last known-
-//!     good value. A hiccup never fabricates a false "update available". FAIL-OPEN throughout.
+//!     `.well-known/bridge.json` on `raw.githubusercontent.com`). We publish ONLY a real fetched
+//!     version: until the first successful check the retained topic is left untouched (so a genuine
+//!     "update available" survives a daemon restart via the broker's own retention), and a later
+//!     failure keeps the last known-good value. A hiccup never fabricates a false "update
+//!     available" nor clobbers a real one with a synthetic "up to date". FAIL-OPEN throughout.
 //!   * TLS trust uses the device's own root store (`rustls-native-certs`, already pulled by
 //!     rumqttc), the same anchors the firmware's `curl` validates against — no bundled
 //!     roots (keeps the dependency tree copyleft-free per THIRD_PARTY.md).
@@ -75,15 +77,18 @@ async fn publish(cfg: &Config, client: &AsyncClient, latest: &str) {
     }
 }
 
-/// Re-assert the retained update topic from cache during the birth sequence (so a broker that
-/// restarted, dropping its retained set, is reconciled on reconnect). Reports `latest =
-/// installed` when no successful fetch has happened yet — never a false "update available".
+/// Re-assert the retained update topic from cache during the birth sequence, so a reconnect
+/// reconciles the broker with what this process last fetched. We publish ONLY a real fetched
+/// version: until the first successful check the retained topic is left as-is, rather than
+/// overwriting a genuine "update available" — which the broker retains across a daemon restart —
+/// with a synthetic "up to date". The daily task publishes the first real state shortly after start.
 pub async fn announce(cfg: &Config, client: &AsyncClient, latest: &LatestVersion) {
     if !cfg.update_check {
         return;
     }
-    let latest = latest.lock().await.clone();
-    publish(cfg, client, latest.as_deref().unwrap_or(INSTALLED_VERSION)).await;
+    if let Some(latest) = latest.lock().await.clone() {
+        publish(cfg, client, &latest).await;
+    }
 }
 
 /// The background task: check now (after a short settle), then once a day. On each successful
