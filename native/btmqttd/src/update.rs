@@ -96,8 +96,16 @@ pub async fn announce(cfg: &Config, client: &AsyncClient, latest: &LatestVersion
     }
 }
 
+/// The persisted last-known "latest" version, validated as a plausible SemVer, for seeding the
+/// cache at startup (issue #114). Reads the reboot-persistent record `persist` maintains so a
+/// restart/upgrade re-asserts the correct state at birth without a network fetch; garbage on disk
+/// is rejected. Blocking (`persist` reads the filesystem) — call via `spawn_blocking`.
+pub fn persisted_latest() -> Option<String> {
+    crate::persist::read_update_latest().filter(|v| is_plausible_semver(v))
+}
+
 /// The background task: check now (after a short settle), then once a day. On each successful
-/// fetch, cache the value and publish; on failure, keep the previous cache (fail-open).
+/// fetch, cache the value, publish, and persist it; on failure, keep the previous cache (fail-open).
 pub async fn run(cfg: Arc<Config>, client: AsyncClient, latest: LatestVersion) {
     if !cfg.update_check {
         return; // opt-out: no network, no publish (the installer also omits the entity)
@@ -111,8 +119,22 @@ pub async fn run(cfg: Arc<Config>, client: AsyncClient, latest: LatestVersion) {
                 // this newer one (see announce()). The retained topic always ends on the newest
                 // fetched value.
                 let mut guard = latest.lock().await;
+                let changed = guard.as_deref() != Some(v.as_str());
                 *guard = Some(v.clone());
                 publish(&cfg, &client, &v).await;
+                drop(guard); // release before the blocking persist below
+                // Persist the new value (off the async runtime) so a later restart/upgrade
+                // re-asserts it at birth without waiting for a fetch. Only on change — the daily
+                // no-op re-check shouldn't rewrite the record. A persist failure is non-fatal.
+                if changed {
+                    let v = v.clone();
+                    if !tokio::task::spawn_blocking(move || crate::persist::store_update_latest(&v))
+                        .await
+                        .unwrap_or(false)
+                    {
+                        eprintln!("btmqttd: update: could not persist latest version");
+                    }
+                }
             }
             Err(e) => {
                 // Fail-open: log and keep whatever we last knew (or "up to date").

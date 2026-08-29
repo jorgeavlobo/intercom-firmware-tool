@@ -72,6 +72,16 @@ const LIGHT_WHERE_FILE: &str = "light-where";
 /// durable source of truth for "provisioned", surviving reboots on the same cfg/extra partition.
 const CAMERA_SPROP_FILE: &str = "camera-sprop";
 
+/// The last-known "latest available" bridge version (issue #114), one plain line. Persisted on
+/// the same reboot-persistent partition so a daemon restart — or a firmware UPGRADE, where the
+/// broker still holds the OLD binary's retained payload — re-asserts the correct
+/// `installed_version` and any genuine "update available" at birth WITHOUT waiting for a network
+/// fetch. Unlike the broker-IP/light/sprop records this is deliberately NOT keyed: a stale hint
+/// is self-correcting — Home Assistant compares installed-vs-latest (a value older than the
+/// running version simply reads as "up to date") and the daily check overwrites it with the
+/// authoritative manifest value — so no reflash-staleness guard is needed.
+const UPDATE_LATEST_FILE: &str = "update-latest";
+
 /// The state directory, honouring `$BTMQTTD_STATE_DIR` (tests/dev) like `config.rs`
 /// honours `$BTMQTTD_CONF`.
 fn state_dir() -> PathBuf {
@@ -225,6 +235,31 @@ pub fn clear_camera_sprop() -> bool {
 /// current `CAMERA_BRANCH`; a mismatch is stale (task #41). Trailing whitespace is trimmed.
 pub fn read_camera_sprop() -> Option<(u8, String)> {
     read_camera_sprop_in(&state_dir())
+}
+
+/// Persist the last-known "latest available" bridge version (issue #114). Atomic write + dir
+/// fsync like the other records. Returns `true` on success. Blocking; call via `spawn_blocking`.
+#[must_use]
+pub fn store_update_latest(value: &str) -> bool {
+    let dir = state_dir();
+    atomic_write_in(&dir, &update_latest_file_in(&dir), format!("{value}\n").as_bytes())
+}
+
+/// Read the persisted last-known "latest" bridge version — a single non-empty trimmed line, or
+/// `None` when absent/unreadable/empty. The caller validates it as a plausible SemVer before use.
+/// Blocking; call via `spawn_blocking`.
+pub fn read_update_latest() -> Option<String> {
+    read_update_latest_in(&state_dir())
+}
+
+fn update_latest_file_in(dir: &Path) -> PathBuf {
+    dir.join(UPDATE_LATEST_FILE)
+}
+
+fn read_update_latest_in(dir: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(update_latest_file_in(dir)).ok()?;
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_string())
 }
 
 fn camera_sprop_file_in(dir: &Path) -> PathBuf {
@@ -643,6 +678,32 @@ mod tests {
         assert!(clear_camera_sprop_in(&dir));
         assert!(read_camera_sprop_in(&dir).is_none());
         assert!(clear_camera_sprop_in(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_latest_store_read_roundtrip() {
+        // Directory-injected core (no env mutation → parallel-safe). The last-known "latest"
+        // is one plain line: store writes it, read returns it trimmed, and a missing file /
+        // empty content reads back as None (not-yet-known).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(7000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("btmqttd-updlatest-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = update_latest_file_in(&dir);
+
+        assert_eq!(read_update_latest_in(&dir), None); // no file yet
+        assert!(atomic_write_in(&dir, &file, b"0.2.0\n"));
+        assert_eq!(read_update_latest_in(&dir).as_deref(), Some("0.2.0"));
+        // Overwrite in place (a later fetch found a newer version).
+        assert!(atomic_write_in(&dir, &file, b"0.3.0\n"));
+        assert_eq!(read_update_latest_in(&dir).as_deref(), Some("0.3.0"));
+        // An empty/whitespace file reads back as None.
+        assert!(atomic_write_in(&dir, &file, b"\n"));
+        assert_eq!(read_update_latest_in(&dir), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -444,6 +444,16 @@ async fn run() -> Result<bool, String> {
     // MQTT-producing task, so it is stopped before the final `offline` like sender/keys.
     let update_latest: update::LatestVersion =
         Arc::new(tokio::sync::Mutex::new(None));
+    // Seed the cache from the persisted last-known "latest" BEFORE the first birth announce(),
+    // so a restart — or a firmware upgrade, where the broker still holds the old binary's
+    // retained payload — re-asserts the correct installed_version and any genuine "update
+    // available" at birth without waiting for the (up to daily) network fetch (issue #114). A
+    // stale hint is self-correcting: the background check overwrites it with the manifest value.
+    if cfg.update_check {
+        if let Ok(Some(v)) = tokio::task::spawn_blocking(update::persisted_latest).await {
+            *update_latest.lock().await = Some(v);
+        }
+    }
     let update_task =
         tokio::spawn(update::run(cfg.clone(), client.clone(), update_latest.clone()));
     // Live doorbell camera (issue #103): opt-in. When enabled, this task runs its own
