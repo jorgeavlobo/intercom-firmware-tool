@@ -205,9 +205,9 @@ fn is_plausible_semver(v: &str) -> bool {
 }
 
 /// Fetch the manifest over HTTPS. Parses `https://host/path` (port 443 only), does a single
-/// GET with `Connection: close`, and returns the response body. Non-2xx, redirects, and
-/// unexpected transfer encodings are treated as errors (fail-open at the caller). We control
-/// the endpoint (a small static file on raw.githubusercontent.com), so this stays minimal.
+/// HTTP/1.0 GET (so the body is identity + close-delimited, never chunked) and returns it. A
+/// non-2xx status (redirects included) is an error; a chunked body would pass through and fail
+/// the JSON parse downstream — both fail-open at the caller. Endpoint is ours, so this stays minimal.
 async fn fetch(url: &str) -> Result<String, String> {
     let (host, path) = split_https_url(url)?;
 
