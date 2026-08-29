@@ -232,12 +232,14 @@ async fn fetch(url: &str) -> Result<String, String> {
     // Request line + headers on a single literal (no `\`-continuation) so it is unmistakable that
     // no leading whitespace leaks into a header name. Each field is CRLF-terminated; the blank line
     // ends the headers. HTTP/1.0 is intentional: it does not support chunked transfer-encoding
-    // (RFC 7230 §4.1 is HTTP/1.1-only), so the server always uses a plain close-delimited body,
-    // which the read-until-EOF loop below handles correctly without a chunked decoder. The Host
-    // header is included for virtual-hosting compatibility even though it is technically optional
-    // in 1.0.
+    // (RFC 7230 §4.1 is HTTP/1.1-only), so the server always uses a plain identity body, which the
+    // read-until-EOF loop below handles without a chunked decoder. `Connection: close` is sent too:
+    // it FORCES the server (or an HTTP/1.1-speaking CDN/proxy in front of it) to close after the
+    // response instead of holding the socket open with keep-alive + Content-Length — otherwise the
+    // read-until-EOF loop would block until OVERALL_TIMEOUT and every check would fail. The Host
+    // header is included for virtual-hosting compatibility even though it is technically optional in 1.0.
     let request = format!(
-        "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: btmqttd-update-check\r\nAccept: application/json\r\n\r\n"
+        "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: btmqttd-update-check\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())
