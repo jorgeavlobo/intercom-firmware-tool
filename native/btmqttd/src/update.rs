@@ -114,30 +114,34 @@ pub async fn run(cfg: Arc<Config>, client: AsyncClient, latest: LatestVersion) {
     loop {
         match check_once(&cfg).await {
             Ok(v) => {
-                // Update the cache and publish while holding the lock, so a concurrent birth
-                // announce() serializes behind this and can never republish an older value after
-                // this newer one (see announce()). The retained topic always ends on the newest
-                // fetched value.
+                // Everything under the cache lock, so a concurrent birth announce() serializes
+                // behind this and can never republish an older value after this newer one (see
+                // announce()). Order is DURABLE-BEFORE-OBSERVABLE: persist the new value first,
+                // THEN update the cache and publish. Otherwise a crash/power-loss in the window
+                // between publishing and the write landing would leave the broker holding the new
+                // value while disk still holds the old one — and the next boot would seed the old
+                // value and re-assert it over the newer retained state. Only on change (the daily
+                // no-op re-check shouldn't rewrite the record); a persist failure is non-fatal
+                // (the retained MQTT state is still correct for this process's lifetime).
                 let mut guard = latest.lock().await;
                 let changed = guard.as_deref() != Some(v.as_str());
-                *guard = Some(v.clone());
-                publish(&cfg, &client, &v).await;
-                drop(guard); // release before the blocking persist below
-                // Persist the new value (off the async runtime) so a later restart/upgrade
-                // re-asserts it at birth without waiting for a fetch. Only on change — the daily
-                // no-op re-check shouldn't rewrite the record. A persist failure is non-fatal.
                 if changed {
-                    let v = v.clone();
-                    if !tokio::task::spawn_blocking(move || crate::persist::store_update_latest(&v))
-                        .await
-                        .unwrap_or(false)
+                    let persisted = v.clone();
+                    if !tokio::task::spawn_blocking(move || {
+                        crate::persist::store_update_latest(&persisted)
+                    })
+                    .await
+                    .unwrap_or(false)
                     {
                         eprintln!("btmqttd: update: could not persist latest version");
                     }
                 }
+                *guard = Some(v.clone());
+                publish(&cfg, &client, &v).await;
             }
             Err(e) => {
-                // Fail-open: log and keep whatever we last knew (or "up to date").
+                // Fail-open: log and keep the last known-good cached value (which stays retained);
+                // never fabricate a false state on a transient error.
                 eprintln!("btmqttd: update: check failed (will retry): {e}");
             }
         }
@@ -271,11 +275,12 @@ fn split_https_url(url: &str) -> Result<(String, String), String> {
     };
     // Reject a userinfo/port host; a query or fragment (a plain static-manifest fetch has
     // neither, and a `?`/`#` before the first `/` would otherwise be mis-parsed straight INTO the
-    // host); and ANY ASCII control or whitespace byte in either the host or the path:
-    // UPDATE_MANIFEST_URL is operator-configurable, and a CR/LF in the path would otherwise be
-    // spliced into the hand-built request line and inject extra headers (request splitting).
-    // 0x20 covers space; <0x20 covers CR/LF/TAB and friends; 0x7f covers DEL.
-    let has_disallowed = |s: &str| s.bytes().any(|b| b <= 0x20 || b == 0x7f) || s.contains(['?', '#']);
+    // host); and any byte outside printable ASCII (0x21–0x7e) in either the host or the path:
+    // UPDATE_MANIFEST_URL is operator-configurable, so a CR/LF in the path would otherwise be
+    // spliced into the hand-built request line and inject extra headers (request splitting), and a
+    // non-ASCII byte would produce an invalid request-target / Host header (and fail SNI). `<=0x20`
+    // covers control/space; `>=0x7f` covers DEL and every non-ASCII byte (0x80–0xff).
+    let has_disallowed = |s: &str| s.bytes().any(|b| b <= 0x20 || b >= 0x7f) || s.contains(['?', '#']);
     if host.is_empty()
         || host.contains(['@', ':'])
         || has_disallowed(&host)
@@ -402,6 +407,10 @@ mod tests {
         assert!(split_https_url("https://ho\nst/a").is_err());
         assert!(split_https_url("https://host/a b").is_err());
         assert!(split_https_url("https://host/a\tb").is_err());
+        // Non-ASCII bytes (e.g. a UTF-8 IDN or path) can't form a valid request-target / Host
+        // header and are rejected outright rather than passed to SNI parsing.
+        assert!(split_https_url("https://exämple.com/x").is_err());
+        assert!(split_https_url("https://host/café.json").is_err());
     }
 
     #[test]
