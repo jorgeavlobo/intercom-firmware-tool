@@ -151,6 +151,16 @@ already-deployed panels show "update available"); the new binary itself reaches 
 next USB reflash, at which point its `sw_version` updates. The SemVer bump size is a judgement
 call based on what changed in the daemon.
 
+> **Release ordering.** Because master's `bridge.json` advertises the new version the moment the
+> bump merges, publish the GitHub Release that carries the new tool build (the `release_url` the
+> update entity links to) **before or together with** merging this bump — otherwise a panel can
+> show "update available" for a version that isn't downloadable yet. This is a deliberate,
+> documented trade-off: `bridge.json` tracks master's bridge version (CI-enforced) rather than
+> being driven by the release workflow, keeping the update signal a one-file edit here instead of
+> coupling it to the release automation. The entity is **notify-only** (the panel can't self-flash),
+> so a brief early "available" is cosmetic, not a failed install — but publishing the release first
+> avoids it entirely.
+
 ## Host checks (fast iteration)
 
 Run these on a **Linux host (or WSL)**. btmqttd depends on Linux-specific APIs
