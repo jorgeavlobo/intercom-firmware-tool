@@ -227,9 +227,13 @@ async fn fetch(url: &str) -> Result<String, String> {
 
     // Request line + headers on a single literal (no `\`-continuation) so it is unmistakable that
     // no leading whitespace leaks into a header name. Each field is CRLF-terminated; the blank line
-    // ends the headers.
+    // ends the headers. HTTP/1.0 is intentional: it does not support chunked transfer-encoding
+    // (RFC 7230 §4.1 is HTTP/1.1-only), so the server always uses a plain close-delimited body,
+    // which the read-until-EOF loop below handles correctly without a chunked decoder. The Host
+    // header is included for virtual-hosting compatibility even though it is technically optional
+    // in 1.0.
     let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: btmqttd-update-check\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: btmqttd-update-check\r\nAccept: application/json\r\n\r\n"
     );
     stream
         .write_all(request.as_bytes())
@@ -237,8 +241,8 @@ async fn fetch(url: &str) -> Result<String, String> {
         .map_err(|e| format!("sending request: {e}"))?;
     stream.flush().await.map_err(|e| format!("flushing request: {e}"))?;
 
-    // Read the whole (small) response, capped. We asked for `Connection: close`, so EOF marks
-    // the end of the body.
+    // Read the whole (small) response, capped. HTTP/1.0 closes the connection at end of body,
+    // so EOF marks the end.
     let mut raw = Vec::new();
     let mut chunk = [0u8; 4096];
     loop {
@@ -282,8 +286,7 @@ fn split_https_url(url: &str) -> Result<(String, String), String> {
     Ok((host, path))
 }
 
-/// Validate the status line (expects `2xx`), reject a chunked body (we don't decode it — our
-/// endpoint sends identity), and return the body as UTF-8.
+/// Validate the status line (expects `2xx`) and return the body as UTF-8.
 fn parse_http_response(raw: &[u8]) -> Result<String, String> {
     let sep = raw
         .windows(4)
@@ -299,12 +302,6 @@ fn parse_http_response(raw: &[u8]) -> Result<String, String> {
     let code = status.split_whitespace().nth(1).unwrap_or("");
     if !code.starts_with('2') {
         return Err(format!("unexpected HTTP status: {status:?}"));
-    }
-    if lines.any(|l| {
-        let l = l.to_ascii_lowercase();
-        l.starts_with("transfer-encoding:") && l.contains("chunked")
-    }) {
-        return Err("unexpected chunked transfer-encoding".to_string());
     }
 
     String::from_utf8(body.to_vec()).map_err(|_| "non-UTF-8 response body".to_string())
@@ -424,13 +421,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_2xx_and_chunked() {
+    fn rejects_non_2xx() {
         let notfound = b"HTTP/1.1 404 Not Found\r\n\r\nnope";
         assert!(parse_http_response(notfound).is_err());
-        let chunked =
-            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n";
-        assert!(parse_http_response(chunked).is_err());
         let headerless = b"garbage without terminator";
         assert!(parse_http_response(headerless).is_err());
+    }
+
+    /// HTTP/1.0 doesn't negotiate chunked transfer-encoding (RFC 7230 §4.1 is HTTP/1.1-only),
+    /// so the parser no longer needs to reject it — the server just won't send it. If a
+    /// misbehaving proxy ever did, we'd see garbled JSON and the `serde_json` parse would fail.
+    #[test]
+    fn accepts_chunked_encoding_header_gracefully() {
+        // A 200 with a Transfer-Encoding header (shouldn't happen with HTTP/1.0, but if it does
+        // the body bytes are parsed as-is — the outer JSON parse will catch malformed content).
+        let chunked =
+            b"HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n";
+        assert!(parse_http_response(chunked).is_ok()); // body is not decoded, but not rejected
     }
 }
