@@ -219,7 +219,7 @@ async fn fetch(url: &str) -> Result<String, String> {
 }
 
 /// Split a `https://host/path` URL into (host, path). HTTPS only; an embedded port, userinfo,
-/// or a plain-HTTP URL is rejected (we only ever talk to a fixed 443 host).
+/// query, fragment, or a plain-HTTP URL is rejected (we only ever talk to a fixed 443 host).
 fn split_https_url(url: &str) -> Result<(String, String), String> {
     let rest = url
         .strip_prefix("https://")
@@ -228,15 +228,17 @@ fn split_https_url(url: &str) -> Result<(String, String), String> {
         Some((h, p)) => (h.to_string(), format!("/{p}")),
         None => (rest.to_string(), "/".to_string()),
     };
-    // Reject a userinfo/port host, and ANY ASCII control or whitespace byte in either the host
-    // or the path: UPDATE_MANIFEST_URL is operator-configurable, and a CR/LF in the path would
-    // otherwise be spliced into the hand-built request line and inject extra headers (request
-    // splitting). 0x20 covers space; <0x20 covers CR/LF/TAB and friends; 0x7f covers DEL.
-    let has_ctrl_or_ws = |s: &str| s.bytes().any(|b| b <= 0x20 || b == 0x7f);
+    // Reject a userinfo/port host; a query or fragment (a plain static-manifest fetch has
+    // neither, and a `?`/`#` before the first `/` would otherwise be mis-parsed straight INTO the
+    // host); and ANY ASCII control or whitespace byte in either the host or the path:
+    // UPDATE_MANIFEST_URL is operator-configurable, and a CR/LF in the path would otherwise be
+    // spliced into the hand-built request line and inject extra headers (request splitting).
+    // 0x20 covers space; <0x20 covers CR/LF/TAB and friends; 0x7f covers DEL.
+    let has_disallowed = |s: &str| s.bytes().any(|b| b <= 0x20 || b == 0x7f) || s.contains(['?', '#']);
     if host.is_empty()
         || host.contains(['@', ':'])
-        || has_ctrl_or_ws(&host)
-        || has_ctrl_or_ws(&path)
+        || has_disallowed(&host)
+        || has_disallowed(&path)
     {
         return Err(format!("unsupported host/path in URL: host={host:?} path={path:?}"));
     }
@@ -366,6 +368,16 @@ mod tests {
         assert!(split_https_url("https://ho\nst/a").is_err());
         assert!(split_https_url("https://host/a b").is_err());
         assert!(split_https_url("https://host/a\tb").is_err());
+    }
+
+    #[test]
+    fn rejects_query_or_fragment() {
+        // A `?`/`#` before the first `/` must not be absorbed into the host; a query/fragment
+        // anywhere is rejected outright (a plain static-manifest fetch never needs one).
+        assert!(split_https_url("https://host?x=1").is_err());
+        assert!(split_https_url("https://host#frag").is_err());
+        assert!(split_https_url("https://host/path?x=1").is_err());
+        assert!(split_https_url("https://host/path#frag").is_err());
     }
 
     #[test]
