@@ -10,9 +10,9 @@
 //!     discovery `device` block's `sw_version` (the installer mirrors it in
 //!     `PayloadBinaries.BridgeVersion`, kept in step by `btmqttd-provenance.yml`).
 //!   * LATEST version comes from `UPDATE_MANIFEST_URL` (default: the repo's
-//!     `.well-known/bridge.json` on `raw.githubusercontent.com`). Until a fetch succeeds —
-//!     or whenever one fails — we report `latest = installed` (i.e. "up to date"), so a
-//!     network hiccup never produces a false "update available". FAIL-OPEN throughout.
+//!     `.well-known/bridge.json` on `raw.githubusercontent.com`). Before the first success
+//!     we report `latest = installed` ("up to date"); a later failure keeps the last known-
+//!     good value. A hiccup never fabricates a false "update available". FAIL-OPEN throughout.
 //!   * TLS trust uses the device's own root store (`rustls-native-certs`, already pulled by
 //!     rumqttc), the same anchors the firmware's `curl` validates against — no bundled
 //!     roots (keeps the dependency tree copyleft-free per THIRD_PARTY.md).

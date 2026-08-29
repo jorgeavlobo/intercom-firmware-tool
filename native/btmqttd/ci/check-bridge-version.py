@@ -232,9 +232,13 @@ def main(argv: list[str]) -> int:
         )
         return 1
     if not cargo_ver or not cs_ver or (len(argv) == 3 and not manifest_ver):
+        sources = (
+            "Cargo.toml, PayloadBinaries.cs, and/or bridge.json"
+            if len(argv) == 3
+            else "Cargo.toml and/or PayloadBinaries.cs"
+        )
         print(
-            "::error::could not read the bridge version from Cargo.toml, "
-            "PayloadBinaries.cs, and/or bridge.json",
+            f"::error::could not read the bridge version from {sources}",
             file=sys.stderr,
         )
         return 1
