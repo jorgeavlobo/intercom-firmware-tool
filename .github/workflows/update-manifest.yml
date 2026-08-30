@@ -285,3 +285,135 @@ jobs:
             # must first be retriggered by a HUMAN-authored event.
             echo "::warning::MANIFEST_PAT is not set, so the PR opened for '$branch' has NO required status checks running (GitHub suppresses pull_request runs triggered by GITHUB_TOKEN). To land it, a maintainer must retrigger the checks with a human-authored event (close then reopen the PR, or push a commit to '$branch' with a personal token) and then merge. Alternatively, just set .well-known/updates.json latestVersion to $version by hand. Set the MANIFEST_PAT secret (plus enable 'Allow auto-merge') to make this fully automatic."
           fi
+
+  bump-bridge:
+    # On a PUBLISHED app release, point .well-known/bridge.json's latestVersion at the BRIDGE
+    # version that release shipped — native/btmqttd/Cargo.toml's [package] version at the release
+    # tag (CI-enforced equal to PayloadBinaries.BridgeVersion). The bridge ships INSIDE the app
+    # release (it has no btmqttd-v* tag of its own), so "latest available bridge" == "the bridge
+    # embedded in the newest published release": release-driven, mirroring the updates.json bump
+    # above, so the panel's notify-only HA update entity never advertises a bridge that isn't
+    # downloadable yet (issues #114 / #115). Uses its OWN rolling side branch so it never collides
+    # with the updates.json PR. Skipped on workflow_dispatch (no released binary to read a version
+    # from) and on prereleases. Simpler than the updates.json bump on purpose — a single,
+    # release-tag-derived version with no minimum-version invariant and no dispatch path; a lost
+    # race just re-bumps on the next release (self-healing, and the entity is notify-only).
+    if: github.event_name == 'release'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          # Commits the bump to a side branch and opens a PR, so the token must persist for the
+          # push. Prefer the PAT (so the PR's required checks run and auto-merge completes).
+          token: ${{ secrets.MANIFEST_PAT || secrets.GITHUB_TOKEN }}
+          persist-credentials: true
+          # Full history so the release tag's blob is readable (we read the bridge version AT the tag).
+          fetch-depth: 0
+
+      - name: Bump latestVersion in the bridge manifest
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+          PRERELEASE: ${{ github.event.release.prerelease }}
+          GH_TOKEN: ${{ secrets.MANIFEST_PAT || secrets.GITHUB_TOKEN }}
+          HAVE_PAT: ${{ secrets.MANIFEST_PAT != '' }}
+        run: |
+          set -euo pipefail
+
+          # A prerelease is not the "latest available" — never bump the notify manifest for one.
+          if [ "${PRERELEASE:-}" = "true" ]; then
+            echo "Prerelease ${TAG:-}; not bumping the bridge manifest."
+            exit 0
+          fi
+
+          # Read the BRIDGE version this release shipped: native/btmqttd/Cargo.toml's [package]
+          # version at the release tag's commit (fetch-depth 0 made the tag blob available). tomllib
+          # parses it robustly (never a grep on a possibly-multiline field), and Cargo.toml ==
+          # PayloadBinaries.BridgeVersion is CI-enforced on every daemon PR, so this is the
+          # authoritative shipped bridge version. Read AT THE TAG, not master, so a bridge bump
+          # merged to master after the tag can't over-advertise a version this release lacks.
+          git fetch --tags --force origin
+          if ! cargo_toml="$(git show "refs/tags/${TAG}:native/btmqttd/Cargo.toml" 2>/dev/null)"; then
+            echo "::error::could not read native/btmqttd/Cargo.toml at tag ${TAG}; not bumping the bridge manifest."
+            exit 1
+          fi
+          version="$(printf '%s' "$cargo_toml" | python3 -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["package"]["version"])')"
+
+          # Same stable-X.Y.Z gate the updates.json bump uses (reject control chars first).
+          is_stable_ver() {
+            case "$1" in *[![:print:]]*) return 1 ;; esac
+            printf '%s' "$1" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          }
+          if ! is_stable_ver "$version"; then
+            echo "::error::bridge version '$version' at tag ${TAG} is not a stable X.Y.Z; not bumping."
+            exit 1
+          fi
+
+          file=.well-known/bridge.json
+          branch="chore/bridge-manifest"
+          # sort_le a b -> true when a <= b (sort -V on stable X.Y.Z).
+          sort_le() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$1" ]; }
+
+          # Root the side branch on FRESHLY fetched master (a prior bridge-manifest PR may have
+          # merged mid-run), not the possibly-stale initial checkout.
+          git fetch origin master
+          git checkout -B "$branch" origin/master
+
+          current="$(jq -r '.latestVersion // "0.0.0"' "$file")"
+          if ! is_stable_ver "$current"; then
+            echo "::error::master's bridge.json latestVersion '$current' is not a stable X.Y.Z; fix .well-known/bridge.json before releasing."
+            exit 1
+          fi
+          # Only ever move FORWARD: a release shipping the same or an older bridge (bridge unchanged,
+          # or a backport) is a no-op.
+          if sort_le "$version" "$current"; then
+            echo "bridge.json already at '$current' (>= released bridge '$version'); nothing to do."
+            exit 0
+          fi
+
+          tmp="$(mktemp)"
+          jq --arg v "$version" '.latestVersion = $v' "$file" > "$tmp"
+          mv "$tmp" "$file"
+          if git diff --quiet -- "$file"; then
+            echo "bridge.json already at $version; nothing to do."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+          git commit -m "chore(bridge): set bridge.json latestVersion to $version"
+
+          # Refresh the rolling branch in place with --force-with-lease against the remote ref
+          # (fetch it first so the lease has a baseline); a genuinely-absent branch is created.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" || true
+          fi
+          git push --force-with-lease origin "HEAD:$branch"
+
+          title="chore(bridge): set bridge.json latestVersion to $version"
+          body="Automated update of \`.well-known/bridge.json\` \`latestVersion\` to \`$version\` after the ${TAG} release was published — the btmqttd version embedded in that build (issue #114). Merging this makes the panel's Home Assistant update entity advertise v$version."
+          # Reuse the open rolling PR from THIS repo if one exists (same-repo filter), else create it.
+          resolve_pr() {
+            gh pr list --head "$branch" --base master --state open --json number,isCrossRepository \
+              --jq 'map(select(.isCrossRepository == false)) | .[0].number // empty'
+          }
+          existing="$(resolve_pr 2>/dev/null || true)"
+          if [ -z "$existing" ]; then
+            gh pr create --base master --head "$branch" --title "$title" --body "$body" \
+              || echo "::warning::could not open the bridge-manifest PR automatically; open it by hand for branch $branch"
+            existing="$(resolve_pr 2>/dev/null || true)"
+          else
+            gh pr edit "$existing" --title "$title" --body "$body" \
+              || echo "::warning::could not edit bridge-manifest PR #$existing (it may have closed)."
+          fi
+
+          # Auto-merge once required checks pass — only completes with the PAT (a GITHUB_TOKEN PR
+          # doesn't trigger the checks). Without it, fall back to a clear manual instruction.
+          if [ "${HAVE_PAT:-false}" = "true" ] && [ -n "$existing" ]; then
+            gh pr merge "$existing" --auto --squash \
+              || echo "::warning::could not enable auto-merge on bridge-manifest PR #$existing (is 'Allow auto-merge' enabled?); merge it by hand."
+            echo "Bridge manifest PR #$existing set to latestVersion=$version, auto-merge requested."
+          else
+            echo "::warning::bridge-manifest PR opened for '$branch' (version $version), but without MANIFEST_PAT its required checks won't auto-start (GitHub suppresses GITHUB_TOKEN pull_request runs). Retrigger with a human-authored event and merge, or just set .well-known/bridge.json latestVersion to $version by hand."
+          fi

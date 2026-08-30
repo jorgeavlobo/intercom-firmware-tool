@@ -118,14 +118,14 @@ in two tiers:
 ## Bumping the bridge version (issue #114)
 
 The daemon compiles its own version in (`env!("CARGO_PKG_VERSION")`), which surfaces to Home
-Assistant as the device `sw_version` and drives the update-check comparison. That version lives
-in **three files that CI keeps equal**, so bumping it is a small provenance chore, not a one-line
-edit. To release e.g. `0.1.0 → 0.2.0`:
+Assistant as the device `sw_version` and drives the update-check comparison. You bump **two files
+that CI keeps equal** — `.well-known/bridge.json` is **not** hand-edited here (see the note below).
+To bump e.g. `0.1.0 → 0.2.0`:
 
-1. Set the new version in all three sources:
+1. Set the new version in both source-of-truth files:
    - `native/btmqttd/Cargo.toml` — `[package] version` (the source of truth).
-   - `IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs` — `BridgeVersion`.
-   - `.well-known/bridge.json` — `latestVersion`.
+   - `IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs` — `BridgeVersion` (mirrors it so the
+     installer bakes `sw_version` into HA discovery without reading the binary).
 2. Refresh `Cargo.lock` so it records the new `btmqttd` version — otherwise the `--locked`
    build in the next step fails with "Cargo.lock needs to be updated":
 
@@ -135,31 +135,27 @@ edit. To release e.g. `0.1.0 → 0.2.0`:
 3. Reproducibly rebuild (see **Build** above) — the baked-in version changes the binary.
 4. Re-sync the vendored binary + provenance exactly as in **Verify** above (copy the binary,
    update `Length`/`Sha256Hex` and `THIRD_PARTY.md`, run `verify-provenance.sh --rebuilt`).
-5. Confirm the three versions agree:
+5. Confirm the two source-of-truth versions agree:
 
    ```sh
    native/btmqttd/ci/check-bridge-version.py \
      native/btmqttd/Cargo.toml \
-     IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs \
-     .well-known/bridge.json
+     IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
    ```
 
-The guardrails make this hard to get wrong: `btmqttd-provenance.yml` fails the PR if the three
+The guardrails make this hard to get wrong: `btmqttd-provenance.yml` fails the PR if the two
 versions disagree (**"bridge version drift"**) **or** if the committed binary doesn't reproduce
-bit-for-bit. After merge, master's `bridge.json` immediately advertises the new version (so
-already-deployed panels show "update available"); the new binary itself reaches a panel on its
-next USB reflash, at which point its `sw_version` updates. The SemVer bump size is a judgement
-call based on what changed in the daemon.
+bit-for-bit. The SemVer bump size is a judgement call based on what changed in the daemon.
 
-> **Release ordering.** Because master's `bridge.json` advertises the new version the moment the
-> bump merges, publish the GitHub Release that carries the new tool build (the `release_url` the
-> update entity links to) **before or together with** merging this bump — otherwise a panel can
-> show "update available" for a version that isn't downloadable yet. This is a deliberate,
-> documented trade-off: `bridge.json` tracks master's bridge version (CI-enforced) rather than
-> being driven by the release workflow, keeping the update signal a one-file edit here instead of
-> coupling it to the release automation. The entity is **notify-only** (the panel can't self-flash),
-> so a brief early "available" is cosmetic, not a failed install — but publishing the release first
-> avoids it entirely.
+> **`.well-known/bridge.json` is release-driven — do not edit it by hand.** The bridge ships
+> *inside* the app release (it has no `btmqttd-v*` tag of its own), so "latest available bridge"
+> means "the bridge embedded in the newest **published** release". `.github/workflows/update-manifest.yml`
+> updates `bridge.json`'s `latestVersion` automatically when a release is published — reading
+> `native/btmqttd/Cargo.toml`'s version at the released tag — exactly as it maintains the app's
+> `updates.json` (gold-standard: advertise only what's actually downloadable). So the update entity
+> is never nudged to a bridge that isn't in a release yet, and there is no merge-vs-release timing
+> window to manage. The new bridge reaches a panel on its next USB reflash (the panel can't
+> self-flash today — see issue #115), at which point its `sw_version` updates.
 
 ## Host checks (fast iteration)
 

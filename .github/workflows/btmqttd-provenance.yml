@@ -21,7 +21,6 @@ on:
       - 'native/btmqttd/**'
       - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd'
       - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
-      - '.well-known/bridge.json'
       - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
       - '.github/workflows/btmqttd-provenance.yml'
   push:
@@ -30,7 +29,6 @@ on:
       - 'native/btmqttd/**'
       - 'IntercomFirmwareTool.Core/Payload/vendor/armhf/btmqttd'
       - 'IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs'
-      - '.well-known/bridge.json'
       - 'IntercomFirmwareTool.Core/Payload/vendor/THIRD_PARTY.md'
       - '.github/workflows/btmqttd-provenance.yml'
   workflow_dispatch:
@@ -56,26 +54,28 @@ jobs:
           # .git/config — avoids credential leakage via the checkout (zizmor artipacked).
           persist-credentials: false
 
-      - name: Bridge version in sync (Cargo.toml == PayloadBinaries.BridgeVersion == bridge.json)
+      - name: Bridge version in sync (Cargo.toml == PayloadBinaries.BridgeVersion)
         run: |
           set -euo pipefail
           # Fatal, fast pre-check (issue #114): the daemon's Cargo.toml [package] version — which
-          # btmqttd compiles in as CARGO_PKG_VERSION — is the single source of truth. Two files must
-          # MIRROR it: PayloadBinaries.BridgeVersion (so the installer bakes sw_version into the HA
-          # discovery device block WITHOUT reading the binary) and .well-known/bridge.json's
-          # latestVersion (the update-check manifest the panel fetches from master — keeping it equal
-          # to master's bridge version means "latest available" is always correct, no release-time
-          # bump). If any drift, HA would advertise/offer a version the running daemon isn't.
+          # btmqttd compiles in as CARGO_PKG_VERSION — is the single source of truth, and
+          # PayloadBinaries.BridgeVersion must MIRROR it (so the installer bakes sw_version into the
+          # HA discovery device block WITHOUT reading the binary). If they drift, HA would show a
+          # version the running daemon isn't.
           #
-          # The checker parses each source SYNTAX-AWARE (tomllib for the TOML, json for the manifest,
-          # comment-stripped matching for the C#), so a stale literal in a comment or a
-          # multiline/verbatim string can't be read and mask a real mismatch. Its --selftest
-          # exercises those exact vectors as a regression guard before the real comparison runs.
+          # NOTE: .well-known/bridge.json's latestVersion is intentionally NOT checked here. It is
+          # RELEASE-DRIVEN (bumped by update-manifest.yml when a release is published, mirroring
+          # updates.json), so it legitimately LAGS master's dev version between releases — enforcing
+          # equality would be wrong. See .well-known/bridge.json and issue #115.
+          #
+          # The checker parses each source SYNTAX-AWARE (tomllib for the TOML, comment-stripped
+          # matching for the C#), so a stale literal in a comment or a multiline/verbatim string
+          # can't be read and mask a real mismatch. Its --selftest exercises those exact vectors as
+          # a regression guard before the real comparison runs.
           python3 native/btmqttd/ci/check-bridge-version.py --selftest
           python3 native/btmqttd/ci/check-bridge-version.py \
             native/btmqttd/Cargo.toml \
-            IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs \
-            .well-known/bridge.json
+            IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
 
       - name: Install the pinned ARM cross C compiler (Ubuntu archive snapshot)
         env:

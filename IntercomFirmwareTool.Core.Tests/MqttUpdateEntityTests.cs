@@ -73,7 +73,8 @@ public class MqttUpdateEntityTests
         // NOTIFY-ONLY: no command/install path (the panel can't self-flash).
         Assert.False(e.TryGetProperty("command_topic", out _), "update entity must have no command_topic");
         Assert.False(e.TryGetProperty("payload_install", out _), "update entity must have no install payload");
-        // Informational link to the releases page, and grouped under the shared device.
+        // Informational link to the latest published release (/releases/latest), grouped under the
+        // shared device.
         Assert.True(e.TryGetProperty("release_url", out var url) && url.GetString()!.Contains("/releases"));
         Assert.True(e.TryGetProperty("device", out _), "update entity must carry the shared device block");
     }

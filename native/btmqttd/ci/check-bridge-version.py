@@ -6,12 +6,14 @@
 
   * ``PayloadBinaries.BridgeVersion`` (C#) — so the installer can bake ``sw_version`` into
     the Home Assistant discovery ``device`` block WITHOUT reading the binary.
-  * ``.well-known/bridge.json``'s ``latestVersion`` — the update-check manifest the panel
-    fetches from ``master``. Because master's manifest always equals master's bridge
-    version (enforced here), the "latest available" version is always correct with no
-    release-time bump.
+``.well-known/bridge.json``'s ``latestVersion`` is the update-check manifest the panel fetches,
+but it is RELEASE-DRIVEN (bumped by ``update-manifest.yml`` on release publish, mirroring
+``updates.json``) and so legitimately LAGS ``master`` between releases — CI does NOT enforce it
+equal to ``Cargo.toml`` (see ``.well-known/bridge.json`` and issue #115). The optional third
+argument below can still compare it (handy for a local release-time sanity check), but the
+provenance workflow calls this with only the two source-of-truth files.
 
-If any drift, HA would advertise or offer a version the running daemon isn't.
+If Cargo.toml and PayloadBinaries drift, HA would show a version the running daemon isn't.
 
 Extraction is SYNTAX-AWARE so a stale literal sitting in a comment or a string can never
 be picked up and mask a real mismatch (the failure mode of a naive line grep):

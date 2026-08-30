@@ -2162,7 +2162,9 @@ namespace IntercomFirmwareTool.Core
             // own version; latest = the version manifest it fetched); HA reads those keys directly and shows
             // an "update available" badge when latest > installed. NOTIFY-ONLY: the panel can't self-flash
             // (firmware is applied over USB), so there is deliberately NO command_topic / Install button —
-            // release_url just points at the GitHub Releases page. device_class "firmware" so HA files it
+            // release_url points at the LATEST published GitHub release (/releases/latest), where the newest
+            // bridge ships (the bridge is bundled in the app release; .well-known/bridge.json is
+            // release-driven, bumped when that release is published). device_class "firmware" so HA files it
             // under the device's firmware updates. READ-ONLY (no command channel), so it ships REGARDLESS of
             // whether TopicRx is concrete — emitted BEFORE the control-topic early return below, alongside
             // the other read-only sensors. Emitted only when the update check is ENABLED; otherwise TOMBSTONE
@@ -2179,7 +2181,7 @@ namespace IntercomFirmwareTool.Core
                         default_entity_id = EntId("update", "bridge"),
                         device_class = "firmware",
                         state_topic = opts.EffectiveTopicUpdate,
-                        release_url = "https://github.com/jorgeavlobo/intercom-firmware-tool/releases",
+                        release_url = "https://github.com/jorgeavlobo/intercom-firmware-tool/releases/latest",
                         availability_topic = opts.TopicLastWill,
                         payload_available = "online",
                         payload_not_available = "offline",
