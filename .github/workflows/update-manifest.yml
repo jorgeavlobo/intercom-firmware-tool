@@ -364,12 +364,48 @@ jobs:
             echo "::error::master's bridge.json latestVersion '$current' is not a stable X.Y.Z; fix .well-known/bridge.json before releasing."
             exit 1
           fi
-          # Only ever move FORWARD: a release shipping the same or an older bridge (bridge unchanged,
-          # or a backport) is a no-op.
-          if sort_le "$version" "$current"; then
-            echo "bridge.json already at '$current' (>= released bridge '$version'); nothing to do."
+
+          # Read any version already QUEUED on the rolling branch, so an out-of-order LOWER release
+          # (e.g. a backport published after a newer release) can't force-push over a higher pending
+          # bump and regress the manifest. Same safeguard the updates.json bump uses. Fail CLOSED if
+          # the branch exists but can't be fetched — a transient error must not silently drop a
+          # higher pending value or push without a fresh lease. `git ls-remote --exit-code` returns 2
+          # when the branch genuinely doesn't exist; any OTHER nonzero means the query itself failed.
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            if ! git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"; then
+              echo "::error::could not fetch existing rolling branch '$branch'; aborting rather than risk regressing a higher pending version or pushing without a fresh lease."
+              exit 1
+            fi
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              echo "::error::could not determine whether rolling branch '$branch' exists (git ls-remote exit $status); aborting rather than risk regressing a higher pending version."
+              exit 1
+            fi
+          fi
+          pending="0.0.0"
+          if git rev-parse -q --verify "origin/$branch" >/dev/null 2>&1; then
+            pending="$(git show "origin/$branch:$file" 2>/dev/null | jq -r '.latestVersion // "0.0.0"' 2>/dev/null || echo '0.0.0')"
+          fi
+          # The rolling branch is only ever written by this job (validated), but a corrupted/hand-
+          # edited value must not be selected as target; ignore a non-stable pending (treat as
+          # 0.0.0) rather than fail closed, so a bad transient branch can't block releases.
+          if ! is_stable_ver "$pending"; then
+            echo "::warning::rolling branch '$branch' carries a non-stable latestVersion '$pending'; ignoring it."
+            pending="0.0.0"
+          fi
+
+          # Advertise the NEWEST of: this release's bridge, master's current, and any pending bump.
+          # This both avoids regressing a higher pending/orphaned value AND recovers an orphaned
+          # higher value (from a prior failed `gh pr create`) instead of skipping it.
+          target="$version"
+          if ! sort_le "$current" "$target"; then target="$current"; fi
+          if ! sort_le "$pending" "$target"; then target="$pending"; fi
+          if [ "$target" = "$current" ]; then
+            echo "bridge.json already at the newest version '$current' (release '$version', pending '$pending'); nothing to do."
             exit 0
           fi
+          version="$target"   # operate on the resolved target for the write + messages below
 
           tmp="$(mktemp)"
           jq --arg v "$version" '.latestVersion = $v' "$file" > "$tmp"
@@ -384,11 +420,8 @@ jobs:
           git add "$file"
           git commit -m "chore(bridge): set bridge.json latestVersion to $version"
 
-          # Refresh the rolling branch in place with --force-with-lease against the remote ref
-          # (fetch it first so the lease has a baseline); a genuinely-absent branch is created.
-          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-            git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch" || true
-          fi
+          # Refresh the rolling branch in place; --force-with-lease against the remote ref fetched
+          # above (a genuinely-absent branch is created).
           git push --force-with-lease origin "HEAD:$branch"
 
           title="chore(bridge): set bridge.json latestVersion to $version"
