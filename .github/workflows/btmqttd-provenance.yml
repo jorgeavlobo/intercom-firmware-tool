@@ -58,18 +58,24 @@ jobs:
         run: |
           set -euo pipefail
           # Fatal, fast pre-check (issue #114): the daemon's Cargo.toml [package] version — which
-          # btmqttd compiles in as CARGO_PKG_VERSION — is the single source of truth, and the C#
-          # installer mirrors it in PayloadBinaries.BridgeVersion to bake sw_version into the HA
-          # discovery device block WITHOUT reading the binary. If the two drift, HA would advertise
-          # a version the running daemon isn't.
+          # btmqttd compiles in as CARGO_PKG_VERSION — is the single source of truth, and
+          # PayloadBinaries.BridgeVersion must MIRROR it (so the installer bakes sw_version into the
+          # HA discovery device block WITHOUT reading the binary). If they drift, HA would show a
+          # version the running daemon isn't.
           #
-          # The checker parses each source SYNTAX-AWARE (tomllib for the TOML; comment-stripped
+          # NOTE: .well-known/bridge.json's latestVersion is intentionally NOT checked here. It is
+          # RELEASE-DRIVEN (bumped by update-manifest.yml when a release is published, mirroring
+          # updates.json), so it legitimately LAGS master's dev version between releases — enforcing
+          # equality would be wrong. See .well-known/bridge.json and issue #115.
+          #
+          # The checker parses each source SYNTAX-AWARE (tomllib for the TOML, comment-stripped
           # matching for the C#), so a stale literal in a comment or a multiline/verbatim string
           # can't be read and mask a real mismatch. Its --selftest exercises those exact vectors as
           # a regression guard before the real comparison runs.
           python3 native/btmqttd/ci/check-bridge-version.py --selftest
           python3 native/btmqttd/ci/check-bridge-version.py \
-            native/btmqttd/Cargo.toml IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
+            native/btmqttd/Cargo.toml \
+            IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
 
       - name: Install the pinned ARM cross C compiler (Ubuntu archive snapshot)
         env:

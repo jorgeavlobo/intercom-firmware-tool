@@ -174,6 +174,10 @@ namespace IntercomFirmwareTool.App
             // Broker rediscovery: on by default (#43/#44). It self-gates on the device
             // (needs a hostname config + a TLS trust anchor), so on-by-default is safe.
             ChkMqttRediscovery.IsChecked = true;
+            // Bridge update check: on by default (opt-out, #114). The panel fetches a small version
+            // manifest from GitHub over HTTPS and shows a notify-only HA "update" entity; unticking
+            // makes the panel do NO outbound-internet call. Set here (not in XAML) like the others.
+            ChkMqttBridgeUpdate.IsChecked = true;
 
             RefreshMqttPlaceholders();
 
@@ -1742,7 +1746,11 @@ namespace IntercomFirmwareTool.App
                 // connection. Only embedded when rediscovery is on (its only consumer);
                 // the field is already null unless it matches the current endpoint, so a
                 // stale anchor can't reach the build.
-                MqttBrokerMac: ChkMqttRediscovery.IsChecked == true ? _mqttBrokerMac : null)
+                MqttBrokerMac: ChkMqttRediscovery.IsChecked == true ? _mqttBrokerMac : null,
+                // Bridge update check (#114): opt-out (on by default). When ticked, the panel does a
+                // daily HTTPS fetch of the version manifest and shows a notify-only HA "update" entity;
+                // unticked, it makes no outbound-internet call and the entity is tombstoned.
+                UpdateCheckEnabled: ChkMqttBridgeUpdate.IsChecked == true)
             {
                 // Topics are prefilled with the record's defaults, so an untouched
                 // panel reproduces those exactly; a customized one overrides them.

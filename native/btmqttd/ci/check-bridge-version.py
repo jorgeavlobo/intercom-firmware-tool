@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
-"""Verify the bridge daemon's SemVer is in sync between its two sources (issue #114).
+"""Verify the bridge daemon's SemVer is in sync across its sources (issue #114).
 
 ``native/btmqttd/Cargo.toml``'s ``[package] version`` is the single source of truth
-— the daemon compiles it in as ``CARGO_PKG_VERSION``. The C# installer mirrors it in
-``PayloadBinaries.BridgeVersion`` so it can bake ``sw_version`` into the Home Assistant
-discovery ``device`` block WITHOUT reading the binary. If the two drift, HA advertises a
-version the running daemon isn't.
+— the daemon compiles it in as ``CARGO_PKG_VERSION``. ``PayloadBinaries.BridgeVersion`` (C#)
+must MIRROR it, so the installer can bake ``sw_version`` into the Home Assistant discovery
+``device`` block WITHOUT reading the binary. These two are the ONLY versions this script (and the
+provenance workflow) enforce equal.
+
+``.well-known/bridge.json``'s ``latestVersion`` is the update-check manifest the panel fetches,
+but it is RELEASE-DRIVEN (bumped by ``update-manifest.yml`` on release publish, mirroring
+``updates.json``) and legitimately LAGS ``master`` between releases — so it is deliberately NOT
+checked here (see ``.well-known/bridge.json`` and issue #115).
+
+If Cargo.toml and PayloadBinaries drift, HA would show a version the running daemon isn't.
 
 Extraction is SYNTAX-AWARE so a stale literal sitting in a comment or a string can never
 be picked up and mask a real mismatch (the failure mode of a naive line grep):
@@ -22,8 +29,8 @@ be picked up and mask a real mismatch (the failure mode of a naive line grep):
     when more than one is left (e.g. a decoy in an inactive ``#if`` region).
 
 Usage:
-  check-bridge-version.py <Cargo.toml> <PayloadBinaries.cs>   # compare; exit 1 on drift
-  check-bridge-version.py --selftest                          # run regression fixtures
+  check-bridge-version.py <Cargo.toml> <PayloadBinaries.cs>  # compare; exit 1 on drift
+  check-bridge-version.py --selftest                         # run regression fixtures
 """
 from __future__ import annotations
 
@@ -194,8 +201,8 @@ def main(argv: list[str]) -> int:
     cargo_ver = cargo_version(_read(argv[0]))
     cs_decls = cs_declarations(_read(argv[1]))
     cs_ver = cs_decls[0] if len(cs_decls) == 1 else None
-    print(f"Cargo.toml [package] version:  {cargo_ver!r}")
-    print(f"PayloadBinaries.BridgeVersion: {cs_ver!r}")
+    print(f"Cargo.toml [package] version:   {cargo_ver!r}")
+    print(f"PayloadBinaries.BridgeVersion:  {cs_ver!r}")
 
     if len(cs_decls) > 1:
         print(
@@ -207,8 +214,7 @@ def main(argv: list[str]) -> int:
         return 1
     if not cargo_ver or not cs_ver:
         print(
-            "::error::could not read the bridge version from Cargo.toml and/or "
-            "PayloadBinaries.cs",
+            "::error::could not read the bridge version from Cargo.toml and/or PayloadBinaries.cs",
             file=sys.stderr,
         )
         return 1
@@ -216,7 +222,7 @@ def main(argv: list[str]) -> int:
         print(
             f"::error::bridge version drift — native/btmqttd/Cargo.toml is "
             f"'{cargo_ver}' but PayloadBinaries.BridgeVersion is '{cs_ver}'. "
-            f"Bump BOTH together.",
+            f"Bump these two source-of-truth files together.",
             file=sys.stderr,
         )
         return 1

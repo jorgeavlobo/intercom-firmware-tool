@@ -39,6 +39,7 @@ mod rediscovery;
 mod sender;
 mod sip;
 mod sprop;
+mod update;
 mod volume;
 
 use std::sync::Arc;
@@ -436,6 +437,25 @@ async fn run() -> Result<bool, String> {
         broker_online.clone(),
     ));
     let keys_task = tokio::spawn(keys::run(cfg.clone(), client.clone(), broker_online.clone()));
+    // Bridge update check (issue #114): daily HTTPS fetch of the version manifest, publishing
+    // installed/latest to TOPIC_UPDATE for the HA `update` entity. Shares its cached "latest"
+    // with the birth sequence (announce) so a reconnect re-asserts the retained topic. Opt-out:
+    // with UPDATE_CHECK=0 the task returns immediately (no network, no publish). It is an
+    // MQTT-producing task, so it is stopped before the final `offline` like sender/keys.
+    let update_latest: update::LatestVersion =
+        Arc::new(tokio::sync::Mutex::new(None));
+    // Seed the cache from the persisted last-known "latest" BEFORE the first birth announce(),
+    // so a restart — or a firmware upgrade, where the broker still holds the old binary's
+    // retained payload — re-asserts the correct installed_version and any genuine "update
+    // available" at birth without waiting for the (up to daily) network fetch (issue #114). A
+    // stale hint is self-correcting: the background check overwrites it with the manifest value.
+    if cfg.update_check {
+        if let Ok(Some(v)) = tokio::task::spawn_blocking(update::persisted_latest).await {
+            *update_latest.lock().await = Some(v);
+        }
+    }
+    let update_task =
+        tokio::spawn(update::run(cfg.clone(), client.clone(), update_latest.clone()));
     // Live doorbell camera (issue #103): opt-in. When enabled, this task runs its own
     // OWN monitor (:20000, independent of `sender`) and, whenever the panel brings an A/V
     // session up, adds a UDP client on `bt_av_media` (:30007) so a cleartext RTP copy is
@@ -784,6 +804,7 @@ async fn run() -> Result<bool, String> {
                                 start_iso.clone(),
                                 volume.clone(),
                                 light.clone(),
+                                update_latest.clone(),
                             )));
                         }
                     }
@@ -951,6 +972,7 @@ async fn run() -> Result<bool, String> {
     }
     stop(sender_task).await;
     stop(keys_task).await;
+    stop(update_task).await;
     // JOIN the command worker (its intake was already frozen right after the loop). It starts no new command;
     // we only wait out the dispatch that was ACTIVE when shutdown began. HOW we wait depends on the exit kind:
     if reexec {
@@ -1184,6 +1206,7 @@ async fn announce(
     start_iso: Arc<str>,
     volume: Arc<volume::VolumeCtl>,
     light: Option<Arc<light::LightCtl>>,
+    update_latest: update::LatestVersion,
 ) {
     // Assert the light-subsystem availability GATE *before* the bridge birth `online`. On a
     // reflash from a configured WHERE to blank learn mode, the broker can still hold a retained
@@ -1234,6 +1257,10 @@ async fn announce(
         eprintln!("btmqttd: publish start_date failed: {e}");
     }
     ha::reconcile(&cfg, &client).await;
+    // Re-assert the retained update topic from the cached "latest" (issue #114), so a broker
+    // that restarted — dropping its retained set — is reconciled on reconnect. No network here;
+    // the background task does the fetching. No-op when the update check is disabled.
+    update::announce(&cfg, &client, &update_latest).await;
     // Re-publish the tracked light state on every connect (a restarted broker dropped its
     // retained topics; a changed WHERE reusing the topic left a stale value). This is
     // INDEPENDENT of discovery — unlike the volume seed below it does NO gateway round-trip,

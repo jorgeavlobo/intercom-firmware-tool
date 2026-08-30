@@ -13,6 +13,13 @@ use std::path::Path;
 
 pub const DEFAULT_CFG_PATH: &str = "/etc/btmqttd/btmqttd.conf";
 
+/// Default source of the bridge version manifest for the update check (issue #114): the repo's
+/// `.well-known/bridge.json` served raw (Fastly CDN, no API rate limit) from the default branch —
+/// the same host/mechanism the App's own update check uses. Overridable via `UPDATE_MANIFEST_URL`
+/// (e.g. to self-host on the LAN). HTTPS only.
+pub const DEFAULT_UPDATE_MANIFEST_URL: &str =
+    "https://raw.githubusercontent.com/jorgeavlobo/intercom-firmware-tool/master/.well-known/bridge.json";
+
 /// The OpenWebNet gateway's command-injection port (raw frames received over MQTT
 /// are forwarded here). Fixed, as in StartMqttReceive (`OWN_PORT=30006`).
 pub const OWN_PORT_CMD: u16 = 30006;
@@ -89,12 +96,21 @@ pub struct Config {
     /// Retained "last maintenance action" state topic — the HA feedback sensor for the reboot/restart
     /// buttons (issue #43). btmqttd publishes `{"action":…,"at":…}` here on each accepted press.
     pub topic_maintenance: String,
+    /// Retained state topic for the HA `update` entity (issue #114): btmqttd publishes
+    /// `{"installed_version":…,"latest_version":…}` here. Only used when `update_check` is on.
+    pub topic_update: String,
     // OpenWebNet monitor endpoint (bus -> MQTT)
     pub own_host: String,
     pub own_port_mon: u16,
     // Behaviour
     pub payload_json: bool,
     pub ha_discovery: bool,
+    /// Bridge update check (issue #114): periodically fetch the version manifest and publish
+    /// installed/latest to `topic_update` for the HA `update` entity. Opt-out (default ON);
+    /// `UPDATE_CHECK=0` disables the network call and the publish entirely.
+    pub update_check: bool,
+    /// Source URL of the version manifest (HTTPS). Defaults to `DEFAULT_UPDATE_MANIFEST_URL`.
+    pub update_manifest_url: String,
     pub allow_remote_shell: bool,
     pub client_id: Option<String>,
     // Broker rediscovery (issue #43): when the broker moves to a new LAN IP, scan its
@@ -234,11 +250,16 @@ impl Config {
             topic_light: get("TOPIC_LIGHT", "Bticino/light"),
             topic_light_avail: get("TOPIC_LIGHT_AVAIL", "Bticino/light_avail"),
             topic_maintenance: get("TOPIC_MAINTENANCE", "Bticino/maintenance"),
+            topic_update: get("TOPIC_UPDATE", "Bticino/update"),
             own_host: get("OWN_HOST", "127.0.0.1"),
             own_port_mon: opt("OWN_PORT_MON").and_then(|s| s.parse().ok()).unwrap_or(20000),
             // PAYLOAD_FORMAT defaults to json (mqtt_common.sh); anything but "raw" is json.
             payload_json: opt("PAYLOAD_FORMAT").as_deref() != Some("raw"),
             ha_discovery: flag("HA_DISCOVERY"),
+            // Opt-OUT (default ON): only an explicit UPDATE_CHECK=0 disables it, so an old conf
+            // that predates the key still gets the check. Mirrors the App's opt-out update check.
+            update_check: opt("UPDATE_CHECK").as_deref() != Some("0"),
+            update_manifest_url: get("UPDATE_MANIFEST_URL", DEFAULT_UPDATE_MANIFEST_URL),
             allow_remote_shell: flag("ALLOW_REMOTE_SHELL"),
             client_id: opt("MQTT_CLIENT_ID"),
             rediscovery: flag("MQTT_REDISCOVERY"),

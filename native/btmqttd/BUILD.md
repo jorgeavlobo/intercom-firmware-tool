@@ -115,6 +115,48 @@ in two tiers:
   bump can no longer change the object code. A mismatch means the vendored binary is out
   of sync with the source: rebuild and re-sync per the steps above. (Resolves **#76**.)
 
+## Bumping the bridge version (issue #114)
+
+The daemon compiles its own version in (`env!("CARGO_PKG_VERSION")`), which surfaces to Home
+Assistant as the device `sw_version` and drives the update-check comparison. You bump **two files
+that CI keeps equal** — `.well-known/bridge.json` is **not** hand-edited here (see the note below).
+To bump e.g. `0.1.0 → 0.2.0`:
+
+1. Set the new version in both source-of-truth files:
+   - `native/btmqttd/Cargo.toml` — `[package] version` (the source of truth).
+   - `IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs` — `BridgeVersion` (mirrors it so the
+     installer bakes `sw_version` into HA discovery without reading the binary).
+2. Refresh `Cargo.lock` so it records the new `btmqttd` version — otherwise the `--locked`
+   build in the next step fails with "Cargo.lock needs to be updated":
+
+   ```sh
+   cd native/btmqttd && cargo update -p btmqttd --precise 0.2.0   # use the new version
+   ```
+3. Reproducibly rebuild (see **Build** above) — the baked-in version changes the binary.
+4. Re-sync the vendored binary + provenance exactly as in **Verify** above (copy the binary,
+   update `Length`/`Sha256Hex` and `THIRD_PARTY.md`, run `verify-provenance.sh --rebuilt`).
+5. Confirm the two source-of-truth versions agree:
+
+   ```sh
+   native/btmqttd/ci/check-bridge-version.py \
+     native/btmqttd/Cargo.toml \
+     IntercomFirmwareTool.Core/Payload/PayloadBinaries.cs
+   ```
+
+The guardrails make this hard to get wrong: `btmqttd-provenance.yml` fails the PR if the two
+versions disagree (**"bridge version drift"**) **or** if the committed binary doesn't reproduce
+bit-for-bit. The SemVer bump size is a judgement call based on what changed in the daemon.
+
+> **`.well-known/bridge.json` is release-driven — do not edit it by hand.** The bridge ships
+> *inside* the app release (it has no `btmqttd-v*` tag of its own), so "latest available bridge"
+> means "the bridge embedded in the newest **published** release". `.github/workflows/update-manifest.yml`
+> updates `bridge.json`'s `latestVersion` automatically when a release is published — reading
+> `native/btmqttd/Cargo.toml`'s version at the released tag — exactly as it maintains the app's
+> `updates.json` (gold-standard: advertise only what's actually downloadable). So the update entity
+> is never nudged to a bridge that isn't in a release yet, and there is no merge-vs-release timing
+> window to manage. The new bridge reaches a panel on its next USB reflash (the panel can't
+> self-flash today — see issue #115), at which point its `sw_version` updates.
+
 ## Host checks (fast iteration)
 
 Run these on a **Linux host (or WSL)**. btmqttd depends on Linux-specific APIs

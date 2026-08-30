@@ -24,7 +24,12 @@ crate).
   publishes when `HA_DISCOVERY=1`, clears when `0`;
 - registers the retained `offline` last will at CONNECT and publishes retained
   `online` only after the command subscription's SubAck — **atomic** availability,
-  no watchdog refresh.
+  no watchdog refresh;
+- checks once a day for a newer bridge version over HTTPS (issue `#114`; opt-out
+  with `UPDATE_CHECK=0`) and publishes it to `TOPIC_UPDATE` for a notify-only Home
+  Assistant `update` entity. The manifest defaults to the repo's
+  `.well-known/bridge.json` on `master`; override it with `UPDATE_MANIFEST_URL`
+  (HTTPS only) to self-host the manifest on the LAN for an air-gapped setup.
 
 Static musl means it needs no interpreter and none of the old runtime tools
 (`tcpdump`, `python`, `jq`, `nc`, `awk`, `mosquitto_pub`/`sub`). The one tool the

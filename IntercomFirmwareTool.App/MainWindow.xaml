@@ -1263,6 +1263,15 @@
                               Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
                     <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
                                Text="{loc:Loc Hint_MqttHaDiscovery}"/>
+                    <!-- Bridge update check (#114): the panel fetches a small version manifest from
+                         GitHub over HTTPS and surfaces a notify-only HA "update" entity. On by default
+                         (opt-out) — the ONLY outbound-internet call the bridge makes; untick to disable
+                         it (no network, no entity). -->
+                    <CheckBox x:Name="ChkMqttBridgeUpdate" Margin="0,10,0,0"
+                              Content="{loc:Loc Chk_MqttBridgeUpdate}" ToolTip="{loc:Loc Tip_MqttBridgeUpdate}"
+                              Checked="MqttOption_Changed" Unchecked="MqttOption_Changed"/>
+                    <TextBlock Margin="22,3,0,0" Foreground="#FF666666" FontSize="11" TextWrapping="Wrap"
+                               Text="{loc:Loc Hint_MqttBridgeUpdate}"/>
                     <!-- Per-unit HA device id: distinct values give each bridge its own
                          HA device/entities (a multi-unit broker also needs distinct MQTT
                          topics, else the devices mirror each other's data — see HaNodeId

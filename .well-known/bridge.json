@@ -1,0 +1,5 @@
+{
+  "_comment": "Bridge daemon (btmqttd) version manifest for the panel's update check (issue #114). 'latestVersion' is the newest btmqttd version shipped in a PUBLISHED GitHub release; it is updated automatically by .github/workflows/update-manifest.yml on release publish (release-driven, mirroring the app's .well-known/updates.json), reading native/btmqttd/Cargo.toml's [package] version at the released tag (CI-enforced equal to PayloadBinaries.BridgeVersion). It is deliberately NOT tied to master's dev version, so the panel is never nudged to a bridge that isn't downloadable yet. Each panel's btmqttd fetches this over HTTPS, compares it to its own compiled-in version, and surfaces a notify-only Home Assistant 'update' entity (the panel can't self-flash today; firmware is applied over USB — see issue #115 for planned on-device self-update).",
+  "schemaVersion": 1,
+  "latestVersion": "0.1.0"
+}
