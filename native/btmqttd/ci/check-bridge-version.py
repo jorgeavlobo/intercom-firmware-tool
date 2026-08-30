@@ -248,7 +248,8 @@ def main(argv: list[str]) -> int:
         print(
             f"::error::bridge version drift — native/btmqttd/Cargo.toml is "
             f"'{cargo_ver}' but PayloadBinaries.BridgeVersion is '{cs_ver}'. "
-            f"Bump ALL sources together.",
+            f"Bump these two source-of-truth files together (.well-known/bridge.json is "
+            f"release-driven and intentionally not checked here).",
             file=sys.stderr,
         )
         return 1
