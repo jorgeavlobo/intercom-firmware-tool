@@ -12,3 +12,12 @@ updates:
     labels:
       - dependencies
       - github-actions
+    # The CodeQL action ships init/ and analyze/ as sub-actions that must move in
+    # lockstep: `analyze` fails with a "configuration error" if its version differs
+    # from the `init` in the same run. Ungrouped, Dependabot opens one PR per
+    # sub-action, so each PR bumps only half the pair and breaks the analyze job.
+    # Grouping every codeql-action bump into a single PR keeps the pair in sync.
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
