@@ -284,6 +284,13 @@ namespace IntercomFirmwareTool.Core
         /// outdoor door station ring). NULL (default) derives from the <see cref="TopicLastWill"/>
         /// namespace — see <see cref="TopicVolume"/> and <see cref="EffectiveTopicEntrancePanelCall"/>.</summary>
         public string? TopicEntrancePanelCall { get; init; }
+        /// <summary>Momentary "ring snapshot ready" topic (issue #169): btmqttd publishes to it (with the
+        /// ring's event id) once the on-device ring capture has written that event's <c>/ring-&lt;id&gt;.jpg</c>,
+        /// so the Home Assistant push automation fires only when the image exists (a fixed post-ring delay
+        /// can't establish readiness). NULL
+        /// (default) derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="EffectiveTopicRingSnapshot"/>. Used on-device only.</summary>
+        public string? TopicRingSnapshot { get; init; }
         /// <summary>Momentary floor-call event topic HA's event entity reads (the dumb push-button
         /// at the apartment's own front door — independent from the entrance panel). NULL (default)
         /// derives from the <see cref="TopicLastWill"/> namespace — see
@@ -364,6 +371,8 @@ namespace IntercomFirmwareTool.Core
         public string EffectiveTopicMute => TopicMute ?? (TopicNamespace(TopicLastWill) + "mute");
         /// <summary>The entrance-panel-call event topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicEntrancePanelCall => TopicEntrancePanelCall ?? (TopicNamespace(TopicLastWill) + "entrance_panel_call");
+        /// <summary>The ring-snapshot-ready topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicRingSnapshot => TopicRingSnapshot ?? (TopicNamespace(TopicLastWill) + "ring_snapshot");
         /// <summary>The floor-call event topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicFloorCall => TopicFloorCall ?? (TopicNamespace(TopicLastWill) + "floor_call");
         /// <summary>The call-state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
@@ -1028,15 +1037,21 @@ namespace IntercomFirmwareTool.Core
                 }
             }
 
-            // Topics must be non-empty and single-line (they are sourced into the
-            // .conf and used as MQTT topic filters).
+            // Topics must be non-empty and contain NO control characters. They are sourced into the .conf,
+            // used as MQTT topic filters, and (the ring-snapshot topic) embedded in the paste-ready Home
+            // Assistant YAML in the on-device guide. Rejecting every control char — not just CR/LF — is the
+            // single upstream gate that keeps all three uses valid: MQTT forbids U+0000 in a topic outright,
+            // and an embedded NUL/ESC/TAB would corrupt the double-quoted YAML scalar the guide builds
+            // (whose escaper only handles '"'/'\\', the two printable specials). char.IsControl subsumes
+            // CR/LF and also covers the C0/DEL/C1 ranges.
             foreach (var t in new[] { opts.TopicRx, opts.TopicDump, opts.TopicStartDate,
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
                                       opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
+                                      opts.EffectiveTopicRingSnapshot,
                                       opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
                                       opts.EffectiveTopicUpdate })
-                if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
+                if (string.IsNullOrWhiteSpace(t) || t.Any(char.IsControl))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
             // The PUBLISH topics (everything except TopicRx, which is only ever
@@ -1048,6 +1063,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                       opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
+                                      opts.EffectiveTopicRingSnapshot,
                                       opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
                                       opts.EffectiveTopicUpdate })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
@@ -1081,6 +1097,14 @@ namespace IntercomFirmwareTool.Core
                 opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
                 opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
             };
+            // Ring-snapshot-ready (#169): btmqttd publishes to it ONLY under on-device capture
+            // (camera_enabled && camera_ondevice); an off-device / camera-off build derives the topic
+            // (it is still written to the .conf) but never publishes it. So include it in the collision
+            // set only when capture can run — mirroring the light STATE / update topics below. Otherwise
+            // an opt-out config whose existing publish topic happens to equal the derived ring topic
+            // (e.g. TopicDump == "Bticino/ring_snapshot") would be wrongly rejected as a collision.
+            bool ringPublished = opts.CameraEnabled && opts.CameraOnDevice;
+            if (ringPublished) publishTopics.Add(opts.EffectiveTopicRingSnapshot);
             // The light STATE topic is published whenever the light is ENABLED, in BOTH modes: a
             // bistable light publishes the tracked on/off, and a momentary light publishes an empty
             // retained payload on connect to clear any stale bistable value (LightCtl::seed). So it
@@ -1156,6 +1180,13 @@ namespace IntercomFirmwareTool.Core
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
+            // The ring-snapshot topic is PUBLISHED only under on-device capture (see the collision set
+            // above) — check its self-loop with TopicRx only then, like the light STATE / update topics.
+            // A build that can't run capture never publishes it, so a TopicRx wildcard that happens to
+            // cover the derived ring topic is harmless there and must not fail a valid opt-out config.
+            if (ringPublished && TopicFilterMatches(rxFilter, opts.EffectiveTopicRingSnapshot))
+                throw new ArgumentException(
+                    CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
             // The light STATE topic is PUBLISHED whenever the light is ENABLED — a bistable light
             // publishes the tracked on/off, and a momentary light publishes an empty retained clear
             // on connect (LightCtl::seed) — so its self-loop with TopicRx is checked in both modes.
@@ -1682,6 +1713,10 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_ENTRANCE_PANEL_CALL", opts.EffectiveTopicEntrancePanelCall));
             sb.Append(Conf("TOPIC_FLOOR_CALL", opts.EffectiveTopicFloorCall));
             sb.Append(Conf("TOPIC_CALL_STATE", opts.EffectiveTopicCallState));
+            // Ring snapshot ready (#169): btmqttd publishes here (with the ring's event id) once the
+            // on-device ring capture has written that event's /ring-<id>.jpg, so the HA push automation
+            // triggers on this and fetches that exact frame (not a fixed delay).
+            sb.Append(Conf("TOPIC_RING_SNAPSHOT", opts.EffectiveTopicRingSnapshot));
 
             // Stair-light SWITCH (opt-in). LIGHT_ENABLED is the "has exterior light" choice: the
             // subsystem runs when set, even with an EMPTY LIGHT_WHERE (learn mode — btmqttd learns
@@ -1736,6 +1771,20 @@ namespace IntercomFirmwareTool.Core
             sb.Append("CAMERA_ONDEVICE=")
                 .Append(opts.CameraEnabled && opts.CameraOnDevice ? '1' : '0')
                 .Append('\n');
+            // On-device RTSP credentials (#169): btmqttd's still-capture helper reads
+            // rtsp://<user>:<pass>@127.0.0.1:8554/doorbell — the SAME go2rtc stream HA consumes — to grab
+            // the idle/ring JPEG frames. Write them ONLY on-device (the capture path exists only there),
+            // and from the SAME MqttOptions values that feed go2rtc.yaml so the daemon and go2rtc agree.
+            // Validate has already guaranteed they are non-empty and control-char-free in on-device mode;
+            // guard on BOTH user and pass so a bare/library caller (on-device flag set but a credential
+            // left blank) emits NEITHER line rather than a half credential — an empty CAMERA_RTSP_USER
+            // with a set pass would be a broken/insecure pairing, not a usable one.
+            if (opts.CameraEnabled && opts.CameraOnDevice
+                && !string.IsNullOrEmpty(opts.CameraRtspUser) && !string.IsNullOrEmpty(opts.CameraRtspPass))
+            {
+                sb.Append(Conf("CAMERA_RTSP_USER", opts.CameraRtspUser));
+                sb.Append(Conf("CAMERA_RTSP_PASS", opts.CameraRtspPass));
+            }
             // On-demand viewing (#104): sip.rs INVITEs the panel to bring the idle session up. Only
             // meaningful with the media path, so gate the ENABLED flag on CameraEnabled too — the
             // daemon does the same, but coercing here keeps a stray on-demand=1 from a camera-off
@@ -1846,6 +1895,7 @@ namespace IntercomFirmwareTool.Core
             ("light_learn.json", "button", "light_learn"),
             ("view_camera.json", "button", "view_camera"),
             ("stop_camera.json", "button", "stop_camera"),
+            ("update_idle.json", "button", "update_idle"),
             ("reboot_device.json", "button", "reboot_device"),
             ("restart_bridge.json", "button", "restart_bridge"),
             ("restore_ssh.json", "button", "restore_ssh"),
@@ -2434,6 +2484,38 @@ namespace IntercomFirmwareTool.Core
                     }, HaJson)));
             else
                 entities.Add(new HaEntity("stop_camera.json", Topic("button", "stop_camera"), ""));
+
+            // Idle snapshot refresh (#169): an "Update idle snapshot" button. btmqttd re-captures the
+            // real empty-doorway view and overwrites the persisted idle.jpg the still endpoint serves at
+            // /idle.jpg, so the HA camera thumbnail becomes current. Same {"action":...}-to-TopicRx,
+            // fire-and-forget posture as the camera/maintenance buttons; the daemon publishes an
+            // "update_idle" record to the maintenance topic on success (the shared feedback sensor).
+            // Gated on the ON-DEVICE camera AND on-demand viewing: capturing an IDLE panel means WAKING
+            // it via the SIP UA first, which needs on-demand; otherwise TOMBSTONE the config so a prior
+            // build's button is cleared from HA rather than lingering as a dead control.
+            if (opts.CameraEnabled && opts.CameraOnDevice && opts.CameraOnDemand)
+                entities.Add(new HaEntity(
+                    "update_idle.json",
+                    Topic("button", "update_idle"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Update idle snapshot",
+                        unique_id = $"{node}_update_idle",
+                        default_entity_id = EntId("button", "update_idle"),
+                        command_topic = controlTopic,
+                        // QoS 0: the capture is idempotent (each press just re-grabs the current view), so
+                        // a redelivered DUP is harmless and a press lost during a reconnect is
+                        // self-correcting — the user presses again.
+                        qos = 0,
+                        payload_press = "{\"action\":\"update_idle\"}",
+                        icon = "mdi:camera-retake",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            else
+                entities.Add(new HaEntity("update_idle.json", Topic("button", "update_idle"), ""));
 
             // Maintenance buttons (issue #43): a "Reboot device" and a "Restart bridge" button, same
             // {"action":...}-to-TopicRx pattern as the locks / camera buttons. They are ALWAYS emitted

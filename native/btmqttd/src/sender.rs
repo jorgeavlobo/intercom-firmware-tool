@@ -6,7 +6,7 @@
 //! tcpdump/filter.py fallback is retired — this connects directly and retries.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -154,7 +154,7 @@ async fn session(
     debounce: &std::sync::Mutex<MomentaryDebounce>,
     // Broker connectivity, so momentary call events can be dropped rather than enqueued while the
     // broker is down (issue #71). Read-only here; owned/updated by main's event loop.
-    broker_online: &AtomicBool,
+    broker_online: &Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
@@ -474,7 +474,7 @@ async fn read_call_state_draining(
     light: Option<&Arc<LightCtl>>,
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
     debounce: &std::sync::Mutex<MomentaryDebounce>,
-    broker_online: &AtomicBool,
+    broker_online: &Arc<AtomicBool>,
     sock: &mut TcpStream,
     framer: &mut Framer,
     buf: &mut [u8],
@@ -605,7 +605,7 @@ async fn publish_frame(
     light: Option<&Arc<LightCtl>>,
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
     debounce: &std::sync::Mutex<MomentaryDebounce>,
-    broker_online: &AtomicBool,
+    broker_online: &Arc<AtomicBool>,
     frame: &str,
 ) -> FrameOutcome {
     // Stair-light SWITCH state tracking: a physical panel press of the light button appears
@@ -632,6 +632,12 @@ async fn publish_frame(
         // classify this call as an entrance-panel call. The `*#8**35*1` ringing frame arrives
         // BEFORE this classifying frame, so the classifier held it as Pending (Suppressed);
         // flush that held ring now that we know it's a real entrance call (arming the watchdog).
+        // Record the ring for idle-capture invalidation FIRST — on detection, before (and independent
+        // of) any MQTT publish or the ring capture — so an in-flight or imminent on-device idle capture
+        // discards a visitor frame even when the broker is offline (see capture::note_ring / #169).
+        if cfg.camera_ondevice {
+            crate::capture::note_ring();
+        }
         let held = lock_classifier(classifier).saw_entrance_panel_call();
         if let Some(code) = held {
             publish_call_state(cfg, client, code).await;
@@ -640,7 +646,68 @@ async fn publish_frame(
             // No held ring, but we still (re)classified to Entrance → snapshot ambiguous.
             outcome = FrameOutcome::ClassifierChanged;
         }
-        publish_call_event(client, debounce, broker_online, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
+        let ring_published = publish_call_event(client, debounce, broker_online, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
+        // Ring snapshot (issue #169): grab a who-is-at-the-door frame into this event's transient
+        // `/ring-<id>.jpg` for the HA push. Fire ONLY on a FRESH ring event (`ring_published`): the
+        // gateway repeats one press's signature and `publish_call_event` coalesces those (#71). Gate on
+        // the media path (camera_enabled) AS WELL as on-device: CAMERA_ONDEVICE can be set independently
+        // in a hand-edited conf, and without the camera feature there is no RTP siphon for go2rtc to
+        // serve. Work is BOUNDED by a single runner in capture.rs: note this ring as the newest pending,
+        // and spawn the runner ONLY if none is active (a burst of distinct rings coalesces to the latest
+        // — one active capture at a time, never a growing queue of tasks).
+        // `ring_ids_durable()`: if the per-boot ring-id counter could not be established (a flash
+        // read/write error or a corrupt counter), SUPPRESS ring-snapshot capture entirely — the ring event
+        // above still fired, but capturing/publishing a `/ring-<id>.jpg` whose id we can't prove unique
+        // could let a stale notification resolve to a new visitor's frame (#169, fail closed).
+        if ring_published && cfg.camera_enabled && cfg.camera_ondevice && crate::capture::ring_ids_durable() {
+            // Record this ring with the broker session epoch it fired on (this online session). The
+            // readiness publish is deferred across the capture; the runner hands each served event's OWN
+            // epoch back to the callback, so a ring that fires after a reconnect (served by an earlier
+            // ring's still-active runner) still publishes, while a pre-reconnect ring is suppressed — see
+            // ring_snapshot_deliverable / BROKER_EPOCH / capture::RING_NEWEST_EPOCH.
+            // Allocate this ring's event id in the boot's reserved namespace. `None` means the boot's
+            // billion-id range is exhausted (unreachable in practice — ~31 years at one ring/second):
+            // decline the snapshot rather than allocate into the NEXT boot's namespace, which a later
+            // reboot reallocates (id reuse could resolve a stale notification to a new visitor's frame).
+            // The entrance ring event above still fired regardless.
+            if crate::capture::note_pending_ring(BROKER_EPOCH.load(Ordering::Relaxed)).is_none() {
+                eprintln!(
+                    "btmqttd: capture: ring-id namespace exhausted for this boot — ring snapshot declined"
+                );
+            } else if let Some(runner) = crate::capture::try_acquire_ring_runner() {
+                let cfg_ring = cfg.clone();
+                let client_ring = client.clone();
+                let broker_ring = broker_online.clone();
+                tokio::spawn(async move {
+                    // On each successful capture the runner calls back here with the event id AND the epoch
+                    // it was detected on, to publish a "ring snapshot ready" signal carrying that id, so the
+                    // HA push fetches exactly THIS event's frame — triggered by this signal, not a fixed
+                    // delay a cold ~20 s capture can outlast. Momentary QoS 0, non-retained, DROPPED when the
+                    // broker is offline AND suppressed if the broker session changed since THIS ring (its
+                    // topic is also in main.rs::is_momentary_publish so an ALREADY-QUEUED one is purged on
+                    // disconnect) — matching the ring event's #71 discipline so a reconnect can't flush, or
+                    // freshly emit, a stale "someone is at the door" later. A failed capture publishes
+                    // nothing (no image ⇒ no push). The `runner` guard rides into the task and frees the slot
+                    // on drop, even on a panic.
+                    crate::capture::run_ring_captures(&cfg_ring, runner, |event_id, event_epoch| {
+                        if !ring_snapshot_deliverable(&broker_ring, event_epoch) {
+                            return;
+                        }
+                        let payload =
+                            format!("{{\"at\":\"{}\",\"id\":{event_id}}}", crate::own::utc_now_iso());
+                        if let Err(e) = client_ring.try_publish(
+                            &cfg_ring.topic_ring_snapshot,
+                            QoS::AtMostOnce,
+                            false,
+                            payload.into_bytes(),
+                        ) {
+                            eprintln!("btmqttd: capture: ring_snapshot publish failed: {e}");
+                        }
+                    })
+                    .await;
+                });
+            }
+        }
     } else if let Some(where_) = dimension::parse_floor_call(frame) {
         // Floor CALL (dumb push-button at the apartment's own front door): a COMPLETELY
         // independent event from the entrance panel. Fire its own momentary event and arm the
@@ -656,6 +723,17 @@ async fn publish_frame(
         outcome = FrameOutcome::ClassifierChanged; // reclassified to Floor → snapshot ambiguous
         publish_call_event(client, debounce, broker_online, &cfg.topic_floor_call, "floor", where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
+        // Idle-capture invalidation as EARLY as possible (issue #169): the dim-35 ringing report
+        // (`*#8**35*1*…`, code 1) arrives ONE frame BEFORE the classifying WHO=8 entrance frame, so
+        // recording the ring only there (crate::capture::note_ring in the entrance branch) leaves a small
+        // window in which an in-flight idle capture could grab the now-streaming visitor and pass its
+        // LAST_RING_MS check before the classify frame lands. Note the ring here too, on ANY non-idle
+        // call-state code (ringing / in_call / active fallback — NOT the terminal `0`): the panel is in a
+        // call, so an idle capture must be declined. This fires for a floor call's dim-35 as well, which
+        // is a harmless FALSE decline (it only skips one best-effort idle update; see RECENT_RING_WINDOW).
+        if code != 0 && cfg.camera_ondevice {
+            crate::capture::note_ring();
+        }
         // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the
         // classifier: an entrance-panel call publishes it (updating the retained sensor and reporting
         // the code so the caller can (dis)arm the watchdog); a floor call's ringing is suppressed; an
@@ -721,20 +799,23 @@ async fn publish_frame(
 /// stall the monitor reader on a full request queue; a press lost during a brief broker outage
 /// is preferable to a double actuation, and it is not retained or replayed. The payload carries
 /// the HA `event_type`, the WHERE (informational), and a `ts` stamp (see [`momentary_payload`]).
+/// Returns `true` iff a FRESH event was actually published (not dropped for a broker outage and not
+/// coalesced as a burst repeat), so a caller can fire a once-per-press side effect — e.g. the ring
+/// snapshot capture — in step with the same `#71` debounce this uses, instead of on every raw frame.
 async fn publish_call_event(
     client: &AsyncClient,
     debounce: &std::sync::Mutex<MomentaryDebounce>,
-    broker_online: &AtomicBool,
+    broker_online: &Arc<AtomicBool>,
     topic: &str,
     kind: &str,
     where_: &str,
-) {
+) -> bool {
     if !momentary_deliverable(broker_online) {
         eprintln!(
             "btmqttd: dropped {kind} call event @ WHERE={where_} on {topic} \
              (broker offline; not queued for late replay)"
         );
-        return;
+        return false;
     }
     // Coalesce a burst of repeats into one event. First a READ-ONLY check: is this a repeat within
     // the window of the last PUBLISHED event? (Guard scope minimal; there is no await here anyway.)
@@ -748,7 +829,7 @@ async fn publish_call_event(
             "btmqttd: coalesced {kind} call event @ WHERE={where_} on {topic} \
              (burst within {MOMENTARY_DEBOUNCE:?} of the last)"
         );
-        return;
+        return false;
     }
     let payload = momentary_payload(where_);
     match client.try_publish(topic, QoS::AtMostOnce, false, payload.into_bytes()) {
@@ -756,11 +837,17 @@ async fn publish_call_event(
         // full, try_publish fails and NOTHING was published, so we must NOT record — otherwise the
         // window would suppress a later retry and silently lose a physical press. The window starts
         // from the PUBLISHED event, exactly as documented.
-        Ok(()) => debounce
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .record(topic, now),
-        Err(e) => eprintln!("btmqttd: publish {kind} call event failed: {e}"),
+        Ok(()) => {
+            debounce
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record(topic, now);
+            true
+        }
+        Err(e) => {
+            eprintln!("btmqttd: publish {kind} call event failed: {e}");
+            false
+        }
     }
 }
 
@@ -826,11 +913,39 @@ fn momentary_deliverable(broker_online: &AtomicBool) -> bool {
     broker_online.load(Ordering::Relaxed)
 }
 
+/// Broker SESSION epoch: bumped by main's event loop on every `ConnAck` (see `BROKER_EPOCH`). A
+/// momentary publish that is enqueued SYNCHRONOUSLY at detection needs only [`momentary_deliverable`]
+/// (rumqttc's `pending` is purged on the same drop, so nothing survives to flush late — issue #71). But
+/// the ring-snapshot-ready signal is DEFERRED across the up-to-25 s capture: the broker can drop AND
+/// reconnect within that window, so `broker_online` reads true again yet this is a NEW session. The
+/// disconnect purge can't catch such a publish — it is created only AFTER the reconnect. Binding it to
+/// the epoch captured at ring detection closes that gap: publish only while still online AND on the SAME
+/// session (epoch unchanged); a reconnect advances the epoch and suppresses the stale "someone is at the
+/// door" for a pre-outage ring. (A ring that itself arrives after the reconnect publishes on the new,
+/// higher epoch — this only suppresses the OLD ring whose runner outlived the bounce.)
+pub static BROKER_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the ring-snapshot-ready signal for a ring detected at `ring_epoch` may be published now:
+/// the broker must be connected AND still the same session it was when the ring fired. See [`BROKER_EPOCH`].
+fn ring_snapshot_deliverable(broker_online: &AtomicBool, ring_epoch: u64) -> bool {
+    momentary_deliverable(broker_online) && BROKER_EPOCH.load(Ordering::Relaxed) == ring_epoch
+}
+
 /// Publish the call STATE to TOPIC_CALL_STATE, RETAINED so HA shows the current state
 /// after a reconnect/restart. The payload carries the mapped label (idle/ringing/in_call,
 /// or "active" for an unmapped code — see [`dimension::call_state_label`]) plus the raw
 /// code as an attribute for finer protocol detail.
 async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
+    // Invalidate any in-flight/imminent on-device idle capture on EVERY non-idle call-state publish — not
+    // just the live entrance/ring frames (which already call note_ring), but also the AUTHORITATIVE
+    // RECONCILE paths (reconnect / periodic poll / reseed): those republish an active call (in_call/active,
+    // ringing) that btmqttd MISSED while disconnected, so LAST_RING_MS may be 0 or expired. Without this, a
+    // first-run or "Update idle snapshot" capture running during such a reconciled active call would accept
+    // the visitor frame and persist it as the empty-doorway thumbnail (#169). Centralised here so every
+    // publisher of a non-idle code invalidates; code 0 (idle) deliberately does NOT (there is no visitor).
+    if code != 0 && cfg.camera_ondevice {
+        crate::capture::note_ring();
+    }
     let payload =
         serde_json::json!({ "state": dimension::call_state_label(code), "code": code }).to_string();
     try_publish_retained(client, &cfg.topic_call_state, QoS::AtLeastOnce, payload.into_bytes());
@@ -881,6 +996,30 @@ mod tests {
         assert!(momentary_deliverable(&online)); // connected -> deliver
         online.store(false, Ordering::Relaxed);
         assert!(!momentary_deliverable(&online)); // dropped again after a disconnect
+    }
+
+    #[test]
+    fn ring_snapshot_only_delivers_on_the_same_online_broker_session() {
+        // The ring-snapshot-ready signal is DEFERRED across the up-to-25 s capture, so it is bound to the
+        // broker SESSION it was detected on (#169): delivered only while online AND on the same epoch. A
+        // reconnect during the capture advances the epoch and suppresses a pre-outage ring's stale "someone
+        // is at the door" — which the disconnect purge can't catch because the publish is created only
+        // after the reconnect. BROKER_EPOCH is a process-global read by production code, so snapshot and
+        // RESTORE it around the test's temporary bump — no other test is left order-dependent on it.
+        let saved_epoch = BROKER_EPOCH.load(Ordering::Relaxed);
+        let online = AtomicBool::new(true);
+        let ring_epoch = BROKER_EPOCH.load(Ordering::Relaxed); // captured at "ring detection"
+        assert!(ring_snapshot_deliverable(&online, ring_epoch)); // online + same session -> deliver
+        online.store(false, Ordering::Relaxed);
+        assert!(!ring_snapshot_deliverable(&online, ring_epoch)); // offline at publish -> drop
+        // Broker bounced (dropped then reconnected) during the capture: online again, but a NEW session.
+        online.store(true, Ordering::Relaxed);
+        BROKER_EPOCH.fetch_add(1, Ordering::Relaxed);
+        assert!(!ring_snapshot_deliverable(&online, ring_epoch)); // online but stale epoch -> suppress
+        // A ring detected on the CURRENT session still delivers.
+        let fresh_epoch = BROKER_EPOCH.load(Ordering::Relaxed);
+        assert!(ring_snapshot_deliverable(&online, fresh_epoch));
+        BROKER_EPOCH.store(saved_epoch, Ordering::Relaxed); // restore the global for any later test
     }
 
     #[test]

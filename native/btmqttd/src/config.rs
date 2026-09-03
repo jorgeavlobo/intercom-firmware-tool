@@ -75,6 +75,11 @@ pub struct Config {
     pub topic_entrance_panel_call: String,
     pub topic_floor_call: String,
     pub topic_call_state: String,
+    /// Momentary "ring snapshot ready" signal (issue #169): published AFTER the on-device ring capture
+    /// has written that event's `/ring-<id>.jpg`, carrying the id, so the Home Assistant push automation
+    /// fires only once the image exists and fetches exactly that event's frame (a fixed post-ring delay
+    /// can't establish readiness — a cold capture can take ~20 s). Only used in on-device mode.
+    pub topic_ring_snapshot: String,
     // Stair-light SWITCH (opt-in). `light_enabled` reflects the installer's "has exterior
     // light" choice: when true the light subsystem RUNS even before a WHERE is known, so a
     // build left blank can LEARN the WHERE at runtime (see light.rs). `light_where` is the
@@ -142,6 +147,14 @@ pub struct Config {
     /// default — the only one siphonable on the C100X, and present on the C300X), `0` =
     /// hi-res (C300X only). Clamped to 0..=1; default 1.
     pub camera_branch: u8,
+    /// The on-device go2rtc RTSP credentials (issue #169). go2rtc serves the panel camera at
+    /// `rtsp://<user>:<pass>@127.0.0.1:8554/doorbell` with MANDATORY auth; the still-capture helper
+    /// (`capture.rs`) reads that same loopback URL to grab the idle/ring JPEG frames. Only meaningful
+    /// in `camera_ondevice` mode (the installer writes them then); `camera_rtsp_user` defaults to
+    /// `camera` (matching `MqttOptions.CameraRtspUser`), `camera_rtsp_pass` is `None` when unset (then
+    /// capture declines rather than pulling an unauthenticated URL).
+    pub camera_rtsp_user: String,
+    pub camera_rtsp_pass: Option<String>,
     /// On-device media server mode (issue #120, Phase 1). When set (`CAMERA_ONDEVICE=1`),
     /// go2rtc + ffmpeg run ON the panel and go2rtc listens on loopback, so the siphon fans
     /// the RTP to the loopback alias [`CAMERA_ONDEVICE_TARGET`] (`127.0.0.2`) rather than an
@@ -233,6 +246,7 @@ impl Config {
             topic_entrance_panel_call: get("TOPIC_ENTRANCE_PANEL_CALL", "Bticino/entrance_panel_call"),
             topic_floor_call: get("TOPIC_FLOOR_CALL", "Bticino/floor_call"),
             topic_call_state: get("TOPIC_CALL_STATE", "Bticino/call_state"),
+            topic_ring_snapshot: get("TOPIC_RING_SNAPSHOT", "Bticino/ring_snapshot"),
             // Digits only — a WHERE like "112". Empty ⇒ unknown (learn mode when enabled).
             light_where: opt("LIGHT_WHERE").filter(|s| s.bytes().all(|b| b.is_ascii_digit())),
             // "Has exterior light". When the installer wrote LIGHT_ENABLED it is AUTHORITATIVE
@@ -268,6 +282,10 @@ impl Config {
             // broker host (go2rtc usually lives with HA). Branch clamped to lo/hi-res (1/0).
             camera_enabled: flag("CAMERA_ENABLED"),
             camera_ondevice,
+            // go2rtc RTSP credentials for the still-capture helper (issue #169): user defaults to
+            // "camera" (matching the installer), pass is None when unset (capture then declines).
+            camera_rtsp_user: get("CAMERA_RTSP_USER", "camera"),
+            camera_rtsp_pass: opt("CAMERA_RTSP_PASS"),
             // On-device mode pins the fan-out to the loopback alias 127.0.0.2 (go2rtc listens
             // there); otherwise it's CAMERA_TARGET_HOST, defaulting to the broker host (go2rtc
             // usually lives with HA).

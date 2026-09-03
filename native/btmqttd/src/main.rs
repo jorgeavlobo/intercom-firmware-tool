@@ -24,6 +24,7 @@
 compile_error!("btmqttd targets Linux only — build and run host checks on Linux or WSL");
 
 mod av;
+mod capture;
 mod config;
 mod dimension;
 mod ha;
@@ -53,6 +54,14 @@ use rumqttc::{
 use tokio::signal::unix::{signal, SignalKind};
 
 use config::Config;
+
+/// Set once the daemon has begun quiescing (clean shutdown or restart_bridge re-exec), BEFORE any
+/// MQTT-producing task is stopped and the final retained `offline` is published. DETACHED tasks that are
+/// not tracked by the shutdown sequence (e.g. the "Update idle snapshot" capture-then-publish in
+/// `receiver`) check this before their final publish, so an in-flight one can't enqueue a retained
+/// maintenance breadcrumb AFTER `offline` — mirroring how the detached ring-snapshot capture gates on
+/// `broker_online` (#169). Never cleared: a quiescing daemon is on its way out (exit or re-exec).
+pub(crate) static QUIESCING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn main() {
     // Single-threaded runtime: this daemon juggles a few sockets, not a workload —
@@ -377,6 +386,65 @@ async fn run() -> Result<bool, String> {
             (None, stopping)
         }
     };
+    // First-run idle auto-capture (issue #169): on the first boot where no idle.jpg exists yet, grab the
+    // real empty-doorway view so Home Assistant's thumbnail is a genuine still from the start (not the
+    // baked placeholder). One-shot BY CONSTRUCTION — it captures only while idle.jpg is ABSENT, so once a
+    // capture lands (here, or via the HA "update idle snapshot" button) it never re-runs; a boot where the
+    // grab fails simply retries next boot (self-healing, no marker file). Waking an IDLE panel to
+    // photograph it needs the on-demand SIP UA, so this is gated on a live `view_tx` (present only with
+    // CAMERA_ONDEMAND_ENABLED) as well as on-device mode. Fully detached and best-effort — bounded by the
+    // capture's own timeout, it never delays or blocks startup, and it publishes nothing to MQTT so it is
+    // not one of the tasks stopped before the final retained `offline` (the runtime drop aborts it).
+    // Gate on the media path (camera_enabled) AS WELL as on-device: CAMERA_ONDEVICE can be set
+    // independently of CAMERA_ENABLED in a hand-edited conf, and without the camera feature there is no
+    // stream to capture. (A live view_tx already implies camera_enabled, so this is belt-and-braces.)
+    if cfg.camera_enabled && cfg.camera_ondevice {
+        // Seed the ring event-id counter above any ring-<id>.jpg that survived a daemon restart (tmpfs
+        // outlives a re-exec/watchdog respawn; only a reboot clears it), so a new process never reuses an
+        // id and overwrites a prior process's file that a delivered notification still points at. One-time
+        // tmpfs scan; a fresh boot finds none and starts at 0. Runs regardless of on-demand — a ring
+        // capture needs no SIP UA. Offload the blocking std::fs scan to the blocking pool (like every other
+        // filesystem read here) so it never stalls the single-threaded runtime; await it so the seed is
+        // committed BEFORE the sender (spawned below) can handle any ring.
+        let _ = tokio::task::spawn_blocking(capture::seed_ring_event_seq).await;
+        if let Some(view_tx) = view_tx.clone() {
+            let cfg_fr = cfg.clone();
+            tokio::spawn(async move {
+                // Nothing to do if a VALID idle image already exists. Validate the JPEG (same check the
+                // still endpoint serves by), NOT just presence: a corrupt/non-JPEG idle.jpg must NOT
+                // permanently suppress the self-healing first-run capture while the endpoint falls back
+                // to the placeholder. Checked off the single-threaded runtime.
+                if tokio::task::spawn_blocking(|| {
+                    persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
+                })
+                .await
+                // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid idle
+                // image exists" — that would permanently skip the self-healing first-run capture for this
+                // boot. Default to false so a transient failure falls through to a capture attempt.
+                .unwrap_or(false)
+                {
+                    return;
+                }
+                // Let go2rtc, the firewall and the SIP UA settle before waking the panel on a fresh boot.
+                tokio::time::sleep(capture::FIRST_RUN_DELAY).await;
+                // Re-check after the delay: a button press could have produced one meanwhile.
+                if tokio::task::spawn_blocking(|| {
+                    persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
+                })
+                .await
+                // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid idle
+                // image exists" — that would permanently skip the self-healing first-run capture for this
+                // boot. Default to false so a transient failure falls through to a capture attempt.
+                .unwrap_or(false)
+                {
+                    return;
+                }
+                eprintln!("btmqttd: capture: first-run idle snapshot (none present yet)");
+                let _ = capture::capture_idle(&cfg_fr, Some(&view_tx)).await;
+            });
+        }
+    }
+
     // On-device camera OFF ⇒ forget any learned sprop, so a later re-enable (or a panel swap) re-learns
     // instead of reassembling the runtime SDP with a stale value. Mirrors the light-where disable reset.
     // (Only when the on-device feature itself is off; an on-device unit with on-demand viewing off keeps
@@ -696,6 +764,11 @@ async fn run() -> Result<bool, String> {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                         // Broker is up: momentary events (door call / keypress) may publish again (#71).
                         broker_online.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // Advance the broker SESSION epoch: this is a NEW session. A deferred ring-snapshot
+                        // publish captured the prior epoch, so a ring whose capture straddled this reconnect
+                        // is now suppressed instead of firing a stale door notification (see #169 /
+                        // sender::BROKER_EPOCH).
+                        sender::BROKER_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // Connected: clear the rediscovery failure streak and forget
                         // proposed addresses, so a later outage starts fresh and a broker
                         // that returns to a former address can be found again.
@@ -957,6 +1030,19 @@ async fn run() -> Result<bool, String> {
             }
         }
     }
+
+    // Mark the broker as no-longer-deliverable the instant the event loop exits — BEFORE the task-stops
+    // and the final retained `offline` below. Momentary publishers gate on this (`momentary_deliverable`,
+    // issue #71), so a DETACHED ring-snapshot capture (issue #169) that finishes during the shutdown
+    // awaits will not enqueue its `ring_snapshot` publish after `offline` and make Home Assistant show a
+    // door notification from a bridge that has already announced itself offline. Set well before the
+    // offline sequence, so an in-flight capture's pre-publish check sees it.
+    broker_online.store(false, std::sync::atomic::Ordering::Relaxed);
+    // Also flag quiescing so a DETACHED task not tracked here (the "Update idle snapshot" capture that
+    // publishes a retained maintenance breadcrumb, #169) skips its final publish rather than enqueuing it
+    // after `offline`. Same placement/rationale as broker_online above; QUIESCING is shutdown-specific (a
+    // transient broker blip does not set it), so it suppresses only during an actual exit/re-exec.
+    QUIESCING.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // FREEZE the command worker's intake the instant the event loop exits — BEFORE any awaited task-stop
     // below. Each `stop(..).await` yields to the scheduler, and without this the worker could pull and
@@ -1318,6 +1404,14 @@ fn is_concrete_topic(topic: &str) -> bool {
 /// momentary topic, a topic-only predicate would purge the retained state publish too. Requiring
 /// `AtMostOnce && !retain` makes this incapable of ever dropping a retained publish, and never loses
 /// a real momentary event (they are always exactly QoS 0 / non-retained).
+///
+/// The ring-snapshot-ready topic is momentary ONLY under on-device capture (`camera_enabled &&
+/// camera_ondevice`) — the same predicate that publishes it (see `sender`) and that gates it in the
+/// installer's collision check. Off-device the daemon never publishes it, and the installer now
+/// deliberately permits another publish topic (e.g. `TOPIC_DUMP`) to equal the unused derived ring
+/// topic; that aliased publish is QoS 0 / non-retained bus data that MUST survive a reconnect, so the
+/// shape guard alone would not save it — gate the ring-topic match on the capture feature so an
+/// off-device alias is never mistaken for a momentary snapshot event and purged.
 fn is_momentary_publish(req: &Request, cfg: &Config) -> bool {
     matches!(
         req,
@@ -1326,6 +1420,9 @@ fn is_momentary_publish(req: &Request, cfg: &Config) -> bool {
                 && !p.retain
                 && (p.topic == cfg.topic_entrance_panel_call
                     || p.topic == cfg.topic_floor_call
+                    || (p.topic == cfg.topic_ring_snapshot
+                        && cfg.camera_enabled
+                        && cfg.camera_ondevice)
                     || p.topic == cfg.topic_key)
     )
 }
@@ -1419,5 +1516,49 @@ mod tests {
         let mut state_shape = Publish::new(&cfg.topic_entrance_panel_call, QoS::AtLeastOnce, "x");
         state_shape.retain = true;
         assert!(!is_momentary_publish(&Request::Publish(state_shape), &cfg));
+    }
+
+    #[test]
+    fn ring_snapshot_is_momentary_only_under_on_device_capture() {
+        // The ring-snapshot-ready publish (QoS 0, non-retained) must be purged on a disconnect like the
+        // other momentary events — but ONLY when on-device capture is enabled, since that is the only
+        // mode that publishes it. Off-device the installer now permits an existing publish topic (e.g.
+        // TOPIC_DUMP) to equal the unused derived ring topic; such an aliased QoS 0 / non-retained bus
+        // publish must SURVIVE a reconnect, so the ring-topic match must be gated on the capture feature.
+        let pub_to = |t: &str| Request::Publish(Publish::new(t, QoS::AtMostOnce, "x"));
+
+        // On-device: the ring-snapshot topic is momentary.
+        let on = Config::from_map(
+            [("MQTT_HOST", "h"), ("CAMERA_ENABLED", "1"), ("CAMERA_ONDEVICE", "1")]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        assert!(on.camera_enabled && on.camera_ondevice);
+        assert!(is_momentary_publish(&pub_to(&on.topic_ring_snapshot), &on));
+
+        // Off-device (default camera off): the ring topic is NOT momentary, so an aliased publish onto it
+        // (here TOPIC_DUMP == the derived ring topic — the exact off-device collision the installer now
+        // allows) is KEPT across a reconnect instead of being wrongly purged.
+        let off = Config::from_map(
+            [("MQTT_HOST", "h"), ("TOPIC_DUMP", "Bticino/ring_snapshot")]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        assert!(!off.camera_enabled && !off.camera_ondevice);
+        assert_eq!(off.topic_dump, off.topic_ring_snapshot, "the alias under test");
+        assert!(!is_momentary_publish(&pub_to(&off.topic_ring_snapshot), &off));
+        assert!(!is_momentary_publish(&pub_to(&off.topic_dump), &off));
+
+        // Camera enabled but OFF-device is likewise not a publisher of the ring topic → not momentary.
+        let off_device_only = Config::from_map(
+            [("MQTT_HOST", "h"), ("CAMERA_ENABLED", "1")]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        assert!(off_device_only.camera_enabled && !off_device_only.camera_ondevice);
+        assert!(!is_momentary_publish(&pub_to(&off_device_only.topic_ring_snapshot), &off_device_only));
     }
 }

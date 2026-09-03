@@ -82,6 +82,13 @@ const CAMERA_SPROP_FILE: &str = "camera-sprop";
 /// so the thumbnail stays stable), NOT keyed: the newest capture is always the wanted one.
 const IDLE_JPG_FILE: &str = "idle.jpg";
 
+/// A strictly-monotonic per-PROCESS counter (issue #169), one plain line, on the reboot- and
+/// reflash-persistent partition. Each daemon start (restart OR reboot) increments it and derives a
+/// DISJOINT ring-event-id range from it, so a ring id is never reused across process lifetimes — even a
+/// same-second reboot or a backward wall-clock step can't repeat one, closing the immutable
+/// `/ring-<id>.jpg` guarantee that a tmpfs-only or wall-clock seed left open.
+const RING_BOOT_FILE: &str = "ring-boot";
+
 /// The last-known "latest available" bridge version (issue #114), one plain line. Persisted on
 /// the same reboot-persistent partition so a daemon restart — or a firmware UPGRADE, where the
 /// broker still holds the OLD binary's retained payload — re-asserts the correct
@@ -285,6 +292,30 @@ pub fn read_idle_jpg() -> Option<Vec<u8>> {
     read_idle_jpg_in(&state_dir())
 }
 
+/// Persist the captured idle-snapshot JPEG (issue #169): the first-run auto-capture and the HA
+/// "Update idle snapshot" button write the real empty-doorway view here so the Phase-1 still endpoint
+/// serves it on the next poll (no restart). Atomic write + dir fsync like every other record, so a
+/// reboot mid-write never leaves a torn image — and, living on the reboot- and reflash-persistent
+/// `cfg/extra` partition, the captured thumbnail survives both. NOT keyed: the newest capture is always
+/// the wanted one. The caller has already validated the bytes are a real JPEG.
+///
+/// `commit_ok` is a COMMIT GATE evaluated at the LAST moment — after the temp file is written, in the
+/// same blocking step, immediately before the atomic rename that makes it the new `idle.jpg`. `None`
+/// discards the temp and leaves the existing `idle.jpg` UNTOUCHED; `Some(guard)` proceeds and the guard is
+/// held ACROSS the rename (see [`atomic_write_gated_in`]). `capture_idle` returns a shared mutex guard
+/// there and takes the same mutex in `note_ring()`, so the final ring check and the rename are one
+/// critical section against ring detection on the runtime thread — a ring detected DURING the (blocking)
+/// write can neither slip between the check and the rename nor get a visitor frame persisted as the
+/// empty-doorway thumbnail. Returns `true` only when the rename committed AND the parent-dir fsync that
+/// makes it durable succeeded; a post-rename fsync failure returns `false` even though `idle.jpg` may
+/// already have been replaced in the (not-yet-durable) directory — treat `false` as "not reliably stored",
+/// not as "unchanged". Blocking; call via `spawn_blocking`.
+#[must_use]
+pub fn store_idle_jpg<G>(bytes: &[u8], commit_ok: impl FnOnce() -> Option<G>) -> bool {
+    let dir = state_dir();
+    atomic_write_gated_in(&dir, &idle_jpg_file_in(&dir), bytes, commit_ok)
+}
+
 fn idle_jpg_file_in(dir: &Path) -> PathBuf {
     dir.join(IDLE_JPG_FILE)
 }
@@ -297,6 +328,57 @@ fn read_idle_jpg_in(dir: &Path) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     file.take(MAX_IDLE_JPG_BYTES + 1).read_to_end(&mut buf).ok()?;
     (!buf.is_empty() && buf.len() as u64 <= MAX_IDLE_JPG_BYTES).then_some(buf)
+}
+
+fn ring_boot_file_in(dir: &Path) -> PathBuf {
+    dir.join(RING_BOOT_FILE)
+}
+
+/// Read the persisted [`RING_BOOT_FILE`] counter, increment it, durably write it back, and return the NEW
+/// value — the per-process boot number the ring-id namespace is derived from (issue #169). Called ONCE at
+/// startup (before any ring). The value strictly increases across every daemon start (restart AND reboot)
+/// because it lives on the reboot-/reflash-persistent partition.
+///
+/// Returns `None` — FAIL CLOSED — whenever a durable, reboot-unique id cannot be guaranteed: the counter
+/// file is present-but-unreadable (I/O error) or present-but-unparseable (corruption), or the incremented
+/// value cannot be written back. In any of those cases silently resetting to a low value could re-issue an
+/// id a prior process already published, so the caller instead SUPPRESSES ring-snapshot capture (a stale
+/// `/ring-<id>.jpg` then 404s rather than resolving to a new visitor). A genuinely ABSENT file is the
+/// legitimate first boot (`0` → `Some(1)`), not a failure. Blocking `std::fs`.
+pub fn bump_ring_boot() -> Option<u64> {
+    bump_ring_boot_in(&state_dir())
+}
+
+fn bump_ring_boot_in(dir: &Path) -> Option<u64> {
+    let path = ring_boot_file_in(dir);
+    let current = match std::fs::read_to_string(&path) {
+        Ok(s) => match s.trim().parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("btmqttd: persist: ring boot counter is corrupt; ring snapshots disabled this run");
+                return None;
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0, // legitimate first boot
+        Err(e) => {
+            eprintln!("btmqttd: persist: cannot read ring boot counter ({e}); ring snapshots disabled this run");
+            return None;
+        }
+    };
+    // Checked, not saturating: at u64::MAX, saturating_add(1) would write/return u64::MAX on EVERY later
+    // start and reuse the id range. Overflow (only reachable after ~1.8e19 starts — physically impossible)
+    // fails closed instead, keeping the uniqueness guarantee literally true.
+    let Some(next) = current.checked_add(1) else {
+        eprintln!("btmqttd: persist: ring boot counter is exhausted (u64::MAX); ring snapshots disabled this run");
+        return None;
+    };
+    // The new value MUST be durable — otherwise the next process reads the old one and reuses `next`. On a
+    // write failure, fail closed rather than hand back a value we can't guarantee is unique.
+    if !atomic_write_in(dir, &path, format!("{next}\n").as_bytes()) {
+        eprintln!("btmqttd: persist: cannot persist ring boot counter; ring snapshots disabled this run");
+        return None;
+    }
+    Some(next)
 }
 
 fn read_update_latest_in(dir: &Path) -> Option<String> {
@@ -343,6 +425,25 @@ fn read_state_in(dir: &Path, host: &str) -> (bool, Option<(Ipv4Addr, Ipv4Addr)>)
 /// caller doesn't advance its change-gate and retries later, rather than claiming a
 /// durability it didn't get. Kept in ONE place so the two records can't drift.
 fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
+    atomic_write_gated_in(dir, path, body, || Some(()))
+}
+
+/// As [`atomic_write_in`], but `commit_ok` is a COMMIT GATE evaluated after the temp file is written and
+/// immediately before the rename (the atomic commit): `None` discards the temp and leaves `path` untouched
+/// (returns `false`); `Some(guard)` proceeds with the rename and — crucially — the returned `guard` is
+/// HELD across the rename, then dropped the instant the swap is done (before the durability fsync). The
+/// gate therefore does more than run without an async yield: a caller can return a lock guard so the
+/// check-then-rename is one critical section against ANOTHER OS THREAD (the gate runs on the blocking
+/// pool; a concurrent mutator runs on the runtime thread), not merely adjacent statements. `capture_idle`
+/// uses this to serialize its final ring check + rename with `note_ring()` under a shared mutex, so a ring
+/// detected on the runtime thread can land strictly before the check (→ vetoed) or strictly after the
+/// rename (→ the visitor frame was still the empty doorway at commit time), never invisibly between them.
+fn atomic_write_gated_in<G>(
+    dir: &Path,
+    path: &Path,
+    body: &[u8],
+    commit_ok: impl FnOnce() -> Option<G>,
+) -> bool {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("btmqttd: persist: cannot create {}: {e}", dir.display());
         return false;
@@ -352,20 +453,37 @@ fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
         return false;
     };
     match crate::receiver::create_unique_temp(path_str, body) {
-        Ok(tmp) => match std::fs::rename(&tmp, path_str) {
-            Ok(()) => match std::fs::File::open(dir).and_then(|dirf| dirf.sync_all()) {
-                Ok(()) => true,
+        Ok(tmp) => {
+            let commit_guard = match commit_ok() {
+                Some(g) => g,
+                None => {
+                    // Vetoed at the commit point (e.g. a ring was detected during the write) — discard the
+                    // temp and leave the existing file in place.
+                    let _ = std::fs::remove_file(&tmp);
+                    return false;
+                }
+            };
+            // Perform the atomic swap while still holding `commit_guard`, then release it BEFORE the dir
+            // fsync: once the rename has run the new file IS `path`, so the guarded critical section is
+            // exactly the check + rename (the fsync only makes the already-committed swap durable, and need
+            // not stall a mutator waiting on the same lock).
+            let renamed = std::fs::rename(&tmp, path_str);
+            drop(commit_guard);
+            match renamed {
+                Ok(()) => match std::fs::File::open(dir).and_then(|dirf| dirf.sync_all()) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
+                        false
+                    }
+                },
                 Err(e) => {
-                    eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
+                    let _ = std::fs::remove_file(&tmp);
+                    eprintln!("btmqttd: persist: cannot write {path_str}: {e}");
                     false
                 }
-            },
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                eprintln!("btmqttd: persist: cannot write {path_str}: {e}");
-                false
             }
-        },
+        }
         Err(e) => {
             eprintln!("btmqttd: persist: cannot create temp for {path_str}: {e}");
             false
@@ -780,6 +898,144 @@ mod tests {
         // An empty file reads back as None (treated as "no idle image yet").
         assert!(atomic_write_in(&dir, &file, b""));
         assert_eq!(read_idle_jpg_in(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_gated_in_vetoes_the_commit_and_leaves_the_prior_file_intact() {
+        // The commit gate (issue #169) lets capture_idle re-check ring-invalidation at the LAST moment,
+        // in the same blocking step just before the atomic rename: a ring detected DURING the (blocking)
+        // write must discard the freshly-written temp and leave the existing idle.jpg UNTOUCHED — never
+        // publish a visitor frame as the empty-doorway thumbnail. Verify both branches, plus no temp leak.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(9000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-gate-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = idle_jpg_file_in(&dir);
+
+        // Seed a prior "empty doorway" image via the ungated path.
+        let doorway = b"\xff\xd8\xff\xe0 doorway \xff\xd9";
+        assert!(atomic_write_in(&dir, &file, doorway));
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&doorway[..]));
+
+        // A vetoed commit (gate returns None) must NOT replace the prior file and must return false.
+        let visitor = b"\xff\xd8\xff\xe0 visitor \xff\xd9";
+        assert!(!atomic_write_gated_in(&dir, &file, visitor, || Option::<()>::None));
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&doorway[..]), "prior file must be untouched");
+
+        // The vetoed write must not leave a temp behind (only the committed idle.jpg remains).
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(leftovers, vec![file.file_name().unwrap().to_owned()], "no temp file should linger");
+
+        // An allowed commit (gate returns Some) replaces the file and returns true.
+        assert!(atomic_write_gated_in(&dir, &file, visitor, || Some(())));
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&visitor[..]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bump_ring_boot_in_is_durably_monotonic_across_process_starts() {
+        // The durable per-process ring boot counter (#169): each "process start" (call) returns a strictly
+        // higher value than the last, and the increment SURVIVES via the on-disk file — so two starts within
+        // the same wall-clock second still get different boot numbers (hence disjoint ring-id ranges), which
+        // a same-second reboot with a wall-clock seed could not guarantee. Directory-injected (no env
+        // mutation → parallel-safe).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(9700);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-ringboot-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Fresh state: first start is 1, and each subsequent start is exactly one higher, read back from disk.
+        assert_eq!(bump_ring_boot_in(&dir), Some(1), "first boot (absent file → 1)");
+        assert_eq!(bump_ring_boot_in(&dir), Some(2), "second start, even within the same second, differs");
+        assert_eq!(bump_ring_boot_in(&dir), Some(3));
+        // The value is DURABLE: a brand-new reader (a fresh process) sees the last persisted counter and
+        // continues strictly above it — never repeating a boot number (and thus never a ring-id range).
+        assert_eq!(
+            std::fs::read_to_string(ring_boot_file_in(&dir)).unwrap().trim(),
+            "3",
+            "the latest counter is persisted"
+        );
+        assert_eq!(bump_ring_boot_in(&dir), Some(4), "a later start resumes above the persisted value");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bump_ring_boot_in_fails_closed_on_a_corrupt_or_unwritable_counter() {
+        // A corrupt/unreadable counter, or a write that can't persist, must return None (fail closed) rather
+        // than silently reset the namespace to a low value and risk reusing a prior process's ids (#169).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(9800);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-ringboot-fc-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Corrupt counter (present but unparseable) → None, and it does NOT overwrite the corrupt file with
+        // a reset value (no silent namespace reset).
+        std::fs::write(ring_boot_file_in(&dir), b"not-a-number\n").unwrap();
+        assert_eq!(bump_ring_boot_in(&dir), None, "a corrupt counter fails closed");
+
+        // Counter path is a DIRECTORY: it can be neither read (read_to_string errors, not NotFound) nor
+        // written (the rename onto it fails), so bump fails closed regardless of which step trips first.
+        // (A read-only dir would be the pure write-failure case, but tests often run as root, which ignores
+        // mode bits — a directory path fails deterministically for any uid.)
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(ring_boot_file_in(&dir)).unwrap();
+        assert_eq!(bump_ring_boot_in(&dir), None, "an unusable counter path fails closed");
+
+        // Namespace exhaustion: a persisted counter at u64::MAX cannot be incremented, so bump fails closed
+        // (checked_add) instead of saturating and re-issuing u64::MAX forever.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(ring_boot_file_in(&dir), format!("{}\n", u64::MAX)).unwrap();
+        assert_eq!(bump_ring_boot_in(&dir), None, "an exhausted counter fails closed");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_gated_in_holds_the_commit_guard_across_the_rename() {
+        // The gate's guard must stay alive UNTIL the rename has run — that is what lets capture_idle hold a
+        // shared mutex across its final ring check + rename so note_ring() (which takes the same mutex on
+        // another thread) can't interleave. Prove it deterministically without threads: the guard's Drop
+        // observes the file and asserts the rename has already committed the new body by the time it runs.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(9500);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-guard-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = idle_jpg_file_in(&dir);
+
+        let doorway = b"\xff\xd8\xff\xe0 doorway \xff\xd9";
+        assert!(atomic_write_in(&dir, &file, doorway));
+
+        let visitor = b"\xff\xd8\xff\xe0 visitor \xff\xd9".to_vec();
+        // A guard whose Drop asserts the rename already happened (the file now holds `expected`). If the
+        // writer released the guard BEFORE the rename, this file would still be the doorway and the assert
+        // would fire.
+        struct RenameProof {
+            path: PathBuf,
+            expected: Vec<u8>,
+        }
+        impl Drop for RenameProof {
+            fn drop(&mut self) {
+                let got = std::fs::read(&self.path).expect("file must exist by guard drop");
+                assert_eq!(got, self.expected, "rename must have committed before the commit guard dropped");
+            }
+        }
+        let proof = RenameProof { path: file.clone(), expected: visitor.clone() };
+        assert!(atomic_write_gated_in(&dir, &file, &visitor, move || Some(proof)));
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&visitor[..]));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

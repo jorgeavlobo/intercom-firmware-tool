@@ -44,8 +44,8 @@ license texts and per-crate copyright notices travel with the binary in
 | Field | `btmqttd` |
 |---|---|
 | File | `armhf/btmqttd` |
-| Size | 1,617,496 bytes |
-| SHA-256 | `4f604885947282960063089297733ad9450886d23147fcf8474fd6d016976ab8` |
+| Size | 1,667,328 bytes |
+| SHA-256 | `7ea49c0bf9edb40e18a050790bebf5ad16cfc5ff784cbc4f6884069acf87bc33` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7 (`Tag_CPU_arch: v7`), **hard-float** (`Tag_FP_arch: VFPv3-D16`, `Tag_ABI_VFP_args: VFP registers`; ELF flags `0x5000400`) |
 | Build ID | none (stripped; `rust-lld` emits no GNU build-id note) |
@@ -142,30 +142,34 @@ Unlike `btmqttd` (our own program), **`ffmpeg` is genuinely third-party** — a 
 **LGPL-2.1-or-later** build of [FFmpeg](https://ffmpeg.org/) `n7.1.1`, cross-compiled to
 a static-musl armv7 hard-float binary and embedded in `IntercomFirmwareTool.Core`. The
 on-device media server (#120) runs it so go2rtc can read the panel's cleartext RTP via an
-SDP and **copy** the H.264 into RTSP — no frame is ever encoded or transcoded. The build
-does include the **H.264 decoder**, but only so `find_stream_info` can read the stream's
-parameter sets (SPS/PPS) from the SDP's `sprop-parameter-sets` at open, resolving the video
-dimensions in under a second; `-c:v copy` never decodes a frame at runtime. Built per
+SDP and **copy** the H.264 into RTSP — the live view never encodes or transcodes a frame. The
+build includes the **H.264 decoder** so `find_stream_info` can read the stream's parameter sets
+(SPS/PPS) from the SDP's `sprop-parameter-sets` at open, resolving the video dimensions in under
+a second; the live `-c:v copy` never decodes a frame at runtime. A separate, occasional
+**snapshot path** (#169) decodes one frame and **MJPEG-encodes** it to a JPEG file (the idle
+thumbnail + the ring snapshot) — the only path that encodes, and only on a first-run capture, an
+HA button press, or a doorbell ring, never on the resident live stream. Built per
 [`../../../native/ffmpeg/BUILD.md`](../../../native/ffmpeg/BUILD.md).
 
 It is compiled `--disable-everything` plus only the RTP/SDP→RTSP H.264-copy path (the H.264
-parser + decoder for parameter-set discovery, and the HEVC parser as a link-only dependency),
-**never** `--enable-gpl`/`--enable-nonfree` and with no GPL-only libraries (no x264/x265/…),
-so the whole binary is LGPL. **No encoders are built** — the one decoder is the LGPL H.264
-decoder, used solely to read parameter sets at open (the GPL x264 *encoder* is never enabled).
+parser + decoder for parameter-set discovery, and the HEVC parser as a link-only dependency)
+and the single-frame H.264-decode→**MJPEG-encode** snapshot path (#169), **never**
+`--enable-gpl`/`--enable-nonfree` and with no GPL-only libraries (no x264/x265/…), so the whole
+binary is LGPL. The only encoder built is the **LGPL MJPEG encoder** (used for the occasional
+JPEG snapshot); the GPL x264 *encoder* is never enabled.
 
 ### Provenance & integrity
 
 | Field | `ffmpeg` |
 |---|---|
 | File | `armhf/ffmpeg` |
-| Size | 2,746,872 bytes |
-| SHA-256 | `ac8dfeed4c54d4416762b052e1af5ac7797e2bdc57f666a1013f2fdf7a095a8e` |
+| Size | 2,974,144 bytes |
+| SHA-256 | `a8e2e63bbc16dc58f36c268653a11a153856644a9259dc8cf84adbd2be693dab` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
 | Upstream | FFmpeg `n7.1.1` (release tag) |
 | Build toolchain | `zig cc` 0.13.0 (bundled musl) per `BUILD.md` |
-| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp` · `parser=h264,hevc` · `decoder=h264` · `--disable-asm` |
+| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp,image2` · `parser=h264,hevc` · `decoder=h264` · `encoder=mjpeg` · `--disable-asm` |
 | License | **LGPL-2.1-or-later** (FFmpeg) **AND MIT** (statically-linked musl libc) |
 | License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](../../../licenses/ffmpeg-COPYING.LGPLv2.1.txt) · [`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt) |
 | SPDX expression | `LGPL-2.1-or-later AND MIT` |

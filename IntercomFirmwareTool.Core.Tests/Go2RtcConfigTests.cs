@@ -211,6 +211,58 @@ public class Go2RtcConfigTests
     }
 
     [Fact]
+    public void BuildOnDeviceSetupGuide_documents_the_idle_button_and_ring_notification()
+    {
+        // #169: the guide explains the real captured idle thumbnail + the "Update idle snapshot" button,
+        // and gives the transient ring snapshot URL plus an HA automation recipe for the ring push.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "doorbell");
+        // The idle thumbnail is a real captured view, refreshable via the HA button.
+        Assert.Contains("Update idle snapshot", guide);
+        // Ring snapshots are per-EVENT URLs (issue #169), addressed by the id the notification carries
+        // — the industry pattern (Ring/Nest/Frigate) so two rings can never cross images.
+        Assert.Contains("http://<intercom-ip>:8556/ring-<id>.jpg", guide);
+        // The pasteable automation templates the image URL from the event id in the MQTT payload.
+        Assert.Contains("/ring-{{ trigger.payload_json.id }}.jpg", guide);
+        // The ring-notification automation triggers on the ring-snapshot-READY topic (published only
+        // after the frame is written), so it never fires on a fixed delay that a cold capture outlasts.
+        Assert.Contains(opts.EffectiveTopicRingSnapshot, guide);
+        Assert.DoesNotContain("delay:", guide);
+        // The raw ring event topic is still mentioned (for automations that just need the ring signal).
+        Assert.Contains(opts.EffectiveTopicEntrancePanelCall, guide);
+        Assert.Contains("notify.mobile_app", guide);
+        Assert.DoesNotContain("\r", guide);
+    }
+
+    [Fact]
+    public void BuildOnDeviceSetupGuide_yaml_escapes_a_ring_topic_with_quote_or_backslash()
+    {
+        // Topic validation permits '"' and '\' (they are printable — only control characters and MQTT
+        // wildcards are rejected), so a library caller could supply one; the ring-notification recipe
+        // interpolates the topic into a double-quoted YAML scalar, which must escape those two characters
+        // or the paste-ready automation breaks / subscribes to a different topic.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+            TopicRingSnapshot = "Bticino/ring\"\\snap",
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "doorbell");
+        // The YAML trigger line carries the escaped form inside the double quotes...
+        Assert.Contains("topic: \"Bticino/ring\\\"\\\\snap\"", guide);
+        // ...and never the raw, unescaped topic (which would terminate the scalar early).
+        Assert.DoesNotContain("\"Bticino/ring\"\\snap\"", guide);
+    }
+
+    [Fact]
     public void BuildOnDeviceSetupGuide_keeps_the_password_placeholder_readable_when_unset()
     {
         // With no password set (a bare/library caller — the App always sets one on-device), the URL must

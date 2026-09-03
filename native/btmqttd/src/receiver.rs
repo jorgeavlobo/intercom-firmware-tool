@@ -226,6 +226,46 @@ async fn handle_json(
             }
             return;
         }
+        // Idle snapshot refresh (issue #169): the HA "Update idle snapshot" button re-captures the real
+        // empty-doorway view and overwrites idle.jpg (served by the Phase-1 still endpoint at /idle.jpg).
+        // Same ungated posture and TOPIC_RX trust boundary as the controls above. On-device only — there
+        // is no on-box capture path otherwise. The capture takes several seconds (SIP bring-up + one
+        // keyframe + encode), so run it FULLY DETACHED: never block the single ordered command worker.
+        // capture_idle wakes the panel (via view_tx) and stores the frame; publish the `update_idle`
+        // maintenance ack ONLY if a fresh image was actually captured and stored — a best-effort "done"
+        // signal like restore_ssh, withheld on failure so HA shows no false success.
+        if action == "update_idle" {
+            // On-device only, AND on-demand viewing must be available (view_tx present): capturing an
+            // IDLE panel means WAKING it via the SIP UA first, so with no view channel `capture_idle`
+            // cannot bring the stream up — `grab_jpeg` would just wait out its ~25 s timeout and publish
+            // no ack. This matches the discovery contract (the installer tombstones the button unless
+            // on-device AND on-demand), and fails a direct MQTT press fast with a clear reason.
+            if !cfg.camera_enabled || !cfg.camera_ondevice || view_tx.is_none() {
+                eprintln!(
+                    "btmqttd: ignored update_idle: on-device camera + on-demand viewing required \
+                     (CAMERA_ENABLED=1, CAMERA_ONDEVICE=1 and CAMERA_ONDEMAND_ENABLED=1 — the SIP UA \
+                     that wakes the panel needs all three)"
+                );
+                return;
+            }
+            let cfg2 = cfg.clone();
+            let client2 = client.clone();
+            let view_tx2 = view_tx.cloned();
+            tokio::spawn(async move {
+                // This capture can run up to ~27 s; the task is detached (so the command worker stays
+                // responsive) and is NOT tracked by main's shutdown task-stop set. Gate the final retained
+                // maintenance publish on QUIESCING so a shutdown / restart_bridge that begins mid-capture
+                // can't enqueue this breadcrumb AFTER the daemon's `offline` — matching the detached
+                // ring-snapshot's broker_online gate (#169). The idle.jpg itself is local, so the capture
+                // still helps even when the ACK is skipped.
+                if crate::capture::capture_idle(&cfg2, view_tx2.as_ref()).await
+                    && !crate::QUIESCING.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    publish_maintenance(&client2, &cfg2, "update_idle").await;
+                }
+            });
+            return;
+        }
         // Maintenance actions (issue #43): the HA "Reboot device" / "Restart bridge" buttons. Same
         // ungated posture and TOPIC_RX trust boundary as the controls above — a FIXED reboot/restart is
         // no wider a capability than the lock a raw frame on this topic can already actuate.

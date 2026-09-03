@@ -418,11 +418,59 @@ namespace IntercomFirmwareTool.Core
             sb.Append("  ring, an answered call, or the self-view eye); between sessions the\n");
             sb.Append("  stream is idle (the panel only encodes on demand).\n");
             sb.Append(string.Create(ci,
-                $"- The Still Image URL (:{OnDeviceStillPort}) serves a fixed idle snapshot, so\n" +
+                $"- The Still Image URL (:{OnDeviceStillPort}) serves the idle snapshot, so\n" +
                 $"  Home Assistant's camera thumbnail never has to open the live stream (which\n" +
                 $"  would otherwise wake the panel on every thumbnail refresh). Leaving it blank\n" +
                 $"  makes Home Assistant grab thumbnails from the stream and keep the doorbell\n" +
                 $"  session churning — so this field is recommended, not optional.\n"));
+            sb.Append(string.Create(ci,
+                $"- The idle snapshot at /idle.jpg is a REAL frame of the empty doorway: the\n" +
+                $"  panel captures it automatically on first boot (best-effort — if that\n" +
+                $"  boot's capture doesn't land, a later boot retries), and you can refresh it\n" +
+                $"  any time with the \"Update idle snapshot\" button (press it to re-capture the\n" +
+                $"  current view). It persists across reboots and reflashes. Both the\n" +
+                $"  auto-capture and the button need on-demand viewing enabled (the panel must\n" +
+                $"  be woken to photograph an idle doorway); with on-demand off, neither can run,\n" +
+                $"  so /idle.jpg keeps serving whatever it already has — a previously captured\n" +
+                $"  snapshot if one exists, otherwise the neutral placeholder.\n"));
+
+            sb.Append("\nRing snapshot + notification\n----------------------------\n");
+            sb.Append(string.Create(ci,
+                $"When the doorbell rings, the panel captures a SEPARATE snapshot of who is at the\n" +
+                $"door. Each ring is its own EVENT with a unique id, and its picture is served\n" +
+                $"(transiently, on tmpfs) at a per-event URL:\n\n" +
+                $"    http://<intercom-ip>:{OnDeviceStillPort}/ring-<id>.jpg\n\n"));
+            sb.Append("This never overwrites the idle thumbnail. The panel publishes the id on the\n");
+            sb.Append("snapshot topic AFTER the frame is written, so the notification below fetches\n");
+            sb.Append("exactly that ring's picture (two rings can never cross images). Add a Home\n");
+            sb.Append("Assistant automation like this — replace <intercom-ip> and\n");
+            sb.Append("notify.mobile_app_your_phone with your own:\n\n");
+            // The topic goes into a double-quoted YAML scalar, so escape the two PRINTABLE characters a
+            // double-quoted scalar treats specially — backslash first, then the quote. Topic validation
+            // (MqttInstaller) already rejects every control character (newlines included) and the MQTT
+            // wildcards, so those cannot reach here; only '"' and '\' — which a library caller could still
+            // supply — need escaping, without which they would break the paste-ready recipe or silently
+            // change the subscribed topic. The default/base64url topics contain neither, so the common case
+            // is unchanged.
+            var ringTopicYaml = opts.EffectiveTopicRingSnapshot.Replace("\\", "\\\\").Replace("\"", "\\\"");
+            sb.Append(string.Create(ci,
+                $"    alias: Doorbell ring notification\n" +
+                $"    trigger:\n" +
+                $"      - platform: mqtt\n" +
+                $"        topic: \"{ringTopicYaml}\"\n" +
+                $"    action:\n" +
+                $"      - service: notify.mobile_app_your_phone\n" +
+                $"        data:\n" +
+                $"          message: \"Someone is at the door\"\n" +
+                $"          data:\n" +
+                $"            image: >-\n" +
+                $"              http://<intercom-ip>:{OnDeviceStillPort}/ring-{{{{ trigger.payload_json.id }}}}.jpg\n\n"));
+            sb.Append(string.Create(ci,
+                $"The snapshot topic carries the ring's event id (`{{\"at\":\"…\",\"id\":123}}`), and\n" +
+                $"the templated image URL above fetches that exact frame — published ONLY after it is\n" +
+                $"written, so there is no fixed-delay guesswork (a cold stream can take a while to\n" +
+                $"produce a frame). The raw ring event on \"{opts.EffectiveTopicEntrancePanelCall}\"\n" +
+                $"still fires immediately, for automations that only need to know a ring happened.\n"));
             return sb.ToString();
         }
     }
