@@ -1741,9 +1741,11 @@ namespace IntercomFirmwareTool.Core
             // the idle/ring JPEG frames. Write them ONLY on-device (the capture path exists only there),
             // and from the SAME MqttOptions values that feed go2rtc.yaml so the daemon and go2rtc agree.
             // Validate has already guaranteed they are non-empty and control-char-free in on-device mode;
-            // the extra non-empty guard keeps a bare/library caller (on-device flag set but no password
-            // wired) from emitting a half credential rather than throwing here.
-            if (opts.CameraEnabled && opts.CameraOnDevice && !string.IsNullOrEmpty(opts.CameraRtspPass))
+            // guard on BOTH user and pass so a bare/library caller (on-device flag set but a credential
+            // left blank) emits NEITHER line rather than a half credential — an empty CAMERA_RTSP_USER
+            // with a set pass would be a broken/insecure pairing, not a usable one.
+            if (opts.CameraEnabled && opts.CameraOnDevice
+                && !string.IsNullOrEmpty(opts.CameraRtspUser) && !string.IsNullOrEmpty(opts.CameraRtspPass))
             {
                 sb.Append(Conf("CAMERA_RTSP_USER", opts.CameraRtspUser));
                 sb.Append(Conf("CAMERA_RTSP_PASS", opts.CameraRtspPass));

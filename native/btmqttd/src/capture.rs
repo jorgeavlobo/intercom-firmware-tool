@@ -71,6 +71,12 @@ pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 static CAPTURING_RING: AtomicBool = AtomicBool::new(false);
 
+/// Monotonic ring "generation". Every ring bumps it; a capture only KEEPS its result if its generation
+/// is still current, so a slow or skipped ring capture can never leave an OLDER visitor's photo standing
+/// for a NEWER ring's notification — the newer ring supersedes it, and the served image is the current
+/// ring's frame or a clean 404, never a stale one.
+static RING_GEN: AtomicU32 = AtomicU32::new(0);
+
 /// Per-process nonce so overlapping-in-time scratch files never collide (atop the pid).
 static NONCE: AtomicU32 = AtomicU32::new(0);
 
@@ -201,8 +207,10 @@ async fn grab_jpeg(cfg: &Config) -> Result<Vec<u8>, String> {
             Ok(Ok(status)) => Err(format!("ffmpeg exited with {status}")),
             Ok(Err(e)) => Err(format!("waiting for ffmpeg failed: {e}")),
             Err(_) => {
-                // Overran the budget — kill it so a stuck pull can't linger (kill_on_drop also covers
-                // an early return, but do it explicitly and reap so no zombie is left).
+                // Overran the budget: SIGKILL the child AND reap it so no zombie is left. tokio's
+                // `Child::kill().await` both signals and AWAITS the child's exit (it is `start_kill()` +
+                // `wait().await`), so this reaps here; `kill_on_drop` is only the belt-and-braces for an
+                // early return that skips this arm.
                 let _ = child.kill().await;
                 Err(format!("ffmpeg capture timed out after {}s", CAPTURE_TIMEOUT.as_secs()))
             }
@@ -301,32 +309,48 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
 /// Returns whether a ring image was captured and written. Skips (returns `false`) if a capture is
 /// already running.
 pub async fn capture_ring(cfg: &Config) -> bool {
+    // Claim a fresh generation for THIS ring. A later ring bumps it again, superseding us.
+    let my_gen = RING_GEN.fetch_add(1, Ordering::SeqCst).wrapping_add(1);
     // Invalidate any PRIOR visitor's ring image FIRST — before the guard — so that even a ring which is
     // skipped (another ring still capturing), fails, or times out leaves NO stale image: the push
     // notification then gets a clean 404 for the new ring instead of the previous person's photograph.
     // The in-flight capture (if any) writes via temp+rename, so this unlink of the final path can't
-    // corrupt it — its rename re-creates the file when the fresh frame is ready.
+    // corrupt it — but the generation re-check below is what makes the 404 guarantee airtight against
+    // that in-flight capture renaming its (now older) frame in after this unlink.
     let _ = tokio::fs::remove_file(ring_jpg_path()).await;
     let Some(_guard) = try_lock(&CAPTURING_RING) else {
         eprintln!("btmqttd: capture: ring capture skipped (a ring capture is already in progress)");
         return false;
     };
-    match grab_jpeg(cfg).await {
-        Ok(bytes) => {
-            let stored =
-                tokio::task::spawn_blocking(move || store_ring_jpg(&bytes)).await.unwrap_or(false);
-            if stored {
-                eprintln!("btmqttd: capture: ring snapshot captured");
-            } else {
-                eprintln!("btmqttd: capture: ring snapshot captured but could not be written");
-            }
-            stored
-        }
+    let bytes = match grab_jpeg(cfg).await {
+        Ok(b) => b,
         Err(e) => {
             eprintln!("btmqttd: capture: ring capture failed: {e}");
-            false
+            return false;
         }
+    };
+    // A newer ring arrived while we captured ⇒ our frame is STALE. Do not leave it standing for the
+    // newer ring's notification: the newer ring already cleared ring.jpg (and will write its own or
+    // leave a clean 404), so drop ours. Checked BOTH here (fast path — skip the write) and again after
+    // the store (closes the race where the newer ring bumps between this check and our rename).
+    if RING_GEN.load(Ordering::SeqCst) != my_gen {
+        eprintln!("btmqttd: capture: ring snapshot superseded by a newer ring; discarding");
+        return false;
     }
+    let stored = tokio::task::spawn_blocking(move || store_ring_jpg(&bytes)).await.unwrap_or(false);
+    if stored && RING_GEN.load(Ordering::SeqCst) != my_gen {
+        // Superseded during/just after our rename — remove our now-stale image so the newer ring's
+        // clean 404 (or its own fresh frame) stands, never this older visitor's photo.
+        let _ = tokio::fs::remove_file(ring_jpg_path()).await;
+        eprintln!("btmqttd: capture: ring snapshot superseded after store; discarded");
+        return false;
+    }
+    if stored {
+        eprintln!("btmqttd: capture: ring snapshot captured");
+    } else {
+        eprintln!("btmqttd: capture: ring snapshot captured but could not be written");
+    }
+    stored
 }
 
 /// Write the transient ring snapshot to tmpfs atomically (temp + rename), so a concurrent
