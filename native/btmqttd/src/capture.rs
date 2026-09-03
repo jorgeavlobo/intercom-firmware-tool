@@ -531,6 +531,13 @@ pub fn note_pending_ring(broker_epoch: u64) -> u64 {
 /// process would run ~31 years), so ids from different process lifetimes never overlap.
 const RING_ID_BOOT_STRIDE: u64 = 1_000_000_000;
 
+/// The base of a boot's ring-id range: `boot * RING_ID_BOOT_STRIDE`, or `None` if that would overflow
+/// `u64` (a boot number above ~1.8e10 — physically unreachable). `None` fails the seed closed, so ids are
+/// never derived from a saturated (range-overlapping) value.
+fn ring_seed_base(boot: u64) -> Option<u64> {
+    boot.checked_mul(RING_ID_BOOT_STRIDE)
+}
+
 /// Seed [`RING_EVENT_SEQ`] so a fresh process never reuses a ring id that a still-undelivered
 /// notification's `/ring-<id>.jpg` URL points at (reuse would hand the old event the NEW visitor's
 /// picture, breaking the immutable-URL guarantee). Anchored to a DURABLE per-process counter
@@ -545,8 +552,8 @@ pub fn seed_ring_event_seq() {
     // The durable per-process counter is the id-uniqueness authority. `None` means it could not be trusted
     // (a flash read/write error or a corrupt counter): FAIL CLOSED — mark ring ids non-durable so
     // ring-snapshot capture is suppressed (see [`ring_ids_durable`]) rather than risk reusing an id.
-    let (mut seed, durable) = match crate::persist::bump_ring_boot() {
-        Some(boot) => (boot.saturating_mul(RING_ID_BOOT_STRIDE), true),
+    let (mut seed, durable) = match crate::persist::bump_ring_boot().and_then(ring_seed_base) {
+        Some(base) => (base, true),
         None => (0, false),
     };
     // tmpfs floor: on the durable path a belt-and-braces guard against a lost counter with lingering files;
@@ -811,6 +818,20 @@ mod tests {
         RING_EVENT_SEQ.store(saved_seq, Ordering::Relaxed);
         RING_NEWEST.store(saved_newest, Ordering::Relaxed);
         RING_NEWEST_EPOCH.store(saved_epoch, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn ring_seed_base_is_checked_at_the_u64_boundary() {
+        // The per-boot id range base multiplies boot by the stride; it must FAIL CLOSED (None) rather than
+        // saturate — a saturated base would overlap a prior range and reuse ids (#169).
+        assert_eq!(ring_seed_base(0), Some(0));
+        assert_eq!(ring_seed_base(1), Some(RING_ID_BOOT_STRIDE));
+        // Largest boot number whose range base still fits in u64.
+        let max_ok = u64::MAX / RING_ID_BOOT_STRIDE;
+        assert_eq!(ring_seed_base(max_ok), Some(max_ok * RING_ID_BOOT_STRIDE));
+        // One higher overflows → None (physically unreachable, but must not saturate).
+        assert_eq!(ring_seed_base(max_ok + 1), None);
+        assert_eq!(ring_seed_base(u64::MAX), None);
     }
 
     #[test]

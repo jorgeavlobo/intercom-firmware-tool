@@ -365,7 +365,13 @@ fn bump_ring_boot_in(dir: &Path) -> Option<u64> {
             return None;
         }
     };
-    let next = current.saturating_add(1);
+    // Checked, not saturating: at u64::MAX, saturating_add(1) would write/return u64::MAX on EVERY later
+    // start and reuse the id range. Overflow (only reachable after ~1.8e19 starts — physically impossible)
+    // fails closed instead, keeping the uniqueness guarantee literally true.
+    let Some(next) = current.checked_add(1) else {
+        eprintln!("btmqttd: persist: ring boot counter is exhausted (u64::MAX); ring snapshots disabled this run");
+        return None;
+    };
     // The new value MUST be durable — otherwise the next process reads the old one and reuses `next`. On a
     // write failure, fail closed rather than hand back a value we can't guarantee is unique.
     if !atomic_write_in(dir, &path, format!("{next}\n").as_bytes()) {
@@ -986,6 +992,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(ring_boot_file_in(&dir)).unwrap();
         assert_eq!(bump_ring_boot_in(&dir), None, "an unusable counter path fails closed");
+
+        // Namespace exhaustion: a persisted counter at u64::MAX cannot be incremented, so bump fails closed
+        // (checked_add) instead of saturating and re-issuing u64::MAX forever.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(ring_boot_file_in(&dir), format!("{}\n", u64::MAX)).unwrap();
+        assert_eq!(bump_ring_boot_in(&dir), None, "an exhausted counter fails closed");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
