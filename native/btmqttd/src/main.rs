@@ -39,6 +39,7 @@ mod rediscovery;
 mod sender;
 mod sip;
 mod sprop;
+mod still;
 mod update;
 mod volume;
 
@@ -357,6 +358,21 @@ async fn run() -> Result<bool, String> {
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if cfg.camera_ondevice {
             (Some(tokio::spawn(sprop::run(cfg.clone(), stopping.clone()))), stopping)
+        } else {
+            (None, stopping)
+        }
+    };
+    // On-device still endpoint (issue #168): a tiny LAN-facing HTTP server (:8556) that serves a
+    // JPEG — the persisted idle snapshot if one exists, else a baked placeholder — so Home Assistant's
+    // camera thumbnail poll grabs a cheap still instead of waking the live RTSP stream (the on-demand
+    // "thrash"). On-device ONLY (it exists to feed the on-device go2rtc/HA path), so gate it on
+    // `camera_ondevice` like sprop. It publishes NOTHING to the broker and holds no half-actuated
+    // state, so shutdown is a plain `stopping`-flag + abort (like av/sprop). `None` (feature off)
+    // threads through as a no-op.
+    let (still_task, still_stopping): (Option<tokio::task::JoinHandle<()>>, Arc<std::sync::atomic::AtomicBool>) = {
+        let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if cfg.camera_ondevice {
+            (Some(tokio::spawn(still::run(stopping.clone()))), stopping)
         } else {
             (None, stopping)
         }
@@ -1094,6 +1110,12 @@ async fn run() -> Result<bool, String> {
     // publishes nothing, so abort it like av.rs — its ordering vs. the SIP drain below is irrelevant.
     if let Some(h) = sprop_task {
         sprop_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+        stop(h).await;
+    }
+    // On-device still endpoint (issue #168): a stateless LAN HTTP server that publishes nothing and
+    // holds no half-actuated state, so stop it like av/sprop — signal `stopping`, then abort-and-await.
+    if let Some(h) = still_task {
+        still_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
     }
     // On-demand SIP UA (issue #104): drain it gracefully. `stop(cmd_worker)` above already dropped

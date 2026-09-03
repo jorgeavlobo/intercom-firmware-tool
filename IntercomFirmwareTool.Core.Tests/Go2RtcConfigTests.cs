@@ -201,6 +201,10 @@ public class Go2RtcConfigTests
         Assert.Contains("rtsp://camera:s3cr3t@<intercom-ip>:8554/frontdoor", guide);
         Assert.Contains("username: camera", guide);
         Assert.Contains("password: s3cr3t", guide);
+        // The Still Image URL (issue #168): the cheap idle JPEG HA polls for the camera thumbnail, on the
+        // on-device still port, with NO credentials in the URL.
+        Assert.Contains("Still Image URL", guide);
+        Assert.Contains("http://<intercom-ip>:8556/idle.jpg", guide);
         // The loopback-only API is called out; no HA-side go2rtc.
         Assert.Contains("127.0.0.1:1984", guide);
         Assert.DoesNotContain("\r", guide);

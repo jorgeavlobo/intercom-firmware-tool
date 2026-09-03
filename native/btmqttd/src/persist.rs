@@ -72,6 +72,16 @@ const LIGHT_WHERE_FILE: &str = "light-where";
 /// durable source of truth for "provisioned", surviving reboots on the same cfg/extra partition.
 const CAMERA_SPROP_FILE: &str = "camera-sprop";
 
+/// The persisted idle-snapshot JPEG (issues #168/#169): the "empty doorway" still Home Assistant
+/// polls for the camera-entity thumbnail, so a thumbnail poll never has to wake the live RTSP
+/// stream (the on-demand thrash — issue #168). Phase 1 (#168) only READS it: the on-device HTTP
+/// still endpoint (`still.rs`) serves this file when it is present and a valid JPEG, else a small
+/// baked neutral placeholder. Phase 2 (#169) will WRITE it — capture the real idle view at first
+/// run and on an HA "update idle snapshot" press. Lives on the same reboot- and reflash-persistent
+/// `cfg/extra` partition as the other records (a captured idle image survives reboots and reflashes
+/// so the thumbnail stays stable), NOT keyed: the newest capture is always the wanted one.
+const IDLE_JPG_FILE: &str = "idle.jpg";
+
 /// The last-known "latest available" bridge version (issue #114), one plain line. Persisted on
 /// the same reboot-persistent partition so a daemon restart — or a firmware UPGRADE, where the
 /// broker still holds the OLD binary's retained payload — re-asserts the correct
@@ -254,6 +264,24 @@ pub fn read_update_latest() -> Option<String> {
 
 fn update_latest_file_in(dir: &Path) -> PathBuf {
     dir.join(UPDATE_LATEST_FILE)
+}
+
+/// Read the persisted idle-snapshot JPEG (issue #168), or `None` when absent, unreadable, or
+/// empty. The bytes are returned VERBATIM — the caller (`still.rs`) validates the JPEG magic
+/// before serving and otherwise falls back to the baked placeholder, so a truncated/garbage file
+/// never reaches Home Assistant. Blocking `std::fs`; call via `spawn_blocking` off the async
+/// runtime. Only reads (Phase 1); Phase 2 (#169) adds the writer.
+pub fn read_idle_jpg() -> Option<Vec<u8>> {
+    read_idle_jpg_in(&state_dir())
+}
+
+fn idle_jpg_file_in(dir: &Path) -> PathBuf {
+    dir.join(IDLE_JPG_FILE)
+}
+
+fn read_idle_jpg_in(dir: &Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(idle_jpg_file_in(dir)).ok()?;
+    (!bytes.is_empty()).then_some(bytes)
 }
 
 fn read_update_latest_in(dir: &Path) -> Option<String> {
@@ -704,6 +732,30 @@ mod tests {
         // An empty/whitespace file reads back as None.
         assert!(atomic_write_in(&dir, &file, b"\n"));
         assert_eq!(read_update_latest_in(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn idle_jpg_reads_bytes_verbatim_and_none_when_absent_or_empty() {
+        // Directory-injected core (no env mutation → parallel-safe). The idle snapshot (issue
+        // #168) is opaque bytes: read returns them verbatim (the caller validates the JPEG magic),
+        // and a missing OR empty file reads back as None so the endpoint serves the baked
+        // placeholder instead.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(8000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-idle-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = idle_jpg_file_in(&dir);
+
+        assert_eq!(read_idle_jpg_in(&dir), None); // no file yet
+        let jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF payload \xff\xd9";
+        assert!(atomic_write_in(&dir, &file, jpeg));
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&jpeg[..]));
+        // An empty file reads back as None (treated as "no idle image yet").
+        assert!(atomic_write_in(&dir, &file, b""));
+        assert_eq!(read_idle_jpg_in(&dir), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

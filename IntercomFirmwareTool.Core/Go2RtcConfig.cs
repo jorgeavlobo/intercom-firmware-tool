@@ -54,6 +54,13 @@ namespace IntercomFirmwareTool.Core
         /// never exposed on the LAN (no firewall rule opens it).</summary>
         public const int OnDeviceApiPort = 1984;
 
+        /// <summary>The port btmqttd serves the still-image (idle snapshot) HTTP endpoint on (issue #168).
+        /// LAN-facing, opened by the <c>go2rtcd</c> firewall alongside <see cref="OnDeviceRtspPort"/>. Home
+        /// Assistant's Generic Camera is pointed at <c>http://&lt;ip&gt;:8556/idle.jpg</c> as its <i>Still
+        /// Image URL</i> so a thumbnail poll grabs this cheap JPEG instead of waking the live RTSP stream.
+        /// Must equal btmqttd's <c>still::STILL_PORT</c> and the go2rtcd script's <c>CAM_STILL_PORT</c>.</summary>
+        public const int OnDeviceStillPort = 8556;
+
         /// <summary>Absolute path of the vendored ffmpeg on the device (see <c>PayloadBinaries.Ffmpeg</c>).
         /// go2rtc's <c>exec:</c> source runs it to copy the panel's H.264 into RTSP.</summary>
         public const string OnDeviceFfmpegPath = "/usr/sbin/ffmpeg";
@@ -388,6 +395,11 @@ namespace IntercomFirmwareTool.Core
             sb.Append(string.Create(ci,
                 $"    rtsp://{userEnc}:{passInUrl}@<intercom-ip>:{OnDeviceRtspPort}/{name}\n\n"));
 
+            sb.Append("Also set the Generic Camera's \"Still Image URL\" to this (no login) —\n");
+            sb.Append("replace <intercom-ip> with the panel's IP:\n\n");
+            sb.Append(string.Create(ci,
+                $"    http://<intercom-ip>:{OnDeviceStillPort}/idle.jpg\n\n"));
+
             sb.Append("Credentials (generated for this build):\n");
             sb.Append(string.Create(ci, $"    username: {user}\n"));
             sb.Append(string.Create(ci, $"    password: {pass}\n\n"));
@@ -400,11 +412,17 @@ namespace IntercomFirmwareTool.Core
             sb.Append("- Video only for now (H.264 copied through untouched, no re-encode);\n");
             sb.Append("  audio + talkback are a later phase.\n");
             sb.Append(string.Create(ci,
-                $"- The panel's firewall must allow port {OnDeviceRtspPort} from your LAN so\n" +
-                $"  Home Assistant can reach the stream.\n"));
+                $"- The panel's firewall must allow ports {OnDeviceRtspPort} and {OnDeviceStillPort}\n" +
+                $"  from your LAN so Home Assistant can reach the stream and the still image.\n"));
             sb.Append("- The picture appears while the panel has an active A/V session (a\n");
             sb.Append("  ring, an answered call, or the self-view eye); between sessions the\n");
             sb.Append("  stream is idle (the panel only encodes on demand).\n");
+            sb.Append(string.Create(ci,
+                $"- The Still Image URL (:{OnDeviceStillPort}) serves a fixed idle snapshot, so\n" +
+                $"  Home Assistant's camera thumbnail never has to open the live stream (which\n" +
+                $"  would otherwise wake the panel on every thumbnail refresh). Leaving it blank\n" +
+                $"  makes Home Assistant grab thumbnails from the stream and keep the doorbell\n" +
+                $"  session churning — so this field is recommended, not optional.\n"));
             return sb.ToString();
         }
     }

@@ -11,8 +11,9 @@
 #                    btmqttd) via a generated SDP, runs the vendored ffmpeg to copy
 #                    the H.264 into RTSP, and serves it to Home Assistant as a native
 #                    Generic Camera. Reads /etc/btmqttd/go2rtc/go2rtc.yaml. Also opens
-#                    the RTSP media port (:8554) in the panel firewall, LAN-source-
-#                    restricted (phase 1c-3). The desired state is a marker file
+#                    the RTSP media port (:8554) AND the btmqttd still-image port (:8556,
+#                    issue #168) in the panel firewall, LAN-source-restricted (phase 1c-3).
+#                    The desired state is a marker file
 #                    (DISABLED); bt_service_watchdog reconciles the running process each
 #                    pass via `respawn`. The firewall is (re)asserted ONLY on discrete
 #                    events — start/stop and the if-up.d hook (`fw-reassert`), never from
@@ -52,10 +53,13 @@ SPROP_FILE=$STATE_DIR/camera-sprop
 # re-learns it. Absent/unreadable ⇒ default branch 1 (matches config.rs's CAMERA_BRANCH default).
 CONF_FILE=/etc/btmqttd/btmqttd.conf
 
-# Firewall (issue #120, phase 1c-3): the RTSP media port + the LAN interface it is served on. The
-# panel enforces a default-deny INPUT chain (`-P INPUT DROP`) and does NOT open :8554, so nothing
-# reaches go2rtc from Home Assistant without a rule. The go2rtc control API (:1984) stays loopback-
-# only and gets NO rule. Only this TCP port is opened, source-restricted to the LAN.
+# Firewall (issue #120, phase 1c-3; extended in #168): the LAN-facing TCP ports + the LAN interface
+# they are served on. The panel enforces a default-deny INPUT chain (`-P INPUT DROP`) and does NOT
+# open them, so nothing reaches go2rtc / btmqttd from Home Assistant without a rule. TWO ports are
+# opened, each source-restricted to the LAN: the go2rtc RTSP media port (:8554) and btmqttd's
+# still-image HTTP endpoint (:8556, issue #168 — the cheap JPEG HA polls for the camera thumbnail so
+# a poll never wakes the live stream). The go2rtc control API (:1984) stays loopback-only and gets NO
+# rule. Both ports live in this ONE chain and are reconciled together (exactly these rules, no more).
 #
 # Ownership is a DEDICATED chain (FW_CHAIN), the industry-standard mechanism for a userspace program that
 # manages iptables: Docker owns a `DOCKER` chain, kube-proxy owns `KUBE-*` chains, fail2ban owns `f2b-*`
@@ -75,6 +79,11 @@ CONF_FILE=/etc/btmqttd/btmqttd.conf
 # still rewrite the firewall wholesale, but that actor already fully controls netfilter — the same
 # boundary Docker/kube-proxy accept.)
 CAM_PORT=8554
+# btmqttd's still-image HTTP endpoint (issue #168): the cheap idle JPEG Home Assistant polls for the
+# camera-entity thumbnail, so a thumbnail poll never wakes the live RTSP stream (the on-demand
+# thrash). Kept in step with btmqttd's `still::STILL_PORT` and the C# installer's on-device setup
+# guide (`Go2RtcConfig.OnDeviceStillPort`). Opened alongside CAM_PORT in the SAME GO2RTC chain.
+CAM_STILL_PORT=8556
 CAM_IFACE=wlan0
 FW_CHAIN=GO2RTC
 FW_OWN=/var/run/go2rtc.fwown
@@ -169,26 +178,27 @@ kill_all() {
 	for p in $(daemon_pids); do kill "$sig" "$p" 2>/dev/null; done
 }
 
-# Open the RTSP media port (issue #120, decision #4: least-privilege + LAN source-restrict). Idempotent,
-# stateless and DHCP-proof. Ownership first: if FW_CHAIN already exists but we did NOT create it this boot
-# (no FW_OWN marker), it is a FOREIGN chain — return without touching it or the port. Otherwise ensure OUR
-# chain exists (creating it claims ownership for this boot; also recreates it if the panel destroyed it),
-# then reconcile its contents to exactly one ACCEPT for tcp/CAM_PORT from CAM_IFACE's own subnet (derived
-# at runtime; iptables masks the address to its /prefix). With NO address yet (the boot race before DHCP,
-# or a lease drop) the desired state is an EMPTY chain — the port stays closed, never opened interface-
-# wide — and a later event fills it once an address appears.
+# Open the LAN-facing ports (issue #120, decision #4: least-privilege + LAN source-restrict; #168 added
+# the still port). Idempotent, stateless and DHCP-proof. Ownership first: if FW_CHAIN already exists but
+# we did NOT create it this boot (no FW_OWN marker), it is a FOREIGN chain — return without touching it or
+# the ports. Otherwise ensure OUR chain exists (creating it claims ownership for this boot; also recreates
+# it if the panel destroyed it), then reconcile its contents to exactly one ACCEPT PER opened port
+# (tcp/CAM_PORT and tcp/CAM_STILL_PORT) from CAM_IFACE's own subnet (derived at runtime; iptables masks
+# the address to its /prefix). With NO address yet (the boot race before DHCP, or a lease drop) the
+# desired state is an EMPTY chain — the ports stay closed, never opened interface-wide — and a later event
+# fills them once an address appears.
 #
 # ZERO-WRITE WHEN ALREADY CORRECT (task #42). This runs ONLY on discrete firewall events (start / stop /
 # fw-reassert), never the periodic watchdog — the watchdog touches no iptables, because our `-w 5`
 # mutating calls could HOLD the xtables lock across the factory firewall's LOCK-LESS `-F INPUT; -A INPUT …`
 # rebuild (in /etc/network/if-pre-up.d/iptables, no `-w`), making the factory's own `-A INPUT` calls FAIL
 # SILENTLY — dropping factory rules (FTP-over-USB reflash, security DROPs, even SSH). Even on those
-# events we WRITE ONLY WHEN THE STATE DIFFERS: if OUR chain already holds exactly the one desired ACCEPT
-# for the current subnet (address present) OR is already empty (no address), we make NO iptables writes
-# at all — just re-assert the (itself zero-write when already-last) INPUT jump and return. A DHCP subnet
-# change, a missing/extra rule, or a chain we just created still triggers the flush+repopulate path. The
-# if-up.d hook (go2rtc-net-hook → `fw-reassert`) is THE re-assert path, run sequentially right AFTER the
-# factory rebuild on every interface bring-up (boot / WiFi-reconnect / usb0 / …).
+# events we WRITE ONLY WHEN THE STATE DIFFERS: if OUR chain already holds exactly the desired ACCEPTs
+# for the current subnet (one per port, address present) OR is already empty (no address), we make NO
+# iptables writes at all — just re-assert the (itself zero-write when already-last) INPUT jump and return.
+# A DHCP subnet change, a missing/extra rule, or a chain we just created still triggers the
+# flush+repopulate path. The if-up.d hook (go2rtc-net-hook → `fw-reassert`) is THE re-assert path, run
+# sequentially right AFTER the factory rebuild on every interface bring-up (boot / WiFi-reconnect / usb0 / …).
 firewall_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	fw_chain_exists; fw_rc=$?
@@ -215,53 +225,65 @@ firewall_open() {
 	# listing.
 	fw_list=$(iptables -S "$FW_CHAIN" 2>/dev/null) || return 0
 	n=$(printf '%s\n' "$fw_list" | grep -c -- "^-A ")
+	# Desired rule count: one ACCEPT per opened port (address present), or an empty chain (no address).
+	# Counting the explicit list — rather than hard-coding 2 — keeps every check in step if a port is added.
+	want=0
+	for p in "$CAM_PORT" "$CAM_STILL_PORT"; do want=$((want + 1)); done
 	# ZERO-WRITE FAST PATH: if the chain is ALREADY in the desired state, perform NO iptables writes — only
 	# re-assert the jump and return. `-C` (also non-blocking) canonicalizes arg order / `-m tcp` / subnet
 	# masking, so it matches the rule iptables actually stored, not just its textual form. Desired state is
-	# either exactly our one ACCEPT for the current subnet (address present) or an empty chain (no address).
+	# either exactly our ACCEPTs for the current subnet (one per port, address present) or an empty chain
+	# (no address). Only take the fast path when the rule COUNT already matches — a missing/extra rule skips
+	# straight to reconcile.
 	if [ -n "$lan" ]; then
-		if [ "$n" -eq 1 ]; then
-			# Non-blocking membership check for the ONE desired rule. Capture its output so we can tell a
-			# genuine MISMATCH (subnet changed / wrong rule → reconcile below) from ANY OTHER failure
-			# (xtables-lock contention, permission/resource/backend error). Only the documented "rule does
-			# not exist" diagnostic may fall through to the mutating `-F`; every other non-zero status BAILS
-			# — writing under lock contention or an unknown error could drop a factory rule, so we defer to
-			# the if-up.d hook / next event. `-C` exits 0 on an exact match; a missing rule prints the
-			# "Bad rule (does a matching rule exist…)" message.
-			if cerr=$(iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" \
-				-s "$lan" -j ACCEPT 2>&1); then
-				fw_jump; return 0                        # already exactly our desired rule → zero-write
-			fi
-			case "$cerr" in
-				*"Bad rule"* | *"matching rule exist"*) : ;;  # genuine mismatch → fall through to reconcile
-				*) return 0 ;;                                # lock / unknown error → bail (never flush)
-			esac
+		if [ "$n" -eq "$want" ]; then
+			# Non-blocking membership check for EACH desired rule. Capture its output so we can tell a genuine
+			# MISMATCH (subnet changed / wrong rule → reconcile below) from ANY OTHER failure (xtables-lock
+			# contention, permission/resource/backend error). Only the documented "rule does not exist"
+			# diagnostic may fall through to the mutating `-F`; every other non-zero status BAILS — writing
+			# under lock contention or an unknown error could drop a factory rule, so we defer to the if-up.d
+			# hook / next event. `-C` exits 0 on an exact match; a missing rule prints the "Bad rule (does a
+			# matching rule exist…)" message.
+			mismatch=0
+			for p in "$CAM_PORT" "$CAM_STILL_PORT"; do
+				cerr=$(iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$p" \
+					-s "$lan" -j ACCEPT 2>&1) && continue    # this rule already present
+				case "$cerr" in
+					*"Bad rule"* | *"matching rule exist"*) mismatch=1; break ;;  # genuine → reconcile
+					*) return 0 ;;                                               # lock / unknown → bail
+				esac
+			done
+			[ "$mismatch" -eq 0 ] && { fw_jump; return 0; }  # all present + count exact → zero-write
 			# genuine mismatch (changed subnet, wrong rule) → fall through to flush + repopulate
 		fi
 	else
 		[ "$n" -eq 0 ] && { fw_jump; return 0; }
 	fi
-	# State DIFFERS (chain empty-but-needs-a-rule, wrong/changed subnet, extra rules, or a rule that should
+	# State DIFFERS (chain empty-but-needs-rules, wrong/changed subnet, extra rules, or a rule that should
 	# be gone): re-assert from scratch. Require a SUCCESSFUL flush before repopulating: if the xtables lock
-	# is contended past the wait and `-F` fails, abort this pass rather than append a second ACCEPT on top
-	# of the stale one (a later pass retries). The `-w 5` on every mutating call waits up to 5s for the
-	# xtables lock (supported on the target), so a spurious failure while the panel touches iptables is rare;
-	# a slow run under contention is safe because the flock mutex auto-releases only on death, never on a
-	# timer, so a live holder is never preempted.
+	# is contended past the wait and `-F` fails, abort this pass rather than append ACCEPTs on top of the
+	# stale ones (a later pass retries). The `-w 5` on every mutating call waits up to 5s for the xtables
+	# lock (supported on the target), so a spurious failure while the panel touches iptables is rare; a slow
+	# run under contention is safe because the flock mutex auto-releases only on death, never on a timer, so
+	# a live holder is never preempted.
 	iptables -w 5 -F "$FW_CHAIN" 2>/dev/null || return 0
-	# shellcheck disable=SC2015  # `[ -n "$lan" ] && add || true`: with no address we intentionally leave
-	# the chain empty (port closed) and still reach fw_jump — `|| true` only neutralizes the guard's exit.
-	[ -n "$lan" ] && iptables -w 5 -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" \
-		-j ACCEPT 2>/dev/null || true
+	# With an address, install exactly one ACCEPT per port; with none, leave the chain empty (ports closed)
+	# and still reach fw_jump. A single failed `-A` leaves a partial chain, which the next reconcile (count
+	# mismatch) repairs — so best-effort per rule (`|| true`), matching the original single-port behaviour.
+	if [ -n "$lan" ]; then
+		for p in "$CAM_PORT" "$CAM_STILL_PORT"; do
+			iptables -w 5 -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$p" -s "$lan" -j ACCEPT 2>/dev/null || true
+		done
+	fi
 	fw_jump
 }
 
-# True (0) when the media port is ALREADY in its intended state for CAM_IFACE's CURRENT address: either our
-# ACCEPT for the present subnet is installed AND INPUT jumps to our chain, or the interface has NO address
-# yet (the port is intentionally closed until the address-up event opens it — nothing to retry). Any
-# inspection failure (lock contention / error) reads as "not confirmed open" so the caller retries; it can
-# never yield a false "open". Reads only, used SOLELY by firewall_open_confirmed on the discrete event path
-# (never the watchdog), so its lock-taking `-S` / `-C` is consistent with task #42.
+# True (0) when the ports are ALREADY in their intended state for CAM_IFACE's CURRENT address: either our
+# ACCEPTs for the present subnet are installed (one per port) AND INPUT jumps to our chain, or the interface
+# has NO address yet (the ports are intentionally closed until the address-up event opens them — nothing to
+# retry). Any inspection failure (lock contention / error) reads as "not confirmed open" so the caller
+# retries; it can never yield a false "open". Reads only, used SOLELY by firewall_open_confirmed on the
+# discrete event path (never the watchdog), so its lock-taking `-S` / `-C` is consistent with task #42.
 firewall_is_open() {
 	command -v iptables >/dev/null 2>&1 || return 0
 	lan=$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
@@ -275,15 +297,20 @@ firewall_is_open() {
 	n=$(printf '%s\n' "$inp" | grep -c -- "^-A INPUT -j $FW_CHAIN\$")
 	last=$(printf '%s\n' "$inp" | tail -n 1)
 	[ "$n" -eq 1 ] && [ "$last" = "-A INPUT -j $FW_CHAIN" ] || return 1
-	# And OUR chain must hold EXACTLY ONE rule — the ACCEPT for the current subnet — matching firewall_open's
-	# desired state. Confirming the ACCEPT merely EXISTS isn't enough: if a transient flush bailed and left a
-	# stale/extra rule alongside it, that extra rule could expose another port or source, so an over-full
-	# chain reads "not open" ⇒ keep retrying until firewall_open reconciles it to the single rule. A
-	# failed chain listing likewise reads "not open" (retry), never a false "open".
+	# And OUR chain must hold EXACTLY the desired rules — one ACCEPT per port for the current subnet, and no
+	# more — matching firewall_open's desired state. Confirming the ACCEPTs merely EXIST isn't enough: if a
+	# transient flush bailed and left a stale/extra rule alongside them, that extra rule could expose another
+	# port or source, so an over-full (or short) chain reads "not open" ⇒ keep retrying until firewall_open
+	# reconciles it. A failed chain listing likewise reads "not open" (retry), never a false "open".
 	fw_rules=$(iptables -S "$FW_CHAIN" 2>/dev/null) || return 1
 	cn=$(printf '%s\n' "$fw_rules" | grep -c -- "^-A ")
-	[ "$cn" -eq 1 ] || return 1
-	iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$CAM_PORT" -s "$lan" -j ACCEPT 2>/dev/null
+	want=0
+	for p in "$CAM_PORT" "$CAM_STILL_PORT"; do want=$((want + 1)); done
+	[ "$cn" -eq "$want" ] || return 1
+	for p in "$CAM_PORT" "$CAM_STILL_PORT"; do
+		iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$p" -s "$lan" -j ACCEPT 2>/dev/null || return 1
+	done
+	return 0
 }
 
 # Open the media port with a BOUNDED retry — for the DISCRETE EVENT path (start / fw-reassert) ONLY. A
