@@ -556,9 +556,12 @@ pub fn note_pending_ring(broker_epoch: u64) -> Option<u64> {
     }
 }
 
-/// Per-process stride of the ring-event-id namespace: each daemon start owns the half-open range
-/// `[boot * STRIDE, (boot+1) * STRIDE)`. A billion ids per process is unreachable (at one ring/second a
-/// process would run ~31 years), so ids from different process lifetimes never overlap.
+/// Per-process stride of the ring-event-id namespace: each daemon start owns STRIDE ids. `boot` SEEDS
+/// [`RING_EVENT_SEQ`] at `boot * STRIDE` and then allocates the range `(boot * STRIDE, (boot+1) * STRIDE]`
+/// — the base is only the seed (never itself an id: the first allocated id is `base + 1`), and the top
+/// `(boot+1) * STRIDE` ([`RING_ID_CEILING`]) IS the last id this boot may allocate, sitting one below the
+/// next boot's first id `(boot+1) * STRIDE + 1`, so ids from different process lifetimes never overlap. A
+/// billion ids per process is unreachable (at one ring/second a process would run ~31 years).
 const RING_ID_BOOT_STRIDE: u64 = 1_000_000_000;
 
 /// A boot's ring-id range as `(base, ceiling)` — `base = boot * RING_ID_BOOT_STRIDE` (the seed) and
