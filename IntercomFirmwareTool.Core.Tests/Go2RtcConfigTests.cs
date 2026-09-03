@@ -238,6 +238,28 @@ public class Go2RtcConfigTests
     }
 
     [Fact]
+    public void BuildOnDeviceSetupGuide_yaml_escapes_a_ring_topic_with_quote_or_backslash()
+    {
+        // Topic validation permits '"' and '\' (only newlines and MQTT wildcards are rejected), so a
+        // library caller could supply one; the ring-notification recipe interpolates the topic into a
+        // double-quoted YAML scalar, which must escape those two characters or the paste-ready automation
+        // breaks / subscribes to a different topic.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+            TopicRingSnapshot = "Bticino/ring\"\\snap",
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "doorbell");
+        // The YAML trigger line carries the escaped form inside the double quotes...
+        Assert.Contains("topic: \"Bticino/ring\\\"\\\\snap\"", guide);
+        // ...and never the raw, unescaped topic (which would terminate the scalar early).
+        Assert.DoesNotContain("\"Bticino/ring\"\\snap\"", guide);
+    }
+
+    [Fact]
     public void BuildOnDeviceSetupGuide_keeps_the_password_placeholder_readable_when_unset()
     {
         // With no password set (a bare/library caller — the App always sets one on-device), the URL must

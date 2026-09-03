@@ -441,11 +441,18 @@ namespace IntercomFirmwareTool.Core
             sb.Append("This never overwrites the idle thumbnail. To get a phone notification with\n");
             sb.Append("that picture, add a Home Assistant automation like this — replace\n");
             sb.Append("<intercom-ip> and notify.mobile_app_your_phone with your own:\n\n");
+            // The topic goes into a double-quoted YAML scalar, so escape the two characters a
+            // double-quoted scalar treats specially — backslash first, then the quote. Topic
+            // validation already forbids newlines and MQTT wildcards, but it permits '"' and '\',
+            // which a library caller could supply; without this they would break the paste-ready
+            // recipe or silently change the subscribed topic. The default/base64url topics contain
+            // neither, so the common case is unchanged.
+            var ringTopicYaml = opts.EffectiveTopicRingSnapshot.Replace("\\", "\\\\").Replace("\"", "\\\"");
             sb.Append(string.Create(ci,
                 $"    alias: Doorbell ring notification\n" +
                 $"    trigger:\n" +
                 $"      - platform: mqtt\n" +
-                $"        topic: \"{opts.EffectiveTopicRingSnapshot}\"\n" +
+                $"        topic: \"{ringTopicYaml}\"\n" +
                 $"    action:\n" +
                 $"      - service: notify.mobile_app_your_phone\n" +
                 $"        data:\n" +
