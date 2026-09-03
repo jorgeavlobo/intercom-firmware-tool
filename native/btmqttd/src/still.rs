@@ -228,12 +228,17 @@ fn is_jpeg(b: &[u8]) -> bool {
                     if !has_sof || ns < 1 || seg_len != 6 + 2 * ns {
                         return false;
                     }
-                    // A real scan is followed by entropy-coded data terminated by an EOI. Require an EOI
-                    // marker after the SOS header, so a file truncated at/just-after the scan header (no
-                    // scan data, no terminator) is rejected. In valid entropy data every `FF` is stuffed
-                    // (`FF 00`) or a restart (`FF D0`..`FF D7`), so a bare `FF D9` only marks the true
-                    // end of image — searching for it is sound and won't false-match inside the scan.
-                    return b[i + seg_len..].windows(2).any(|w| w == [0xFF, 0xD9]);
+                    // A real scan is entropy-coded data terminated by an EOI. Require an EOI marker
+                    // AFTER at least one byte of scan data (offset > 0 past the SOS header): a scan
+                    // header immediately followed by `FF D9` carries no image data and is rejected, as
+                    // is a file truncated at/just-after the header (no data, no terminator). In valid
+                    // entropy data every `FF` is stuffed (`FF 00`) or a restart (`FF D0`..`FF D7`), so a
+                    // bare `FF D9` only marks the true end of image — the search is sound and won't
+                    // false-match inside the scan. Skipping the first post-header byte enforces the
+                    // "at least one scan byte" rule.
+                    return b
+                        .get(i + seg_len + 1..)
+                        .is_some_and(|rest| rest.windows(2).any(|w| w == [0xFF, 0xD9]));
                 }
                 // Start-Of-Frame (SOF0..SOF15, excluding the non-frame DHT C4 / JPG C8 / DAC CC):
                 // precision(1) + height(2) + width(2) + Nf(1) + Nf*(3) => length == 8 + 3*Nf, with a
@@ -343,6 +348,13 @@ mod tests {
         assert!(!is_jpeg(&[
             0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
             0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+        ]));
+        // Valid SOF + valid SOS header + an IMMEDIATE EOI with ZERO scan-data bytes → rejected: the
+        // scan carries no image data (this is `valid` with the 0x00 scan byte removed).
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+            0xFF, 0xD9, // EOI immediately after the SOS header — no scan byte
         ]));
         // Marker-LIKE bytes buried in an APP0 PAYLOAD must NOT count: here `FF C0 FF DA` are the 4
         // payload bytes of the APP0 segment (length 6), not real SOF/SOS segments → rejected.
