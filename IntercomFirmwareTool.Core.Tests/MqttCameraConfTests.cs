@@ -134,6 +134,7 @@ public class MqttCameraConfTests
             CameraEnabled = true,
             CameraOnDevice = true,
         });
+        Assert.DoesNotContain("CAMERA_RTSP_USER=", noPass);
         Assert.DoesNotContain("CAMERA_RTSP_PASS=", noPass);
     }
 

@@ -140,7 +140,8 @@ where
 }
 
 /// Read the request head — up to the `\r\n\r\n` terminator, or the byte cap, or EOF. We keep only
-/// enough to read the method; the rest (path, headers, body) is intentionally ignored.
+/// enough to parse the request LINE (method + request-target — the target selects `/idle.jpg` vs a
+/// `/ring-<id>.jpg`); the headers and body are intentionally ignored.
 async fn read_head<S>(stream: &mut S) -> std::io::Result<Vec<u8>>
 where
     S: AsyncRead + Unpin,
