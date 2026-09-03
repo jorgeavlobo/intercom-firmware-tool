@@ -655,7 +655,11 @@ async fn publish_frame(
         // serve. Work is BOUNDED by a single runner in capture.rs: note this ring as the newest pending,
         // and spawn the runner ONLY if none is active (a burst of distinct rings coalesces to the latest
         // — one active capture at a time, never a growing queue of tasks).
-        if ring_published && cfg.camera_enabled && cfg.camera_ondevice {
+        // `ring_ids_durable()`: if the per-boot ring-id counter could not be established (a flash
+        // read/write error or a corrupt counter), SUPPRESS ring-snapshot capture entirely — the ring event
+        // above still fired, but capturing/publishing a `/ring-<id>.jpg` whose id we can't prove unique
+        // could let a stale notification resolve to a new visitor's frame (#169, fail closed).
+        if ring_published && cfg.camera_enabled && cfg.camera_ondevice && crate::capture::ring_ids_durable() {
             // Record this ring with the broker session epoch it fired on (this online session). The
             // readiness publish is deferred across the capture; the runner hands each served event's OWN
             // epoch back to the callback, so a ring that fires after a reconnect (served by an earlier

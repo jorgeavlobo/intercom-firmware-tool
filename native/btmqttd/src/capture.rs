@@ -132,6 +132,19 @@ static RING_NEWEST_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// Assistant fetches exactly that event's frame (never another ring's).
 static RING_EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Whether [`seed_ring_event_seq`] established a DURABLE, reboot-unique ring-id namespace (the per-boot
+/// counter persisted). Default `false` until the seed runs. When `false` — a flash read/write error or a
+/// corrupt counter — ring-snapshot capture is SUPPRESSED (the entrance ring event still fires; no
+/// `/ring-<id>.jpg` is captured or published), because an id we can't prove unique could let a stale
+/// notification resolve to a new visitor's frame. Read by the sender before each ring capture.
+static RING_IDS_DURABLE: AtomicBool = AtomicBool::new(false);
+
+/// Whether on-device ring snapshots may be captured this run — `false` when the durable ring-id namespace
+/// could not be established (see [`RING_IDS_DURABLE`]). The sender gates ring capture on this.
+pub fn ring_ids_durable() -> bool {
+    RING_IDS_DURABLE.load(Ordering::Relaxed)
+}
+
 /// Monotonic clock base (process start), for the ring timestamp below.
 static CLOCK_BASE: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
 
@@ -529,7 +542,16 @@ const RING_ID_BOOT_STRIDE: u64 = 1_000_000_000;
 /// (corruption) while a prior process's files linger, ids still stay above them. Call ONCE at startup,
 /// before any ring is handled. Blocking `std::fs`.
 pub fn seed_ring_event_seq() {
-    let mut seed = crate::persist::bump_ring_boot().saturating_mul(RING_ID_BOOT_STRIDE);
+    // The durable per-process counter is the id-uniqueness authority. `None` means it could not be trusted
+    // (a flash read/write error or a corrupt counter): FAIL CLOSED — mark ring ids non-durable so
+    // ring-snapshot capture is suppressed (see [`ring_ids_durable`]) rather than risk reusing an id.
+    let (mut seed, durable) = match crate::persist::bump_ring_boot() {
+        Some(boot) => (boot.saturating_mul(RING_ID_BOOT_STRIDE), true),
+        None => (0, false),
+    };
+    // tmpfs floor: on the durable path a belt-and-braces guard against a lost counter with lingering files;
+    // on the fail-closed path it keeps RING_EVENT_SEQ above any file that does exist (ring capture is
+    // suppressed anyway, but this keeps the sequence self-consistent).
     if let Ok(entries) = std::fs::read_dir(run_dir()) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -544,6 +566,7 @@ pub fn seed_ring_event_seq() {
         }
     }
     RING_EVENT_SEQ.store(seed, Ordering::Relaxed);
+    RING_IDS_DURABLE.store(durable, Ordering::Relaxed);
 }
 
 /// Try to become THE ring-capture runner. `Some(guard)` (won the [`RING_RUNNER_ACTIVE`] false→true flip)
@@ -759,6 +782,7 @@ mod tests {
         let saved_seq = RING_EVENT_SEQ.load(Ordering::Relaxed);
         let saved_newest = RING_NEWEST.load(Ordering::Relaxed);
         let saved_epoch = RING_NEWEST_EPOCH.load(Ordering::Relaxed);
+        let saved_runner = RING_RUNNER_ACTIVE.load(Ordering::Relaxed);
         RING_RUNNER_ACTIVE.store(false, Ordering::Relaxed);
         // Ring A detected on broker session epoch 1.
         let a = note_pending_ring(1);
@@ -782,7 +806,8 @@ mod tests {
         let g2 = try_acquire_ring_runner();
         assert!(g2.is_some(), "the slot is re-acquirable once the guard is dropped");
         drop(g2);
-        // Restore the process-global ring counters so any later-added test starts from clean state.
+        // Restore the process-global ring state so any later-added test starts from clean state.
+        RING_RUNNER_ACTIVE.store(saved_runner, Ordering::Relaxed);
         RING_EVENT_SEQ.store(saved_seq, Ordering::Relaxed);
         RING_NEWEST.store(saved_newest, Ordering::Relaxed);
         RING_NEWEST_EPOCH.store(saved_epoch, Ordering::Relaxed);

@@ -337,28 +337,42 @@ fn ring_boot_file_in(dir: &Path) -> PathBuf {
 /// Read the persisted [`RING_BOOT_FILE`] counter, increment it, durably write it back, and return the NEW
 /// value — the per-process boot number the ring-id namespace is derived from (issue #169). Called ONCE at
 /// startup (before any ring). The value strictly increases across every daemon start (restart AND reboot)
-/// because it lives on the reboot-/reflash-persistent partition. A missing/corrupt file reads as 0 (first
-/// boot → 1). Best-effort DURABILITY: if the write fails (e.g. a transient flash error) it still returns
-/// `next` so THIS process stays monotonic above the last persisted value; only the NEXT process could then
-/// reuse `next` — bounded, rare, and strictly better than the old tmpfs/wall-clock seeds. Blocking `std::fs`.
-pub fn bump_ring_boot() -> u64 {
+/// because it lives on the reboot-/reflash-persistent partition.
+///
+/// Returns `None` — FAIL CLOSED — whenever a durable, reboot-unique id cannot be guaranteed: the counter
+/// file is present-but-unreadable (I/O error) or present-but-unparseable (corruption), or the incremented
+/// value cannot be written back. In any of those cases silently resetting to a low value could re-issue an
+/// id a prior process already published, so the caller instead SUPPRESSES ring-snapshot capture (a stale
+/// `/ring-<id>.jpg` then 404s rather than resolving to a new visitor). A genuinely ABSENT file is the
+/// legitimate first boot (`0` → `Some(1)`), not a failure. Blocking `std::fs`.
+pub fn bump_ring_boot() -> Option<u64> {
     bump_ring_boot_in(&state_dir())
 }
 
-fn bump_ring_boot_in(dir: &Path) -> u64 {
+fn bump_ring_boot_in(dir: &Path) -> Option<u64> {
     let path = ring_boot_file_in(dir);
-    let current = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0);
+    let current = match std::fs::read_to_string(&path) {
+        Ok(s) => match s.trim().parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => {
+                eprintln!("btmqttd: persist: ring boot counter is corrupt; ring snapshots disabled this run");
+                return None;
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0, // legitimate first boot
+        Err(e) => {
+            eprintln!("btmqttd: persist: cannot read ring boot counter ({e}); ring snapshots disabled this run");
+            return None;
+        }
+    };
     let next = current.saturating_add(1);
+    // The new value MUST be durable — otherwise the next process reads the old one and reuses `next`. On a
+    // write failure, fail closed rather than hand back a value we can't guarantee is unique.
     if !atomic_write_in(dir, &path, format!("{next}\n").as_bytes()) {
-        eprintln!(
-            "btmqttd: persist: could not persist the ring boot counter; ring-id uniqueness across the \
-             NEXT restart is best-effort until it persists again"
-        );
+        eprintln!("btmqttd: persist: cannot persist ring boot counter; ring snapshots disabled this run");
+        return None;
     }
-    next
+    Some(next)
 }
 
 fn read_update_latest_in(dir: &Path) -> Option<String> {
@@ -934,9 +948,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         // Fresh state: first start is 1, and each subsequent start is exactly one higher, read back from disk.
-        assert_eq!(bump_ring_boot_in(&dir), 1, "first boot");
-        assert_eq!(bump_ring_boot_in(&dir), 2, "second start, even within the same second, differs");
-        assert_eq!(bump_ring_boot_in(&dir), 3);
+        assert_eq!(bump_ring_boot_in(&dir), Some(1), "first boot (absent file → 1)");
+        assert_eq!(bump_ring_boot_in(&dir), Some(2), "second start, even within the same second, differs");
+        assert_eq!(bump_ring_boot_in(&dir), Some(3));
         // The value is DURABLE: a brand-new reader (a fresh process) sees the last persisted counter and
         // continues strictly above it — never repeating a boot number (and thus never a ring-id range).
         assert_eq!(
@@ -944,7 +958,34 @@ mod tests {
             "3",
             "the latest counter is persisted"
         );
-        assert_eq!(bump_ring_boot_in(&dir), 4, "a later start resumes above the persisted value");
+        assert_eq!(bump_ring_boot_in(&dir), Some(4), "a later start resumes above the persisted value");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bump_ring_boot_in_fails_closed_on_a_corrupt_or_unwritable_counter() {
+        // A corrupt/unreadable counter, or a write that can't persist, must return None (fail closed) rather
+        // than silently reset the namespace to a low value and risk reusing a prior process's ids (#169).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(9800);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-ringboot-fc-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Corrupt counter (present but unparseable) → None, and it does NOT overwrite the corrupt file with
+        // a reset value (no silent namespace reset).
+        std::fs::write(ring_boot_file_in(&dir), b"not-a-number\n").unwrap();
+        assert_eq!(bump_ring_boot_in(&dir), None, "a corrupt counter fails closed");
+
+        // Counter path is a DIRECTORY: it can be neither read (read_to_string errors, not NotFound) nor
+        // written (the rename onto it fails), so bump fails closed regardless of which step trips first.
+        // (A read-only dir would be the pure write-failure case, but tests often run as root, which ignores
+        // mode bits — a directory path fails deterministically for any uid.)
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(ring_boot_file_in(&dir)).unwrap();
+        assert_eq!(bump_ring_boot_in(&dir), None, "an unusable counter path fails closed");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
