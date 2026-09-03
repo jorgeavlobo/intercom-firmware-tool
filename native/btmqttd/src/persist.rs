@@ -266,11 +266,21 @@ fn update_latest_file_in(dir: &Path) -> PathBuf {
     dir.join(UPDATE_LATEST_FILE)
 }
 
-/// Read the persisted idle-snapshot JPEG (issue #168), or `None` when absent, unreadable, or
-/// empty. The bytes are returned VERBATIM — the caller (`still.rs`) validates the JPEG magic
-/// before serving and otherwise falls back to the baked placeholder, so a truncated/garbage file
-/// never reaches Home Assistant. Blocking `std::fs`; call via `spawn_blocking` off the async
-/// runtime. Only reads (Phase 1); Phase 2 (#169) adds the writer.
+/// Upper bound on the idle-snapshot JPEG we will read into memory and serve (issue #168). A doorbell
+/// still is tens of KB, so 256 KiB is generous headroom — and it matches the `write_file` decoded-data
+/// contract, the cap on the only sanctioned way a file lands under `cfg/extra`. It BOUNDS the read: the
+/// still endpoint reads this per request and up to `MAX_CONNS` handlers can do so concurrently, so an
+/// oversized `idle.jpg` (one written outside the normal capture path — e.g. via the authenticated
+/// `execute_command`) must not be slurped whole and copied N times. Over the cap ⇒ treat as absent ⇒
+/// the endpoint serves the baked placeholder instead.
+pub const MAX_IDLE_JPG_BYTES: u64 = 256 * 1024;
+
+/// Read the persisted idle-snapshot JPEG (issue #168), or `None` when absent, unreadable, empty, or
+/// LARGER than [`MAX_IDLE_JPG_BYTES`] (an oversized file falls back to the placeholder rather than
+/// being loaded and copied per request). The bytes are returned VERBATIM — the caller (`still.rs`)
+/// validates the JPEG magic before serving, so a truncated/garbage file never reaches Home Assistant.
+/// Blocking `std::fs`; call via `spawn_blocking` off the async runtime. Only reads (Phase 1); Phase 2
+/// (#169) adds the writer.
 pub fn read_idle_jpg() -> Option<Vec<u8>> {
     read_idle_jpg_in(&state_dir())
 }
@@ -280,8 +290,13 @@ fn idle_jpg_file_in(dir: &Path) -> PathBuf {
 }
 
 fn read_idle_jpg_in(dir: &Path) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(idle_jpg_file_in(dir)).ok()?;
-    (!bytes.is_empty()).then_some(bytes)
+    use std::io::Read;
+    let file = std::fs::File::open(idle_jpg_file_in(dir)).ok()?;
+    // Read at most the cap PLUS ONE byte, so a file exactly at the cap is kept while anything larger is
+    // detected (buf grows to cap+1) and rejected — without ever allocating more than cap+1 bytes.
+    let mut buf = Vec::new();
+    file.take(MAX_IDLE_JPG_BYTES + 1).read_to_end(&mut buf).ok()?;
+    (!buf.is_empty() && buf.len() as u64 <= MAX_IDLE_JPG_BYTES).then_some(buf)
 }
 
 fn read_update_latest_in(dir: &Path) -> Option<String> {
@@ -753,6 +768,15 @@ mod tests {
         let jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF payload \xff\xd9";
         assert!(atomic_write_in(&dir, &file, jpeg));
         assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&jpeg[..]));
+        // A file exactly AT the cap is still returned (the boundary is inclusive).
+        let at_cap = vec![0xAAu8; MAX_IDLE_JPG_BYTES as usize];
+        assert!(atomic_write_in(&dir, &file, &at_cap));
+        assert_eq!(read_idle_jpg_in(&dir).map(|b| b.len()), Some(MAX_IDLE_JPG_BYTES as usize));
+        // A file OVER the cap reads back as None → the endpoint serves the placeholder instead of
+        // slurping and copying an oversized image per request (bounded-read hardening, issue #168).
+        let over_cap = vec![0xAAu8; MAX_IDLE_JPG_BYTES as usize + 1];
+        assert!(atomic_write_in(&dir, &file, &over_cap));
+        assert_eq!(read_idle_jpg_in(&dir), None);
         // An empty file reads back as None (treated as "no idle image yet").
         assert!(atomic_write_in(&dir, &file, b""));
         assert_eq!(read_idle_jpg_in(&dir), None);
