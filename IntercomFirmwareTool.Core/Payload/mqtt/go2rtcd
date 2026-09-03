@@ -313,11 +313,11 @@ firewall_is_open() {
 	return 0
 }
 
-# Open the media port with a BOUNDED retry — for the DISCRETE EVENT path (start / fw-reassert) ONLY. A
-# single firewall_open deliberately BAILS without establishing the rule on a transient failure (xtables
+# Open the LAN ports with a BOUNDED retry — for the DISCRETE EVENT path (start / fw-reassert) ONLY. A
+# single firewall_open deliberately BAILS without establishing the rules on a transient failure (xtables
 # lock contention past `-w 5`, or an ACCEPT that lost a race with the factory chain rebuild). Because the
 # periodic watchdog no longer retries iptables (task #42), a transient miss would otherwise
-# leave :8554 CLOSED until the next interface event or a manual restart. So re-attempt a few times,
+# leave :8554/:8556 CLOSED until the next interface event or a manual restart. So re-attempt a few times,
 # verifying the end state with firewall_is_open between tries and pausing briefly to let a contending
 # factory rebuild finish. Zero extra cost once open (the first firewall_is_open short-circuits, and the
 # no-address boot race settles immediately without sleeping).
@@ -483,7 +483,7 @@ case "$1" in
 		# enabled so a slow/failed first launch (then a later respawn success) still ends up reachable.
 		# firewall_open is idempotent and zero-write when already correct; firewall_open_confirmed wraps it in
 		# a bounded retry so a boot-time overlap with the factory rebuild that makes one attempt BAIL is
-		# re-attempted here instead of leaving :8554 closed until the next interface event. It
+		# re-attempted here instead of leaving :8554/:8556 closed until the next interface event. It
 		# SELF-LOCKS per attempt (see its LOCK DISCIPLINE note), so it is called OUTSIDE this arm's mutex —
 		# the daemon launch stays under the lock, then the firewall is asserted with its own per-attempt lock.
 		acquire
@@ -494,8 +494,8 @@ case "$1" in
 		# Boot resilience (#166): WiFi (wlan0) on this panel is NOT driven by ifupdown at runtime — no
 		# supplicant/DHCP client runs from it — so wlan0's real address-up does NOT fire the if-up.d hook
 		# (go2rtc-net-hook -> fw-reassert) the other interfaces rely on. At boot, firewall_open above runs
-		# before wlan0 has an IPv4 and correctly leaves OUR chain empty (port closed), but then nothing
-		# re-asserts once the address appears — so :8554 stays closed until a MANUAL fw-reassert. Bridge
+		# before wlan0 has an IPv4 and correctly leaves OUR chain empty (ports closed), but then nothing
+		# re-asserts once the address appears — so :8554/:8556 stay closed until a MANUAL fw-reassert. Bridge
 		# that gap with a BOUNDED, BACKGROUNDED one-shot: wait for wlan0 to gain an IPv4, then fw-reassert
 		# ONCE. This is NOT the periodic watchdog (task #42): it fires a SINGLE sequenced re-assert when the
 		# address appears and then exits — never iptables on a timer that could race the factory's lock-less
@@ -541,7 +541,7 @@ case "$1" in
 		# and (with start/stop) the only place that touches iptables. It re-asserts sequentially — no daemon
 		# racing the factory's lock-less INPUT writes — and is idempotent + zero-write in steady state (see
 		# firewall_open). It must NEVER launch or kill the daemon. The firewall follows the ENABLED/DISABLED
-		# intent, NOT the daemon's momentary run state: since the watchdog no longer re-opens the port, it
+		# intent, NOT the daemon's momentary run state: since the watchdog no longer re-opens the ports, they
 		# must stay open whenever the service is enabled (a brief crash/relaunch window with :8554 open but
 		# nothing listening just yields a TCP reset — harmless, and LAN-source-restricted).
 		# firewall_open_confirmed SELF-LOCKS per attempt (re-reading DISABLED under the lock each time), so it
