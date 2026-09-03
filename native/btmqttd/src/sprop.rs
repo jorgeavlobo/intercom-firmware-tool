@@ -92,12 +92,12 @@ const SPROP_RTP_ADDR: &str = "127.0.0.1:40100";
 /// patched SDP equals what the installer would have written with CameraSprop set.
 const FMTP_ANCHOR: &str = "packetization-mode=1;";
 
-/// The go2rtc `exec:` ffmpeg's absolute path (`Go2RtcConfig.OnDeviceFfmpegPath`) and the go2rtc daemon
-/// path (the producer's parent — `PayloadBinaries.Go2rtc.InstallPath` / `go2rtcd`'s `$DAEMON`). Used to
-/// identify — precisely — the ONE process safe to SIGTERM for the fix-B respawn ([`respawn_go2rtc_producer`]):
-/// argv[0] is this ffmpeg, its input is our SDP, and its direct parent is this daemon. Kept in sync with
-/// the C# installer / go2rtcd.
-const GO2RTC_FFMPEG_PATH: &str = "/usr/sbin/ffmpeg";
+/// The go2rtc daemon path — the parent process of the `exec:` ffmpeg producer we respawn
+/// (`PayloadBinaries.Go2rtc.InstallPath` / `go2rtcd`'s `$DAEMON`). The producer's ffmpeg path is the
+/// vendored ffmpeg — reused from [`crate::capture::DEFAULT_FFMPEG_BIN`] (one source of truth), since
+/// go2rtc's generated `exec:` argv[0] is that FIXED path. Together they identify — precisely — the ONE
+/// process safe to SIGTERM for the fix-B respawn ([`respawn_go2rtc_producer`]): argv[0] is that ffmpeg,
+/// its input is our SDP, and its direct parent is this daemon.
 const GO2RTC_DAEMON_PATH: &str = "/usr/sbin/go2rtc";
 
 /// How long a single `recv_from` waits before we loop back to re-check `stopping` / the persisted state.
@@ -508,11 +508,19 @@ async fn patch_sdp_in(path: &str, sprop: &str) -> std::io::Result<bool> {
 async fn respawn_go2rtc_producer() {
     // Do the whole scan-validate-signal in ONE blocking pass (no async yield between identifying a
     // producer and SIGTERMing it), so a PID can't be recycled out from under us across an await.
-    let signalled = tokio::task::spawn_blocking(|| {
-        terminate_sdp_producers(GO2RTC_FFMPEG_PATH, GO2RTC_DAEMON_PATH, SDP_PATH)
+    let signalled = match tokio::task::spawn_blocking(|| {
+        terminate_sdp_producers(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, SDP_PATH)
     })
     .await
-    .unwrap_or(0);
+    {
+        Ok(n) => n,
+        // The blocking task panicked. Log the JoinError so a "no self-heal" report isn't confused with
+        // "no producer found"; non-fatal — the persisted value still fixes the next open/boot.
+        Err(e) => {
+            eprintln!("btmqttd: sprop: producer-respawn task failed ({e}); relying on the next open/boot");
+            return;
+        }
+    };
     if signalled == 0 {
         eprintln!(
             "btmqttd: sprop: no running go2rtc exec producer to respawn; the patched SDP takes effect on its next start"
@@ -837,7 +845,7 @@ mod tests {
 
     #[test]
     fn cmdline_matches_only_the_ffmpeg_with_the_sdp_as_input() {
-        let ff = GO2RTC_FFMPEG_PATH; // "/usr/sbin/ffmpeg"
+        let ff = crate::capture::DEFAULT_FFMPEG_BIN; // "/usr/sbin/ffmpeg"
         let sdp = SDP_PATH; // "/var/run/btmqttd/doorbell.sdp"
         // The go2rtc exec producer: `<ffmpeg> … -i <runtime SDP> …` — argv[0] is ffmpeg and the SDP is
         // the argument right after `-i`.

@@ -50,9 +50,13 @@ use tokio::sync::mpsc;
 use crate::config::Config;
 use crate::sip::ViewCmd;
 
-/// The vendored ffmpeg on the device rootfs — mirrors `PayloadBinaries.Ffmpeg.InstallPath` (C#).
-/// Overridable via `$BTMQTTD_FFMPEG_BIN` (tests/dev).
-const DEFAULT_FFMPEG_BIN: &str = "/usr/sbin/ffmpeg";
+/// The vendored ffmpeg on the device rootfs — mirrors `PayloadBinaries.Ffmpeg.InstallPath` (C#) and the
+/// `Go2RtcConfig.OnDeviceFfmpegPath` the installer bakes into go2rtc's `exec:` command, so it is ALSO the
+/// argv[0] of go2rtc's exec producer that `sprop::respawn_go2rtc_producer` matches — a single source of
+/// truth for the vendored ffmpeg path. `pub(crate)` for that reuse. Capture's OWN invocations are
+/// overridable via `$BTMQTTD_FFMPEG_BIN` (tests/dev, see [`ffmpeg_bin`]); the go2rtc producer match uses
+/// this FIXED path because go2rtc's generated command never honours that env override.
+pub(crate) const DEFAULT_FFMPEG_BIN: &str = "/usr/sbin/ffmpeg";
 
 /// go2rtc's on-device RTSP port and stream name — mirror `Go2RtcConfig.OnDeviceRtspPort` /
 /// `OnDeviceStreamName`. The capture reads the SAME loopback RTSP URL Home Assistant consumes.
