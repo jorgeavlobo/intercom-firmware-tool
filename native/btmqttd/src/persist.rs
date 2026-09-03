@@ -299,8 +299,10 @@ pub fn read_idle_jpg() -> Option<Vec<u8>> {
 /// there and takes the same mutex in `note_ring()`, so the final ring check and the rename are one
 /// critical section against ring detection on the runtime thread — a ring detected DURING the (blocking)
 /// write can neither slip between the check and the rename nor get a visitor frame persisted as the
-/// empty-doorway thumbnail. Returns `true` only when the rename committed. Blocking; call via
-/// `spawn_blocking`.
+/// empty-doorway thumbnail. Returns `true` only when the rename committed AND the parent-dir fsync that
+/// makes it durable succeeded; a post-rename fsync failure returns `false` even though `idle.jpg` may
+/// already have been replaced in the (not-yet-durable) directory — treat `false` as "not reliably stored",
+/// not as "unchanged". Blocking; call via `spawn_blocking`.
 #[must_use]
 pub fn store_idle_jpg<G>(bytes: &[u8], commit_ok: impl FnOnce() -> Option<G>) -> bool {
     let dir = state_dir();
