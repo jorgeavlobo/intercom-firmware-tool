@@ -647,8 +647,8 @@ async fn publish_frame(
             outcome = FrameOutcome::ClassifierChanged;
         }
         let ring_published = publish_call_event(client, debounce, broker_online, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
-        // Ring snapshot (issue #169): grab a who-is-at-the-door frame and write it to the transient
-        // `/ring.jpg` for the HA push. Fire ONLY on a FRESH ring event (`ring_published`): the gateway
+        // Ring snapshot (issue #169): grab a who-is-at-the-door frame and write it to this event's
+        // transient `/ring-<id>.jpg` for the HA push. Fire ONLY on a FRESH ring event (`ring_published`): the gateway
         // repeats one press's signature and `publish_call_event` coalesces those (#71) — spawning per raw
         // frame would emit multiple notifications for one press. DETACHED + best-effort (the panel is
         // already streaming because it is ringing),
@@ -661,22 +661,28 @@ async fn publish_frame(
             let client_ring = client.clone();
             let broker_ring = broker_online.clone();
             tokio::spawn(async move {
-                // Publish a "ring snapshot ready" signal ONLY after the capture has written /ring.jpg, so
-                // the HA push triggers on THIS (not a fixed delay a cold ~20 s capture can outlast) and
-                // always fetches a present image. Momentary QoS 0, non-retained, and DROPPED when the
-                // broker is offline — its topic is in main.rs::is_momentary_publish so a queued one is
-                // also purged on disconnect, matching the ring event's #71 discipline so a reconnect can't
-                // flush a stale "someone is at the door" later. If the capture fails, no signal is sent
-                // (no push, rather than a push with a missing image).
-                if crate::capture::capture_ring(&cfg_ring).await && momentary_deliverable(&broker_ring) {
-                    let payload = format!("{{\"at\":\"{}\"}}", crate::own::utc_now_iso());
-                    if let Err(e) = client_ring.try_publish(
-                        &cfg_ring.topic_ring_snapshot,
-                        QoS::AtMostOnce,
-                        false,
-                        payload.into_bytes(),
-                    ) {
-                        eprintln!("btmqttd: capture: ring_snapshot publish failed: {e}");
+                // Publish a "ring snapshot ready" signal ONLY after the capture has written this event's
+                // ring-<id>.jpg, carrying that id so the HA push fetches exactly THIS event's frame (never
+                // another ring's) — and triggers on this signal, not a fixed delay a cold ~20 s capture
+                // can outlast. Momentary QoS 0, non-retained, and DROPPED when the broker is offline — its
+                // topic is in main.rs::is_momentary_publish so a queued one is also purged on disconnect,
+                // matching the ring event's #71 discipline so a reconnect can't flush a stale "someone is
+                // at the door" later. If the capture fails, no signal is sent (no push, rather than a push
+                // with a missing image).
+                if let Some(event_id) = crate::capture::capture_ring(&cfg_ring).await {
+                    if momentary_deliverable(&broker_ring) {
+                        let payload = format!(
+                            "{{\"at\":\"{}\",\"id\":{event_id}}}",
+                            crate::own::utc_now_iso()
+                        );
+                        if let Err(e) = client_ring.try_publish(
+                            &cfg_ring.topic_ring_snapshot,
+                            QoS::AtMostOnce,
+                            false,
+                            payload.into_bytes(),
+                        ) {
+                            eprintln!("btmqttd: capture: ring_snapshot publish failed: {e}");
+                        }
                     }
                 }
             });

@@ -10,8 +10,10 @@
 //!
 //! ## What it serves
 //! On a `GET` it serves one JPEG, chosen by path:
-//!   * `/ring.jpg` → the transient who-is-at-the-door ring snapshot (issue #169), captured at ring
-//!     time on tmpfs; 404 when there is no current ring image (never a stale/placeholder picture).
+//!   * `/ring-<id>.jpg` → one ring EVENT's who-is-at-the-door snapshot (issue #169), captured at ring
+//!     time on tmpfs and addressed by the event id the ring push notification carries; 404 when that
+//!     event has no image (never a stale/placeholder picture). `<id>` is digits only — nothing to
+//!     traverse.
 //!   * every OTHER path (incl. `/idle.jpg`, `/`) → the idle thumbnail: the persisted idle snapshot
 //!     (`cfg/extra/btmqttd/idle.jpg`) when present and a valid JPEG, else a small baked neutral
 //!     placeholder.
@@ -25,8 +27,10 @@
 //! idle snapshot is the same picture the doorbell already shows on the LAN; it is not a credential).
 //! Behind the firewall the server is still defensive against a misbehaving LAN client: it is GET-only,
 //! reads the request head under a byte cap AND a per-connection timeout, caps concurrent connections,
-//! always sends `Connection: close`, and IGNORES the request path, headers and body entirely (it
-//! always serves the one image) — so there is no path to traverse and nothing to inject.
+//! always sends `Connection: close`, and ignores the request headers and body entirely. The only part
+//! of the path it reads is an optional `/ring-<id>.jpg` where `<id>` is parsed as ALL-digits into a
+//! `u64` (anything else serves the idle image), so the path can never name a file to traverse — the id
+//! only ever indexes a `ring-<u64>.jpg` in the run dir.
 
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -112,16 +116,18 @@ where
 {
     let response = match tokio::time::timeout(REQUEST_TIMEOUT, read_head(&mut stream)).await {
         Ok(Ok(head)) => match request_is_get(&head) {
-            // The ring snapshot (issue #169) lives on its OWN path: `/ring.jpg` serves the transient
-            // who-is-at-the-door frame, and 404s when there is no current ring image (it is never a
+            // The ring snapshots (issue #169) live on their OWN per-event paths: `/ring-<id>.jpg` serves
+            // that event's who-is-at-the-door frame, and 404s when that event has no image (it is never a
             // placeholder — a stale/blank "who rang" picture would be misleading). EVERY other path
             // (incl. `/idle.jpg`, `/`, anything else) serves the idle thumbnail, preserving Phase-1
             // behaviour where the path was ignored.
-            Some(true) if request_path_is_ring(&head) => match ring_jpeg().await {
-                Some(bytes) => jpeg_response(&bytes),
-                None => simple_response("404 Not Found"),
+            Some(true) => match request_ring_event_id(&head) {
+                Some(id) => match ring_event_jpeg(id).await {
+                    Some(bytes) => jpeg_response(&bytes),
+                    None => simple_response("404 Not Found"),
+                },
+                None => jpeg_response(&idle_or_placeholder().await),
             },
-            Some(true) => jpeg_response(&idle_or_placeholder().await),
             Some(false) => simple_response("405 Method Not Allowed"),
             None => simple_response("400 Bad Request"),
         },
@@ -173,7 +179,7 @@ fn request_is_get(head: &[u8]) -> Option<bool> {
 }
 
 /// The request-target (path) token: the SECOND whitespace-delimited field of the request line
-/// (`GET /ring.jpg HTTP/1.1` → `/ring.jpg`). `None` if there is no second token.
+/// (`GET /ring-1.jpg HTTP/1.1` → `/ring-1.jpg`). `None` if there is no second token.
 fn request_path(head: &[u8]) -> Option<&[u8]> {
     let line_end = head.iter().position(|&b| b == b'\r' || b == b'\n').unwrap_or(head.len());
     let mut fields = head[..line_end].split(|&b| b == b' ').filter(|s| !s.is_empty());
@@ -181,21 +187,26 @@ fn request_path(head: &[u8]) -> Option<&[u8]> {
     fields.next()
 }
 
-/// True iff the request targets the ring snapshot (`/ring.jpg`), ignoring any `?query`. Every other
-/// path serves the idle thumbnail (Phase-1 path-agnostic behaviour), so only this exact target flips
-/// to the transient ring image.
-fn request_path_is_ring(head: &[u8]) -> bool {
-    match request_path(head) {
-        Some(p) => p.split(|&b| b == b'?').next().unwrap_or(p) == b"/ring.jpg",
-        None => false,
+/// The ring EVENT id a request targets (`/ring-<id>.jpg` → `Some(id)`), ignoring any `?query`; `None`
+/// for every other path (which then serves the idle thumbnail, preserving Phase-1 path-agnostic
+/// behaviour). `<id>` must be ALL ASCII digits between the fixed `/ring-` prefix and `.jpg` suffix —
+/// so the value can only be a `u64`, never a path or traversal — and must parse within `u64` range.
+fn request_ring_event_id(head: &[u8]) -> Option<u64> {
+    let path = request_path(head)?;
+    let path = path.split(|&b| b == b'?').next().unwrap_or(path); // drop any ?query
+    let mid = path.strip_prefix(b"/ring-")?.strip_suffix(b".jpg")?;
+    if mid.is_empty() || !mid.iter().all(|b| b.is_ascii_digit()) {
+        return None;
     }
+    // ASCII digits only ⇒ valid UTF-8; parse (rejects an id that overflows u64).
+    std::str::from_utf8(mid).ok()?.parse::<u64>().ok()
 }
 
-/// The transient ring snapshot if a valid JPEG exists on tmpfs, else `None` (⇒ 404). Read per request
-/// (the ring writer replaces it atomically); the blocking `std::fs` read is offloaded off the
-/// single-threaded runtime.
-async fn ring_jpeg() -> Option<Vec<u8>> {
-    match tokio::task::spawn_blocking(crate::capture::read_ring_jpg).await {
+/// One ring EVENT's snapshot if a valid JPEG exists on tmpfs for that id, else `None` (⇒ 404). Read per
+/// request (each event's file is immutable once written); the blocking `std::fs` read is offloaded off
+/// the single-threaded runtime.
+async fn ring_event_jpeg(id: u64) -> Option<Vec<u8>> {
+    match tokio::task::spawn_blocking(move || crate::capture::read_ring_event(id)).await {
         Ok(Some(bytes)) if is_jpeg(&bytes) => Some(bytes),
         _ => None,
     }
@@ -353,8 +364,8 @@ fn jpeg_response(body: &[u8]) -> Vec<u8> {
 }
 
 /// A bodyless status response (error paths). Always `Connection: close`, and `no-store` so a client or
-/// proxy never caches the error — in particular a `/ring.jpg` 404 must not be remembered and keep
-/// masking a ring snapshot written moments later.
+/// proxy never caches the error — in particular a `/ring-<id>.jpg` 404 must not be remembered and keep
+/// masking that event's snapshot written moments later.
 fn simple_response(status: &str) -> Vec<u8> {
     format!(
         "HTTP/1.1 {status}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
@@ -465,17 +476,27 @@ mod tests {
     }
 
     #[test]
-    fn request_path_is_ring_only_for_the_ring_target() {
-        // Exactly /ring.jpg (with or without a query string) → the ring snapshot.
-        assert!(request_path_is_ring(b"GET /ring.jpg HTTP/1.1\r\n"));
-        assert!(request_path_is_ring(b"GET /ring.jpg?ts=1 HTTP/1.1\r\n"));
+    fn request_ring_event_id_parses_only_a_numeric_ring_target() {
+        // /ring-<digits>.jpg (with or without a query string) → that event id.
+        assert_eq!(request_ring_event_id(b"GET /ring-1.jpg HTTP/1.1\r\n"), Some(1));
+        assert_eq!(request_ring_event_id(b"GET /ring-42.jpg?ts=9 HTTP/1.1\r\n"), Some(42));
+        assert_eq!(
+            request_ring_event_id(b"GET /ring-18446744073709551615.jpg HTTP/1.1\r\n"),
+            Some(u64::MAX)
+        );
         // Everything else serves the idle image (Phase-1 path-agnostic behaviour is preserved).
-        assert!(!request_path_is_ring(b"GET /idle.jpg HTTP/1.1\r\n"));
-        assert!(!request_path_is_ring(b"GET / HTTP/1.1\r\n"));
-        assert!(!request_path_is_ring(b"GET /ring.jpeg HTTP/1.1\r\n"));
-        assert!(!request_path_is_ring(b"GET /sub/ring.jpg HTTP/1.1\r\n"));
-        // A malformed line with no target token is not the ring path.
-        assert!(!request_path_is_ring(b"GET\r\n"));
+        assert_eq!(request_ring_event_id(b"GET /idle.jpg HTTP/1.1\r\n"), None);
+        assert_eq!(request_ring_event_id(b"GET / HTTP/1.1\r\n"), None);
+        assert_eq!(request_ring_event_id(b"GET /ring.jpg HTTP/1.1\r\n"), None); // no id
+        assert_eq!(request_ring_event_id(b"GET /ring-.jpg HTTP/1.1\r\n"), None); // empty id
+        assert_eq!(request_ring_event_id(b"GET /ring-1.jpeg HTTP/1.1\r\n"), None); // wrong suffix
+        assert_eq!(request_ring_event_id(b"GET /ring-1a.jpg HTTP/1.1\r\n"), None); // non-digit
+        assert_eq!(request_ring_event_id(b"GET /ring--1.jpg HTTP/1.1\r\n"), None); // sign / non-digit
+        assert_eq!(request_ring_event_id(b"GET /sub/ring-1.jpg HTTP/1.1\r\n"), None); // not at root
+        // An id past u64 range is rejected (no image can exist for it anyway).
+        assert_eq!(request_ring_event_id(b"GET /ring-18446744073709551616.jpg HTTP/1.1\r\n"), None);
+        // A malformed line with no target token is not a ring path.
+        assert_eq!(request_ring_event_id(b"GET\r\n"), None);
     }
 
     #[test]

@@ -225,8 +225,11 @@ public class Go2RtcConfigTests
         string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "doorbell");
         // The idle thumbnail is a real captured view, refreshable via the HA button.
         Assert.Contains("Update idle snapshot", guide);
-        // The ring snapshot lives on its own transient URL, on the still port (issue #169).
-        Assert.Contains("http://<intercom-ip>:8556/ring.jpg", guide);
+        // Ring snapshots are per-EVENT URLs (issue #169), addressed by the id the notification carries
+        // — the industry pattern (Ring/Nest/Frigate) so two rings can never cross images.
+        Assert.Contains("http://<intercom-ip>:8556/ring-<id>.jpg", guide);
+        // The pasteable automation templates the image URL from the event id in the MQTT payload.
+        Assert.Contains("/ring-{{ trigger.payload_json.id }}.jpg", guide);
         // The ring-notification automation triggers on the ring-snapshot-READY topic (published only
         // after the frame is written), so it never fires on a fixed delay that a cold capture outlasts.
         Assert.Contains(opts.EffectiveTopicRingSnapshot, guide);

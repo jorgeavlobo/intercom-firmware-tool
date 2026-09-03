@@ -6,8 +6,9 @@
 //!     HA "Update idle snapshot" button — persisted to `cfg/extra/btmqttd/idle.jpg` and served by
 //!     the Phase-1 still endpoint at `/idle.jpg`;
 //!   * the **ring snapshot** — who is at the door at the instant of a ring — written to a transient
-//!     tmpfs file and served at `/ring.jpg`, used ONLY by the ring push notification. It NEVER
-//!     overwrites the idle thumbnail.
+//!     PER-EVENT tmpfs file and served at `/ring-<id>.jpg`, used ONLY by the ring push notification
+//!     (which carries the event id, so it fetches exactly that ring's frame). It NEVER overwrites the
+//!     idle thumbnail.
 //!
 //! ## How a frame is grabbed
 //! The panel's H.264 is already fanned out by go2rtc as `rtsp://…@127.0.0.1:8554/doorbell` — the
@@ -20,16 +21,16 @@
 //!
 //! ## Bounds / safety
 //! The whole capture is wrapped in [`CAPTURE_TIMEOUT`]; ffmpeg is KILLED if it overruns so a stuck
-//! pull can never wedge the daemon. Captures are guarded PER KIND: an idle capture uses a try-lock (a
-//! mashed "Update idle snapshot" button just skips while one is running — the earlier grab is as good
-//! as the later), while ring captures are SERIALIZED on a mutex, so a time-critical ring is never
-//! dropped just because an idle capture is running. Ring captures are also generation-stamped so the
-//! NEWEST ring wins: a capture writes `/ring.jpg` (atomically, temp+rename) and reports success — which
-//! is what makes its caller publish the "snapshot ready" signal the HA push triggers on — ONLY while it
-//! is still the latest generation, so a ready signal always names the frame THAT ring wrote, never a
-//! superseded or removed one. A previous ring's image that a failed/superseded capture can't refresh is
-//! bounded out by [`read_ring_jpg`]'s freshness window (and never reaches the notification path, which
-//! fires on the ready signal, not a timer).
+//! pull can never wedge the daemon. An idle capture uses a try-lock (a mashed "Update idle snapshot"
+//! button just skips while one is running — the earlier grab is as good as the later), and ring
+//! captures are SERIALIZED on a mutex purely to cap encoder concurrency on the constrained panel — a
+//! time-critical ring is never dropped just because an idle capture is running (separate guards).
+//! Each ring is an INDEPENDENT event addressed by a unique id: it writes its own `ring-<id>.jpg`
+//! (atomically, temp+rename) and the ready signal the HA push triggers on carries that id, so the
+//! notification fetches exactly that event's frame — two rings can never cross images, and there is no
+//! shared mutable "latest" file to overwrite. Per-event files are retained for
+//! [`RING_FRESH_WINDOW`] (so the notification's fetch always resolves) then pruned; an aged one reads
+//! as 404 via [`read_ring_event`].
 //! The JPEG lands in a UNIQUE private tmpfs scratch file that is removed after it is read, so a
 //! concurrent request can't observe a torn file. The result is size-capped
 //! ([`crate::persist::MAX_IDLE_JPG_BYTES`]) and structurally validated before it is stored, so a
@@ -53,23 +54,23 @@ const DEFAULT_FFMPEG_BIN: &str = "/usr/sbin/ffmpeg";
 const RTSP_PORT: u16 = 8554;
 const STREAM_NAME: &str = "doorbell";
 
-/// The transient ring snapshot on tmpfs (issue #169): captured at ring time, served at `/ring.jpg`,
-/// and used ONLY by the push notification — it is deliberately NOT persisted (a stale "who rang"
-/// picture must not survive a reboot). Same tmpfs dir the runtime SDP lives in (`go2rtcd` creates it
-/// at boot); overridable via `$BTMQTTD_RUN_DIR` (tests/dev).
+/// The transient ring snapshots on tmpfs (issue #169). Each ring is its OWN event, addressed by a
+/// unique id and served at `/ring-<id>.jpg` — the industry pattern (Ring / Nest / Frigate): the push
+/// notification carries the event id and fetches THAT event's frame, so two rings can never cross
+/// images. Deliberately NOT persisted (a stale "who rang" picture must not survive a reboot). Same
+/// tmpfs dir the runtime SDP lives in (`go2rtcd` creates it at boot); overridable via `$BTMQTTD_RUN_DIR`
+/// (tests/dev).
 const DEFAULT_RUN_DIR: &str = "/var/run/btmqttd";
-const RING_JPG_FILE: &str = "ring.jpg";
+/// Filename prefix + suffix for a per-event ring snapshot (`ring-<id>.jpg`).
+const RING_FILE_PREFIX: &str = "ring-";
+const RING_FILE_SUFFIX: &str = ".jpg";
 
-/// How recent a ring snapshot must be to still be served at `/ring.jpg`. A ring image is a transient
-/// "who just rang" frame the HA push fetches within seconds of the capture. This mtime bound puts a
-/// CEILING on how long a previous ring's image can linger: one older than the window (a prior ring THIS
-/// ring could not refresh — the broker was offline so the capture was skipped, or the capture failed)
-/// ages out to a 404 rather than serving a stale visitor indefinitely. It is a backstop, not the primary
-/// guard: the reason a skipped/failed ring never NOTIFIES with a stale image is that the HA push triggers
-/// on the "snapshot ready" MQTT signal, which is published ONLY on a successful capture (see sender.rs).
-/// A DIRECT read of `/ring.jpg` within the window can still return the prior ring's frame — bounded and
-/// same-doorway, and never reached by the notification path. Judged by mtime (the capture writes it
-/// "now"), so no fragile per-ring cache-invalidation is needed.
+/// How long a ring snapshot is retained + servable. A ring image is a transient "who just rang" frame
+/// the HA push fetches within seconds of the capture; each event's file is kept this long (so the
+/// notification's fetch always resolves) and then aged out — both by `read_ring_event` (an older file
+/// reads as 404) and by the post-store cleanup that unlinks ring files past this age, bounding tmpfs
+/// use. This is a retention policy, exactly like Frigate's event-snapshot TTL — the per-event URL means
+/// there is no cross-ring staleness to guard, only how long each event lingers.
 const RING_FRESH_WINDOW: Duration = Duration::from_secs(120);
 
 /// Overall capture budget: bring-up + connect + one keyframe + encode. The panel emits an in-stream
@@ -95,23 +96,18 @@ pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 /// ~27 s) is running — go2rtc fans the stream out to both.
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 
-/// Ring captures are SERIALIZED (at most one ffmpeg at a time) AND generation-stamped ([`RING_GEN`]):
-/// the transient ring snapshot is time-ORDERED, so the NEWEST ring wins. A capture writes `/ring.jpg`
-/// and reports success — which is what makes its caller publish the "snapshot ready" signal — ONLY if
-/// no newer ring has been stamped since it started, so a ready signal always names the frame that ring
-/// produced, never a superseded one. The mutex also lets a waiter that a newer ring has ALREADY
-/// superseded skip its capture outright, bounding a burst of distinct rings to ~2 ffmpegs (the first,
-/// and the newest). Rings are already coalesced upstream (`publish_call_event` debounce), so only
-/// DISTINCT presses reach here in the first place.
+/// Ring captures are SERIALIZED (at most one ffmpeg at a time) so a burst of distinct rings can't fork
+/// unbounded encoders on the constrained panel — a second ring waits out the first's [`CAPTURE_TIMEOUT`]
+/// at most. Each ring is otherwise INDEPENDENT: it captures to its own `ring-<id>.jpg` and publishes a
+/// ready signal naming that id, so serialization is only a resource bound, never a correctness one (no
+/// ring's image can be overwritten or superseded by another). Rings are already coalesced upstream
+/// (`publish_call_event` debounce), so only DISTINCT presses reach here in the first place.
 static CAPTURING_RING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Monotonic ring-capture generation. Each [`capture_ring`] stamps itself with the next value on entry;
-/// a capture is "still the latest" only while `RING_GEN` has not advanced past its stamp. Used to make
-/// the NEWEST ring the sole writer + notifier so a ready signal can never point at a superseded (or
-/// removed) image. Advanced ONLY here — i.e. once per ring that actually spawns a capture (the spawn is
-/// gated on a fresh, non-coalesced publish), NOT on every detected frame — so a coalesced repeat can't
-/// make a genuinely-latest capture believe it was superseded.
-static RING_GEN: AtomicU64 = AtomicU64::new(0);
+/// Monotonic ring-event id. Each [`capture_ring`] takes the next value as its event id, names its
+/// snapshot `ring-<id>.jpg`, and the ready signal carries that id so Home Assistant fetches exactly
+/// that event's frame (never another ring's). Advanced once per ring that spawns a capture.
+static RING_EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Monotonic clock base (process start), for the ring timestamp below.
 static CLOCK_BASE: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
@@ -162,24 +158,22 @@ fn run_dir() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from(DEFAULT_RUN_DIR))
 }
 
-/// The tmpfs path the ring snapshot is served from.
-fn ring_jpg_path() -> std::path::PathBuf {
-    run_dir().join(RING_JPG_FILE)
+/// The tmpfs path of a specific ring event's snapshot (`ring-<id>.jpg`).
+fn ring_event_path(id: u64) -> std::path::PathBuf {
+    run_dir().join(format!("{RING_FILE_PREFIX}{id}{RING_FILE_SUFFIX}"))
 }
 
-/// Read the transient ring snapshot (for the `/ring.jpg` still-endpoint path). `None` when absent,
-/// unreadable, empty, or larger than the cap — the endpoint then replies 404 (there is no current
-/// ring image), never a stale/placeholder picture. Blocking `std::fs`; call via `spawn_blocking`.
-pub fn read_ring_jpg() -> Option<Vec<u8>> {
+/// Read one ring EVENT's snapshot by id (for the `/ring-<id>.jpg` still-endpoint path). `None` when
+/// absent, unreadable, empty, larger than the cap, or older than [`RING_FRESH_WINDOW`] — the endpoint
+/// then replies 404. Because each event has its OWN immutable file, this only ever returns THAT event's
+/// frame (never another ring's); the freshness bound is just the retention TTL. Blocking `std::fs`;
+/// call via `spawn_blocking`.
+pub fn read_ring_event(id: u64) -> Option<Vec<u8>> {
     use std::io::Read;
-    let file = std::fs::File::open(ring_jpg_path()).ok()?;
-    // Serve ONLY a recent ring snapshot: an image older than RING_FRESH_WINDOW is a previous ring that
-    // could not be refreshed (broker offline ⇒ capture skipped, or the capture failed), so it ages out to
-    // a 404 rather than serving a stale visitor indefinitely — a CEILING on staleness, not a per-ring
-    // invalidation (within the window a direct read can still return the prior frame; the notification
-    // never does — it fires on the ready signal, published only on a successful capture). Lenient if the
-    // mtime can't be read (serve): mtime is available on the tmpfs it lives on, and a missing mtime should
-    // not blank a genuinely-fresh capture.
+    let file = std::fs::File::open(ring_event_path(id)).ok()?;
+    // Retention TTL: a ring file past the window has aged out (its notification is long delivered), so it
+    // reads as 404 and the cleanup below will unlink it. Lenient if the mtime can't be read (serve): mtime
+    // is available on the tmpfs it lives on, and a missing mtime should not blank a genuinely-fresh grab.
     let stale = file
         .metadata()
         .ok()
@@ -324,7 +318,7 @@ async fn grab_jpeg(cfg: &Config) -> Result<Vec<u8>, String> {
 /// Read the scratch capture file, bounded to the idle cap (a capture is tens of KB; the cap guards a
 /// runaway file). Reads at most `cap + 1` bytes so an unexpectedly large ffmpeg output is REJECTED
 /// without ever allocating the whole file into memory on the constrained device (mirrors
-/// `persist::read_idle_jpg` / `read_ring_jpg`). `None` when absent/empty/oversized.
+/// `persist::read_idle_jpg` / `read_ring_event`). `None` when absent/empty/oversized.
 async fn read_scratch(path: &std::path::Path) -> Option<Vec<u8>> {
     use tokio::io::AsyncReadExt;
     let file = tokio::fs::File::open(path).await.ok()?;
@@ -415,81 +409,54 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     stored
 }
 
-/// Capture the ring snapshot and write it to the transient tmpfs `ring.jpg` (served at `/ring.jpg`).
-/// Does NOT wake the panel (a ring means it is already streaming) and does NOT touch `idle.jpg`.
-/// Returns `true` only when THIS ring is still the latest and its frame was written — which is the
-/// signal the caller uses to publish the "snapshot ready" notification, so the notification always
-/// names a present, current image. Returns `false` when superseded by a newer ring, or on capture
-/// failure (the caller then publishes nothing).
-pub async fn capture_ring(cfg: &Config) -> bool {
+/// Capture ONE ring event's snapshot and write it to its own tmpfs `ring-<id>.jpg` (served at
+/// `/ring-<id>.jpg`). Does NOT wake the panel (a ring means it is already streaming) and does NOT touch
+/// `idle.jpg`. Returns `Some(id)` when the frame was captured and written — the id the caller puts in
+/// the "snapshot ready" signal so Home Assistant fetches exactly THIS event's frame — or `None` on
+/// failure (the caller then publishes nothing). Each ring is independent: there is no cross-ring
+/// overwrite or supersession, so no ring's notification can ever carry another ring's picture.
+pub async fn capture_ring(cfg: &Config) -> Option<u64> {
     // (Idle-capture invalidation is handled at ring DETECTION on the bus via `note_ring`, not here, so it
     // also covers a ring whose event/notification never published — see LAST_RING_MS.)
-    //
-    // Stamp this ring, then let the NEWEST win. We deliberately do NOT unlink `/ring.jpg` up front: an
-    // unlink would open a window where a direct read 404s (or, worse, a superseded writer could restore a
-    // stale frame). Instead each capture writes atomically (temp+rename) and publishes its ready signal
-    // ONLY while it is still the latest generation, so a ready signal always names the image THAT ring
-    // wrote — never a removed or superseded one. A previous ring's image that this ring can't refresh
-    // (capture failed) is bounded out by `read_ring_jpg`'s freshness window and never reaches the
-    // notification path (which fires on the ready signal, not a timer).
-    let my_gen = RING_GEN.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-    // Serialize so at most one ffmpeg runs. If a NEWER ring was stamped while we waited, ours is already
-    // obsolete before it starts — skip the capture entirely (this is what bounds a burst of distinct
-    // rings to ~2 ffmpegs: the first, plus the newest).
+    // Take this event's unique id up front; its snapshot is addressed by it for the event's whole life.
+    let id = RING_EVENT_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    // Serialize purely to cap encoder concurrency on the constrained panel (a burst of distinct rings
+    // can't fork unbounded ffmpegs); correctness does not depend on it — each event writes its own file.
     let _guard = CAPTURING_RING.lock().await;
-    if RING_GEN.load(Ordering::Relaxed) != my_gen {
-        eprintln!("btmqttd: capture: ring capture skipped (superseded by a newer ring before it ran)");
-        return false;
-    }
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("btmqttd: capture: ring capture failed: {e}");
-            return false;
+            return None;
         }
     };
-    // A newer ring may have arrived DURING the grab. If so, discard our now-stale frame rather than
-    // overwriting `/ring.jpg` with it and firing a stale ready signal — the newer ring will write the
-    // current image and notify.
-    if RING_GEN.load(Ordering::Relaxed) != my_gen {
-        eprintln!("btmqttd: capture: ring snapshot discarded (superseded by a newer ring during capture)");
-        return false;
+    // Write this event's own immutable file, then prune aged-out ring files. Blocking std::fs — offload it.
+    let stored = tokio::task::spawn_blocking(move || store_ring_event(id, &bytes)).await.unwrap_or(false);
+    if stored {
+        eprintln!("btmqttd: capture: ring snapshot captured (event {id})");
+        Some(id)
+    } else {
+        eprintln!("btmqttd: capture: ring snapshot captured but could not be written (event {id})");
+        None
     }
-    let stored = tokio::task::spawn_blocking(move || store_ring_jpg(&bytes)).await.unwrap_or(false);
-    if !stored {
-        eprintln!("btmqttd: capture: ring snapshot captured but could not be written");
-        return false;
-    }
-    // RE-CHECK after the store's await point: `spawn_blocking` yields, so a newer ring could have stamped
-    // while the blocking write ran. If so, DON'T report success — returning `false` withholds the ready
-    // signal for this now-superseded generation (the newer ring writes the current image and notifies).
-    // The write itself is harmless: the newer ring's own atomic rename overwrites it. Because the caller
-    // publishes the ready signal synchronously off this `true` (no `.await` between the return and the
-    // publish, single-threaded runtime), a newer ring cannot slip in AFTER this check but BEFORE the
-    // publish — so a published ready signal always reflects the latest generation at publish time.
-    if RING_GEN.load(Ordering::Relaxed) != my_gen {
-        eprintln!("btmqttd: capture: ring snapshot superseded after write; ready signal withheld");
-        return false;
-    }
-    eprintln!("btmqttd: capture: ring snapshot captured");
-    true
 }
 
-/// Write the transient ring snapshot to tmpfs atomically (temp + rename), so a concurrent
-/// `/ring.jpg` read never sees a torn file. No dir fsync — tmpfs is volatile by design (the ring
-/// image is deliberately not durable). Returns `true` on success. Blocking; call via `spawn_blocking`.
-fn store_ring_jpg(bytes: &[u8]) -> bool {
+/// Write ring event `id`'s snapshot to tmpfs atomically (temp + rename), so a concurrent
+/// `/ring-<id>.jpg` read never sees a torn file, then prune ring files older than the retention window
+/// so tmpfs use stays bounded. No dir fsync — tmpfs is volatile by design (ring images are deliberately
+/// not durable). Returns `true` on a successful write. Blocking; call via `spawn_blocking`.
+fn store_ring_event(id: u64, bytes: &[u8]) -> bool {
     let dir = run_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         eprintln!("btmqttd: capture: cannot create {}: {e}", dir.display());
         return false;
     }
-    let path = ring_jpg_path();
+    let path = ring_event_path(id);
     let Some(path_str) = path.to_str() else {
         eprintln!("btmqttd: capture: ring path is not valid UTF-8");
         return false;
     };
-    match crate::receiver::create_unique_temp(path_str, bytes) {
+    let ok = match crate::receiver::create_unique_temp(path_str, bytes) {
         Ok(tmp) => match std::fs::rename(&tmp, path_str) {
             Ok(()) => true,
             Err(e) => {
@@ -501,6 +468,33 @@ fn store_ring_jpg(bytes: &[u8]) -> bool {
         Err(e) => {
             eprintln!("btmqttd: capture: cannot create temp for {path_str}: {e}");
             false
+        }
+    };
+    prune_aged_ring_files(&dir);
+    ok
+}
+
+/// Unlink `ring-*.jpg` files whose mtime is older than [`RING_FRESH_WINDOW`] — the retention sweep that
+/// keeps per-event ring snapshots from accumulating on tmpfs. A just-written event is far newer than the
+/// window, so its own notification's fetch is never pruned out from under it. Best-effort: any error
+/// (unreadable dir/entry/mtime) is ignored — a leftover file is at worst harmless tmpfs use, aged out by
+/// [`read_ring_event`] anyway. Blocking; runs inside the `spawn_blocking` store.
+fn prune_aged_ring_files(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !(name.starts_with(RING_FILE_PREFIX) && name.ends_with(RING_FILE_SUFFIX)) {
+            continue;
+        }
+        let aged = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|m| m.elapsed().ok())
+            .is_some_and(|age| age > RING_FRESH_WINDOW);
+        if aged {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }

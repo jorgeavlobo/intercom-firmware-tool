@@ -76,9 +76,9 @@ pub struct Config {
     pub topic_floor_call: String,
     pub topic_call_state: String,
     /// Momentary "ring snapshot ready" signal (issue #169): published AFTER the on-device ring capture
-    /// has written `/ring.jpg`, so the Home Assistant push automation fires only once the image actually
-    /// exists (a fixed post-ring delay can't establish readiness — a cold capture can take ~20 s). Only
-    /// used in on-device mode.
+    /// has written that event's `/ring-<id>.jpg`, carrying the id, so the Home Assistant push automation
+    /// fires only once the image exists and fetches exactly that event's frame (a fixed post-ring delay
+    /// can't establish readiness — a cold capture can take ~20 s). Only used in on-device mode.
     pub topic_ring_snapshot: String,
     // Stair-light SWITCH (opt-in). `light_enabled` reflects the installer's "has exterior
     // light" choice: when true the light subsystem RUNS even before a WHERE is known, so a

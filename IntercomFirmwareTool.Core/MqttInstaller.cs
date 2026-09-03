@@ -284,9 +284,10 @@ namespace IntercomFirmwareTool.Core
         /// outdoor door station ring). NULL (default) derives from the <see cref="TopicLastWill"/>
         /// namespace — see <see cref="TopicVolume"/> and <see cref="EffectiveTopicEntrancePanelCall"/>.</summary>
         public string? TopicEntrancePanelCall { get; init; }
-        /// <summary>Momentary "ring snapshot ready" topic (issue #169): btmqttd publishes to it once the
-        /// on-device ring capture has written <c>/ring.jpg</c>, so the Home Assistant push automation
-        /// fires only when the image exists (a fixed post-ring delay can't establish readiness). NULL
+        /// <summary>Momentary "ring snapshot ready" topic (issue #169): btmqttd publishes to it (with the
+        /// ring's event id) once the on-device ring capture has written that event's <c>/ring-&lt;id&gt;.jpg</c>,
+        /// so the Home Assistant push automation fires only when the image exists (a fixed post-ring delay
+        /// can't establish readiness). NULL
         /// (default) derives from the <see cref="TopicLastWill"/> namespace — see
         /// <see cref="EffectiveTopicRingSnapshot"/>. Used on-device only.</summary>
         public string? TopicRingSnapshot { get; init; }
@@ -1696,8 +1697,9 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_ENTRANCE_PANEL_CALL", opts.EffectiveTopicEntrancePanelCall));
             sb.Append(Conf("TOPIC_FLOOR_CALL", opts.EffectiveTopicFloorCall));
             sb.Append(Conf("TOPIC_CALL_STATE", opts.EffectiveTopicCallState));
-            // Ring snapshot ready (#169): btmqttd publishes here once the on-device ring capture has
-            // written /ring.jpg, so the HA push automation triggers on this (not a fixed delay).
+            // Ring snapshot ready (#169): btmqttd publishes here (with the ring's event id) once the
+            // on-device ring capture has written that event's /ring-<id>.jpg, so the HA push automation
+            // triggers on this and fetches that exact frame (not a fixed delay).
             sb.Append(Conf("TOPIC_RING_SNAPSHOT", opts.EffectiveTopicRingSnapshot));
 
             // Stair-light SWITCH (opt-in). LIGHT_ENABLED is the "has exterior light" choice: the

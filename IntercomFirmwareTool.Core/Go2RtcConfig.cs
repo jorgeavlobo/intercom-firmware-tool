@@ -435,12 +435,15 @@ namespace IntercomFirmwareTool.Core
 
             sb.Append("\nRing snapshot + notification\n----------------------------\n");
             sb.Append(string.Create(ci,
-                $"When the doorbell rings, the panel captures a SEPARATE snapshot of who is at\n" +
-                $"the door and serves it (transiently, on tmpfs) at:\n\n" +
-                $"    http://<intercom-ip>:{OnDeviceStillPort}/ring.jpg\n\n"));
-            sb.Append("This never overwrites the idle thumbnail. To get a phone notification with\n");
-            sb.Append("that picture, add a Home Assistant automation like this — replace\n");
-            sb.Append("<intercom-ip> and notify.mobile_app_your_phone with your own:\n\n");
+                $"When the doorbell rings, the panel captures a SEPARATE snapshot of who is at the\n" +
+                $"door. Each ring is its own EVENT with a unique id, and its picture is served\n" +
+                $"(transiently, on tmpfs) at a per-event URL:\n\n" +
+                $"    http://<intercom-ip>:{OnDeviceStillPort}/ring-<id>.jpg\n\n"));
+            sb.Append("This never overwrites the idle thumbnail. The panel publishes the id on the\n");
+            sb.Append("snapshot topic AFTER the frame is written, so the notification below fetches\n");
+            sb.Append("exactly that ring's picture (two rings can never cross images). Add a Home\n");
+            sb.Append("Assistant automation like this — replace <intercom-ip> and\n");
+            sb.Append("notify.mobile_app_your_phone with your own:\n\n");
             // The topic goes into a double-quoted YAML scalar, so escape the two characters a
             // double-quoted scalar treats specially — backslash first, then the quote. Topic
             // validation already forbids newlines and MQTT wildcards, but it permits '"' and '\',
@@ -458,13 +461,14 @@ namespace IntercomFirmwareTool.Core
                 $"        data:\n" +
                 $"          message: \"Someone is at the door\"\n" +
                 $"          data:\n" +
-                $"            image: \"http://<intercom-ip>:{OnDeviceStillPort}/ring.jpg\"\n\n"));
+                $"            image: >-\n" +
+                $"              http://<intercom-ip>:{OnDeviceStillPort}/ring-{{ trigger.payload_json.id }}.jpg\n\n"));
             sb.Append(string.Create(ci,
-                $"The panel publishes to that MQTT topic ONLY after it has captured the ring frame\n" +
-                $"and written /ring.jpg, so the notification always carries a fresh picture — no\n" +
-                $"guesswork with a fixed delay (a cold stream can take a while to produce a frame).\n" +
-                $"The raw ring event on \"{opts.EffectiveTopicEntrancePanelCall}\" still fires\n" +
-                $"immediately, for automations that only need to know a ring happened.\n"));
+                $"The snapshot topic carries the ring's event id (`{{\"at\":\"…\",\"id\":123}}`), and\n" +
+                $"the templated image URL above fetches that exact frame — published ONLY after it is\n" +
+                $"written, so there is no fixed-delay guesswork (a cold stream can take a while to\n" +
+                $"produce a frame). The raw ring event on \"{opts.EffectiveTopicEntrancePanelCall}\"\n" +
+                $"still fires immediately, for automations that only need to know a ring happened.\n"));
             return sb.ToString();
         }
     }
