@@ -1404,6 +1404,14 @@ fn is_concrete_topic(topic: &str) -> bool {
 /// momentary topic, a topic-only predicate would purge the retained state publish too. Requiring
 /// `AtMostOnce && !retain` makes this incapable of ever dropping a retained publish, and never loses
 /// a real momentary event (they are always exactly QoS 0 / non-retained).
+///
+/// The ring-snapshot-ready topic is momentary ONLY under on-device capture (`camera_enabled &&
+/// camera_ondevice`) — the same predicate that publishes it (see `sender`) and that gates it in the
+/// installer's collision check. Off-device the daemon never publishes it, and the installer now
+/// deliberately permits another publish topic (e.g. `TOPIC_DUMP`) to equal the unused derived ring
+/// topic; that aliased publish is QoS 0 / non-retained bus data that MUST survive a reconnect, so the
+/// shape guard alone would not save it — gate the ring-topic match on the capture feature so an
+/// off-device alias is never mistaken for a momentary snapshot event and purged.
 fn is_momentary_publish(req: &Request, cfg: &Config) -> bool {
     matches!(
         req,
@@ -1412,7 +1420,9 @@ fn is_momentary_publish(req: &Request, cfg: &Config) -> bool {
                 && !p.retain
                 && (p.topic == cfg.topic_entrance_panel_call
                     || p.topic == cfg.topic_floor_call
-                    || p.topic == cfg.topic_ring_snapshot
+                    || (p.topic == cfg.topic_ring_snapshot
+                        && cfg.camera_enabled
+                        && cfg.camera_ondevice)
                     || p.topic == cfg.topic_key)
     )
 }
@@ -1506,5 +1516,49 @@ mod tests {
         let mut state_shape = Publish::new(&cfg.topic_entrance_panel_call, QoS::AtLeastOnce, "x");
         state_shape.retain = true;
         assert!(!is_momentary_publish(&Request::Publish(state_shape), &cfg));
+    }
+
+    #[test]
+    fn ring_snapshot_is_momentary_only_under_on_device_capture() {
+        // The ring-snapshot-ready publish (QoS 0, non-retained) must be purged on a disconnect like the
+        // other momentary events — but ONLY when on-device capture is enabled, since that is the only
+        // mode that publishes it. Off-device the installer now permits an existing publish topic (e.g.
+        // TOPIC_DUMP) to equal the unused derived ring topic; such an aliased QoS 0 / non-retained bus
+        // publish must SURVIVE a reconnect, so the ring-topic match must be gated on the capture feature.
+        let pub_to = |t: &str| Request::Publish(Publish::new(t, QoS::AtMostOnce, "x"));
+
+        // On-device: the ring-snapshot topic is momentary.
+        let on = Config::from_map(
+            [("MQTT_HOST", "h"), ("CAMERA_ENABLED", "1"), ("CAMERA_ONDEVICE", "1")]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        assert!(on.camera_enabled && on.camera_ondevice);
+        assert!(is_momentary_publish(&pub_to(&on.topic_ring_snapshot), &on));
+
+        // Off-device (default camera off): the ring topic is NOT momentary, so an aliased publish onto it
+        // (here TOPIC_DUMP == the derived ring topic — the exact off-device collision the installer now
+        // allows) is KEPT across a reconnect instead of being wrongly purged.
+        let off = Config::from_map(
+            [("MQTT_HOST", "h"), ("TOPIC_DUMP", "Bticino/ring_snapshot")]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        assert!(!off.camera_enabled && !off.camera_ondevice);
+        assert_eq!(off.topic_dump, off.topic_ring_snapshot, "the alias under test");
+        assert!(!is_momentary_publish(&pub_to(&off.topic_ring_snapshot), &off));
+        assert!(!is_momentary_publish(&pub_to(&off.topic_dump), &off));
+
+        // Camera enabled but OFF-device is likewise not a publisher of the ring topic → not momentary.
+        let off_device_only = Config::from_map(
+            [("MQTT_HOST", "h"), ("CAMERA_ENABLED", "1")]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        );
+        assert!(off_device_only.camera_enabled && !off_device_only.camera_ondevice);
+        assert!(!is_momentary_publish(&pub_to(&off_device_only.topic_ring_snapshot), &off_device_only));
     }
 }
