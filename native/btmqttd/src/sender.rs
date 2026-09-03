@@ -656,29 +656,29 @@ async fn publish_frame(
         // and spawn the runner ONLY if none is active (a burst of distinct rings coalesces to the latest
         // — one active capture at a time, never a growing queue of tasks).
         if ring_published && cfg.camera_enabled && cfg.camera_ondevice {
-            crate::capture::note_pending_ring();
+            // Record this ring with the broker session epoch it fired on (this online session). The
+            // readiness publish is deferred across the capture; the runner hands each served event's OWN
+            // epoch back to the callback, so a ring that fires after a reconnect (served by an earlier
+            // ring's still-active runner) still publishes, while a pre-reconnect ring is suppressed — see
+            // ring_snapshot_deliverable / BROKER_EPOCH / capture::RING_NEWEST_EPOCH.
+            crate::capture::note_pending_ring(BROKER_EPOCH.load(Ordering::Relaxed));
             if let Some(runner) = crate::capture::try_acquire_ring_runner() {
                 let cfg_ring = cfg.clone();
                 let client_ring = client.clone();
                 let broker_ring = broker_online.clone();
-                // Capture the broker session epoch NOW (the ring fired on this online session). The
-                // readiness publish below is deferred across the capture; if the broker bounces meanwhile
-                // the epoch advances and the publish is suppressed rather than firing a pre-outage ring's
-                // notification on the new session — see ring_snapshot_deliverable / BROKER_EPOCH.
-                let ring_epoch = BROKER_EPOCH.load(Ordering::Relaxed);
                 tokio::spawn(async move {
-                    // On each successful capture the runner calls back here to publish a "ring snapshot
-                    // ready" signal carrying that event's id, so the HA push fetches exactly THIS event's
-                    // frame — triggered by this signal, not a fixed delay a cold ~20 s capture can outlast.
-                    // Momentary QoS 0, non-retained, DROPPED when the broker is offline AND suppressed if
-                    // the broker session changed since the ring (its topic is also in
-                    // main.rs::is_momentary_publish so an ALREADY-QUEUED one is purged on disconnect) —
-                    // matching the ring event's #71 discipline so a reconnect can't flush, or freshly emit,
-                    // a stale "someone is at the door" later. A failed capture publishes nothing (no image ⇒
-                    // no push). The `runner` guard rides into the task and frees the slot on drop, even on a
-                    // panic.
-                    crate::capture::run_ring_captures(&cfg_ring, runner, |event_id| {
-                        if !ring_snapshot_deliverable(&broker_ring, ring_epoch) {
+                    // On each successful capture the runner calls back here with the event id AND the epoch
+                    // it was detected on, to publish a "ring snapshot ready" signal carrying that id, so the
+                    // HA push fetches exactly THIS event's frame — triggered by this signal, not a fixed
+                    // delay a cold ~20 s capture can outlast. Momentary QoS 0, non-retained, DROPPED when the
+                    // broker is offline AND suppressed if the broker session changed since THIS ring (its
+                    // topic is also in main.rs::is_momentary_publish so an ALREADY-QUEUED one is purged on
+                    // disconnect) — matching the ring event's #71 discipline so a reconnect can't flush, or
+                    // freshly emit, a stale "someone is at the door" later. A failed capture publishes
+                    // nothing (no image ⇒ no push). The `runner` guard rides into the task and frees the slot
+                    // on drop, even on a panic.
+                    crate::capture::run_ring_captures(&cfg_ring, runner, |event_id, event_epoch| {
+                        if !ring_snapshot_deliverable(&broker_ring, event_epoch) {
                             return;
                         }
                         let payload =

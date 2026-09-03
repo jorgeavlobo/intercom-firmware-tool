@@ -118,6 +118,15 @@ static RING_RUNNER_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// runner handshake below (release then re-check) is what makes a late ring never get lost.
 static RING_NEWEST: AtomicU64 = AtomicU64::new(0);
 
+/// The broker SESSION epoch (see `sender::BROKER_EPOCH`) in effect when the NEWEST pending ring was
+/// DETECTED — stored alongside [`RING_NEWEST`] by [`note_pending_ring`] and handed back to the runner's
+/// `on_ready` so the "snapshot ready" publish is bound to the ring's OWN session, not the (possibly
+/// older) session the runner was started in. This is what lets a ring detected AFTER a reconnect — served
+/// by a runner an earlier ring started — still publish, while a pre-reconnect ring is suppressed. All
+/// reads/writes are on the single-threaded runtime (main's event loop, the sender, and the runner task
+/// never run truly concurrently), so `Relaxed` with epoch-before-id store ordering is sufficient.
+static RING_NEWEST_EPOCH: AtomicU64 = AtomicU64::new(0);
+
 /// Monotonic ring-event id source. Each detected ring takes the next value (via [`note_pending_ring`])
 /// as its event id, which names its snapshot `ring-<id>.jpg`; the ready signal carries that id so Home
 /// Assistant fetches exactly that event's frame (never another ring's).
@@ -480,8 +489,15 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
 /// the life of the process — `u64` at one ring/second wraps only after ~5.8e11 years — and are held
 /// `>= 1`: `.max(1)` maps the single value a (practically unreachable) wrap could land on, `0`, forward,
 /// since `0` is [`RING_NEWEST`]'s "no ring" sentinel and must never be a real event id.
-pub fn note_pending_ring() -> u64 {
+///
+/// `broker_epoch` is the caller's `sender::BROKER_EPOCH` at detection; it is stored in
+/// [`RING_NEWEST_EPOCH`] BEFORE the id, so any reader that observes the new id also observes this event's
+/// epoch (single-threaded runtime, so this ordering is enough). The runner hands it back via `on_ready`
+/// to bind the readiness publish to THIS ring's session — so a ring detected after a reconnect and served
+/// by an earlier ring's still-active runner is not mistaken for a pre-reconnect one.
+pub fn note_pending_ring(broker_epoch: u64) -> u64 {
     let id = RING_EVENT_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1).max(1);
+    RING_NEWEST_EPOCH.store(broker_epoch, Ordering::Relaxed);
     RING_NEWEST.store(id, Ordering::Relaxed);
     id
 }
@@ -529,15 +545,20 @@ impl Drop for RingRunnerGuard {
 }
 
 /// Drive ring captures to completion under the single-runner bound. Captures the NEWEST pending ring and
-/// calls `on_ready(id)` for it (the caller publishes the "snapshot ready" signal for that id) — but ONLY
-/// if no newer ring arrived during the grab; a superseded capture is discarded unpublished (its live frame
-/// may belong to the newer visitor) and the newer ring is captured on the next iteration. It loops only
-/// while a still-newer ring arrived during the capture — so a burst of distinct rings COALESCES to a
+/// calls `on_ready(id, epoch)` for it (the caller publishes the "snapshot ready" signal for that id) — but
+/// ONLY if no newer ring arrived during the grab; a superseded capture is discarded unpublished (its live
+/// frame may belong to the newer visitor) and the newer ring is captured on the next iteration. It loops
+/// only while a still-newer ring arrived during the capture — so a burst of distinct rings COALESCES to a
 /// single notification carrying the latest frame, and work is bounded to one active capture, never a queue.
 /// Takes the runner `guard` by value (from a winning [`try_acquire_ring_runner`]); the slot is released
 /// via the guard's drop, so even a panic inside a capture frees it. `on_ready` is invoked synchronously
 /// (no `.await` inside it on the production path), so the id it publishes is still the one just written.
-pub async fn run_ring_captures<F: Fn(u64)>(cfg: &Config, guard: RingRunnerGuard, on_ready: F) {
+///
+/// `epoch` is [`RING_NEWEST_EPOCH`] — the broker session THIS event was detected on, read together with
+/// the still-newest confirmation so a runner started for an older ring hands the caller each served ring's
+/// OWN epoch (not the runner's start epoch). That lets the caller correctly publish a ring detected after
+/// a reconnect while still suppressing one detected before it.
+pub async fn run_ring_captures<F: Fn(u64, u64)>(cfg: &Config, guard: RingRunnerGuard, on_ready: F) {
     // We hold the slot via `guard`; it releases on drop — including during unwind, so a panic in the
     // capture/publish below still frees the slot instead of wedging ring captures for the process life.
     let mut guard = guard;
@@ -548,9 +569,10 @@ pub async fn run_ring_captures<F: Fn(u64)>(cfg: &Config, guard: RingRunnerGuard,
         // that arrived during the (up-to-25 s) grab means the live frame may be the NEWER visitor, so
         // binding it to the older event would mislabel it. Discard the superseded result and let the next
         // loop iteration capture-and-publish the newer id — so a burst collapses to one notification with
-        // the freshest frame, never an older event carrying a newer visitor's picture.
+        // the freshest frame, never an older event carrying a newer visitor's picture. Read the epoch
+        // AFTER confirming `id` is still newest, so it is this event's own detecting epoch.
         if capture_ring_frame(cfg, id).await && RING_NEWEST.load(Ordering::Relaxed) == id {
-            on_ready(id);
+            on_ready(id, RING_NEWEST_EPOCH.load(Ordering::Relaxed));
         }
         // Release the slot (drop the guard) BEFORE re-checking for a newer ring: this ordering (release
         // before the re-check, and a fresh ring stores RING_NEWEST before it tries to acquire) guarantees
@@ -707,15 +729,28 @@ mod tests {
     }
 
     #[test]
-    fn ring_runner_slot_is_exclusive_and_coalesces() {
+    fn ring_runner_slot_is_exclusive_coalesces_and_records_per_event_epoch() {
         // The single-runner bound: only ONE task can hold the runner slot, extra rings just record the
-        // newest id, and the slot is re-acquirable once released. (Uses the real process-global statics;
-        // no other test touches them.)
+        // newest id, and the slot is re-acquirable once released. Also covers per-EVENT epoch binding
+        // (#169): the newest pending ring carries ITS OWN detecting epoch. (This is the sole test that
+        // touches the process-global ring counters, so its consecutive-id / newest-epoch assertions can't
+        // race another test.)
         RING_RUNNER_ACTIVE.store(false, Ordering::Relaxed);
-        let a = note_pending_ring();
-        let b = note_pending_ring();
+        // Ring A detected on broker session epoch 1.
+        let a = note_pending_ring(1);
+        assert_eq!(RING_NEWEST.load(Ordering::Relaxed), a, "RING_NEWEST tracks ring A");
+        assert_eq!(RING_NEWEST_EPOCH.load(Ordering::Relaxed), 1, "A's epoch is its own detecting epoch");
+        // Broker bounced (epoch -> 2). Ring B is detected on the NEW session while A's runner is still busy.
+        // Its epoch — what run_ring_captures hands on_ready — must be 2 (B's own), not A's start epoch 1, so
+        // B publishes on the current session instead of being suppressed as a pre-reconnect ring.
+        let b = note_pending_ring(2);
         assert_eq!(b, a + 1, "each ring takes the next event id");
         assert_eq!(RING_NEWEST.load(Ordering::Relaxed), b, "RING_NEWEST tracks the latest ring");
+        assert_eq!(
+            RING_NEWEST_EPOCH.load(Ordering::Relaxed),
+            2,
+            "the newest event carries ITS OWN epoch (2), not the runner's start epoch (1)"
+        );
         let g = try_acquire_ring_runner();
         assert!(g.is_some(), "first acquire wins the runner slot");
         assert!(try_acquire_ring_runner().is_none(), "a second acquire is refused while active");
