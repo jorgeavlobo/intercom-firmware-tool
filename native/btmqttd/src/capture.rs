@@ -179,10 +179,11 @@ fn ring_event_path(id: u64) -> std::path::PathBuf {
 /// call via `spawn_blocking`.
 pub fn read_ring_event(id: u64) -> Option<Vec<u8>> {
     use std::io::Read;
-    let file = std::fs::File::open(ring_event_path(id)).ok()?;
+    let path = ring_event_path(id);
+    let file = std::fs::File::open(&path).ok()?;
     // Retention TTL: a ring file past the window has aged out (its notification is long delivered), so it
-    // reads as 404 and the cleanup below will unlink it. Lenient if the mtime can't be read (serve): mtime
-    // is available on the tmpfs it lives on, and a missing mtime should not blank a genuinely-fresh grab.
+    // reads as 404. Lenient if the mtime can't be read (serve): mtime is available on the tmpfs it lives
+    // on, and a missing mtime should not blank a genuinely-fresh grab.
     let stale = file
         .metadata()
         .ok()
@@ -190,6 +191,11 @@ pub fn read_ring_event(id: u64) -> Option<Vec<u8>> {
         .and_then(|m| m.elapsed().ok())
         .is_some_and(|age| age > RING_FRESH_WINDOW);
     if stale {
+        // Opportunistically unlink the aged file so a read cleans it even if no further ring ever fires
+        // `prune_aged_ring_files` (which runs at capture time). Together they mean an aged ring file is
+        // removed by whichever happens first — the next ring OR a read of its path (HA polls the still
+        // endpoint) — and any residue is bounded by the last window's rings and cleared on reboot (tmpfs).
+        let _ = std::fs::remove_file(&path);
         return None;
     }
     let mut buf = Vec::new();
