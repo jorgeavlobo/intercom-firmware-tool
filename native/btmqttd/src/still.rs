@@ -166,15 +166,34 @@ async fn idle_or_placeholder() -> Vec<u8> {
     }
 }
 
-/// A cheap structural JPEG check: SOI (`FF D8 FF`) at the start and an EOI (`FF D9`) somewhere after
-/// it. Enough to reject a truncated or non-JPEG file so HA never renders garbage; we do NOT fully
-/// decode (the endpoint is not a codec). Crucially the EOI need NOT be the LAST two bytes — some
-/// encoders append trailing padding, a metadata block, or an embedded thumbnail after EOI, and such a
-/// file is perfectly viewable — so we SEARCH for the marker instead of requiring it at the very end.
+/// A structural JPEG check — enough to trust the bytes are a REAL frame without pulling a full JPEG
+/// decoder into a size-constrained embedded binary (the endpoint is not a codec). It requires, in the
+/// byte stream: the SOI magic (`FF D8 FF`) at the start, a Start-Of-Frame marker (`FF C0`..`FF CF`,
+/// excluding the non-frame `FF C4` DHT / `FF C8` JPG / `FF CC` DAC), a Start-Of-Scan (`FF DA`), and an
+/// EOI (`FF D9`). The SOF+SOS requirement rejects a marker-only stub like `FF D8 FF D9` that carries no
+/// image data (which HA would render as nothing), on top of rejecting a truncated or non-JPEG file. The
+/// markers are SEARCHED, not position-pinned: the EOI need not be the last two bytes (encoders append
+/// trailing padding / metadata / an embedded thumbnail after it), and a valid file still matches.
 fn is_jpeg(b: &[u8]) -> bool {
-    b.len() >= 4
-        && b.starts_with(&[0xFF, 0xD8, 0xFF])
-        && b[2..].windows(2).any(|w| w == [0xFF, 0xD9])
+    if b.len() < 4 || !b.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return false;
+    }
+    let (mut has_sof, mut has_sos, mut has_eoi) = (false, false, false);
+    // A JPEG marker is `FF` followed by its code. We only need PRESENCE of the three structural
+    // markers; a byte scan is sufficient (in a valid stream, entropy-coded data byte-stuffs every
+    // `FF` as `FF 00` or a restart `FF D0`..`FF D7`, so a bare SOF/SOS/EOI code marks a real segment).
+    for w in b[2..].windows(2) {
+        if w[0] != 0xFF {
+            continue;
+        }
+        match w[1] {
+            0xC0..=0xCF if !matches!(w[1], 0xC4 | 0xC8 | 0xCC) => has_sof = true,
+            0xDA => has_sos = true,
+            0xD9 => has_eoi = true,
+            _ => {}
+        }
+    }
+    has_sof && has_sos && has_eoi
 }
 
 /// A `200 OK` JPEG response. `no-store` keeps HA from pinning a stale thumbnail after a Phase-2
@@ -225,15 +244,24 @@ mod tests {
     }
 
     #[test]
-    fn is_jpeg_accepts_soi_eoi_and_rejects_others() {
-        assert!(is_jpeg(&[0xFF, 0xD8, 0xFF, 0xD9]));
-        assert!(is_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIF\xff\xd9"));
+    fn is_jpeg_requires_frame_and_scan_structure_not_just_markers() {
+        // A structurally complete JPEG: SOI + SOF0 + SOS + EOI (segment payloads elided).
+        let valid: &[u8] = &[0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0xFF, 0xDA, 0x00, 0x08, 0xFF, 0xD9];
+        assert!(is_jpeg(valid));
         // Trailing padding / metadata after EOI is fine — the EOI need not be the last two bytes
         // (some encoders append bytes after EOI, and the file is still a valid, viewable JPEG).
-        assert!(is_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIF\xff\xd9\x00\x00   trailer"));
+        let mut with_trailer = valid.to_vec();
+        with_trailer.extend_from_slice(b"\x00\x00   trailer");
+        assert!(is_jpeg(&with_trailer));
+        // A marker-only stub (SOI + EOI, no frame/scan) carries no image data → rejected, so the
+        // endpoint serves the baked placeholder instead of an unusable "image".
+        assert!(!is_jpeg(&[0xFF, 0xD8, 0xFF, 0xD9]));
+        // SOI + an APP0 header but no SOF/SOS (a truncated header) → rejected.
+        assert!(!is_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIF\xff\xd9"));
+        // SOF present but no SOS (frame declared, scan missing) → rejected.
+        assert!(!is_jpeg(&[0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0xFF, 0xD9]));
         assert!(!is_jpeg(b"")); // empty
-        assert!(!is_jpeg(b"\xff\xd8\xff")); // no EOI, too short
-        assert!(!is_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIFdata-no-eoi")); // SOI but truncated, no EOI marker
+        assert!(!is_jpeg(b"\xff\xd8\xff")); // too short, no structure
         assert!(!is_jpeg(b"not a jpeg at all")); // wrong magic
         assert!(!is_jpeg(b"\x89PNG\r\n\x1a\n")); // a PNG
     }
