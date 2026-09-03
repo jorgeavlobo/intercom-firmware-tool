@@ -100,10 +100,12 @@ static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 
 /// Ring captures run through a BOUNDED single runner ([`run_ring_captures`]): at most one capture is
 /// ever active, and a burst of distinct rings does NOT queue a task each — extra rings only update
-/// [`RING_NEWEST`] and the one active runner picks up the newest when it finishes. So work is bounded
-/// to one active capture + at most one follow-up regardless of how many rings arrive, and no queued
-/// task can capture minutes after its ring ended. `true` means a runner is active; a fresh ring spawns
-/// the runner only if it can flip this false→true, otherwise the existing runner will serve it.
+/// [`RING_NEWEST`], and the one active runner loops to capture each successive newest ring (coalescing
+/// the rest) rather than a task piling up per ring. So at any instant there is at most one active
+/// capture plus one pending (the latest); over a sustained burst the runner iterates, but the number of
+/// LIVE tasks stays O(1) — there is no unbounded queue, and no task captures minutes after its ring
+/// ended. `true` means a runner is active; a fresh ring spawns the runner only if it can flip this
+/// false→true, otherwise the existing runner will serve it.
 static RING_RUNNER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// The event id of the NEWEST pending ring. Each detected ring bumps [`RING_EVENT_SEQ`] and stores its
