@@ -178,10 +178,11 @@ async fn idle_or_placeholder() -> Vec<u8> {
 /// the non-frame `FF C4` DHT / `FF C8` JPG / `FF CC` DAC: `length == 8 + 3*Nf` with non-zero precision
 /// / height / width / component count; SOS: `length == 6 + 2*Ns` with `Ns >= 1`), and every segment
 /// must be fully present — so a degenerate or truncated SOF/SOS is rejected, not just a bare marker. A
-/// file is a real image iff a valid SOS is reached with a valid SOF already seen. This rejects a
-/// truncated, marker-only, payload-forged, or field-degenerate file (it falls back to the placeholder)
-/// while accepting any genuine JPEG regardless of what follows the scan (trailing padding / metadata /
-/// an embedded thumbnail).
+/// file is a real image iff a valid SOS is reached (with a valid SOF already seen) AND an EOI (`FF D9`)
+/// follows the scan header — so a file truncated at/after the scan header, with no scan data or
+/// terminator, is rejected too. This rejects a truncated, marker-only, payload-forged, or
+/// field-degenerate file (it falls back to the placeholder) while accepting any genuine JPEG regardless
+/// of trailing padding / metadata / an embedded thumbnail after the EOI.
 fn is_jpeg(b: &[u8]) -> bool {
     if b.len() < 4 || b[0] != 0xFF || b[1] != 0xD8 {
         return false; // no SOI
@@ -218,14 +219,21 @@ fn is_jpeg(b: &[u8]) -> bool {
                 }
                 let body = &b[i + 2..i + seg_len]; // segment payload (after the 2 length bytes)
                 if marker == 0xDA {
-                    // Start-Of-Scan header: Ns(1) + Ns*(2) + 3 bytes => length == 6 + 2*Ns, Ns >= 1. A
-                    // VALID scan after a valid frame means a real image; the entropy data that follows
-                    // is irrelevant to structural validity, so accept here.
+                    // Start-Of-Scan header: Ns(1) + Ns*(2) + 3 bytes => length == 6 + 2*Ns, Ns >= 1,
+                    // after a valid frame.
                     let ns = match body.first() {
                         Some(&n) => n as usize,
                         None => return false,
                     };
-                    return has_sof && ns >= 1 && seg_len == 6 + 2 * ns;
+                    if !has_sof || ns < 1 || seg_len != 6 + 2 * ns {
+                        return false;
+                    }
+                    // A real scan is followed by entropy-coded data terminated by an EOI. Require an EOI
+                    // marker after the SOS header, so a file truncated at/just-after the scan header (no
+                    // scan data, no terminator) is rejected. In valid entropy data every `FF` is stuffed
+                    // (`FF 00`) or a restart (`FF D0`..`FF D7`), so a bare `FF D9` only marks the true
+                    // end of image — searching for it is sound and won't false-match inside the scan.
+                    return b[i + seg_len..].windows(2).any(|w| w == [0xFF, 0xD9]);
                 }
                 // Start-Of-Frame (SOF0..SOF15, excluding the non-frame DHT C4 / JPG C8 / DAC CC):
                 // precision(1) + height(2) + width(2) + Nf(1) + Nf*(3) => length == 8 + 3*Nf, with a
@@ -307,6 +315,7 @@ mod tests {
             0xFF, 0xD8, // SOI
             0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, // SOF0
             0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, // SOS
+            0x00, // one byte of entropy-coded scan data
             0xFF, 0xD9, // EOI
         ];
         assert!(is_jpeg(valid));
@@ -328,6 +337,12 @@ mod tests {
         assert!(!is_jpeg(&[
             0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
             0xFF, 0xD9,
+        ]));
+        // Valid SOF + valid SOS header but truncated right after it (no scan data, no EOI) → rejected:
+        // a real scan is terminated by an EOI, so the missing terminator means an unusable image.
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
         ]));
         // Marker-LIKE bytes buried in an APP0 PAYLOAD must NOT count: here `FF C0 FF DA` are the 4
         // payload bytes of the APP0 segment (length 6), not real SOF/SOS segments → rejected.
