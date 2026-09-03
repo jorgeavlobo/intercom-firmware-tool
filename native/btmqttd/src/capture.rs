@@ -58,6 +58,13 @@ const RING_JPG_FILE: &str = "ring.jpg";
 /// two, so this must comfortably exceed that; ffmpeg is killed if it overruns.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(25);
 
+/// How long to hold the panel up for an idle/button capture. Comfortably longer than the warm-up
+/// delay plus [`CAPTURE_TIMEOUT`], so the SIP session can't lapse mid-grab even under a very short
+/// `CAMERA_VIEW_IDLE_SECS` (which a `ViewCmd::Start` window would honour and could cap at 1 s). We use
+/// `ViewCmd::Hold` with this ABSOLUTE expiry: its deadline governs independently of that manual window
+/// (see `sip::governing_deadline`), so a short manual window can't starve the capture.
+const CAPTURE_HOLD: Duration = Duration::from_secs(30);
+
 /// Settle delay before the FIRST-RUN capture, so go2rtc, the firewall and the SIP UA are all up
 /// before we try to wake the panel on a fresh boot.
 pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
@@ -259,14 +266,20 @@ impl Drop for CaptureGuard {
     }
 }
 
-/// Bring the panel up for an idle/button capture: poke the on-demand SIP UA (`ViewCmd::Start`) so it
-/// INVITEs the panel, then wait briefly for the media to start flowing before ffmpeg connects. Best
-/// effort — if on-demand viewing is off (`view_tx` is `None`) there is no way to wake an idle panel,
-/// so the capture will simply time out and be reported as failed.
+/// Bring the panel up for an idle/button capture: poke the on-demand SIP UA so it INVITEs the panel,
+/// then wait briefly for the media to start flowing before ffmpeg connects. Best effort — if on-demand
+/// viewing is off (`view_tx` is `None`) there is no way to wake an idle panel, so the capture will
+/// simply time out and be reported as failed.
+///
+/// Uses `ViewCmd::Hold` with an ABSOLUTE [`CAPTURE_HOLD`] expiry, NOT `ViewCmd::Start`: `Start` arms
+/// the operator-configurable `CAMERA_VIEW_IDLE_SECS` window, which can be as short as 1 s and would
+/// then expire before a cold-stream grab completes. `Hold`'s deadline governs independently of that
+/// window (`sip::governing_deadline` takes the max), so the panel stays up for the whole capture
+/// regardless of how short the manual window is — and it does not shorten a concurrent manual view.
 async fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>) {
     if let Some(tx) = view_tx {
-        // try_send: never block the caller; Start is idempotent (the UA re-checks on each poke).
-        let _ = tx.try_send(ViewCmd::Start);
+        // try_send: never block the caller; Hold is idempotent (the UA re-checks + renews on each poke).
+        let _ = tx.try_send(ViewCmd::Hold(tokio::time::Instant::now() + CAPTURE_HOLD));
         // Give the SIP INVITE + the panel's media-start a moment before ffmpeg connects, so go2rtc's
         // producer has RTP to serve rather than opening onto silence. ffmpeg still waits for the first
         // keyframe within CAPTURE_TIMEOUT, so this is only a head start, not a correctness dependency.
@@ -283,25 +296,36 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
         eprintln!("btmqttd: capture: idle capture skipped (an idle capture is already in progress)");
         return false;
     };
+    // Snapshot the ring generation. An idle capture and a ring capture can run concurrently (separate
+    // guards), so a ring that arrives DURING this idle capture means a VISITOR is at the door — the
+    // frame we grab is then NOT the empty doorway. If the generation moved, discard rather than persist
+    // a visitor as the idle thumbnail (which would otherwise survive reboots + reflashes).
+    let ring_gen_at_start = RING_GEN.load(Ordering::SeqCst);
     wake_panel(view_tx).await;
-    match grab_jpeg(cfg).await {
-        Ok(bytes) => {
-            // The atomic store is blocking std::fs — offload it off the single-threaded runtime.
-            let stored = tokio::task::spawn_blocking(move || crate::persist::store_idle_jpg(&bytes))
-                .await
-                .unwrap_or(false);
-            if stored {
-                eprintln!("btmqttd: capture: idle snapshot updated");
-            } else {
-                eprintln!("btmqttd: capture: idle snapshot captured but could not be stored");
-            }
-            stored
-        }
+    let bytes = match grab_jpeg(cfg).await {
+        Ok(b) => b,
         Err(e) => {
             eprintln!("btmqttd: capture: idle capture failed: {e}");
-            false
+            return false;
         }
+    };
+    if RING_GEN.load(Ordering::SeqCst) != ring_gen_at_start {
+        eprintln!(
+            "btmqttd: capture: idle capture superseded by a ring (visitor present); discarding \
+             so the idle thumbnail stays the empty doorway"
+        );
+        return false;
     }
+    // The atomic store is blocking std::fs — offload it off the single-threaded runtime.
+    let stored = tokio::task::spawn_blocking(move || crate::persist::store_idle_jpg(&bytes))
+        .await
+        .unwrap_or(false);
+    if stored {
+        eprintln!("btmqttd: capture: idle snapshot updated");
+    } else {
+        eprintln!("btmqttd: capture: idle snapshot captured but could not be stored");
+    }
+    stored
 }
 
 /// Capture the ring snapshot and write it to the transient tmpfs `ring.jpg` (served at `/ring.jpg`).
