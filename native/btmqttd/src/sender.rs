@@ -632,6 +632,12 @@ async fn publish_frame(
         // classify this call as an entrance-panel call. The `*#8**35*1` ringing frame arrives
         // BEFORE this classifying frame, so the classifier held it as Pending (Suppressed);
         // flush that held ring now that we know it's a real entrance call (arming the watchdog).
+        // Record the ring for idle-capture invalidation FIRST — on detection, before (and independent
+        // of) any MQTT publish or the ring capture — so an in-flight or imminent on-device idle capture
+        // discards a visitor frame even when the broker is offline (see capture::note_ring / #169).
+        if cfg.camera_ondevice {
+            crate::capture::note_ring();
+        }
         let held = lock_classifier(classifier).saw_entrance_panel_call();
         if let Some(code) = held {
             publish_call_state(cfg, client, code).await;
@@ -644,8 +650,8 @@ async fn publish_frame(
         // Ring snapshot (issue #169): grab a who-is-at-the-door frame and write it to the transient
         // `/ring.jpg` for the HA push. Fire ONLY on a FRESH ring event (`ring_published`): the gateway
         // repeats one press's signature and `publish_call_event` coalesces those (#71) — spawning per raw
-        // frame would let a duplicate supersede the first capture (RING_GEN) or emit multiple
-        // notifications. DETACHED + best-effort (the panel is already streaming because it is ringing),
+        // frame would emit multiple notifications for one press. DETACHED + best-effort (the panel is
+        // already streaming because it is ringing),
         // bounded by the capture's own timeout, and it NEVER touches idle.jpg. Gate on the media path
         // (camera_enabled) AS WELL as on-device: CAMERA_ONDEVICE can be set independently in a
         // hand-edited conf, and without the camera feature there is no RTP siphon for go2rtc to serve.

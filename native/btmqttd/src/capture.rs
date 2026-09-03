@@ -29,7 +29,8 @@
 //! ([`crate::persist::MAX_IDLE_JPG_BYTES`]) and structurally validated before it is stored, so a
 //! truncated/garbage grab never reaches Home Assistant.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -78,18 +79,36 @@ pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 static CAPTURING_RING: AtomicBool = AtomicBool::new(false);
 
-/// Monotonic ring "generation", bumped on every ring. Its SOLE purpose is to let a CONCURRENT idle
-/// capture (first-run / button) detect that a ring happened DURING its grab — a visitor is at the door —
-/// and discard that frame instead of persisting a visitor as the empty-doorway idle thumbnail (see
-/// `capture_idle`). The ring capture itself does NOT self-discard on it: the single-capture guard
-/// already serialises rings (a second ring while one is capturing is skipped, not run concurrently), and
-/// the HA notification fires on the "snapshot ready" signal that is published ONLY on a successful
-/// capture — so a skipped/failed ring produces no notification, and the "clear ring.jpg first" step keeps
-/// a direct `/ring.jpg` read at a clean 404 rather than a stale image. (An earlier revision also made the
-/// ring capture discard its own result on a newer generation; that made two near-simultaneous rings
-/// produce NOTHING — the in-flight capture discarded because the skipped second ring had bumped the
-/// generation — so it was removed once the ready-signal made it redundant.)
-static RING_GEN: AtomicU32 = AtomicU32::new(0);
+/// Monotonic clock base (process start), for the ring timestamp below.
+static CLOCK_BASE: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
+
+/// Milliseconds since [`CLOCK_BASE`] — a cheap monotonic tick.
+fn now_ms() -> u64 {
+    CLOCK_BASE.elapsed().as_millis() as u64
+}
+
+/// [`now_ms`] of the last DETECTED entrance ring (via [`note_ring`]), or 0 if none yet. An idle capture
+/// reads it to DECLINE while a visitor is/was recently at the door, so a visitor frame is never persisted
+/// as the empty-doorway idle thumbnail. It is advanced at ring DETECTION on the bus — independent of
+/// whether the ring's MQTT event or the snapshot notification can be published, and independent of the
+/// ring capture (which the single-capture guard may skip) — so an idle capture is invalidated even by a
+/// ring it never saw a publish for.
+static LAST_RING_MS: AtomicU64 = AtomicU64::new(0);
+
+/// If a ring was DETECTED within this window before an idle capture started (or at any time during it),
+/// the idle capture is declined: a doorbell call may still be streaming the visitor, so the grabbed frame
+/// is not the empty doorway. Generous on purpose — a false decline only skips one idle update (first-run
+/// retries next boot; the "Update idle snapshot" button can be re-pressed), whereas a false ACCEPT would
+/// persist a visitor as the idle thumbnail across reboots + reflashes.
+const RECENT_RING_WINDOW: Duration = Duration::from_secs(120);
+
+/// Record that an entrance ring was DETECTED (called from the bus monitor on every entrance-panel-call
+/// signature, BEFORE and independent of any MQTT publish). Advances the idle-invalidation clock so a
+/// concurrent or imminent idle capture discards its (visitor) frame rather than storing it as the idle
+/// thumbnail.
+pub fn note_ring() {
+    LAST_RING_MS.store(now_ms(), Ordering::Relaxed);
+}
 
 /// Per-process nonce so overlapping-in-time scratch files never collide (atop the pid).
 static NONCE: AtomicU32 = AtomicU32::new(0);
@@ -303,11 +322,11 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
         eprintln!("btmqttd: capture: idle capture skipped (an idle capture is already in progress)");
         return false;
     };
-    // Snapshot the ring generation. An idle capture and a ring capture can run concurrently (separate
-    // guards), so a ring that arrives DURING this idle capture means a VISITOR is at the door — the
-    // frame we grab is then NOT the empty doorway. If the generation moved, discard rather than persist
-    // a visitor as the idle thumbnail (which would otherwise survive reboots + reflashes).
-    let ring_gen_at_start = RING_GEN.load(Ordering::SeqCst);
+    // Note when this capture started. An idle and a ring capture can run concurrently (separate guards),
+    // and an idle capture can even begin while a ring call is already streaming — either way a VISITOR is
+    // at the door and the frame is NOT the empty doorway. We decline (below) if a ring was DETECTED within
+    // RECENT_RING_WINDOW before this start, or at any time during the grab.
+    let capture_start_ms = now_ms();
     wake_panel(view_tx).await;
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
@@ -316,10 +335,16 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
             return false;
         }
     };
-    if RING_GEN.load(Ordering::SeqCst) != ring_gen_at_start {
+    let last_ring = LAST_RING_MS.load(Ordering::Relaxed);
+    if last_ring != 0
+        && last_ring.saturating_add(RECENT_RING_WINDOW.as_millis() as u64) >= capture_start_ms
+    {
+        // A ring is recent (within the window before this capture) or happened during it (last_ring >=
+        // start). Discard rather than persist a visitor as the idle thumbnail (it survives reboots +
+        // reflashes); first-run retries next boot and the button can be re-pressed once the door is clear.
         eprintln!(
-            "btmqttd: capture: idle capture superseded by a ring (visitor present); discarding \
-             so the idle thumbnail stays the empty doorway"
+            "btmqttd: capture: idle capture declined — a ring is recent/active (visitor present); \
+             keeping the idle thumbnail as the empty doorway"
         );
         return false;
     }
@@ -340,11 +365,8 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
 /// Returns whether a ring image was captured and written. Skips (returns `false`) if a capture is
 /// already running.
 pub async fn capture_ring(cfg: &Config) -> bool {
-    // Bump the ring generation so a CONCURRENT idle capture (first-run / button) sees that a visitor is
-    // at the door and discards its frame rather than storing a visitor as the empty-doorway idle
-    // thumbnail (see capture_idle). This is the ONLY thing the generation drives — the ring capture does
-    // NOT discard its own result on a later ring (that made two near-simultaneous rings produce nothing).
-    RING_GEN.fetch_add(1, Ordering::SeqCst);
+    // (Idle-capture invalidation is handled at ring DETECTION on the bus via `note_ring`, not here, so it
+    // also covers a ring whose event/notification never published — see LAST_RING_MS.)
     // Invalidate any PRIOR visitor's ring image FIRST — before the guard — so that even a ring which is
     // skipped (another ring still capturing), fails, or times out leaves NO stale image: a direct read of
     // /ring.jpg gets a clean 404 instead of the previous person's photograph. The HA push triggers on the
