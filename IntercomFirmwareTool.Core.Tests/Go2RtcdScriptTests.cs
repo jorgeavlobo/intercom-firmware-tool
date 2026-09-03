@@ -552,6 +552,37 @@ public class Go2RtcdScriptTests
     }
 
     [Fact]
+    public void Start_reasserts_the_firewall_once_wlan0_gains_an_address_after_boot()
+    {
+        // #166: WiFi (wlan0) on this panel is NOT driven by ifupdown at runtime (no supplicant/DHCP client
+        // runs from it), so wlan0's real address-up does NOT fire the if-up.d hook (go2rtc-net-hook ->
+        // fw-reassert) the other interfaces rely on. firewall_open at boot runs before wlan0 has an IPv4 and
+        // correctly leaves the chain empty (port closed), but then nothing re-asserts once the address
+        // appears — leaving :8554 closed until a manual fw-reassert. So the start arm spawns a BOUNDED,
+        // BACKGROUNDED one-shot that waits for wlan0's IPv4 and then re-asserts ONCE via the firewall-only
+        // subcommand. It must NOT be the periodic watchdog (task #42): a single sequenced re-assert, then it
+        // exits — never a direct iptables call and never the daemon.
+        string s = ReadScript().Replace("\r\n", "\n");
+        int stStart = s.IndexOf("\tstart)", System.StringComparison.Ordinal);
+        int stEnd = s.IndexOf("\trespawn)", stStart, System.StringComparison.Ordinal);
+        Assert.True(stStart >= 0 && stEnd > stStart);
+        string startBody = s.Substring(stStart, stEnd - stStart);
+        // Backgrounded so it never delays boot.
+        Assert.Contains(") &", startBody);
+        // Waits for wlan0's own IPv4 (the same idiom firewall_open uses to derive the LAN source); this
+        // string appears in the start arm ONLY from the boot-resilience waiter.
+        Assert.Contains("ip -4 addr show \"$CAM_IFACE\"", startBody);
+        // Re-asserts via the firewall-only subcommand — never a direct iptables call, never the daemon.
+        Assert.Contains("\"$0\" fw-reassert", startBody);
+        // No EXECUTABLE line in the start arm calls iptables directly (a comment may mention it to explain
+        // the task #42 rationale, so assert on code lines, not the raw text).
+        string[] startCode = CodeLines(startBody);
+        Assert.DoesNotContain(startCode, l => l.Contains("iptables"));
+        // Bounded, not an unbounded spin.
+        Assert.Contains("-lt 60 ]", startBody);
+    }
+
+    [Fact]
     public void Waits_for_a_just_launched_daemon_before_returning()
     {
         // The is_running check right after backgrounding go2rtc can race the child's exec, so a manual

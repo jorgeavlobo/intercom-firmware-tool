@@ -464,6 +464,30 @@ case "$1" in
 		launch_if_enabled && wait_running
 		release
 		firewall_open_confirmed
+		# Boot resilience (#166): WiFi (wlan0) on this panel is NOT driven by ifupdown at runtime — no
+		# supplicant/DHCP client runs from it — so wlan0's real address-up does NOT fire the if-up.d hook
+		# (go2rtc-net-hook -> fw-reassert) the other interfaces rely on. At boot, firewall_open above runs
+		# before wlan0 has an IPv4 and correctly leaves OUR chain empty (port closed), but then nothing
+		# re-asserts once the address appears — so :8554 stays closed until a MANUAL fw-reassert. Bridge
+		# that gap with a BOUNDED, BACKGROUNDED one-shot: wait for wlan0 to gain an IPv4, then fw-reassert
+		# ONCE. This is NOT the periodic watchdog (task #42): it fires a SINGLE sequenced re-assert when the
+		# address appears and then exits — never iptables on a timer that could race the factory's lock-less
+		# INPUT rebuild. If the address was already present at start (firewall_open_confirmed already opened
+		# the port), the first poll re-asserts idempotently (zero-write); if none ever appears it gives up
+		# after ~5 min. Backgrounded so it never delays boot — the daemon itself is likewise backgrounded
+		# and survives the init script's return. A later WiFi-up (reconnect) that DOES route through
+		# ifupdown still re-asserts via the hook; a subnet change with no hook is the out-of-scope follow-up.
+		(
+			fw_wait=0
+			while [ "$fw_wait" -lt 60 ]; do   # up to ~5 min (60 * 5 s) for WiFi association + DHCP
+				if [ -n "$(ip -4 addr show "$CAM_IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')" ]; then
+					"$0" fw-reassert >/dev/null 2>&1 || true
+					break
+				fi
+				sleep 5
+				fw_wait=$((fw_wait + 1))
+			done
+		) &
 		echo "$NAME started"
 		;;
 	respawn)
