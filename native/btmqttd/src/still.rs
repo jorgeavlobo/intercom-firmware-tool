@@ -228,17 +228,10 @@ fn is_jpeg(b: &[u8]) -> bool {
                     if !has_sof || ns < 1 || seg_len != 6 + 2 * ns {
                         return false;
                     }
-                    // A real scan is entropy-coded data terminated by an EOI. Require an EOI marker
-                    // AFTER at least one byte of scan data (offset > 0 past the SOS header): a scan
-                    // header immediately followed by `FF D9` carries no image data and is rejected, as
-                    // is a file truncated at/just-after the header (no data, no terminator). In valid
-                    // entropy data every `FF` is stuffed (`FF 00`) or a restart (`FF D0`..`FF D7`), so a
-                    // bare `FF D9` only marks the true end of image — the search is sound and won't
-                    // false-match inside the scan. Skipping the first post-header byte enforces the
-                    // "at least one scan byte" rule.
-                    return b
-                        .get(i + seg_len + 1..)
-                        .is_some_and(|rest| rest.windows(2).any(|w| w == [0xFF, 0xD9]));
+                    // The entropy-coded scan follows the SOS header and ends at an EOI. Require at least
+                    // one real scan-data byte before that EOI, so a data-less scan is rejected and the
+                    // endpoint serves the placeholder.
+                    return scan_has_entropy_then_eoi(&b[i + seg_len..]);
                 }
                 // Start-Of-Frame (SOF0..SOF15, excluding the non-frame DHT C4 / JPG C8 / DAC CC):
                 // precision(1) + height(2) + width(2) + Nf(1) + Nf*(3) => length == 8 + 3*Nf, with a
@@ -262,6 +255,41 @@ fn is_jpeg(b: &[u8]) -> bool {
         }
     }
     false // ran out of bytes without reaching a Start-Of-Scan
+}
+
+/// Walk the entropy-coded scan that follows the SOS header (WITHOUT decoding it) and return true iff
+/// at least one byte of real scan data precedes the terminating EOI (`FF D9`). This rejects a
+/// data-less scan — a bare `FF D9`, or an EOI preceded only by marker fill (`FF FF D9`) — which
+/// carries no image. Classification of each position:
+///   * a non-`FF` byte, or a byte-stuffed `FF 00`, is entropy DATA;
+///   * a restart marker `FF D0`..`FF D7` is a scan delimiter, skipped but NOT counted as data;
+///   * a lone leading `FF` is marker fill — advance one and re-examine (so `FF FF D9` is fill+EOI);
+///   * `FF D9` is the EOI — the scan is valid iff data was seen before it;
+///   * any other `FF <marker>` ends the scan (valid iff data was seen).
+///
+/// A trailing lone `FF`, or running out of bytes without an EOI, is a truncated scan → false.
+fn scan_has_entropy_then_eoi(rest: &[u8]) -> bool {
+    let mut i = 0;
+    let mut saw_data = false;
+    while i < rest.len() {
+        if rest[i] != 0xFF {
+            saw_data = true; // a literal entropy byte
+            i += 1;
+            continue;
+        }
+        match rest.get(i + 1).copied() {
+            None => return false,                            // trailing lone FF → truncated
+            Some(0x00) => {
+                saw_data = true; // byte-stuffed literal 0xFF = data
+                i += 2;
+            }
+            Some(0xD9) => return saw_data,                   // EOI → valid iff data preceded it
+            Some(m) if (0xD0..=0xD7).contains(&m) => i += 2, // restart marker (not itself data)
+            Some(0xFF) => i += 1,                            // marker fill — re-examine next byte
+            Some(_) => return saw_data,                      // any other marker ends the scan
+        }
+    }
+    false // no EOI reached
 }
 
 /// A `200 OK` JPEG response. `no-store` keeps HA from pinning a stale thumbnail after a Phase-2
@@ -355,6 +383,13 @@ mod tests {
             0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
             0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
             0xFF, 0xD9, // EOI immediately after the SOS header — no scan byte
+        ]));
+        // Valid SOF + valid SOS header + `FF FF D9`: the first FF is EOI marker fill, not scan data,
+        // so there are still zero entropy bytes → rejected (data-less scan).
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+            0xFF, 0xFF, 0xD9, // marker-fill FF then EOI — no scan data
         ]));
         // Marker-LIKE bytes buried in an APP0 PAYLOAD must NOT count: here `FF C0 FF DA` are the 4
         // payload bytes of the APP0 segment (length 6), not real SOF/SOS segments → rejected.
