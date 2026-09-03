@@ -129,7 +129,10 @@ where
     let mut buf = Vec::with_capacity(512);
     let mut chunk = [0u8; 512];
     while find_head_end(&buf).is_none() && buf.len() < MAX_REQUEST_BYTES {
-        let n = stream.read(&mut chunk).await?;
+        // Read no more than the remaining budget so the buffer can NEVER exceed MAX_REQUEST_BYTES —
+        // a hard cap, not "cap ± one chunk" (the loop-guard alone would let the last read overshoot).
+        let want = (MAX_REQUEST_BYTES - buf.len()).min(chunk.len());
+        let n = stream.read(&mut chunk[..want]).await?;
         if n == 0 {
             break; // EOF before a full head — parse what we have (likely None ⇒ 400)
         }
@@ -343,6 +346,20 @@ mod tests {
         let text = String::from_utf8_lossy(&resp);
         assert!(text.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"), "resp: {text}");
         assert!(text.contains("Connection: close\r\n"));
+    }
+
+    #[tokio::test]
+    async fn read_head_enforces_the_byte_cap_exactly() {
+        // A flood with no head terminator must stop at EXACTLY MAX_REQUEST_BYTES — the last read can't
+        // overshoot the cap by a chunk (the request-head DoS bound must be hard, not "cap ± a chunk").
+        use tokio::io::AsyncWriteExt as _;
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+        let flood = vec![b'A'; MAX_REQUEST_BYTES + 1000];
+        tokio::spawn(async move {
+            let _ = client.write_all(&flood).await;
+        });
+        let head = read_head(&mut server).await.unwrap();
+        assert_eq!(head.len(), MAX_REQUEST_BYTES);
     }
 
     #[tokio::test]
