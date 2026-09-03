@@ -75,6 +75,11 @@ pub struct Config {
     pub topic_entrance_panel_call: String,
     pub topic_floor_call: String,
     pub topic_call_state: String,
+    /// Momentary "ring snapshot ready" signal (issue #169): published AFTER the on-device ring capture
+    /// has written `/ring.jpg`, so the Home Assistant push automation fires only once the image actually
+    /// exists (a fixed post-ring delay can't establish readiness — a cold capture can take ~20 s). Only
+    /// used in on-device mode.
+    pub topic_ring_snapshot: String,
     // Stair-light SWITCH (opt-in). `light_enabled` reflects the installer's "has exterior
     // light" choice: when true the light subsystem RUNS even before a WHERE is known, so a
     // build left blank can LEARN the WHERE at runtime (see light.rs). `light_where` is the
@@ -241,6 +246,7 @@ impl Config {
             topic_entrance_panel_call: get("TOPIC_ENTRANCE_PANEL_CALL", "Bticino/entrance_panel_call"),
             topic_floor_call: get("TOPIC_FLOOR_CALL", "Bticino/floor_call"),
             topic_call_state: get("TOPIC_CALL_STATE", "Bticino/call_state"),
+            topic_ring_snapshot: get("TOPIC_RING_SNAPSHOT", "Bticino/ring_snapshot"),
             // Digits only — a WHERE like "112". Empty ⇒ unknown (learn mode when enabled).
             light_where: opt("LIGHT_WHERE").filter(|s| s.bytes().all(|b| b.is_ascii_digit())),
             // "Has exterior light". When the installer wrote LIGHT_ENABLED it is AUTHORITATIVE

@@ -284,6 +284,12 @@ namespace IntercomFirmwareTool.Core
         /// outdoor door station ring). NULL (default) derives from the <see cref="TopicLastWill"/>
         /// namespace — see <see cref="TopicVolume"/> and <see cref="EffectiveTopicEntrancePanelCall"/>.</summary>
         public string? TopicEntrancePanelCall { get; init; }
+        /// <summary>Momentary "ring snapshot ready" topic (issue #169): btmqttd publishes to it once the
+        /// on-device ring capture has written <c>/ring.jpg</c>, so the Home Assistant push automation
+        /// fires only when the image exists (a fixed post-ring delay can't establish readiness). NULL
+        /// (default) derives from the <see cref="TopicLastWill"/> namespace — see
+        /// <see cref="EffectiveTopicRingSnapshot"/>. Used on-device only.</summary>
+        public string? TopicRingSnapshot { get; init; }
         /// <summary>Momentary floor-call event topic HA's event entity reads (the dumb push-button
         /// at the apartment's own front door — independent from the entrance panel). NULL (default)
         /// derives from the <see cref="TopicLastWill"/> namespace — see
@@ -364,6 +370,8 @@ namespace IntercomFirmwareTool.Core
         public string EffectiveTopicMute => TopicMute ?? (TopicNamespace(TopicLastWill) + "mute");
         /// <summary>The entrance-panel-call event topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicEntrancePanelCall => TopicEntrancePanelCall ?? (TopicNamespace(TopicLastWill) + "entrance_panel_call");
+        /// <summary>The ring-snapshot-ready topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
+        public string EffectiveTopicRingSnapshot => TopicRingSnapshot ?? (TopicNamespace(TopicLastWill) + "ring_snapshot");
         /// <summary>The floor-call event topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicFloorCall => TopicFloorCall ?? (TopicNamespace(TopicLastWill) + "floor_call");
         /// <summary>The call-state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
@@ -1682,6 +1690,9 @@ namespace IntercomFirmwareTool.Core
             sb.Append(Conf("TOPIC_ENTRANCE_PANEL_CALL", opts.EffectiveTopicEntrancePanelCall));
             sb.Append(Conf("TOPIC_FLOOR_CALL", opts.EffectiveTopicFloorCall));
             sb.Append(Conf("TOPIC_CALL_STATE", opts.EffectiveTopicCallState));
+            // Ring snapshot ready (#169): btmqttd publishes here once the on-device ring capture has
+            // written /ring.jpg, so the HA push automation triggers on this (not a fixed delay).
+            sb.Append(Conf("TOPIC_RING_SNAPSHOT", opts.EffectiveTopicRingSnapshot));
 
             // Stair-light SWITCH (opt-in). LIGHT_ENABLED is the "has exterior light" choice: the
             // subsystem runs when set, even with an EMPTY LIGHT_WHERE (learn mode — btmqttd learns

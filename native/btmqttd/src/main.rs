@@ -391,19 +391,26 @@ async fn run() -> Result<bool, String> {
         if let Some(view_tx) = view_tx.clone() {
             let cfg_fr = cfg.clone();
             tokio::spawn(async move {
-                // Nothing to do if an idle image already exists (checked off the single-threaded runtime).
-                if tokio::task::spawn_blocking(|| persist::read_idle_jpg().is_some())
-                    .await
-                    .unwrap_or(true)
+                // Nothing to do if a VALID idle image already exists. Validate the JPEG (same check the
+                // still endpoint serves by), NOT just presence: a corrupt/non-JPEG idle.jpg must NOT
+                // permanently suppress the self-healing first-run capture while the endpoint falls back
+                // to the placeholder. Checked off the single-threaded runtime.
+                if tokio::task::spawn_blocking(|| {
+                    persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
+                })
+                .await
+                .unwrap_or(true)
                 {
                     return;
                 }
                 // Let go2rtc, the firewall and the SIP UA settle before waking the panel on a fresh boot.
                 tokio::time::sleep(capture::FIRST_RUN_DELAY).await;
                 // Re-check after the delay: a button press could have produced one meanwhile.
-                if tokio::task::spawn_blocking(|| persist::read_idle_jpg().is_some())
-                    .await
-                    .unwrap_or(true)
+                if tokio::task::spawn_blocking(|| {
+                    persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
+                })
+                .await
+                .unwrap_or(true)
                 {
                     return;
                 }

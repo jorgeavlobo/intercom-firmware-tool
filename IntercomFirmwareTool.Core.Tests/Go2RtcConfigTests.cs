@@ -227,7 +227,11 @@ public class Go2RtcConfigTests
         Assert.Contains("Update idle snapshot", guide);
         // The ring snapshot lives on its own transient URL, on the still port (issue #169).
         Assert.Contains("http://<intercom-ip>:8556/ring.jpg", guide);
-        // The ring-notification automation recipe triggers on the entrance-panel call topic.
+        // The ring-notification automation triggers on the ring-snapshot-READY topic (published only
+        // after the frame is written), so it never fires on a fixed delay that a cold capture outlasts.
+        Assert.Contains(opts.EffectiveTopicRingSnapshot, guide);
+        Assert.DoesNotContain("delay:", guide);
+        // The raw ring event topic is still mentioned (for automations that just need the ring signal).
         Assert.Contains(opts.EffectiveTopicEntrancePanelCall, guide);
         Assert.Contains("notify.mobile_app", guide);
         Assert.DoesNotContain("\r", guide);

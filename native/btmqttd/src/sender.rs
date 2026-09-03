@@ -649,8 +649,22 @@ async fn publish_frame(
         // rings can't pile up ffmpeg processes.
         if cfg.camera_ondevice {
             let cfg_ring = cfg.clone();
+            let client_ring = client.clone();
             tokio::spawn(async move {
-                let _ = crate::capture::capture_ring(&cfg_ring).await;
+                // Publish a "ring snapshot ready" signal ONLY after the capture has actually written
+                // /ring.jpg, so the HA push automation triggers on THIS (not a fixed post-ring delay that
+                // a cold ~20 s capture can outlast) and always fetches a present image. Momentary + QoS 0
+                // (not retained, not late-flushed) like the ring event itself — if the capture fails, no
+                // signal is sent (no push, rather than a push carrying a stale or missing image).
+                if crate::capture::capture_ring(&cfg_ring).await {
+                    let payload = format!("{{\"at\":\"{}\"}}", crate::own::utc_now_iso());
+                    if let Err(e) = client_ring
+                        .publish(&cfg_ring.topic_ring_snapshot, QoS::AtMostOnce, false, payload.into_bytes())
+                        .await
+                    {
+                        eprintln!("btmqttd: capture: ring_snapshot publish failed: {e}");
+                    }
+                }
             });
         }
     } else if let Some(where_) = dimension::parse_floor_call(frame) {

@@ -441,18 +441,19 @@ namespace IntercomFirmwareTool.Core
                 $"    alias: Doorbell ring notification\n" +
                 $"    trigger:\n" +
                 $"      - platform: mqtt\n" +
-                $"        topic: \"{opts.EffectiveTopicEntrancePanelCall}\"\n" +
+                $"        topic: \"{opts.EffectiveTopicRingSnapshot}\"\n" +
                 $"    action:\n" +
-                $"      - delay: \"00:00:03\"   # give the panel a moment to grab the ring frame\n" +
                 $"      - service: notify.mobile_app_your_phone\n" +
                 $"        data:\n" +
                 $"          message: \"Someone is at the door\"\n" +
                 $"          data:\n" +
                 $"            image: \"http://<intercom-ip>:{OnDeviceStillPort}/ring.jpg\"\n\n"));
             sb.Append(string.Create(ci,
-                $"The ring event fires as soon as the bus reports the call; the short delay lets\n" +
-                $"the capture land. If a notification occasionally arrives without a picture,\n" +
-                $"increase the delay a little — a cold stream can take an extra second or two.\n"));
+                $"The panel publishes to that MQTT topic ONLY after it has captured the ring frame\n" +
+                $"and written /ring.jpg, so the notification always carries a fresh picture — no\n" +
+                $"guesswork with a fixed delay (a cold stream can take a while to produce a frame).\n" +
+                $"The raw ring event on \"{opts.EffectiveTopicEntrancePanelCall}\" still fires\n" +
+                $"immediately, for automations that only need to know a ring happened.\n"));
             return sb.ToString();
         }
     }
