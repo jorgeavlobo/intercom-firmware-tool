@@ -20,10 +20,14 @@
 //!
 //! ## Bounds / safety
 //! The whole capture is wrapped in [`CAPTURE_TIMEOUT`]; ffmpeg is KILLED if it overruns so a stuck
-//! pull can never wedge the daemon. Captures are guarded PER KIND (one idle + one ring at a time), so
-//! a time-critical ring is never dropped just because an idle capture is running, while a mashed
-//! button or repeated rings don't pile up ffmpegs. A new ring FIRST invalidates the previous visitor's
-//! `ring.jpg`, so a failed/skipped ring yields a clean 404 for the notification, never a stale photo.
+//! pull can never wedge the daemon. Captures are guarded PER KIND: an idle capture uses a try-lock (a
+//! mashed "Update idle snapshot" button just skips while one is running — the earlier grab is as good
+//! as the later), while ring captures are SERIALIZED on a mutex, so a time-critical ring is never
+//! dropped just because an idle capture is running, and a second ring WAITS for an in-flight ring
+//! rather than skipping (which would leave the older, staler frame standing). Each ring invalidates the
+//! previous visitor's `ring.jpg` and re-captures UNDER the lock, so a failed/timed-out ring yields a
+//! clean 404 for the notification (never a stale photo) and no superseded capture can rename an
+//! out-of-date frame back over a newer ring's image.
 //! The JPEG lands in a UNIQUE private tmpfs scratch file that is removed after it is read, so a
 //! concurrent request can't observe a torn file. The result is size-capped
 //! ([`crate::persist::MAX_IDLE_JPG_BYTES`]) and structurally validated before it is stored, so a
@@ -77,14 +81,22 @@ const CAPTURE_HOLD: Duration = Duration::from_secs(30);
 /// before we try to wake the panel on a fresh boot.
 pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 
-/// At most one capture of EACH KIND at a time — a separate guard for the persisted idle thumbnail and
-/// the transient ring snapshot. They write DIFFERENT files for DIFFERENT purposes, so a ring capture
-/// (time-critical: someone is at the door NOW) must never be dropped just because an idle capture
-/// (first-run / button, up to ~27 s) happens to be running — go2rtc fans the stream out to both. Two
-/// captures of the SAME kind are still coalesced (a mashed button or repeated rings don't launch
-/// redundant ffmpegs — the earlier grab is as good as the later one a moment on).
+/// One idle capture at a time — a try-lock the persisted idle thumbnail uses. A mashed "Update idle
+/// snapshot" button (or first-run overlapping the button) just SKIPS while one is running: the earlier
+/// grab is as good as the later, and idle has no ordering requirement. Separate from the ring path
+/// (below) so a time-critical ring is never dropped because an idle capture (first-run / button, up to
+/// ~27 s) is running — go2rtc fans the stream out to both.
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
-static CAPTURING_RING: AtomicBool = AtomicBool::new(false);
+
+/// Ring captures are SERIALIZED, not skip-on-busy: the transient ring snapshot is time-ORDERED (each
+/// notification must carry ITS OWN visitor), so a second ring WAITS for an in-flight one rather than
+/// skipping — skipping would leave the older ring's frame standing and, worse, let the older capture
+/// rename a now-stale frame back over the newer ring's image after it unlinked. Under this mutex the
+/// unlink→capture→rename of each ring is exclusive, so the NEWEST ring always ends with its own fresh
+/// frame (or a clean 404 on failure). Rings are already coalesced upstream (`publish_call_event`
+/// debounce), so only DISTINCT presses reach here and the serialized wait is bounded by one in-flight
+/// capture's own [`CAPTURE_TIMEOUT`].
+static CAPTURING_RING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Monotonic clock base (process start), for the ring timestamp below.
 static CLOCK_BASE: LazyLock<std::time::Instant> = LazyLock::new(std::time::Instant::now);
@@ -388,17 +400,18 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
 pub async fn capture_ring(cfg: &Config) -> bool {
     // (Idle-capture invalidation is handled at ring DETECTION on the bus via `note_ring`, not here, so it
     // also covers a ring whose event/notification never published — see LAST_RING_MS.)
-    // Invalidate any PRIOR visitor's ring image FIRST — before the guard — so that even a ring which is
-    // skipped (another ring still capturing), fails, or times out leaves NO stale image: a direct read of
-    // /ring.jpg gets a clean 404 instead of the previous person's photograph. The HA push triggers on the
-    // "snapshot ready" signal (published only on a successful capture), so a skipped/failed ring never
-    // fires a notification carrying a stale image regardless. The in-flight capture (if any) writes via
-    // temp+rename, so this unlink of the final path can't corrupt it.
+    // SERIALIZE on the ring mutex: a second ring WAITS for any in-flight capture instead of skipping, so
+    // the newest ring always ends with ITS OWN fresh frame and no superseded capture can rename a stale
+    // frame back afterwards. The wait is bounded by the in-flight capture's own CAPTURE_TIMEOUT, and
+    // upstream debounce means only distinct presses ever queue here.
+    let _guard = CAPTURING_RING.lock().await;
+    // Invalidate any PRIOR visitor's ring image, then (re)capture — both UNDER the lock, so nothing can
+    // slip between the unlink and this ring's rename. Even a ring that fails or times out therefore
+    // leaves NO stale image: a direct read of /ring.jpg gets a clean 404 instead of the previous person's
+    // photograph. (The HA push also triggers on the "snapshot ready" signal, published only on a
+    // successful capture, so a failed ring never fires a notification regardless.) The write is
+    // temp+rename, so a concurrent /ring.jpg read never sees a torn file.
     let _ = tokio::fs::remove_file(ring_jpg_path()).await;
-    let Some(_guard) = try_lock(&CAPTURING_RING) else {
-        eprintln!("btmqttd: capture: ring capture skipped (a ring capture is already in progress)");
-        return false;
-    };
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
         Err(e) => {
@@ -506,11 +519,12 @@ mod tests {
 
     #[test]
     fn idle_and_ring_guards_are_independent() {
-        // A ring during an idle capture must NOT be dropped: the two guards are separate flags, so
-        // holding the idle guard leaves the ring guard free (and vice versa).
+        // A ring during an idle capture must NOT be blocked: idle uses a try-lock (skip-if-busy) and ring
+        // a serializing mutex, on separate statics, so holding the idle guard leaves the ring lock free to
+        // proceed (and vice versa).
         let idle = try_lock(&CAPTURING_IDLE).expect("idle guard free");
-        let ring = try_lock(&CAPTURING_RING);
-        assert!(ring.is_some(), "the ring guard must be independent of the idle guard");
+        let ring = CAPTURING_RING.try_lock();
+        assert!(ring.is_ok(), "the ring lock must be independent of the idle guard");
         drop(ring);
         drop(idle);
     }
