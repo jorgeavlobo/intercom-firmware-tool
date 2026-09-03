@@ -159,8 +159,8 @@ decoder, used solely to read parameter sets at open (the GPL x264 *encoder* is n
 | Field | `ffmpeg` |
 |---|---|
 | File | `armhf/ffmpeg` |
-| Size | 2,746,872 bytes |
-| SHA-256 | `ac8dfeed4c54d4416762b052e1af5ac7797e2bdc57f666a1013f2fdf7a095a8e` |
+| Size | 2,974,144 bytes |
+| SHA-256 | `a8e2e63bbc16dc58f36c268653a11a153856644a9259dc8cf84adbd2be693dab` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
 | Upstream | FFmpeg `n7.1.1` (release tag) |
