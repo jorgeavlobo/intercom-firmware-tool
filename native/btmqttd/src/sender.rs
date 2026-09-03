@@ -665,8 +665,16 @@ async fn publish_frame(
             // epoch back to the callback, so a ring that fires after a reconnect (served by an earlier
             // ring's still-active runner) still publishes, while a pre-reconnect ring is suppressed — see
             // ring_snapshot_deliverable / BROKER_EPOCH / capture::RING_NEWEST_EPOCH.
-            crate::capture::note_pending_ring(BROKER_EPOCH.load(Ordering::Relaxed));
-            if let Some(runner) = crate::capture::try_acquire_ring_runner() {
+            // Allocate this ring's event id in the boot's reserved namespace. `None` means the boot's
+            // billion-id range is exhausted (unreachable in practice — ~31 years at one ring/second):
+            // decline the snapshot rather than allocate into the NEXT boot's namespace, which a later
+            // reboot reallocates (id reuse could resolve a stale notification to a new visitor's frame).
+            // The entrance ring event above still fired regardless.
+            if crate::capture::note_pending_ring(BROKER_EPOCH.load(Ordering::Relaxed)).is_none() {
+                eprintln!(
+                    "btmqttd: capture: ring-id namespace exhausted for this boot — ring snapshot declined"
+                );
+            } else if let Some(runner) = crate::capture::try_acquire_ring_runner() {
                 let cfg_ring = cfg.clone();
                 let client_ring = client.clone();
                 let broker_ring = broker_online.clone();

@@ -132,6 +132,14 @@ static RING_NEWEST_EPOCH: AtomicU64 = AtomicU64::new(0);
 /// Assistant fetches exactly that event's frame (never another ring's).
 static RING_EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// The largest ring-event id this boot may allocate (INCLUSIVE): the top of the boot's reserved range,
+/// `(boot+1) * RING_ID_BOOT_STRIDE`. [`note_pending_ring`] DECLINES once [`RING_EVENT_SEQ`] reaches it,
+/// so an id is never issued in the NEXT boot's namespace — which a later reboot reallocates, and reusing
+/// it there could hand a stale notification's `/ring-<id>.jpg` URL a future visitor's frame. The default
+/// (and the non-durable fail-closed seed) is `u64::MAX` — effectively unbounded, but harmless because ring
+/// capture is then suppressed anyway ([`ring_ids_durable`]), so no id is ever allocated against it.
+static RING_ID_CEILING: AtomicU64 = AtomicU64::new(u64::MAX);
+
 /// Whether [`seed_ring_event_seq`] established a DURABLE, reboot-unique ring-id namespace (the per-boot
 /// counter persisted). Default `false` until the seed runs. When `false` — a flash read/write error or a
 /// corrupt counter — ring-snapshot capture is SUPPRESSED (the entrance ring event still fires; no
@@ -507,23 +515,45 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     stored
 }
 
-/// Record a freshly-DETECTED ring as the newest pending capture and return its event id. Called once
-/// per fresh (non-coalesced, publishable) ring. Advances [`RING_EVENT_SEQ`] and stores the id in
-/// [`RING_NEWEST`] so the single runner captures the latest ring of a burst. Ids increase strictly for
-/// the life of the process — `u64` at one ring/second wraps only after ~5.8e11 years — and are held
-/// `>= 1`: `.max(1)` maps the single value a (practically unreachable) wrap could land on, `0`, forward,
-/// since `0` is [`RING_NEWEST`]'s "no ring" sentinel and must never be a real event id.
+/// Record a freshly-DETECTED ring as the newest pending capture and return its event id, or `None` when
+/// this boot's reserved id range is exhausted. Called once per fresh (non-coalesced, publishable) ring.
+/// Advances [`RING_EVENT_SEQ`] and stores the id in [`RING_NEWEST`] so the single runner captures the
+/// latest ring of a burst. Ids increase strictly within the boot's namespace and are held `>= 1`:
+/// `.max(1)` maps the `0` sentinel forward (unreachable on the durable path, where ids start at
+/// `boot * STRIDE >= STRIDE`), since `0` is [`RING_NEWEST`]'s "no ring" value and must never be a real id.
+///
+/// It DECLINES (returns `None`, mutating nothing) once [`RING_EVENT_SEQ`] reaches [`RING_ID_CEILING`] —
+/// the top of this boot's reserved `RING_ID_BOOT_STRIDE`-wide range. That takes >1e9 rings in one
+/// uninterrupted process (~31 years at one ring/second), so it is unreachable in practice; but allocating
+/// past it would issue an id in the NEXT boot's namespace, which a later reboot's durable counter
+/// reallocates — so the first post-reboot event could reuse the exhausted process's id and resolve an old
+/// notification to a new visitor's frame. Fail closed: the entrance ring event still fires; only the
+/// `/ring-<id>.jpg` capture/publish for that (extraordinary) ring is skipped (see the sender's caller).
 ///
 /// `broker_epoch` is the caller's `sender::BROKER_EPOCH` at detection; it is stored in
 /// [`RING_NEWEST_EPOCH`] BEFORE the id, so any reader that observes the new id also observes this event's
 /// epoch (single-threaded runtime, so this ordering is enough). The runner hands it back via `on_ready`
 /// to bind the readiness publish to THIS ring's session — so a ring detected after a reconnect and served
 /// by an earlier ring's still-active runner is not mistaken for a pre-reconnect one.
-pub fn note_pending_ring(broker_epoch: u64) -> u64 {
-    let id = RING_EVENT_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1).max(1);
-    RING_NEWEST_EPOCH.store(broker_epoch, Ordering::Relaxed);
-    RING_NEWEST.store(id, Ordering::Relaxed);
-    id
+pub fn note_pending_ring(broker_epoch: u64) -> Option<u64> {
+    let ceiling = RING_ID_CEILING.load(Ordering::Relaxed);
+    let mut cur = RING_EVENT_SEQ.load(Ordering::Relaxed);
+    loop {
+        if cur >= ceiling {
+            // Boot's reserved id range exhausted — decline rather than bleed into the next boot's range.
+            return None;
+        }
+        let next = cur + 1; // cur < ceiling <= u64::MAX, so this cannot overflow.
+        match RING_EVENT_SEQ.compare_exchange_weak(cur, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => {
+                let id = next.max(1);
+                RING_NEWEST_EPOCH.store(broker_epoch, Ordering::Relaxed);
+                RING_NEWEST.store(id, Ordering::Relaxed);
+                return Some(id);
+            }
+            Err(actual) => cur = actual,
+        }
+    }
 }
 
 /// Per-process stride of the ring-event-id namespace: each daemon start owns the half-open range
@@ -531,16 +561,16 @@ pub fn note_pending_ring(broker_epoch: u64) -> u64 {
 /// process would run ~31 years), so ids from different process lifetimes never overlap.
 const RING_ID_BOOT_STRIDE: u64 = 1_000_000_000;
 
-/// The base of a boot's ring-id range: `boot * RING_ID_BOOT_STRIDE`, or `None` if the boot's COMPLETE
-/// range `[base, base + RING_ID_BOOT_STRIDE)` would not fit in `u64` (a boot above ~1.8e10 — physically
-/// unreachable). Requiring the full range — by checking the NEXT boot's base `(boot+1) * STRIDE` also fits
-/// — matters because `note_pending_ring` allocates ids with `wrapping_add`: a partial final range could
-/// wrap past `u64::MAX` to a low, already-used id. `None` fails the seed closed, so ids are never derived
-/// from a range that could wrap or overlap.
-fn ring_seed_base(boot: u64) -> Option<u64> {
+/// A boot's ring-id range as `(base, ceiling)` — `base = boot * RING_ID_BOOT_STRIDE` (the seed) and
+/// `ceiling = (boot+1) * RING_ID_BOOT_STRIDE` (the top, the highest id this boot may allocate; see
+/// [`RING_ID_CEILING`]). `None` if the boot's COMPLETE range would not fit in `u64` (a boot above ~1.8e10
+/// — physically unreachable): requiring the NEXT boot's base to also fit is what guarantees the range is
+/// whole, so `note_pending_ring` never allocates past `u64::MAX` or into another boot's namespace. `None`
+/// fails the seed closed, so ids are never derived from a range that could wrap or overlap.
+fn ring_seed_base(boot: u64) -> Option<(u64, u64)> {
     let base = boot.checked_mul(RING_ID_BOOT_STRIDE)?;
-    boot.checked_add(1).and_then(|next| next.checked_mul(RING_ID_BOOT_STRIDE))?;
-    Some(base)
+    let ceiling = boot.checked_add(1).and_then(|next| next.checked_mul(RING_ID_BOOT_STRIDE))?;
+    Some((base, ceiling))
 }
 
 /// Seed [`RING_EVENT_SEQ`] so a fresh process never reuses a ring id that a still-undelivered
@@ -557,9 +587,9 @@ pub fn seed_ring_event_seq() {
     // The durable per-process counter is the id-uniqueness authority. `None` means it could not be trusted
     // (a flash read/write error or a corrupt counter): FAIL CLOSED — mark ring ids non-durable so
     // ring-snapshot capture is suppressed (see [`ring_ids_durable`]) rather than risk reusing an id.
-    let (mut seed, durable) = match crate::persist::bump_ring_boot().and_then(ring_seed_base) {
-        Some(base) => (base, true),
-        None => (0, false),
+    let (mut seed, ceiling, durable) = match crate::persist::bump_ring_boot().and_then(ring_seed_base) {
+        Some((base, ceiling)) => (base, ceiling, true),
+        None => (0, u64::MAX, false),
     };
     // tmpfs floor: on the durable path a belt-and-braces guard against a lost counter with lingering files;
     // on the fail-closed path it keeps RING_EVENT_SEQ above any file that does exist (ring capture is
@@ -578,6 +608,7 @@ pub fn seed_ring_event_seq() {
         }
     }
     RING_EVENT_SEQ.store(seed, Ordering::Relaxed);
+    RING_ID_CEILING.store(ceiling, Ordering::Relaxed);
     RING_IDS_DURABLE.store(durable, Ordering::Relaxed);
 }
 
@@ -728,6 +759,12 @@ fn prune_aged_ring_files(dir: &std::path::Path) {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that mutate the process-global ring-event counters (`RING_EVENT_SEQ`,
+    /// `RING_NEWEST`, `RING_ID_CEILING`, `RING_NEWEST_EPOCH`) — the harness runs tests in parallel, so
+    /// without this their snapshot/mutate/restore sequences would race each other. Each such test holds it
+    /// for its whole body; tests that only read pure helpers (e.g. `ring_seed_base`) need not take it.
+    static RING_COUNTER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn pct_encode_userinfo_passes_base64url_and_escapes_punctuation() {
         // base64url (the installer's generated password alphabet) is all-unreserved → unchanged.
@@ -787,23 +824,28 @@ mod tests {
     fn ring_runner_slot_is_exclusive_coalesces_and_records_per_event_epoch() {
         // The single-runner bound: only ONE task can hold the runner slot, extra rings just record the
         // newest id, and the slot is re-acquirable once released. Also covers per-EVENT epoch binding
-        // (#169): the newest pending ring carries ITS OWN detecting epoch. (This is the sole test that
-        // touches the process-global ring counters, so its consecutive-id / newest-epoch assertions can't
-        // race another test.) These statics are read by production code, so snapshot and RESTORE them so a
-        // later-added test can't inherit the perturbed state.
+        // (#169): the newest pending ring carries ITS OWN detecting epoch. It holds RING_COUNTER_TEST_LOCK
+        // so its consecutive-id / newest-epoch assertions can't race another counter-mutating test. These
+        // statics are read by production code, so snapshot and RESTORE them so a later-added test can't
+        // inherit the perturbed state.
+        let _serial = RING_COUNTER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let saved_seq = RING_EVENT_SEQ.load(Ordering::Relaxed);
+        let saved_ceiling = RING_ID_CEILING.load(Ordering::Relaxed);
         let saved_newest = RING_NEWEST.load(Ordering::Relaxed);
         let saved_epoch = RING_NEWEST_EPOCH.load(Ordering::Relaxed);
         let saved_runner = RING_RUNNER_ACTIVE.load(Ordering::Relaxed);
         RING_RUNNER_ACTIVE.store(false, Ordering::Relaxed);
+        // Deterministic id source well below the ceiling so allocation always succeeds here.
+        RING_EVENT_SEQ.store(0, Ordering::Relaxed);
+        RING_ID_CEILING.store(u64::MAX, Ordering::Relaxed);
         // Ring A detected on broker session epoch 1.
-        let a = note_pending_ring(1);
+        let a = note_pending_ring(1).expect("an id is allocated below the ceiling");
         assert_eq!(RING_NEWEST.load(Ordering::Relaxed), a, "RING_NEWEST tracks ring A");
         assert_eq!(RING_NEWEST_EPOCH.load(Ordering::Relaxed), 1, "A's epoch is its own detecting epoch");
         // Broker bounced (epoch -> 2). Ring B is detected on the NEW session while A's runner is still busy.
         // Its epoch — what run_ring_captures hands on_ready — must be 2 (B's own), not A's start epoch 1, so
         // B publishes on the current session instead of being suppressed as a pre-reconnect ring.
-        let b = note_pending_ring(2);
+        let b = note_pending_ring(2).expect("an id is allocated below the ceiling");
         assert_eq!(b, a + 1, "each ring takes the next event id");
         assert_eq!(RING_NEWEST.load(Ordering::Relaxed), b, "RING_NEWEST tracks the latest ring");
         assert_eq!(
@@ -821,24 +863,64 @@ mod tests {
         // Restore the process-global ring state so any later-added test starts from clean state.
         RING_RUNNER_ACTIVE.store(saved_runner, Ordering::Relaxed);
         RING_EVENT_SEQ.store(saved_seq, Ordering::Relaxed);
+        RING_ID_CEILING.store(saved_ceiling, Ordering::Relaxed);
         RING_NEWEST.store(saved_newest, Ordering::Relaxed);
         RING_NEWEST_EPOCH.store(saved_epoch, Ordering::Relaxed);
     }
 
     #[test]
     fn ring_seed_base_is_checked_at_the_u64_boundary() {
-        // The per-boot id range base multiplies boot by the stride; it must FAIL CLOSED (None) rather than
-        // saturate — a saturated base would overlap a prior range and reuse ids (#169).
-        assert_eq!(ring_seed_base(0), Some(0));
-        assert_eq!(ring_seed_base(1), Some(RING_ID_BOOT_STRIDE));
+        // The per-boot id range multiplies boot by the stride for the base AND the next boot's base (the
+        // ceiling); it must FAIL CLOSED (None) rather than saturate — a saturated base would overlap a
+        // prior range and reuse ids (#169). Each accepted boot yields (base, ceiling) = the seed and the
+        // top of its reserved range.
+        assert_eq!(ring_seed_base(0), Some((0, RING_ID_BOOT_STRIDE)));
+        assert_eq!(ring_seed_base(1), Some((RING_ID_BOOT_STRIDE, 2 * RING_ID_BOOT_STRIDE)));
         // Largest boot whose COMPLETE range [base, base+STRIDE) still fits — i.e. (boot+1)*STRIDE does not
-        // overflow. Its base is accepted...
+        // overflow. Its base and ceiling are accepted...
         let max_full = u64::MAX / RING_ID_BOOT_STRIDE - 1;
-        assert_eq!(ring_seed_base(max_full), Some(max_full * RING_ID_BOOT_STRIDE));
+        assert_eq!(
+            ring_seed_base(max_full),
+            Some((max_full * RING_ID_BOOT_STRIDE, (max_full + 1) * RING_ID_BOOT_STRIDE))
+        );
         // ...but the next boot's range would cross u64::MAX (a partial range note_pending_ring could wrap
         // through), so it fails closed — as does a base that overflows outright.
         assert_eq!(ring_seed_base(max_full + 1), None);
         assert_eq!(ring_seed_base(u64::MAX), None);
+    }
+
+    #[test]
+    fn note_pending_ring_declines_at_the_boot_range_ceiling() {
+        // The boot's reserved id range is bounded: note_pending_ring allocates the final valid id (the
+        // ceiling) and then DECLINES, so it never issues an id in the next boot's namespace (which a later
+        // reboot reallocates — id reuse). Prove it at the exact boundary. These are process-global counters
+        // read by production code, so snapshot and RESTORE them.
+        let _serial = RING_COUNTER_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved_seq = RING_EVENT_SEQ.load(Ordering::Relaxed);
+        let saved_ceiling = RING_ID_CEILING.load(Ordering::Relaxed);
+        let saved_newest = RING_NEWEST.load(Ordering::Relaxed);
+        let saved_epoch = RING_NEWEST_EPOCH.load(Ordering::Relaxed);
+        // One id left in the range: RING_EVENT_SEQ is one below the (inclusive) ceiling.
+        let ceiling = 3 * RING_ID_BOOT_STRIDE;
+        RING_ID_CEILING.store(ceiling, Ordering::Relaxed);
+        RING_EVENT_SEQ.store(ceiling - 1, Ordering::Relaxed);
+        // The final valid id is allocated and recorded as newest.
+        assert_eq!(note_pending_ring(7), Some(ceiling), "the last id in the range is allocated");
+        assert_eq!(RING_NEWEST.load(Ordering::Relaxed), ceiling, "RING_NEWEST tracks the final id");
+        assert_eq!(RING_EVENT_SEQ.load(Ordering::Relaxed), ceiling, "the sequence reached the ceiling");
+        // The range is now exhausted: the next allocation is declined and mutates nothing.
+        assert_eq!(note_pending_ring(8), None, "past the ceiling the allocation is declined");
+        assert_eq!(
+            RING_EVENT_SEQ.load(Ordering::Relaxed),
+            ceiling,
+            "a declined allocation does not advance the sequence into the next boot's namespace"
+        );
+        assert_eq!(RING_NEWEST.load(Ordering::Relaxed), ceiling, "a declined ring leaves RING_NEWEST put");
+        assert_eq!(RING_NEWEST_EPOCH.load(Ordering::Relaxed), 7, "a declined ring leaves the epoch put");
+        RING_EVENT_SEQ.store(saved_seq, Ordering::Relaxed);
+        RING_ID_CEILING.store(saved_ceiling, Ordering::Relaxed);
+        RING_NEWEST.store(saved_newest, Ordering::Relaxed);
+        RING_NEWEST_EPOCH.store(saved_epoch, Ordering::Relaxed);
     }
 
     #[test]
