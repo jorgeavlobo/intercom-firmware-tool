@@ -22,15 +22,17 @@
 //! ## Bounds / safety
 //! The whole capture is wrapped in [`CAPTURE_TIMEOUT`]; ffmpeg is KILLED if it overruns so a stuck
 //! pull can never wedge the daemon. An idle capture uses a try-lock (a mashed "Update idle snapshot"
-//! button just skips while one is running — the earlier grab is as good as the later), and ring
-//! captures are SERIALIZED on a mutex purely to cap encoder concurrency on the constrained panel — a
-//! time-critical ring is never dropped just because an idle capture is running (separate guards).
-//! Each ring is an INDEPENDENT event addressed by a unique id: it writes its own `ring-<id>.jpg`
-//! (atomically, temp+rename) and the ready signal the HA push triggers on carries that id, so the
-//! notification fetches exactly that event's frame — two rings can never cross images, and there is no
-//! shared mutable "latest" file to overwrite. Per-event files are retained for
-//! [`RING_FRESH_WINDOW`] (so the notification's fetch always resolves) then pruned; an aged one reads
-//! as 404 via [`read_ring_event`].
+//! button just skips while one is running — the earlier grab is as good as the later). Ring captures
+//! run through a BOUNDED single runner ([`run_ring_captures`]): at most one capture is ever active, and
+//! a burst of distinct rings does not queue a task each — extra rings only update [`RING_NEWEST`] and
+//! the active runner picks up the latest when it finishes, so work can't pile up minutes deep on the
+//! constrained panel. The ring path is separate from the idle guard, so a time-critical ring is never
+//! dropped because an idle capture is running. Each captured ring is an INDEPENDENT event addressed by
+//! a unique id: it writes its own `ring-<id>.jpg` (atomically, temp+rename) and the ready signal the HA
+//! push triggers on carries that id, so the notification fetches exactly that event's frame — two rings
+//! can never cross images, and there is no shared mutable "latest" file to overwrite. Per-event files
+//! are retained for [`RING_FRESH_WINDOW`] (so the notification's fetch always resolves) then pruned; an
+//! aged one reads as 404 via [`read_ring_event`].
 //! The JPEG lands in a UNIQUE private tmpfs scratch file that is removed after it is read, so a
 //! concurrent request can't observe a torn file. The result is size-capped
 //! ([`crate::persist::MAX_IDLE_JPG_BYTES`]) and structurally validated before it is stored, so a
@@ -96,17 +98,24 @@ pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 /// ~27 s) is running — go2rtc fans the stream out to both.
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 
-/// Ring captures are SERIALIZED (at most one ffmpeg at a time) so a burst of distinct rings can't fork
-/// unbounded encoders on the constrained panel — a second ring waits out the first's [`CAPTURE_TIMEOUT`]
-/// at most. Each ring is otherwise INDEPENDENT: it captures to its own `ring-<id>.jpg` and publishes a
-/// ready signal naming that id, so serialization is only a resource bound, never a correctness one (no
-/// ring's image can be overwritten or superseded by another). Rings are already coalesced upstream
-/// (`publish_call_event` debounce), so only DISTINCT presses reach here in the first place.
-static CAPTURING_RING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Ring captures run through a BOUNDED single runner ([`run_ring_captures`]): at most one capture is
+/// ever active, and a burst of distinct rings does NOT queue a task each — extra rings only update
+/// [`RING_NEWEST`] and the one active runner picks up the newest when it finishes. So work is bounded
+/// to one active capture + at most one follow-up regardless of how many rings arrive, and no queued
+/// task can capture minutes after its ring ended. `true` means a runner is active; a fresh ring spawns
+/// the runner only if it can flip this false→true, otherwise the existing runner will serve it.
+static RING_RUNNER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Monotonic ring-event id. Each [`capture_ring`] takes the next value as its event id, names its
-/// snapshot `ring-<id>.jpg`, and the ready signal carries that id so Home Assistant fetches exactly
-/// that event's frame (never another ring's). Advanced once per ring that spawns a capture.
+/// The event id of the NEWEST pending ring. Each detected ring bumps [`RING_EVENT_SEQ`] and stores its
+/// id here; the runner always captures for this value, so a burst COALESCES to the latest ring (each
+/// captured frame is still its own immutable `ring-<id>.jpg`, and only captured events publish a ready
+/// signal — coalesced-away rings simply don't notify). Read/written under [`Ordering::Relaxed`]; the
+/// runner handshake below (release then re-check) is what makes a late ring never get lost.
+static RING_NEWEST: AtomicU64 = AtomicU64::new(0);
+
+/// Monotonic ring-event id source. Each detected ring takes the next value (via [`note_pending_ring`])
+/// as its event id, which names its snapshot `ring-<id>.jpg`; the ready signal carries that id so Home
+/// Assistant fetches exactly that event's frame (never another ring's).
 static RING_EVENT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Monotonic clock base (process start), for the ring timestamp below.
@@ -409,36 +418,74 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     stored
 }
 
-/// Capture ONE ring event's snapshot and write it to its own tmpfs `ring-<id>.jpg` (served at
-/// `/ring-<id>.jpg`). Does NOT wake the panel (a ring means it is already streaming) and does NOT touch
-/// `idle.jpg`. Returns `Some(id)` when the frame was captured and written — the id the caller puts in
-/// the "snapshot ready" signal so Home Assistant fetches exactly THIS event's frame — or `None` on
-/// failure (the caller then publishes nothing). Each ring is independent: there is no cross-ring
-/// overwrite or supersession, so no ring's notification can ever carry another ring's picture.
-pub async fn capture_ring(cfg: &Config) -> Option<u64> {
-    // (Idle-capture invalidation is handled at ring DETECTION on the bus via `note_ring`, not here, so it
-    // also covers a ring whose event/notification never published — see LAST_RING_MS.)
-    // Take this event's unique id up front; its snapshot is addressed by it for the event's whole life.
+/// Record a freshly-DETECTED ring as the newest pending capture and return its unique event id. Called
+/// once per fresh (non-coalesced, publishable) ring. Advances [`RING_EVENT_SEQ`] and stores the id in
+/// [`RING_NEWEST`] so the single runner captures the latest ring of a burst.
+pub fn note_pending_ring() -> u64 {
     let id = RING_EVENT_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
-    // Serialize purely to cap encoder concurrency on the constrained panel (a burst of distinct rings
-    // can't fork unbounded ffmpegs); correctness does not depend on it — each event writes its own file.
-    let _guard = CAPTURING_RING.lock().await;
+    RING_NEWEST.store(id, Ordering::Relaxed);
+    id
+}
+
+/// Try to become THE ring-capture runner. `true` (won the [`RING_RUNNER_ACTIVE`] false→true flip) means
+/// the caller owns the single runner slot and MUST drive [`run_ring_captures`] (which releases it);
+/// `false` means a runner is already active and will serve the ring just noted.
+pub fn try_acquire_ring_runner() -> bool {
+    !RING_RUNNER_ACTIVE.swap(true, Ordering::AcqRel)
+}
+
+/// Release the runner slot (paired with a winning [`try_acquire_ring_runner`]).
+fn release_ring_runner() {
+    RING_RUNNER_ACTIVE.store(false, Ordering::Release);
+}
+
+/// Drive ring captures to completion under the single-runner bound. Captures the NEWEST pending ring,
+/// calls `on_ready(id)` on each successful write (the caller publishes the "snapshot ready" signal for
+/// that id), and loops only while a still-newer ring arrived during the capture — so a burst of distinct
+/// rings COALESCES to the latest and work is bounded to one active capture at a time, never a queue.
+/// MUST be called exactly once per winning [`try_acquire_ring_runner`]; it releases the runner slot
+/// before returning. `on_ready` is invoked synchronously (no `.await` inside it on the production path),
+/// so the id it publishes is still the one just written.
+pub async fn run_ring_captures<F: Fn(u64)>(cfg: &Config, on_ready: F) {
+    loop {
+        let id = RING_NEWEST.load(Ordering::Relaxed);
+        if capture_ring_frame(cfg, id).await {
+            on_ready(id);
+        }
+        // Done with `id`. Release the slot, THEN re-check for a newer ring: this ordering (release before
+        // the re-check, and a fresh ring stores RING_NEWEST before it tries to acquire) guarantees a ring
+        // that arrives around now is never lost — either this runner sees it here and re-acquires, or the
+        // fresh ring itself wins the slot and starts its own runner.
+        release_ring_runner();
+        if RING_NEWEST.load(Ordering::Relaxed) == id {
+            break; // nothing newer arrived — done
+        }
+        if !try_acquire_ring_runner() {
+            break; // a newer ring already started its own runner; let it handle the latest
+        }
+    }
+}
+
+/// Capture ONE ring frame for event `id` and write it to its own tmpfs `ring-<id>.jpg` (served at
+/// `/ring-<id>.jpg`). Does NOT wake the panel (a ring means it is already streaming) and does NOT touch
+/// `idle.jpg`. Returns whether the frame was captured AND written. Each ring is independent: it has its
+/// own immutable file, so no ring's notification can ever carry another ring's picture.
+async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("btmqttd: capture: ring capture failed: {e}");
-            return None;
+            eprintln!("btmqttd: capture: ring capture failed (event {id}): {e}");
+            return false;
         }
     };
     // Write this event's own immutable file, then prune aged-out ring files. Blocking std::fs — offload it.
     let stored = tokio::task::spawn_blocking(move || store_ring_event(id, &bytes)).await.unwrap_or(false);
     if stored {
         eprintln!("btmqttd: capture: ring snapshot captured (event {id})");
-        Some(id)
     } else {
         eprintln!("btmqttd: capture: ring snapshot captured but could not be written (event {id})");
-        None
     }
+    stored
 }
 
 /// Write ring event `id`'s snapshot to tmpfs atomically (temp + rename), so a concurrent
@@ -559,14 +606,19 @@ mod tests {
     }
 
     #[test]
-    fn idle_and_ring_guards_are_independent() {
-        // A ring during an idle capture must NOT be blocked: idle uses a try-lock (skip-if-busy) and ring
-        // a serializing mutex, on separate statics, so holding the idle guard leaves the ring lock free to
-        // proceed (and vice versa).
-        let idle = try_lock(&CAPTURING_IDLE).expect("idle guard free");
-        let ring = CAPTURING_RING.try_lock();
-        assert!(ring.is_ok(), "the ring lock must be independent of the idle guard");
-        drop(ring);
-        drop(idle);
+    fn ring_runner_slot_is_exclusive_and_coalesces() {
+        // The single-runner bound: only ONE task can hold the runner slot, extra rings just record the
+        // newest id, and the slot is re-acquirable once released. (Uses the real process-global statics;
+        // no other test touches them.)
+        RING_RUNNER_ACTIVE.store(false, Ordering::Relaxed);
+        let a = note_pending_ring();
+        let b = note_pending_ring();
+        assert_eq!(b, a + 1, "each ring takes the next event id");
+        assert_eq!(RING_NEWEST.load(Ordering::Relaxed), b, "RING_NEWEST tracks the latest ring");
+        assert!(try_acquire_ring_runner(), "first acquire wins the runner slot");
+        assert!(!try_acquire_ring_runner(), "a second acquire is refused while the runner is active");
+        release_ring_runner();
+        assert!(try_acquire_ring_runner(), "the slot is re-acquirable once released");
+        release_ring_runner();
     }
 }

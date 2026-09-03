@@ -647,34 +647,34 @@ async fn publish_frame(
             outcome = FrameOutcome::ClassifierChanged;
         }
         let ring_published = publish_call_event(client, debounce, broker_online, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
-        // Ring snapshot (issue #169): grab a who-is-at-the-door frame and write it to this event's
-        // transient `/ring-<id>.jpg` for the HA push. Fire ONLY on a FRESH ring event (`ring_published`): the gateway
-        // repeats one press's signature and `publish_call_event` coalesces those (#71) — spawning per raw
-        // frame would emit multiple notifications for one press. DETACHED + best-effort (the panel is
-        // already streaming because it is ringing),
-        // bounded by the capture's own timeout, and it NEVER touches idle.jpg. Gate on the media path
-        // (camera_enabled) AS WELL as on-device: CAMERA_ONDEVICE can be set independently in a
-        // hand-edited conf, and without the camera feature there is no RTP siphon for go2rtc to serve.
-        // capture.rs's single-capture guard drops overlaps.
+        // Ring snapshot (issue #169): grab a who-is-at-the-door frame into this event's transient
+        // `/ring-<id>.jpg` for the HA push. Fire ONLY on a FRESH ring event (`ring_published`): the
+        // gateway repeats one press's signature and `publish_call_event` coalesces those (#71). Gate on
+        // the media path (camera_enabled) AS WELL as on-device: CAMERA_ONDEVICE can be set independently
+        // in a hand-edited conf, and without the camera feature there is no RTP siphon for go2rtc to
+        // serve. Work is BOUNDED by a single runner in capture.rs: note this ring as the newest pending,
+        // and spawn the runner ONLY if none is active (a burst of distinct rings coalesces to the latest
+        // — one active capture at a time, never a growing queue of tasks).
         if ring_published && cfg.camera_enabled && cfg.camera_ondevice {
-            let cfg_ring = cfg.clone();
-            let client_ring = client.clone();
-            let broker_ring = broker_online.clone();
-            tokio::spawn(async move {
-                // Publish a "ring snapshot ready" signal ONLY after the capture has written this event's
-                // ring-<id>.jpg, carrying that id so the HA push fetches exactly THIS event's frame (never
-                // another ring's) — and triggers on this signal, not a fixed delay a cold ~20 s capture
-                // can outlast. Momentary QoS 0, non-retained, and DROPPED when the broker is offline — its
-                // topic is in main.rs::is_momentary_publish so a queued one is also purged on disconnect,
-                // matching the ring event's #71 discipline so a reconnect can't flush a stale "someone is
-                // at the door" later. If the capture fails, no signal is sent (no push, rather than a push
-                // with a missing image).
-                if let Some(event_id) = crate::capture::capture_ring(&cfg_ring).await {
-                    if momentary_deliverable(&broker_ring) {
-                        let payload = format!(
-                            "{{\"at\":\"{}\",\"id\":{event_id}}}",
-                            crate::own::utc_now_iso()
-                        );
+            crate::capture::note_pending_ring();
+            if crate::capture::try_acquire_ring_runner() {
+                let cfg_ring = cfg.clone();
+                let client_ring = client.clone();
+                let broker_ring = broker_online.clone();
+                tokio::spawn(async move {
+                    // On each successful capture the runner calls back here to publish a "ring snapshot
+                    // ready" signal carrying that event's id, so the HA push fetches exactly THIS event's
+                    // frame — triggered by this signal, not a fixed delay a cold ~20 s capture can outlast.
+                    // Momentary QoS 0, non-retained, and DROPPED when the broker is offline — its topic is
+                    // in main.rs::is_momentary_publish so a queued one is also purged on disconnect,
+                    // matching the ring event's #71 discipline so a reconnect can't flush a stale "someone
+                    // is at the door" later. A failed capture publishes nothing (no image ⇒ no push).
+                    crate::capture::run_ring_captures(&cfg_ring, |event_id| {
+                        if !momentary_deliverable(&broker_ring) {
+                            return;
+                        }
+                        let payload =
+                            format!("{{\"at\":\"{}\",\"id\":{event_id}}}", crate::own::utc_now_iso());
                         if let Err(e) = client_ring.try_publish(
                             &cfg_ring.topic_ring_snapshot,
                             QoS::AtMostOnce,
@@ -683,9 +683,10 @@ async fn publish_frame(
                         ) {
                             eprintln!("btmqttd: capture: ring_snapshot publish failed: {e}");
                         }
-                    }
-                }
-            });
+                    })
+                    .await;
+                });
+            }
         }
     } else if let Some(where_) = dimension::parse_floor_call(frame) {
         // Floor CALL (dumb push-button at the apartment's own front door): a COMPLETELY
