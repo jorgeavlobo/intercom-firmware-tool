@@ -24,6 +24,7 @@
 compile_error!("btmqttd targets Linux only — build and run host checks on Linux or WSL");
 
 mod av;
+mod capture;
 mod config;
 mod dimension;
 mod ha;
@@ -377,6 +378,41 @@ async fn run() -> Result<bool, String> {
             (None, stopping)
         }
     };
+    // First-run idle auto-capture (issue #169): on the first boot where no idle.jpg exists yet, grab the
+    // real empty-doorway view so Home Assistant's thumbnail is a genuine still from the start (not the
+    // baked placeholder). One-shot BY CONSTRUCTION — it captures only while idle.jpg is ABSENT, so once a
+    // capture lands (here, or via the HA "update idle snapshot" button) it never re-runs; a boot where the
+    // grab fails simply retries next boot (self-healing, no marker file). Waking an IDLE panel to
+    // photograph it needs the on-demand SIP UA, so this is gated on a live `view_tx` (present only with
+    // CAMERA_ONDEMAND_ENABLED) as well as on-device mode. Fully detached and best-effort — bounded by the
+    // capture's own timeout, it never delays or blocks startup, and it publishes nothing to MQTT so it is
+    // not one of the tasks stopped before the final retained `offline` (the runtime drop aborts it).
+    if cfg.camera_ondevice {
+        if let Some(view_tx) = view_tx.clone() {
+            let cfg_fr = cfg.clone();
+            tokio::spawn(async move {
+                // Nothing to do if an idle image already exists (checked off the single-threaded runtime).
+                if tokio::task::spawn_blocking(|| persist::read_idle_jpg().is_some())
+                    .await
+                    .unwrap_or(true)
+                {
+                    return;
+                }
+                // Let go2rtc, the firewall and the SIP UA settle before waking the panel on a fresh boot.
+                tokio::time::sleep(capture::FIRST_RUN_DELAY).await;
+                // Re-check after the delay: a button press could have produced one meanwhile.
+                if tokio::task::spawn_blocking(|| persist::read_idle_jpg().is_some())
+                    .await
+                    .unwrap_or(true)
+                {
+                    return;
+                }
+                eprintln!("btmqttd: capture: first-run idle snapshot (none present yet)");
+                let _ = capture::capture_idle(&cfg_fr, Some(&view_tx)).await;
+            });
+        }
+    }
+
     // On-device camera OFF ⇒ forget any learned sprop, so a later re-enable (or a panel swap) re-learns
     // instead of reassembling the runtime SDP with a stale value. Mirrors the light-where disable reset.
     // (Only when the on-device feature itself is off; an on-device unit with on-demand viewing off keeps

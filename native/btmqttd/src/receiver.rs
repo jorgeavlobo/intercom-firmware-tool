@@ -226,6 +226,31 @@ async fn handle_json(
             }
             return;
         }
+        // Idle snapshot refresh (issue #169): the HA "Update idle snapshot" button re-captures the real
+        // empty-doorway view and overwrites idle.jpg (served by the Phase-1 still endpoint at /idle.jpg).
+        // Same ungated posture and TOPIC_RX trust boundary as the controls above. On-device only — there
+        // is no on-box capture path otherwise. The capture takes several seconds (SIP bring-up + one
+        // keyframe + encode), so run it FULLY DETACHED: never block the single ordered command worker.
+        // capture_idle wakes the panel (via view_tx) and stores the frame; publish the `update_idle`
+        // maintenance ack ONLY if a fresh image was actually captured and stored — a best-effort "done"
+        // signal like restore_ssh, withheld on failure so HA shows no false success.
+        if action == "update_idle" {
+            if !cfg.camera_ondevice {
+                eprintln!(
+                    "btmqttd: ignored update_idle: on-device camera disabled (needs CAMERA_ONDEVICE=1)"
+                );
+                return;
+            }
+            let cfg2 = cfg.clone();
+            let client2 = client.clone();
+            let view_tx2 = view_tx.cloned();
+            tokio::spawn(async move {
+                if crate::capture::capture_idle(&cfg2, view_tx2.as_ref()).await {
+                    publish_maintenance(&client2, &cfg2, "update_idle").await;
+                }
+            });
+            return;
+        }
         // Maintenance actions (issue #43): the HA "Reboot device" / "Restart bridge" buttons. Same
         // ungated posture and TOPIC_RX trust boundary as the controls above — a FIXED reboot/restart is
         // no wider a capability than the lock a raw frame on this topic can already actuate.

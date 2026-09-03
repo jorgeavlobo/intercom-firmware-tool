@@ -142,6 +142,14 @@ pub struct Config {
     /// default — the only one siphonable on the C100X, and present on the C300X), `0` =
     /// hi-res (C300X only). Clamped to 0..=1; default 1.
     pub camera_branch: u8,
+    /// The on-device go2rtc RTSP credentials (issue #169). go2rtc serves the panel camera at
+    /// `rtsp://<user>:<pass>@127.0.0.1:8554/doorbell` with MANDATORY auth; the still-capture helper
+    /// (`capture.rs`) reads that same loopback URL to grab the idle/ring JPEG frames. Only meaningful
+    /// in `camera_ondevice` mode (the installer writes them then); `camera_rtsp_user` defaults to
+    /// `camera` (matching `MqttOptions.CameraRtspUser`), `camera_rtsp_pass` is `None` when unset (then
+    /// capture declines rather than pulling an unauthenticated URL).
+    pub camera_rtsp_user: String,
+    pub camera_rtsp_pass: Option<String>,
     /// On-device media server mode (issue #120, Phase 1). When set (`CAMERA_ONDEVICE=1`),
     /// go2rtc + ffmpeg run ON the panel and go2rtc listens on loopback, so the siphon fans
     /// the RTP to the loopback alias [`CAMERA_ONDEVICE_TARGET`] (`127.0.0.2`) rather than an
@@ -268,6 +276,10 @@ impl Config {
             // broker host (go2rtc usually lives with HA). Branch clamped to lo/hi-res (1/0).
             camera_enabled: flag("CAMERA_ENABLED"),
             camera_ondevice,
+            // go2rtc RTSP credentials for the still-capture helper (issue #169): user defaults to
+            // "camera" (matching the installer), pass is None when unset (capture then declines).
+            camera_rtsp_user: get("CAMERA_RTSP_USER", "camera"),
+            camera_rtsp_pass: opt("CAMERA_RTSP_PASS"),
             // On-device mode pins the fan-out to the loopback alias 127.0.0.2 (go2rtc listens
             // there); otherwise it's CAMERA_TARGET_HOST, defaulting to the broker host (go2rtc
             // usually lives with HA).

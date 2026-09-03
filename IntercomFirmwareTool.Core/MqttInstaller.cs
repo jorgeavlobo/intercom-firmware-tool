@@ -1736,6 +1736,18 @@ namespace IntercomFirmwareTool.Core
             sb.Append("CAMERA_ONDEVICE=")
                 .Append(opts.CameraEnabled && opts.CameraOnDevice ? '1' : '0')
                 .Append('\n');
+            // On-device RTSP credentials (#169): btmqttd's still-capture helper reads
+            // rtsp://<user>:<pass>@127.0.0.1:8554/doorbell — the SAME go2rtc stream HA consumes — to grab
+            // the idle/ring JPEG frames. Write them ONLY on-device (the capture path exists only there),
+            // and from the SAME MqttOptions values that feed go2rtc.yaml so the daemon and go2rtc agree.
+            // Validate has already guaranteed they are non-empty and control-char-free in on-device mode;
+            // the extra non-empty guard keeps a bare/library caller (on-device flag set but no password
+            // wired) from emitting a half credential rather than throwing here.
+            if (opts.CameraEnabled && opts.CameraOnDevice && !string.IsNullOrEmpty(opts.CameraRtspPass))
+            {
+                sb.Append(Conf("CAMERA_RTSP_USER", opts.CameraRtspUser));
+                sb.Append(Conf("CAMERA_RTSP_PASS", opts.CameraRtspPass));
+            }
             // On-demand viewing (#104): sip.rs INVITEs the panel to bring the idle session up. Only
             // meaningful with the media path, so gate the ENABLED flag on CameraEnabled too — the
             // daemon does the same, but coercing here keeps a stray on-demand=1 from a camera-off
@@ -1846,6 +1858,7 @@ namespace IntercomFirmwareTool.Core
             ("light_learn.json", "button", "light_learn"),
             ("view_camera.json", "button", "view_camera"),
             ("stop_camera.json", "button", "stop_camera"),
+            ("update_idle.json", "button", "update_idle"),
             ("reboot_device.json", "button", "reboot_device"),
             ("restart_bridge.json", "button", "restart_bridge"),
             ("restore_ssh.json", "button", "restore_ssh"),
@@ -2434,6 +2447,38 @@ namespace IntercomFirmwareTool.Core
                     }, HaJson)));
             else
                 entities.Add(new HaEntity("stop_camera.json", Topic("button", "stop_camera"), ""));
+
+            // Idle snapshot refresh (#169): an "Update idle snapshot" button. btmqttd re-captures the
+            // real empty-doorway view and overwrites the persisted idle.jpg the still endpoint serves at
+            // /idle.jpg, so the HA camera thumbnail becomes current. Same {"action":...}-to-TopicRx,
+            // fire-and-forget posture as the camera/maintenance buttons; the daemon publishes an
+            // "update_idle" record to the maintenance topic on success (the shared feedback sensor).
+            // Gated on the ON-DEVICE camera AND on-demand viewing: capturing an IDLE panel means WAKING
+            // it via the SIP UA first, which needs on-demand; otherwise TOMBSTONE the config so a prior
+            // build's button is cleared from HA rather than lingering as a dead control.
+            if (opts.CameraEnabled && opts.CameraOnDevice && opts.CameraOnDemand)
+                entities.Add(new HaEntity(
+                    "update_idle.json",
+                    Topic("button", "update_idle"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Update idle snapshot",
+                        unique_id = $"{node}_update_idle",
+                        default_entity_id = EntId("button", "update_idle"),
+                        command_topic = controlTopic,
+                        // QoS 0: the capture is idempotent (each press just re-grabs the current view), so
+                        // a redelivered DUP is harmless and a press lost during a reconnect is
+                        // self-correcting — the user presses again.
+                        qos = 0,
+                        payload_press = "{\"action\":\"update_idle\"}",
+                        icon = "mdi:camera-retake",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            else
+                entities.Add(new HaEntity("update_idle.json", Topic("button", "update_idle"), ""));
 
             // Maintenance buttons (issue #43): a "Reboot device" and a "Restart bridge" button, same
             // {"action":...}-to-TopicRx pattern as the locks / camera buttons. They are ALWAYS emitted

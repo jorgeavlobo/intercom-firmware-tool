@@ -418,11 +418,41 @@ namespace IntercomFirmwareTool.Core
             sb.Append("  ring, an answered call, or the self-view eye); between sessions the\n");
             sb.Append("  stream is idle (the panel only encodes on demand).\n");
             sb.Append(string.Create(ci,
-                $"- The Still Image URL (:{OnDeviceStillPort}) serves a fixed idle snapshot, so\n" +
+                $"- The Still Image URL (:{OnDeviceStillPort}) serves the idle snapshot, so\n" +
                 $"  Home Assistant's camera thumbnail never has to open the live stream (which\n" +
                 $"  would otherwise wake the panel on every thumbnail refresh). Leaving it blank\n" +
                 $"  makes Home Assistant grab thumbnails from the stream and keep the doorbell\n" +
                 $"  session churning — so this field is recommended, not optional.\n"));
+            sb.Append(string.Create(ci,
+                $"- The idle snapshot at /idle.jpg is a REAL frame of the empty doorway: the\n" +
+                $"  panel captures it once automatically after the first boot, and you can\n" +
+                $"  refresh it any time with the \"Update idle snapshot\" button (press it to\n" +
+                $"  re-capture the current view). It persists across reboots and reflashes.\n"));
+
+            sb.Append("\nRing snapshot + notification\n----------------------------\n");
+            sb.Append(string.Create(ci,
+                $"When the doorbell rings, the panel captures a SEPARATE snapshot of who is at\n" +
+                $"the door and serves it (transiently, on tmpfs) at:\n\n" +
+                $"    http://<intercom-ip>:{OnDeviceStillPort}/ring.jpg\n\n"));
+            sb.Append("This never overwrites the idle thumbnail. To get a phone notification with\n");
+            sb.Append("that picture, add a Home Assistant automation like this — replace\n");
+            sb.Append("<intercom-ip> and notify.mobile_app_your_phone with your own:\n\n");
+            sb.Append(string.Create(ci,
+                $"    alias: Doorbell ring notification\n" +
+                $"    trigger:\n" +
+                $"      - platform: mqtt\n" +
+                $"        topic: \"{opts.EffectiveTopicEntrancePanelCall}\"\n" +
+                $"    action:\n" +
+                $"      - delay: \"00:00:03\"   # give the panel a moment to grab the ring frame\n" +
+                $"      - service: notify.mobile_app_your_phone\n" +
+                $"        data:\n" +
+                $"          message: \"Someone is at the door\"\n" +
+                $"          data:\n" +
+                $"            image: \"http://<intercom-ip>:{OnDeviceStillPort}/ring.jpg\"\n\n"));
+            sb.Append(string.Create(ci,
+                $"The ring event fires as soon as the bus reports the call; the short delay lets\n" +
+                $"the capture land. If a notification occasionally arrives without a picture,\n" +
+                $"increase the delay a little — a cold stream can take an extra second or two.\n"));
             return sb.ToString();
         }
     }

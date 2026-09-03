@@ -641,6 +641,18 @@ async fn publish_frame(
             outcome = FrameOutcome::ClassifierChanged;
         }
         publish_call_event(client, debounce, broker_online, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
+        // Ring snapshot (issue #169): on an entrance-panel ring, grab a who-is-at-the-door frame and
+        // write it to the transient `/ring.jpg` for the HA push notification — DETACHED and best-effort.
+        // No SIP wake is needed (the panel is already streaming because it is ringing), it is bounded by
+        // the capture's own timeout, and it NEVER touches idle.jpg. On-device only (nowhere to serve it
+        // otherwise). capture.rs's single-capture guard drops it if one is already running, so repeated
+        // rings can't pile up ffmpeg processes.
+        if cfg.camera_ondevice {
+            let cfg_ring = cfg.clone();
+            tokio::spawn(async move {
+                let _ = crate::capture::capture_ring(&cfg_ring).await;
+            });
+        }
     } else if let Some(where_) = dimension::parse_floor_call(frame) {
         // Floor CALL (dumb push-button at the apartment's own front door): a COMPLETELY
         // independent event from the entrance panel. Fire its own momentary event and arm the

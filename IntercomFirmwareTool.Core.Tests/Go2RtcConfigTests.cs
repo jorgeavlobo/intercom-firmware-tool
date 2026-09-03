@@ -211,6 +211,29 @@ public class Go2RtcConfigTests
     }
 
     [Fact]
+    public void BuildOnDeviceSetupGuide_documents_the_idle_button_and_ring_notification()
+    {
+        // #169: the guide explains the real captured idle thumbnail + the "Update idle snapshot" button,
+        // and gives the transient ring snapshot URL plus an HA automation recipe for the ring push.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "doorbell");
+        // The idle thumbnail is a real captured view, refreshable via the HA button.
+        Assert.Contains("Update idle snapshot", guide);
+        // The ring snapshot lives on its own transient URL, on the still port (issue #169).
+        Assert.Contains("http://<intercom-ip>:8556/ring.jpg", guide);
+        // The ring-notification automation recipe triggers on the entrance-panel call topic.
+        Assert.Contains(opts.EffectiveTopicEntrancePanelCall, guide);
+        Assert.Contains("notify.mobile_app", guide);
+        Assert.DoesNotContain("\r", guide);
+    }
+
+    [Fact]
     public void BuildOnDeviceSetupGuide_keeps_the_password_placeholder_readable_when_unset()
     {
         // With no password set (a bare/library caller — the App always sets one on-device), the URL must

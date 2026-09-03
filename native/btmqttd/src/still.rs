@@ -9,11 +9,15 @@
 //! someone actually opens the camera.
 //!
 //! ## What it serves
-//! One JPEG on a `GET`: the persisted idle snapshot (`cfg/extra/btmqttd/idle.jpg`) when it is present
-//! and a valid JPEG, else a small baked neutral placeholder. It re-reads the file PER REQUEST, so
-//! Phase 2 (#169) — which captures the real idle view at first run and on an HA "update idle snapshot"
-//! press — is picked up on the next poll with no restart. Phase 1 (#168) only ever serves the baked
-//! placeholder (no writer exists yet); the endpoint and HA wiring are what Phase 1 delivers.
+//! On a `GET` it serves one JPEG, chosen by path:
+//!   * `/ring.jpg` → the transient who-is-at-the-door ring snapshot (issue #169), captured at ring
+//!     time on tmpfs; 404 when there is no current ring image (never a stale/placeholder picture).
+//!   * every OTHER path (incl. `/idle.jpg`, `/`) → the idle thumbnail: the persisted idle snapshot
+//!     (`cfg/extra/btmqttd/idle.jpg`) when present and a valid JPEG, else a small baked neutral
+//!     placeholder.
+//!
+//! Both are re-read PER REQUEST, so a Phase-2 capture (the real idle view at first run / on an HA
+//! "update idle snapshot" press, or a fresh ring frame) is picked up on the next poll with no restart.
 //!
 //! ## Security posture
 //! LAN-only, gated by the go2rtcd `GO2RTC` firewall chain — an `ACCEPT` for tcp/8556 from the LAN /24
@@ -108,6 +112,15 @@ where
 {
     let response = match tokio::time::timeout(REQUEST_TIMEOUT, read_head(&mut stream)).await {
         Ok(Ok(head)) => match request_is_get(&head) {
+            // The ring snapshot (issue #169) lives on its OWN path: `/ring.jpg` serves the transient
+            // who-is-at-the-door frame, and 404s when there is no current ring image (it is never a
+            // placeholder — a stale/blank "who rang" picture would be misleading). EVERY other path
+            // (incl. `/idle.jpg`, `/`, anything else) serves the idle thumbnail, preserving Phase-1
+            // behaviour where the path was ignored.
+            Some(true) if request_path_is_ring(&head) => match ring_jpeg().await {
+                Some(bytes) => jpeg_response(&bytes),
+                None => simple_response("404 Not Found"),
+            },
             Some(true) => jpeg_response(&idle_or_placeholder().await),
             Some(false) => simple_response("405 Method Not Allowed"),
             None => simple_response("400 Bad Request"),
@@ -159,6 +172,35 @@ fn request_is_get(head: &[u8]) -> Option<bool> {
     Some(&head[..end] == b"GET")
 }
 
+/// The request-target (path) token: the SECOND whitespace-delimited field of the request line
+/// (`GET /ring.jpg HTTP/1.1` → `/ring.jpg`). `None` if there is no second token.
+fn request_path(head: &[u8]) -> Option<&[u8]> {
+    let line_end = head.iter().position(|&b| b == b'\r' || b == b'\n').unwrap_or(head.len());
+    let mut fields = head[..line_end].split(|&b| b == b' ').filter(|s| !s.is_empty());
+    let _method = fields.next()?;
+    fields.next()
+}
+
+/// True iff the request targets the ring snapshot (`/ring.jpg`), ignoring any `?query`. Every other
+/// path serves the idle thumbnail (Phase-1 path-agnostic behaviour), so only this exact target flips
+/// to the transient ring image.
+fn request_path_is_ring(head: &[u8]) -> bool {
+    match request_path(head) {
+        Some(p) => p.split(|&b| b == b'?').next().unwrap_or(p) == b"/ring.jpg",
+        None => false,
+    }
+}
+
+/// The transient ring snapshot if a valid JPEG exists on tmpfs, else `None` (⇒ 404). Read per request
+/// (the ring writer replaces it atomically); the blocking `std::fs` read is offloaded off the
+/// single-threaded runtime.
+async fn ring_jpeg() -> Option<Vec<u8>> {
+    match tokio::task::spawn_blocking(crate::capture::read_ring_jpg).await {
+        Ok(Some(bytes)) if is_jpeg(&bytes) => Some(bytes),
+        _ => None,
+    }
+}
+
 /// The idle snapshot if a valid persisted JPEG exists, else the baked placeholder. Read per request
 /// (so a Phase-2 capture is picked up without a restart); the blocking `std::fs` read is offloaded
 /// off the single-threaded runtime.
@@ -182,8 +224,9 @@ async fn idle_or_placeholder() -> Vec<u8> {
 /// follows the scan header — so a file truncated at/after the scan header, with no scan data or
 /// terminator, is rejected too. This rejects a truncated, marker-only, payload-forged, or
 /// field-degenerate file (it falls back to the placeholder) while accepting any genuine JPEG regardless
-/// of trailing padding / metadata / an embedded thumbnail after the EOI.
-fn is_jpeg(b: &[u8]) -> bool {
+/// of trailing padding / metadata / an embedded thumbnail after the EOI. `pub(crate)` so the capture
+/// helper (`capture.rs`) validates a freshly-grabbed frame with the SAME check before it stores it.
+pub(crate) fn is_jpeg(b: &[u8]) -> bool {
     if b.len() < 4 || b[0] != 0xFF || b[1] != 0xD8 {
         return false; // no SOI
     }
@@ -414,6 +457,20 @@ mod tests {
         assert_eq!(request_is_get(b""), None);
         assert_eq!(request_is_get(b" \r\n"), None);
         assert_eq!(request_is_get(b"\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn request_path_is_ring_only_for_the_ring_target() {
+        // Exactly /ring.jpg (with or without a query string) → the ring snapshot.
+        assert!(request_path_is_ring(b"GET /ring.jpg HTTP/1.1\r\n"));
+        assert!(request_path_is_ring(b"GET /ring.jpg?ts=1 HTTP/1.1\r\n"));
+        // Everything else serves the idle image (Phase-1 path-agnostic behaviour is preserved).
+        assert!(!request_path_is_ring(b"GET /idle.jpg HTTP/1.1\r\n"));
+        assert!(!request_path_is_ring(b"GET / HTTP/1.1\r\n"));
+        assert!(!request_path_is_ring(b"GET /ring.jpeg HTTP/1.1\r\n"));
+        assert!(!request_path_is_ring(b"GET /sub/ring.jpg HTTP/1.1\r\n"));
+        // A malformed line with no target token is not the ring path.
+        assert!(!request_path_is_ring(b"GET\r\n"));
     }
 
     #[test]

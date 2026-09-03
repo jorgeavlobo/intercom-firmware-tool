@@ -285,6 +285,19 @@ pub fn read_idle_jpg() -> Option<Vec<u8>> {
     read_idle_jpg_in(&state_dir())
 }
 
+/// Persist the captured idle-snapshot JPEG (issue #169): the first-run auto-capture and the HA
+/// "Update idle snapshot" button write the real empty-doorway view here so the Phase-1 still endpoint
+/// serves it on the next poll (no restart). Atomic write + dir fsync like every other record, so a
+/// reboot mid-write never leaves a torn image — and, living on the reboot- and reflash-persistent
+/// `cfg/extra` partition, the captured thumbnail survives both. NOT keyed: the newest capture is always
+/// the wanted one. The caller has already validated the bytes are a real JPEG. Returns `true` on
+/// success. Blocking; call via `spawn_blocking`.
+#[must_use]
+pub fn store_idle_jpg(bytes: &[u8]) -> bool {
+    let dir = state_dir();
+    atomic_write_in(&dir, &idle_jpg_file_in(&dir), bytes)
+}
+
 fn idle_jpg_file_in(dir: &Path) -> PathBuf {
     dir.join(IDLE_JPG_FILE)
 }

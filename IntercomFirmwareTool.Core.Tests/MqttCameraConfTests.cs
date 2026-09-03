@@ -86,6 +86,43 @@ public class MqttCameraConfTests
     }
 
     [Fact]
+    public void On_device_mode_writes_the_rtsp_credentials_for_capture()
+    {
+        // #169: the still-capture helper reads rtsp://<user>:<pass>@127.0.0.1:8554/doorbell, so the go2rtc
+        // RTSP creds are written to the device conf (single-quoted) on-device.
+        var conf = MqttInstaller.GenerateConf(new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cret-_",
+        });
+        Assert.Contains("CAMERA_RTSP_USER='camera'\n", conf);
+        Assert.Contains("CAMERA_RTSP_PASS='s3cret-_'\n", conf);
+    }
+
+    [Fact]
+    public void Off_device_or_credential_less_mode_omits_the_rtsp_credentials()
+    {
+        // The capture path exists only on-device: an off-device conf writes neither RTSP key...
+        var off = MqttInstaller.GenerateConf(new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraRtspPass = "s3cret",
+        });
+        Assert.DoesNotContain("CAMERA_RTSP_USER=", off);
+        Assert.DoesNotContain("CAMERA_RTSP_PASS=", off);
+        // ...and an on-device flag with no password wired (a bare/library caller) writes neither rather
+        // than emitting a half credential.
+        var noPass = MqttInstaller.GenerateConf(new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+        });
+        Assert.DoesNotContain("CAMERA_RTSP_PASS=", noPass);
+    }
+
+    [Fact]
     public void On_device_flag_is_gated_on_the_camera_being_enabled()
     {
         // Default off-device path emits CAMERA_ONDEVICE=0.
