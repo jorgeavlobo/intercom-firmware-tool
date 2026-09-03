@@ -20,11 +20,14 @@
 //!
 //! ## Bounds / safety
 //! The whole capture is wrapped in [`CAPTURE_TIMEOUT`]; ffmpeg is KILLED if it overruns so a stuck
-//! pull can never wedge the daemon. Only ONE capture runs at a time (an in-flight guard drops a
-//! second request rather than launching a redundant pull). The JPEG lands in a UNIQUE private tmpfs
-//! scratch file that is removed after it is read, so a concurrent request can't observe a torn file.
-//! The result is size-capped ([`crate::persist::MAX_IDLE_JPG_BYTES`]) and structurally validated
-//! before it is stored, so a truncated/garbage grab never reaches Home Assistant.
+//! pull can never wedge the daemon. Captures are guarded PER KIND (one idle + one ring at a time), so
+//! a time-critical ring is never dropped just because an idle capture is running, while a mashed
+//! button or repeated rings don't pile up ffmpegs. A new ring FIRST invalidates the previous visitor's
+//! `ring.jpg`, so a failed/skipped ring yields a clean 404 for the notification, never a stale photo.
+//! The JPEG lands in a UNIQUE private tmpfs scratch file that is removed after it is read, so a
+//! concurrent request can't observe a torn file. The result is size-capped
+//! ([`crate::persist::MAX_IDLE_JPG_BYTES`]) and structurally validated before it is stored, so a
+//! truncated/garbage grab never reaches Home Assistant.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
@@ -59,10 +62,14 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(25);
 /// before we try to wake the panel on a fresh boot.
 pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 
-/// At most one capture at a time. A capture holds the panel/stream briefly; a second concurrent
-/// request (button mashing, or a ring during a first-run capture) is DROPPED rather than launching a
-/// redundant ffmpeg — the first grab is as good as the second a moment later.
-static CAPTURING: AtomicBool = AtomicBool::new(false);
+/// At most one capture of EACH KIND at a time — a separate guard for the persisted idle thumbnail and
+/// the transient ring snapshot. They write DIFFERENT files for DIFFERENT purposes, so a ring capture
+/// (time-critical: someone is at the door NOW) must never be dropped just because an idle capture
+/// (first-run / button, up to ~27 s) happens to be running — go2rtc fans the stream out to both. Two
+/// captures of the SAME kind are still coalesced (a mashed button or repeated rings don't launch
+/// redundant ffmpegs — the earlier grab is as good as the later one a moment on).
+static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
+static CAPTURING_RING: AtomicBool = AtomicBool::new(false);
 
 /// Per-process nonce so overlapping-in-time scratch files never collide (atop the pid).
 static NONCE: AtomicU32 = AtomicU32::new(0);
@@ -93,26 +100,38 @@ pub fn read_ring_jpg() -> Option<Vec<u8>> {
     (!buf.is_empty() && buf.len() as u64 <= crate::persist::MAX_IDLE_JPG_BYTES).then_some(buf)
 }
 
-/// True iff `s` is safe to place verbatim in the `user:pass@` userinfo of an RTSP URL: non-empty and
-/// free of the delimiters that would mis-split the URL (`@ : / \ ?  #`) or whitespace/control bytes.
-/// ffmpeg uses the userinfo VERBATIM for RTSP auth (it does not percent-decode it), so we must pass it
-/// raw — the installer's generated password is base64url (all of which is safe here); this guard only
-/// fails closed on a hand-edited conf with a URL-breaking credential (skip capture rather than build a
-/// malformed URL). Pure, so it unit-tests.
-fn userinfo_is_url_safe(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars().all(|c| {
-            !c.is_control()
-                && !c.is_whitespace()
-                && !matches!(c, '@' | ':' | '/' | '\\' | '?' | '#' | '%')
-        })
+/// Percent-encode a credential for an RTSP URL's userinfo (RFC 3986: keep only the unreserved set
+/// `A-Za-z0-9-._~`, `%`-escape every other byte). This MATCHES the on-device setup guide's HA camera
+/// URL (`Uri.EscapeDataString`), so the capture reads the stream with exactly the credentials the
+/// installer accepts and go2rtc serves — including a hand-supplied password with URL punctuation
+/// (`@ : / ? #`) that would otherwise mis-split the URL. The installer's generated password is
+/// base64url, all of which is unreserved, so it passes through UNCHANGED (the common case is
+/// byte-for-byte the raw value). Pure, so it unit-tests.
+fn pct_encode_userinfo(s: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(b as char),
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
 }
 
-/// Build the loopback RTSP URL for the capture, or `None` when the credentials are missing/unsafe
-/// (capture then declines rather than pulling an unauthenticated or malformed URL). Pure.
+/// Build the loopback RTSP URL for the capture, or `None` when a credential is missing (capture then
+/// declines rather than pulling an unauthenticated URL). The user and password are percent-encoded into
+/// the userinfo, so any credential the installer accepts (and go2rtc serves) is read correctly. Pure.
 fn rtsp_url(user: &str, pass: &str) -> Option<String> {
-    (userinfo_is_url_safe(user) && userinfo_is_url_safe(pass))
-        .then(|| format!("rtsp://{user}:{pass}@127.0.0.1:{RTSP_PORT}/{STREAM_NAME}"))
+    (!user.is_empty() && !pass.is_empty()).then(|| {
+        format!(
+            "rtsp://{}:{}@127.0.0.1:{RTSP_PORT}/{STREAM_NAME}",
+            pct_encode_userinfo(user),
+            pct_encode_userinfo(pass)
+        )
+    })
 }
 
 /// The ffmpeg argument vector for a one-frame JPEG grab from `rtsp_url` into `out_path`. Pure (no
@@ -157,9 +176,7 @@ fn capture_argv(rtsp_url: &str, out_path: &str) -> Vec<String> {
 /// oversized output) — the caller logs and leaves the target unchanged.
 async fn grab_jpeg(cfg: &Config) -> Result<Vec<u8>, String> {
     let url = rtsp_url(&cfg.camera_rtsp_user, cfg.camera_rtsp_pass.as_deref().unwrap_or(""))
-        .ok_or_else(|| {
-            "RTSP credentials missing or not URL-safe (CAMERA_RTSP_USER/CAMERA_RTSP_PASS)".to_string()
-        })?;
+        .ok_or_else(|| "RTSP credentials missing (CAMERA_RTSP_USER/CAMERA_RTSP_PASS)".to_string())?;
 
     let dir = run_dir();
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
@@ -215,16 +232,16 @@ async fn read_scratch(path: &std::path::Path) -> Option<Vec<u8>> {
     (!bytes.is_empty() && bytes.len() as u64 <= crate::persist::MAX_IDLE_JPG_BYTES).then_some(bytes)
 }
 
-/// Try to acquire the single-capture guard; `None` when a capture is already running (the caller then
-/// skips). The returned guard releases the flag on drop.
-fn try_lock_capture() -> Option<CaptureGuard> {
-    (!CAPTURING.swap(true, Ordering::AcqRel)).then_some(CaptureGuard)
+/// Try to acquire a capture guard `flag`; `None` when a capture of that kind is already running (the
+/// caller then skips). The returned guard releases the flag on drop.
+fn try_lock(flag: &'static AtomicBool) -> Option<CaptureGuard> {
+    (!flag.swap(true, Ordering::AcqRel)).then_some(CaptureGuard(flag))
 }
 
-struct CaptureGuard;
+struct CaptureGuard(&'static AtomicBool);
 impl Drop for CaptureGuard {
     fn drop(&mut self) {
-        CAPTURING.store(false, Ordering::Release);
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -248,8 +265,8 @@ async fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>) {
 /// panel first (idle panels don't stream). Returns whether a fresh idle image was captured AND stored.
 /// Skips (returns `false`) if another capture is already running.
 pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>) -> bool {
-    let Some(_guard) = try_lock_capture() else {
-        eprintln!("btmqttd: capture: idle capture skipped (a capture is already in progress)");
+    let Some(_guard) = try_lock(&CAPTURING_IDLE) else {
+        eprintln!("btmqttd: capture: idle capture skipped (an idle capture is already in progress)");
         return false;
     };
     wake_panel(view_tx).await;
@@ -278,8 +295,14 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
 /// Returns whether a ring image was captured and written. Skips (returns `false`) if a capture is
 /// already running.
 pub async fn capture_ring(cfg: &Config) -> bool {
-    let Some(_guard) = try_lock_capture() else {
-        eprintln!("btmqttd: capture: ring capture skipped (a capture is already in progress)");
+    // Invalidate any PRIOR visitor's ring image FIRST — before the guard — so that even a ring which is
+    // skipped (another ring still capturing), fails, or times out leaves NO stale image: the push
+    // notification then gets a clean 404 for the new ring instead of the previous person's photograph.
+    // The in-flight capture (if any) writes via temp+rename, so this unlink of the final path can't
+    // corrupt it — its rename re-creates the file when the fresh frame is ready.
+    let _ = tokio::fs::remove_file(ring_jpg_path()).await;
+    let Some(_guard) = try_lock(&CAPTURING_RING) else {
+        eprintln!("btmqttd: capture: ring capture skipped (a ring capture is already in progress)");
         return false;
     };
     match grab_jpeg(cfg).await {
@@ -335,30 +358,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn userinfo_safety_accepts_base64url_and_rejects_url_breakers() {
-        // The installer's generated password is base64url — all of which is URL-safe here.
-        assert!(userinfo_is_url_safe("camera"));
-        assert!(userinfo_is_url_safe("aZ09-_bQ")); // base64url alphabet
-        // Empty / URL-delimiter / whitespace / control → rejected (fail closed).
-        assert!(!userinfo_is_url_safe(""));
-        assert!(!userinfo_is_url_safe("a@b"));
-        assert!(!userinfo_is_url_safe("a:b"));
-        assert!(!userinfo_is_url_safe("a/b"));
-        assert!(!userinfo_is_url_safe("a b"));
-        assert!(!userinfo_is_url_safe("a\nb"));
-        assert!(!userinfo_is_url_safe("a%b"));
+    fn pct_encode_userinfo_passes_base64url_and_escapes_punctuation() {
+        // base64url (the installer's generated password alphabet) is all-unreserved → unchanged.
+        assert_eq!(pct_encode_userinfo("aZ09-_camera"), "aZ09-_camera");
+        assert_eq!(pct_encode_userinfo("a.b~c"), "a.b~c");
+        // URL punctuation / whitespace / control are percent-escaped so they can't mis-split the URL.
+        assert_eq!(pct_encode_userinfo("a@b:c/d"), "a%40b%3Ac%2Fd");
+        assert_eq!(pct_encode_userinfo("p ss"), "p%20ss");
+        assert_eq!(pct_encode_userinfo("100%"), "100%25");
     }
 
     #[test]
     fn rtsp_url_builds_loopback_url_or_declines() {
+        // A base64url credential passes through raw (unreserved) — matching how HA reads the same URL.
         assert_eq!(
             rtsp_url("camera", "s3cret-_"),
             Some("rtsp://camera:s3cret-_@127.0.0.1:8554/doorbell".to_string())
         );
-        // A missing or unsafe credential declines (None) rather than building a malformed URL.
+        // A credential with URL punctuation is percent-encoded into the userinfo, NOT rejected: every
+        // credential the installer accepts is read correctly.
+        assert_eq!(
+            rtsp_url("camera", "p@ss"),
+            Some("rtsp://camera:p%40ss@127.0.0.1:8554/doorbell".to_string())
+        );
+        // A missing credential declines (None) rather than building an unauthenticated URL.
         assert_eq!(rtsp_url("camera", ""), None);
         assert_eq!(rtsp_url("", "p"), None);
-        assert_eq!(rtsp_url("camera", "bad/pass"), None);
     }
 
     #[test]
@@ -378,11 +403,23 @@ mod tests {
     }
 
     #[test]
-    fn capture_guard_is_exclusive() {
-        let g1 = try_lock_capture();
+    fn capture_guard_is_exclusive_and_released_on_drop() {
+        static FLAG: AtomicBool = AtomicBool::new(false);
+        let g1 = try_lock(&FLAG);
         assert!(g1.is_some());
-        assert!(try_lock_capture().is_none(), "a second capture must not acquire the guard");
+        assert!(try_lock(&FLAG).is_none(), "a second lock of the same kind must not acquire the guard");
         drop(g1);
-        assert!(try_lock_capture().is_some(), "the guard is released on drop");
+        assert!(try_lock(&FLAG).is_some(), "the guard is released on drop");
+    }
+
+    #[test]
+    fn idle_and_ring_guards_are_independent() {
+        // A ring during an idle capture must NOT be dropped: the two guards are separate flags, so
+        // holding the idle guard leaves the ring guard free (and vice versa).
+        let idle = try_lock(&CAPTURING_IDLE).expect("idle guard free");
+        let ring = try_lock(&CAPTURING_RING);
+        assert!(ring.is_some(), "the ring guard must be independent of the idle guard");
+        drop(ring);
+        drop(idle);
     }
 }
