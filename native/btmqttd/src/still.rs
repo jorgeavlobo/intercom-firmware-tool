@@ -173,11 +173,15 @@ async fn idle_or_placeholder() -> Vec<u8> {
 /// decoder into a size-constrained embedded binary (the endpoint is not a codec). It WALKS the JPEG
 /// segment structure from the SOI: each marker's 2-byte length is parsed and its payload skipped, so a
 /// Start-Of-Frame / Start-Of-Scan is recognised ONLY at a genuine segment boundary — a marker-like byte
-/// pair buried inside an APPn (or other) payload cannot be mistaken for one. A file is a real image iff
-/// a Start-Of-Scan (`FF DA`) is reached with a Start-Of-Frame (`FF C0`..`FF CF`, excluding the
-/// non-frame `FF C4` DHT / `FF C8` JPG / `FF CC` DAC) already seen before it. This rejects a truncated,
-/// marker-only, or payload-forged file (it falls back to the placeholder) while accepting any genuine
-/// JPEG regardless of what follows the scan (trailing padding / metadata / an embedded thumbnail).
+/// pair buried inside an APPn (or other) payload cannot be mistaken for one. Both the SOF and the SOS
+/// are validated by their DECLARED length and mandatory header fields (SOF `FF C0`..`FF CF`, excluding
+/// the non-frame `FF C4` DHT / `FF C8` JPG / `FF CC` DAC: `length == 8 + 3*Nf` with non-zero precision
+/// / height / width / component count; SOS: `length == 6 + 2*Ns` with `Ns >= 1`), and every segment
+/// must be fully present — so a degenerate or truncated SOF/SOS is rejected, not just a bare marker. A
+/// file is a real image iff a valid SOS is reached with a valid SOF already seen. This rejects a
+/// truncated, marker-only, payload-forged, or field-degenerate file (it falls back to the placeholder)
+/// while accepting any genuine JPEG regardless of what follows the scan (trailing padding / metadata /
+/// an embedded thumbnail).
 fn is_jpeg(b: &[u8]) -> bool {
     if b.len() < 4 || b[0] != 0xFF || b[1] != 0xD8 {
         return false; // no SOI
@@ -202,18 +206,43 @@ fn is_jpeg(b: &[u8]) -> bool {
             // Standalone markers with NO length payload: SOI, TEM, RST0..RST7 — keep walking.
             0xD8 | 0x01 | 0xD0..=0xD7 => continue,
             0xD9 => return false, // EOI before any scan → no usable image
-            0xDA => return has_sof, // Start-Of-Scan at a real boundary → valid iff a frame preceded it
-            // Every other marker carries a big-endian 2-byte length (which includes the length bytes).
+            // Every other marker carries a big-endian 2-byte length (including the length bytes), and
+            // its whole segment must be present in the buffer.
             _ => {
                 if i + 1 >= b.len() {
                     return false; // truncated length field
                 }
                 let seg_len = ((b[i] as usize) << 8) | (b[i + 1] as usize);
-                if seg_len < 2 {
-                    return false; // invalid segment length
+                if seg_len < 2 || i + seg_len > b.len() {
+                    return false; // invalid or truncated segment
                 }
+                let body = &b[i + 2..i + seg_len]; // segment payload (after the 2 length bytes)
+                if marker == 0xDA {
+                    // Start-Of-Scan header: Ns(1) + Ns*(2) + 3 bytes => length == 6 + 2*Ns, Ns >= 1. A
+                    // VALID scan after a valid frame means a real image; the entropy data that follows
+                    // is irrelevant to structural validity, so accept here.
+                    let ns = match body.first() {
+                        Some(&n) => n as usize,
+                        None => return false,
+                    };
+                    return has_sof && ns >= 1 && seg_len == 6 + 2 * ns;
+                }
+                // Start-Of-Frame (SOF0..SOF15, excluding the non-frame DHT C4 / JPG C8 / DAC CC):
+                // precision(1) + height(2) + width(2) + Nf(1) + Nf*(3) => length == 8 + 3*Nf, with a
+                // non-zero precision / height / width / component count.
                 if matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
-                    has_sof = true; // a real Start-Of-Frame segment
+                    if body.len() < 6 {
+                        return false;
+                    }
+                    let precision = body[0];
+                    let height = (u16::from(body[1]) << 8) | u16::from(body[2]);
+                    let width = (u16::from(body[3]) << 8) | u16::from(body[4]);
+                    let nf = body[5] as usize;
+                    if precision == 0 || height == 0 || width == 0 || nf == 0 || seg_len != 8 + 3 * nf
+                    {
+                        return false;
+                    }
+                    has_sof = true; // a valid Start-Of-Frame segment
                 }
                 i += seg_len; // skip the whole segment to the next marker
             }
@@ -270,11 +299,15 @@ mod tests {
     }
 
     #[test]
-    fn is_jpeg_walks_segments_and_requires_a_real_frame_and_scan() {
-        // A structurally valid baseline JPEG: SOI, SOF0 (length 3 = 2 length bytes + 1 payload), SOS
-        // (length 2 = header only), EOI. The segment lengths are honest, so the walker reaches the SOS.
+    fn is_jpeg_walks_segments_and_validates_frame_and_scan_headers() {
+        // A minimally VALID baseline JPEG (1 component, 1x1):
+        //   SOI; SOF0 length 11 = 8 + 3*1: precision 8, height 1, width 1, Nf 1, one component spec;
+        //   SOS length 8 = 6 + 2*1: Ns 1, one component selector, Ss/Se/AhAl; EOI.
         let valid: &[u8] = &[
-            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x03, 0x00, 0xFF, 0xDA, 0x00, 0x02, 0xFF, 0xD9,
+            0xFF, 0xD8, // SOI
+            0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, // SOF0
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, // SOS
+            0xFF, 0xD9, // EOI
         ];
         assert!(is_jpeg(valid));
         // Trailing padding / metadata after the scan is irrelevant — we accept at the SOS boundary.
@@ -283,8 +316,19 @@ mod tests {
         assert!(is_jpeg(&with_trailer));
         // Marker-only stub (SOI + EOI, no frame/scan) → rejected (serve the placeholder).
         assert!(!is_jpeg(&[0xFF, 0xD8, 0xFF, 0xD9]));
-        // SOF present but no SOS (frame declared, scan missing) → rejected.
-        assert!(!is_jpeg(&[0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x03, 0x00, 0xFF, 0xD9]));
+        // A DEGENERATE SOF whose declared length (2) has no header fields, followed by a bare SOS, must
+        // be rejected — a marker alone is not a frame/scan.
+        assert!(!is_jpeg(&[0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x02, 0xFF, 0xDA]));
+        // A valid SOF followed by an SOS with a bogus length (2, no scan header) → rejected.
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xDA, 0x00, 0x02,
+        ]));
+        // Valid SOF but no SOS at all (scan missing) → rejected.
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xD9,
+        ]));
         // Marker-LIKE bytes buried in an APP0 PAYLOAD must NOT count: here `FF C0 FF DA` are the 4
         // payload bytes of the APP0 segment (length 6), not real SOF/SOS segments → rejected.
         assert!(!is_jpeg(&[
