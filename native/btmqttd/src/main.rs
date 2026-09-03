@@ -1369,6 +1369,7 @@ fn is_momentary_publish(req: &Request, cfg: &Config) -> bool {
                 && !p.retain
                 && (p.topic == cfg.topic_entrance_panel_call
                     || p.topic == cfg.topic_floor_call
+                    || p.topic == cfg.topic_ring_snapshot
                     || p.topic == cfg.topic_key)
     )
 }

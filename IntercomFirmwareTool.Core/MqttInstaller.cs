@@ -1042,6 +1042,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
                                       opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
+                                      opts.EffectiveTopicRingSnapshot,
                                       opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
                                       opts.EffectiveTopicUpdate })
                 if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
@@ -1056,6 +1057,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                       opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
+                                      opts.EffectiveTopicRingSnapshot,
                                       opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
                                       opts.EffectiveTopicUpdate })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
@@ -1087,6 +1089,10 @@ namespace IntercomFirmwareTool.Core
                 opts.TopicCmdResult, opts.TopicFileContent, opts.EffectiveTopicVolume,
                 opts.EffectiveTopicMute, opts.EffectiveTopicEntrancePanelCall,
                 opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
+                // Ring-snapshot-ready (#169): btmqttd publishes to it (on-device), so it is validated +
+                // collision-checked like the other momentary event topics — always in the set, matching
+                // entrance/floor/call-state (which are likewise always present regardless of a live call).
+                opts.EffectiveTopicRingSnapshot,
                 opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
             };
             // The light STATE topic is published whenever the light is ENABLED, in BOTH modes: a
@@ -1160,7 +1166,7 @@ namespace IntercomFirmwareTool.Core
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                         opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                         opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                        opts.EffectiveTopicMaintenance })
+                                        opts.EffectiveTopicRingSnapshot, opts.EffectiveTopicMaintenance })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));

@@ -154,7 +154,7 @@ async fn session(
     debounce: &std::sync::Mutex<MomentaryDebounce>,
     // Broker connectivity, so momentary call events can be dropped rather than enqueued while the
     // broker is down (issue #71). Read-only here; owned/updated by main's event loop.
-    broker_online: &AtomicBool,
+    broker_online: &Arc<AtomicBool>,
 ) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
@@ -474,7 +474,7 @@ async fn read_call_state_draining(
     light: Option<&Arc<LightCtl>>,
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
     debounce: &std::sync::Mutex<MomentaryDebounce>,
-    broker_online: &AtomicBool,
+    broker_online: &Arc<AtomicBool>,
     sock: &mut TcpStream,
     framer: &mut Framer,
     buf: &mut [u8],
@@ -605,7 +605,7 @@ async fn publish_frame(
     light: Option<&Arc<LightCtl>>,
     classifier: &std::sync::Mutex<dimension::CallClassifier>,
     debounce: &std::sync::Mutex<MomentaryDebounce>,
-    broker_online: &AtomicBool,
+    broker_online: &Arc<AtomicBool>,
     frame: &str,
 ) -> FrameOutcome {
     // Stair-light SWITCH state tracking: a physical panel press of the light button appears
@@ -640,31 +640,36 @@ async fn publish_frame(
             // No held ring, but we still (re)classified to Entrance → snapshot ambiguous.
             outcome = FrameOutcome::ClassifierChanged;
         }
-        publish_call_event(client, debounce, broker_online, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
-        // Ring snapshot (issue #169): on an entrance-panel ring, grab a who-is-at-the-door frame and
-        // write it to the transient `/ring.jpg` for the HA push notification — DETACHED and best-effort.
-        // No SIP wake is needed (the panel is already streaming because it is ringing), it is bounded by
-        // the capture's own timeout, and it NEVER touches idle.jpg. On-device only (nowhere to serve it
-        // otherwise). capture.rs's single-capture guard drops it if one is already running, so repeated
-        // rings can't pile up ffmpeg processes. Gate on the media path (camera_enabled) AS WELL as
-        // on-device: CAMERA_ONDEVICE can be set independently in a hand-edited conf, and without the
-        // camera feature there is no RTP siphon for go2rtc to serve, so a capture would just burn its
-        // full timeout on every ring.
-        if cfg.camera_enabled && cfg.camera_ondevice {
+        let ring_published = publish_call_event(client, debounce, broker_online, &cfg.topic_entrance_panel_call, "entrance-panel", where_).await;
+        // Ring snapshot (issue #169): grab a who-is-at-the-door frame and write it to the transient
+        // `/ring.jpg` for the HA push. Fire ONLY on a FRESH ring event (`ring_published`): the gateway
+        // repeats one press's signature and `publish_call_event` coalesces those (#71) — spawning per raw
+        // frame would let a duplicate supersede the first capture (RING_GEN) or emit multiple
+        // notifications. DETACHED + best-effort (the panel is already streaming because it is ringing),
+        // bounded by the capture's own timeout, and it NEVER touches idle.jpg. Gate on the media path
+        // (camera_enabled) AS WELL as on-device: CAMERA_ONDEVICE can be set independently in a
+        // hand-edited conf, and without the camera feature there is no RTP siphon for go2rtc to serve.
+        // capture.rs's single-capture guard drops overlaps.
+        if ring_published && cfg.camera_enabled && cfg.camera_ondevice {
             let cfg_ring = cfg.clone();
             let client_ring = client.clone();
+            let broker_ring = broker_online.clone();
             tokio::spawn(async move {
-                // Publish a "ring snapshot ready" signal ONLY after the capture has actually written
-                // /ring.jpg, so the HA push automation triggers on THIS (not a fixed post-ring delay that
-                // a cold ~20 s capture can outlast) and always fetches a present image. Momentary + QoS 0
-                // (not retained, not late-flushed) like the ring event itself — if the capture fails, no
-                // signal is sent (no push, rather than a push carrying a stale or missing image).
-                if crate::capture::capture_ring(&cfg_ring).await {
+                // Publish a "ring snapshot ready" signal ONLY after the capture has written /ring.jpg, so
+                // the HA push triggers on THIS (not a fixed delay a cold ~20 s capture can outlast) and
+                // always fetches a present image. Momentary QoS 0, non-retained, and DROPPED when the
+                // broker is offline — its topic is in main.rs::is_momentary_publish so a queued one is
+                // also purged on disconnect, matching the ring event's #71 discipline so a reconnect can't
+                // flush a stale "someone is at the door" later. If the capture fails, no signal is sent
+                // (no push, rather than a push with a missing image).
+                if crate::capture::capture_ring(&cfg_ring).await && momentary_deliverable(&broker_ring) {
                     let payload = format!("{{\"at\":\"{}\"}}", crate::own::utc_now_iso());
-                    if let Err(e) = client_ring
-                        .publish(&cfg_ring.topic_ring_snapshot, QoS::AtMostOnce, false, payload.into_bytes())
-                        .await
-                    {
+                    if let Err(e) = client_ring.try_publish(
+                        &cfg_ring.topic_ring_snapshot,
+                        QoS::AtMostOnce,
+                        false,
+                        payload.into_bytes(),
+                    ) {
                         eprintln!("btmqttd: capture: ring_snapshot publish failed: {e}");
                     }
                 }
@@ -750,20 +755,23 @@ async fn publish_frame(
 /// stall the monitor reader on a full request queue; a press lost during a brief broker outage
 /// is preferable to a double actuation, and it is not retained or replayed. The payload carries
 /// the HA `event_type`, the WHERE (informational), and a `ts` stamp (see [`momentary_payload`]).
+/// Returns `true` iff a FRESH event was actually published (not dropped for a broker outage and not
+/// coalesced as a burst repeat), so a caller can fire a once-per-press side effect — e.g. the ring
+/// snapshot capture — in step with the same `#71` debounce this uses, instead of on every raw frame.
 async fn publish_call_event(
     client: &AsyncClient,
     debounce: &std::sync::Mutex<MomentaryDebounce>,
-    broker_online: &AtomicBool,
+    broker_online: &Arc<AtomicBool>,
     topic: &str,
     kind: &str,
     where_: &str,
-) {
+) -> bool {
     if !momentary_deliverable(broker_online) {
         eprintln!(
             "btmqttd: dropped {kind} call event @ WHERE={where_} on {topic} \
              (broker offline; not queued for late replay)"
         );
-        return;
+        return false;
     }
     // Coalesce a burst of repeats into one event. First a READ-ONLY check: is this a repeat within
     // the window of the last PUBLISHED event? (Guard scope minimal; there is no await here anyway.)
@@ -777,7 +785,7 @@ async fn publish_call_event(
             "btmqttd: coalesced {kind} call event @ WHERE={where_} on {topic} \
              (burst within {MOMENTARY_DEBOUNCE:?} of the last)"
         );
-        return;
+        return false;
     }
     let payload = momentary_payload(where_);
     match client.try_publish(topic, QoS::AtMostOnce, false, payload.into_bytes()) {
@@ -785,11 +793,17 @@ async fn publish_call_event(
         // full, try_publish fails and NOTHING was published, so we must NOT record — otherwise the
         // window would suppress a later retry and silently lose a physical press. The window starts
         // from the PUBLISHED event, exactly as documented.
-        Ok(()) => debounce
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .record(topic, now),
-        Err(e) => eprintln!("btmqttd: publish {kind} call event failed: {e}"),
+        Ok(()) => {
+            debounce
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record(topic, now);
+            true
+        }
+        Err(e) => {
+            eprintln!("btmqttd: publish {kind} call event failed: {e}");
+            false
+        }
     }
 }
 
