@@ -424,11 +424,14 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     stored
 }
 
-/// Record a freshly-DETECTED ring as the newest pending capture and return its unique event id. Called
-/// once per fresh (non-coalesced, publishable) ring. Advances [`RING_EVENT_SEQ`] and stores the id in
-/// [`RING_NEWEST`] so the single runner captures the latest ring of a burst.
+/// Record a freshly-DETECTED ring as the newest pending capture and return its event id. Called once
+/// per fresh (non-coalesced, publishable) ring. Advances [`RING_EVENT_SEQ`] and stores the id in
+/// [`RING_NEWEST`] so the single runner captures the latest ring of a burst. Ids increase strictly for
+/// the life of the process — `u64` at one ring/second wraps only after ~5.8e11 years — and are held
+/// `>= 1`: `.max(1)` maps the single value a (practically unreachable) wrap could land on, `0`, forward,
+/// since `0` is [`RING_NEWEST`]'s "no ring" sentinel and must never be a real event id.
 pub fn note_pending_ring() -> u64 {
-    let id = RING_EVENT_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+    let id = RING_EVENT_SEQ.fetch_add(1, Ordering::Relaxed).wrapping_add(1).max(1);
     RING_NEWEST.store(id, Ordering::Relaxed);
     id
 }

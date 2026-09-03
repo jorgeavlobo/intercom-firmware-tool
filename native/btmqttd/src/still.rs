@@ -178,8 +178,11 @@ fn request_is_get(head: &[u8]) -> Option<bool> {
     Some(&head[..end] == b"GET")
 }
 
-/// The request-target (path) token: the SECOND whitespace-delimited field of the request line
-/// (`GET /ring-1.jpg HTTP/1.1` → `/ring-1.jpg`). `None` if there is no second token.
+/// The request-target (path) token: the SECOND space-delimited field of the request line
+/// (`GET /ring-1.jpg HTTP/1.1` → `/ring-1.jpg`). Splits on the ASCII space (the request-line separator
+/// per RFC 9112 §3), so a tab in the target is not a delimiter — irrelevant here, since a valid GET has
+/// exactly two single-space separators and only `/ring-<digits>.jpg` is matched. `None` if there is no
+/// second token.
 fn request_path(head: &[u8]) -> Option<&[u8]> {
     let line_end = head.iter().position(|&b| b == b'\r' || b == b'\n').unwrap_or(head.len());
     let mut fields = head[..line_end].split(|&b| b == b' ').filter(|s| !s.is_empty());
