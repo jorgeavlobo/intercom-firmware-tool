@@ -141,7 +141,12 @@ const RECENT_RING_WINDOW: Duration = Duration::from_secs(120);
 /// concurrent or imminent idle capture discards its (visitor) frame rather than storing it as the idle
 /// thumbnail.
 pub fn note_ring() {
-    LAST_RING_MS.store(now_ms(), Ordering::Relaxed);
+    // Clamp to a MINIMUM of 1: `now_ms()` returns 0 for the first tick right after `CLOCK_BASE` is
+    // initialized, but 0 is LAST_RING_MS's "no ring yet" sentinel — so a first-ever ring at t≈0 must
+    // still store a non-zero tick, or `capture_idle`'s `last_ring != 0` guard would mistake it for "no
+    // ring" and could persist that visitor as the idle thumbnail. Losing the true sub-millisecond value
+    // is irrelevant to a 120 s window.
+    LAST_RING_MS.store(now_ms().max(1), Ordering::Relaxed);
 }
 
 /// Per-process nonce so overlapping-in-time scratch files never collide (atop the pid).
