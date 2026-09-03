@@ -462,7 +462,7 @@ namespace IntercomFirmwareTool.Core
                 $"          message: \"Someone is at the door\"\n" +
                 $"          data:\n" +
                 $"            image: >-\n" +
-                $"              http://<intercom-ip>:{OnDeviceStillPort}/ring-{{ trigger.payload_json.id }}.jpg\n\n"));
+                $"              http://<intercom-ip>:{OnDeviceStillPort}/ring-{{{{ trigger.payload_json.id }}}}.jpg\n\n"));
             sb.Append(string.Create(ci,
                 $"The snapshot topic carries the ring's event id (`{{\"at\":\"…\",\"id\":123}}`), and\n" +
                 $"the templated image URL above fetches that exact frame — published ONLY after it is\n" +
