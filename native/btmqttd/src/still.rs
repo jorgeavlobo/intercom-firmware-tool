@@ -1,0 +1,504 @@
+//! On-device still-image HTTP endpoint (issue #168).
+//!
+//! ## Why
+//! Home Assistant's Generic Camera grabs the entity THUMBNAIL from the configured still-image URL;
+//! with NO still URL it instead grabs a frame from the live RTSP stream, so every thumbnail poll
+//! (~every 10 s) wakes the on-demand doorbell session — the panel is brought up, streamed, and torn
+//! down again and again (issue #168, the "thrash"). Pointing HA's *Still Image URL* at THIS endpoint
+//! gives it a cheap JPEG that never touches the stream, so the panel session stays down until
+//! someone actually opens the camera.
+//!
+//! ## What it serves
+//! One JPEG on a `GET`: the persisted idle snapshot (`cfg/extra/btmqttd/idle.jpg`) when it is present
+//! and a valid JPEG, else a small baked neutral placeholder. It re-reads the file PER REQUEST, so
+//! Phase 2 (#169) — which captures the real idle view at first run and on an HA "update idle snapshot"
+//! press — is picked up on the next poll with no restart. Phase 1 (#168) only ever serves the baked
+//! placeholder (no writer exists yet); the endpoint and HA wiring are what Phase 1 delivers.
+//!
+//! ## Security posture
+//! LAN-only, gated by the go2rtcd `GO2RTC` firewall chain — an `ACCEPT` for tcp/8556 from the LAN /24
+//! on `wlan0`, exactly like the tcp/8554 RTSP rule — so the socket carries NO auth of its own (the
+//! idle snapshot is the same picture the doorbell already shows on the LAN; it is not a credential).
+//! Behind the firewall the server is still defensive against a misbehaving LAN client: it is GET-only,
+//! reads the request head under a byte cap AND a per-connection timeout, caps concurrent connections,
+//! always sends `Connection: close`, and IGNORES the request path, headers and body entirely (it
+//! always serves the one image) — so there is no path to traverse and nothing to inject.
+
+use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
+
+/// LAN-facing TCP port for the still endpoint. Adjacent to the go2rtc RTSP port (8554) and WebRTC
+/// port (8555), and firewalled the same way. Kept in step with the C# installer's on-device setup
+/// guide (`Go2RtcConfig.OnDeviceStillPort`) and the go2rtcd firewall (`CAM_STILL_PORT`).
+pub const STILL_PORT: u16 = 8556;
+
+/// The baked neutral placeholder, served whenever no valid persisted idle snapshot exists. Compiled
+/// into the binary so the endpoint always has SOMETHING to return (it is provenance-covered like the
+/// rest of the binary). A ~11 KB 640×480 JPEG — see `native/btmqttd/assets/idle-placeholder.jpg`.
+const PLACEHOLDER: &[u8] = include_bytes!("../assets/idle-placeholder.jpg");
+
+/// Whole-request-head read budget: a client has this long to send the request line + headers. A
+/// slow-loris that dribbles bytes is cut off here rather than pinning a task/socket.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Response write budget: a client that stops reading mid-response can't pin the task forever.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How long `accept()` waits before the loop wakes to re-check `stopping`, so a quiet endpoint still
+/// winds down promptly at shutdown even though the daemon also aborts the task.
+const ACCEPT_POLL: Duration = Duration::from_secs(1);
+
+/// Cap on request-head bytes read. We only need the method (first token); the path/headers/body are
+/// discarded. 8 KiB is ample for any real request line + headers and bounds a garbage flood.
+const MAX_REQUEST_BYTES: usize = 8 * 1024;
+
+/// Cap on concurrently-served connections, so a LAN client opening many sockets can't exhaust file
+/// descriptors or spawn unbounded tasks. Excess connections are dropped (the client can retry).
+const MAX_CONNS: usize = 8;
+
+/// Run the still endpoint until `stopping` is set (the daemon also aborts the task at shutdown).
+/// Binds `0.0.0.0:STILL_PORT` (DHCP-proof; the firewall is the access gate, like go2rtc's RTSP). A
+/// bind failure degrades gracefully: the endpoint is simply absent and HA falls back to stream stills
+/// (the pre-#168 behaviour) rather than the daemon crashing.
+pub async fn run(stopping: Arc<AtomicBool>) {
+    let listener = match TcpListener::bind((Ipv4Addr::UNSPECIFIED, STILL_PORT)).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("btmqttd: still: cannot bind :{STILL_PORT}: {e}; still endpoint disabled");
+            return;
+        }
+    };
+    eprintln!("btmqttd: still: serving idle snapshot on :{STILL_PORT}");
+    let sem = Arc::new(Semaphore::new(MAX_CONNS));
+    while !stopping.load(Ordering::Relaxed) {
+        // Bounded accept so the loop periodically re-checks `stopping` on a quiet endpoint.
+        let (stream, _peer) = match tokio::time::timeout(ACCEPT_POLL, listener.accept()).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => {
+                eprintln!("btmqttd: still: accept error: {e}");
+                continue;
+            }
+            Err(_) => continue, // accept timed out — re-check `stopping`
+        };
+        // Bound concurrency: if the pool is exhausted, drop this connection rather than queue it.
+        let Ok(permit) = sem.clone().try_acquire_owned() else {
+            drop(stream); // closes the socket; the client can retry
+            continue;
+        };
+        tokio::spawn(async move {
+            // `permit` is held for the connection's lifetime and released on drop. A client hanging
+            // up mid-request is normal, so swallow the connection error rather than log per hit.
+            let _permit = permit;
+            let _ = serve_conn(stream).await;
+        });
+    }
+}
+
+/// Serve ONE connection: read (and discard) the request head, then reply. Generic over the stream so
+/// it is unit-testable over an in-memory duplex without binding a real socket.
+async fn serve_conn<S>(mut stream: S) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let response = match tokio::time::timeout(REQUEST_TIMEOUT, read_head(&mut stream)).await {
+        Ok(Ok(head)) => match request_is_get(&head) {
+            Some(true) => jpeg_response(&idle_or_placeholder().await),
+            Some(false) => simple_response("405 Method Not Allowed"),
+            None => simple_response("400 Bad Request"),
+        },
+        Ok(Err(e)) => return Err(e), // socket read error — nothing to reply on
+        Err(_) => simple_response("408 Request Timeout"), // slow client — bounded reply, then close
+    };
+    let _ = write_all_timeout(&mut stream, &response).await;
+    let _ = stream.shutdown().await;
+    Ok(())
+}
+
+/// Read the request head — up to the `\r\n\r\n` terminator, or the byte cap, or EOF. We keep only
+/// enough to read the method; the rest (path, headers, body) is intentionally ignored.
+async fn read_head<S>(stream: &mut S) -> std::io::Result<Vec<u8>>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut buf = Vec::with_capacity(512);
+    let mut chunk = [0u8; 512];
+    while find_head_end(&buf).is_none() && buf.len() < MAX_REQUEST_BYTES {
+        // Read no more than the remaining budget so the buffer can NEVER exceed MAX_REQUEST_BYTES —
+        // a hard cap, not "cap ± one chunk" (the loop-guard alone would let the last read overshoot).
+        let want = (MAX_REQUEST_BYTES - buf.len()).min(chunk.len());
+        let n = stream.read(&mut chunk[..want]).await?;
+        if n == 0 {
+            break; // EOF before a full head — parse what we have (likely None ⇒ 400)
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    Ok(buf)
+}
+
+/// Index just past the blank line that ends an HTTP head (`\r\n\r\n`), if present.
+fn find_head_end(buf: &[u8]) -> Option<usize> {
+    buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4)
+}
+
+/// The request method decision from the head: `Some(true)` = GET, `Some(false)` = a valid but
+/// non-GET method, `None` = malformed (no method token). Only the first token (up to the first
+/// space or line end) is examined.
+fn request_is_get(head: &[u8]) -> Option<bool> {
+    let end = head
+        .iter()
+        .position(|&b| b == b' ' || b == b'\r' || b == b'\n')?;
+    if end == 0 {
+        return None; // leading space / blank line — no method
+    }
+    Some(&head[..end] == b"GET")
+}
+
+/// The idle snapshot if a valid persisted JPEG exists, else the baked placeholder. Read per request
+/// (so a Phase-2 capture is picked up without a restart); the blocking `std::fs` read is offloaded
+/// off the single-threaded runtime.
+async fn idle_or_placeholder() -> Vec<u8> {
+    match tokio::task::spawn_blocking(crate::persist::read_idle_jpg).await {
+        Ok(Some(bytes)) if is_jpeg(&bytes) => bytes,
+        _ => PLACEHOLDER.to_vec(),
+    }
+}
+
+/// A structural JPEG check — enough to trust the bytes are a REAL frame without pulling a full JPEG
+/// decoder into a size-constrained embedded binary (the endpoint is not a codec). It WALKS the JPEG
+/// segment structure from the SOI: each marker's 2-byte length is parsed and its payload skipped, so a
+/// Start-Of-Frame / Start-Of-Scan is recognised ONLY at a genuine segment boundary — a marker-like byte
+/// pair buried inside an APPn (or other) payload cannot be mistaken for one. Both the SOF and the SOS
+/// are validated by their DECLARED length and mandatory header fields (SOF `FF C0`..`FF CF`, excluding
+/// the non-frame `FF C4` DHT / `FF C8` JPG / `FF CC` DAC: `length == 8 + 3*Nf` with non-zero precision
+/// / height / width / component count; SOS: `length == 6 + 2*Ns` with `Ns >= 1`), and every segment
+/// must be fully present — so a degenerate or truncated SOF/SOS is rejected, not just a bare marker. A
+/// file is a real image iff a valid SOS is reached (with a valid SOF already seen) AND an EOI (`FF D9`)
+/// follows the scan header — so a file truncated at/after the scan header, with no scan data or
+/// terminator, is rejected too. This rejects a truncated, marker-only, payload-forged, or
+/// field-degenerate file (it falls back to the placeholder) while accepting any genuine JPEG regardless
+/// of trailing padding / metadata / an embedded thumbnail after the EOI.
+fn is_jpeg(b: &[u8]) -> bool {
+    if b.len() < 4 || b[0] != 0xFF || b[1] != 0xD8 {
+        return false; // no SOI
+    }
+    let mut i = 2usize;
+    let mut has_sof = false;
+    while i + 1 < b.len() {
+        if b[i] != 0xFF {
+            return false; // not aligned on a marker → malformed
+        }
+        // Any number of `FF` fill bytes may precede the marker code; skip them to the code byte.
+        let mut j = i;
+        while j < b.len() && b[j] == 0xFF {
+            j += 1;
+        }
+        if j >= b.len() {
+            return false; // trailing `FF` fill with no marker code
+        }
+        let marker = b[j];
+        i = j + 1;
+        match marker {
+            // Standalone markers with NO length payload: SOI, TEM, RST0..RST7 — keep walking.
+            0xD8 | 0x01 | 0xD0..=0xD7 => continue,
+            0xD9 => return false, // EOI before any scan → no usable image
+            // Every other marker carries a big-endian 2-byte length (including the length bytes), and
+            // its whole segment must be present in the buffer.
+            _ => {
+                if i + 1 >= b.len() {
+                    return false; // truncated length field
+                }
+                let seg_len = ((b[i] as usize) << 8) | (b[i + 1] as usize);
+                if seg_len < 2 || i + seg_len > b.len() {
+                    return false; // invalid or truncated segment
+                }
+                let body = &b[i + 2..i + seg_len]; // segment payload (after the 2 length bytes)
+                if marker == 0xDA {
+                    // Start-Of-Scan header: Ns(1) + Ns*(2) + 3 bytes => length == 6 + 2*Ns, Ns >= 1,
+                    // after a valid frame.
+                    let ns = match body.first() {
+                        Some(&n) => n as usize,
+                        None => return false,
+                    };
+                    if !has_sof || ns < 1 || seg_len != 6 + 2 * ns {
+                        return false;
+                    }
+                    // The entropy-coded scan follows the SOS header and ends at an EOI. Require at least
+                    // one real scan-data byte before that EOI, so a data-less scan is rejected and the
+                    // endpoint serves the placeholder.
+                    return scan_has_entropy_then_eoi(&b[i + seg_len..]);
+                }
+                // Start-Of-Frame (SOF0..SOF15, excluding the non-frame DHT C4 / JPG C8 / DAC CC):
+                // precision(1) + height(2) + width(2) + Nf(1) + Nf*(3) => length == 8 + 3*Nf, with a
+                // non-zero precision / height / width / component count.
+                if matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+                    if body.len() < 6 {
+                        return false;
+                    }
+                    let precision = body[0];
+                    let height = (u16::from(body[1]) << 8) | u16::from(body[2]);
+                    let width = (u16::from(body[3]) << 8) | u16::from(body[4]);
+                    let nf = body[5] as usize;
+                    if precision == 0 || height == 0 || width == 0 || nf == 0 || seg_len != 8 + 3 * nf
+                    {
+                        return false;
+                    }
+                    has_sof = true; // a valid Start-Of-Frame segment
+                }
+                i += seg_len; // skip the whole segment to the next marker
+            }
+        }
+    }
+    false // ran out of bytes without reaching a Start-Of-Scan
+}
+
+/// Walk the entropy-coded scan that follows the SOS header (WITHOUT decoding it) and return true iff
+/// at least one byte of real scan data precedes the terminating EOI (`FF D9`). This rejects a
+/// data-less scan — a bare `FF D9`, or an EOI preceded only by marker fill (`FF FF D9`) — which
+/// carries no image. Classification of each position:
+///   * a non-`FF` byte, or a byte-stuffed `FF 00`, is entropy DATA;
+///   * a restart marker `FF D0`..`FF D7` is a scan delimiter, skipped but NOT counted as data;
+///   * a lone leading `FF` is marker fill — advance one and re-examine (so `FF FF D9` is fill+EOI);
+///   * `FF D9` is the EOI — the scan is valid iff data was seen before it;
+///   * any other `FF <marker>` ends the scan (valid iff data was seen).
+///
+/// A trailing lone `FF`, or running out of bytes without an EOI, is a truncated scan → false.
+fn scan_has_entropy_then_eoi(rest: &[u8]) -> bool {
+    let mut i = 0;
+    let mut saw_data = false;
+    while i < rest.len() {
+        if rest[i] != 0xFF {
+            saw_data = true; // a literal entropy byte
+            i += 1;
+            continue;
+        }
+        match rest.get(i + 1).copied() {
+            None => return false,                            // trailing lone FF → truncated
+            Some(0x00) => {
+                saw_data = true; // byte-stuffed literal 0xFF = data
+                i += 2;
+            }
+            Some(0xD9) => return saw_data,                   // EOI → valid iff data preceded it
+            Some(m) if (0xD0..=0xD7).contains(&m) => i += 2, // restart marker (not itself data)
+            Some(0xFF) => i += 1,                            // marker fill — re-examine next byte
+            Some(_) => return saw_data,                      // any other marker ends the scan
+        }
+    }
+    false // no EOI reached
+}
+
+/// A `200 OK` JPEG response. `no-store` keeps HA from pinning a stale thumbnail after a Phase-2
+/// idle-image update; `Connection: close` matches the one-shot request/response shape.
+fn jpeg_response(body: &[u8]) -> Vec<u8> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: image/jpeg\r\n\
+         Content-Length: {}\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    let mut out = Vec::with_capacity(head.len() + body.len());
+    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+/// A bodyless status response (error paths). Always `Connection: close`.
+fn simple_response(status: &str) -> Vec<u8> {
+    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
+}
+
+async fn write_all_timeout<S>(stream: &mut S, bytes: &[u8]) -> std::io::Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    match tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(bytes)).await {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "still: response write timed out",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn baked_placeholder_is_a_valid_jpeg() {
+        // The compiled-in fallback must itself pass the JPEG structural check, so the endpoint never
+        // serves a body HA would reject.
+        assert!(is_jpeg(PLACEHOLDER));
+        assert!(PLACEHOLDER.len() > 1000); // a real image, not an empty stub
+    }
+
+    #[test]
+    fn is_jpeg_walks_segments_and_validates_frame_and_scan_headers() {
+        // A minimally VALID baseline JPEG (1 component, 1x1):
+        //   SOI; SOF0 length 11 = 8 + 3*1: precision 8, height 1, width 1, Nf 1, one component spec;
+        //   SOS length 8 = 6 + 2*1: Ns 1, one component selector, Ss/Se/AhAl; EOI.
+        let valid: &[u8] = &[
+            0xFF, 0xD8, // SOI
+            0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, // SOF0
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, // SOS
+            0x00, // one byte of entropy-coded scan data
+            0xFF, 0xD9, // EOI
+        ];
+        assert!(is_jpeg(valid));
+        // Trailing padding / metadata after the scan is irrelevant — we accept at the SOS boundary.
+        let mut with_trailer = valid.to_vec();
+        with_trailer.extend_from_slice(b"   trailer");
+        assert!(is_jpeg(&with_trailer));
+        // Marker-only stub (SOI + EOI, no frame/scan) → rejected (serve the placeholder).
+        assert!(!is_jpeg(&[0xFF, 0xD8, 0xFF, 0xD9]));
+        // A DEGENERATE SOF whose declared length (2) has no header fields, followed by a bare SOS, must
+        // be rejected — a marker alone is not a frame/scan.
+        assert!(!is_jpeg(&[0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x02, 0xFF, 0xDA]));
+        // A valid SOF followed by an SOS with a bogus length (2, no scan header) → rejected.
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xDA, 0x00, 0x02,
+        ]));
+        // Valid SOF but no SOS at all (scan missing) → rejected.
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xD9,
+        ]));
+        // Valid SOF + valid SOS header but truncated right after it (no scan data, no EOI) → rejected:
+        // a real scan is terminated by an EOI, so the missing terminator means an unusable image.
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+        ]));
+        // Valid SOF + valid SOS header + an IMMEDIATE EOI with ZERO scan-data bytes → rejected: the
+        // scan carries no image data (this is `valid` with the 0x00 scan byte removed).
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+            0xFF, 0xD9, // EOI immediately after the SOS header — no scan byte
+        ]));
+        // Valid SOF + valid SOS header + `FF FF D9`: the first FF is EOI marker fill, not scan data,
+        // so there are still zero entropy bytes → rejected (data-less scan).
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+            0xFF, 0xFF, 0xD9, // marker-fill FF then EOI — no scan data
+        ]));
+        // Marker-LIKE bytes buried in an APP0 PAYLOAD must NOT count: here `FF C0 FF DA` are the 4
+        // payload bytes of the APP0 segment (length 6), not real SOF/SOS segments → rejected.
+        assert!(!is_jpeg(&[
+            0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x06, 0xFF, 0xC0, 0xFF, 0xDA, 0xFF, 0xD9,
+        ]));
+        assert!(!is_jpeg(b"")); // empty
+        assert!(!is_jpeg(b"\xff\xd8\xff")); // too short, no structure
+        assert!(!is_jpeg(b"not a jpeg at all")); // wrong magic
+        assert!(!is_jpeg(b"\x89PNG\r\n\x1a\n")); // a PNG
+    }
+
+    #[test]
+    fn request_is_get_parses_only_the_method_token() {
+        assert_eq!(request_is_get(b"GET /idle.jpg HTTP/1.1\r\n"), Some(true));
+        assert_eq!(request_is_get(b"GET / HTTP/1.1\r\n\r\n"), Some(true));
+        assert_eq!(request_is_get(b"POST / HTTP/1.1\r\n"), Some(false));
+        assert_eq!(request_is_get(b"HEAD / HTTP/1.1\r\n"), Some(false));
+        // A path is never inspected: a would-be traversal in the URL is irrelevant (still GET).
+        assert_eq!(request_is_get(b"GET /../../etc/passwd HTTP/1.1\r\n"), Some(true));
+        // Malformed: no method token.
+        assert_eq!(request_is_get(b""), None);
+        assert_eq!(request_is_get(b" \r\n"), None);
+        assert_eq!(request_is_get(b"\r\n\r\n"), None);
+    }
+
+    #[test]
+    fn find_head_end_locates_the_blank_line() {
+        assert_eq!(find_head_end(b"GET / HTTP/1.1\r\n\r\n"), Some(18));
+        assert_eq!(find_head_end(b"GET / HTTP/1.1\r\nHost: x\r\n\r\nBODY"), Some(27));
+        assert_eq!(find_head_end(b"GET / HTTP/1.1\r\n"), None); // head not finished
+    }
+
+    #[test]
+    fn jpeg_response_has_image_content_type_and_length() {
+        let body = b"\xff\xd8\xff\xd9";
+        let resp = jpeg_response(body);
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(text.contains("Content-Type: image/jpeg\r\n"));
+        assert!(text.contains("Content-Length: 4\r\n"));
+        assert!(text.contains("Connection: close\r\n"));
+        // Body is appended verbatim after the blank line.
+        assert!(resp.ends_with(body));
+    }
+
+    // --- End-to-end over an in-memory duplex (no socket bound) --------------------------------
+
+    async fn round_trip(request: &[u8]) -> Vec<u8> {
+        use tokio::io::AsyncWriteExt as _;
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let srv = tokio::spawn(async move { serve_conn(server).await });
+        client.write_all(request).await.unwrap();
+        // Read the whole response until the server closes its half.
+        let mut resp = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            let n = client.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            resp.extend_from_slice(&chunk[..n]);
+        }
+        srv.await.unwrap().unwrap();
+        resp
+    }
+
+    #[tokio::test]
+    async fn get_returns_a_valid_jpeg_body() {
+        // No persisted idle.jpg in the test env ⇒ the baked placeholder is served. Assert the shape
+        // and that the body is a structurally valid JPEG (true whether idle.jpg exists or not).
+        let resp = round_trip(b"GET /idle.jpg HTTP/1.1\r\nHost: unit\r\n\r\n").await;
+        let sep = resp.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let (head, body) = resp.split_at(sep);
+        let head = String::from_utf8_lossy(head);
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "head: {head}");
+        assert!(head.contains("Content-Type: image/jpeg\r\n"));
+        assert!(head.contains("Connection: close\r\n"));
+        assert!(is_jpeg(body), "served body is not a valid JPEG");
+        // Content-Length must match the served body exactly.
+        assert!(head.contains(&format!("Content-Length: {}\r\n", body.len())));
+    }
+
+    #[tokio::test]
+    async fn non_get_method_is_405() {
+        let resp = round_trip(b"POST /idle.jpg HTTP/1.1\r\n\r\n").await;
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.starts_with("HTTP/1.1 405 Method Not Allowed\r\n"), "resp: {text}");
+        assert!(text.contains("Connection: close\r\n"));
+    }
+
+    #[tokio::test]
+    async fn read_head_enforces_the_byte_cap_exactly() {
+        // A flood with no head terminator must stop at EXACTLY MAX_REQUEST_BYTES — the last read can't
+        // overshoot the cap by a chunk (the request-head DoS bound must be hard, not "cap ± a chunk").
+        use tokio::io::AsyncWriteExt as _;
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+        let flood = vec![b'A'; MAX_REQUEST_BYTES + 1000];
+        tokio::spawn(async move {
+            let _ = client.write_all(&flood).await;
+        });
+        let head = read_head(&mut server).await.unwrap();
+        assert_eq!(head.len(), MAX_REQUEST_BYTES);
+    }
+
+    #[tokio::test]
+    async fn malformed_request_is_400() {
+        let resp = round_trip(b"\r\n\r\n").await;
+        let text = String::from_utf8_lossy(&resp);
+        assert!(text.starts_with("HTTP/1.1 400 Bad Request\r\n"), "resp: {text}");
+    }
+}

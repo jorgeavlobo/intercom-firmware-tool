@@ -135,7 +135,8 @@ interface bring-up, then sets `-P INPUT DROP`. Without `-w`, any of those calls
 **fails immediately** — and the factory script never checks the exit code — if
 the xtables lock is held by another process at that instant, so the rule is
 **silently dropped** for the whole boot. The on-device camera adds a **second**
-iptables writer (`go2rtcd`'s `GO2RTC :8554` rule), so a factory `-A` that
+iptables writer (`go2rtcd`'s `GO2RTC` chain — its `:8554` RTSP rule plus the
+`:8556` still-image rule, issue #168), so a factory `-A` that
 overlaps our lock hold could go missing, taking a factory rule with it — observed
 on real hardware as an **SSH `:22` lockout** after a flash and an **FTP-over-USB
 reflash `:21` lockout**.

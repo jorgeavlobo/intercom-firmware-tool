@@ -200,24 +200,29 @@ public class Go2RtcdScriptTests
             ReadScript().Replace("\r\n", "\n"), @"\s*\\\s*\n\s*", " ");
 
     [Fact]
-    public void Opens_only_the_rtsp_media_port_least_privilege_lan_restricted()
+    public void Opens_the_rtsp_and_still_ports_least_privilege_lan_restricted()
     {
-        // Phase 1c-3: open :8554 on the LAN interface, source-restricted to the interface's own subnet.
-        // The control API (:1984) must NOT be opened, and no other port is touched.
+        // Phase 1c-3 + issue #168: open :8554 (go2rtc RTSP) AND :8556 (btmqttd still-image endpoint) on the
+        // LAN interface, each source-restricted to the interface's own subnet. The control API (:1984) must
+        // NOT be opened, and no other port is touched.
         string s = ReadScript();
         string joined = JoinedScript();
         string[] code = CodeLines(s);
         Assert.Contains("CAM_PORT=8554", s);
+        Assert.Contains("CAM_STILL_PORT=8556", s);
         Assert.Contains("CAM_IFACE=wlan0", s);
-        // The single ACCEPT lives in OUR chain, matches tcp/CAM_PORT on the interface, SOURCE-RESTRICTED
-        // to the derived LAN subnet.
+        // The still port must match the C# installer's on-device guide constant (which HA is pointed at).
+        Assert.Equal(8556, Go2RtcConfig.OnDeviceStillPort);
+        // One ACCEPT is added PER port, iterating the explicit port list — each ACCEPT lives in OUR chain,
+        // matches tcp on the interface, SOURCE-RESTRICTED to the derived LAN subnet.
+        Assert.Contains(code, l => l.Contains("for p in \"$CAM_PORT\" \"$CAM_STILL_PORT\""));
         Assert.Contains(
-            "iptables -w 5 -A \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
+            "iptables -w 5 -A \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$p\" -s \"$lan\" -j ACCEPT",
             joined);
-        // LAN source derived at runtime; the ACCEPT is added ONLY when an address exists — with no address
-        // the chain is left empty (port closed), never opened interface-wide.
+        // LAN source derived at runtime; the ACCEPTs are added ONLY when an address exists — with no address
+        // the chain is left empty (ports closed), never opened interface-wide.
         Assert.Contains(code, l => l.Contains("ip -4 addr show \"$CAM_IFACE\""));
-        Assert.Contains(code, l => l.Contains("[ -n \"$lan\" ] && iptables -w 5 -A \"$FW_CHAIN\""));
+        Assert.Contains(code, l => l.Contains("if [ -n \"$lan\" ]; then"));
         // The control API port is loopback-only — no executable line references 1984 (a comment may
         // mention it, so assert on code lines, not the whole script).
         Assert.DoesNotContain(code, l => l.Contains("1984"));
@@ -302,9 +307,11 @@ public class Go2RtcdScriptTests
         // reading "open" with our ACCEPT ahead of a factory filter.
         Assert.Contains("[ \"$n\" -eq 1 ]", pred);
         Assert.Contains("[ \"$last\" = \"-A INPUT -j $FW_CHAIN\" ]", pred);
-        // And OUR chain must hold EXACTLY ONE rule (the ACCEPT) — an extra/stale rule could expose another
-        // port or source, so a membership-only check isn't enough; it must count the chain rules.
-        Assert.Contains("[ \"$cn\" -eq 1 ]", pred);
+        // And OUR chain must hold EXACTLY the desired rules (one ACCEPT per port, counted from the port
+        // list) — an extra/stale rule could expose another port or source, so a membership-only check isn't
+        // enough; it must count the chain rules against the wanted count.
+        Assert.Contains("[ \"$cn\" -eq \"$want\" ]", pred);
+        Assert.Contains("for p in \"$CAM_PORT\" \"$CAM_STILL_PORT\"", pred);
     }
 
     [Fact]
@@ -444,7 +451,7 @@ public class Go2RtcdScriptTests
         int flush = openBody.IndexOf("iptables -w 5 -F \"$FW_CHAIN\"", System.StringComparison.Ordinal);
         int append = openBody.IndexOf("iptables -w 5 -A \"$FW_CHAIN\"", System.StringComparison.Ordinal);
         Assert.True(flush >= 0 && append > flush, "the chain must be flushed before it is repopulated");
-        Assert.Contains("[ -n \"$lan\" ] && iptables -w 5 -A \"$FW_CHAIN\"", openBody);
+        Assert.Contains("if [ -n \"$lan\" ]; then", openBody);
         // The repopulation is GATED on a successful flush — a contended `-F` aborts the pass instead of
         // stacking a new ACCEPT on the stale one; mutating calls use `-w 5` to wait for the xtables lock.
         Assert.Contains("iptables -w 5 -F \"$FW_CHAIN\" 2>/dev/null || return 0", openBody);
@@ -495,15 +502,17 @@ public class Go2RtcdScriptTests
         Assert.Contains("fw_list=$(iptables -S \"$FW_CHAIN\" 2>/dev/null) || return 0", openBody);
         Assert.Contains("grep -c -- \"^-A \"", openBody);
         Assert.Contains(
-            "iptables -C \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$CAM_PORT\" -s \"$lan\" -j ACCEPT",
+            "iptables -C \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$p\" -s \"$lan\" -j ACCEPT",
             joined);
-        // The `-C` STATUS is captured (`if cerr=$(...)`) so ONLY the documented "rule not found"
+        // The `-C` STATUS is captured (`cerr=$(...)`) per port so ONLY the documented "rule not found"
         // diagnostic reconciles; EVERY other non-zero status (lock contention, permission/resource/backend
         // error) BAILS rather than falling through to the mutating `-F`. The fast path exits
-        // (fw_jump + return) for BOTH the already-correct (n==1 + -C match) and already-empty (n==0) cases.
-        Assert.Contains("if cerr=$(iptables -C \"$FW_CHAIN\"", joined);
-        Assert.Contains("*\"Bad rule\"* | *\"matching rule exist\"*) : ;;", openBody);  // mismatch → reconcile
+        // (fw_jump + return) for BOTH the already-correct (n==want + every -C match) and already-empty (n==0)
+        // cases.
+        Assert.Contains("cerr=$(iptables -C \"$FW_CHAIN\"", joined);
+        Assert.Contains("*\"Bad rule\"* | *\"matching rule exist\"*) mismatch=1; break ;;", openBody);  // → reconcile
         Assert.Contains("*) return 0 ;;", openBody);                                    // any other error → bail
+        Assert.Contains("[ \"$mismatch\" -eq 0 ] && { fw_jump; return 0; }", openBody); // all present → zero-write
         Assert.Contains("[ \"$n\" -eq 0 ] && { fw_jump; return 0; }", openBody);
         // ZERO-WRITE PROOF: the first fast-path `{ fw_jump; return 0; }` must appear BEFORE the flush, so a
         // matching chain never reaches any `-F`/`-A` write.
@@ -515,9 +524,10 @@ public class Go2RtcdScriptTests
         Assert.True(listing >= 0 && listing < fastReturn && listing < flush,
             "the chain listing must be read before the fast-path decision and the flush");
         // The full flush+repopulate path is still there for when the state DIFFERS (missing/extra rule,
-        // changed subnet, freshly created chain), gated on a successful flush.
+        // changed subnet, freshly created chain), gated on a successful flush, and adds one ACCEPT per port.
         Assert.Contains("iptables -w 5 -F \"$FW_CHAIN\" 2>/dev/null || return 0", openBody);
-        Assert.Contains("[ -n \"$lan\" ] && iptables -w 5 -A \"$FW_CHAIN\"", openBody);
+        Assert.Contains("if [ -n \"$lan\" ]; then", openBody);
+        Assert.Contains("iptables -w 5 -A \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$p\"", JoinedScript());
     }
 
     [Fact]
