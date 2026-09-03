@@ -514,6 +514,15 @@ async fn respawn_go2rtc_producer() {
             eprintln!(
                 "btmqttd: sprop: signalled the go2rtc exec producer (pid {pid}) to re-read the patched SDP"
             );
+        } else {
+            // Non-fatal (the persisted value still fixes the next open/boot), but log with the errno so a
+            // "no self-heal" report can be told apart from "no producer found": ESRCH means the producer
+            // exited between the /proc scan and here (already gone — its respawn will read the patch),
+            // EPERM a permission problem. Read last_os_error() immediately, before any other syscall.
+            eprintln!(
+                "btmqttd: sprop: could not signal go2rtc exec producer (pid {pid}): {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
 }
