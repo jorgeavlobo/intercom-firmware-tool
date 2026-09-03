@@ -456,12 +456,23 @@ pub async fn capture_ring(cfg: &Config) -> bool {
         return false;
     }
     let stored = tokio::task::spawn_blocking(move || store_ring_jpg(&bytes)).await.unwrap_or(false);
-    if stored {
-        eprintln!("btmqttd: capture: ring snapshot captured");
-    } else {
+    if !stored {
         eprintln!("btmqttd: capture: ring snapshot captured but could not be written");
+        return false;
     }
-    stored
+    // RE-CHECK after the store's await point: `spawn_blocking` yields, so a newer ring could have stamped
+    // while the blocking write ran. If so, DON'T report success — returning `false` withholds the ready
+    // signal for this now-superseded generation (the newer ring writes the current image and notifies).
+    // The write itself is harmless: the newer ring's own atomic rename overwrites it. Because the caller
+    // publishes the ready signal synchronously off this `true` (no `.await` between the return and the
+    // publish, single-threaded runtime), a newer ring cannot slip in AFTER this check but BEFORE the
+    // publish — so a published ready signal always reflects the latest generation at publish time.
+    if RING_GEN.load(Ordering::Relaxed) != my_gen {
+        eprintln!("btmqttd: capture: ring snapshot superseded after write; ready signal withheld");
+        return false;
+    }
+    eprintln!("btmqttd: capture: ring snapshot captured");
+    true
 }
 
 /// Write the transient ring snapshot to tmpfs atomically (temp + rename), so a concurrent
