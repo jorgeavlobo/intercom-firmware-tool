@@ -277,8 +277,10 @@ fn capture_argv(rtsp_url: &str, out_path: &str) -> Vec<String> {
     .collect()
 }
 
-/// Grab one JPEG frame, returning the bytes. Assumes the caller already holds the [`CAPTURING`] guard
-/// and (for an idle/button grab) has poked the panel up. Spawns the vendored ffmpeg against go2rtc's
+/// Grab one JPEG frame, returning the bytes. Assumes the caller already holds its exclusivity guard
+/// (the [`CAPTURING_IDLE`] try-lock for an idle/button grab, or the single-runner slot —
+/// [`RING_RUNNER_ACTIVE`] — for a ring grab) and (for an idle/button grab) has poked the panel up.
+/// Spawns the vendored ffmpeg against go2rtc's
 /// loopback RTSP, bounded by [`CAPTURE_TIMEOUT`] (the child is killed on overrun), then reads back the
 /// scratch file and removes it. `Err` on any failure (declined creds, spawn/exit/timeout, empty or
 /// oversized output) — the caller logs and leaves the target unchanged.
