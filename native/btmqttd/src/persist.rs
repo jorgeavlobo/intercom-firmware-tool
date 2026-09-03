@@ -82,6 +82,13 @@ const CAMERA_SPROP_FILE: &str = "camera-sprop";
 /// so the thumbnail stays stable), NOT keyed: the newest capture is always the wanted one.
 const IDLE_JPG_FILE: &str = "idle.jpg";
 
+/// A strictly-monotonic per-PROCESS counter (issue #169), one plain line, on the reboot- and
+/// reflash-persistent partition. Each daemon start (restart OR reboot) increments it and derives a
+/// DISJOINT ring-event-id range from it, so a ring id is never reused across process lifetimes — even a
+/// same-second reboot or a backward wall-clock step can't repeat one, closing the immutable
+/// `/ring-<id>.jpg` guarantee that a tmpfs-only or wall-clock seed left open.
+const RING_BOOT_FILE: &str = "ring-boot";
+
 /// The last-known "latest available" bridge version (issue #114), one plain line. Persisted on
 /// the same reboot-persistent partition so a daemon restart — or a firmware UPGRADE, where the
 /// broker still holds the OLD binary's retained payload — re-asserts the correct
@@ -321,6 +328,37 @@ fn read_idle_jpg_in(dir: &Path) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     file.take(MAX_IDLE_JPG_BYTES + 1).read_to_end(&mut buf).ok()?;
     (!buf.is_empty() && buf.len() as u64 <= MAX_IDLE_JPG_BYTES).then_some(buf)
+}
+
+fn ring_boot_file_in(dir: &Path) -> PathBuf {
+    dir.join(RING_BOOT_FILE)
+}
+
+/// Read the persisted [`RING_BOOT_FILE`] counter, increment it, durably write it back, and return the NEW
+/// value — the per-process boot number the ring-id namespace is derived from (issue #169). Called ONCE at
+/// startup (before any ring). The value strictly increases across every daemon start (restart AND reboot)
+/// because it lives on the reboot-/reflash-persistent partition. A missing/corrupt file reads as 0 (first
+/// boot → 1). Best-effort DURABILITY: if the write fails (e.g. a transient flash error) it still returns
+/// `next` so THIS process stays monotonic above the last persisted value; only the NEXT process could then
+/// reuse `next` — bounded, rare, and strictly better than the old tmpfs/wall-clock seeds. Blocking `std::fs`.
+pub fn bump_ring_boot() -> u64 {
+    bump_ring_boot_in(&state_dir())
+}
+
+fn bump_ring_boot_in(dir: &Path) -> u64 {
+    let path = ring_boot_file_in(dir);
+    let current = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let next = current.saturating_add(1);
+    if !atomic_write_in(dir, &path, format!("{next}\n").as_bytes()) {
+        eprintln!(
+            "btmqttd: persist: could not persist the ring boot counter; ring-id uniqueness across the \
+             NEXT restart is best-effort until it persists again"
+        );
+    }
+    next
 }
 
 fn read_update_latest_in(dir: &Path) -> Option<String> {
@@ -878,6 +916,35 @@ mod tests {
         // An allowed commit (gate returns Some) replaces the file and returns true.
         assert!(atomic_write_gated_in(&dir, &file, visitor, || Some(())));
         assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&visitor[..]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bump_ring_boot_in_is_durably_monotonic_across_process_starts() {
+        // The durable per-process ring boot counter (#169): each "process start" (call) returns a strictly
+        // higher value than the last, and the increment SURVIVES via the on-disk file — so two starts within
+        // the same wall-clock second still get different boot numbers (hence disjoint ring-id ranges), which
+        // a same-second reboot with a wall-clock seed could not guarantee. Directory-injected (no env
+        // mutation → parallel-safe).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(9700);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-ringboot-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Fresh state: first start is 1, and each subsequent start is exactly one higher, read back from disk.
+        assert_eq!(bump_ring_boot_in(&dir), 1, "first boot");
+        assert_eq!(bump_ring_boot_in(&dir), 2, "second start, even within the same second, differs");
+        assert_eq!(bump_ring_boot_in(&dir), 3);
+        // The value is DURABLE: a brand-new reader (a fresh process) sees the last persisted counter and
+        // continues strictly above it — never repeating a boot number (and thus never a ring-id range).
+        assert_eq!(
+            std::fs::read_to_string(ring_boot_file_in(&dir)).unwrap().trim(),
+            "3",
+            "the latest counter is persisted"
+        );
+        assert_eq!(bump_ring_boot_in(&dir), 4, "a later start resumes above the persisted value");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

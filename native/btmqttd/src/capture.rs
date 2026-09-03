@@ -513,22 +513,23 @@ pub fn note_pending_ring(broker_epoch: u64) -> u64 {
     id
 }
 
+/// Per-process stride of the ring-event-id namespace: each daemon start owns the half-open range
+/// `[boot * STRIDE, (boot+1) * STRIDE)`. A billion ids per process is unreachable (at one ring/second a
+/// process would run ~31 years), so ids from different process lifetimes never overlap.
+const RING_ID_BOOT_STRIDE: u64 = 1_000_000_000;
+
 /// Seed [`RING_EVENT_SEQ`] so a fresh process never reuses a ring id that a still-undelivered
 /// notification's `/ring-<id>.jpg` URL points at (reuse would hand the old event the NEW visitor's
-/// picture, breaking the immutable-URL guarantee). Two sources, whichever is higher:
-///
-/// 1. The max `ring-<id>.jpg` surviving on tmpfs — covers a daemon re-exec / watchdog respawn WITHIN the
-///    retention window (tmpfs outlives a restart).
-/// 2. The wall clock (seconds since epoch) — covers a full REBOOT, which CLEARS tmpfs (so source 1 sees
-///    nothing and would restart at 1). Real time always advances across a reboot on a clock-bearing
-///    device, so seeding from it keeps ids monotonic across reboots too. Guarded by a plausibility floor:
-///    a pre-NTP/unsynced clock (below 2020) is ignored, falling back to the tmpfs scan (pre-existing
-///    behaviour) — the residual reuse window then needs a reboot AND an unsynced clock AND a stale fetch
-///    within the 120 s retention window.
-///
-/// Call ONCE at startup, before any ring is handled. Best-effort. Blocking `std::fs`; a one-time tiny scan.
+/// picture, breaking the immutable-URL guarantee). Anchored to a DURABLE per-process counter
+/// ([`persist::bump_ring_boot`], on the reboot-/reflash-persistent partition): each daemon start takes a
+/// strictly-higher boot number and thus a DISJOINT id range ([`RING_ID_BOOT_STRIDE`] apart), a hard
+/// uniqueness guarantee across restarts AND reboots — closing the gap a tmpfs-only or wall-clock seed left
+/// (a same-second reboot or a backward clock step could repeat an id). The max surviving `ring-<id>.jpg`
+/// on tmpfs is kept as a belt-and-braces FLOOR, so even if the durable counter is ever lost/reset
+/// (corruption) while a prior process's files linger, ids still stay above them. Call ONCE at startup,
+/// before any ring is handled. Blocking `std::fs`.
 pub fn seed_ring_event_seq() {
-    let mut seed = 0u64;
+    let mut seed = crate::persist::bump_ring_boot().saturating_mul(RING_ID_BOOT_STRIDE);
     if let Ok(entries) = std::fs::read_dir(run_dir()) {
         for entry in entries.flatten() {
             let name = entry.file_name();
@@ -540,15 +541,6 @@ pub fn seed_ring_event_seq() {
             {
                 seed = seed.max(id);
             }
-        }
-    }
-    // Seconds since epoch, only when the clock is plausibly set (>= 2020-01-01Z); an unsynced boot clock
-    // is left to the tmpfs scan above rather than seeding a small, reboot-colliding value.
-    const CLOCK_PLAUSIBLE_FLOOR_SECS: u64 = 1_577_836_800;
-    if let Ok(since_epoch) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        let secs = since_epoch.as_secs();
-        if secs >= CLOCK_PLAUSIBLE_FLOOR_SECS {
-            seed = seed.max(secs);
         }
     }
     RING_EVENT_SEQ.store(seed, Ordering::Relaxed);
