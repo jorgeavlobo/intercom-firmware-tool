@@ -166,10 +166,15 @@ async fn idle_or_placeholder() -> Vec<u8> {
     }
 }
 
-/// A cheap structural JPEG check: SOI (`FF D8 FF`) … EOI (`FF D9`). Enough to reject a truncated or
-/// non-JPEG file so HA never renders garbage; we do NOT fully decode (the endpoint is not a codec).
+/// A cheap structural JPEG check: SOI (`FF D8 FF`) at the start and an EOI (`FF D9`) somewhere after
+/// it. Enough to reject a truncated or non-JPEG file so HA never renders garbage; we do NOT fully
+/// decode (the endpoint is not a codec). Crucially the EOI need NOT be the LAST two bytes — some
+/// encoders append trailing padding, a metadata block, or an embedded thumbnail after EOI, and such a
+/// file is perfectly viewable — so we SEARCH for the marker instead of requiring it at the very end.
 fn is_jpeg(b: &[u8]) -> bool {
-    b.len() >= 4 && b.starts_with(&[0xFF, 0xD8, 0xFF]) && b.ends_with(&[0xFF, 0xD9])
+    b.len() >= 4
+        && b.starts_with(&[0xFF, 0xD8, 0xFF])
+        && b[2..].windows(2).any(|w| w == [0xFF, 0xD9])
 }
 
 /// A `200 OK` JPEG response. `no-store` keeps HA from pinning a stale thumbnail after a Phase-2
@@ -223,8 +228,12 @@ mod tests {
     fn is_jpeg_accepts_soi_eoi_and_rejects_others() {
         assert!(is_jpeg(&[0xFF, 0xD8, 0xFF, 0xD9]));
         assert!(is_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIF\xff\xd9"));
+        // Trailing padding / metadata after EOI is fine — the EOI need not be the last two bytes
+        // (Copilot review on PR #170: some encoders append bytes after EOI, and the file is still valid).
+        assert!(is_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIF\xff\xd9\x00\x00   trailer"));
         assert!(!is_jpeg(b"")); // empty
         assert!(!is_jpeg(b"\xff\xd8\xff")); // no EOI, too short
+        assert!(!is_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIFdata-no-eoi")); // SOI but truncated, no EOI marker
         assert!(!is_jpeg(b"not a jpeg at all")); // wrong magic
         assert!(!is_jpeg(b"\x89PNG\r\n\x1a\n")); // a PNG
     }
