@@ -1010,6 +1010,14 @@ async fn run() -> Result<bool, String> {
         }
     }
 
+    // Mark the broker as no-longer-deliverable the instant the event loop exits — BEFORE the task-stops
+    // and the final retained `offline` below. Momentary publishers gate on this (`momentary_deliverable`,
+    // issue #71), so a DETACHED ring-snapshot capture (issue #169) that finishes during the shutdown
+    // awaits will not enqueue its `ring_snapshot` publish after `offline` and make Home Assistant show a
+    // door notification from a bridge that has already announced itself offline. Set well before the
+    // offline sequence, so an in-flight capture's pre-publish check sees it.
+    broker_online.store(false, std::sync::atomic::Ordering::Relaxed);
+
     // FREEZE the command worker's intake the instant the event loop exits — BEFORE any awaited task-stop
     // below. Each `stop(..).await` yields to the scheduler, and without this the worker could pull and
     // dispatch a still-BUFFERED command mid-shutdown during one of those yields. Setting
