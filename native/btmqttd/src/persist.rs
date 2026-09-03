@@ -293,13 +293,16 @@ pub fn read_idle_jpg() -> Option<Vec<u8>> {
 /// the wanted one. The caller has already validated the bytes are a real JPEG.
 ///
 /// `commit_ok` is a COMMIT GATE evaluated at the LAST moment — after the temp file is written, in the
-/// same blocking step, immediately before the atomic rename that makes it the new `idle.jpg`. If it
-/// returns `false` the temp is discarded and the existing `idle.jpg` is left UNTOUCHED. `capture_idle`
-/// uses this to re-check ring-invalidation right at the commit point, so a ring detected DURING the
-/// (blocking) write can't get a visitor frame persisted as the empty-doorway thumbnail. Returns `true`
-/// only when the rename committed. Blocking; call via `spawn_blocking`.
+/// same blocking step, immediately before the atomic rename that makes it the new `idle.jpg`. `None`
+/// discards the temp and leaves the existing `idle.jpg` UNTOUCHED; `Some(guard)` proceeds and the guard is
+/// held ACROSS the rename (see [`atomic_write_gated_in`]). `capture_idle` returns a shared mutex guard
+/// there and takes the same mutex in `note_ring()`, so the final ring check and the rename are one
+/// critical section against ring detection on the runtime thread — a ring detected DURING the (blocking)
+/// write can neither slip between the check and the rename nor get a visitor frame persisted as the
+/// empty-doorway thumbnail. Returns `true` only when the rename committed. Blocking; call via
+/// `spawn_blocking`.
 #[must_use]
-pub fn store_idle_jpg(bytes: &[u8], commit_ok: impl FnOnce() -> bool) -> bool {
+pub fn store_idle_jpg<G>(bytes: &[u8], commit_ok: impl FnOnce() -> Option<G>) -> bool {
     let dir = state_dir();
     atomic_write_gated_in(&dir, &idle_jpg_file_in(&dir), bytes, commit_ok)
 }
@@ -362,18 +365,24 @@ fn read_state_in(dir: &Path, host: &str) -> (bool, Option<(Ipv4Addr, Ipv4Addr)>)
 /// caller doesn't advance its change-gate and retries later, rather than claiming a
 /// durability it didn't get. Kept in ONE place so the two records can't drift.
 fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
-    atomic_write_gated_in(dir, path, body, || true)
+    atomic_write_gated_in(dir, path, body, || Some(()))
 }
 
-/// As [`atomic_write_in`], but `commit_ok` is evaluated after the temp file is written and immediately
-/// before the rename (the atomic commit): if it returns `false`, the temp is removed and `path` is left
-/// untouched (returns `false`). The gate runs in this same blocking call — there is no async yield
-/// between it and the rename — so a caller can make the "publish or discard" decision at the last moment.
-fn atomic_write_gated_in(
+/// As [`atomic_write_in`], but `commit_ok` is a COMMIT GATE evaluated after the temp file is written and
+/// immediately before the rename (the atomic commit): `None` discards the temp and leaves `path` untouched
+/// (returns `false`); `Some(guard)` proceeds with the rename and — crucially — the returned `guard` is
+/// HELD across the rename, then dropped the instant the swap is done (before the durability fsync). The
+/// gate therefore does more than run without an async yield: a caller can return a lock guard so the
+/// check-then-rename is one critical section against ANOTHER OS THREAD (the gate runs on the blocking
+/// pool; a concurrent mutator runs on the runtime thread), not merely adjacent statements. `capture_idle`
+/// uses this to serialize its final ring check + rename with `note_ring()` under a shared mutex, so a ring
+/// detected on the runtime thread can land strictly before the check (→ vetoed) or strictly after the
+/// rename (→ the visitor frame was still the empty doorway at commit time), never invisibly between them.
+fn atomic_write_gated_in<G>(
     dir: &Path,
     path: &Path,
     body: &[u8],
-    commit_ok: impl FnOnce() -> bool,
+    commit_ok: impl FnOnce() -> Option<G>,
 ) -> bool {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("btmqttd: persist: cannot create {}: {e}", dir.display());
@@ -385,13 +394,22 @@ fn atomic_write_gated_in(
     };
     match crate::receiver::create_unique_temp(path_str, body) {
         Ok(tmp) => {
-            if !commit_ok() {
-                // Vetoed at the commit point (e.g. a ring was detected during the write) — discard the
-                // temp and leave the existing file in place.
-                let _ = std::fs::remove_file(&tmp);
-                return false;
-            }
-            match std::fs::rename(&tmp, path_str) {
+            let commit_guard = match commit_ok() {
+                Some(g) => g,
+                None => {
+                    // Vetoed at the commit point (e.g. a ring was detected during the write) — discard the
+                    // temp and leave the existing file in place.
+                    let _ = std::fs::remove_file(&tmp);
+                    return false;
+                }
+            };
+            // Perform the atomic swap while still holding `commit_guard`, then release it BEFORE the dir
+            // fsync: once the rename has run the new file IS `path`, so the guarded critical section is
+            // exactly the check + rename (the fsync only makes the already-committed swap durable, and need
+            // not stall a mutator waiting on the same lock).
+            let renamed = std::fs::rename(&tmp, path_str);
+            drop(commit_guard);
+            match renamed {
                 Ok(()) => match std::fs::File::open(dir).and_then(|dirf| dirf.sync_all()) {
                     Ok(()) => true,
                     Err(e) => {
@@ -842,9 +860,9 @@ mod tests {
         assert!(atomic_write_in(&dir, &file, doorway));
         assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&doorway[..]));
 
-        // A vetoed commit (gate returns false) must NOT replace the prior file and must return false.
+        // A vetoed commit (gate returns None) must NOT replace the prior file and must return false.
         let visitor = b"\xff\xd8\xff\xe0 visitor \xff\xd9";
-        assert!(!atomic_write_gated_in(&dir, &file, visitor, || false));
+        assert!(!atomic_write_gated_in(&dir, &file, visitor, || Option::<()>::None));
         assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&doorway[..]), "prior file must be untouched");
 
         // The vetoed write must not leave a temp behind (only the committed idle.jpg remains).
@@ -855,8 +873,45 @@ mod tests {
             .collect();
         assert_eq!(leftovers, vec![file.file_name().unwrap().to_owned()], "no temp file should linger");
 
-        // An allowed commit (gate returns true) replaces the file and returns true.
-        assert!(atomic_write_gated_in(&dir, &file, visitor, || true));
+        // An allowed commit (gate returns Some) replaces the file and returns true.
+        assert!(atomic_write_gated_in(&dir, &file, visitor, || Some(())));
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&visitor[..]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_gated_in_holds_the_commit_guard_across_the_rename() {
+        // The gate's guard must stay alive UNTIL the rename has run — that is what lets capture_idle hold a
+        // shared mutex across its final ring check + rename so note_ring() (which takes the same mutex on
+        // another thread) can't interleave. Prove it deterministically without threads: the guard's Drop
+        // observes the file and asserts the rename has already committed the new body by the time it runs.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(9500);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-guard-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = idle_jpg_file_in(&dir);
+
+        let doorway = b"\xff\xd8\xff\xe0 doorway \xff\xd9";
+        assert!(atomic_write_in(&dir, &file, doorway));
+
+        let visitor = b"\xff\xd8\xff\xe0 visitor \xff\xd9".to_vec();
+        // A guard whose Drop asserts the rename already happened (the file now holds `expected`). If the
+        // writer released the guard BEFORE the rename, this file would still be the doorway and the assert
+        // would fire.
+        struct RenameProof {
+            path: PathBuf,
+            expected: Vec<u8>,
+        }
+        impl Drop for RenameProof {
+            fn drop(&mut self) {
+                let got = std::fs::read(&self.path).expect("file must exist by guard drop");
+                assert_eq!(got, self.expected, "rename must have committed before the commit guard dropped");
+            }
+        }
+        let proof = RenameProof { path: file.clone(), expected: visitor.clone() };
+        assert!(atomic_write_gated_in(&dir, &file, &visitor, move || Some(proof)));
         assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&visitor[..]));
 
         let _ = std::fs::remove_dir_all(&dir);

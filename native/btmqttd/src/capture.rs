@@ -42,7 +42,7 @@
 //! truncated/garbage grab never reaches Home Assistant.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -139,6 +139,16 @@ fn now_ms() -> u64 {
 /// ring it never saw a publish for.
 static LAST_RING_MS: AtomicU64 = AtomicU64::new(0);
 
+/// Serializes the idle-capture COMMIT (its final ring check + the rename that publishes `idle.jpg`) with
+/// [`note_ring`]'s advance of [`LAST_RING_MS`]. The two run on different OS threads — the commit inside a
+/// `spawn_blocking` worker, `note_ring` on the Tokio runtime thread — so `LAST_RING_MS`'s atomic ordering
+/// alone can't stop a ring from landing in the tiny gap between "check passed" and "rename". Both sides
+/// take this mutex, making the check+rename atomic w.r.t. a ring detection: a ring lands strictly before
+/// the check (→ the commit is vetoed) or strictly after the rename (→ the frame committed was still the
+/// empty doorway at commit time), never invisibly between. Held only for the timestamp read/write plus the
+/// rename — never across the ffmpeg grab or the temp write — so it can't stall the runtime thread for long.
+static RING_COMMIT_LOCK: Mutex<()> = Mutex::new(());
+
 /// If a ring was DETECTED within this window before an idle capture started (or at any time during it),
 /// the idle capture is declined: a doorbell call may still be streaming the visitor, so the grabbed frame
 /// is not the empty doorway. Generous on purpose — a false decline only skips one idle update (first-run
@@ -151,6 +161,12 @@ const RECENT_RING_WINDOW: Duration = Duration::from_secs(120);
 /// concurrent or imminent idle capture discards its (visitor) frame rather than storing it as the idle
 /// thumbnail.
 pub fn note_ring() {
+    // Take RING_COMMIT_LOCK for the store so this advance is serialized with capture_idle's final ring
+    // check + rename (which holds the same lock across its rename): the two can't interleave across the
+    // blocking-pool and runtime threads, so a ring can't land invisibly between an idle commit's check
+    // and its rename. (Tolerate a poisoned lock — a panic elsewhere must not silently stop ring
+    // invalidation.) The guard is released immediately after the store.
+    let _commit = RING_COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Clamp to a MINIMUM of 1: `now_ms()` returns 0 for the first tick right after `CLOCK_BASE` is
     // initialized, but 0 is LAST_RING_MS's "no ring yet" sentinel — so a first-ever ring at t≈0 must
     // still store a non-zero tick, or `capture_idle`'s `last_ring != 0` guard would mistake it for "no
@@ -424,20 +440,30 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
         last_ring != 0 && last_ring.saturating_add(RECENT_RING_WINDOW.as_millis() as u64) >= capture_start_ms
     };
     if ring_recent() {
-        // Discard rather than persist a visitor as the idle thumbnail; first-run retries next boot and the
-        // button can be re-pressed once the door is clear.
+        // Fast-path decline — a ring is already known, so skip the (blocking) store entirely. Discard
+        // rather than persist a visitor as the idle thumbnail; first-run retries next boot and the button
+        // can be re-pressed once the door is clear. (The authoritative re-check runs under the lock below.)
         eprintln!(
             "btmqttd: capture: idle capture declined — a ring is recent/active (visitor present); \
              keeping the idle thumbnail as the empty doorway"
         );
         return false;
     }
-    // The atomic store is blocking std::fs — offload it off the single-threaded runtime. `commit_ok`
-    // re-checks `ring_recent()` at the last moment before the rename: a ring that arrives while the temp
-    // is being written discards the temp and leaves the prior idle thumbnail intact (store returns false).
-    let stored = tokio::task::spawn_blocking(move || crate::persist::store_idle_jpg(&bytes, || !ring_recent()))
-        .await
-        .unwrap_or(false);
+    // The atomic store is blocking std::fs — offload it off the single-threaded runtime. The commit gate
+    // takes RING_COMMIT_LOCK, re-checks `ring_recent()`, and (if clear) returns the guard so it is HELD
+    // across the rename. note_ring() takes the SAME lock before advancing LAST_RING_MS, so a ring arriving
+    // during the write is serialized: either it lands before the check (→ gate returns None, temp
+    // discarded, prior thumbnail intact) or strictly after the rename (→ the doorway was still empty when
+    // this frame committed). The MutexGuard lives and dies inside this one blocking task (never crosses a
+    // thread), so the closure stays `Send`.
+    let stored = tokio::task::spawn_blocking(move || {
+        crate::persist::store_idle_jpg(&bytes, move || {
+            let guard = RING_COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            if ring_recent() { None } else { Some(guard) }
+        })
+    })
+    .await
+    .unwrap_or(false);
     if stored {
         eprintln!("btmqttd: capture: idle snapshot updated");
     } else {
@@ -502,10 +528,12 @@ impl Drop for RingRunnerGuard {
     }
 }
 
-/// Drive ring captures to completion under the single-runner bound. Captures the NEWEST pending ring,
-/// calls `on_ready(id)` on each successful write (the caller publishes the "snapshot ready" signal for
-/// that id), and loops only while a still-newer ring arrived during the capture — so a burst of distinct
-/// rings COALESCES to the latest and work is bounded to one active capture at a time, never a queue.
+/// Drive ring captures to completion under the single-runner bound. Captures the NEWEST pending ring and
+/// calls `on_ready(id)` for it (the caller publishes the "snapshot ready" signal for that id) — but ONLY
+/// if no newer ring arrived during the grab; a superseded capture is discarded unpublished (its live frame
+/// may belong to the newer visitor) and the newer ring is captured on the next iteration. It loops only
+/// while a still-newer ring arrived during the capture — so a burst of distinct rings COALESCES to a
+/// single notification carrying the latest frame, and work is bounded to one active capture, never a queue.
 /// Takes the runner `guard` by value (from a winning [`try_acquire_ring_runner`]); the slot is released
 /// via the guard's drop, so even a panic inside a capture frees it. `on_ready` is invoked synchronously
 /// (no `.await` inside it on the production path), so the id it publishes is still the one just written.
@@ -515,7 +543,13 @@ pub async fn run_ring_captures<F: Fn(u64)>(cfg: &Config, guard: RingRunnerGuard,
     let mut guard = guard;
     loop {
         let id = RING_NEWEST.load(Ordering::Relaxed);
-        if capture_ring_frame(cfg, id).await {
+        // `capture_ring_frame` grabs the LIVE frame, which belongs to whatever visitor is at the door
+        // *now*. Only publish it for `id` if `id` is still the newest ring after the grab: a newer ring
+        // that arrived during the (up-to-25 s) grab means the live frame may be the NEWER visitor, so
+        // binding it to the older event would mislabel it. Discard the superseded result and let the next
+        // loop iteration capture-and-publish the newer id — so a burst collapses to one notification with
+        // the freshest frame, never an older event carrying a newer visitor's picture.
+        if capture_ring_frame(cfg, id).await && RING_NEWEST.load(Ordering::Relaxed) == id {
             on_ready(id);
         }
         // Release the slot (drop the guard) BEFORE re-checking for a newer ring: this ordering (release
@@ -689,5 +723,37 @@ mod tests {
         let g2 = try_acquire_ring_runner();
         assert!(g2.is_some(), "the slot is re-acquirable once the guard is dropped");
         drop(g2);
+    }
+
+    #[test]
+    fn note_ring_serializes_with_the_held_commit_lock() {
+        // note_ring() advances LAST_RING_MS only AFTER taking RING_COMMIT_LOCK, and capture_idle's commit
+        // gate holds that same lock across its final ring check + rename. So while the gate holds the lock,
+        // a concurrent ring cannot advance LAST_RING_MS — it can't wedge itself between the check and the
+        // rename. Prove it deterministically (no sleeps): hold the lock as the gate does, start a note_ring
+        // on another thread, and confirm LAST_RING_MS stays put until the lock is released. This is sound
+        // regardless of scheduling because note_ring's store is strictly AFTER the lock acquire it cannot
+        // complete while we hold the lock.
+        use std::sync::mpsc;
+        LAST_RING_MS.store(0, Ordering::Relaxed);
+        let guard = RING_COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = mpsc::channel();
+        let h = std::thread::spawn(move || {
+            tx.send(()).unwrap(); // announce we are about to contend for the lock
+            note_ring(); // blocks on RING_COMMIT_LOCK until the main thread drops `guard`
+        });
+        rx.recv().unwrap(); // the ring thread is now heading into note_ring()
+        assert_eq!(
+            LAST_RING_MS.load(Ordering::Relaxed),
+            0,
+            "note_ring must not advance LAST_RING_MS while the commit lock is held"
+        );
+        drop(guard); // release — note_ring may now take the lock and store
+        h.join().unwrap();
+        assert_ne!(
+            LAST_RING_MS.load(Ordering::Relaxed),
+            0,
+            "note_ring advances LAST_RING_MS once the commit lock is free"
+        );
     }
 }

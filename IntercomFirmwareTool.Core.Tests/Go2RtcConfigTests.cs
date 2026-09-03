@@ -243,10 +243,10 @@ public class Go2RtcConfigTests
     [Fact]
     public void BuildOnDeviceSetupGuide_yaml_escapes_a_ring_topic_with_quote_or_backslash()
     {
-        // Topic validation permits '"' and '\' (only newlines and MQTT wildcards are rejected), so a
-        // library caller could supply one; the ring-notification recipe interpolates the topic into a
-        // double-quoted YAML scalar, which must escape those two characters or the paste-ready automation
-        // breaks / subscribes to a different topic.
+        // Topic validation permits '"' and '\' (they are printable — only control characters and MQTT
+        // wildcards are rejected), so a library caller could supply one; the ring-notification recipe
+        // interpolates the topic into a double-quoted YAML scalar, which must escape those two characters
+        // or the paste-ready automation breaks / subscribes to a different topic.
         var opts = new MqttOptions("broker.lan")
         {
             CameraEnabled = true,

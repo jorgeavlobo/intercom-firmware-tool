@@ -38,6 +38,28 @@ public class MqttCameraValidationTests
         Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(Cam(target)));
     }
 
+    [Theory]
+    [InlineData("Bticino/ring\0snap")]  // NUL — MQTT forbids it in a topic outright
+    [InlineData("Bticino/ring\x1bsnap")] // ESC — a C0 control that would corrupt the guide's YAML scalar
+    [InlineData("Bticino/ring\tsnap")]   // TAB — whitespace control, still not a valid topic character
+    [InlineData("Bticino/ring\x7fsnap")] // DEL
+    public void Rejects_a_ring_snapshot_topic_with_a_control_character(string topic)
+    {
+        // The ring-snapshot topic is sourced into the .conf, used as an MQTT topic, AND embedded in the
+        // on-device guide's double-quoted YAML scalar — so validation must reject EVERY control character,
+        // not just CR/LF, at this single upstream gate (the guide's escaper only handles the printable
+        // '"'/'\\'). A NUL/ESC/TAB/DEL that slipped through would corrupt one of those three uses.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+            TopicRingSnapshot = topic,
+        };
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(opts));
+    }
+
     [Fact]
     public void Rejects_a_camera_target_pinned_to_loopback_openserver()
     {

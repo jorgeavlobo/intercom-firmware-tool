@@ -445,12 +445,13 @@ namespace IntercomFirmwareTool.Core
             sb.Append("exactly that ring's picture (two rings can never cross images). Add a Home\n");
             sb.Append("Assistant automation like this — replace <intercom-ip> and\n");
             sb.Append("notify.mobile_app_your_phone with your own:\n\n");
-            // The topic goes into a double-quoted YAML scalar, so escape the two characters a
-            // double-quoted scalar treats specially — backslash first, then the quote. Topic
-            // validation already forbids newlines and MQTT wildcards, but it permits '"' and '\',
-            // which a library caller could supply; without this they would break the paste-ready
-            // recipe or silently change the subscribed topic. The default/base64url topics contain
-            // neither, so the common case is unchanged.
+            // The topic goes into a double-quoted YAML scalar, so escape the two PRINTABLE characters a
+            // double-quoted scalar treats specially — backslash first, then the quote. Topic validation
+            // (MqttInstaller) already rejects every control character (newlines included) and the MQTT
+            // wildcards, so those cannot reach here; only '"' and '\' — which a library caller could still
+            // supply — need escaping, without which they would break the paste-ready recipe or silently
+            // change the subscribed topic. The default/base64url topics contain neither, so the common case
+            // is unchanged.
             var ringTopicYaml = opts.EffectiveTopicRingSnapshot.Replace("\\", "\\\\").Replace("\"", "\\\"");
             sb.Append(string.Create(ci,
                 $"    alias: Doorbell ring notification\n" +

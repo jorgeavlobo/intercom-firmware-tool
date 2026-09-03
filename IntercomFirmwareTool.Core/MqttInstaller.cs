@@ -1037,8 +1037,13 @@ namespace IntercomFirmwareTool.Core
                 }
             }
 
-            // Topics must be non-empty and single-line (they are sourced into the
-            // .conf and used as MQTT topic filters).
+            // Topics must be non-empty and contain NO control characters. They are sourced into the .conf,
+            // used as MQTT topic filters, and (the ring-snapshot topic) embedded in the paste-ready Home
+            // Assistant YAML in the on-device guide. Rejecting every control char — not just CR/LF — is the
+            // single upstream gate that keeps all three uses valid: MQTT forbids U+0000 in a topic outright,
+            // and an embedded NUL/ESC/TAB would corrupt the double-quoted YAML scalar the guide builds
+            // (whose escaper only handles '"'/'\\', the two printable specials). char.IsControl subsumes
+            // CR/LF and also covers the C0/DEL/C1 ranges.
             foreach (var t in new[] { opts.TopicRx, opts.TopicDump, opts.TopicStartDate,
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
                                       opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
@@ -1046,7 +1051,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.EffectiveTopicRingSnapshot,
                                       opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
                                       opts.EffectiveTopicUpdate })
-                if (string.IsNullOrWhiteSpace(t) || t.IndexOfAny(new[] { '\r', '\n' }) >= 0)
+                if (string.IsNullOrWhiteSpace(t) || t.Any(char.IsControl))
                     throw new ArgumentException(CoreStrings.Get("Mqtt_InvalidTopic"), nameof(opts));
 
             // The PUBLISH topics (everything except TopicRx, which is only ever
