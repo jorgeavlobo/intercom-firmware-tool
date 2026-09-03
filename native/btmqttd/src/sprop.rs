@@ -506,63 +506,72 @@ async fn patch_sdp_in(path: &str, sprop: &str) -> std::io::Result<bool> {
 /// NON-fatal — if no producer is found or the signal fails, the persisted value still fixes the next
 /// open/boot. Touches no firewall (#145). Blocking `/proc` scan → `spawn_blocking`.
 async fn respawn_go2rtc_producer() {
-    let pids = tokio::task::spawn_blocking(|| {
-        find_sdp_producer_pids(GO2RTC_FFMPEG_PATH, GO2RTC_DAEMON_PATH, SDP_PATH)
+    // Do the whole scan-validate-signal in ONE blocking pass (no async yield between identifying a
+    // producer and SIGTERMing it), so a PID can't be recycled out from under us across an await.
+    let signalled = tokio::task::spawn_blocking(|| {
+        terminate_sdp_producers(GO2RTC_FFMPEG_PATH, GO2RTC_DAEMON_PATH, SDP_PATH)
     })
     .await
-    .unwrap_or_default();
-    if pids.is_empty() {
+    .unwrap_or(0);
+    if signalled == 0 {
         eprintln!(
             "btmqttd: sprop: no running go2rtc exec producer to respawn; the patched SDP takes effect on its next start"
         );
-        return;
-    }
-    for pid in pids {
-        // SIGTERM lets ffmpeg exit cleanly so go2rtc tears the producer down tidily. `kill` is the only
-        // way to make a producer that reads its input file ONLY at spawn pick up the patched SDP.
-        if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
-            eprintln!(
-                "btmqttd: sprop: signalled the go2rtc exec producer (pid {pid}) to re-read the patched SDP"
-            );
-        } else {
-            // Non-fatal (the persisted value still fixes the next open/boot), but log with the errno so a
-            // "no self-heal" report can be told apart from "no producer found": ESRCH means the producer
-            // exited between the /proc scan and here (already gone — its respawn will read the patch),
-            // EPERM a permission problem. Read last_os_error() immediately, before any other syscall.
-            eprintln!(
-                "btmqttd: sprop: could not signal go2rtc exec producer (pid {pid}): {}",
-                std::io::Error::last_os_error()
-            );
-        }
     }
 }
 
-/// Scan `/proc` for the PIDs of the go2rtc `exec:` ffmpeg producer(s) reading OUR runtime SDP. A candidate
-/// must clear THREE independent checks before it is eligible for SIGTERM, so an unrelated local process is
-/// never terminated (#146 review): its command line is `<ffmpeg_path> … -i <sdp_path> …`
-/// ([`cmdline_is_sdp_producer`]) AND its direct parent process is the go2rtc daemon ([`parent_is`]). Only
-/// then is it go2rtc's OWN producer for this stream. Blocking (`read_dir` + per-pid reads); only numeric
-/// `/proc/<pid>` entries are considered, and any unreadable entry is skipped (best-effort).
-fn find_sdp_producer_pids(ffmpeg_path: &str, daemon_path: &str, sdp_path: &str) -> Vec<libc::pid_t> {
-    let mut pids = Vec::new();
+/// Scan `/proc` and SIGTERM the go2rtc `exec:` ffmpeg producer(s) reading OUR runtime SDP, returning how
+/// many were signalled. Each PID is VALIDATED and signalled in the SAME loop iteration — identity checked
+/// ([`pid_is_sdp_producer`]) immediately before `kill`, with no async yield between — so PID reuse between
+/// discovery and the signal can't make us terminate an unrelated process (#146 review): a recycled PID
+/// would itself have to be a `<ffmpeg> -i <sdp>` child of go2rtc in that microsecond gap, which is
+/// effectively impossible. (The device kernel — Linux 4.9 — predates `pidfd`, the only mechanism that
+/// truly cannot follow PID reuse, so re-validation immediately before the kill is the best available.)
+/// Blocking (`read_dir` + per-pid reads); only numeric `/proc/<pid>` entries are considered and any
+/// unreadable entry is skipped (best-effort).
+fn terminate_sdp_producers(ffmpeg_path: &str, daemon_path: &str, sdp_path: &str) -> usize {
+    let mut signalled = 0usize;
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return pids;
+        return 0;
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
             continue; // not a numeric pid directory
         };
-        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        if !pid_is_sdp_producer(pid, ffmpeg_path, daemon_path, sdp_path) {
             continue;
-        };
-        // argv shape first (cheap), then the parent check (an extra read) only for a shape match — there
-        // is at most one such process, so the parent read runs at most once.
-        if cmdline_is_sdp_producer(&cmdline, ffmpeg_path, sdp_path) && parent_is(pid, daemon_path) {
-            pids.push(pid as libc::pid_t);
+        }
+        // Validated immediately above; SIGTERM now with no intervening await. SIGTERM lets ffmpeg exit
+        // cleanly so go2rtc tears the producer down tidily.
+        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0 {
+            signalled += 1;
+            eprintln!(
+                "btmqttd: sprop: signalled the go2rtc exec producer (pid {pid}) to re-read the patched SDP"
+            );
+        } else {
+            // Non-fatal (the persisted value still fixes the next open/boot), but log with the errno so a
+            // "no self-heal" report can be told apart: ESRCH means the producer exited in the gap (already
+            // gone — its respawn reads the patch), EPERM a permission problem. Read last_os_error()
+            // immediately, before any other syscall.
+            eprintln!(
+                "btmqttd: sprop: could not signal go2rtc exec producer (pid {pid}): {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
-    pids
+    signalled
+}
+
+/// True iff `/proc/<pid>` is CURRENTLY the go2rtc `exec:` ffmpeg producer reading OUR runtime SDP: its
+/// command line is `<ffmpeg_path> … -i <sdp_path> …` ([`cmdline_is_sdp_producer`]) AND its direct parent
+/// is the go2rtc daemon ([`parent_is`]). Both are read live from `/proc`, so calling this immediately
+/// before `kill` re-confirms the identity. Blocking; any unreadable entry ⇒ `false`.
+fn pid_is_sdp_producer(pid: i32, ffmpeg_path: &str, daemon_path: &str, sdp_path: &str) -> bool {
+    matches!(
+        std::fs::read(format!("/proc/{pid}/cmdline")),
+        Ok(cmdline) if cmdline_is_sdp_producer(&cmdline, ffmpeg_path, sdp_path)
+    ) && parent_is(pid, daemon_path)
 }
 
 /// True iff a raw `/proc/<pid>/cmdline` (arguments NUL-separated) is the go2rtc `exec:` ffmpeg producer
