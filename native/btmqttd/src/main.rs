@@ -754,6 +754,11 @@ async fn run() -> Result<bool, String> {
                     Ok(Event::Incoming(Incoming::ConnAck(_))) => {
                         // Broker is up: momentary events (door call / keypress) may publish again (#71).
                         broker_online.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // Advance the broker SESSION epoch: this is a NEW session. A deferred ring-snapshot
+                        // publish captured the prior epoch, so a ring whose capture straddled this reconnect
+                        // is now suppressed instead of firing a stale door notification (see #169 /
+                        // sender::BROKER_EPOCH).
+                        sender::BROKER_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         // Connected: clear the rediscovery failure streak and forget
                         // proposed addresses, so a later outage starts fresh and a broker
                         // that returns to a former address can be found again.

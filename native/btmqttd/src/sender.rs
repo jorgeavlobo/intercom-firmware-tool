@@ -6,7 +6,7 @@
 //! tcpdump/filter.py fallback is retired — this connects directly and retries.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -661,17 +661,24 @@ async fn publish_frame(
                 let cfg_ring = cfg.clone();
                 let client_ring = client.clone();
                 let broker_ring = broker_online.clone();
+                // Capture the broker session epoch NOW (the ring fired on this online session). The
+                // readiness publish below is deferred across the capture; if the broker bounces meanwhile
+                // the epoch advances and the publish is suppressed rather than firing a pre-outage ring's
+                // notification on the new session — see ring_snapshot_deliverable / BROKER_EPOCH.
+                let ring_epoch = BROKER_EPOCH.load(Ordering::Relaxed);
                 tokio::spawn(async move {
                     // On each successful capture the runner calls back here to publish a "ring snapshot
                     // ready" signal carrying that event's id, so the HA push fetches exactly THIS event's
                     // frame — triggered by this signal, not a fixed delay a cold ~20 s capture can outlast.
-                    // Momentary QoS 0, non-retained, and DROPPED when the broker is offline — its topic is
-                    // in main.rs::is_momentary_publish so a queued one is also purged on disconnect,
-                    // matching the ring event's #71 discipline so a reconnect can't flush a stale "someone
-                    // is at the door" later. A failed capture publishes nothing (no image ⇒ no push). The
-                    // `runner` guard rides into the task and frees the slot on drop, even on a panic.
+                    // Momentary QoS 0, non-retained, DROPPED when the broker is offline AND suppressed if
+                    // the broker session changed since the ring (its topic is also in
+                    // main.rs::is_momentary_publish so an ALREADY-QUEUED one is purged on disconnect) —
+                    // matching the ring event's #71 discipline so a reconnect can't flush, or freshly emit,
+                    // a stale "someone is at the door" later. A failed capture publishes nothing (no image ⇒
+                    // no push). The `runner` guard rides into the task and frees the slot on drop, even on a
+                    // panic.
                     crate::capture::run_ring_captures(&cfg_ring, runner, |event_id| {
-                        if !momentary_deliverable(&broker_ring) {
+                        if !ring_snapshot_deliverable(&broker_ring, ring_epoch) {
                             return;
                         }
                         let payload =
@@ -894,6 +901,24 @@ fn momentary_deliverable(broker_online: &AtomicBool) -> bool {
     broker_online.load(Ordering::Relaxed)
 }
 
+/// Broker SESSION epoch: bumped by main's event loop on every `ConnAck` (see `BROKER_EPOCH`). A
+/// momentary publish that is enqueued SYNCHRONOUSLY at detection needs only [`momentary_deliverable`]
+/// (rumqttc's `pending` is purged on the same drop, so nothing survives to flush late — issue #71). But
+/// the ring-snapshot-ready signal is DEFERRED across the up-to-25 s capture: the broker can drop AND
+/// reconnect within that window, so `broker_online` reads true again yet this is a NEW session. The
+/// disconnect purge can't catch such a publish — it is created only AFTER the reconnect. Binding it to
+/// the epoch captured at ring detection closes that gap: publish only while still online AND on the SAME
+/// session (epoch unchanged); a reconnect advances the epoch and suppresses the stale "someone is at the
+/// door" for a pre-outage ring. (A ring that itself arrives after the reconnect publishes on the new,
+/// higher epoch — this only suppresses the OLD ring whose runner outlived the bounce.)
+pub static BROKER_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the ring-snapshot-ready signal for a ring detected at `ring_epoch` may be published now:
+/// the broker must be connected AND still the same session it was when the ring fired. See [`BROKER_EPOCH`].
+fn ring_snapshot_deliverable(broker_online: &AtomicBool, ring_epoch: u64) -> bool {
+    momentary_deliverable(broker_online) && BROKER_EPOCH.load(Ordering::Relaxed) == ring_epoch
+}
+
 /// Publish the call STATE to TOPIC_CALL_STATE, RETAINED so HA shows the current state
 /// after a reconnect/restart. The payload carries the mapped label (idle/ringing/in_call,
 /// or "active" for an unmapped code — see [`dimension::call_state_label`]) plus the raw
@@ -949,6 +974,27 @@ mod tests {
         assert!(momentary_deliverable(&online)); // connected -> deliver
         online.store(false, Ordering::Relaxed);
         assert!(!momentary_deliverable(&online)); // dropped again after a disconnect
+    }
+
+    #[test]
+    fn ring_snapshot_only_delivers_on_the_same_online_broker_session() {
+        // The ring-snapshot-ready signal is DEFERRED across the up-to-25 s capture, so it is bound to the
+        // broker SESSION it was detected on (#169): delivered only while online AND on the same epoch. A
+        // reconnect during the capture advances the epoch and suppresses a pre-outage ring's stale "someone
+        // is at the door" — which the disconnect purge can't catch because the publish is created only
+        // after the reconnect. (BROKER_EPOCH is a process-global; no other test mutates it.)
+        let online = AtomicBool::new(true);
+        let ring_epoch = BROKER_EPOCH.load(Ordering::Relaxed); // captured at "ring detection"
+        assert!(ring_snapshot_deliverable(&online, ring_epoch)); // online + same session -> deliver
+        online.store(false, Ordering::Relaxed);
+        assert!(!ring_snapshot_deliverable(&online, ring_epoch)); // offline at publish -> drop
+        // Broker bounced (dropped then reconnected) during the capture: online again, but a NEW session.
+        online.store(true, Ordering::Relaxed);
+        BROKER_EPOCH.fetch_add(1, Ordering::Relaxed);
+        assert!(!ring_snapshot_deliverable(&online, ring_epoch)); // online but stale epoch -> suppress
+        // A ring detected on the CURRENT session still delivers.
+        let fresh_epoch = BROKER_EPOCH.load(Ordering::Relaxed);
+        assert!(ring_snapshot_deliverable(&online, fresh_epoch));
     }
 
     #[test]
