@@ -430,8 +430,9 @@ namespace IntercomFirmwareTool.Core
                 $"  any time with the \"Update idle snapshot\" button (press it to re-capture the\n" +
                 $"  current view). It persists across reboots and reflashes. Both the\n" +
                 $"  auto-capture and the button need on-demand viewing enabled (the panel must\n" +
-                $"  be woken to photograph an idle doorway); with on-demand off, the endpoint\n" +
-                $"  keeps serving the neutral placeholder instead.\n"));
+                $"  be woken to photograph an idle doorway); with on-demand off, neither can run,\n" +
+                $"  so /idle.jpg keeps serving whatever it already has — a previously captured\n" +
+                $"  snapshot if one exists, otherwise the neutral placeholder.\n"));
 
             sb.Append("\nRing snapshot + notification\n----------------------------\n");
             sb.Append(string.Create(ci,

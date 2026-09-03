@@ -657,7 +657,7 @@ async fn publish_frame(
         // — one active capture at a time, never a growing queue of tasks).
         if ring_published && cfg.camera_enabled && cfg.camera_ondevice {
             crate::capture::note_pending_ring();
-            if crate::capture::try_acquire_ring_runner() {
+            if let Some(runner) = crate::capture::try_acquire_ring_runner() {
                 let cfg_ring = cfg.clone();
                 let client_ring = client.clone();
                 let broker_ring = broker_online.clone();
@@ -668,8 +668,9 @@ async fn publish_frame(
                     // Momentary QoS 0, non-retained, and DROPPED when the broker is offline — its topic is
                     // in main.rs::is_momentary_publish so a queued one is also purged on disconnect,
                     // matching the ring event's #71 discipline so a reconnect can't flush a stale "someone
-                    // is at the door" later. A failed capture publishes nothing (no image ⇒ no push).
-                    crate::capture::run_ring_captures(&cfg_ring, |event_id| {
+                    // is at the door" later. A failed capture publishes nothing (no image ⇒ no push). The
+                    // `runner` guard rides into the task and frees the slot on drop, even on a panic.
+                    crate::capture::run_ring_captures(&cfg_ring, runner, |event_id| {
                         if !momentary_deliverable(&broker_ring) {
                             return;
                         }

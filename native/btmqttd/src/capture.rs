@@ -294,9 +294,16 @@ async fn grab_jpeg(cfg: &Config) -> Result<Vec<u8>, String> {
     }
     let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
     let out = dir.join(format!("capture-{}-{nonce}.jpg", std::process::id()));
-    let out_str = out.to_string_lossy().into_owned();
+    // Fail fast if the scratch path is not valid UTF-8 rather than passing ffmpeg a LOSSY rendering:
+    // ffmpeg would then write to a different path than the `out` we read back and remove, silently
+    // failing the capture and leaking the temp file. `to_str()` is exact (byte-for-byte the path), so the
+    // arg and the `out` we read/remove stay identical. The run dir is UTF-8 on-device (see run_dir); this
+    // only trips a pathological non-UTF-8 `$BTMQTTD_RUN_DIR` override.
+    let out_str = out
+        .to_str()
+        .ok_or_else(|| format!("scratch path is not valid UTF-8: {}", out.display()))?;
 
-    let argv = capture_argv(&url, &out_str);
+    let argv = capture_argv(&url, out_str);
     let mut cmd = tokio::process::Command::new(ffmpeg_bin());
     cmd.args(&argv);
     cmd.kill_on_drop(true);
@@ -443,42 +450,51 @@ pub fn note_pending_ring() -> u64 {
     id
 }
 
-/// Try to become THE ring-capture runner. `true` (won the [`RING_RUNNER_ACTIVE`] false→true flip) means
-/// the caller owns the single runner slot and MUST drive [`run_ring_captures`] (which releases it);
-/// `false` means a runner is already active and will serve the ring just noted.
-pub fn try_acquire_ring_runner() -> bool {
-    !RING_RUNNER_ACTIVE.swap(true, Ordering::AcqRel)
+/// Try to become THE ring-capture runner. `Some(guard)` (won the [`RING_RUNNER_ACTIVE`] false→true flip)
+/// means the caller owns the single runner slot; the [`RingRunnerGuard`] releases it on drop — including
+/// on a panic/abort — so a crashed runner can never leave the slot stuck `true` (which would silently
+/// disable ring captures for the rest of the process). `None` means a runner is already active and will
+/// serve the ring just noted.
+pub fn try_acquire_ring_runner() -> Option<RingRunnerGuard> {
+    (!RING_RUNNER_ACTIVE.swap(true, Ordering::AcqRel)).then_some(RingRunnerGuard)
 }
 
-/// Release the runner slot (paired with a winning [`try_acquire_ring_runner`]).
-fn release_ring_runner() {
-    RING_RUNNER_ACTIVE.store(false, Ordering::Release);
+/// RAII ownership of the ring-runner slot: releases [`RING_RUNNER_ACTIVE`] on drop.
+pub struct RingRunnerGuard;
+impl Drop for RingRunnerGuard {
+    fn drop(&mut self) {
+        RING_RUNNER_ACTIVE.store(false, Ordering::Release);
+    }
 }
 
 /// Drive ring captures to completion under the single-runner bound. Captures the NEWEST pending ring,
 /// calls `on_ready(id)` on each successful write (the caller publishes the "snapshot ready" signal for
 /// that id), and loops only while a still-newer ring arrived during the capture — so a burst of distinct
 /// rings COALESCES to the latest and work is bounded to one active capture at a time, never a queue.
-/// MUST be called exactly once per winning [`try_acquire_ring_runner`]; it releases the runner slot
-/// before returning. `on_ready` is invoked synchronously (no `.await` inside it on the production path),
-/// so the id it publishes is still the one just written.
-pub async fn run_ring_captures<F: Fn(u64)>(cfg: &Config, on_ready: F) {
+/// Takes the runner `guard` by value (from a winning [`try_acquire_ring_runner`]); the slot is released
+/// via the guard's drop, so even a panic inside a capture frees it. `on_ready` is invoked synchronously
+/// (no `.await` inside it on the production path), so the id it publishes is still the one just written.
+pub async fn run_ring_captures<F: Fn(u64)>(cfg: &Config, guard: RingRunnerGuard, on_ready: F) {
+    // We hold the slot via `guard`; it releases on drop — including during unwind, so a panic in the
+    // capture/publish below still frees the slot instead of wedging ring captures for the process life.
+    let mut guard = guard;
     loop {
         let id = RING_NEWEST.load(Ordering::Relaxed);
         if capture_ring_frame(cfg, id).await {
             on_ready(id);
         }
-        // Done with `id`. Release the slot, THEN re-check for a newer ring: this ordering (release before
-        // the re-check, and a fresh ring stores RING_NEWEST before it tries to acquire) guarantees a ring
-        // that arrives around now is never lost — either this runner sees it here and re-acquires, or the
-        // fresh ring itself wins the slot and starts its own runner.
-        release_ring_runner();
+        // Release the slot (drop the guard) BEFORE re-checking for a newer ring: this ordering (release
+        // before the re-check, and a fresh ring stores RING_NEWEST before it tries to acquire) guarantees
+        // a ring that arrives around now is never lost — either this runner sees it here and re-acquires,
+        // or the fresh ring itself wins the freed slot and starts its own runner.
+        drop(guard);
         if RING_NEWEST.load(Ordering::Relaxed) == id {
-            break; // nothing newer arrived — done
+            return; // nothing newer arrived — done
         }
-        if !try_acquire_ring_runner() {
-            break; // a newer ring already started its own runner; let it handle the latest
-        }
+        guard = match try_acquire_ring_runner() {
+            Some(g) => g,   // re-took the slot — loop for the newer ring
+            None => return, // a fresh ring already started its own runner; let it handle it
+        };
     }
 }
 
@@ -631,10 +647,12 @@ mod tests {
         let b = note_pending_ring();
         assert_eq!(b, a + 1, "each ring takes the next event id");
         assert_eq!(RING_NEWEST.load(Ordering::Relaxed), b, "RING_NEWEST tracks the latest ring");
-        assert!(try_acquire_ring_runner(), "first acquire wins the runner slot");
-        assert!(!try_acquire_ring_runner(), "a second acquire is refused while the runner is active");
-        release_ring_runner();
-        assert!(try_acquire_ring_runner(), "the slot is re-acquirable once released");
-        release_ring_runner();
+        let g = try_acquire_ring_runner();
+        assert!(g.is_some(), "first acquire wins the runner slot");
+        assert!(try_acquire_ring_runner().is_none(), "a second acquire is refused while active");
+        drop(g); // the guard releases the slot on drop
+        let g2 = try_acquire_ring_runner();
+        assert!(g2.is_some(), "the slot is re-acquirable once the guard is dropped");
+        drop(g2);
     }
 }
