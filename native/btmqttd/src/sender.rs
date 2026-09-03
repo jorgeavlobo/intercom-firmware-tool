@@ -924,6 +924,16 @@ fn ring_snapshot_deliverable(broker_online: &AtomicBool, ring_epoch: u64) -> boo
 /// or "active" for an unmapped code — see [`dimension::call_state_label`]) plus the raw
 /// code as an attribute for finer protocol detail.
 async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
+    // Invalidate any in-flight/imminent on-device idle capture on EVERY non-idle call-state publish — not
+    // just the live entrance/ring frames (which already call note_ring), but also the AUTHORITATIVE
+    // RECONCILE paths (reconnect / periodic poll / reseed): those republish an active call (in_call/active,
+    // ringing) that btmqttd MISSED while disconnected, so LAST_RING_MS may be 0 or expired. Without this, a
+    // first-run or "Update idle snapshot" capture running during such a reconciled active call would accept
+    // the visitor frame and persist it as the empty-doorway thumbnail (#169). Centralised here so every
+    // publisher of a non-idle code invalidates; code 0 (idle) deliberately does NOT (there is no visitor).
+    if code != 0 && cfg.camera_ondevice {
+        crate::capture::note_ring();
+    }
     let payload =
         serde_json::json!({ "state": dimension::call_state_label(code), "code": code }).to_string();
     try_publish_retained(client, &cfg.topic_call_state, QoS::AtLeastOnce, payload.into_bytes());

@@ -55,6 +55,14 @@ use tokio::signal::unix::{signal, SignalKind};
 
 use config::Config;
 
+/// Set once the daemon has begun quiescing (clean shutdown or restart_bridge re-exec), BEFORE any
+/// MQTT-producing task is stopped and the final retained `offline` is published. DETACHED tasks that are
+/// not tracked by the shutdown sequence (e.g. the "Update idle snapshot" capture-then-publish in
+/// `receiver`) check this before their final publish, so an in-flight one can't enqueue a retained
+/// maintenance breadcrumb AFTER `offline` — mirroring how the detached ring-snapshot capture gates on
+/// `broker_online` (#169). Never cleared: a quiescing daemon is on its way out (exit or re-exec).
+pub(crate) static QUIESCING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn main() {
     // Single-threaded runtime: this daemon juggles a few sockets, not a workload —
     // one worker thread keeps the resident footprint small on the intercom.
@@ -1030,6 +1038,11 @@ async fn run() -> Result<bool, String> {
     // door notification from a bridge that has already announced itself offline. Set well before the
     // offline sequence, so an in-flight capture's pre-publish check sees it.
     broker_online.store(false, std::sync::atomic::Ordering::Relaxed);
+    // Also flag quiescing so a DETACHED task not tracked here (the "Update idle snapshot" capture that
+    // publishes a retained maintenance breadcrumb, #169) skips its final publish rather than enqueuing it
+    // after `offline`. Same placement/rationale as broker_online above; QUIESCING is shutdown-specific (a
+    // transient broker blip does not set it), so it suppresses only during an actual exit/re-exec.
+    QUIESCING.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // FREEZE the command worker's intake the instant the event loop exits — BEFORE any awaited task-stop
     // below. Each `stop(..).await` yields to the scheduler, and without this the worker could pull and

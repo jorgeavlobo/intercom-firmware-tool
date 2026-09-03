@@ -252,7 +252,15 @@ async fn handle_json(
             let client2 = client.clone();
             let view_tx2 = view_tx.cloned();
             tokio::spawn(async move {
-                if crate::capture::capture_idle(&cfg2, view_tx2.as_ref()).await {
+                // This capture can run up to ~27 s; the task is detached (so the command worker stays
+                // responsive) and is NOT tracked by main's shutdown task-stop set. Gate the final retained
+                // maintenance publish on QUIESCING so a shutdown / restart_bridge that begins mid-capture
+                // can't enqueue this breadcrumb AFTER the daemon's `offline` — matching the detached
+                // ring-snapshot's broker_online gate (#169). The idle.jpg itself is local, so the capture
+                // still helps even when the ACK is skipped.
+                if crate::capture::capture_idle(&cfg2, view_tx2.as_ref()).await
+                    && !crate::QUIESCING.load(std::sync::atomic::Ordering::Relaxed)
+                {
                     publish_maintenance(&client2, &cfg2, "update_idle").await;
                 }
             });
