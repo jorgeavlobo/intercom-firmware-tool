@@ -92,6 +92,14 @@ const SPROP_RTP_ADDR: &str = "127.0.0.1:40100";
 /// patched SDP equals what the installer would have written with CameraSprop set.
 const FMTP_ANCHOR: &str = "packetization-mode=1;";
 
+/// The go2rtc `exec:` ffmpeg's absolute path (`Go2RtcConfig.OnDeviceFfmpegPath`) and the go2rtc daemon
+/// path (the producer's parent — `PayloadBinaries.Go2rtc.InstallPath` / `go2rtcd`'s `$DAEMON`). Used to
+/// identify — precisely — the ONE process safe to SIGTERM for the fix-B respawn ([`respawn_go2rtc_producer`]):
+/// argv[0] is this ffmpeg, its input is our SDP, and its direct parent is this daemon. Kept in sync with
+/// the C# installer / go2rtcd.
+const GO2RTC_FFMPEG_PATH: &str = "/usr/sbin/ffmpeg";
+const GO2RTC_DAEMON_PATH: &str = "/usr/sbin/go2rtc";
+
 /// How long a single `recv_from` waits before we loop back to re-check `stopping` / the persisted state.
 /// Short enough that a shutdown (or an operator pre-seed) is observed promptly while a view is idle.
 const RECV_TIMEOUT: Duration = Duration::from_secs(1);
@@ -498,9 +506,11 @@ async fn patch_sdp_in(path: &str, sprop: &str) -> std::io::Result<bool> {
 /// NON-fatal — if no producer is found or the signal fails, the persisted value still fixes the next
 /// open/boot. Touches no firewall (#145). Blocking `/proc` scan → `spawn_blocking`.
 async fn respawn_go2rtc_producer() {
-    let pids = tokio::task::spawn_blocking(|| find_sdp_producer_pids(SDP_PATH))
-        .await
-        .unwrap_or_default();
+    let pids = tokio::task::spawn_blocking(|| {
+        find_sdp_producer_pids(GO2RTC_FFMPEG_PATH, GO2RTC_DAEMON_PATH, SDP_PATH)
+    })
+    .await
+    .unwrap_or_default();
     if pids.is_empty() {
         eprintln!(
             "btmqttd: sprop: no running go2rtc exec producer to respawn; the patched SDP takes effect on its next start"
@@ -527,10 +537,13 @@ async fn respawn_go2rtc_producer() {
     }
 }
 
-/// Scan `/proc` for the PIDs of the go2rtc `exec:` ffmpeg producer(s) reading OUR runtime SDP, identified
-/// by [`cmdline_is_sdp_producer`]. Blocking (`read_dir` + per-pid `read`). Only numeric `/proc/<pid>`
-/// entries are considered; an unreadable `/proc` or cmdline is skipped (best-effort).
-fn find_sdp_producer_pids(sdp_path: &str) -> Vec<libc::pid_t> {
+/// Scan `/proc` for the PIDs of the go2rtc `exec:` ffmpeg producer(s) reading OUR runtime SDP. A candidate
+/// must clear THREE independent checks before it is eligible for SIGTERM, so an unrelated local process is
+/// never terminated (#146 review): its command line is `<ffmpeg_path> … -i <sdp_path> …`
+/// ([`cmdline_is_sdp_producer`]) AND its direct parent process is the go2rtc daemon ([`parent_is`]). Only
+/// then is it go2rtc's OWN producer for this stream. Blocking (`read_dir` + per-pid reads); only numeric
+/// `/proc/<pid>` entries are considered, and any unreadable entry is skipped (best-effort).
+fn find_sdp_producer_pids(ffmpeg_path: &str, daemon_path: &str, sdp_path: &str) -> Vec<libc::pid_t> {
     let mut pids = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return pids;
@@ -540,22 +553,63 @@ fn find_sdp_producer_pids(sdp_path: &str) -> Vec<libc::pid_t> {
         let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
             continue; // not a numeric pid directory
         };
-        if let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) {
-            if cmdline_is_sdp_producer(&cmdline, sdp_path) {
-                pids.push(pid as libc::pid_t);
-            }
+        let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        // argv shape first (cheap), then the parent check (an extra read) only for a shape match — there
+        // is at most one such process, so the parent read runs at most once.
+        if cmdline_is_sdp_producer(&cmdline, ffmpeg_path, sdp_path) && parent_is(pid, daemon_path) {
+            pids.push(pid as libc::pid_t);
         }
     }
     pids
 }
 
 /// True iff a raw `/proc/<pid>/cmdline` (arguments NUL-separated) is the go2rtc `exec:` ffmpeg producer
-/// reading OUR runtime SDP — i.e. one of its arguments is EXACTLY `sdp_path` (its `-i <sdp>` input). The
-/// idle/ring capture ffmpeg reads an `rtsp://…/doorbell` URL and go2rtc itself takes `-config <yaml>`, so
-/// neither carries the `.sdp` file path as an argument; the EXACT-argument match (not a substring) also
-/// rejects a lookalike like `<sdp>.bak`. Pure — unit-tested.
-fn cmdline_is_sdp_producer(cmdline: &[u8], sdp_path: &str) -> bool {
-    cmdline.split(|&b| b == 0).any(|arg| arg == sdp_path.as_bytes())
+/// reading OUR runtime SDP: argv[0] is EXACTLY `ffmpeg_path`, AND some `-i` argument is IMMEDIATELY
+/// followed by EXACTLY `sdp_path` (the real input pairing). Requiring the ffmpeg executable rejects a
+/// `tail`/`cat <sdp>`; requiring the `-i` adjacency rejects the SDP used as an OUTPUT or a positional
+/// argument, and the idle/ring capture ffmpeg (whose input is an `rtsp://…/doorbell` URL, not the `.sdp`
+/// file) — while the exact match also rejects a `<sdp>.bak` lookalike. Pure — unit-tested.
+fn cmdline_is_sdp_producer(cmdline: &[u8], ffmpeg_path: &str, sdp_path: &str) -> bool {
+    let mut args = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty());
+    if args.next() != Some(ffmpeg_path.as_bytes()) {
+        return false; // argv[0] is not the go2rtc exec ffmpeg
+    }
+    let mut after_i = false;
+    for arg in args {
+        if after_i && arg == sdp_path.as_bytes() {
+            return true; // `-i <sdp_path>` — the input pairing
+        }
+        after_i = arg == b"-i";
+    }
+    false
+}
+
+/// True iff `pid`'s DIRECT parent process's executable is `exe_path` — read `PPid:` from
+/// `/proc/<pid>/status` ([`parse_ppid`]), then `readlink /proc/<ppid>/exe`. go2rtc runs its `exec:`
+/// command directly (v1.9.14: `exec.Command`, no shell wrapper), so its ffmpeg producer's parent IS the
+/// go2rtc daemon. Any read/parse failure ⇒ `false`: an unverifiable parent is never signalled. Blocking.
+fn parent_is(pid: i32, exe_path: &str) -> bool {
+    let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return false;
+    };
+    let Some(ppid) = parse_ppid(&status) else {
+        return false;
+    };
+    matches!(
+        std::fs::read_link(format!("/proc/{ppid}/exe")),
+        Ok(p) if p == std::path::Path::new(exe_path)
+    )
+}
+
+/// Parse the `PPid:` field (the parent PID) out of `/proc/<pid>/status`. Returns `None` if the field is
+/// absent or non-numeric. Pure — unit-tested.
+fn parse_ppid(status: &str) -> Option<i32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))
+        .and_then(|rest| rest.trim().parse::<i32>().ok())
 }
 
 #[cfg(test)]
@@ -773,11 +827,13 @@ mod tests {
     // --- go2rtc exec producer identification (issue #146, fix B) ---
 
     #[test]
-    fn cmdline_matches_only_the_sdp_input_producer() {
+    fn cmdline_matches_only_the_ffmpeg_with_the_sdp_as_input() {
+        let ff = GO2RTC_FFMPEG_PATH; // "/usr/sbin/ffmpeg"
         let sdp = SDP_PATH; // "/var/run/btmqttd/doorbell.sdp"
-        // The go2rtc exec producer: ffmpeg with `-i <runtime SDP>` — one arg is EXACTLY the SDP path.
+        // The go2rtc exec producer: `<ffmpeg> … -i <runtime SDP> …` — argv[0] is ffmpeg and the SDP is
+        // the argument right after `-i`.
         let producer = [
-            b"/usr/sbin/ffmpeg".as_ref(),
+            ff.as_bytes(),
             b"-hide_banner",
             b"-protocol_whitelist",
             b"file,udp,rtp",
@@ -788,37 +844,51 @@ mod tests {
             b"copy",
         ]
         .join(&0u8);
-        assert!(cmdline_is_sdp_producer(&producer, sdp));
+        assert!(cmdline_is_sdp_producer(&producer, ff, sdp));
 
         // The idle/ring capture ffmpeg reads an rtsp:// URL, never the .sdp FILE — must NOT match.
-        let capture = [
-            b"/usr/sbin/ffmpeg".as_ref(),
-            b"-rtsp_transport",
-            b"tcp",
-            b"-i",
-            b"rtsp://camera:p@127.0.0.1:8554/doorbell",
-            b"-frames:v",
-            b"1",
-        ]
-        .join(&0u8);
-        assert!(!cmdline_is_sdp_producer(&capture, sdp));
+        let capture = [ff.as_bytes(), b"-rtsp_transport", b"tcp", b"-i", b"rtsp://camera:p@127.0.0.1:8554/doorbell", b"-frames:v", b"1"]
+            .join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&capture, ff, sdp));
 
         // go2rtc itself takes -config <yaml>, not the SDP path — must NOT match.
-        let go2rtc = [
-            b"/usr/sbin/go2rtc".as_ref(),
-            b"-config",
-            b"/etc/btmqttd/go2rtc/go2rtc.yaml",
-        ]
-        .join(&0u8);
-        assert!(!cmdline_is_sdp_producer(&go2rtc, sdp));
+        let go2rtc = [b"/usr/sbin/go2rtc".as_ref(), b"-config", b"/etc/btmqttd/go2rtc/go2rtc.yaml"].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&go2rtc, ff, sdp));
 
-        // An EXACT-argument match, not a substring: a lookalike arg must NOT match.
-        let lookalike = [b"/usr/sbin/ffmpeg".as_ref(), b"-i", b"/var/run/btmqttd/doorbell.sdp.bak"]
-            .join(&0u8);
-        assert!(!cmdline_is_sdp_producer(&lookalike, sdp));
+        // `tail`/`cat <sdp>`: argv[0] is not the ffmpeg executable — must NOT match (the over-broad
+        // "any argument equals the SDP path" matcher would have wrongly killed these).
+        let tail = [b"/usr/bin/tail".as_ref(), b"-f", sdp.as_bytes()].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&tail, ff, sdp));
+
+        // ffmpeg with the SDP as an OUTPUT / positional argument (not after `-i`) — must NOT match.
+        let sdp_as_output = [ff.as_bytes(), b"-i", b"rtsp://x", b"-f", b"sdp", sdp.as_bytes()].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&sdp_as_output, ff, sdp));
+
+        // The SDP path present but NOT paired to `-i` — must NOT match.
+        let unpaired = [ff.as_bytes(), b"-map_metadata", sdp.as_bytes(), b"-i", b"rtsp://x"].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&unpaired, ff, sdp));
+
+        // A trailing `-i` with no following argument — must NOT match (no input pairing).
+        let dangling_i = [ff.as_bytes(), b"-hide_banner", b"-i"].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&dangling_i, ff, sdp));
+
+        // An EXACT-argument match, not a substring: a `<sdp>.bak` lookalike after `-i` must NOT match.
+        let lookalike = [ff.as_bytes(), b"-i", b"/var/run/btmqttd/doorbell.sdp.bak"].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&lookalike, ff, sdp));
 
         // Empty cmdline (e.g. a kernel thread) never matches.
-        assert!(!cmdline_is_sdp_producer(&[], sdp));
+        assert!(!cmdline_is_sdp_producer(&[], ff, sdp));
+    }
+
+    #[test]
+    fn parse_ppid_reads_the_parent_pid_field() {
+        let status = "Name:\tffmpeg\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t4321\nPid:\t4321\nPPid:\t1234\nUid:\t0\t0\t0\t0\n";
+        assert_eq!(parse_ppid(status), Some(1234));
+        // PPid 0 (the idle task's parent) parses as 0 — a real value, distinct from absent.
+        assert_eq!(parse_ppid("PPid:\t0\n"), Some(0));
+        // Absent or non-numeric ⇒ None (an unverifiable parent is never signalled).
+        assert_eq!(parse_ppid("Name:\tx\nUid:\t0\n"), None);
+        assert_eq!(parse_ppid("PPid:\tnotanumber\n"), None);
     }
 
     #[tokio::test]
