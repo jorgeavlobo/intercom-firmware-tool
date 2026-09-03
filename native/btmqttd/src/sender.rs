@@ -704,6 +704,17 @@ async fn publish_frame(
         outcome = FrameOutcome::ClassifierChanged; // reclassified to Floor → snapshot ambiguous
         publish_call_event(client, debounce, broker_online, &cfg.topic_floor_call, "floor", where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
+        // Idle-capture invalidation as EARLY as possible (issue #169): the dim-35 ringing report
+        // (`*#8**35*1*…`, code 1) arrives ONE frame BEFORE the classifying WHO=8 entrance frame, so
+        // recording the ring only there (crate::capture::note_ring in the entrance branch) leaves a small
+        // window in which an in-flight idle capture could grab the now-streaming visitor and pass its
+        // LAST_RING_MS check before the classify frame lands. Note the ring here too, on ANY non-idle
+        // call-state code (ringing / in_call / active fallback — NOT the terminal `0`): the panel is in a
+        // call, so an idle capture must be declined. This fires for a floor call's dim-35 as well, which
+        // is a harmless FALSE decline (it only skips one best-effort idle update; see RECENT_RING_WINDOW).
+        if code != 0 && cfg.camera_ondevice {
+            crate::capture::note_ring();
+        }
         // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the
         // classifier: an entrance-panel call publishes it (updating the retained sensor and reporting
         // the code so the caller can (dis)arm the watchdog); a floor call's ringing is suppressed; an
