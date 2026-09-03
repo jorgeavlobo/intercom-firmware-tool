@@ -229,7 +229,7 @@ mod tests {
         assert!(is_jpeg(&[0xFF, 0xD8, 0xFF, 0xD9]));
         assert!(is_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIF\xff\xd9"));
         // Trailing padding / metadata after EOI is fine — the EOI need not be the last two bytes
-        // (Copilot review on PR #170: some encoders append bytes after EOI, and the file is still valid).
+        // (some encoders append bytes after EOI, and the file is still a valid, viewable JPEG).
         assert!(is_jpeg(b"\xff\xd8\xff\xe0\x00\x10JFIF\xff\xd9\x00\x00   trailer"));
         assert!(!is_jpeg(b"")); // empty
         assert!(!is_jpeg(b"\xff\xd8\xff")); // no EOI, too short
