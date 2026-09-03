@@ -450,6 +450,31 @@ pub fn note_pending_ring() -> u64 {
     id
 }
 
+/// Seed [`RING_EVENT_SEQ`] ABOVE any `ring-<id>.jpg` that survived a daemon restart, so a re-exec /
+/// watchdog respawn WITHIN the retention window can't reuse an id and overwrite a prior process's file
+/// — which a still-delivered notification's `/ring-<id>.jpg` URL points at (that would hand the old
+/// event the new visitor's picture, breaking the immutable-URL guarantee). tmpfs outlives a daemon
+/// restart but a reboot clears it, so a fresh boot finds no files and stays at 0. Call ONCE at startup,
+/// before any ring is handled. Best-effort: an unreadable dir / unparsable name is ignored (worst case
+/// the next id is lower than a surviving file's, the pre-existing behaviour). Blocking `std::fs`; the
+/// scan is a one-time, tiny tmpfs read.
+pub fn seed_ring_event_seq() {
+    let Ok(entries) = std::fs::read_dir(run_dir()) else { return };
+    let mut max_id = 0u64;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if let Some(id) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix(RING_FILE_PREFIX))
+            .and_then(|n| n.strip_suffix(RING_FILE_SUFFIX))
+            .and_then(|mid| mid.parse::<u64>().ok())
+        {
+            max_id = max_id.max(id);
+        }
+    }
+    RING_EVENT_SEQ.store(max_id, Ordering::Relaxed);
+}
+
 /// Try to become THE ring-capture runner. `Some(guard)` (won the [`RING_RUNNER_ACTIVE`] false→true flip)
 /// means the caller owns the single runner slot; the [`RingRunnerGuard`] releases it on drop — including
 /// on a panic/abort — so a crashed runner can never leave the slot stuck `true` (which would silently

@@ -391,6 +391,12 @@ async fn run() -> Result<bool, String> {
     // independently of CAMERA_ENABLED in a hand-edited conf, and without the camera feature there is no
     // stream to capture. (A live view_tx already implies camera_enabled, so this is belt-and-braces.)
     if cfg.camera_enabled && cfg.camera_ondevice {
+        // Seed the ring event-id counter above any ring-<id>.jpg that survived a daemon restart (tmpfs
+        // outlives a re-exec/watchdog respawn; only a reboot clears it), so a new process never reuses an
+        // id and overwrites a prior process's file that a delivered notification still points at. One-time
+        // tmpfs scan; a fresh boot finds none and starts at 0. Runs regardless of on-demand — a ring
+        // capture needs no SIP UA.
+        capture::seed_ring_event_seq();
         if let Some(view_tx) = view_tx.clone() {
             let cfg_fr = cfg.clone();
             tokio::spawn(async move {
