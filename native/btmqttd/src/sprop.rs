@@ -37,6 +37,23 @@
 //!   * The first view is the ~20 s parser resolve (unchanged); every later view is fast. Until a live
 //!     view produces the SPS/PPS, it just keeps listening.
 //!
+//! ## Self-heal the CURRENT view when the learn happens mid-view (issue #146, fix B)
+//! Patching the tmpfs SDP fixes every LATER open, but go2rtc's `exec:` ffmpeg producer for the view that
+//! is happening RIGHT NOW already read the BARE SDP at spawn and never re-reads it — so that view stays
+//! undecodable (`non-existing PPS 0 referenced`) until the producer respawns. go2rtc does NOT restart an
+//! `exec:` producer on its own (v1.9.14: "consumers must re-request the stream"). So, when the runtime
+//! patch actually INSERTS sprop into a bare SDP (i.e. the running producer is stale), this task nudges
+//! the producer to respawn by sending it SIGTERM ([`respawn_go2rtc_producer`]): the stream drops, Home
+//! Assistant's camera reconnects, and go2rtc runs a fresh `exec:` ffmpeg that opens the PATCHED SDP with
+//! the parameter sets from the first frame — the view self-heals in seconds, no `go2rtcd restart`, no
+//! human, and no firewall touch (#145 discipline). This is a BACKSTOP: fix A (the #169 first-run warm-up)
+//! learns before the first open in the common case, so the producer already reads a patched SDP and there
+//! is nothing to respawn; the patch-then-respawn only fires when a real view learns first. In the rare
+//! case a first-run warm-up capture is the view that learns, its one-frame grab may be interrupted by the
+//! respawn and simply retries on the next boot — by which point the value is persisted, so `go2rtcd`
+//! assembles the SDP with sprop at boot, the producer starts correct, and no runtime patch/respawn ever
+//! fires again on that unit.
+//!
 //! ## Why a tmpfs runtime SDP (the rootfs is read-only)
 //! The device rootfs — including `/etc` — is mounted READ-ONLY (see `persist.rs`), so a runtime write to
 //! the `/etc` SDP fails with `EROFS`. The design therefore SPLITS the SDP:
@@ -74,6 +91,14 @@ const SPROP_RTP_ADDR: &str = "127.0.0.1:40100";
 /// The `a=fmtp` fragment we splice sprop in AFTER — matches Go2RtcConfig.BuildOnDeviceSdp's order so a
 /// patched SDP equals what the installer would have written with CameraSprop set.
 const FMTP_ANCHOR: &str = "packetization-mode=1;";
+
+/// The go2rtc daemon path — the parent process of the `exec:` ffmpeg producer we respawn
+/// (`PayloadBinaries.Go2rtc.InstallPath` / `go2rtcd`'s `$DAEMON`). The producer's ffmpeg path is the
+/// vendored ffmpeg — reused from [`crate::capture::DEFAULT_FFMPEG_BIN`] (one source of truth), since
+/// go2rtc's generated `exec:` argv[0] is that FIXED path. Together they identify — precisely — the ONE
+/// process safe to SIGTERM for the fix-B respawn ([`respawn_go2rtc_producer`]): argv[0] is that ffmpeg,
+/// its input is our SDP, and its direct parent is this daemon.
+const GO2RTC_DAEMON_PATH: &str = "/usr/sbin/go2rtc";
 
 /// How long a single `recv_from` waits before we loop back to re-check `stopping` / the persisted state.
 /// Short enough that a shutdown (or an operator pre-seed) is observed promptly while a view is idle.
@@ -194,10 +219,18 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
                         // without waiting for a reboot. A failure here is NON-fatal — the value is
                         // already persisted, so the next boot's go2rtcd splices it in regardless; just
                         // log and still succeed.
-                        if let Err(e) = patch_sdp(&value).await {
-                            eprintln!(
+                        match patch_sdp(&value).await {
+                            // We just INSERTED sprop into a bare runtime SDP — the live go2rtc `exec:`
+                            // producer already read that bare SDP and won't re-read it, so THIS view stays
+                            // undecodable until the producer respawns (#146 fix B). Nudge it to respawn on
+                            // the patched SDP so the current view self-heals; best-effort, non-fatal.
+                            Ok(true) => respawn_go2rtc_producer().await,
+                            // The runtime SDP already carried sprop (e.g. go2rtcd spliced a persisted value
+                            // at boot), so the running producer already reads it — nothing to respawn.
+                            Ok(false) => {}
+                            Err(e) => eprintln!(
                                 "btmqttd: sprop listener: persisted the value but could not patch the runtime SDP ({e}); it takes effect on the next boot"
-                            );
+                            ),
                         }
                         eprintln!(
                             "btmqttd: learned camera parameter sets (from a live view) — the on-device camera now resolves instantly"
@@ -423,14 +456,21 @@ fn b64(bytes: &[u8]) -> String {
 }
 
 /// Splice a learned sprop into the RUNTIME tmpfs SDP's ([`SDP_PATH`]) fmtp line and write it back
-/// atomically (temp + rename, 0644 — the SDP carries no secret). The temp file sits in the SAME tmpfs
-/// dir as the target, so the rename is atomic. Idempotent: a no-op if sprop is already present (e.g.
-/// go2rtcd already spliced a persisted value at boot). This is a best-effort fast-path for the current
-/// boot; durability comes from the persisted value, not from this write.
-async fn patch_sdp(sprop: &str) -> std::io::Result<()> {
-    let sdp = tokio::fs::read_to_string(SDP_PATH).await?;
+/// atomically (temp + rename, 0644 — the SDP carries no secret). Returns `Ok(true)` when it actually
+/// INSERTED sprop, `Ok(false)` when it was a no-op because sprop is already present (e.g. go2rtcd already
+/// spliced a persisted value at boot) — the caller respawns the go2rtc producer ONLY on a real insert
+/// (#146 fix B), so a no-op never disturbs a producer that already reads the parameter sets. This is a
+/// best-effort fast-path for the current boot; durability comes from the persisted value, not this write.
+async fn patch_sdp(sprop: &str) -> std::io::Result<bool> {
+    patch_sdp_in(SDP_PATH, sprop).await
+}
+
+/// [`patch_sdp`] with the target path injected, so the insert/no-op/atomic-rename behaviour is unit-tested
+/// against a temp file rather than the fixed runtime path.
+async fn patch_sdp_in(path: &str, sprop: &str) -> std::io::Result<bool> {
+    let sdp = tokio::fs::read_to_string(path).await?;
     if sdp.contains("sprop-parameter-sets=") {
-        return Ok(());
+        return Ok(false);
     }
     if !sdp.contains(FMTP_ANCHOR) {
         return Err(std::io::Error::new(
@@ -445,7 +485,7 @@ async fn patch_sdp(sprop: &str) -> std::io::Result<()> {
     );
     // Write a temp file in the same directory, fsync, then rename over the target so a crash never
     // leaves go2rtc a half-written SDP.
-    let tmp = format!("{SDP_PATH}.tmp.{}", std::process::id());
+    let tmp = format!("{path}.tmp.{}", std::process::id());
     {
         let mut f = tokio::fs::File::create(&tmp).await?;
         f.write_all(patched.as_bytes()).await?;
@@ -454,8 +494,139 @@ async fn patch_sdp(sprop: &str) -> std::io::Result<()> {
     }
     use std::os::unix::fs::PermissionsExt;
     tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).await?;
-    tokio::fs::rename(&tmp, SDP_PATH).await?;
-    Ok(())
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(true)
+}
+
+/// Nudge go2rtc to re-read a freshly-patched runtime SDP by terminating its `exec:` ffmpeg producer
+/// (issue #146, fix B). That producer read the BARE SDP at spawn and never re-reads it, so the current
+/// view stays undecodable until it respawns — and go2rtc does NOT restart an `exec:` producer itself
+/// (v1.9.14). SIGTERM it: the stream drops, Home Assistant's camera reconnects, and go2rtc runs a fresh
+/// ffmpeg that opens the PATCHED SDP with the parameter sets from the first frame. Best-effort and
+/// NON-fatal — if no producer is found or the signal fails, the persisted value still fixes the next
+/// open/boot. Touches no firewall (#145). Blocking `/proc` scan → `spawn_blocking`.
+async fn respawn_go2rtc_producer() {
+    // Do the whole scan-validate-signal in ONE blocking pass (no async yield between identifying a
+    // producer and SIGTERMing it), so a PID can't be recycled out from under us across an await.
+    let signalled = match tokio::task::spawn_blocking(|| {
+        terminate_sdp_producers(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, SDP_PATH)
+    })
+    .await
+    {
+        Ok(n) => n,
+        // The blocking task panicked. Log the JoinError so a "no self-heal" report isn't confused with
+        // "no producer found"; non-fatal — the persisted value still fixes the next open/boot.
+        Err(e) => {
+            eprintln!("btmqttd: sprop: producer-respawn task failed ({e}); relying on the next open/boot");
+            return;
+        }
+    };
+    if signalled == 0 {
+        eprintln!(
+            "btmqttd: sprop: no running go2rtc exec producer to respawn; the patched SDP takes effect on its next start"
+        );
+    }
+}
+
+/// Scan `/proc` and SIGTERM the go2rtc `exec:` ffmpeg producer(s) reading OUR runtime SDP, returning how
+/// many were signalled. Each PID is VALIDATED and signalled in the SAME loop iteration — identity checked
+/// ([`pid_is_sdp_producer`]) immediately before `kill`, with no async yield between — so PID reuse between
+/// discovery and the signal can't make us terminate an unrelated process (#146 review): a recycled PID
+/// would itself have to be a `<ffmpeg> -i <sdp>` child of go2rtc in that microsecond gap, which is
+/// effectively impossible. (The device kernel — Linux 4.9 — predates `pidfd`, the only mechanism that
+/// truly cannot follow PID reuse, so re-validation immediately before the kill is the best available.)
+/// Blocking (`read_dir` + per-pid reads); only numeric `/proc/<pid>` entries are considered and any
+/// unreadable entry is skipped (best-effort).
+fn terminate_sdp_producers(ffmpeg_path: &str, daemon_path: &str, sdp_path: &str) -> usize {
+    let mut signalled = 0usize;
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue; // not a numeric pid directory
+        };
+        if !pid_is_sdp_producer(pid, ffmpeg_path, daemon_path, sdp_path) {
+            continue;
+        }
+        // Validated immediately above; SIGTERM now with no intervening await. SIGTERM lets ffmpeg exit
+        // cleanly so go2rtc tears the producer down tidily.
+        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) } == 0 {
+            signalled += 1;
+            eprintln!(
+                "btmqttd: sprop: signalled the go2rtc exec producer (pid {pid}) to re-read the patched SDP"
+            );
+        } else {
+            // Non-fatal (the persisted value still fixes the next open/boot), but log with the errno so a
+            // "no self-heal" report can be told apart: ESRCH means the producer exited in the gap (already
+            // gone — its respawn reads the patch), EPERM a permission problem. Read last_os_error()
+            // immediately, before any other syscall.
+            eprintln!(
+                "btmqttd: sprop: could not signal go2rtc exec producer (pid {pid}): {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    signalled
+}
+
+/// True iff `/proc/<pid>` is CURRENTLY the go2rtc `exec:` ffmpeg producer reading OUR runtime SDP: its
+/// command line is `<ffmpeg_path> … -i <sdp_path> …` ([`cmdline_is_sdp_producer`]) AND its direct parent
+/// is the go2rtc daemon ([`parent_is`]). Both are read live from `/proc`, so calling this immediately
+/// before `kill` re-confirms the identity. Blocking; any unreadable entry ⇒ `false`.
+fn pid_is_sdp_producer(pid: i32, ffmpeg_path: &str, daemon_path: &str, sdp_path: &str) -> bool {
+    matches!(
+        std::fs::read(format!("/proc/{pid}/cmdline")),
+        Ok(cmdline) if cmdline_is_sdp_producer(&cmdline, ffmpeg_path, sdp_path)
+    ) && parent_is(pid, daemon_path)
+}
+
+/// True iff a raw `/proc/<pid>/cmdline` (arguments NUL-separated) is the go2rtc `exec:` ffmpeg producer
+/// reading OUR runtime SDP: argv[0] is EXACTLY `ffmpeg_path`, AND some `-i` argument is IMMEDIATELY
+/// followed by EXACTLY `sdp_path` (the real input pairing). Requiring the ffmpeg executable rejects a
+/// `tail`/`cat <sdp>`; requiring the `-i` adjacency rejects the SDP used as an OUTPUT or a positional
+/// argument, and the idle/ring capture ffmpeg (whose input is an `rtsp://…/doorbell` URL, not the `.sdp`
+/// file) — while the exact match also rejects a `<sdp>.bak` lookalike. Pure — unit-tested.
+fn cmdline_is_sdp_producer(cmdline: &[u8], ffmpeg_path: &str, sdp_path: &str) -> bool {
+    let mut args = cmdline.split(|&b| b == 0).filter(|a| !a.is_empty());
+    if args.next() != Some(ffmpeg_path.as_bytes()) {
+        return false; // argv[0] is not the go2rtc exec ffmpeg
+    }
+    let mut after_i = false;
+    for arg in args {
+        if after_i && arg == sdp_path.as_bytes() {
+            return true; // `-i <sdp_path>` — the input pairing
+        }
+        after_i = arg == b"-i";
+    }
+    false
+}
+
+/// True iff `pid`'s DIRECT parent process's executable is `exe_path` — read `PPid:` from
+/// `/proc/<pid>/status` ([`parse_ppid`]), then `readlink /proc/<ppid>/exe`. go2rtc runs its `exec:`
+/// command directly (v1.9.14: `exec.Command`, no shell wrapper), so its ffmpeg producer's parent IS the
+/// go2rtc daemon. Any read/parse failure ⇒ `false`: an unverifiable parent is never signalled. Blocking.
+fn parent_is(pid: i32, exe_path: &str) -> bool {
+    let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+        return false;
+    };
+    let Some(ppid) = parse_ppid(&status) else {
+        return false;
+    };
+    matches!(
+        std::fs::read_link(format!("/proc/{ppid}/exe")),
+        Ok(p) if p == std::path::Path::new(exe_path)
+    )
+}
+
+/// Parse the `PPid:` field (the parent PID) out of `/proc/<pid>/status`. Returns `None` if the field is
+/// absent or non-numeric. Pure — unit-tested.
+fn parse_ppid(status: &str) -> Option<i32> {
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))
+        .and_then(|rest| rest.trim().parse::<i32>().ok())
 }
 
 #[cfg(test)]
@@ -668,5 +839,109 @@ mod tests {
                 "a=fmtp:96 packetization-mode=1;sprop-parameter-sets={value};profile-level-id=42801f\n"
             )
         );
+    }
+
+    // --- go2rtc exec producer identification (issue #146, fix B) ---
+
+    #[test]
+    fn cmdline_matches_only_the_ffmpeg_with_the_sdp_as_input() {
+        let ff = crate::capture::DEFAULT_FFMPEG_BIN; // "/usr/sbin/ffmpeg"
+        let sdp = SDP_PATH; // "/var/run/btmqttd/doorbell.sdp"
+        // The go2rtc exec producer: `<ffmpeg> … -i <runtime SDP> …` — argv[0] is ffmpeg and the SDP is
+        // the argument right after `-i`.
+        let producer = [
+            ff.as_bytes(),
+            b"-hide_banner",
+            b"-protocol_whitelist",
+            b"file,udp,rtp",
+            b"-i",
+            sdp.as_bytes(),
+            b"-an",
+            b"-c:v",
+            b"copy",
+        ]
+        .join(&0u8);
+        assert!(cmdline_is_sdp_producer(&producer, ff, sdp));
+
+        // The idle/ring capture ffmpeg reads an rtsp:// URL, never the .sdp FILE — must NOT match.
+        let capture = [ff.as_bytes(), b"-rtsp_transport", b"tcp", b"-i", b"rtsp://camera:p@127.0.0.1:8554/doorbell", b"-frames:v", b"1"]
+            .join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&capture, ff, sdp));
+
+        // go2rtc itself takes -config <yaml>, not the SDP path — must NOT match.
+        let go2rtc = [b"/usr/sbin/go2rtc".as_ref(), b"-config", b"/etc/btmqttd/go2rtc/go2rtc.yaml"].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&go2rtc, ff, sdp));
+
+        // `tail`/`cat <sdp>`: argv[0] is not the ffmpeg executable — must NOT match (the over-broad
+        // "any argument equals the SDP path" matcher would have wrongly killed these).
+        let tail = [b"/usr/bin/tail".as_ref(), b"-f", sdp.as_bytes()].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&tail, ff, sdp));
+
+        // ffmpeg with the SDP as an OUTPUT / positional argument (not after `-i`) — must NOT match.
+        let sdp_as_output = [ff.as_bytes(), b"-i", b"rtsp://x", b"-f", b"sdp", sdp.as_bytes()].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&sdp_as_output, ff, sdp));
+
+        // The SDP path present but NOT paired to `-i` — must NOT match.
+        let unpaired = [ff.as_bytes(), b"-map_metadata", sdp.as_bytes(), b"-i", b"rtsp://x"].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&unpaired, ff, sdp));
+
+        // A trailing `-i` with no following argument — must NOT match (no input pairing).
+        let dangling_i = [ff.as_bytes(), b"-hide_banner", b"-i"].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&dangling_i, ff, sdp));
+
+        // An EXACT-argument match, not a substring: a `<sdp>.bak` lookalike after `-i` must NOT match.
+        let lookalike = [ff.as_bytes(), b"-i", b"/var/run/btmqttd/doorbell.sdp.bak"].join(&0u8);
+        assert!(!cmdline_is_sdp_producer(&lookalike, ff, sdp));
+
+        // Empty cmdline (e.g. a kernel thread) never matches.
+        assert!(!cmdline_is_sdp_producer(&[], ff, sdp));
+    }
+
+    #[test]
+    fn parse_ppid_reads_the_parent_pid_field() {
+        let status = "Name:\tffmpeg\nUmask:\t0022\nState:\tS (sleeping)\nTgid:\t4321\nPid:\t4321\nPPid:\t1234\nUid:\t0\t0\t0\t0\n";
+        assert_eq!(parse_ppid(status), Some(1234));
+        // PPid 0 (the idle task's parent) parses as 0 — a real value, distinct from absent.
+        assert_eq!(parse_ppid("PPid:\t0\n"), Some(0));
+        // Absent or non-numeric ⇒ None (an unverifiable parent is never signalled).
+        assert_eq!(parse_ppid("Name:\tx\nUid:\t0\n"), None);
+        assert_eq!(parse_ppid("PPid:\tnotanumber\n"), None);
+    }
+
+    #[tokio::test]
+    async fn patch_sdp_in_inserts_once_then_is_a_noop() {
+        // Unique temp target so the atomic temp+rename runs against a real file without the fixed path.
+        let path = std::env::temp_dir()
+            .join(format!("btmqttd-sprop-test-{}.sdp", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let bare = "v=0\na=fmtp:96 packetization-mode=1;profile-level-id=42801f\na=recvonly\n";
+        tokio::fs::write(&path, bare).await.unwrap();
+
+        // First patch INSERTS and reports it (true), so the caller respawns the stale producer.
+        assert!(patch_sdp_in(&path, "AAA,BBB=").await.unwrap(), "first patch inserts sprop");
+        let after = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(
+            after,
+            "v=0\na=fmtp:96 packetization-mode=1;sprop-parameter-sets=AAA,BBB=;profile-level-id=42801f\na=recvonly\n"
+        );
+
+        // Second patch is a NO-OP (sprop already present) and reports false, so NO producer respawn fires.
+        assert!(!patch_sdp_in(&path, "CCC,DDD=").await.unwrap(), "second patch is a no-op");
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), after, "a no-op leaves the SDP unchanged");
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[tokio::test]
+    async fn patch_sdp_in_errors_without_an_fmtp_anchor() {
+        let path = std::env::temp_dir()
+            .join(format!("btmqttd-sprop-noanchor-{}.sdp", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        tokio::fs::write(&path, "v=0\nc=IN IP4 127.0.0.2\n").await.unwrap();
+        // No `packetization-mode=1;` to splice after ⇒ Err (nothing written), never a false "inserted".
+        assert!(patch_sdp_in(&path, "AAA,BBB=").await.is_err());
+        let _ = tokio::fs::remove_file(&path).await;
     }
 }
