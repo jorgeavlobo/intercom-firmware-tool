@@ -54,6 +54,13 @@ const STREAM_NAME: &str = "doorbell";
 const DEFAULT_RUN_DIR: &str = "/var/run/btmqttd";
 const RING_JPG_FILE: &str = "ring.jpg";
 
+/// How recent a ring snapshot must be to still be served at `/ring.jpg`. A ring image is a transient
+/// "who just rang" frame: the HA push fetches it within seconds of the capture. An OLDER one — a previous
+/// ring that THIS ring could not refresh (the broker was offline, so the capture was skipped, or the
+/// capture failed) — must read as a 404, never a stale visitor. Freshness is judged by the file's mtime
+/// (the capture writes it "now"), so no fragile per-ring cache-invalidation is needed.
+const RING_FRESH_WINDOW: Duration = Duration::from_secs(120);
+
 /// Overall capture budget: bring-up + connect + one keyframe + encode. The panel emits an in-stream
 /// SPS/PPS only every ~20 s on a cold open (issue #120), and a fresh SIP bring-up adds a second or
 /// two, so this must comfortably exceed that; ffmpeg is killed if it overruns.
@@ -134,6 +141,20 @@ fn ring_jpg_path() -> std::path::PathBuf {
 pub fn read_ring_jpg() -> Option<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(ring_jpg_path()).ok()?;
+    // Serve ONLY a recent ring snapshot: an image older than RING_FRESH_WINDOW is a previous ring that
+    // could not be refreshed (broker offline ⇒ capture skipped, or the capture failed), so it must read as
+    // 404 rather than a stale visitor — this is what keeps a broker-offline ring from leaving a stale
+    // /ring.jpg. Lenient if the mtime can't be read (serve): the mtime is available on the tmpfs it lives
+    // on, and a missing mtime should not blank a genuinely-fresh capture.
+    let stale = file
+        .metadata()
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|m| m.elapsed().ok())
+        .is_some_and(|age| age > RING_FRESH_WINDOW);
+    if stale {
+        return None;
+    }
     let mut buf = Vec::new();
     file.take(crate::persist::MAX_IDLE_JPG_BYTES + 1).read_to_end(&mut buf).ok()?;
     (!buf.is_empty() && buf.len() as u64 <= crate::persist::MAX_IDLE_JPG_BYTES).then_some(buf)
