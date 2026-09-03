@@ -646,8 +646,11 @@ async fn publish_frame(
         // No SIP wake is needed (the panel is already streaming because it is ringing), it is bounded by
         // the capture's own timeout, and it NEVER touches idle.jpg. On-device only (nowhere to serve it
         // otherwise). capture.rs's single-capture guard drops it if one is already running, so repeated
-        // rings can't pile up ffmpeg processes.
-        if cfg.camera_ondevice {
+        // rings can't pile up ffmpeg processes. Gate on the media path (camera_enabled) AS WELL as
+        // on-device: CAMERA_ONDEVICE can be set independently in a hand-edited conf, and without the
+        // camera feature there is no RTP siphon for go2rtc to serve, so a capture would just burn its
+        // full timeout on every ring.
+        if cfg.camera_enabled && cfg.camera_ondevice {
             let cfg_ring = cfg.clone();
             let client_ring = client.clone();
             tokio::spawn(async move {

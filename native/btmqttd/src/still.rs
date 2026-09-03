@@ -352,9 +352,14 @@ fn jpeg_response(body: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A bodyless status response (error paths). Always `Connection: close`.
+/// A bodyless status response (error paths). Always `Connection: close`, and `no-store` so a client or
+/// proxy never caches the error — in particular a `/ring.jpg` 404 must not be remembered and keep
+/// masking a ring snapshot written moments later.
 fn simple_response(status: &str) -> Vec<u8> {
-    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes()
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes()
 }
 
 async fn write_all_timeout<S>(stream: &mut S, bytes: &[u8]) -> std::io::Result<()>

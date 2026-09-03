@@ -243,7 +243,8 @@ async fn handle_json(
             if !cfg.camera_ondevice || view_tx.is_none() {
                 eprintln!(
                     "btmqttd: ignored update_idle: on-device camera + on-demand viewing required \
-                     (CAMERA_ONDEVICE=1 and CAMERA_ONDEMAND_ENABLED=1)"
+                     (CAMERA_ENABLED=1, CAMERA_ONDEVICE=1 and CAMERA_ONDEMAND_ENABLED=1 — the SIP UA \
+                     that wakes the panel needs all three)"
                 );
                 return;
             }

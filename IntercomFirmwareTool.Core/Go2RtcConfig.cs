@@ -427,7 +427,10 @@ namespace IntercomFirmwareTool.Core
                 $"- The idle snapshot at /idle.jpg is a REAL frame of the empty doorway: the\n" +
                 $"  panel captures it once automatically after the first boot, and you can\n" +
                 $"  refresh it any time with the \"Update idle snapshot\" button (press it to\n" +
-                $"  re-capture the current view). It persists across reboots and reflashes.\n"));
+                $"  re-capture the current view). It persists across reboots and reflashes.\n" +
+                $"  Both the auto-capture and the button need on-demand viewing enabled (the\n" +
+                $"  panel must be woken to photograph an idle doorway); with on-demand off,\n" +
+                $"  the endpoint keeps serving the neutral placeholder instead.\n"));
 
             sb.Append("\nRing snapshot + notification\n----------------------------\n");
             sb.Append(string.Create(ci,
