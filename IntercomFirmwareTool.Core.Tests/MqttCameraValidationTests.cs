@@ -61,6 +61,44 @@ public class MqttCameraValidationTests
     }
 
     [Fact]
+    public void Off_device_config_accepts_an_existing_topic_equal_to_the_derived_ring_topic()
+    {
+        // The ring-snapshot-ready topic (default "Bticino/ring_snapshot") is PUBLISHED only under
+        // on-device capture. An off-device / camera-off build derives the topic but never publishes it,
+        // so an existing publish topic that happens to equal the derived ring topic is NOT a real
+        // collision — validation must NOT reject it (regression: including the ring topic in the
+        // collision set unconditionally wrongly failed a previously-valid opt-out config).
+        var offDevice = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = false,          // off-device: go2rtc/HA fetch the frame, btmqttd never publishes it
+            CameraTargetHost = "192.168.1.9",
+            TopicDump = "Bticino/ring_snapshot",
+        };
+        MqttInstaller.Validate(offDevice); // must not throw
+
+        // Camera entirely off is likewise safe.
+        var cameraOff = new MqttOptions("broker.lan") { TopicDump = "Bticino/ring_snapshot" };
+        MqttInstaller.Validate(cameraOff); // must not throw
+    }
+
+    [Fact]
+    public void On_device_config_still_rejects_an_existing_topic_equal_to_the_ring_topic()
+    {
+        // On-device, btmqttd DOES publish the ring-snapshot topic, so a second publish topic aliased
+        // onto it is a genuine collision (two streams on one topic) and must still be rejected.
+        var onDevice = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+            TopicDump = "Bticino/ring_snapshot",   // collides with the derived ring topic
+        };
+        Assert.Throws<ArgumentException>(() => MqttInstaller.Validate(onDevice));
+    }
+
+    [Fact]
     public void Rejects_a_camera_target_pinned_to_loopback_openserver()
     {
         // "openserver" is the stock device alias the installer pins to 127.0.0.1. When it is the

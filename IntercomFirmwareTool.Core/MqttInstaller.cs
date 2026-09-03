@@ -1095,12 +1095,16 @@ namespace IntercomFirmwareTool.Core
                 opts.TopicCmdResult, opts.TopicFileContent, opts.EffectiveTopicVolume,
                 opts.EffectiveTopicMute, opts.EffectiveTopicEntrancePanelCall,
                 opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                // Ring-snapshot-ready (#169): btmqttd publishes to it (on-device), so it is validated +
-                // collision-checked like the other momentary event topics — always in the set, matching
-                // entrance/floor/call-state (which are likewise always present regardless of a live call).
-                opts.EffectiveTopicRingSnapshot,
                 opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
             };
+            // Ring-snapshot-ready (#169): btmqttd publishes to it ONLY under on-device capture
+            // (camera_enabled && camera_ondevice); an off-device / camera-off build derives the topic
+            // (it is still written to the .conf) but never publishes it. So include it in the collision
+            // set only when capture can run — mirroring the light STATE / update topics below. Otherwise
+            // an opt-out config whose existing publish topic happens to equal the derived ring topic
+            // (e.g. TopicDump == "Bticino/ring_snapshot") would be wrongly rejected as a collision.
+            bool ringPublished = opts.CameraEnabled && opts.CameraOnDevice;
+            if (ringPublished) publishTopics.Add(opts.EffectiveTopicRingSnapshot);
             // The light STATE topic is published whenever the light is ENABLED, in BOTH modes: a
             // bistable light publishes the tracked on/off, and a momentary light publishes an empty
             // retained payload on connect to clear any stale bistable value (LightCtl::seed). So it
@@ -1172,10 +1176,17 @@ namespace IntercomFirmwareTool.Core
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                         opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                         opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                        opts.EffectiveTopicRingSnapshot, opts.EffectiveTopicMaintenance })
+                                        opts.EffectiveTopicMaintenance })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
                         CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
+            // The ring-snapshot topic is PUBLISHED only under on-device capture (see the collision set
+            // above) — check its self-loop with TopicRx only then, like the light STATE / update topics.
+            // A build that can't run capture never publishes it, so a TopicRx wildcard that happens to
+            // cover the derived ring topic is harmless there and must not fail a valid opt-out config.
+            if (ringPublished && TopicFilterMatches(rxFilter, opts.EffectiveTopicRingSnapshot))
+                throw new ArgumentException(
+                    CoreStrings.Get("Mqtt_RxMatchesPublishTopic"), nameof(opts));
             // The light STATE topic is PUBLISHED whenever the light is ENABLED — a bistable light
             // publishes the tracked on/off, and a momentary light publishes an empty retained clear
             // on connect (LightCtl::seed) — so its self-loop with TopicRx is checked in both modes.
