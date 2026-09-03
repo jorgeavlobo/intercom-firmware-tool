@@ -531,11 +531,16 @@ pub fn note_pending_ring(broker_epoch: u64) -> u64 {
 /// process would run ~31 years), so ids from different process lifetimes never overlap.
 const RING_ID_BOOT_STRIDE: u64 = 1_000_000_000;
 
-/// The base of a boot's ring-id range: `boot * RING_ID_BOOT_STRIDE`, or `None` if that would overflow
-/// `u64` (a boot number above ~1.8e10 — physically unreachable). `None` fails the seed closed, so ids are
-/// never derived from a saturated (range-overlapping) value.
+/// The base of a boot's ring-id range: `boot * RING_ID_BOOT_STRIDE`, or `None` if the boot's COMPLETE
+/// range `[base, base + RING_ID_BOOT_STRIDE)` would not fit in `u64` (a boot above ~1.8e10 — physically
+/// unreachable). Requiring the full range — by checking the NEXT boot's base `(boot+1) * STRIDE` also fits
+/// — matters because `note_pending_ring` allocates ids with `wrapping_add`: a partial final range could
+/// wrap past `u64::MAX` to a low, already-used id. `None` fails the seed closed, so ids are never derived
+/// from a range that could wrap or overlap.
 fn ring_seed_base(boot: u64) -> Option<u64> {
-    boot.checked_mul(RING_ID_BOOT_STRIDE)
+    let base = boot.checked_mul(RING_ID_BOOT_STRIDE)?;
+    boot.checked_add(1).and_then(|next| next.checked_mul(RING_ID_BOOT_STRIDE))?;
+    Some(base)
 }
 
 /// Seed [`RING_EVENT_SEQ`] so a fresh process never reuses a ring id that a still-undelivered
@@ -826,11 +831,13 @@ mod tests {
         // saturate — a saturated base would overlap a prior range and reuse ids (#169).
         assert_eq!(ring_seed_base(0), Some(0));
         assert_eq!(ring_seed_base(1), Some(RING_ID_BOOT_STRIDE));
-        // Largest boot number whose range base still fits in u64.
-        let max_ok = u64::MAX / RING_ID_BOOT_STRIDE;
-        assert_eq!(ring_seed_base(max_ok), Some(max_ok * RING_ID_BOOT_STRIDE));
-        // One higher overflows → None (physically unreachable, but must not saturate).
-        assert_eq!(ring_seed_base(max_ok + 1), None);
+        // Largest boot whose COMPLETE range [base, base+STRIDE) still fits — i.e. (boot+1)*STRIDE does not
+        // overflow. Its base is accepted...
+        let max_full = u64::MAX / RING_ID_BOOT_STRIDE - 1;
+        assert_eq!(ring_seed_base(max_full), Some(max_full * RING_ID_BOOT_STRIDE));
+        // ...but the next boot's range would cross u64::MAX (a partial range note_pending_ring could wrap
+        // through), so it fails closed — as does a base that overflows outright.
+        assert_eq!(ring_seed_base(max_full + 1), None);
         assert_eq!(ring_seed_base(u64::MAX), None);
     }
 
