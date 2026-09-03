@@ -290,12 +290,18 @@ pub fn read_idle_jpg() -> Option<Vec<u8>> {
 /// serves it on the next poll (no restart). Atomic write + dir fsync like every other record, so a
 /// reboot mid-write never leaves a torn image — and, living on the reboot- and reflash-persistent
 /// `cfg/extra` partition, the captured thumbnail survives both. NOT keyed: the newest capture is always
-/// the wanted one. The caller has already validated the bytes are a real JPEG. Returns `true` on
-/// success. Blocking; call via `spawn_blocking`.
+/// the wanted one. The caller has already validated the bytes are a real JPEG.
+///
+/// `commit_ok` is a COMMIT GATE evaluated at the LAST moment — after the temp file is written, in the
+/// same blocking step, immediately before the atomic rename that makes it the new `idle.jpg`. If it
+/// returns `false` the temp is discarded and the existing `idle.jpg` is left UNTOUCHED. `capture_idle`
+/// uses this to re-check ring-invalidation right at the commit point, so a ring detected DURING the
+/// (blocking) write can't get a visitor frame persisted as the empty-doorway thumbnail. Returns `true`
+/// only when the rename committed. Blocking; call via `spawn_blocking`.
 #[must_use]
-pub fn store_idle_jpg(bytes: &[u8]) -> bool {
+pub fn store_idle_jpg(bytes: &[u8], commit_ok: impl FnOnce() -> bool) -> bool {
     let dir = state_dir();
-    atomic_write_in(&dir, &idle_jpg_file_in(&dir), bytes)
+    atomic_write_gated_in(&dir, &idle_jpg_file_in(&dir), bytes, commit_ok)
 }
 
 fn idle_jpg_file_in(dir: &Path) -> PathBuf {
@@ -356,6 +362,19 @@ fn read_state_in(dir: &Path, host: &str) -> (bool, Option<(Ipv4Addr, Ipv4Addr)>)
 /// caller doesn't advance its change-gate and retries later, rather than claiming a
 /// durability it didn't get. Kept in ONE place so the two records can't drift.
 fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
+    atomic_write_gated_in(dir, path, body, || true)
+}
+
+/// As [`atomic_write_in`], but `commit_ok` is evaluated after the temp file is written and immediately
+/// before the rename (the atomic commit): if it returns `false`, the temp is removed and `path` is left
+/// untouched (returns `false`). The gate runs in this same blocking call — there is no async yield
+/// between it and the rename — so a caller can make the "publish or discard" decision at the last moment.
+fn atomic_write_gated_in(
+    dir: &Path,
+    path: &Path,
+    body: &[u8],
+    commit_ok: impl FnOnce() -> bool,
+) -> bool {
     if let Err(e) = std::fs::create_dir_all(dir) {
         eprintln!("btmqttd: persist: cannot create {}: {e}", dir.display());
         return false;
@@ -365,20 +384,28 @@ fn atomic_write_in(dir: &Path, path: &Path, body: &[u8]) -> bool {
         return false;
     };
     match crate::receiver::create_unique_temp(path_str, body) {
-        Ok(tmp) => match std::fs::rename(&tmp, path_str) {
-            Ok(()) => match std::fs::File::open(dir).and_then(|dirf| dirf.sync_all()) {
-                Ok(()) => true,
+        Ok(tmp) => {
+            if !commit_ok() {
+                // Vetoed at the commit point (e.g. a ring was detected during the write) — discard the
+                // temp and leave the existing file in place.
+                let _ = std::fs::remove_file(&tmp);
+                return false;
+            }
+            match std::fs::rename(&tmp, path_str) {
+                Ok(()) => match std::fs::File::open(dir).and_then(|dirf| dirf.sync_all()) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
+                        false
+                    }
+                },
                 Err(e) => {
-                    eprintln!("btmqttd: persist: cannot sync dir {}: {e}", dir.display());
+                    let _ = std::fs::remove_file(&tmp);
+                    eprintln!("btmqttd: persist: cannot write {path_str}: {e}");
                     false
                 }
-            },
-            Err(e) => {
-                let _ = std::fs::remove_file(&tmp);
-                eprintln!("btmqttd: persist: cannot write {path_str}: {e}");
-                false
             }
-        },
+        }
         Err(e) => {
             eprintln!("btmqttd: persist: cannot create temp for {path_str}: {e}");
             false
@@ -793,6 +820,44 @@ mod tests {
         // An empty file reads back as None (treated as "no idle image yet").
         assert!(atomic_write_in(&dir, &file, b""));
         assert_eq!(read_idle_jpg_in(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn atomic_write_gated_in_vetoes_the_commit_and_leaves_the_prior_file_intact() {
+        // The commit gate (issue #169) lets capture_idle re-check ring-invalidation at the LAST moment,
+        // in the same blocking step just before the atomic rename: a ring detected DURING the (blocking)
+        // write must discard the freshly-written temp and leave the existing idle.jpg UNTOUCHED — never
+        // publish a visitor frame as the empty-doorway thumbnail. Verify both branches, plus no temp leak.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(9000);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("btmqttd-gate-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = idle_jpg_file_in(&dir);
+
+        // Seed a prior "empty doorway" image via the ungated path.
+        let doorway = b"\xff\xd8\xff\xe0 doorway \xff\xd9";
+        assert!(atomic_write_in(&dir, &file, doorway));
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&doorway[..]));
+
+        // A vetoed commit (gate returns false) must NOT replace the prior file and must return false.
+        let visitor = b"\xff\xd8\xff\xe0 visitor \xff\xd9";
+        assert!(!atomic_write_gated_in(&dir, &file, visitor, || false));
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&doorway[..]), "prior file must be untouched");
+
+        // The vetoed write must not leave a temp behind (only the committed idle.jpg remains).
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(leftovers, vec![file.file_name().unwrap().to_owned()], "no temp file should linger");
+
+        // An allowed commit (gate returns true) replaces the file and returns true.
+        assert!(atomic_write_gated_in(&dir, &file, visitor, || true));
+        assert_eq!(read_idle_jpg_in(&dir).as_deref(), Some(&visitor[..]));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

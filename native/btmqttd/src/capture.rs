@@ -413,27 +413,37 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
             return false;
         }
     };
-    let last_ring = LAST_RING_MS.load(Ordering::Relaxed);
-    if last_ring != 0
-        && last_ring.saturating_add(RECENT_RING_WINDOW.as_millis() as u64) >= capture_start_ms
-    {
-        // A ring is recent (within the window before this capture) or happened during it (last_ring >=
-        // start). Discard rather than persist a visitor as the idle thumbnail (it survives reboots +
-        // reflashes); first-run retries next boot and the button can be re-pressed once the door is clear.
+    // A ring DETECTED within RECENT_RING_WINDOW before this capture started — or at any point up to the
+    // atomic commit — means a visitor is at the door, so the grabbed frame is NOT the empty doorway.
+    // LAST_RING_MS is only ever advanced, so re-reading it is monotonic: the early check below skips the
+    // (blocking) store entirely on an already-known ring, and the SAME predicate runs again as the commit
+    // gate inside store_idle_jpg so a ring that lands DURING the blocking write vetoes the rename instead
+    // of replacing idle.jpg (which survives reboots + reflashes) with a visitor frame.
+    let ring_recent = move || {
+        let last_ring = LAST_RING_MS.load(Ordering::Relaxed);
+        last_ring != 0 && last_ring.saturating_add(RECENT_RING_WINDOW.as_millis() as u64) >= capture_start_ms
+    };
+    if ring_recent() {
+        // Discard rather than persist a visitor as the idle thumbnail; first-run retries next boot and the
+        // button can be re-pressed once the door is clear.
         eprintln!(
             "btmqttd: capture: idle capture declined — a ring is recent/active (visitor present); \
              keeping the idle thumbnail as the empty doorway"
         );
         return false;
     }
-    // The atomic store is blocking std::fs — offload it off the single-threaded runtime.
-    let stored = tokio::task::spawn_blocking(move || crate::persist::store_idle_jpg(&bytes))
+    // The atomic store is blocking std::fs — offload it off the single-threaded runtime. `commit_ok`
+    // re-checks `ring_recent()` at the last moment before the rename: a ring that arrives while the temp
+    // is being written discards the temp and leaves the prior idle thumbnail intact (store returns false).
+    let stored = tokio::task::spawn_blocking(move || crate::persist::store_idle_jpg(&bytes, || !ring_recent()))
         .await
         .unwrap_or(false);
     if stored {
         eprintln!("btmqttd: capture: idle snapshot updated");
     } else {
-        eprintln!("btmqttd: capture: idle snapshot captured but could not be stored");
+        eprintln!(
+            "btmqttd: capture: idle snapshot not stored (a ring arrived during the write, or an I/O error)"
+        );
     }
     stored
 }
