@@ -212,14 +212,18 @@ pub fn read_ring_event(id: u64) -> Option<Vec<u8>> {
     let path = ring_event_path(id);
     let file = std::fs::File::open(&path).ok()?;
     // Retention TTL: a ring file past the window has aged out (its notification is long delivered), so it
-    // reads as 404. Lenient if the mtime can't be read (serve): mtime is available on the tmpfs it lives
-    // on, and a missing mtime should not blank a genuinely-fresh grab.
-    let stale = file
-        .metadata()
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|m| m.elapsed().ok())
-        .is_some_and(|age| age > RING_FRESH_WINDOW);
+    // reads as 404. A mtime in the FUTURE — `elapsed()` errors — means the wall clock stepped BACKWARD
+    // since the write (e.g. an NTP correction during boot), and must be treated as AGED, not "fresh
+    // forever": otherwise a snapshot would be served/retained indefinitely. Only a positively-confirmed
+    // age within the window serves; a genuinely-unreadable mtime stays LENIENT (serve) since mtime is
+    // always present on the tmpfs it lives on and a rare metadata blip shouldn't blank a fresh grab.
+    let stale = match file.metadata().and_then(|m| m.modified()) {
+        Ok(mtime) => match mtime.elapsed() {
+            Ok(age) => age > RING_FRESH_WINDOW,
+            Err(_) => true, // mtime in the future (clock stepped back) → age out conservatively
+        },
+        Err(_) => false, // mtime unreadable → lenient (serve)
+    };
     if stale {
         // Opportunistically unlink the aged file so a read cleans it even if no further ring ever fires
         // `prune_aged_ring_files` (which runs at capture time). Together they mean an aged ring file is
@@ -509,29 +513,45 @@ pub fn note_pending_ring(broker_epoch: u64) -> u64 {
     id
 }
 
-/// Seed [`RING_EVENT_SEQ`] ABOVE any `ring-<id>.jpg` that survived a daemon restart, so a re-exec /
-/// watchdog respawn WITHIN the retention window can't reuse an id and overwrite a prior process's file
-/// — which a still-delivered notification's `/ring-<id>.jpg` URL points at (that would hand the old
-/// event the new visitor's picture, breaking the immutable-URL guarantee). tmpfs outlives a daemon
-/// restart but a reboot clears it, so a fresh boot finds no files and stays at 0. Call ONCE at startup,
-/// before any ring is handled. Best-effort: an unreadable dir / unparsable name is ignored (worst case
-/// the next id is lower than a surviving file's, the pre-existing behaviour). Blocking `std::fs`; the
-/// scan is a one-time, tiny tmpfs read.
+/// Seed [`RING_EVENT_SEQ`] so a fresh process never reuses a ring id that a still-undelivered
+/// notification's `/ring-<id>.jpg` URL points at (reuse would hand the old event the NEW visitor's
+/// picture, breaking the immutable-URL guarantee). Two sources, whichever is higher:
+///
+/// 1. The max `ring-<id>.jpg` surviving on tmpfs — covers a daemon re-exec / watchdog respawn WITHIN the
+///    retention window (tmpfs outlives a restart).
+/// 2. The wall clock (seconds since epoch) — covers a full REBOOT, which CLEARS tmpfs (so source 1 sees
+///    nothing and would restart at 1). Real time always advances across a reboot on a clock-bearing
+///    device, so seeding from it keeps ids monotonic across reboots too. Guarded by a plausibility floor:
+///    a pre-NTP/unsynced clock (below 2020) is ignored, falling back to the tmpfs scan (pre-existing
+///    behaviour) — the residual reuse window then needs a reboot AND an unsynced clock AND a stale fetch
+///    within the 120 s retention window.
+///
+/// Call ONCE at startup, before any ring is handled. Best-effort. Blocking `std::fs`; a one-time tiny scan.
 pub fn seed_ring_event_seq() {
-    let Ok(entries) = std::fs::read_dir(run_dir()) else { return };
-    let mut max_id = 0u64;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        if let Some(id) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix(RING_FILE_PREFIX))
-            .and_then(|n| n.strip_suffix(RING_FILE_SUFFIX))
-            .and_then(|mid| mid.parse::<u64>().ok())
-        {
-            max_id = max_id.max(id);
+    let mut seed = 0u64;
+    if let Ok(entries) = std::fs::read_dir(run_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if let Some(id) = name
+                .to_str()
+                .and_then(|n| n.strip_prefix(RING_FILE_PREFIX))
+                .and_then(|n| n.strip_suffix(RING_FILE_SUFFIX))
+                .and_then(|mid| mid.parse::<u64>().ok())
+            {
+                seed = seed.max(id);
+            }
         }
     }
-    RING_EVENT_SEQ.store(max_id, Ordering::Relaxed);
+    // Seconds since epoch, only when the clock is plausibly set (>= 2020-01-01Z); an unsynced boot clock
+    // is left to the tmpfs scan above rather than seeding a small, reboot-colliding value.
+    const CLOCK_PLAUSIBLE_FLOOR_SECS: u64 = 1_577_836_800;
+    if let Ok(since_epoch) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        let secs = since_epoch.as_secs();
+        if secs >= CLOCK_PLAUSIBLE_FLOOR_SECS {
+            seed = seed.max(secs);
+        }
+    }
+    RING_EVENT_SEQ.store(seed, Ordering::Relaxed);
 }
 
 /// Try to become THE ring-capture runner. `Some(guard)` (won the [`RING_RUNNER_ACTIVE`] false→true flip)
@@ -664,12 +684,13 @@ fn prune_aged_ring_files(dir: &std::path::Path) {
         if !(name.starts_with(RING_FILE_PREFIX) && name.ends_with(RING_FILE_SUFFIX)) {
             continue;
         }
-        let aged = entry
-            .metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .and_then(|m| m.elapsed().ok())
-            .is_some_and(|age| age > RING_FRESH_WINDOW);
+        // Prune past-window files; a FUTURE mtime (clock stepped back) ages out too, so a backward clock
+        // step can't strand a file forever. A genuinely-unreadable mtime is left (read_ring_event's TTL
+        // still gates serving it).
+        let aged = match entry.metadata().and_then(|m| m.modified()) {
+            Ok(mtime) => mtime.elapsed().map_or(true, |age| age > RING_FRESH_WINDOW),
+            Err(_) => false,
+        };
         if aged {
             let _ = std::fs::remove_file(entry.path());
         }
