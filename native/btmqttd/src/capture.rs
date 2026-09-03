@@ -20,8 +20,11 @@
 //! no poke — the panel is already streaming because it is ringing.
 //!
 //! ## Bounds / safety
-//! The whole capture is wrapped in [`CAPTURE_TIMEOUT`]; ffmpeg is KILLED if it overruns so a stuck
-//! pull can never wedge the daemon. An idle capture uses a try-lock (a mashed "Update idle snapshot"
+//! The ffmpeg grab — the one step that can block on the stream/network — is wrapped in
+//! [`CAPTURE_TIMEOUT`]; ffmpeg is KILLED if it overruns so a stuck pull can never wedge the daemon. The
+//! steps around it are fast, local tmpfs I/O (the brief wake-panel poke, a size-bounded scratch read, an
+//! unlink, an atomic store), not network-bound, so they need no timeout of their own. An idle capture
+//! uses a try-lock (a mashed "Update idle snapshot"
 //! button just skips while one is running — the earlier grab is as good as the later). Ring captures
 //! run through a BOUNDED single runner ([`run_ring_captures`]): at most one capture is ever active, and
 //! a burst of distinct rings does not queue a task each — extra rings only update [`RING_NEWEST`] and
