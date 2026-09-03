@@ -226,9 +226,15 @@ async fn grab_jpeg(cfg: &Config) -> Result<Vec<u8>, String> {
 }
 
 /// Read the scratch capture file, bounded to the idle cap (a capture is tens of KB; the cap guards a
-/// runaway file). `None` when absent/empty/oversized.
+/// runaway file). Reads at most `cap + 1` bytes so an unexpectedly large ffmpeg output is REJECTED
+/// without ever allocating the whole file into memory on the constrained device (mirrors
+/// `persist::read_idle_jpg` / `read_ring_jpg`). `None` when absent/empty/oversized.
 async fn read_scratch(path: &std::path::Path) -> Option<Vec<u8>> {
-    let bytes = tokio::fs::read(path).await.ok()?;
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path).await.ok()?;
+    let mut reader = file.take(crate::persist::MAX_IDLE_JPG_BYTES + 1);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await.ok()?;
     (!bytes.is_empty() && bytes.len() as u64 <= crate::persist::MAX_IDLE_JPG_BYTES).then_some(bytes)
 }
 

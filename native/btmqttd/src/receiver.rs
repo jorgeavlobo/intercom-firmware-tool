@@ -235,9 +235,15 @@ async fn handle_json(
         // maintenance ack ONLY if a fresh image was actually captured and stored — a best-effort "done"
         // signal like restore_ssh, withheld on failure so HA shows no false success.
         if action == "update_idle" {
-            if !cfg.camera_ondevice {
+            // On-device only, AND on-demand viewing must be available (view_tx present): capturing an
+            // IDLE panel means WAKING it via the SIP UA first, so with no view channel `capture_idle`
+            // cannot bring the stream up — `grab_jpeg` would just wait out its ~25 s timeout and publish
+            // no ack. This matches the discovery contract (the installer tombstones the button unless
+            // on-device AND on-demand), and fails a direct MQTT press fast with a clear reason.
+            if !cfg.camera_ondevice || view_tx.is_none() {
                 eprintln!(
-                    "btmqttd: ignored update_idle: on-device camera disabled (needs CAMERA_ONDEVICE=1)"
+                    "btmqttd: ignored update_idle: on-device camera + on-demand viewing required \
+                     (CAMERA_ONDEVICE=1 and CAMERA_ONDEMAND_ENABLED=1)"
                 );
                 return;
             }
