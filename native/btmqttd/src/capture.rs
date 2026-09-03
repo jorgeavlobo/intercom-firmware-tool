@@ -798,6 +798,9 @@ mod tests {
         // regardless of scheduling because note_ring's store is strictly AFTER the lock acquire it cannot
         // complete while we hold the lock.
         use std::sync::mpsc;
+        // LAST_RING_MS is a process-global read by production code, so snapshot and RESTORE it (below) —
+        // this test leaves it advanced otherwise, which a later-added test could inherit.
+        let saved_last_ring = LAST_RING_MS.load(Ordering::Relaxed);
         LAST_RING_MS.store(0, Ordering::Relaxed);
         let guard = RING_COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (tx, rx) = mpsc::channel();
@@ -818,5 +821,6 @@ mod tests {
             0,
             "note_ring advances LAST_RING_MS once the commit lock is free"
         );
+        LAST_RING_MS.store(saved_last_ring, Ordering::Relaxed); // restore the global for any later test
     }
 }
