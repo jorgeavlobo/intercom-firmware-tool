@@ -427,9 +427,27 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     };
     // Note when this capture started. An idle and a ring capture can run concurrently (separate guards),
     // and an idle capture can even begin while a ring call is already streaming — either way a VISITOR is
-    // at the door and the frame is NOT the empty doorway. We decline (below) if a ring was DETECTED within
-    // RECENT_RING_WINDOW before this start, or at any time during the grab.
+    // at the door and the frame is NOT the empty doorway. A ring DETECTED within RECENT_RING_WINDOW before
+    // this start, or at any time during the grab, declines the capture.
     let capture_start_ms = now_ms();
+    // LAST_RING_MS is only ever advanced, so re-reading this is monotonic. It is checked THREE times: as an
+    // EARLY fast path (below, BEFORE waking the panel or the ~25 s grab — so an already-known ring costs
+    // neither a panel wake nor an ffmpeg run on the constrained device), AGAIN after the grab, and finally
+    // as the commit gate inside store_idle_jpg (a ring landing DURING the blocking write vetoes the rename
+    // instead of replacing idle.jpg — which survives reboots + reflashes — with a visitor frame).
+    let ring_recent = move || {
+        let last_ring = LAST_RING_MS.load(Ordering::Relaxed);
+        last_ring != 0 && last_ring.saturating_add(RECENT_RING_WINDOW.as_millis() as u64) >= capture_start_ms
+    };
+    if ring_recent() {
+        // Already-known ring: decline UP FRONT, without waking the panel or spending the grab on a frame we
+        // would only discard. first-run retries next boot; the button can be re-pressed once the door clears.
+        eprintln!(
+            "btmqttd: capture: idle capture declined up front — a ring is recent/active (visitor present); \
+             keeping the idle thumbnail as the empty doorway"
+        );
+        return false;
+    }
     wake_panel(view_tx).await;
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
@@ -438,23 +456,12 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
             return false;
         }
     };
-    // A ring DETECTED within RECENT_RING_WINDOW before this capture started — or at any point up to the
-    // atomic commit — means a visitor is at the door, so the grabbed frame is NOT the empty doorway.
-    // LAST_RING_MS is only ever advanced, so re-reading it is monotonic: the early check below skips the
-    // (blocking) store entirely on an already-known ring, and the SAME predicate runs again as the commit
-    // gate inside store_idle_jpg so a ring that lands DURING the blocking write vetoes the rename instead
-    // of replacing idle.jpg (which survives reboots + reflashes) with a visitor frame.
-    let ring_recent = move || {
-        let last_ring = LAST_RING_MS.load(Ordering::Relaxed);
-        last_ring != 0 && last_ring.saturating_add(RECENT_RING_WINDOW.as_millis() as u64) >= capture_start_ms
-    };
     if ring_recent() {
-        // Fast-path decline — a ring is already known, so skip the (blocking) store entirely. Discard
-        // rather than persist a visitor as the idle thumbnail; first-run retries next boot and the button
-        // can be re-pressed once the door is clear. (The authoritative re-check runs under the lock below.)
+        // A ring became recent/active while we were waking the panel or grabbing — discard the (visitor)
+        // frame. (The commit gate below re-checks once more, right before the atomic rename.)
         eprintln!(
-            "btmqttd: capture: idle capture declined — a ring is recent/active (visitor present); \
-             keeping the idle thumbnail as the empty doorway"
+            "btmqttd: capture: idle capture declined — a ring became recent/active during the grab \
+             (visitor present); keeping the idle thumbnail as the empty doorway"
         );
         return false;
     }
