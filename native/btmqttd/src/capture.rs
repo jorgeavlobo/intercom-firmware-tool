@@ -59,10 +59,15 @@ const DEFAULT_RUN_DIR: &str = "/var/run/btmqttd";
 const RING_JPG_FILE: &str = "ring.jpg";
 
 /// How recent a ring snapshot must be to still be served at `/ring.jpg`. A ring image is a transient
-/// "who just rang" frame: the HA push fetches it within seconds of the capture. An OLDER one — a previous
-/// ring that THIS ring could not refresh (the broker was offline, so the capture was skipped, or the
-/// capture failed) — must read as a 404, never a stale visitor. Freshness is judged by the file's mtime
-/// (the capture writes it "now"), so no fragile per-ring cache-invalidation is needed.
+/// "who just rang" frame the HA push fetches within seconds of the capture. This mtime bound puts a
+/// CEILING on how long a previous ring's image can linger: one older than the window (a prior ring THIS
+/// ring could not refresh — the broker was offline so the capture was skipped, or the capture failed)
+/// ages out to a 404 rather than serving a stale visitor indefinitely. It is a backstop, not the primary
+/// guard: the reason a skipped/failed ring never NOTIFIES with a stale image is that the HA push triggers
+/// on the "snapshot ready" MQTT signal, which is published ONLY on a successful capture (see sender.rs).
+/// A DIRECT read of `/ring.jpg` within the window can still return the prior ring's frame — bounded and
+/// same-doorway, and never reached by the notification path. Judged by mtime (the capture writes it
+/// "now"), so no fragile per-ring cache-invalidation is needed.
 const RING_FRESH_WINDOW: Duration = Duration::from_secs(120);
 
 /// Overall capture budget: bring-up + connect + one keyframe + encode. The panel emits an in-stream
@@ -154,10 +159,12 @@ pub fn read_ring_jpg() -> Option<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(ring_jpg_path()).ok()?;
     // Serve ONLY a recent ring snapshot: an image older than RING_FRESH_WINDOW is a previous ring that
-    // could not be refreshed (broker offline ⇒ capture skipped, or the capture failed), so it must read as
-    // 404 rather than a stale visitor — this is what keeps a broker-offline ring from leaving a stale
-    // /ring.jpg. Lenient if the mtime can't be read (serve): the mtime is available on the tmpfs it lives
-    // on, and a missing mtime should not blank a genuinely-fresh capture.
+    // could not be refreshed (broker offline ⇒ capture skipped, or the capture failed), so it ages out to
+    // a 404 rather than serving a stale visitor indefinitely — a CEILING on staleness, not a per-ring
+    // invalidation (within the window a direct read can still return the prior frame; the notification
+    // never does — it fires on the ready signal, published only on a successful capture). Lenient if the
+    // mtime can't be read (serve): mtime is available on the tmpfs it lives on, and a missing mtime should
+    // not blank a genuinely-fresh capture.
     let stale = file
         .metadata()
         .ok()
