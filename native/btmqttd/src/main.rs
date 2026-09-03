@@ -387,7 +387,10 @@ async fn run() -> Result<bool, String> {
     // CAMERA_ONDEMAND_ENABLED) as well as on-device mode. Fully detached and best-effort — bounded by the
     // capture's own timeout, it never delays or blocks startup, and it publishes nothing to MQTT so it is
     // not one of the tasks stopped before the final retained `offline` (the runtime drop aborts it).
-    if cfg.camera_ondevice {
+    // Gate on the media path (camera_enabled) AS WELL as on-device: CAMERA_ONDEVICE can be set
+    // independently of CAMERA_ENABLED in a hand-edited conf, and without the camera feature there is no
+    // stream to capture. (A live view_tx already implies camera_enabled, so this is belt-and-braces.)
+    if cfg.camera_enabled && cfg.camera_ondevice {
         if let Some(view_tx) = view_tx.clone() {
             let cfg_fr = cfg.clone();
             tokio::spawn(async move {
@@ -399,7 +402,10 @@ async fn run() -> Result<bool, String> {
                     persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
                 })
                 .await
-                .unwrap_or(true)
+                // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid idle
+                // image exists" — that would permanently skip the self-healing first-run capture for this
+                // boot. Default to false so a transient failure falls through to a capture attempt.
+                .unwrap_or(false)
                 {
                     return;
                 }
@@ -410,7 +416,10 @@ async fn run() -> Result<bool, String> {
                     persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
                 })
                 .await
-                .unwrap_or(true)
+                // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid idle
+                // image exists" — that would permanently skip the self-healing first-run capture for this
+                // boot. Default to false so a transient failure falls through to a capture attempt.
+                .unwrap_or(false)
                 {
                     return;
                 }

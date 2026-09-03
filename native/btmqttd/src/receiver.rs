@@ -240,7 +240,7 @@ async fn handle_json(
             // cannot bring the stream up — `grab_jpeg` would just wait out its ~25 s timeout and publish
             // no ack. This matches the discovery contract (the installer tombstones the button unless
             // on-device AND on-demand), and fails a direct MQTT press fast with a clear reason.
-            if !cfg.camera_ondevice || view_tx.is_none() {
+            if !cfg.camera_enabled || !cfg.camera_ondevice || view_tx.is_none() {
                 eprintln!(
                     "btmqttd: ignored update_idle: on-device camera + on-demand viewing required \
                      (CAMERA_ENABLED=1, CAMERA_ONDEVICE=1 and CAMERA_ONDEMAND_ENABLED=1 — the SIP UA \
