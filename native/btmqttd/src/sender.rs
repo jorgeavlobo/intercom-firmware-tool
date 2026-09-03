@@ -982,7 +982,9 @@ mod tests {
         // broker SESSION it was detected on (#169): delivered only while online AND on the same epoch. A
         // reconnect during the capture advances the epoch and suppresses a pre-outage ring's stale "someone
         // is at the door" — which the disconnect purge can't catch because the publish is created only
-        // after the reconnect. (BROKER_EPOCH is a process-global; no other test mutates it.)
+        // after the reconnect. BROKER_EPOCH is a process-global read by production code, so snapshot and
+        // RESTORE it around the test's temporary bump — no other test is left order-dependent on it.
+        let saved_epoch = BROKER_EPOCH.load(Ordering::Relaxed);
         let online = AtomicBool::new(true);
         let ring_epoch = BROKER_EPOCH.load(Ordering::Relaxed); // captured at "ring detection"
         assert!(ring_snapshot_deliverable(&online, ring_epoch)); // online + same session -> deliver
@@ -995,6 +997,7 @@ mod tests {
         // A ring detected on the CURRENT session still delivers.
         let fresh_epoch = BROKER_EPOCH.load(Ordering::Relaxed);
         assert!(ring_snapshot_deliverable(&online, fresh_epoch));
+        BROKER_EPOCH.store(saved_epoch, Ordering::Relaxed); // restore the global for any later test
     }
 
     #[test]

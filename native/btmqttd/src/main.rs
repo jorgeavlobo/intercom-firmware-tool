@@ -395,8 +395,10 @@ async fn run() -> Result<bool, String> {
         // outlives a re-exec/watchdog respawn; only a reboot clears it), so a new process never reuses an
         // id and overwrites a prior process's file that a delivered notification still points at. One-time
         // tmpfs scan; a fresh boot finds none and starts at 0. Runs regardless of on-demand — a ring
-        // capture needs no SIP UA.
-        capture::seed_ring_event_seq();
+        // capture needs no SIP UA. Offload the blocking std::fs scan to the blocking pool (like every other
+        // filesystem read here) so it never stalls the single-threaded runtime; await it so the seed is
+        // committed BEFORE the sender (spawned below) can handle any ring.
+        let _ = tokio::task::spawn_blocking(capture::seed_ring_event_seq).await;
         if let Some(view_tx) = view_tx.clone() {
             let cfg_fr = cfg.clone();
             tokio::spawn(async move {

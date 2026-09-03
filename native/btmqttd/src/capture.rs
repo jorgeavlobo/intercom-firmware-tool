@@ -734,7 +734,11 @@ mod tests {
         // newest id, and the slot is re-acquirable once released. Also covers per-EVENT epoch binding
         // (#169): the newest pending ring carries ITS OWN detecting epoch. (This is the sole test that
         // touches the process-global ring counters, so its consecutive-id / newest-epoch assertions can't
-        // race another test.)
+        // race another test.) These statics are read by production code, so snapshot and RESTORE them so a
+        // later-added test can't inherit the perturbed state.
+        let saved_seq = RING_EVENT_SEQ.load(Ordering::Relaxed);
+        let saved_newest = RING_NEWEST.load(Ordering::Relaxed);
+        let saved_epoch = RING_NEWEST_EPOCH.load(Ordering::Relaxed);
         RING_RUNNER_ACTIVE.store(false, Ordering::Relaxed);
         // Ring A detected on broker session epoch 1.
         let a = note_pending_ring(1);
@@ -758,6 +762,10 @@ mod tests {
         let g2 = try_acquire_ring_runner();
         assert!(g2.is_some(), "the slot is re-acquirable once the guard is dropped");
         drop(g2);
+        // Restore the process-global ring counters so any later-added test starts from clean state.
+        RING_EVENT_SEQ.store(saved_seq, Ordering::Relaxed);
+        RING_NEWEST.store(saved_newest, Ordering::Relaxed);
+        RING_NEWEST_EPOCH.store(saved_epoch, Ordering::Relaxed);
     }
 
     #[test]
