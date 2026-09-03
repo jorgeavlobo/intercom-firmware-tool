@@ -1,17 +1,21 @@
 # Building the minimal `ffmpeg` for the on-device media server
 
 This is the **minimal, LGPL, statically-linked armv7 `ffmpeg`** the on-device camera
-path (issue #120, Phase 1) feeds to `go2rtc`: it reads the panel's cleartext RTP via an
-SDP and **copies the H.264 through untouched** into `go2rtc`'s internal RTSP — no
-decode, no encode, no transcode. In Phase 1a it is only **embedded into the
+path (issue #120, Phase 1) feeds to `go2rtc`: for the **live view** it reads the panel's
+cleartext RTP via an SDP and **copies the H.264 through untouched** into `go2rtc`'s
+internal RTSP — no decode, no encode, no transcode. A **separate, occasional snapshot path**
+(issue #169, Phase 2) decodes **one** frame and MJPEG-encodes it to a JPEG file (the real
+idle thumbnail + the ring snapshot) — that is the only path that decodes/encodes, and it
+runs only on a first-run capture, an HA button press, or a doorbell ring, never on the
+resident live stream. In Phase 1a it is only **embedded into the
 `IntercomFirmwareTool.Core` assembly** as a resource via `PayloadBinaries` (length +
 SHA-256 verified on read), the same way as `btmqttd` (see
 [`../btmqttd/BUILD.md`](../btmqttd/BUILD.md)); it is deliberately **not** in
 `PayloadBinaries.All` yet, so `MqttInstaller` does not write it into the firmware image
 until the installer wiring lands in Phase 1c.
 
-Video-only in Phase 1. The speex→Opus audio path (and the #105 backchannel) come in
-Phase 3 and will add `libspeex`-decode + `libopus`-encode to this same recipe.
+Video-only. The speex→Opus audio path (and the #105 backchannel) come in Phase 3 and will
+add `libspeex`-decode + `libopus`-encode to this same recipe.
 
 ## Why a custom build (not the generic static ffmpeg)
 
@@ -21,8 +25,9 @@ build is:
 
 - **LGPL only** — never `--enable-gpl`, never `--enable-nonfree`, no GPL-only libraries
   (no x264/x265/…). Only the LGPL core + LGPL externals (later: `libopus`).
-- **Minimal** — `--disable-everything` plus exactly the RTP/SDP→RTSP H.264-copy path, so
-  the binary is a few MB, not 31, with a tiny attack surface.
+- **Minimal** — `--disable-everything` plus exactly the RTP/SDP→RTSP H.264-copy path and the
+  single-frame H.264-decode→MJPEG-encode snapshot path (issue #169), so the binary is a few MB,
+  not 31, with a tiny attack surface.
 
 ## Target
 
