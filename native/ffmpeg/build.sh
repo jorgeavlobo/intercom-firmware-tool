@@ -44,6 +44,7 @@ cd "$src" || exit 1
   --enable-parser=h264 --enable-parser=hevc \
   --enable-decoder=h264 \
   --enable-encoder=mjpeg \
+  --enable-filter=scale --enable-filter=format \
   --extra-cflags="-Os" --extra-ldflags="-static -s"
 # --enable-decoder=h264: needed so `-c:v copy` resolves the video dimensions FAST. The C100X test
 # (issue #120) proved the panel emits an in-stream SPS/PPS only ~every 20 s, so with the parser
@@ -57,19 +58,27 @@ cd "$src" || exit 1
 # is unchanged. The H.264 DECODER is LGPL (only the x264 ENCODER is GPL; not enabled). It pulls
 # h264_sei.o (film-grain SEI) exactly as the parser did, so the HEVC-parser link dependency below
 # still applies.
-# --enable-encoder=mjpeg + --enable-muxer=image2: the on-device SNAPSHOT path (issue #169, Phase 2).
-# The live view is still a pure `-c:v copy` (no decode/encode) — this adds a SEPARATE, occasional path
-# that grabs ONE frame and writes a JPEG: the real empty-doorway idle thumbnail (first run + an HA
-# "update idle snapshot" button) and a who-is-at-the-door ring snapshot. btmqttd runs
-# `ffmpeg -i rtsp://…@127.0.0.1:8554/doorbell -frames:v 1 -c:v mjpeg -f image2 <file>` — so it decodes
-# H.264 (the decoder above), then MJPEG-encodes one frame into a JPEG file (image2 muxer). The panel
-# feed is yuv420p and FFmpeg's mjpeg encoder accepts yuv420p directly (its pix_fmts list includes it),
-# so NO swscale/scale filter is pulled in — the size cost is just the encoder + its mpegvideoenc select
-# (jpegtables, mpegvideoenc) and the tiny image2 muxer. Before #169 the device had the H.264 decoder but
-# no MJPEG encoder, so it could not produce a JPEG at all (go2rtc `/api/frame.jpeg` returned nothing —
-# hardware-confirmed). The MJPEG encoder is LGPL (only x264/x265 are GPL; not enabled). image2 writes a
-# single self-contained JPEG file (vs the `mjpeg` raw muxer's stdout stream), which is what the atomic
-# file-swap capture wants. See native/btmqttd/src/capture.rs.
+# --enable-encoder=mjpeg + --enable-muxer=image2 + --enable-filter=scale --enable-filter=format: the on-device SNAPSHOT
+# path (issue #169, Phase 2). The live view is still a pure `-c:v copy` (no decode/encode) — this adds a
+# SEPARATE, occasional path that grabs ONE frame and writes a JPEG: the real empty-doorway idle thumbnail
+# (first run + an HA "update idle snapshot" button) and a who-is-at-the-door ring snapshot. btmqttd runs
+# `ffmpeg -rtsp_transport tcp -i rtsp://…@127.0.0.1:8554/doorbell -an -frames:v 1 -c:v mjpeg
+# -pix_fmt yuvj420p -f image2 -update 1 -y <file>` (the exact argv is capture.rs::capture_argv) — so it
+# decodes H.264 (the decoder above), then MJPEG-encodes one frame into a JPEG file (image2 muxer).
+# The `scale` filter (which pulls in swscale) is REQUIRED and is the fix for issue #174 (Finding #1): an
+# earlier revision omitted it on the assumption "the mjpeg encoder accepts yuv420p directly, so no swscale
+# is pulled in." That was WRONG on hardware — the panel's H.264 decodes to LIMITED-range `yuv420p(tv)`,
+# but a JPEG is FULL-range, so FFmpeg's auto-negotiation must range-convert (`yuv420p`→`yuvj420p`), which
+# needs the `scale` filter. Without it the capture aborted with `'scale' filter not present, cannot convert
+# formats` → `-EINVAL` → exit 234, and NO JPEG was ever produced (idle thumbnail, update button and ring
+# snapshot all broken; hardware-confirmed on a C100X). So `scale` (+ the trivial `format` filter the
+# negotiation may also insert) is enabled and capture.rs forces `-pix_fmt yuvj420p` for a correct
+# full-range JPEG. Before #169 the device had the H.264 decoder but no MJPEG encoder, so it could not
+# produce a JPEG at all (go2rtc `/api/frame.jpeg` returned nothing — hardware-confirmed). The MJPEG
+# encoder, the `scale`/`format` filters and swscale are all LGPL (only x264/x265 are GPL; not enabled).
+# image2 writes a single self-contained JPEG file (vs the `mjpeg` raw muxer's stdout stream), which is what
+# the atomic file-swap capture wants. The size cost of swscale + the scale filter is the price of a
+# correct-colour snapshot. See native/btmqttd/src/capture.rs.
 # --enable-parser=h264: the C100X hardware test (issue #120) proved `-c:v copy` DOES need
 # in-stream parameter-set extraction after all. The panel's SDP carries no sprop-parameter-sets,
 # so without the H.264 parser ffmpeg never extracts the SPS: it logs `parser not found for codec

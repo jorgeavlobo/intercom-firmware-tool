@@ -44,8 +44,8 @@ license texts and per-crate copyright notices travel with the binary in
 | Field | `btmqttd` |
 |---|---|
 | File | `armhf/btmqttd` |
-| Size | 1,673,552 bytes |
-| SHA-256 | `84e51599ec9aaabeaab620a14690fbac9db7a6d58e19616c96e00a01fc4d9880` |
+| Size | 1,676,296 bytes |
+| SHA-256 | `a36553ae26c948d90362057267eb51d909102fa268ca975aac3643f108625cdf` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7 (`Tag_CPU_arch: v7`), **hard-float** (`Tag_FP_arch: VFPv3-D16`, `Tag_ABI_VFP_args: VFP registers`; ELF flags `0x5000400`) |
 | Build ID | none (stripped; `rust-lld` emits no GNU build-id note) |
@@ -153,9 +153,10 @@ HA button press, or a doorbell ring, never on the resident live stream. Built pe
 
 It is compiled `--disable-everything` plus only the RTP/SDP→RTSP H.264-copy path (the H.264
 parser + decoder for parameter-set discovery, and the HEVC parser as a link-only dependency)
-and the single-frame H.264-decode→**MJPEG-encode** snapshot path (#169), **never**
-`--enable-gpl`/`--enable-nonfree` and with no GPL-only libraries (no x264/x265/…), so the whole
-binary is LGPL. The only encoder built is the **LGPL MJPEG encoder** (used for the occasional
+and the single-frame H.264-decode→**MJPEG-encode** snapshot path (#169, with the LGPL `scale`
+(swscale) + `format` filters for the limited→full-range `yuv420p`→`yuvj420p` JPEG conversion — #174),
+**never** `--enable-gpl`/`--enable-nonfree` and with no GPL-only libraries (no x264/x265/…), so the
+whole binary is LGPL. The only encoder built is the **LGPL MJPEG encoder** (used for the occasional
 JPEG snapshot); the GPL x264 *encoder* is never enabled.
 
 ### Provenance & integrity
@@ -163,13 +164,13 @@ JPEG snapshot); the GPL x264 *encoder* is never enabled.
 | Field | `ffmpeg` |
 |---|---|
 | File | `armhf/ffmpeg` |
-| Size | 2,974,144 bytes |
-| SHA-256 | `a8e2e63bbc16dc58f36c268653a11a153856644a9259dc8cf84adbd2be693dab` |
+| Size | 2,996,128 bytes |
+| SHA-256 | `c8a6810d4862a37f9501f4870068d300adbfd2a882f088002ad12efff42eb5b4` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
 | Upstream | FFmpeg `n7.1.1` (release tag) |
 | Build toolchain | `zig cc` 0.13.0 (bundled musl) per `BUILD.md` |
-| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp,image2` · `parser=h264,hevc` · `decoder=h264` · `encoder=mjpeg` · `--disable-asm` |
+| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp,image2` · `parser=h264,hevc` · `decoder=h264` · `encoder=mjpeg` · `filter=scale,format` · `--disable-asm` |
 | License | **LGPL-2.1-or-later** (FFmpeg) **AND MIT** (statically-linked musl libc) |
 | License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](../../../licenses/ffmpeg-COPYING.LGPLv2.1.txt) · [`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt) |
 | SPDX expression | `LGPL-2.1-or-later AND MIT` |
