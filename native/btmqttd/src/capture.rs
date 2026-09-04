@@ -620,9 +620,10 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // non-idle state is a live viewer's, not this capture's self-view.)
     //
     // The linger runs DETACHED so it does not delay the result: the "update_idle" caller publishes its
-    // success ack (and the panel is freed to a re-press) as soon as the JPEG is committed, not ~CAPTURE_HOLD
-    // later. The task keeps holding `CAPTURING_IDLE` through the linger, so idle captures stay serialised
-    // (no concurrent store). Only linger when a self-view may actually be up; otherwise both guards drop
+    // success ack as soon as the JPEG is committed, not ~CAPTURE_HOLD later. The task keeps holding
+    // `CAPTURING_IDLE` through the linger, so idle captures stay serialised (a re-press during the linger
+    // still returns `false` — no concurrent store), and the reconcile/reseed self-view suppression spans the
+    // panel's lingering session. Only linger when a self-view may actually be up; otherwise both guards drop
     // here at once.
     if let Some(wake) = _wake {
         tokio::spawn(async move {
