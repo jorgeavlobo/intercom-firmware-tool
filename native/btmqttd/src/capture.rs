@@ -499,7 +499,7 @@ fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>, hold_deadline: tokio::tim
     };
     // try_send: never block the caller; Hold is idempotent (the UA re-checks + renews on each poke). The
     // ABSOLUTE `hold_deadline` (= wake time + CAPTURE_HOLD) is passed in so the caller can hold its
-    // suppression marker for the SAME lifetime the self-view stays up (see `capture_idle`).
+    // suppression marker for this capture's own local suppression deadline (see `capture_idle`).
     match tx.try_send(ViewCmd::Hold(hold_deadline)) {
         // Queued: our own Hold will bring the panel up.
         Ok(()) => true,
