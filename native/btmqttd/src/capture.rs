@@ -465,13 +465,17 @@ pub fn idle_capture_wake_active() -> bool {
 struct IdleWakeGuard;
 impl IdleWakeGuard {
     fn new() -> Self {
-        IDLE_CAPTURE_WAKE_ACTIVE.store(true, Ordering::Release);
+        // Relaxed on both store and load: btmqttd is a single-threaded runtime, so capture_idle (which
+        // sets/clears this) and sender.rs (which reads it) never run truly concurrently — this is a plain
+        // boolean suppression switch, not a synchronization edge, matching the module's other runtime flags
+        // (LAST_RING_MS, RING_NEWEST, …).
+        IDLE_CAPTURE_WAKE_ACTIVE.store(true, Ordering::Relaxed);
         IdleWakeGuard
     }
 }
 impl Drop for IdleWakeGuard {
     fn drop(&mut self) {
-        IDLE_CAPTURE_WAKE_ACTIVE.store(false, Ordering::Release);
+        IDLE_CAPTURE_WAKE_ACTIVE.store(false, Ordering::Relaxed);
     }
 }
 
