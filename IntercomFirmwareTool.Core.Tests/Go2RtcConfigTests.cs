@@ -122,18 +122,14 @@ public class Go2RtcConfigTests
         Assert.Contains("exec:/usr/sbin/ffmpeg", yaml);
         Assert.Contains("-i /var/run/btmqttd/doorbell.sdp", yaml);
         Assert.DoesNotContain("-i /etc/btmqttd/go2rtc/", yaml);
-        // `-c:v copy` with a WIDENED input probe (issue #174, Finding #3) but still no jitter-buffer
-        // tuning. go2rtc's lazy exec starts ffmpeg at DESCRIBE, ~8-10 s before the on-demand panel is up,
-        // so a cold open must WAIT for RTP instead of aborting with "unspecified size" — hence
-        // -analyzeduration/-probesize. The reorder buffer, by contrast, was ACTIVELY HARMFUL on the
-        // loopback ingest (it never reorders, so an oversized -reorder_queue_size made ffmpeg drop every
-        // packet as "received too late" and 404 — issue #120), so those stay OUT, as do the (removed)
-        // extract_extradata/dump_extra bitstream filters. The copy args after -i are unchanged.
-        Assert.Contains(
-            $"-analyzeduration {Go2RtcConfig.OnDeviceProbeAnalyzeDurationUs} " +
-            $"-probesize {Go2RtcConfig.OnDeviceProbeSizeBytes} " +
-            "-i /var/run/btmqttd/doorbell.sdp -an -c:v copy -rtsp_transport tcp -f rtsp",
-            yaml);
+        // Plain `-c:v copy` with default input options (issue #120, hardware-diagnosed on the C100X). The
+        // vendored ffmpeg's H.264 parser recovers the SPS/PPS from the in-stream data, so the copy gets
+        // its dimensions and publishes without any jitter-buffer tuning. An earlier revision widened
+        // -reorder_queue_size/-max_delay to catch the sparse in-stream SPS/PPS, but the loopback ingest
+        // never reorders, so that oversized queue made ffmpeg drop every packet as "received too late" and
+        // 404 — reverting to defaults locks on in under a second. Guard that the harmful tuning and the
+        // (now-removed) extract_extradata/dump_extra bitstream filters stay OUT of the generated exec.
+        Assert.Contains("-i /var/run/btmqttd/doorbell.sdp -an -c:v copy -rtsp_transport tcp -f rtsp", yaml);
         // A SECOND output on the SAME live-view ffmpeg ships a raw H.264 RTP copy to btmqttd (sprop
         // learning, #120 / PR #129): sprop.rs binds this loopback port and parses the panel's in-band
         // SPS/PPS from the RTP payload — ffmpeg's -sdp_file can't emit sprop on a copy path (hardware-
@@ -145,6 +141,7 @@ public class Go2RtcConfigTests
         Assert.DoesNotContain("derived.sdp", yaml);
         Assert.DoesNotContain("-reorder_queue_size", yaml);
         Assert.DoesNotContain("-max_delay", yaml);
+        Assert.DoesNotContain("-analyzeduration", yaml);
         Assert.DoesNotContain("-bsf", yaml);
         Assert.Contains("{output}", yaml);
         Assert.DoesNotContain("\r", yaml);
