@@ -105,6 +105,20 @@ pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 /// ~27 s) is running — go2rtc fans the stream out to both.
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 
+/// Set while an idle/button capture is actively waking the panel and grabbing/committing its frame. An
+/// idle capture brings the panel up ITSELF — a silent self-view (`ViewCmd::Hold`) — which makes the panel
+/// emit non-idle call-state codes (ringing → active → in_call), the SAME codes a real ring produces. The
+/// GENERIC call-state paths in `sender.rs` (`parse_call_state` / the `publish_call_state` reconcile) call
+/// [`note_ring`] on any non-idle code, so the capture's own self-view would advance [`LAST_RING_MS`] and
+/// make the capture DECLINE ITS OWN FRAME (issue #174, Finding #2 — hardware-observed: "idle capture
+/// declined — a ring became recent/active during the grab"). While this flag is set, `sender.rs`
+/// suppresses ONLY those generic call-state notes. The AUTHORITATIVE entrance-panel-call note (the WHO=8
+/// ring signature, which a silent self-view NEVER produces) stays UNCONDITIONAL, so a REAL visitor ringing
+/// during the capture still advances `LAST_RING_MS` and is correctly declined. A single process-global flag
+/// is sufficient: the [`CAPTURING_IDLE`] try-lock already serialises idle captures, and ring captures never
+/// wake the panel.
+static IDLE_CAPTURE_WAKE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Ring captures run through a BOUNDED single runner ([`run_ring_captures`]): at most one capture is
 /// ever active, and a burst of distinct rings does NOT queue a task each — extra rings only update
 /// [`RING_NEWEST`], and the one active runner loops to capture each successive newest ring (coalescing
@@ -298,14 +312,22 @@ fn rtsp_url(user: &str, pass: &str) -> Option<String> {
 
 /// The ffmpeg argument vector for a one-frame JPEG grab from `rtsp_url` into `out_path`. Pure (no
 /// I/O, no spawn) so the exact recipe is unit-tested and kept in step with `native/ffmpeg/build.sh`
-/// (which enables exactly the mjpeg encoder + image2 muxer this uses):
+/// (which enables exactly the mjpeg encoder + image2 muxer + the `scale` filter this uses):
 ///   * `-rtsp_transport tcp` — go2rtc's loopback RTSP, matching how HA reads it (no UDP reorder);
 ///   * `-i <url>` then `-an` — video only (the snapshot has no audio);
-///   * `-frames:v 1 -c:v mjpeg -f image2 -y <file>` — decode ONE frame, MJPEG-encode it, write a
-///     single self-contained JPEG file, overwriting any stale scratch file.
+///   * `-frames:v 1 -c:v mjpeg -pix_fmt yuvj420p -f image2 -update 1 -y <file>` — decode ONE frame,
+///     MJPEG-encode it to FULL-RANGE `yuvj420p`, write a single self-contained JPEG file, overwriting
+///     any stale scratch file.
 ///
-/// No `-pix_fmt` is forced: the panel feed is yuv420p and the mjpeg encoder accepts it directly, so
-/// no swscale is pulled into the size-constrained binary (see build.sh).
+/// `-pix_fmt yuvj420p` forces the JPEG full-range pixel format. The panel's H.264 decodes to
+/// LIMITED-range `yuv420p(tv)`, but a JPEG is FULL-range, so ffmpeg must range-convert
+/// (`yuv420p`→`yuvj420p`) — which needs the `scale` filter (swscale). Omitting the scaler is what made
+/// the capture abort with `exit 234` on hardware (issue #174, Finding #1): even a bare `-c:v mjpeg`
+/// auto-negotiation inserts that range conversion, so the fix is to ENABLE `scale`/swscale in
+/// `native/ffmpeg/build.sh` and make the target format explicit here (rather than the earlier — and
+/// wrong — assumption that mjpeg accepts limited-range `yuv420p` directly, which only held with the
+/// non-standard `-strict unofficial` stopgap that wrote a washed-out limited-range JPEG). `-update 1`
+/// is the documented way to write a single image file (and silences image2's sequence-pattern warning).
 fn capture_argv(rtsp_url: &str, out_path: &str) -> Vec<String> {
     [
         "-nostdin",
@@ -321,8 +343,12 @@ fn capture_argv(rtsp_url: &str, out_path: &str) -> Vec<String> {
         "1",
         "-c:v",
         "mjpeg",
+        "-pix_fmt",
+        "yuvj420p",
         "-f",
         "image2",
+        "-update",
+        "1",
         "-y",
         out_path,
     ]
@@ -424,6 +450,31 @@ impl Drop for CaptureGuard {
     }
 }
 
+/// Whether an idle/button capture is currently waking the panel for its OWN self-view (see
+/// [`IDLE_CAPTURE_WAKE_ACTIVE`]). `sender.rs` reads this to suppress the GENERIC call-state
+/// [`note_ring`] during the capture's self-induced session, so the capture does not decline its own
+/// frame (issue #174, Finding #2).
+pub fn idle_capture_wake_active() -> bool {
+    IDLE_CAPTURE_WAKE_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// RAII marker for [`IDLE_CAPTURE_WAKE_ACTIVE`]: set on construction, cleared on drop (including on an
+/// early return or panic), so the suppression window is exactly the idle capture's own wake + grab +
+/// commit. Held by [`capture_idle`] across [`wake_panel`] and the grab so every non-idle call-state the
+/// self-view emits is suppressed, then released when the capture returns.
+struct IdleWakeGuard;
+impl IdleWakeGuard {
+    fn new() -> Self {
+        IDLE_CAPTURE_WAKE_ACTIVE.store(true, Ordering::Release);
+        IdleWakeGuard
+    }
+}
+impl Drop for IdleWakeGuard {
+    fn drop(&mut self) {
+        IDLE_CAPTURE_WAKE_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
 /// Bring the panel up for an idle/button capture: poke the on-demand SIP UA so it INVITEs the panel,
 /// then wait briefly for the media to start flowing before ffmpeg connects. Best effort — if on-demand
 /// viewing is off (`view_tx` is `None`) there is no way to wake an idle panel, so the capture will
@@ -477,6 +528,12 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
         );
         return false;
     }
+    // From here on this capture WAKES the panel for its own silent self-view, which emits the same
+    // non-idle call-state codes a real call does. Mark the wake active so sender.rs suppresses the
+    // GENERIC call-state note_ring for the duration (the authoritative entrance-panel-call note stays
+    // unconditional, so a REAL ring during the grab still declines this frame). The guard clears on any
+    // exit path; it is held across the grab AND the blocking commit below (#174, Finding #2).
+    let _wake = IdleWakeGuard::new();
     wake_panel(view_tx).await;
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
@@ -813,8 +870,27 @@ mod tests {
         assert!(argv.windows(2).any(|w| w == ["-c:v", "mjpeg"]));
         assert!(argv.windows(2).any(|w| w == ["-f", "image2"]));
         assert!(argv.contains(&"-an".to_string()));
-        // No forced pixel format (would pull swscale, which the vendored ffmpeg deliberately omits).
-        assert!(!argv.iter().any(|a| a == "-pix_fmt"));
+        // Full-range JPEG pixel format is forced (issue #174): the panel decodes to limited-range
+        // yuv420p(tv), so the JPEG needs a yuv420p→yuvj420p range conversion via the `scale` filter
+        // (swscale) — which build.sh now enables. `-update 1` writes a single image file.
+        assert!(argv.windows(2).any(|w| w == ["-pix_fmt", "yuvj420p"]));
+        assert!(argv.windows(2).any(|w| w == ["-update", "1"]));
+    }
+
+    #[test]
+    fn idle_capture_wake_active_flag_toggles_with_the_guard() {
+        // The wake marker (#174, Finding #2) starts clear, is set while an IdleWakeGuard is alive, and
+        // clears again on drop — so sender.rs suppresses the generic call-state note_ring for exactly the
+        // idle capture's own self-view window. Snapshot/restore in case a later test observes it.
+        let saved = IDLE_CAPTURE_WAKE_ACTIVE.load(Ordering::Relaxed);
+        IDLE_CAPTURE_WAKE_ACTIVE.store(false, Ordering::Relaxed);
+        assert!(!idle_capture_wake_active(), "clear before any capture wakes the panel");
+        {
+            let _wake = IdleWakeGuard::new();
+            assert!(idle_capture_wake_active(), "set while the guard is alive");
+        }
+        assert!(!idle_capture_wake_active(), "cleared once the guard drops");
+        IDLE_CAPTURE_WAKE_ACTIVE.store(saved, Ordering::Relaxed);
     }
 
     #[test]

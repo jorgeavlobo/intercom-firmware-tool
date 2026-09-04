@@ -91,6 +91,30 @@ namespace IntercomFirmwareTool.Core
         public const string OnDeviceSpropRtpEndpoint = "127.0.0.1:40100";
 
         /// <summary>
+        /// ffmpeg <c>-analyzeduration</c> (microseconds) on go2rtc's <c>exec:</c> SDP input — how long
+        /// <c>find_stream_info</c> may wait for enough stream data before giving up. Fixes issue #174
+        /// (Finding #3): go2rtc's <c>exec:</c> is LAZY — it starts ffmpeg at the consumer's DESCRIBE, but
+        /// the on-demand panel bring-up (viewer-socket detect → SIP INVITE → panel media start → RTP
+        /// fan-out) takes ~8-10 s, so on a COLD open ffmpeg reads the SDP with NO RTP arriving yet and,
+        /// with the default short probe, aborts with <c>Could not find codec parameters … unspecified
+        /// size</c> — it is dead by the time RTP flows, so the first open shows no video (a warm re-open
+        /// works). 20 s comfortably outlasts the bring-up; this is a CEILING, not a fixed wait — a warm
+        /// open with RTP already flowing still resolves in &lt;1 s (find_stream_info returns as soon as the
+        /// parameters are known), so it adds no steady-state latency. Stays under go2rtc's 30 s exec
+        /// start-timeout so the producer isn't killed before it can lock on.
+        /// </summary>
+        public const long OnDeviceProbeAnalyzeDurationUs = 20_000_000;
+
+        /// <summary>
+        /// ffmpeg <c>-probesize</c> (bytes) on go2rtc's <c>exec:</c> SDP input — the byte budget
+        /// <c>find_stream_info</c> may read while probing. Raised above the 5 MB default (issue #174,
+        /// Finding #3) so the cold-open probe is bounded by <see cref="OnDeviceProbeAnalyzeDurationUs"/>
+        /// (time), not an early byte cap. With <c>sprop-parameter-sets</c> in the SDP a warm open resolves
+        /// in a handful of packets regardless, so this only matters on a cold open.
+        /// </summary>
+        public const long OnDeviceProbeSizeBytes = 10_000_000;
+
+        /// <summary>
         /// Normalise a go2rtc stream name to the safe subset go2rtc keys and Home Assistant entity ids
         /// tolerate: lower-case ASCII letters, digits, <c>_</c> and <c>-</c>. Everything else is dropped;
         /// an empty or all-invalid input becomes <see cref="DefaultStreamName"/>. Deterministic so the
@@ -249,15 +273,26 @@ namespace IntercomFirmwareTool.Core
             // ({output}). Video only — the minimal on-device ffmpeg has no audio codecs until Phase 3
             // (#105), so -an drops the SDP's (absent) audio outright.
             //
-            // Deliberately PLAIN defaults on the input — no -analyzeduration/-probesize/-reorder_queue_size/
-            // -max_delay tuning. Two paths get `-c:v copy` its 640x480 dimensions. The FAST path is the
-            // sprop-parameter-sets in this SDP: btmqttd auto-provisions them into doorbell.sdp on first
-            // boot (native/btmqttd/src/sprop.rs), and the decoder-enabled ffmpeg (native/ffmpeg/build.sh)
-            // reads them at open — so it resolves the video IMMEDIATELY instead of waiting for the panel's
-            // next in-stream SPS/PPS. The FALLBACK — before that provisioning completes, or if on-demand
-            // is off — is the H.264 PARSER recovering the SPS/PPS from the in-stream data; correct but
-            // slow, since the panel emits an in-stream SPS only ~every 20 s. Either way `-c:v copy`
-            // publishes to go2rtc with no input tuning.
+            // Input probe patience — -analyzeduration/-probesize ONLY (issue #174, Finding #3); still NO
+            // -reorder_queue_size/-max_delay (the reorder buffer was the harmful lever — see below). go2rtc's
+            // `exec:` is LAZY: it starts ffmpeg at the consumer's DESCRIBE, but the on-demand panel bring-up
+            // (viewer-socket detect → SIP INVITE → panel media start → RTP fan-out) takes ~8-10 s. With the
+            // default short probe, a COLD open reads this SDP with NO RTP arriving yet and ffmpeg aborts
+            // (`Could not find codec parameters … unspecified size`) BEFORE the panel is up — so it is dead
+            // when RTP finally flows and the FIRST open shows no video (a warm re-open works). Widening the
+            // probe to OnDeviceProbeAnalyzeDurationUs/OnDeviceProbeSizeBytes makes find_stream_info WAIT
+            // through the bring-up and lock on within the same ffmpeg lifetime. It is a CEILING, not a fixed
+            // wait: a warm open with RTP already flowing still resolves in <1 s, so no steady-state latency is
+            // added; and it stays under go2rtc's 30 s exec start-timeout.
+            //
+            // Two paths get `-c:v copy` its 640x480 dimensions. The FAST path is the sprop-parameter-sets in
+            // this SDP: btmqttd auto-provisions them into doorbell.sdp on first boot (native/btmqttd/src/
+            // sprop.rs), and the decoder-enabled ffmpeg (native/ffmpeg/build.sh) reads them at open — so once
+            // RTP is flowing it resolves the video IMMEDIATELY instead of waiting for the panel's next
+            // in-stream SPS/PPS. The FALLBACK — before that provisioning completes, or if on-demand is off —
+            // is the H.264 PARSER recovering the SPS/PPS from the in-stream data; correct but slow, since the
+            // panel emits an in-stream SPS only ~every 20 s. (The probe patience above is what keeps ffmpeg
+            // alive long enough to reach either.)
             //
             // HARDWARE-DIAGNOSED (issue #120, C100X): an earlier revision widened the RTP jitter buffer
             // (-reorder_queue_size 3000 -max_delay 5000000) to catch the sparse in-stream SPS/PPS. That
@@ -286,7 +321,7 @@ namespace IntercomFirmwareTool.Core
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {OnDeviceRuntimeSdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}} -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}\"\n"));
+                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -analyzeduration {OnDeviceProbeAnalyzeDurationUs} -probesize {OnDeviceProbeSizeBytes} -i {OnDeviceRuntimeSdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}} -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}\"\n"));
             return sb.ToString();
         }
 

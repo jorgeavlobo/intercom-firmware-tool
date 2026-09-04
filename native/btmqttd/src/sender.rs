@@ -731,7 +731,14 @@ async fn publish_frame(
         // call-state code (ringing / in_call / active fallback — NOT the terminal `0`): the panel is in a
         // call, so an idle capture must be declined. This fires for a floor call's dim-35 as well, which
         // is a harmless FALSE decline (it only skips one best-effort idle update; see RECENT_RING_WINDOW).
-        if code != 0 && cfg.camera_ondevice {
+        //
+        // But SUPPRESS this generic note while an on-device idle capture is waking the panel for its OWN
+        // self-view (issue #174, Finding #2): that self-view emits the same non-idle codes (ringing →
+        // active → in_call) a real call does, so noting it here would make the capture decline its own
+        // frame. A REAL visitor ringing during the capture still fires the AUTHORITATIVE
+        // entrance-panel-call note (the WHO=8 signature above, which a silent self-view never produces),
+        // so it is still declined correctly — this only drops the self-induced false ring.
+        if code != 0 && cfg.camera_ondevice && !crate::capture::idle_capture_wake_active() {
             crate::capture::note_ring();
         }
         // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the
@@ -943,7 +950,12 @@ async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
     // first-run or "Update idle snapshot" capture running during such a reconciled active call would accept
     // the visitor frame and persist it as the empty-doorway thumbnail (#169). Centralised here so every
     // publisher of a non-idle code invalidates; code 0 (idle) deliberately does NOT (there is no visitor).
-    if code != 0 && cfg.camera_ondevice {
+    //
+    // SUPPRESSED while an on-device idle capture is waking the panel for its own self-view (issue #174,
+    // Finding #2): during that window the only active session is the capture's OWN self-view, whose
+    // non-idle state must not invalidate the capture. A real ring is still caught by the unconditional
+    // entrance-panel-call note (the WHO=8 signature a self-view never emits), so real visitors are unaffected.
+    if code != 0 && cfg.camera_ondevice && !crate::capture::idle_capture_wake_active() {
         crate::capture::note_ring();
     }
     let payload =
