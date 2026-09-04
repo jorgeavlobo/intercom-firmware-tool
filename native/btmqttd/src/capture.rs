@@ -534,10 +534,17 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     }
     // From here on this capture WAKES the panel for its own silent self-view, which emits the same
     // non-idle call-state codes a real call does. Mark the wake active so sender.rs suppresses the
-    // GENERIC call-state note_ring for the duration (the authoritative entrance-panel-call note stays
-    // unconditional, so a REAL ring during the grab still declines this frame). The guard clears on any
-    // exit path; it is held across the grab AND the blocking commit below (#174, Finding #2).
-    let _wake = IdleWakeGuard::new();
+    // GENERIC live call-state note_ring for the duration (#174, Finding #2). The AUTHORITATIVE
+    // entrance-panel-call note and the reconcile note both stay unconditional, so a REAL ring — live or
+    // reconciled — during the grab still declines this frame.
+    //
+    // Only arm the guard when a wake will ACTUALLY be attempted (`view_tx` is Some — on-demand viewing
+    // enabled): with no `view_tx` there is no self-view to suppress and the grab just times out, so
+    // arming the guard would needlessly suppress the live early note for an unrelated call (a real
+    // entrance is still caught by the unconditional entrance note regardless). Armed BEFORE `wake_panel`
+    // so the self-view's very first call-state codes are already suppressed (no gap). `Option` held to
+    // the end of the function, so it clears on every exit path — across the grab AND the blocking commit.
+    let _wake = view_tx.is_some().then(IdleWakeGuard::new);
     wake_panel(view_tx).await;
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,

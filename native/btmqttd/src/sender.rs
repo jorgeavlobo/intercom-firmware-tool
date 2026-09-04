@@ -938,10 +938,30 @@ fn ring_snapshot_deliverable(broker_online: &AtomicBool, ring_epoch: u64) -> boo
     momentary_deliverable(broker_online) && BROKER_EPOCH.load(Ordering::Relaxed) == ring_epoch
 }
 
+/// Whether a call-state PUBLISH should invalidate an in-flight on-device idle capture (call
+/// `capture::note_ring`). Pure, so the policy is unit-tested (#174 Finding #2).
+///
+/// Only the AUTHORITATIVE RECONCILE origin (`from_reconcile`) invalidates here, and it does so
+/// UNCONDITIONALLY — it is deliberately NOT gated by `capture::idle_capture_wake_active()`. A reconcile
+/// (reconnect / periodic poll / reseed) can surface a REAL entrance call that began while the monitor
+/// was disconnected (its WHO=8 was missed, so the unconditional entrance note never fired); that must
+/// win over an idle capture even during the capture's own wake, or a visitor frame could be persisted as
+/// the idle thumbnail. A false decline only skips one best-effort idle update; a false accept persists a
+/// visitor across reboots — so reconcile always invalidates a non-idle code. The LIVE-bus callers pass
+/// `from_reconcile == false` and never invalidate here: the live path is already covered by
+/// `parse_call_state`'s wake-gated early note (which suppresses the capture's own self-view) plus the
+/// unconditional entrance-panel-call note. `code == 0` (idle) never invalidates (no visitor); on-device
+/// only (`camera_ondevice`).
+fn call_state_publish_invalidates(from_reconcile: bool, code: u8, camera_ondevice: bool) -> bool {
+    from_reconcile && code != 0 && camera_ondevice
+}
+
 /// Publish the call STATE to TOPIC_CALL_STATE, RETAINED so HA shows the current state
 /// after a reconnect/restart. The payload carries the mapped label (idle/ringing/in_call,
 /// or "active" for an unmapped code — see [`dimension::call_state_label`]) plus the raw
-/// code as an attribute for finer protocol detail.
+/// code as an attribute for finer protocol detail. `from_reconcile` marks the AUTHORITATIVE reconcile
+/// callers (reconnect/periodic/reseed) so only those invalidate an idle capture — see
+/// [`call_state_publish_invalidates`].
 async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8, from_reconcile: bool) {
     // Idle-capture invalidation for the AUTHORITATIVE RECONCILE paths only (reconnect / periodic poll /
     // reseed, `from_reconcile == true`): those republish an active call (in_call/active, ringing) that
@@ -958,7 +978,7 @@ async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8, f
     // IS wake-gated, so the capture's self-view is suppressed) and the unconditional entrance-panel-call note
     // (the WHO=8 signature a silent self-view never emits). Noting again here would re-introduce the
     // self-decline the wake gate removes. code 0 (idle) never invalidates (no visitor).
-    if from_reconcile && code != 0 && cfg.camera_ondevice {
+    if call_state_publish_invalidates(from_reconcile, code, cfg.camera_ondevice) {
         crate::capture::note_ring();
     }
     let payload =
@@ -986,6 +1006,31 @@ pub(crate) fn try_publish_retained(client: &AsyncClient, topic: &str, qos: QoS, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconcile_publish_invalidates_idle_capture_but_live_bus_does_not() {
+        // #174 Finding #2 (P1): a call-state PUBLISH from the AUTHORITATIVE reconcile paths must
+        // invalidate an in-flight idle capture — a real entrance call surfaced by reconnect/periodic/reseed
+        // (states 4/6, WHO=8 missed while disconnected) can otherwise let a visitor frame be persisted as
+        // the idle thumbnail. This must hold REGARDLESS of whether an idle capture's own self-view wake is
+        // active (the reconcile decision does not consult that flag at all — hence it is not even an input).
+        for code in [1u8, 3, 4, 6] {
+            assert!(
+                call_state_publish_invalidates(true, code, true),
+                "a reconciled non-idle code ({code}) must invalidate the idle capture, wake or not"
+            );
+        }
+        // The LIVE-bus callers (entrance held-ring flush, on_call_state Publish) never invalidate HERE:
+        // the live path is covered by parse_call_state's wake-gated early note + the unconditional
+        // entrance-panel-call note. Noting again here is what would re-introduce the self-decline.
+        for code in [1u8, 3, 4, 6] {
+            assert!(!call_state_publish_invalidates(false, code, true), "live-bus publishes don't note here");
+        }
+        // Idle (code 0) never invalidates — no visitor — on either origin.
+        assert!(!call_state_publish_invalidates(true, 0, true), "idle (0) never invalidates");
+        // Off-device (camera_ondevice = false): never invalidates (no on-device capture to protect).
+        assert!(!call_state_publish_invalidates(true, 6, false), "off-device never invalidates");
+    }
 
     #[test]
     fn call_watch_arms_on_non_idle_and_disarms_on_idle() {
