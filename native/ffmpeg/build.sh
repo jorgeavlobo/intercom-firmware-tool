@@ -58,7 +58,7 @@ cd "$src" || exit 1
 # is unchanged. The H.264 DECODER is LGPL (only the x264 ENCODER is GPL; not enabled). It pulls
 # h264_sei.o (film-grain SEI) exactly as the parser did, so the HEVC-parser link dependency below
 # still applies.
-# --enable-encoder=mjpeg + --enable-muxer=image2 + --enable-filter=scale,format: the on-device SNAPSHOT
+# --enable-encoder=mjpeg + --enable-muxer=image2 + --enable-filter=scale --enable-filter=format: the on-device SNAPSHOT
 # path (issue #169, Phase 2). The live view is still a pure `-c:v copy` (no decode/encode) — this adds a
 # SEPARATE, occasional path that grabs ONE frame and writes a JPEG: the real empty-doorway idle thumbnail
 # (first run + an HA "update idle snapshot" button) and a who-is-at-the-door ring snapshot. btmqttd runs

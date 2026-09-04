@@ -309,7 +309,7 @@ fn rtsp_url(user: &str, pass: &str) -> Option<String> {
 
 /// The ffmpeg argument vector for a one-frame JPEG grab from `rtsp_url` into `out_path`. Pure (no
 /// I/O, no spawn) so the exact recipe is unit-tested and kept in step with `native/ffmpeg/build.sh`
-/// (which enables exactly the mjpeg encoder + image2 muxer + the `scale` filter this uses):
+/// (which enables exactly the mjpeg encoder + image2 muxer + the `scale` and `format` filters this uses):
 ///   * `-rtsp_transport tcp` — go2rtc's loopback RTSP, matching how HA reads it (no UDP reorder);
 ///   * `-i <url>` then `-an` — video only (the snapshot has no audio);
 ///   * `-frames:v 1 -c:v mjpeg -pix_fmt yuvj420p -f image2 -update 1 -y <file>` — decode ONE frame,
