@@ -484,18 +484,19 @@ impl Drop for IdleWakeGuard {
 /// Returns whether a self-view wake was actually QUEUED: `false` when on-demand viewing is off
 /// (`view_tx` is `None`) or the SIP UA's channel is full/closed, so the caller does not mark the wake
 /// active (there is no self-view to protect against a reconcile self-decline) — see [`capture_idle`].
-async fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>) -> bool {
+///
+/// Synchronous and non-blocking (just a `try_send`): the caller arms [`IdleWakeGuard`] on the returned
+/// `true` BEFORE the media-start settle wait, so the self-view is marked active for the WHOLE
+/// wake-to-commit interval — including the settle — and a reconcile/reseed firing during the settle
+/// can't self-decline the frame (#174, Finding #2). Waking the panel is deliberately kept apart from
+/// waiting for it so the guard covers the wait too.
+fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>) -> bool {
     let Some(tx) = view_tx else {
         return false;
     };
     // try_send: never block the caller; Hold is idempotent (the UA re-checks + renews on each poke). A
     // full/closed channel means the UA isn't taking pokes, so no self-view starts — report that.
-    let queued = tx.try_send(ViewCmd::Hold(tokio::time::Instant::now() + CAPTURE_HOLD)).is_ok();
-    // Give the SIP INVITE + the panel's media-start a moment before ffmpeg connects, so go2rtc's
-    // producer has RTP to serve rather than opening onto silence. ffmpeg still waits for the first
-    // keyframe within CAPTURE_TIMEOUT, so this is only a head start, not a correctness dependency.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    queued
+    tx.try_send(ViewCmd::Hold(tokio::time::Instant::now() + CAPTURE_HOLD)).is_ok()
 }
 
 /// Capture the idle thumbnail and persist it to `cfg/extra/btmqttd/idle.jpg` (survives reboot +
@@ -537,7 +538,15 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // capture's own reseed can't decline its frame (#174, Finding #2). The LIVE call-state path does not
     // note at all and the WHO=8 entrance-panel-call note stays unconditional, so a REAL visitor's ring —
     // live, or a missed-WHO=8 one surfaced by reconcile OUTSIDE this window — still declines the capture.
-    let _wake = wake_panel(view_tx).await.then(IdleWakeGuard::new);
+    // Arm the guard BEFORE the settle wait so the self-view is protected for the whole wake-to-commit
+    // interval; only wait when a wake was actually queued (nothing to wait for otherwise).
+    let _wake = wake_panel(view_tx).then(IdleWakeGuard::new);
+    if _wake.is_some() {
+        // Give the SIP INVITE + the panel's media-start a moment before ffmpeg connects, so go2rtc's
+        // producer has RTP to serve rather than opening onto silence. ffmpeg still waits for the first
+        // keyframe within CAPTURE_TIMEOUT, so this is only a head start, not a correctness dependency.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
         Err(e) => {
