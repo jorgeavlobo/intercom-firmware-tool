@@ -153,9 +153,10 @@ HA button press, or a doorbell ring, never on the resident live stream. Built pe
 
 It is compiled `--disable-everything` plus only the RTP/SDP→RTSP H.264-copy path (the H.264
 parser + decoder for parameter-set discovery, and the HEVC parser as a link-only dependency)
-and the single-frame H.264-decode→**MJPEG-encode** snapshot path (#169), **never**
-`--enable-gpl`/`--enable-nonfree` and with no GPL-only libraries (no x264/x265/…), so the whole
-binary is LGPL. The only encoder built is the **LGPL MJPEG encoder** (used for the occasional
+and the single-frame H.264-decode→**MJPEG-encode** snapshot path (#169, with the LGPL `scale`
+(swscale) + `format` filters for the limited→full-range `yuv420p`→`yuvj420p` JPEG conversion — #174),
+**never** `--enable-gpl`/`--enable-nonfree` and with no GPL-only libraries (no x264/x265/…), so the
+whole binary is LGPL. The only encoder built is the **LGPL MJPEG encoder** (used for the occasional
 JPEG snapshot); the GPL x264 *encoder* is never enabled.
 
 ### Provenance & integrity
@@ -169,7 +170,7 @@ JPEG snapshot); the GPL x264 *encoder* is never enabled.
 | ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
 | Upstream | FFmpeg `n7.1.1` (release tag) |
 | Build toolchain | `zig cc` 0.13.0 (bundled musl) per `BUILD.md` |
-| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp,image2` · `parser=h264,hevc` · `decoder=h264` · `encoder=mjpeg` · `--disable-asm` |
+| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp,image2` · `parser=h264,hevc` · `decoder=h264` · `encoder=mjpeg` · `filter=scale,format` · `--disable-asm` |
 | License | **LGPL-2.1-or-later** (FFmpeg) **AND MIT** (statically-linked musl libc) |
 | License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](../../../licenses/ffmpeg-COPYING.LGPLv2.1.txt) · [`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt) |
 | SPDX expression | `LGPL-2.1-or-later AND MIT` |
