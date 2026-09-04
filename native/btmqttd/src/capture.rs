@@ -106,7 +106,7 @@ pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 
 /// Set while an idle/button capture is holding its OWN silent self-view (from when a self-view MAY be
-/// active — our Hold queued, or the shared channel full — through the self-view's Hold deadline). The self-view makes a
+/// active — our Hold queued, or the shared channel full — through this capture's local suppression deadline). The self-view makes a
 /// non-idle call-state (in_call) that is indistinguishable from a real call, so [`sender.rs`] suppresses
 /// the RECONCILE-path `note_ring` while this is set — otherwise the capture's own reseed would decline its
 /// own frame (issue #174, Finding #2). It does NOT gate the LIVE call-state path (that no longer notes at
@@ -456,8 +456,8 @@ pub fn idle_capture_wake_active() -> bool {
 
 /// RAII marker for [`IDLE_CAPTURE_WAKE_ACTIVE`], created by [`capture_idle`] whenever a self-view MAY be
 /// active — i.e. [`wake_panel`] returned `true`: our own `Hold` queued, OR the shared view channel was
-/// full so a self-view may already be pending — and held through the self-view's Hold deadline (past
-/// grab + commit, so the lingering self-view stays covered). Cleared on drop
+/// full so a self-view may already be pending — and held through this capture's local suppression deadline
+/// `hold_deadline` (past grab + commit, so the lingering self-view stays covered). Cleared on drop
 /// (incl. early return / panic). Relaxed on both ends: single-threaded runtime, a plain suppression
 /// switch (matching the module's other runtime flags), not a synchronization edge.
 struct IdleWakeGuard;
@@ -489,8 +489,8 @@ impl Drop for IdleWakeGuard {
 /// CLOSED (the UA is gone). A FULL channel returns `true` — see below. See [`capture_idle`].
 ///
 /// Synchronous and non-blocking (just a `try_send`): the caller arms [`IdleWakeGuard`] on the returned
-/// `true` BEFORE the media-start settle wait, so the self-view is marked active for its WHOLE lifetime —
-/// the settle, the grab+commit, AND the post-commit linger to `hold_deadline` — so a reconcile/reseed
+/// `true` BEFORE the media-start settle wait, so the marker is active through this capture's suppression
+/// deadline `hold_deadline` — the settle, the grab+commit, AND the post-commit linger — so a reconcile/reseed
 /// firing anywhere in that window can't self-decline the frame (#174, Finding #2). Waking the panel is
 /// deliberately kept apart from waiting for it so the guard covers the wait too.
 fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>, hold_deadline: tokio::time::Instant) -> bool {
@@ -550,11 +550,11 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // panel republish a non-idle call-state (in_call) — indistinguishable from a real call on the
     // reconcile/reseed path — so mark the wake active (whenever a self-view MAY be starting: our Hold
     // queued, OR the shared channel was full and one may already be pending) and hold that marker through
-    // the self-view's Hold deadline, so sender.rs suppresses the RECONCILE `note_ring` and the capture's own reseed
+    // this capture's local suppression deadline, so sender.rs suppresses the RECONCILE `note_ring` and its own reseed
     // can't decline its frame (#174, Finding #2). The LIVE call-state path does not note at all and the
     // WHO=8 entrance-panel-call note stays unconditional, so a REAL visitor's ring — live, or a
     // missed-WHO=8 one surfaced by reconcile OUTSIDE this window — still declines the capture. Arm the
-    // guard BEFORE the settle wait so the self-view is protected across its whole lifetime (the linger extends it past commit);
+    // guard BEFORE the settle wait so the self-view is protected through this capture's suppression deadline (the linger extends it past commit);
     // skip the wait only when there is genuinely no self-view (viewing off / channel closed).
     let hold_deadline = tokio::time::Instant::now() + CAPTURE_HOLD;
     let _wake = wake_panel(view_tx, hold_deadline).then(IdleWakeGuard::new);
@@ -608,15 +608,18 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
         }
         stored
     };
-    // The grab + commit can finish well before the panel's self-view does: our `Hold` keeps the panel
-    // non-idle until `hold_deadline` (= wake + CAPTURE_HOLD) and it renews MONOTONICALLY
-    // (`sip::governing_deadline`), so the session can't end sooner. Dropping the wake marker at grab-end
-    // would leave that tail unprotected — a 30 s authoritative poll or 60 s reseed landing in it would note
-    // the capture's OWN lingering self-view as a ring and spuriously decline the next idle capture for
-    // RECENT_RING_WINDOW (#174). So keep BOTH guards (the wake marker AND the one-capture lock) alive until
-    // the self-view's own deadline. Both callers run `capture_idle` detached and the idle.jpg is already
-    // committed + served, so this delays nothing user-visible — it only extends the invisible suppression
-    // to match the real self-view lifetime. Only linger when a self-view may actually be up.
+    // The grab + commit can finish well before this capture's suppression window closes. On the normal
+    // path our own `Hold(hold_deadline)` (= wake + CAPTURE_HOLD) keeps the panel non-idle until that
+    // instant, renewing MONOTONICALLY (`sip::governing_deadline`) so the session can't end sooner. Dropping
+    // the wake marker at grab-end would leave that tail unprotected — a 30 s authoritative poll or 60 s
+    // reseed landing in it would note the capture's OWN lingering self-view as a ring and spuriously decline
+    // the next idle capture for RECENT_RING_WINDOW (#174). So keep BOTH guards (the wake marker AND the
+    // one-capture lock) alive until `hold_deadline` — this capture's LOCAL suppression deadline. (On the
+    // full-channel path we did not queue our own Hold, so a manual `Start` may hold the session even past
+    // `hold_deadline`; bounding suppression to our own window is still right — past it, any lingering
+    // non-idle state is a live viewer's, not this capture's self-view.) Both callers run `capture_idle`
+    // detached and idle.jpg is already committed + served, so this delays nothing user-visible. Only linger
+    // when a self-view may actually be up.
     if _wake.is_some() {
         tokio::time::sleep_until(hold_deadline).await;
     }
