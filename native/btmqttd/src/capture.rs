@@ -928,6 +928,26 @@ mod tests {
     }
 
     #[test]
+    fn wake_panel_classifies_the_channel_state() {
+        // #174: the ViewCmd channel is SHARED with the manual-view / viewer-hold producers, so a FULL
+        // queue may hide a Start/Hold that is already opening a self-view — wake_panel must still return
+        // true (the caller then arms the guard + settle). Only a genuinely absent self-view returns
+        // false: on-demand viewing off (None) or a CLOSED channel (the SIP UA is gone).
+        assert!(!wake_panel(None), "on-demand viewing off: no self-view to protect");
+
+        // Closed: receiver dropped → the UA is gone → no self-view can start.
+        let (tx, rx) = mpsc::channel::<ViewCmd>(1);
+        drop(rx);
+        assert!(!wake_panel(Some(&tx)), "closed channel: nothing to protect");
+
+        // Full: the capacity-1 channel already holds a command (kept from being read by holding `_rx`),
+        // standing in for a pending self-view on the shared queue.
+        let (tx, _rx) = mpsc::channel::<ViewCmd>(1);
+        tx.try_send(ViewCmd::Hold(tokio::time::Instant::now() + CAPTURE_HOLD)).expect("first send fits");
+        assert!(wake_panel(Some(&tx)), "full shared channel: treat as a possible pending self-view");
+    }
+
+    #[test]
     fn ring_runner_slot_is_exclusive_coalesces_and_records_per_event_epoch() {
         // The single-runner bound: only ONE task can hold the runner slot, extra rings just record the
         // newest id, and the slot is re-acquirable once released. Also covers per-EVENT epoch binding
