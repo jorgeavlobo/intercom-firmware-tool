@@ -916,7 +916,7 @@ mod tests {
     fn idle_wake_guard_toggles_the_flag() {
         // #174 Finding #2: the wake marker is off, on while an IdleWakeGuard lives, and off again after it
         // drops — so sender.rs suppresses the reconcile note_ring for exactly the capture's own self-view
-        // window (capture_idle arms it only after a successful wake). Snapshot/restore the process-global.
+        // window (capture_idle arms it whenever a self-view may be active). Snapshot/restore the process-global.
         let saved = IDLE_CAPTURE_WAKE_ACTIVE.load(Ordering::Relaxed);
         IDLE_CAPTURE_WAKE_ACTIVE.store(false, Ordering::Relaxed);
         assert!(!idle_capture_wake_active(), "clear before any capture self-view");
