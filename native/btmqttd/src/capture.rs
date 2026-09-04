@@ -106,7 +106,7 @@ pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 
 /// Set while an idle/button capture is holding its OWN silent self-view (from when a self-view MAY be
-/// active — our Hold queued, or the shared channel full — through grab+commit). The self-view makes a
+/// active — our Hold queued, or the shared channel full — through the self-view's Hold deadline). The self-view makes a
 /// non-idle call-state (in_call) that is indistinguishable from a real call, so [`sender.rs`] suppresses
 /// the RECONCILE-path `note_ring` while this is set — otherwise the capture's own reseed would decline its
 /// own frame (issue #174, Finding #2). It does NOT gate the LIVE call-state path (that no longer notes at
@@ -456,7 +456,8 @@ pub fn idle_capture_wake_active() -> bool {
 
 /// RAII marker for [`IDLE_CAPTURE_WAKE_ACTIVE`], created by [`capture_idle`] whenever a self-view MAY be
 /// active — i.e. [`wake_panel`] returned `true`: our own `Hold` queued, OR the shared view channel was
-/// full so a self-view may already be pending — and held across the grab + commit. Cleared on drop
+/// full so a self-view may already be pending — and held through the self-view's Hold deadline (past
+/// grab + commit, so the lingering self-view stays covered). Cleared on drop
 /// (incl. early return / panic). Relaxed on both ends: single-threaded runtime, a plain suppression
 /// switch (matching the module's other runtime flags), not a synchronization edge.
 struct IdleWakeGuard;
