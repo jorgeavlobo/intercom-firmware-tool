@@ -492,12 +492,14 @@ impl Drop for IdleWakeGuard {
 /// wake-to-commit interval — including the settle — and a reconcile/reseed firing during the settle
 /// can't self-decline the frame (#174, Finding #2). Waking the panel is deliberately kept apart from
 /// waiting for it so the guard covers the wait too.
-fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>) -> bool {
+fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>, hold_deadline: tokio::time::Instant) -> bool {
     let Some(tx) = view_tx else {
         return false;
     };
-    // try_send: never block the caller; Hold is idempotent (the UA re-checks + renews on each poke).
-    match tx.try_send(ViewCmd::Hold(tokio::time::Instant::now() + CAPTURE_HOLD)) {
+    // try_send: never block the caller; Hold is idempotent (the UA re-checks + renews on each poke). The
+    // ABSOLUTE `hold_deadline` (= wake time + CAPTURE_HOLD) is passed in so the caller can hold its
+    // suppression marker for the SAME lifetime the self-view stays up (see `capture_idle`).
+    match tx.try_send(ViewCmd::Hold(hold_deadline)) {
         // Queued: our own Hold will bring the panel up.
         Ok(()) => true,
         // FULL: the capacity-bounded channel is SHARED with the manual-view / viewer-hold paths, so a
@@ -553,52 +555,71 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // missed-WHO=8 one surfaced by reconcile OUTSIDE this window — still declines the capture. Arm the
     // guard BEFORE the settle wait so the self-view is protected for the whole wake-to-commit interval;
     // skip the wait only when there is genuinely no self-view (viewing off / channel closed).
-    let _wake = wake_panel(view_tx).then(IdleWakeGuard::new);
-    if _wake.is_some() {
-        // Give the SIP INVITE + the panel's media-start a moment before ffmpeg connects, so go2rtc's
-        // producer has RTP to serve rather than opening onto silence. ffmpeg still waits for the first
-        // keyframe within CAPTURE_TIMEOUT, so this is only a head start, not a correctness dependency.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-    let bytes = match grab_jpeg(cfg).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("btmqttd: capture: idle capture failed: {e}");
-            return false;
+    let hold_deadline = tokio::time::Instant::now() + CAPTURE_HOLD;
+    let _wake = wake_panel(view_tx, hold_deadline).then(IdleWakeGuard::new);
+    // Run the capture in a labeled block so every exit (grab error, ring decline, store result) converges
+    // on the linger below WITHOUT dropping the guards early. `_wake` and the `CAPTURING_IDLE` lock stay
+    // held across both the capture and the linger.
+    let result = 'capture: {
+        if _wake.is_some() {
+            // Give the SIP INVITE + the panel's media-start a moment before ffmpeg connects, so go2rtc's
+            // producer has RTP to serve rather than opening onto silence. ffmpeg still waits for the first
+            // keyframe within CAPTURE_TIMEOUT, so this is only a head start, not a correctness dependency.
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
-    };
-    if ring_recent() {
-        // A ring became recent/active while we were waking the panel or grabbing — discard the (visitor)
-        // frame. (The commit gate below re-checks once more, right before the atomic rename.)
-        eprintln!(
-            "btmqttd: capture: idle capture declined — a ring became recent/active during the grab \
-             (visitor present); keeping the idle thumbnail as the empty doorway"
-        );
-        return false;
-    }
-    // The atomic store is blocking std::fs — offload it off the single-threaded runtime. The commit gate
-    // takes RING_COMMIT_LOCK, re-checks `ring_recent()`, and (if clear) returns the guard so it is HELD
-    // across the rename. note_ring() takes the SAME lock before advancing LAST_RING_MS, so a ring arriving
-    // during the write is serialized: either it lands before the check (→ gate returns None, temp
-    // discarded, prior thumbnail intact) or strictly after the rename (→ the doorway was still empty when
-    // this frame committed). The MutexGuard lives and dies inside this one blocking task (never crosses a
-    // thread), so the closure stays `Send`.
-    let stored = tokio::task::spawn_blocking(move || {
-        crate::persist::store_idle_jpg(&bytes, move || {
-            let guard = RING_COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            if ring_recent() { None } else { Some(guard) }
+        let bytes = match grab_jpeg(cfg).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("btmqttd: capture: idle capture failed: {e}");
+                break 'capture false;
+            }
+        };
+        if ring_recent() {
+            // A ring became recent/active while we were waking the panel or grabbing — discard the (visitor)
+            // frame. (The commit gate below re-checks once more, right before the atomic rename.)
+            eprintln!(
+                "btmqttd: capture: idle capture declined — a ring became recent/active during the grab \
+                 (visitor present); keeping the idle thumbnail as the empty doorway"
+            );
+            break 'capture false;
+        }
+        // The atomic store is blocking std::fs — offload it off the single-threaded runtime. The commit gate
+        // takes RING_COMMIT_LOCK, re-checks `ring_recent()`, and (if clear) returns the guard so it is HELD
+        // across the rename. note_ring() takes the SAME lock before advancing LAST_RING_MS, so a ring arriving
+        // during the write is serialized: either it lands before the check (→ gate returns None, temp
+        // discarded, prior thumbnail intact) or strictly after the rename (→ the doorway was still empty when
+        // this frame committed). The MutexGuard lives and dies inside this one blocking task (never crosses a
+        // thread), so the closure stays `Send`.
+        let stored = tokio::task::spawn_blocking(move || {
+            crate::persist::store_idle_jpg(&bytes, move || {
+                let guard = RING_COMMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                if ring_recent() { None } else { Some(guard) }
+            })
         })
-    })
-    .await
-    .unwrap_or(false);
-    if stored {
-        eprintln!("btmqttd: capture: idle snapshot updated");
-    } else {
-        eprintln!(
-            "btmqttd: capture: idle snapshot not stored (a ring arrived during the write, or an I/O error)"
-        );
+        .await
+        .unwrap_or(false);
+        if stored {
+            eprintln!("btmqttd: capture: idle snapshot updated");
+        } else {
+            eprintln!(
+                "btmqttd: capture: idle snapshot not stored (a ring arrived during the write, or an I/O error)"
+            );
+        }
+        stored
+    };
+    // The grab + commit can finish well before the panel's self-view does: our `Hold` keeps the panel
+    // non-idle until `hold_deadline` (= wake + CAPTURE_HOLD) and it renews MONOTONICALLY
+    // (`sip::governing_deadline`), so the session can't end sooner. Dropping the wake marker at grab-end
+    // would leave that tail unprotected — a 30 s authoritative poll or 60 s reseed landing in it would note
+    // the capture's OWN lingering self-view as a ring and spuriously decline the next idle capture for
+    // RECENT_RING_WINDOW (#174). So keep BOTH guards (the wake marker AND the one-capture lock) alive until
+    // the self-view's own deadline. Both callers run `capture_idle` detached and the idle.jpg is already
+    // committed + served, so this delays nothing user-visible — it only extends the invisible suppression
+    // to match the real self-view lifetime. Only linger when a self-view may actually be up.
+    if _wake.is_some() {
+        tokio::time::sleep_until(hold_deadline).await;
     }
-    stored
+    result
 }
 
 /// Record a freshly-DETECTED ring as the newest pending capture and return its event id, or `None` when
@@ -934,22 +955,23 @@ mod tests {
         // queue may hide a Start/Hold that is already opening a self-view — wake_panel must still return
         // true (the caller then arms the guard + settle). Only a genuinely absent self-view returns
         // false: on-demand viewing off (None) or a CLOSED channel (the SIP UA is gone).
-        assert!(!wake_panel(None), "on-demand viewing off: no self-view to protect");
+        let deadline = tokio::time::Instant::now() + CAPTURE_HOLD;
+        assert!(!wake_panel(None, deadline), "on-demand viewing off: no self-view to protect");
 
         // Open with free capacity: our own Hold queues → true.
         let (tx, _rx) = mpsc::channel::<ViewCmd>(1);
-        assert!(wake_panel(Some(&tx)), "open channel: our own Hold queued the wake");
+        assert!(wake_panel(Some(&tx), deadline), "open channel: our own Hold queued the wake");
 
         // Closed: receiver dropped → the UA is gone → no self-view can start.
         let (tx, rx) = mpsc::channel::<ViewCmd>(1);
         drop(rx);
-        assert!(!wake_panel(Some(&tx)), "closed channel: nothing to protect");
+        assert!(!wake_panel(Some(&tx), deadline), "closed channel: nothing to protect");
 
         // Full: the capacity-1 channel already holds a command (kept from being read by holding `_rx`),
         // standing in for a pending self-view on the shared queue.
         let (tx, _rx) = mpsc::channel::<ViewCmd>(1);
-        tx.try_send(ViewCmd::Hold(tokio::time::Instant::now() + CAPTURE_HOLD)).expect("first send fits");
-        assert!(wake_panel(Some(&tx)), "full shared channel: treat as a possible pending self-view");
+        tx.try_send(ViewCmd::Hold(deadline)).expect("first send fits");
+        assert!(wake_panel(Some(&tx), deadline), "full shared channel: treat as a possible pending self-view");
     }
 
     #[test]
