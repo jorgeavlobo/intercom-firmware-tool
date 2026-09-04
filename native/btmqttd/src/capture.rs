@@ -94,6 +94,13 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(25);
 /// (see `sip::governing_deadline`), so a short manual window can't starve the capture.
 const CAPTURE_HOLD: Duration = Duration::from_secs(30);
 
+/// Extra grace added to the wake-suppression linger AFTER [`CAPTURE_HOLD`] expires, covering the SIP
+/// teardown tail: `sip::session` only BEGINS teardown at the Hold deadline, and `teardown_bye` then waits
+/// up to ~1 s for the BYE 200 OK — the panel keeps reporting the capture's own non-idle self-view until it
+/// processes that BYE. Holding [`IDLE_CAPTURE_WAKE_ACTIVE`] for this tail past the deadline stops a poll /
+/// reseed landing during teardown from noting the capture's OWN winding-down self-view as a ring (#174).
+const CAPTURE_TEARDOWN_GRACE: Duration = Duration::from_secs(2);
+
 /// Settle delay before the FIRST-RUN capture, so go2rtc, the firewall and the SIP UA are all up
 /// before we try to wake the panel on a fresh boot.
 pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
@@ -614,10 +621,12 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // the wake marker at grab-end would leave that tail unprotected — a 30 s authoritative poll or 60 s
     // reseed landing in it would note the capture's OWN lingering self-view as a ring and spuriously decline
     // the next idle capture for RECENT_RING_WINDOW (#174). So keep BOTH guards (the wake marker AND the
-    // one-capture lock) alive until `hold_deadline` — this capture's LOCAL suppression deadline. (On the
-    // full-channel path we did not queue our own Hold, so a manual `Start` may hold the session even past
-    // `hold_deadline`; bounding suppression to our own window is still right — past it, any lingering
-    // non-idle state is a live viewer's, not this capture's self-view.)
+    // one-capture lock) alive until `hold_deadline` + [`CAPTURE_TEARDOWN_GRACE`] — this capture's LOCAL
+    // suppression deadline plus the SIP teardown tail (`sip::session` only STARTS the BYE at the deadline;
+    // the panel keeps reporting the self-view until it processes that BYE, ~1 s). (On the full-channel path
+    // we did not queue our own Hold, so a manual `Start` may hold the session even past that; bounding
+    // suppression to our own window is still right — past it, any lingering non-idle state is a live
+    // viewer's, not this capture's self-view.)
     //
     // The linger runs DETACHED so it does not delay the result: the "update_idle" caller publishes its
     // success ack as soon as the JPEG is committed, not ~CAPTURE_HOLD later. The task keeps holding
@@ -627,7 +636,7 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // here at once.
     if let Some(wake) = _wake {
         tokio::spawn(async move {
-            tokio::time::sleep_until(hold_deadline).await;
+            tokio::time::sleep_until(hold_deadline + CAPTURE_TEARDOWN_GRACE).await;
             drop(wake);
             drop(_guard);
         });
