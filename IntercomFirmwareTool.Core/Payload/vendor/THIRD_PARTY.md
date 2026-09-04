@@ -163,8 +163,8 @@ JPEG snapshot); the GPL x264 *encoder* is never enabled.
 | Field | `ffmpeg` |
 |---|---|
 | File | `armhf/ffmpeg` |
-| Size | 2,974,144 bytes |
-| SHA-256 | `a8e2e63bbc16dc58f36c268653a11a153856644a9259dc8cf84adbd2be693dab` |
+| Size | 2,996,128 bytes |
+| SHA-256 | `c8a6810d4862a37f9501f4870068d300adbfd2a882f088002ad12efff42eb5b4` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
 | Upstream | FFmpeg `n7.1.1` (release tag) |
