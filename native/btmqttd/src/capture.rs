@@ -454,10 +454,11 @@ pub fn idle_capture_wake_active() -> bool {
     IDLE_CAPTURE_WAKE_ACTIVE.load(Ordering::Relaxed)
 }
 
-/// RAII marker for [`IDLE_CAPTURE_WAKE_ACTIVE`], created by [`capture_idle`] ONLY after the self-view
-/// wake was actually queued, and held across the grab + commit. Cleared on drop (incl. early return /
-/// panic). Relaxed on both ends: single-threaded runtime, a plain suppression switch (matching the
-/// module's other runtime flags), not a synchronization edge.
+/// RAII marker for [`IDLE_CAPTURE_WAKE_ACTIVE`], created by [`capture_idle`] whenever a self-view MAY be
+/// active — i.e. [`wake_panel`] returned `true`: our own `Hold` queued, OR the shared view channel was
+/// full so a self-view may already be pending — and held across the grab + commit. Cleared on drop
+/// (incl. early return / panic). Relaxed on both ends: single-threaded runtime, a plain suppression
+/// switch (matching the module's other runtime flags), not a synchronization edge.
 struct IdleWakeGuard;
 impl IdleWakeGuard {
     fn new() -> Self {
