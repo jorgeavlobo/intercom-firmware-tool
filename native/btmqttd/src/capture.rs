@@ -105,8 +105,8 @@ pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 /// ~27 s) is running — go2rtc fans the stream out to both.
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 
-/// Set while an idle/button capture is holding its OWN silent self-view (from a SUCCESSFULLY queued wake
-/// to the end of the grab+commit). The self-view makes the panel's periodic reconcile/reseed republish a
+/// Set while an idle/button capture is holding its OWN silent self-view (from when a self-view MAY be
+/// active — our Hold queued, or the shared channel full — through grab+commit). The self-view makes a
 /// non-idle call-state (in_call) that is indistinguishable from a real call, so [`sender.rs`] suppresses
 /// the RECONCILE-path `note_ring` while this is set — otherwise the capture's own reseed would decline its
 /// own frame (issue #174, Finding #2). It does NOT gate the LIVE call-state path (that no longer notes at
