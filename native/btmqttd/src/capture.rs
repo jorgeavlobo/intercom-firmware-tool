@@ -489,10 +489,10 @@ impl Drop for IdleWakeGuard {
 /// CLOSED (the UA is gone). A FULL channel returns `true` — see below. See [`capture_idle`].
 ///
 /// Synchronous and non-blocking (just a `try_send`): the caller arms [`IdleWakeGuard`] on the returned
-/// `true` BEFORE the media-start settle wait, so the self-view is marked active for the WHOLE
-/// wake-to-commit interval — including the settle — and a reconcile/reseed firing during the settle
-/// can't self-decline the frame (#174, Finding #2). Waking the panel is deliberately kept apart from
-/// waiting for it so the guard covers the wait too.
+/// `true` BEFORE the media-start settle wait, so the self-view is marked active for its WHOLE lifetime —
+/// the settle, the grab+commit, AND the post-commit linger to `hold_deadline` — so a reconcile/reseed
+/// firing anywhere in that window can't self-decline the frame (#174, Finding #2). Waking the panel is
+/// deliberately kept apart from waiting for it so the guard covers the wait too.
 fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>, hold_deadline: tokio::time::Instant) -> bool {
     let Some(tx) = view_tx else {
         return false;
@@ -549,12 +549,12 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // From here on this capture WAKES the panel for its own silent self-view. That self-view makes the
     // panel republish a non-idle call-state (in_call) — indistinguishable from a real call on the
     // reconcile/reseed path — so mark the wake active (whenever a self-view MAY be starting: our Hold
-    // queued, OR the shared channel was full and one may already be pending) and hold that marker across
-    // the grab + commit, so sender.rs suppresses the RECONCILE `note_ring` and the capture's own reseed
+    // queued, OR the shared channel was full and one may already be pending) and hold that marker through
+    // the self-view's Hold deadline, so sender.rs suppresses the RECONCILE `note_ring` and the capture's own reseed
     // can't decline its frame (#174, Finding #2). The LIVE call-state path does not note at all and the
     // WHO=8 entrance-panel-call note stays unconditional, so a REAL visitor's ring — live, or a
     // missed-WHO=8 one surfaced by reconcile OUTSIDE this window — still declines the capture. Arm the
-    // guard BEFORE the settle wait so the self-view is protected for the whole wake-to-commit interval;
+    // guard BEFORE the settle wait so the self-view is protected across its whole lifetime (the linger extends it past commit);
     // skip the wait only when there is genuinely no self-view (viewing off / channel closed).
     let hold_deadline = tokio::time::Instant::now() + CAPTURE_HOLD;
     let _wake = wake_panel(view_tx, hold_deadline).then(IdleWakeGuard::new);
