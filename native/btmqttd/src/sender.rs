@@ -353,6 +353,19 @@ async fn session(
                             // failed reconnect read) so the first successful poll always writes.
                             if known != Some(c) {
                                 publish_call_state(cfg, client, c, true).await; // periodic-poll reconcile
+                            } else if reconcile_publish_invalidates(
+                                true,
+                                c,
+                                cfg.camera_ondevice,
+                                crate::capture::idle_capture_wake_active(),
+                            ) {
+                                // Deduplicated publish must STILL invalidate: a missed WHO=8 can leave
+                                // `known` already non-idle (a live publish set it without noting a ring),
+                                // so gating invalidation on `known != Some(c)` would defer it to the 60 s
+                                // reseed and let an idle capture commit a visitor frame in between (#174).
+                                // The reseed path invalidates unconditionally; the poll matches it here —
+                                // the publish stays deduped, only the invalidation runs.
+                                crate::capture::note_ring();
                             }
                             update_call_watch(&mut call_watch, c);
                         }
@@ -1015,6 +1028,13 @@ mod tests {
         // decline it. Live-bus publishes never invalidate here (WHO=8 covers them); idle & off-device never.
         assert!(reconcile_publish_invalidates(true, 6, true, false), "reconciled real call invalidates");
         assert!(reconcile_publish_invalidates(true, 1, true, false), "any non-idle reconciled code");
+        // Dedup-branch regression: a missed WHO=8 then a live publish(6) leaves `known == Some(6)`, so the
+        // next clean reconcile of 6 skips the publish — but it must still invalidate (same inputs as a
+        // fresh reconcile), or an idle capture could commit a visitor frame before the 60 s reseed (#174).
+        assert!(
+            reconcile_publish_invalidates(true, 6, true, false),
+            "deduplicated non-idle reconcile still invalidates"
+        );
         assert!(!reconcile_publish_invalidates(true, 6, true, true), "suppressed during the capture's self-view");
         assert!(!reconcile_publish_invalidates(false, 6, true, false), "live-bus publishes don't note here");
         assert!(!reconcile_publish_invalidates(true, 0, true, false), "idle (0) never invalidates");
