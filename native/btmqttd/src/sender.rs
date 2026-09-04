@@ -265,7 +265,7 @@ async fn session(
             // Bind the action first so the (non-Send) guard is dropped before the await.
             let action = lock_classifier(classifier).reconcile_snapshot(code);
             if let dimension::CallStateAction::Publish(c) = action {
-                publish_call_state(cfg, client, c, true).await; // reconnect reconcile
+                publish_call_state(cfg, client, c, true); // reconnect reconcile
                 update_call_watch(&mut call_watch, c);
             }
         }
@@ -352,7 +352,7 @@ async fn session(
                             // Publish only on a real change — `known` is None ("unknown", from a
                             // failed reconnect read) so the first successful poll always writes.
                             if known != Some(c) {
-                                publish_call_state(cfg, client, c, true).await; // periodic-poll reconcile
+                                publish_call_state(cfg, client, c, true); // periodic-poll reconcile
                             } else if reconcile_publish_invalidates(
                                 true,
                                 c,
@@ -422,7 +422,7 @@ async fn session(
                     // entrance. Bind first to drop the guard before the await.
                     let action = lock_classifier(classifier).reconcile_snapshot(code);
                     if let dimension::CallStateAction::Publish(c) = action {
-                        publish_call_state(cfg, client, c, true).await; // reseed reconcile
+                        publish_call_state(cfg, client, c, true); // reseed reconcile
                         update_call_watch(&mut call_watch, c);
                     }
                 }
@@ -432,8 +432,8 @@ async fn session(
                     // floor call, call_watch is disarmed (None) → this republishes idle(0), which is
                     // exactly right: the entrance-panel sensor stays idle through a floor call.
                     match call_watch {
-                        None => publish_call_state(cfg, client, 0, true).await, // confirmed idle (reconcile)
-                        Some((Some(code), _)) => publish_call_state(cfg, client, code, true).await, // reseed reconcile
+                        None => publish_call_state(cfg, client, 0, true), // confirmed idle (reconcile)
+                        Some((Some(code), _)) => publish_call_state(cfg, client, code, true), // reseed reconcile
                         Some((None, _)) => {} // unknown — nothing authoritative to republish
                     }
                 }
@@ -659,7 +659,7 @@ async fn publish_frame(
         }
         let held = lock_classifier(classifier).saw_entrance_panel_call();
         if let Some(code) = held {
-            publish_call_state(cfg, client, code, false).await; // live entrance held-ring flush (639 already noted)
+            publish_call_state(cfg, client, code, false); // live entrance held-ring flush (639 already noted)
             outcome = FrameOutcome::CallStatePublished(code);
         } else {
             // No held ring, but we still (re)classified to Entrance → snapshot ambiguous.
@@ -766,7 +766,7 @@ async fn publish_frame(
         let action = lock_classifier(classifier).on_call_state(code);
         outcome = match action {
             dimension::CallStateAction::Publish(c) => {
-                publish_call_state(cfg, client, c, false).await; // live bus (WHO=8 note covers a real ring)
+                publish_call_state(cfg, client, c, false); // live bus (WHO=8 note covers a real ring)
                 FrameOutcome::CallStatePublished(c)
             }
             dimension::CallStateAction::Suppress => FrameOutcome::ClassifierChanged,
@@ -972,7 +972,7 @@ fn reconcile_publish_invalidates(
 /// after a reconnect/restart. The payload carries the mapped label (idle/ringing/in_call,
 /// or "active" for an unmapped code — see [`dimension::call_state_label`]) plus the raw
 /// code as an attribute for finer protocol detail.
-async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8, from_reconcile: bool) {
+fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8, from_reconcile: bool) {
     // Idle-capture invalidation for the AUTHORITATIVE RECONCILE callers only (reconnect / periodic poll /
     // reseed, `from_reconcile`): those republish an active call (in_call/active, ringing) whose WHO=8 was
     // MISSED while the monitor was disconnected, so LAST_RING_MS is stale — without this a first-run /
