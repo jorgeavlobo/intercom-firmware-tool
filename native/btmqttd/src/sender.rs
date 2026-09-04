@@ -262,7 +262,7 @@ async fn session(
             // surfacing the ring on the entrance-panel sensor; an idle snapshot resets the classifier.
             // A KNOWN Entrance publishes the ring, and a definitive entrance-only phase (4/6) publishes
             // and reclassifies, so a genuine in-progress ENTRANCE call is still reconciled.
-            // Bind the action first so the (non-Send) guard is dropped before the await.
+            // Bind the action first so the classifier guard is dropped before the publish, not held across it.
             let action = lock_classifier(classifier).reconcile_snapshot(code);
             if let dimension::CallStateAction::Publish(c) = action {
                 publish_call_state(cfg, client, c, true); // reconnect reconcile
@@ -346,7 +346,7 @@ async fn session(
                         // reconcile_snapshot always returns Publish (idle for an ambiguous snapshot,
                         // to CLEAR any stale retained value — it never Suppresses, unlike the live
                         // on_call_state path), so a single Publish arm covers it (as at the reconnect
-                        // and reseed sites). Bind + drop the guard before the await.
+                        // and reseed sites). Bind + drop the classifier guard before the publish.
                         let action = lock_classifier(classifier).reconcile_snapshot(code);
                         if let dimension::CallStateAction::Publish(c) = action {
                             // Publish only on a real change — `known` is None ("unknown", from a
@@ -419,7 +419,7 @@ async fn session(
                     // call (or a still-Pending ring) suppresses its dim-35 "ringing" so it can't reach
                     // the entrance-panel sensor; an idle snapshot also resets the classifier, repairing
                     // a missed terminal frame so a later floor call's ring isn't mis-published as
-                    // entrance. Bind first to drop the guard before the await.
+                    // entrance. Bind first to drop the classifier guard before the publish.
                     let action = lock_classifier(classifier).reconcile_snapshot(code);
                     if let dimension::CallStateAction::Publish(c) = action {
                         publish_call_state(cfg, client, c, true); // reseed reconcile
