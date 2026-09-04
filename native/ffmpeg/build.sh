@@ -62,8 +62,9 @@ cd "$src" || exit 1
 # path (issue #169, Phase 2). The live view is still a pure `-c:v copy` (no decode/encode) — this adds a
 # SEPARATE, occasional path that grabs ONE frame and writes a JPEG: the real empty-doorway idle thumbnail
 # (first run + an HA "update idle snapshot" button) and a who-is-at-the-door ring snapshot. btmqttd runs
-# `ffmpeg -i rtsp://…@127.0.0.1:8554/doorbell -frames:v 1 -c:v mjpeg -pix_fmt yuvj420p -f image2 <file>` —
-# so it decodes H.264 (the decoder above), then MJPEG-encodes one frame into a JPEG file (image2 muxer).
+# `ffmpeg -rtsp_transport tcp -i rtsp://…@127.0.0.1:8554/doorbell -an -frames:v 1 -c:v mjpeg
+# -pix_fmt yuvj420p -f image2 -update 1 -y <file>` (the exact argv is capture.rs::capture_argv) — so it
+# decodes H.264 (the decoder above), then MJPEG-encodes one frame into a JPEG file (image2 muxer).
 # The `scale` filter (which pulls in swscale) is REQUIRED and is the fix for issue #174 (Finding #1): an
 # earlier revision omitted it on the assumption "the mjpeg encoder accepts yuv420p directly, so no swscale
 # is pulled in." That was WRONG on hardware — the panel's H.264 decodes to LIMITED-range `yuv420p(tv)`,

@@ -265,7 +265,7 @@ async fn session(
             // Bind the action first so the (non-Send) guard is dropped before the await.
             let action = lock_classifier(classifier).reconcile_snapshot(code);
             if let dimension::CallStateAction::Publish(c) = action {
-                publish_call_state(cfg, client, c).await;
+                publish_call_state(cfg, client, c, true).await; // reconnect reconcile
                 update_call_watch(&mut call_watch, c);
             }
         }
@@ -352,7 +352,7 @@ async fn session(
                             // Publish only on a real change — `known` is None ("unknown", from a
                             // failed reconnect read) so the first successful poll always writes.
                             if known != Some(c) {
-                                publish_call_state(cfg, client, c).await;
+                                publish_call_state(cfg, client, c, true).await; // periodic-poll reconcile
                             }
                             update_call_watch(&mut call_watch, c);
                         }
@@ -409,7 +409,7 @@ async fn session(
                     // entrance. Bind first to drop the guard before the await.
                     let action = lock_classifier(classifier).reconcile_snapshot(code);
                     if let dimension::CallStateAction::Publish(c) = action {
-                        publish_call_state(cfg, client, c).await;
+                        publish_call_state(cfg, client, c, true).await; // reseed reconcile
                         update_call_watch(&mut call_watch, c);
                     }
                 }
@@ -419,8 +419,8 @@ async fn session(
                     // floor call, call_watch is disarmed (None) → this republishes idle(0), which is
                     // exactly right: the entrance-panel sensor stays idle through a floor call.
                     match call_watch {
-                        None => publish_call_state(cfg, client, 0).await, // confirmed idle
-                        Some((Some(code), _)) => publish_call_state(cfg, client, code).await,
+                        None => publish_call_state(cfg, client, 0, true).await, // confirmed idle (reconcile)
+                        Some((Some(code), _)) => publish_call_state(cfg, client, code, true).await, // reseed reconcile
                         Some((None, _)) => {} // unknown — nothing authoritative to republish
                     }
                 }
@@ -635,16 +635,18 @@ async fn publish_frame(
         // Record the ring for idle-capture invalidation FIRST — on detection, before (and independent
         // of) any MQTT publish or the ring capture — so an in-flight or imminent on-device idle capture
         // discards a visitor frame even when the broker is offline (see capture::note_ring / #169).
-        // This WHO=8 entrance-panel-call is the SOLE idle-capture invalidation signal (issue #174,
-        // Finding #2): unlike generic call-state, a silent self-view (which the idle capture itself opens
-        // to photograph the doorway) never produces it, so keying only on WHO=8 stops the capture from
-        // declining its own frame while still declining for a genuine visitor.
+        // This WHO=8 entrance-panel-call is the PRIMARY idle-capture invalidation signal (issue #174,
+        // Finding #2) and is noted UNCONDITIONALLY: unlike generic live call-state, a silent self-view
+        // (which the idle capture itself opens to photograph the doorway) never produces it, so it declines
+        // a genuine visitor without the capture declining its own frame. (The reconcile path in
+        // publish_call_state adds invalidation for a real call whose WHO=8 was missed while disconnected,
+        // suppressed only during the capture's own self-view window.)
         if cfg.camera_ondevice {
             crate::capture::note_ring();
         }
         let held = lock_classifier(classifier).saw_entrance_panel_call();
         if let Some(code) = held {
-            publish_call_state(cfg, client, code).await;
+            publish_call_state(cfg, client, code, false).await; // live entrance held-ring flush (639 already noted)
             outcome = FrameOutcome::CallStatePublished(code);
         } else {
             // No held ring, but we still (re)classified to Entrance → snapshot ambiguous.
@@ -727,17 +729,18 @@ async fn publish_frame(
         outcome = FrameOutcome::ClassifierChanged; // reclassified to Floor → snapshot ambiguous
         publish_call_event(client, debounce, broker_online, &cfg.topic_floor_call, "floor", where_).await;
     } else if let Some(code) = dimension::parse_call_state(frame) {
-        // Idle-capture invalidation is DELIBERATELY NOT done on generic call-state (issue #174,
+        // Idle-capture invalidation is DELIBERATELY NOT done on the LIVE call-state here (issue #174,
         // Finding #2). An on-device idle/first-run/button capture WAKES the panel for its own silent
         // self-view, which makes the panel emit the SAME non-idle call-state codes (dim-35 ringing /
-        // active / in_call) a real call does — so noting a ring on any non-idle call-state here made the
+        // active / in_call) a real call does — so noting a ring on any live non-idle call-state made the
         // capture DECLINE ITS OWN frame ("a ring became recent/active during the grab", hardware-observed).
-        // The self-view is indistinguishable from a real call at THIS layer (and at the reconcile layer),
-        // so no wake-flag or reconcile-origin gate can separate them without either self-declining or
-        // missing a real ring. The ONE signal a silent self-view never produces is the WHO=8
-        // entrance-panel-call — so that (in the entrance branch above) is the SOLE idle-capture
-        // invalidation signal. A real visitor's WHO=8 lands within the capture's multi-second grab, before
-        // the commit gate re-checks LAST_RING_MS, so the empty-doorway guarantee holds without this note.
+        // The live self-view is indistinguishable from a real call at THIS layer, so the live real-ring
+        // signal is instead the WHO=8 entrance-panel-call (the entrance branch above, noted
+        // UNCONDITIONALLY) — a silent self-view never produces it. A real visitor's WHO=8 lands within the
+        // capture's multi-second grab, before the commit gate re-checks LAST_RING_MS, so the empty-doorway
+        // guarantee holds without a live call-state note. (The AUTHORITATIVE reconcile path — for a real
+        // call whose WHO=8 was missed while disconnected — DOES invalidate, but is suppressed during the
+        // capture's own self-view window; see publish_call_state.)
         //
         // Call STATE transition (idle/ringing/in_call, or "active" fallback). Route it through the
         // classifier: an entrance-panel call publishes it (updating the retained sensor and reporting
@@ -750,7 +753,7 @@ async fn publish_frame(
         let action = lock_classifier(classifier).on_call_state(code);
         outcome = match action {
             dimension::CallStateAction::Publish(c) => {
-                publish_call_state(cfg, client, c).await;
+                publish_call_state(cfg, client, c, false).await; // live bus (WHO=8 note covers a real ring)
                 FrameOutcome::CallStatePublished(c)
             }
             dimension::CallStateAction::Suppress => FrameOutcome::ClassifierChanged,
@@ -936,18 +939,48 @@ fn ring_snapshot_deliverable(broker_online: &AtomicBool, ring_epoch: u64) -> boo
     momentary_deliverable(broker_online) && BROKER_EPOCH.load(Ordering::Relaxed) == ring_epoch
 }
 
+/// Whether a call-state PUBLISH should invalidate an in-flight on-device idle capture (issue #174,
+/// Finding #2). Pure, so the policy is unit-tested. Only the AUTHORITATIVE reconcile callers
+/// (`from_reconcile`) invalidate — the live-bus callers rely on the unconditional WHO=8 entrance note —
+/// and only for a non-idle code on an on-device unit, AND only when an idle capture is NOT currently
+/// holding its own self-view (`wake_active`): during that window the reconcile/reseed republishes the
+/// capture's OWN in_call, which would otherwise decline its own frame. A real call whose WHO=8 was missed
+/// while disconnected is surfaced by reconcile OUTSIDE that window and still invalidates.
+fn reconcile_publish_invalidates(
+    from_reconcile: bool,
+    code: u8,
+    camera_ondevice: bool,
+    wake_active: bool,
+) -> bool {
+    from_reconcile && code != 0 && camera_ondevice && !wake_active
+}
+
 /// Publish the call STATE to TOPIC_CALL_STATE, RETAINED so HA shows the current state
 /// after a reconnect/restart. The payload carries the mapped label (idle/ringing/in_call,
 /// or "active" for an unmapped code — see [`dimension::call_state_label`]) plus the raw
 /// code as an attribute for finer protocol detail.
-async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8) {
-    // NB: this does NOT invalidate an in-flight idle capture (issue #174, Finding #2). Both the live and
-    // the AUTHORITATIVE RECONCILE (reconnect / periodic poll / reseed) publishes of a non-idle code are
-    // indistinguishable from the capture's OWN self-view state: the periodic 60 s reseed in particular
-    // republishes the self-view's in_call, so invalidating here made every first-run / button capture
-    // decline itself. Idle-capture invalidation keys solely on the WHO=8 entrance-panel-call (the entrance
-    // branch in publish_frame), which a silent self-view never produces — see the note there and at the
-    // parse_call_state branch.
+async fn publish_call_state(cfg: &Arc<Config>, client: &AsyncClient, code: u8, from_reconcile: bool) {
+    // Idle-capture invalidation for the AUTHORITATIVE RECONCILE callers only (reconnect / periodic poll /
+    // reseed, `from_reconcile`): those republish an active call (in_call/active, ringing) whose WHO=8 was
+    // MISSED while the monitor was disconnected, so LAST_RING_MS is stale — without this a first-run /
+    // "Update idle snapshot" capture could persist the visitor frame as the idle thumbnail (#169).
+    //
+    // BUT suppress it while an on-device idle capture holds its own self-view
+    // (`idle_capture_wake_active()`): during that window the reconcile/reseed republishes the capture's
+    // OWN in_call, indistinguishable from a real call, so noting here would make the capture decline its
+    // own frame (issue #174, Finding #2 — the 60 s reseed self-decline). A real ring during the
+    // capture is still caught by the unconditional WHO=8 entrance-panel-call; a missed-WHO=8 call surfaced
+    // by reconcile OUTSIDE the capture window still invalidates here (declining a capture that starts
+    // within RECENT_RING_WINDOW). The LIVE-bus callers pass `from_reconcile == false` and never note here
+    // — the live path relies on that same unconditional WHO=8 note. code 0 (idle) never invalidates.
+    if reconcile_publish_invalidates(
+        from_reconcile,
+        code,
+        cfg.camera_ondevice,
+        crate::capture::idle_capture_wake_active(),
+    ) {
+        crate::capture::note_ring();
+    }
     let payload =
         serde_json::json!({ "state": dimension::call_state_label(code), "code": code }).to_string();
     try_publish_retained(client, &cfg.topic_call_state, QoS::AtLeastOnce, payload.into_bytes());
@@ -973,6 +1006,20 @@ pub(crate) fn try_publish_retained(client: &AsyncClient, topic: &str, qos: QoS, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reconcile_publish_invalidation_policy() {
+        // #174 Finding #2. A reconciled non-idle call (reconnect/poll/reseed surfacing a real call whose
+        // WHO=8 was missed) invalidates an idle capture — EXCEPT while the capture holds its own self-view
+        // (wake_active), when the reconcile/reseed is republishing the capture's OWN in_call and must not
+        // decline it. Live-bus publishes never invalidate here (WHO=8 covers them); idle & off-device never.
+        assert!(reconcile_publish_invalidates(true, 6, true, false), "reconciled real call invalidates");
+        assert!(reconcile_publish_invalidates(true, 1, true, false), "any non-idle reconciled code");
+        assert!(!reconcile_publish_invalidates(true, 6, true, true), "suppressed during the capture's self-view");
+        assert!(!reconcile_publish_invalidates(false, 6, true, false), "live-bus publishes don't note here");
+        assert!(!reconcile_publish_invalidates(true, 0, true, false), "idle (0) never invalidates");
+        assert!(!reconcile_publish_invalidates(true, 6, false, false), "off-device never invalidates");
+    }
 
     #[test]
     fn call_watch_arms_on_non_idle_and_disarms_on_idle() {

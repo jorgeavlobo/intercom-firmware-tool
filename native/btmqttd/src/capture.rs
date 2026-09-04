@@ -105,6 +105,17 @@ pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 /// ~27 s) is running — go2rtc fans the stream out to both.
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 
+/// Set while an idle/button capture is holding its OWN silent self-view (from a SUCCESSFULLY queued wake
+/// to the end of the grab+commit). The self-view makes the panel's periodic reconcile/reseed republish a
+/// non-idle call-state (in_call) that is indistinguishable from a real call, so [`sender.rs`] suppresses
+/// the RECONCILE-path `note_ring` while this is set — otherwise the capture's own reseed would decline its
+/// own frame (issue #174, Finding #2). It does NOT gate the LIVE call-state path (that no longer notes at
+/// all — the unconditional WHO=8 entrance-panel-call is the live real-ring signal a silent self-view never
+/// produces) nor the WHO=8 note, so a REAL entrance ring — live, or one whose WHO=8 was missed and is
+/// surfaced by reconcile OUTSIDE this window — still declines the capture. Single process-global flag: the
+/// [`CAPTURING_IDLE`] try-lock serialises idle captures, and ring captures never wake the panel.
+static IDLE_CAPTURE_WAKE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
 /// Ring captures run through a BOUNDED single runner ([`run_ring_captures`]): at most one capture is
 /// ever active, and a burst of distinct rings does NOT queue a task each — extra rings only update
 /// [`RING_NEWEST`], and the one active runner loops to capture each successive newest ring (coalescing
@@ -436,6 +447,30 @@ impl Drop for CaptureGuard {
     }
 }
 
+/// Whether an idle/button capture is currently holding its OWN self-view (see
+/// [`IDLE_CAPTURE_WAKE_ACTIVE`]). `sender.rs` reads this to suppress the RECONCILE-path `note_ring`
+/// during the capture's self-induced session so the capture does not decline its own frame (#174).
+pub fn idle_capture_wake_active() -> bool {
+    IDLE_CAPTURE_WAKE_ACTIVE.load(Ordering::Relaxed)
+}
+
+/// RAII marker for [`IDLE_CAPTURE_WAKE_ACTIVE`], created by [`capture_idle`] ONLY after the self-view
+/// wake was actually queued, and held across the grab + commit. Cleared on drop (incl. early return /
+/// panic). Relaxed on both ends: single-threaded runtime, a plain suppression switch (matching the
+/// module's other runtime flags), not a synchronization edge.
+struct IdleWakeGuard;
+impl IdleWakeGuard {
+    fn new() -> Self {
+        IDLE_CAPTURE_WAKE_ACTIVE.store(true, Ordering::Relaxed);
+        IdleWakeGuard
+    }
+}
+impl Drop for IdleWakeGuard {
+    fn drop(&mut self) {
+        IDLE_CAPTURE_WAKE_ACTIVE.store(false, Ordering::Relaxed);
+    }
+}
+
 /// Bring the panel up for an idle/button capture: poke the on-demand SIP UA so it INVITEs the panel,
 /// then wait briefly for the media to start flowing before ffmpeg connects. Best effort — if on-demand
 /// viewing is off (`view_tx` is `None`) there is no way to wake an idle panel, so the capture will
@@ -446,15 +481,21 @@ impl Drop for CaptureGuard {
 /// then expire before a cold-stream grab completes. `Hold`'s deadline governs independently of that
 /// window (`sip::governing_deadline` takes the max), so the panel stays up for the whole capture
 /// regardless of how short the manual window is — and it does not shorten a concurrent manual view.
-async fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>) {
-    if let Some(tx) = view_tx {
-        // try_send: never block the caller; Hold is idempotent (the UA re-checks + renews on each poke).
-        let _ = tx.try_send(ViewCmd::Hold(tokio::time::Instant::now() + CAPTURE_HOLD));
-        // Give the SIP INVITE + the panel's media-start a moment before ffmpeg connects, so go2rtc's
-        // producer has RTP to serve rather than opening onto silence. ffmpeg still waits for the first
-        // keyframe within CAPTURE_TIMEOUT, so this is only a head start, not a correctness dependency.
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
+/// Returns whether a self-view wake was actually QUEUED: `false` when on-demand viewing is off
+/// (`view_tx` is `None`) or the SIP UA's channel is full/closed, so the caller does not mark the wake
+/// active (there is no self-view to protect against a reconcile self-decline) — see [`capture_idle`].
+async fn wake_panel(view_tx: Option<&mpsc::Sender<ViewCmd>>) -> bool {
+    let Some(tx) = view_tx else {
+        return false;
+    };
+    // try_send: never block the caller; Hold is idempotent (the UA re-checks + renews on each poke). A
+    // full/closed channel means the UA isn't taking pokes, so no self-view starts — report that.
+    let queued = tx.try_send(ViewCmd::Hold(tokio::time::Instant::now() + CAPTURE_HOLD)).is_ok();
+    // Give the SIP INVITE + the panel's media-start a moment before ffmpeg connects, so go2rtc's
+    // producer has RTP to serve rather than opening onto silence. ffmpeg still waits for the first
+    // keyframe within CAPTURE_TIMEOUT, so this is only a head start, not a correctness dependency.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    queued
 }
 
 /// Capture the idle thumbnail and persist it to `cfg/extra/btmqttd/idle.jpg` (survives reboot +
@@ -490,11 +531,13 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
         return false;
     }
     // From here on this capture WAKES the panel for its own silent self-view. That self-view makes the
-    // panel emit the same non-idle call-state codes a real call does — but idle-capture invalidation keys
-    // ONLY on the WHO=8 entrance-panel-call (sender.rs), which a silent self-view never produces, so the
-    // capture does not decline its own frame while a REAL visitor's WHO=8 still declines it (#174,
-    // Finding #2). No wake flag is needed here.
-    wake_panel(view_tx).await;
+    // panel republish a non-idle call-state (in_call) — indistinguishable from a real call on the
+    // reconcile/reseed path — so mark the wake active (ONLY if it was actually queued) and hold that
+    // marker across the grab + commit, so sender.rs suppresses the RECONCILE `note_ring` and the
+    // capture's own reseed can't decline its frame (#174, Finding #2). The LIVE call-state path does not
+    // note at all and the WHO=8 entrance-panel-call note stays unconditional, so a REAL visitor's ring —
+    // live, or a missed-WHO=8 one surfaced by reconcile OUTSIDE this window — still declines the capture.
+    let _wake = wake_panel(view_tx).await.then(IdleWakeGuard::new);
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
         Err(e) => {
@@ -845,6 +888,22 @@ mod tests {
         assert!(try_lock(&FLAG).is_none(), "a second lock of the same kind must not acquire the guard");
         drop(g1);
         assert!(try_lock(&FLAG).is_some(), "the guard is released on drop");
+    }
+
+    #[test]
+    fn idle_wake_guard_toggles_the_flag() {
+        // #174 Finding #2: the wake marker is off, on while an IdleWakeGuard lives, and off again after it
+        // drops — so sender.rs suppresses the reconcile note_ring for exactly the capture's own self-view
+        // window (capture_idle arms it only after a successful wake). Snapshot/restore the process-global.
+        let saved = IDLE_CAPTURE_WAKE_ACTIVE.load(Ordering::Relaxed);
+        IDLE_CAPTURE_WAKE_ACTIVE.store(false, Ordering::Relaxed);
+        assert!(!idle_capture_wake_active(), "clear before any capture self-view");
+        {
+            let _g = IdleWakeGuard::new();
+            assert!(idle_capture_wake_active(), "set while the guard is alive");
+        }
+        assert!(!idle_capture_wake_active(), "cleared once the guard drops");
+        IDLE_CAPTURE_WAKE_ACTIVE.store(saved, Ordering::Relaxed);
     }
 
     #[test]
