@@ -936,6 +936,10 @@ mod tests {
         // false: on-demand viewing off (None) or a CLOSED channel (the SIP UA is gone).
         assert!(!wake_panel(None), "on-demand viewing off: no self-view to protect");
 
+        // Open with free capacity: our own Hold queues → true.
+        let (tx, _rx) = mpsc::channel::<ViewCmd>(1);
+        assert!(wake_panel(Some(&tx)), "open channel: our own Hold queued the wake");
+
         // Closed: receiver dropped → the UA is gone → no self-view can start.
         let (tx, rx) = mpsc::channel::<ViewCmd>(1);
         drop(rx);
