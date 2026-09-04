@@ -105,20 +105,6 @@ pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 /// ~27 s) is running — go2rtc fans the stream out to both.
 static CAPTURING_IDLE: AtomicBool = AtomicBool::new(false);
 
-/// Set while an idle/button capture is actively waking the panel and grabbing/committing its frame. An
-/// idle capture brings the panel up ITSELF — a silent self-view (`ViewCmd::Hold`) — which makes the panel
-/// emit non-idle call-state codes (ringing → active → in_call), the SAME codes a real ring produces. The
-/// GENERIC call-state paths in `sender.rs` (`parse_call_state` / the `publish_call_state` reconcile) call
-/// [`note_ring`] on any non-idle code, so the capture's own self-view would advance [`LAST_RING_MS`] and
-/// make the capture DECLINE ITS OWN FRAME (issue #174, Finding #2 — hardware-observed: "idle capture
-/// declined — a ring became recent/active during the grab"). While this flag is set, `sender.rs`
-/// suppresses ONLY those generic call-state notes. The AUTHORITATIVE entrance-panel-call note (the WHO=8
-/// ring signature, which a silent self-view NEVER produces) stays UNCONDITIONAL, so a REAL visitor ringing
-/// during the capture still advances `LAST_RING_MS` and is correctly declined. A single process-global flag
-/// is sufficient: the [`CAPTURING_IDLE`] try-lock already serialises idle captures, and ring captures never
-/// wake the panel.
-static IDLE_CAPTURE_WAKE_ACTIVE: AtomicBool = AtomicBool::new(false);
-
 /// Ring captures run through a BOUNDED single runner ([`run_ring_captures`]): at most one capture is
 /// ever active, and a burst of distinct rings does NOT queue a task each — extra rings only update
 /// [`RING_NEWEST`], and the one active runner loops to capture each successive newest ring (coalescing
@@ -450,35 +436,6 @@ impl Drop for CaptureGuard {
     }
 }
 
-/// Whether an idle/button capture is currently waking the panel for its OWN self-view (see
-/// [`IDLE_CAPTURE_WAKE_ACTIVE`]). `sender.rs` reads this to suppress the GENERIC call-state
-/// [`note_ring`] during the capture's self-induced session, so the capture does not decline its own
-/// frame (issue #174, Finding #2).
-pub fn idle_capture_wake_active() -> bool {
-    IDLE_CAPTURE_WAKE_ACTIVE.load(Ordering::Relaxed)
-}
-
-/// RAII marker for [`IDLE_CAPTURE_WAKE_ACTIVE`]: set on construction, cleared on drop (including on an
-/// early return or panic), so the suppression window is exactly the idle capture's own wake + grab +
-/// commit. Held by [`capture_idle`] across [`wake_panel`] and the grab so every non-idle call-state the
-/// self-view emits is suppressed, then released when the capture returns.
-struct IdleWakeGuard;
-impl IdleWakeGuard {
-    fn new() -> Self {
-        // Relaxed on both store and load: btmqttd is a single-threaded runtime, so capture_idle (which
-        // sets/clears this) and sender.rs (which reads it) never run truly concurrently — this is a plain
-        // boolean suppression switch, not a synchronization edge, matching the module's other runtime flags
-        // (LAST_RING_MS, RING_NEWEST, …).
-        IDLE_CAPTURE_WAKE_ACTIVE.store(true, Ordering::Relaxed);
-        IdleWakeGuard
-    }
-}
-impl Drop for IdleWakeGuard {
-    fn drop(&mut self) {
-        IDLE_CAPTURE_WAKE_ACTIVE.store(false, Ordering::Relaxed);
-    }
-}
-
 /// Bring the panel up for an idle/button capture: poke the on-demand SIP UA so it INVITEs the panel,
 /// then wait briefly for the media to start flowing before ffmpeg connects. Best effort — if on-demand
 /// viewing is off (`view_tx` is `None`) there is no way to wake an idle panel, so the capture will
@@ -532,19 +489,11 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
         );
         return false;
     }
-    // From here on this capture WAKES the panel for its own silent self-view, which emits the same
-    // non-idle call-state codes a real call does. Mark the wake active so sender.rs suppresses the
-    // GENERIC live call-state note_ring for the duration (#174, Finding #2). The AUTHORITATIVE
-    // entrance-panel-call note and the reconcile note both stay unconditional, so a REAL ring — live or
-    // reconciled — during the grab still declines this frame.
-    //
-    // Only arm the guard when a wake will ACTUALLY be attempted (`view_tx` is Some — on-demand viewing
-    // enabled): with no `view_tx` there is no self-view to suppress and the grab just times out, so
-    // arming the guard would needlessly suppress the live early note for an unrelated call (a real
-    // entrance is still caught by the unconditional entrance note regardless). Armed BEFORE `wake_panel`
-    // so the self-view's very first call-state codes are already suppressed (no gap). `Option` held to
-    // the end of the function, so it clears on every exit path — across the grab AND the blocking commit.
-    let _wake = view_tx.is_some().then(IdleWakeGuard::new);
+    // From here on this capture WAKES the panel for its own silent self-view. That self-view makes the
+    // panel emit the same non-idle call-state codes a real call does — but idle-capture invalidation keys
+    // ONLY on the WHO=8 entrance-panel-call (sender.rs), which a silent self-view never produces, so the
+    // capture does not decline its own frame while a REAL visitor's WHO=8 still declines it (#174,
+    // Finding #2). No wake flag is needed here.
     wake_panel(view_tx).await;
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
@@ -886,22 +835,6 @@ mod tests {
         // (swscale) — which build.sh now enables. `-update 1` writes a single image file.
         assert!(argv.windows(2).any(|w| w == ["-pix_fmt", "yuvj420p"]));
         assert!(argv.windows(2).any(|w| w == ["-update", "1"]));
-    }
-
-    #[test]
-    fn idle_capture_wake_active_flag_toggles_with_the_guard() {
-        // The wake marker (#174, Finding #2) starts clear, is set while an IdleWakeGuard is alive, and
-        // clears again on drop — so sender.rs suppresses the generic call-state note_ring for exactly the
-        // idle capture's own self-view window. Snapshot/restore in case a later test observes it.
-        let saved = IDLE_CAPTURE_WAKE_ACTIVE.load(Ordering::Relaxed);
-        IDLE_CAPTURE_WAKE_ACTIVE.store(false, Ordering::Relaxed);
-        assert!(!idle_capture_wake_active(), "clear before any capture wakes the panel");
-        {
-            let _wake = IdleWakeGuard::new();
-            assert!(idle_capture_wake_active(), "set while the guard is alive");
-        }
-        assert!(!idle_capture_wake_active(), "cleared once the guard drops");
-        IDLE_CAPTURE_WAKE_ACTIVE.store(saved, Ordering::Relaxed);
     }
 
     #[test]
