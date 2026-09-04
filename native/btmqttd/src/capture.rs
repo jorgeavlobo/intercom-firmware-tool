@@ -617,11 +617,19 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // one-capture lock) alive until `hold_deadline` — this capture's LOCAL suppression deadline. (On the
     // full-channel path we did not queue our own Hold, so a manual `Start` may hold the session even past
     // `hold_deadline`; bounding suppression to our own window is still right — past it, any lingering
-    // non-idle state is a live viewer's, not this capture's self-view.) Both callers run `capture_idle`
-    // detached and idle.jpg is already committed + served, so this delays nothing user-visible. Only linger
-    // when a self-view may actually be up.
-    if _wake.is_some() {
-        tokio::time::sleep_until(hold_deadline).await;
+    // non-idle state is a live viewer's, not this capture's self-view.)
+    //
+    // The linger runs DETACHED so it does not delay the result: the "update_idle" caller publishes its
+    // success ack (and the panel is freed to a re-press) as soon as the JPEG is committed, not ~CAPTURE_HOLD
+    // later. The task keeps holding `CAPTURING_IDLE` through the linger, so idle captures stay serialised
+    // (no concurrent store). Only linger when a self-view may actually be up; otherwise both guards drop
+    // here at once.
+    if let Some(wake) = _wake {
+        tokio::spawn(async move {
+            tokio::time::sleep_until(hold_deadline).await;
+            drop(wake);
+            drop(_guard);
+        });
     }
     result
 }
