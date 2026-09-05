@@ -1053,15 +1053,16 @@ async fn session(
         }
         // Make-before-break, done as a PRE-select step (not a select arm) so the attempt can watch
         // `view_rx` + `stopping` internally without a second mutable borrow of `view_rx` colliding with the
-        // `view_rx.recv()` arm below. It fires only once the dialog is old enough AND a viewer is still
-        // holding (`governing_deadline` still ahead of now — otherwise we let the session hang up instead
-        // of refreshing a view nobody is watching). While a viewer holds, hold.rs re-pokes every ~1 s so
-        // this loop iterates well inside `SESSION_REFRESH_AFTER` and the attempt fires within ~1 s of it.
+        // `view_rx.recv()` arm below. It fires only once the dialog is old enough AND an AUTO-HOLD is still
+        // live (`hold_deadline` ahead of now — a viewer is genuinely watching). Deliberately gated on
+        // `hold_deadline`, NOT the governing deadline: a manual `view_camera` press with a long
+        // `camera_view_idle_secs` must NOT trigger a viewerless refresh (it would also let the linger renew
+        // on adopt push the session a few seconds past that manual window). A manual-only view keeps its
+        // existing behavior — the panel's ~60 s cut bounds it, exactly as before this feature. While a
+        // viewer holds, hold.rs re-pokes every ~1 s so this loop iterates well inside SESSION_REFRESH_AFTER
+        // and the attempt fires within ~1 s of it.
         let now = tokio::time::Instant::now();
-        if !refresh_disabled
-            && now >= refresh_at
-            && governing_deadline(start_deadline, hold_deadline) > now
-        {
+        if !refresh_disabled && now >= refresh_at && hold_deadline > now {
             match establish_refresh_dialog(cfg, stopping, view_rx, &d.aor, &d.domain, &devaddr).await {
                 RefreshOutcome::Established(new_sock, new_d) => {
                     // The panel ADMITTED a concurrent dialog. BYE the old one on its own socket
