@@ -1200,6 +1200,12 @@ async fn establish_refresh_dialog(
     }
 
     let Some(tag) = to_tag(&final_resp) else {
+        // A 2xx with NO To-tag is malformed (flexisip always sets one), but the panel has still ACCEPTED the
+        // INVITE — so the successor may be live even though we can't form a properly-tagged confirmed dialog.
+        // Doing nothing would leak that dialog until the panel's own timeout (and stack up on retries). Tear
+        // it down BEST-EFFORT over a fresh connection with what we have (ACK-then-BYE, tag empty), exactly as
+        // the ACK-write-failure path does, then decline retriably so the caller keeps its current dialog.
+        ack_bye_reconnect(cfg, &d).await;
         return RefreshOutcome::Declined(
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -2326,6 +2332,71 @@ mod tests {
         };
         assert!(err.to_string().contains("486"), "error should name the status, got: {err}");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_tears_down_a_2xx_with_no_to_tag() {
+        // A malformed 2xx WITHOUT a To-tag still means the panel ACCEPTED the INVITE, so the successor may be
+        // live. The helper must decline retriably AND tear that dialog down best-effort over a fresh
+        // connection (ACK-then-BYE), not leak it until the panel timeout. The mock accepts the INVITE, sends a
+        // tagless 200 OK, then accepts the reconnect and checks a BYE arrives.
+        use std::collections::HashMap;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // 1) The INVITE connection: read the INVITE, answer 200 OK with NO To-tag.
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let invite = read_one_sip(&mut s, &mut acc).await;
+            assert!(invite.starts_with("INVITE "), "expected the refresh INVITE, got: {invite}");
+            s.write_all(
+                b"SIP/2.0 200 OK\r\n\
+                  Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+                  From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+                  To: <sip:c100x@dev.example>\r\n\
+                  Call-ID: xyz\r\n\
+                  CSeq: 21 INVITE\r\n\
+                  Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+                  Content-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            s.flush().await.unwrap();
+            drop(s);
+            // 2) The best-effort teardown reconnect: it must carry a BYE for the accepted dialog.
+            let (mut s2, _) = listener.accept().await.unwrap();
+            let mut all = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match s2.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+                }
+            }
+            all.contains("BYE ")
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
+        match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
+            .await
+        {
+            RefreshOutcome::Declined(_e, _renewals, retriable) => {
+                assert!(retriable, "a malformed (tagless) 2xx is transient ⇒ retriable")
+            }
+            _ => panic!("a tagless 2xx must decline (it can't form a confirmed dialog to adopt)"),
+        }
+        assert!(
+            server.await.unwrap(),
+            "a tagless-2xx decline must BYE the accepted successor over a fresh connection"
+        );
     }
 
     #[tokio::test]
