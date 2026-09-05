@@ -711,18 +711,64 @@ fn governing_deadline(
     start_deadline.max(hold_deadline)
 }
 
+/// Viewing-window renewals observed on `view_rx` WHILE a refresh INVITE was in flight, carried back so the
+/// caller can apply them — a `Start`/`Hold` that arrives during the attempt must renew the deadlines just
+/// as it would in the hold loop, not be silently dropped (issue #174, Finding #3 review). Mirrors how
+/// `session`'s own establish records `want_start` / the latest `hold_expiry` seen during establishment.
+#[derive(Default)]
+struct RefreshRenewals {
+    /// A manual `view_camera` (`ViewCmd::Start`) arrived: the caller must re-arm the FULL window.
+    saw_start: bool,
+    /// The LATEST auto-hold `ViewCmd::Hold` expiry seen (absolute), if any: the caller lifts `hold_deadline`
+    /// to it (max), so a poke buffered during the attempt still keeps the view alive.
+    hold_expiry: Option<tokio::time::Instant>,
+}
+
+impl RefreshRenewals {
+    /// Fold one command seen during the attempt into the accumulated renewals.
+    fn record(&mut self, cmd: &ViewCmd) {
+        match cmd {
+            ViewCmd::Start => self.saw_start = true,
+            ViewCmd::Hold(e) => self.hold_expiry = Some(self.hold_expiry.map_or(*e, |cur| cur.max(*e))),
+            ViewCmd::Stop => {}
+        }
+    }
+}
+
+/// Apply renewals captured during a refresh attempt to the caller's viewing-window deadlines, with the
+/// SAME rules the hold loop uses for a live command: a `Start` re-arms the FULL `window` from `now`; a
+/// `Hold` lifts `hold_deadline` to its absolute expiry (max), ignoring one already elapsed by `now`. Pure,
+/// so the deadline arithmetic is unit-testable.
+fn apply_refresh_renewals(
+    renewals: &RefreshRenewals,
+    now: tokio::time::Instant,
+    window: Duration,
+    start_deadline: &mut tokio::time::Instant,
+    hold_deadline: &mut tokio::time::Instant,
+) {
+    if renewals.saw_start {
+        *start_deadline = now + window;
+    }
+    if let Some(e) = renewals.hold_expiry {
+        if e > now {
+            *hold_deadline = (*hold_deadline).max(e);
+        }
+    }
+}
+
 /// Outcome of a make-before-break refresh attempt ([`establish_refresh_dialog`]).
 enum RefreshOutcome {
-    /// The panel admitted a concurrent dialog: the confirmed successor `(socket, Dialog)`.
-    Established(TcpStream, Dialog),
+    /// The panel admitted a concurrent dialog: the confirmed successor socket + `Dialog`, plus any
+    /// viewing-window renewals seen mid-attempt for the caller to apply to the ADOPTED dialog.
+    Established(TcpStream, Dialog, RefreshRenewals),
     /// The panel refused (e.g. `486 Busy` on a single-owner plant) or the attempt errored. The pending
     /// INVITE was CANCELled / the non-2xx ACKed, so nothing dangles; the caller keeps its current dialog
-    /// and falls back to the panel's recycle.
-    Declined(std::io::Error),
+    /// and falls back to the panel's recycle — applying any renewals seen mid-attempt to that dialog.
+    Declined(std::io::Error, RefreshRenewals),
     /// Shutdown (`stopping`) or a `Stop`/closed channel was observed mid-attempt. The pending INVITE was
     /// CANCELled (over TCP a dropped socket does NOT cancel it, so a late 2xx could otherwise pin the
     /// panel), so nothing dangles; the caller tears the CURRENT dialog down (a Stop means the viewer wants
-    /// the camera off; a shutdown means we are going away).
+    /// the camera off; a shutdown means we are going away). No renewals — the session is ending.
     Aborted,
 }
 
@@ -737,8 +783,10 @@ enum RefreshOutcome {
 /// `Stop`/"Stop Camera" press aborts PROMPTLY instead of blocking up to `RESPONSE_TIMEOUT + CANCEL_DRAIN`.
 /// Every exit that is not a clean 2xx — refusal, error, timeout, or abort — first runs the cancellation
 /// routine (CANCEL a pending INVITE / ACK a non-2xx), because over TCP a dropped socket does NOT cancel an
-/// INVITE and a late 2xx would otherwise pin the panel. `Start`/`Hold` that arrive mid-attempt are ignored
-/// (the caller's live dialog still owns the viewing-window deadlines, and it renews the linger on adopt).
+/// INVITE and a late 2xx would otherwise pin the panel. `Start`/`Hold` that arrive mid-attempt are NOT
+/// dropped: they are RECORDED into the returned [`RefreshRenewals`] so the caller re-arms the viewing-window
+/// deadlines exactly as the hold loop would (a manual press or a hold poke during the attempt must not be
+/// lost), mirroring how `session`'s own establish records `want_start` / the latest `hold_expiry`.
 async fn establish_refresh_dialog(
     cfg: &Arc<Config>,
     stopping: &Arc<AtomicBool>,
@@ -747,13 +795,16 @@ async fn establish_refresh_dialog(
     domain: &str,
     devaddr: &str,
 ) -> RefreshOutcome {
+    // Viewing-window commands seen while the INVITE is in flight, folded in and handed back so the caller
+    // applies them (see RefreshRenewals). Empty on the pre-INVITE error paths below.
+    let mut renewals = RefreshRenewals::default();
     let mut sock = match TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
         Ok(s) => s,
-        Err(e) => return RefreshOutcome::Declined(e),
+        Err(e) => return RefreshOutcome::Declined(e, renewals),
     };
     let local_port = match sock.local_addr() {
         Ok(a) => a.port(),
-        Err(e) => return RefreshOutcome::Declined(e),
+        Err(e) => return RefreshOutcome::Declined(e, renewals),
     };
     let mut d = Dialog {
         aor: aor.to_string(),
@@ -769,7 +820,7 @@ async fn establish_refresh_dialog(
     let sdp = build_sdp_offer(cfg.camera_video_port, cfg.camera_audio_port, &srtp_key(), devaddr);
     let invite = build_invite(&d, &sdp);
     if let Err(e) = write_all_flush(&mut sock, invite.as_bytes()).await {
-        return RefreshOutcome::Declined(e);
+        return RefreshOutcome::Declined(e, renewals);
     }
 
     // Bounded, INTERRUPTIBLE wait for the final response. Every non-2xx / error / abort routes through
@@ -787,9 +838,12 @@ async fn establish_refresh_dialog(
                 return RefreshOutcome::Aborted; // shutdown: INVITE cancelled, caller BYEs the live dialog
             }
             v = view_rx.recv() => match v {
-                // Start/Hold mid-refresh: the caller's live dialog still owns the deadlines (and renews the
-                // linger on adopt), so ignore and keep waiting rather than swallow-and-act on them here.
-                Some(ViewCmd::Start) | Some(ViewCmd::Hold(_)) => continue,
+                // Start/Hold mid-refresh: RECORD it so the caller re-arms the deadline it renews (never
+                // drop it), then keep waiting for the response.
+                Some(cmd @ (ViewCmd::Start | ViewCmd::Hold(_))) => {
+                    renewals.record(&cmd);
+                    continue;
+                }
                 Some(ViewCmd::Stop) | None => {
                     let seed = std::mem::take(&mut acc);
                     cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
@@ -802,14 +856,17 @@ async fn establish_refresh_dialog(
                     other => {
                         let seed = std::mem::take(&mut acc);
                         cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
-                        return RefreshOutcome::Declined(match other {
-                            Err(_) => std::io::Error::new(
-                                std::io::ErrorKind::TimedOut,
-                                "refresh INVITE timed out (CANCEL sent)",
-                            ),
-                            Ok(Err(e)) => e,
-                            Ok(Ok(_)) => unreachable!("handled by the break arm above"),
-                        });
+                        return RefreshOutcome::Declined(
+                            match other {
+                                Err(_) => std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "refresh INVITE timed out (CANCEL sent)",
+                                ),
+                                Ok(Err(e)) => e,
+                                Ok(Ok(_)) => unreachable!("handled by the break arm above"),
+                            },
+                            renewals,
+                        );
                     }
                 }
             }
@@ -817,10 +874,10 @@ async fn establish_refresh_dialog(
     };
 
     let Some(status) = parse_status(&final_resp) else {
-        return RefreshOutcome::Declined(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "no SIP status line",
-        ));
+        return RefreshOutcome::Declined(
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "no SIP status line"),
+            renewals,
+        );
     };
     if !(200..300).contains(&status) {
         // ACK the non-2xx (486 Busy / other) so flexisip doesn't hold the INVITE server transaction to
@@ -829,16 +886,20 @@ async fn establish_refresh_dialog(
         if let Some(tag) = to_tag(&final_resp) {
             let _ = write_all_flush(&mut sock, build_ack_failure(&d, &tag).as_bytes()).await;
         }
-        return RefreshOutcome::Declined(std::io::Error::other(format!(
-            "refresh INVITE rejected with {status}"
-        )));
+        return RefreshOutcome::Declined(
+            std::io::Error::other(format!("refresh INVITE rejected with {status}")),
+            renewals,
+        );
     }
 
     let Some(tag) = to_tag(&final_resp) else {
-        return RefreshOutcome::Declined(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "2xx to refresh INVITE has no To-tag — cannot form a confirmed dialog for ACK/BYE",
-        ));
+        return RefreshOutcome::Declined(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "2xx to refresh INVITE has no To-tag — cannot form a confirmed dialog for ACK/BYE",
+            ),
+            renewals,
+        );
     };
     d.to_tag = tag;
     d.remote_target =
@@ -849,9 +910,9 @@ async fn establish_refresh_dialog(
         // so BYE it over a FRESH connection rather than leaving it streaming, and decline so the caller
         // keeps its current dialog. Same last-resort reasoning as `session`'s post-2xx ACK failure.
         bye_reconnect(cfg, &d).await;
-        return RefreshOutcome::Declined(e);
+        return RefreshOutcome::Declined(e, renewals);
     }
-    RefreshOutcome::Established(sock, d)
+    RefreshOutcome::Established(sock, d, renewals)
 }
 
 /// One on-demand session: INVITE → ACK, hold while views keep arriving, then BYE. `initial` is the
@@ -1064,7 +1125,7 @@ async fn session(
         let now = tokio::time::Instant::now();
         if !refresh_disabled && now >= refresh_at && hold_deadline > now {
             match establish_refresh_dialog(cfg, stopping, view_rx, &d.aor, &d.domain, &devaddr).await {
-                RefreshOutcome::Established(new_sock, new_d) => {
+                RefreshOutcome::Established(new_sock, new_d, renewals) => {
                     // The panel ADMITTED a concurrent dialog. BYE the old one on its own socket
                     // (best-effort) and adopt the new. When the plant shares its single media session
                     // across the two — the seamless case, and the likely one since it just accepted a
@@ -1086,13 +1147,25 @@ async fn session(
                     // stale deadline can't spuriously hang the freshly-adopted dialog up before the next poke
                     // arrives. A longer manual window, if any, still governs via `start_deadline`.
                     hold_deadline = hold_deadline.max(now + VIEWER_LINGER);
+                    // Apply any Start/Hold that arrived DURING the attempt (held out of the hold loop while
+                    // we established the successor) to the adopted dialog — never dropped.
+                    apply_refresh_renewals(&renewals, now, window, &mut start_deadline, &mut hold_deadline);
                     refresh_at = now + SESSION_REFRESH_AFTER;
                     continue; // re-evaluate with the adopted dialog
                 }
-                RefreshOutcome::Declined(e) => {
+                RefreshOutcome::Declined(e, renewals) => {
                     // Refused (a single-owner plant's `486 Busy`) or errored: keep THIS dialog untouched,
                     // stop retrying, and let the panel's ~60 s BYE + run()'s re-INVITE recycle take over (a
-                    // brief blip, never a permanent freeze). The refusal itself is the hardware probe.
+                    // brief blip, never a permanent freeze). The refusal itself is the hardware probe. Still
+                    // apply any Start/Hold seen during the attempt to THIS dialog's deadlines — a press
+                    // during a failed refresh must renew the window just as it would in the hold loop.
+                    apply_refresh_renewals(
+                        &renewals,
+                        tokio::time::Instant::now(),
+                        window,
+                        &mut start_deadline,
+                        &mut hold_deadline,
+                    );
                     eprintln!(
                         "btmqttd: on-demand session refresh declined ({e}) — falling back to the panel recycle"
                     );
@@ -1751,21 +1824,38 @@ mod tests {
 
     // --- make-before-break refresh (issue #174, Finding #3) --------------------------------------
 
+    /// Read exactly ONE complete SIP message from `sock`, framing across TCP chunk boundaries the same way
+    /// `complete_message_len` does (and preserving any trailing bytes of the NEXT message in `acc`), so a
+    /// refresh-test mock can't misclassify a partial or coalesced read (e.g. INVITE + ACK in one packet).
+    async fn read_one_sip(sock: &mut tokio::net::TcpStream, acc: &mut Vec<u8>) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0u8; 4096];
+        loop {
+            if let Some(len) = complete_message_len(acc) {
+                let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
+                acc.drain(..len);
+                return msg;
+            }
+            let n = sock.read(&mut buf).await.unwrap();
+            assert!(n > 0, "peer closed before a complete SIP message");
+            acc.extend_from_slice(&buf[..n]);
+        }
+    }
+
     #[tokio::test]
     async fn establish_refresh_dialog_adopts_a_2xx_and_acks() {
         // A confirmable 200 OK to the refresh INVITE is adopted: the helper parses the To-tag + Contact
         // and ACKs, returning the confirmed successor dialog for the make-before-break handover.
         use std::collections::HashMap;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncWriteExt};
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             let (mut s, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            let n = s.read(&mut buf).await.unwrap();
-            let invite = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let mut acc: Vec<u8> = Vec::new();
+            let invite = read_one_sip(&mut s, &mut acc).await; // framed, not a raw chunk
             assert!(
                 invite.starts_with("INVITE sip:c100x@dev.example SIP/2.0\r\n"),
                 "expected a fresh INVITE, got: {invite}"
@@ -1784,8 +1874,7 @@ mod tests {
             .unwrap();
             s.flush().await.unwrap();
             // The UAC MUST ACK the confirmed dialog (else the panel retransmits the 2xx).
-            let n = s.read(&mut buf).await.unwrap();
-            let ack = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let ack = read_one_sip(&mut s, &mut acc).await;
             assert!(ack.starts_with("ACK "), "expected an ACK, got: {ack}");
         });
 
@@ -1798,11 +1887,11 @@ mod tests {
         let d = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
             .await
         {
-            RefreshOutcome::Established(_sock, d) => d,
+            RefreshOutcome::Established(_sock, d, _renewals) => d,
             other => panic!(
                 "a confirmable 2xx refresh must be adopted, got {}",
                 match other {
-                    RefreshOutcome::Declined(e) => format!("Declined({e})"),
+                    RefreshOutcome::Declined(e, _) => format!("Declined({e})"),
                     RefreshOutcome::Aborted => "Aborted".to_string(),
                     RefreshOutcome::Established(..) => unreachable!(),
                 }
@@ -1823,15 +1912,16 @@ mod tests {
         // failure (so flexisip doesn't hold the transaction) and returns Err, so the caller keeps its
         // current dialog and falls back to the panel's recycle — never a panic, never a stuck view.
         use std::collections::HashMap;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             let (mut s, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 4096];
-            let _ = s.read(&mut buf).await.unwrap(); // consume the INVITE
+            let mut acc: Vec<u8> = Vec::new();
+            let invite = read_one_sip(&mut s, &mut acc).await; // framed, not a raw chunk
+            assert!(invite.starts_with("INVITE "), "expected the refresh INVITE, got: {invite}");
             s.write_all(
                 b"SIP/2.0 486 Busy Here\r\n\
                   Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
@@ -1845,8 +1935,7 @@ mod tests {
             .unwrap();
             s.flush().await.unwrap();
             // The UAC MUST ACK the non-2xx final (RFC 3261 §17.1.1.3), carrying the failure To-tag.
-            let n = s.read(&mut buf).await.unwrap();
-            let ack = String::from_utf8_lossy(&buf[..n]).into_owned();
+            let ack = read_one_sip(&mut s, &mut acc).await;
             assert!(ack.starts_with("ACK "), "expected a failure ACK, got: {ack}");
             assert!(ack.contains("tag=srv486"), "failure ACK must echo the To-tag, got: {ack}");
         });
@@ -1860,7 +1949,7 @@ mod tests {
         let err = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
             .await
         {
-            RefreshOutcome::Declined(e) => e,
+            RefreshOutcome::Declined(e, _renewals) => e,
             RefreshOutcome::Established(..) => {
                 panic!("a 486 must not be adopted — the caller must keep its current dialog")
             }
@@ -1920,6 +2009,100 @@ mod tests {
         let (saw_invite, saw_cancel) = server.await.unwrap();
         assert!(saw_invite, "the refresh must have sent an INVITE");
         assert!(saw_cancel, "the aborted refresh must CANCEL its in-flight INVITE");
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_records_a_hold_seen_mid_attempt() {
+        // A Hold poke that arrives while the refresh INVITE is in flight must be CAPTURED (not dropped),
+        // so the caller can renew the adopted dialog's hold_deadline. The panel here answers 200 OK; the
+        // queued Hold is processed first (biased select), then the response is read.
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let _invite = read_one_sip(&mut s, &mut acc).await;
+            s.write_all(
+                b"SIP/2.0 200 OK\r\n\
+                  To: <sip:c100x@dev.example>;tag=srv123\r\n\
+                  CSeq: 21 INVITE\r\n\
+                  Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+                  Content-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            s.flush().await.unwrap();
+            let _ack = read_one_sip(&mut s, &mut acc).await;
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
+        let hold_at = tokio::time::Instant::now() + Duration::from_secs(30);
+        view_tx.send(ViewCmd::Hold(hold_at)).await.unwrap(); // queued before the panel responds
+        let renewals =
+            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
+                .await
+            {
+                RefreshOutcome::Established(_sock, _d, r) => r,
+                _ => panic!("a 2xx refresh must be adopted"),
+            };
+        assert_eq!(
+            renewals.hold_expiry,
+            Some(hold_at),
+            "a Hold seen mid-refresh must be recorded, not dropped"
+        );
+        drop(view_tx);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn apply_refresh_renewals_rearms_start_and_lifts_hold() {
+        let base = tokio::time::Instant::now();
+        let window = Duration::from_secs(30);
+        let now = base + Duration::from_secs(10);
+
+        // saw_start re-arms the FULL window from now; a future hold_expiry lifts hold_deadline (max).
+        let mut start = base; // an already-elapsed regime
+        let mut hold = base;
+        let future_hold = now + Duration::from_secs(4);
+        apply_refresh_renewals(
+            &RefreshRenewals { saw_start: true, hold_expiry: Some(future_hold) },
+            now,
+            window,
+            &mut start,
+            &mut hold,
+        );
+        assert_eq!(start, now + window);
+        assert_eq!(hold, future_hold);
+
+        // Nothing recorded ⇒ deadlines unchanged.
+        let mut s2 = base;
+        let mut h2 = base;
+        apply_refresh_renewals(&RefreshRenewals::default(), now, window, &mut s2, &mut h2);
+        assert_eq!(s2, base);
+        assert_eq!(h2, base);
+
+        // A hold_expiry already in the past is ignored (mirrors the hold loop dropping a stale poke), and
+        // `max` never moves hold_deadline backwards.
+        let mut s3 = base;
+        let mut h3 = now + Duration::from_secs(20);
+        apply_refresh_renewals(
+            &RefreshRenewals { saw_start: false, hold_expiry: Some(now - Duration::from_secs(1)) },
+            now,
+            window,
+            &mut s3,
+            &mut h3,
+        );
+        assert_eq!(s3, base, "no Start ⇒ start_deadline untouched");
+        assert_eq!(h3, now + Duration::from_secs(20), "a past hold_expiry must not move hold_deadline");
     }
 
     #[test]
