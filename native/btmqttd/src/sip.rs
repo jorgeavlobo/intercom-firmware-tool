@@ -379,6 +379,32 @@ pub fn build_ack(d: &Dialog, ack_branch: &str) -> String {
     )
 }
 
+/// ACK for a 2xx whose `To` header we echo VERBATIM. Used only for a MALFORMED 2xx whose To-tag is empty
+/// or entirely absent: RFC 3261 §13.2.2.4 requires the ACK's `To` to equal the 2xx's `To`, so we must
+/// reproduce the received header exactly rather than synthesize `;tag=` (which `build_ack` always does).
+/// `to_header` is the raw `To` value from the 2xx; `target` is its `Contact` (the ACK Request-URI).
+pub fn build_ack_echoing_to(d: &Dialog, ack_branch: &str, target: &str, to_header: &str) -> String {
+    format!(
+        "ACK {target} SIP/2.0\r\n\
+         Via: SIP/2.0/TCP 127.0.0.1:{lport};rport;branch={branch}\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:btmqttd@{domain}>;tag={ftag}\r\n\
+         To: {to}\r\n\
+         Call-ID: {callid}\r\n\
+         CSeq: {cseq} ACK\r\n\
+         Content-Length: 0\r\n\
+         \r\n",
+        target = target,
+        lport = d.local_port,
+        branch = ack_branch,
+        domain = d.domain,
+        ftag = d.from_tag,
+        to = to_header,
+        callid = d.call_id,
+        cseq = d.cseq,
+    )
+}
+
 /// CANCEL a still-pending INVITE (RFC 3261 §9.1). It MUST reuse the INVITE's Request-URI, `Call-ID`,
 /// `From`-tag, `To` (no tag yet — the transaction isn't confirmed), CSeq NUMBER (method `CANCEL`) and,
 /// critically, the SAME top `Via` branch as the INVITE it cancels, so the proxy matches it to that
@@ -1108,7 +1134,7 @@ async fn establish_refresh_dialog(
             if tokio::time::Instant::now() >= attempt_deadline {
                 break WriteStep::Declined(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    "refresh INVITE write timed out (CANCEL sent)",
+                    "refresh INVITE write timed out (cancelling)",
                 ));
             }
             let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline, window);
@@ -1127,7 +1153,7 @@ async fn establish_refresh_dialog(
                     Ok(Err(e)) => WriteStep::Declined(e),
                     Err(_) => WriteStep::Declined(std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
-                        "refresh INVITE write timed out (CANCEL sent)",
+                        "refresh INVITE write timed out (cancelling)",
                     )),
                 },
             }
@@ -1161,7 +1187,7 @@ async fn establish_refresh_dialog(
             let seed = std::mem::take(&mut acc);
             cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
             return RefreshOutcome::Declined(
-                std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh INVITE timed out (CANCEL sent)"),
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh INVITE timed out (cancelling)"),
                 renewals,
                 true, // timeout ⇒ transient ⇒ retriable
             );
@@ -1210,7 +1236,7 @@ async fn establish_refresh_dialog(
                             match other {
                                 Err(_) => std::io::Error::new(
                                     std::io::ErrorKind::TimedOut,
-                                    "refresh INVITE timed out (CANCEL sent)",
+                                    "refresh INVITE timed out (cancelling)",
                                 ),
                                 Ok(Err(e)) => e,
                                 Ok(Ok(_)) => unreachable!("handled by the break arm above"),
@@ -1253,17 +1279,18 @@ async fn establish_refresh_dialog(
     let Some(tag) = to_tag(&final_resp).filter(|t| !t.trim().is_empty()) else {
         // A 2xx with NO (or an empty/whitespace) To-tag is malformed (flexisip always sets one). The panel
         // has still ACCEPTED the INVITE, so a UAC MUST ACK the 2xx (RFC 3261 §13.2.2.4) or flexisip keeps
-        // retransmitting it. We CAN ACK — echoing the received To exactly (its empty/absent tag) with the
-        // Request-URI taken from the 2xx's Contact — even though we canNOT form a reliable in-dialog BYE
-        // without a remote tag. So ACK on THIS connection (where the 2xx arrived and the dialog lives), then
-        // LATCH (retriable=false): a BYE here would be unaddressable (empty remote tag), and retrying only
-        // reproduces the same tagless 2xx and stacks one orphan per attempt, so we ride the current dialog to
-        // the panel's cut, which reclaims this successor on its own timeout. (Cannot happen against a
-        // conformant flexisip; defensive.)
-        d.to_tag = to_tag(&final_resp).unwrap_or_default(); // echo the received tag verbatim (may be empty)
-        d.remote_target =
+        // retransmitting it. We CAN ACK — echoing the received `To` header VERBATIM (whether its tag is
+        // empty OR entirely absent; build_ack always emits `;tag=`, so it would NOT reproduce a no-tag To)
+        // with the Request-URI taken from the 2xx's Contact — even though we canNOT form a reliable in-dialog
+        // BYE without a remote tag. So ACK on THIS connection (where the 2xx arrived and the dialog lives),
+        // then LATCH (retriable=false): a BYE here would be unaddressable, and retrying only reproduces the
+        // same tagless 2xx and stacks one orphan per attempt, so we ride the current dialog to the panel's
+        // cut, which reclaims this successor on its own timeout. (Cannot happen against a conformant flexisip;
+        // defensive.)
+        let to_hdr = header_value(&final_resp, "To").unwrap_or_default();
+        let target =
             contact_uri(&final_resp).unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
-        let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
+        let ack = build_ack_echoing_to(&d, &format!("z9hG4bK{}", rand_hex(8)), &target, to_hdr);
         let _ = write_all_flush(&mut sock, ack.as_bytes()).await;
         return RefreshOutcome::Declined(
             std::io::Error::new(
@@ -1393,7 +1420,7 @@ async fn session(
                         return match other {
                             Err(_) => Err(std::io::Error::new(
                                 std::io::ErrorKind::TimedOut,
-                                "INVITE response timed out (CANCEL sent)",
+                                "INVITE response timed out (cancelling)",
                             )),
                             Ok(Err(e)) => Err(e), // reader error; cancelled best-effort
                             Ok(Ok(_)) => unreachable!("handled by the break arm above"),
@@ -2455,16 +2482,14 @@ mod tests {
         server.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn establish_refresh_dialog_acks_then_latches_on_a_2xx_with_no_or_empty_to_tag() {
-        // A 2xx with an EMPTY (or absent) To-tag is malformed: the panel ACCEPTED the INVITE, so a UAC MUST
-        // still ACK the 2xx (RFC 3261 §13.2.2.4) or flexisip keeps retransmitting it. The helper must ACK on
-        // the ORIGINAL connection — echoing the received (empty) tag, Request-URI = the response Contact —
-        // but must NOT send a BYE (unaddressable without a remote tag) and must NOT open a teardown
-        // reconnect. It must then LATCH (decline NON-retriably) and NOT adopt the dialog, so the caller keeps
-        // its current dialog and the panel's own cut reclaims the orphan. The mock sends a 200 OK with
-        // `;tag=` (empty), asserts the ACK arrives on the same connection with the Contact as Request-URI,
-        // and asserts NO second connection opens.
+    // A malformed 2xx whose To-tag is EMPTY (`;tag=`) or ENTIRELY ABSENT still means the panel ACCEPTED the
+    // INVITE, so a UAC MUST ACK the 2xx (RFC 3261 §13.2.2.4) or flexisip keeps retransmitting it. The helper
+    // must ACK on the ORIGINAL connection, echoing the received `To` header VERBATIM (Request-URI = the
+    // response Contact), must NOT send a BYE (unaddressable without a remote tag), must NOT open a teardown
+    // reconnect, and must LATCH (decline NON-retriably) without adopting — so the caller keeps its current
+    // dialog and the panel's own cut reclaims the orphan. `to_line`/`expect_to` parametrize the sent `To`
+    // header line and the exact `To` line the ACK must reproduce.
+    async fn assert_tagless_2xx_acked_verbatim(to_line: &'static str, expect_to: &'static str) {
         use std::collections::HashMap;
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
@@ -2472,31 +2497,34 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
-            // 1) The INVITE connection: read the INVITE, answer 200 OK with an EMPTY To-tag (`;tag=`).
+            // 1) The INVITE connection: read the INVITE, answer 200 OK with the parametrized (bad) To.
             let (mut s, _) = listener.accept().await.unwrap();
             let mut acc: Vec<u8> = Vec::new();
             let invite = read_one_sip(&mut s, &mut acc).await;
             assert!(invite.starts_with("INVITE "), "expected the refresh INVITE, got: {invite}");
-            s.write_all(
-                b"SIP/2.0 200 OK\r\n\
-                  Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
-                  From: <sip:btmqttd@dev.example>;tag=cf\r\n\
-                  To: <sip:c100x@dev.example>;tag=\r\n\
-                  Call-ID: xyz\r\n\
-                  CSeq: 21 INVITE\r\n\
-                  Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
-                  Content-Length: 0\r\n\r\n",
-            )
-            .await
-            .unwrap();
+            let resp = format!(
+                "SIP/2.0 200 OK\r\n\
+                 Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+                 From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+                 {to_line}\r\n\
+                 Call-ID: xyz\r\n\
+                 CSeq: 21 INVITE\r\n\
+                 Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+                 Content-Length: 0\r\n\r\n"
+            );
+            s.write_all(resp.as_bytes()).await.unwrap();
             s.flush().await.unwrap();
-            // 2) The 2xx ACK MUST arrive on THIS connection, addressed to the response Contact, and must NOT
-            //    be a BYE (the dialog is unaddressable). read_one_sip returns after one complete message.
+            // 2) The 2xx ACK MUST arrive on THIS connection, addressed to the response Contact, echoing the
+            //    received To header VERBATIM, and must NOT be a BYE. read_one_sip returns one whole message.
             let ack = read_one_sip(&mut s, &mut acc).await;
             assert!(ack.starts_with("ACK "), "expected the 2xx ACK on the original connection, got: {ack}");
             assert!(
                 ack.contains("sip:c100x@127.0.0.1:5599"),
                 "the 2xx ACK Request-URI must be the response Contact, got: {ack}"
+            );
+            assert!(
+                ack.contains(&format!("\r\n{expect_to}\r\n")),
+                "the 2xx ACK must echo the received To verbatim ({expect_to}), got: {ack}"
             );
             assert!(!ack.contains("BYE"), "must NOT BYE an unaddressable dialog, got: {ack}");
             // 3) No teardown reconnect: assert no second connection arrives (true = no reconnect = pass).
@@ -2521,6 +2549,27 @@ mod tests {
             server.await.unwrap(),
             "a tagless-2xx decline must ACK on the original connection and NOT open a teardown connection"
         );
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_acks_verbatim_a_2xx_with_empty_to_tag() {
+        // An explicit but EMPTY tag param (`;tag=`) must be echoed exactly — including the trailing `;tag=`.
+        assert_tagless_2xx_acked_verbatim(
+            "To: <sip:c100x@dev.example>;tag=",
+            "To: <sip:c100x@dev.example>;tag=",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_acks_verbatim_a_2xx_with_absent_to_tag() {
+        // No tag param at all: the ACK must NOT synthesize `;tag=` (as build_ack would) — it must echo the
+        // bare `To` exactly, or a peer may fail to match the ACK and keep retransmitting the 2xx.
+        assert_tagless_2xx_acked_verbatim(
+            "To: <sip:c100x@dev.example>",
+            "To: <sip:c100x@dev.example>",
+        )
+        .await;
     }
 
     #[tokio::test]
