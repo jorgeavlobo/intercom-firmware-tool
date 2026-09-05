@@ -103,17 +103,18 @@ pub const VIEWER_LINGER: Duration = Duration::from_secs(5);
 /// stops the RTP, `av.rs` sees the panel's `*7*0*##` teardown and releases the go2rtc siphon, and by the
 /// time a fresh dialog re-establishes the media, go2rtc's producer has already timed out and dropped every
 /// consumer. So while a viewer is still holding the session, we proactively stand up the NEXT dialog part
-/// way through this one (at `SESSION_REFRESH_AFTER`, ~15 s before the ~60 s cut), so even a slow refresh
+/// way through this one (at `SESSION_REFRESH_AFTER`, ~20 s before the ~60 s cut), so even a slow refresh
 /// COMPLETES before the panel's BYE. IF the plant keeps its single shared media session up while the new
 /// dialog holds it (multiudpsink is fan-out, and `av.rs` arms/releases the siphon off the BUS media
 /// lifecycle, NOT per-dialog), the panel never emits `*7*0*##`, the siphon never lapses, and the view is
 /// SEAMLESS. IF the plant refuses a second concurrent dialog (some installs are single-owner — a `486`
 /// busy), the refresh is abandoned for this dialog and we fall back to the panel's BYE + `run()`'s
 /// re-INVITE recycle: a brief blip, never a permanent freeze. Sized so the WHOLE attempt — start plus its
-/// worst-case [`RESPONSE_TIMEOUT`] budget — completes with margin before [`PANEL_SESSION_LIMIT`], so even a
-/// slow refresh finishes standing up the successor before the panel drops the old dialog (guarded by the
-/// `const _: () = assert!(…)` timing invariant just below [`PANEL_SESSION_LIMIT`]).
-const SESSION_REFRESH_AFTER: Duration = Duration::from_secs(45);
+/// worst-case [`RESPONSE_TIMEOUT`] budget and the [`HANDOVER_MARGIN`] — completes before [`PANEL_SESSION_LIMIT`]
+/// AND leaves room for at least one transient retry ([`REFRESH_RETRY_BACKOFF`] + a full attempt) inside the
+/// window, so a momentary flexisip blip doesn't forfeit make-before-break (both guaranteed by the two
+/// `const _: () = assert!(…)` timing invariants just below [`PANEL_SESSION_LIMIT`]).
+const SESSION_REFRESH_AFTER: Duration = Duration::from_secs(40);
 
 /// The panel's observed HARD lifetime on an on-demand camera dialog before it BYEs (issue #174,
 /// Finding #3) — ~60 s on the C100X, and it binds every consumer (BTicino's own app included). Not a knob
@@ -147,6 +148,21 @@ const _: () = assert!(
     SESSION_REFRESH_AFTER.as_millis() + RESPONSE_TIMEOUT.as_millis() + HANDOVER_MARGIN.as_millis()
         <= PANEL_SESSION_LIMIT.as_millis(),
     "make-before-break refresh must complete with handover margin before the panel's session cut",
+);
+
+/// Compile-time invariant (issue #174, Finding #3 review): at least ONE transient retry must still fit
+/// inside the window. The first attempt starts at `SESSION_REFRESH_AFTER`; a retry after `REFRESH_RETRY_BACKOFF`
+/// plus a whole fresh attempt (`RESPONSE_TIMEOUT` + `HANDOVER_MARGIN`) must land before the cut, or the retry
+/// path is dead — every transient blip would latch `refresh_disabled` and force the freeze-prone recycle,
+/// defeating the whole point of having a retry. This is what the runtime retry gate budgets, enforced here so
+/// the constants can't drift the retry out of reach.
+const _: () = assert!(
+    SESSION_REFRESH_AFTER.as_millis()
+        + REFRESH_RETRY_BACKOFF.as_millis()
+        + RESPONSE_TIMEOUT.as_millis()
+        + HANDOVER_MARGIN.as_millis()
+        <= PANEL_SESSION_LIMIT.as_millis(),
+    "a transient-refresh retry must still fit before the panel's session cut",
 );
 
 // ---- runtime discovery (pure helpers take file contents, so they unit-test) ------------------
