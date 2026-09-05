@@ -742,6 +742,14 @@ impl RefreshRenewals {
             ViewCmd::Stop => {}
         }
     }
+
+    /// Whether ANY viewing renewal (a manual `Start` or an auto-hold `Hold` poke) was seen during the
+    /// attempt. Used to DISARM the viewing-deadline abort: a poke arriving mid-attempt proves the viewer is
+    /// still there, so the stale pre-attempt deadline must not cut the refresh short — the caller will extend
+    /// the real deadline from these renewals once the attempt returns.
+    fn any(&self) -> bool {
+        self.saw_start || self.hold_expiry.is_some()
+    }
 }
 
 /// Apply renewals captured during a refresh attempt to the caller's viewing-window deadlines, with the
@@ -772,7 +780,8 @@ enum InDialog {
     /// The panel BYE'd (we ACKed it); the caller must NOT send its own BYE to the dead dialog.
     PanelEnded,
     /// The confirmed dialog's socket is dead (or the buffer blew its cap); teardown was already attempted
-    /// over a fresh connection, so the caller propagates this error for the session-backoff path.
+    /// (BYE on the live socket, falling back to a fresh connection only if that write fails), so the caller
+    /// propagates this error for the session-backoff path.
     Failed(std::io::Error),
 }
 
@@ -865,6 +874,13 @@ enum RefreshOutcome {
 /// dropped: they are RECORDED into the returned [`RefreshRenewals`] so the caller re-arms the viewing-window
 /// deadlines exactly as the hold loop would (a manual press or a hold poke during the attempt must not be
 /// lost), mirroring how `session`'s own establish records `want_start` / the latest `hold_expiry`.
+///
+/// It also honors the caller's `viewing_deadline` (the governing hang-up deadline captured at the attempt's
+/// start): if that window lapses mid-attempt WITHOUT a renewing poke, the attempt aborts (cancelling any
+/// pending INVITE) instead of blocking for the full response budget — so an auto-only session that loses its
+/// viewer just as the refresh begins still hangs up ~`VIEWER_LINGER` later, not up to `RESPONSE_TIMEOUT`
+/// later. A poke seen during the attempt DISARMS that abort (see [`RefreshRenewals::any`]): the viewer is
+/// still there and the caller will extend the real deadline from the recorded renewals.
 async fn establish_refresh_dialog(
     cfg: &Arc<Config>,
     stopping: &Arc<AtomicBool>,
@@ -872,6 +888,7 @@ async fn establish_refresh_dialog(
     aor: &str,
     domain: &str,
     devaddr: &str,
+    viewing_deadline: tokio::time::Instant,
 ) -> RefreshOutcome {
     // Viewing-window commands seen while the INVITE is in flight, folded in and handed back so the caller
     // applies them (see RefreshRenewals). Empty on the pre-INVITE error paths below.
@@ -900,6 +917,11 @@ async fn establish_refresh_dialog(
                     Some(cmd @ (ViewCmd::Start | ViewCmd::Hold(_))) => renewals.record(&cmd),
                     Some(ViewCmd::Stop) | None => return RefreshOutcome::Aborted,
                 },
+                // The viewer's window lapsed with no renewing poke during setup: no INVITE has been sent yet,
+                // so just abort and let the caller tear the current dialog down at its deadline.
+                _ = tokio::time::sleep_until(viewing_deadline), if !renewals.any() => {
+                    return RefreshOutcome::Aborted;
+                }
                 r = tokio::time::timeout_at(attempt_deadline, &mut connect) => match r {
                     Ok(Ok(s)) => break s,
                     Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals, true), // transient ⇒ retriable
@@ -940,8 +962,14 @@ async fn establish_refresh_dialog(
         r = tokio::time::timeout_at(attempt_deadline, write_all_flush(&mut sock, invite.as_bytes())) => {
             match r {
                 Ok(Ok(())) => {}
-                // socket dead ⇒ nothing pinned; transient ⇒ retriable
-                Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals, true),
+                // A write error can still leave a COMPLETE INVITE delivered to flexisip before the socket
+                // died (a partial flush, or the reset landing after the last byte). Over TCP a dropped
+                // socket does NOT cancel it, so run the best-effort CANCEL (which reconnects when the
+                // original socket is dead) before returning; transient ⇒ retriable.
+                Ok(Err(e)) => {
+                    cancel_pending_invite(&mut sock, cfg, &mut d, Vec::new()).await;
+                    return RefreshOutcome::Declined(e, renewals, true);
+                }
                 Err(_) => {
                     cancel_pending_invite(&mut sock, cfg, &mut d, Vec::new()).await;
                     return RefreshOutcome::Declined(
@@ -986,6 +1014,15 @@ async fn establish_refresh_dialog(
                     return RefreshOutcome::Aborted; // Stop/closed: INVITE cancelled, caller hangs up
                 }
             },
+            // The viewing window lapsed mid-attempt with no renewing poke (the viewer left just as the
+            // refresh began): CANCEL the pending INVITE (a late 2xx must not pin the panel) and hand back
+            // Aborted so the caller hangs up now — honoring VIEWER_LINGER instead of blocking here for the
+            // full response budget. A poke seen during the attempt DISARMS this (renewals.any()).
+            _ = tokio::time::sleep_until(viewing_deadline), if !renewals.any() => {
+                let seed = std::mem::take(&mut acc);
+                cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
+                return RefreshOutcome::Aborted;
+            }
             res = tokio::time::timeout_at(resp_deadline, wait_final_response(&mut sock, &mut acc)) => {
                 match res {
                     Ok(Ok(resp)) => break resp,
@@ -1279,7 +1316,22 @@ async fn session(
         // and the attempt fires within ~1 s of it.
         let now = tokio::time::Instant::now();
         if !refresh_disabled && now >= refresh_at && hold_deadline > now {
-            match establish_refresh_dialog(cfg, stopping, view_rx, &d.aor, &d.domain, &devaddr).await {
+            // Bound the attempt by the governing hang-up deadline (the LATER of the manual and linger
+            // windows): if BOTH lapse mid-attempt with no renewing poke, the refresh aborts promptly rather
+            // than blocking for the full response budget, so a viewer that leaves as the refresh begins still
+            // hangs up ~VIEWER_LINGER later. A poke during the attempt disarms that (renewals.any()).
+            let viewing_deadline = governing_deadline(start_deadline, hold_deadline);
+            match establish_refresh_dialog(
+                cfg,
+                stopping,
+                view_rx,
+                &d.aor,
+                &d.domain,
+                &devaddr,
+                viewing_deadline,
+            )
+            .await
+            {
                 RefreshOutcome::Established(new_sock, new_d, renewals, residual) => {
                     // The panel admitted a concurrent dialog — but adopt it ONLY after confirming it is
                     // actually alive. Process any bytes flexisip coalesced after its 2xx (an in-dialog
@@ -1317,14 +1369,23 @@ async fn session(
                             dialog_started_at = now; // the adopted dialog starts its own ~60 s clock now
                             refresh_at = now + SESSION_REFRESH_AFTER;
                         }
-                        InDialog::PanelEnded | InDialog::Failed(_) => {
-                            // The successor terminated (or its socket died) before we committed — its BYE was
-                            // ACKed / its teardown done by process_in_dialog, so drop it and KEEP the healthy
-                            // OLD dialog. Treat like a transient miss: retry before the cut if budget
-                            // remains, else latch and let the panel BYE + run()'s recycle take over.
-                            eprintln!(
-                                "btmqttd: on-demand refresh successor ended before adoption — keeping the current dialog"
-                            );
+                        // The successor terminated (PanelEnded) or its socket died / buffer overflowed
+                        // (Failed) before we committed — its BYE was ACKed / its teardown done by
+                        // process_in_dialog, so drop it and KEEP the healthy OLD dialog. Both are handled the
+                        // same way (retry-or-latch below), but the arms are split so a Failed carries its
+                        // error into the log — a dead socket vs a cap overflow vs a real panel BYE are very
+                        // different to diagnose.
+                        adopt @ (InDialog::PanelEnded | InDialog::Failed(_)) => {
+                            match adopt {
+                                InDialog::Failed(e) => eprintln!(
+                                    "btmqttd: on-demand refresh successor failed before adoption ({e}) — keeping the current dialog"
+                                ),
+                                _ => eprintln!(
+                                    "btmqttd: on-demand refresh successor ended before adoption — keeping the current dialog"
+                                ),
+                            }
+                            // Treat like a transient miss: retry before the cut if budget remains, else latch
+                            // and let the panel BYE + run()'s recycle take over.
                             let cut = dialog_started_at + PANEL_SESSION_LIMIT;
                             if now + REFRESH_RETRY_BACKOFF + RESPONSE_TIMEOUT < cut {
                                 refresh_at = now + REFRESH_RETRY_BACKOFF;
@@ -2024,7 +2085,7 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4); // kept open: no Stop/None mid-attempt
-        let d = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
+        let d = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600))
             .await
         {
             RefreshOutcome::Established(_sock, d, _renewals, _residual) => d,
@@ -2086,7 +2147,7 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
-        let err = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
+        let err = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600))
             .await
         {
             RefreshOutcome::Declined(e, _renewals, retriable) => {
@@ -2119,7 +2180,7 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
-        match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da").await {
+        match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600)).await {
             RefreshOutcome::Declined(_e, _renewals, retriable) => {
                 assert!(retriable, "a transport error (connect refused) must be retriable")
             }
@@ -2174,7 +2235,7 @@ mod tests {
             let _ = view_tx.send(ViewCmd::Stop).await;
         });
         let outcome =
-            establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da").await;
+            establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600)).await;
         assert!(
             matches!(outcome, RefreshOutcome::Aborted),
             "a mid-flight Stop must abort the refresh, not block on the response"
@@ -2183,6 +2244,63 @@ mod tests {
         assert!(
             server.await.unwrap(),
             "the aborted refresh must CANCEL its in-flight INVITE"
+        );
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_aborts_when_the_viewing_deadline_lapses() {
+        // If the viewer leaves just as the refresh begins (no renewing poke) and the panel never answers,
+        // the attempt must abort at the governing viewing deadline — honoring VIEWER_LINGER — instead of
+        // blocking for the full RESPONSE_TIMEOUT. It must also CANCEL the in-flight INVITE so a late 2xx
+        // can't pin the panel. The deadline is set comfortably past the (sub-millisecond loopback) connect
+        // + INVITE write, so the abort lands in the response wait after the INVITE is on the wire.
+        use std::collections::HashMap;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let invite = read_one_sip(&mut s, &mut acc).await; // wait for the whole INVITE
+            assert!(invite.starts_with("INVITE "), "expected the refresh INVITE, got: {invite}");
+            // Never answer; accumulate until the client drops, looking for the CANCEL.
+            let mut all = String::from_utf8_lossy(&acc).into_owned();
+            let mut buf = [0u8; 4096];
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+                }
+            }
+            all.contains("CANCEL ")
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4); // no pokes ⇒ deadline is honored
+        let viewing_deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        let outcome = establish_refresh_dialog(
+            &cfg,
+            &stopping,
+            &mut view_rx,
+            "c100x",
+            "dev.example",
+            "da",
+            viewing_deadline,
+        )
+        .await;
+        assert!(
+            matches!(outcome, RefreshOutcome::Aborted),
+            "a lapsed viewing deadline (no poke) must abort the refresh, not block on the response"
+        );
+        assert!(
+            server.await.unwrap(),
+            "the deadline-aborted refresh must CANCEL its in-flight INVITE"
         );
     }
 
@@ -2223,7 +2341,7 @@ mod tests {
         let hold_at = tokio::time::Instant::now() + Duration::from_secs(30);
         view_tx.send(ViewCmd::Hold(hold_at)).await.unwrap(); // queued before the panel responds
         let renewals =
-            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
+            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600))
                 .await
             {
                 RefreshOutcome::Established(_sock, _d, r, _residual) => r,
@@ -2281,7 +2399,7 @@ mod tests {
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
         let residual =
-            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
+            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600))
                 .await
             {
                 RefreshOutcome::Established(_sock, _d, _r, residual) => residual,
