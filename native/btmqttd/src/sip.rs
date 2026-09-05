@@ -2193,27 +2193,35 @@ mod tests {
 
     #[tokio::test]
     async fn establish_refresh_dialog_marks_a_transport_error_retriable() {
-        // A transport failure (no SIP listener ⇒ connection refused) is TRANSIENT and must be marked
-        // retriable, so the caller re-attempts before the panel cut instead of forfeiting make-before-break
-        // (a definitive panel refusal, by contrast, is NOT retriable — see the 486 test).
+        // A transport failure (the loopback SIP peer drops the connection without answering) is TRANSIENT
+        // and must be marked retriable, so the caller re-attempts before the panel cut instead of forfeiting
+        // make-before-break (a definitive panel refusal, by contrast, is NOT retriable — see the 486 test).
+        // A real listener that ACCEPTS then immediately CLOSES is deterministic (no dead-port reuse race)
+        // and fast: the peer-close surfaces at once as a write error or an EOF on the response read, rather
+        // than only after RESPONSE_TIMEOUT.
         use std::collections::HashMap;
-        // A loopback port with (almost certainly) no listener: bind one to reserve a free port, then drop it.
-        let dead_port = {
-            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            l.local_addr().unwrap().port()
-        };
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // Accept once and drop the connection immediately, without sending any response.
+            let _ = listener.accept().await;
+        });
+
         let mut m = HashMap::new();
         m.insert("MQTT_HOST".to_string(), "h".to_string());
-        m.insert("SIP_PORT".to_string(), dead_port.to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
         let cfg = Arc::new(crate::config::Config::from_map(m));
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
         match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600)).await {
             RefreshOutcome::Declined(_e, _renewals, retriable) => {
-                assert!(retriable, "a transport error (connect refused) must be retriable")
+                assert!(retriable, "a transport error (peer closed) must be retriable")
             }
-            _ => panic!("a connect to a dead port must decline"),
+            _ => panic!("a dropped connection must decline"),
         }
+        server.await.unwrap();
     }
 
     // NB: the timing invariant `SESSION_REFRESH_AFTER + RESPONSE_TIMEOUT (+margin) < PANEL_SESSION_LIMIT`
