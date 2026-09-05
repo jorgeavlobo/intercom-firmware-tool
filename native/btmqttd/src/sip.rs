@@ -109,6 +109,14 @@ const SESSION_REFRESH_AFTER: Duration = Duration::from_secs(45);
 /// real cutoff, not a bare constant.
 const PANEL_SESSION_LIMIT: Duration = Duration::from_secs(60);
 
+/// Backoff before RE-attempting a refresh that failed TRANSIENTLY (a transport error — flexisip briefly
+/// refusing the loopback connect, a reset socket, a timeout — NOT a panel `486` refusal). A transient
+/// failure must not permanently disable make-before-break for the dialog: as long as there is still budget
+/// before the panel cut, we retry after this short delay so a momentary signalling hiccup doesn't force the
+/// view through the freeze-prone recycle (issue #174, Finding #3 review). Short, so a retry still lands
+/// inside the pre-cut window.
+const REFRESH_RETRY_BACKOFF: Duration = Duration::from_secs(3);
+
 /// Compile-time invariant (issue #174, Finding #3): the make-before-break successor must be fully stood up
 /// — its start (`SESSION_REFRESH_AFTER`) plus the WORST-CASE response budget (`RESPONSE_TIMEOUT`) — with a
 /// few seconds of handover margin left BELOW the panel's hard cut, or a slow refresh could complete only
@@ -829,8 +837,11 @@ enum RefreshOutcome {
     Established(TcpStream, Box<Dialog>, RefreshRenewals, Vec<u8>),
     /// The panel refused (e.g. `486 Busy` on a single-owner plant) or the attempt errored. The pending
     /// INVITE was CANCELled / the non-2xx ACKed, so nothing dangles; the caller keeps its current dialog
-    /// and falls back to the panel's recycle — applying any renewals seen mid-attempt to that dialog.
-    Declined(std::io::Error, RefreshRenewals),
+    /// and applies any renewals seen mid-attempt to it. The `bool` is `retriable`: `false` for a definitive
+    /// panel refusal (a SIP `>=300` final response — a single-owner plant won't change its mind mid-dialog,
+    /// so the caller latches and falls back); `true` for a TRANSIENT transport error (connect/write/timeout/
+    /// malformed) the caller may re-attempt while budget remains before the panel cut.
+    Declined(std::io::Error, RefreshRenewals, bool),
     /// Shutdown (`stopping`) or a `Stop`/closed channel was observed mid-attempt. The pending INVITE was
     /// CANCELled (over TCP a dropped socket does NOT cancel it, so a late 2xx could otherwise pin the
     /// panel), so nothing dangles; the caller tears the CURRENT dialog down (a Stop means the viewer wants
@@ -876,17 +887,18 @@ async fn establish_refresh_dialog(
         r = tokio::time::timeout_at(setup_deadline, TcpStream::connect(("127.0.0.1", cfg.sip_port))) => {
             match r {
                 Ok(Ok(s)) => s,
-                Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals),
+                Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals, true), // transient ⇒ retriable
                 Err(_) => return RefreshOutcome::Declined(
                     std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh connect timed out"),
                     renewals,
+                    true, // transient ⇒ retriable
                 ),
             }
         }
     };
     let local_port = match sock.local_addr() {
         Ok(a) => a.port(),
-        Err(e) => return RefreshOutcome::Declined(e, renewals),
+        Err(e) => return RefreshOutcome::Declined(e, renewals, true), // transient ⇒ retriable
     };
     let mut d = Dialog {
         aor: aor.to_string(),
@@ -912,7 +924,8 @@ async fn establish_refresh_dialog(
         r = tokio::time::timeout_at(setup_deadline, write_all_flush(&mut sock, invite.as_bytes())) => {
             match r {
                 Ok(Ok(())) => {}
-                Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals), // socket dead ⇒ nothing pinned
+                // socket dead ⇒ nothing pinned; transient ⇒ retriable
+                Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals, true),
                 Err(_) => {
                     cancel_pending_invite(&mut sock, cfg, &mut d, Vec::new()).await;
                     return RefreshOutcome::Declined(
@@ -921,6 +934,7 @@ async fn establish_refresh_dialog(
                             "refresh INVITE write timed out (CANCEL sent)",
                         ),
                         renewals,
+                        true, // transient ⇒ retriable
                     );
                 }
             }
@@ -970,6 +984,7 @@ async fn establish_refresh_dialog(
                                 Ok(Ok(_)) => unreachable!("handled by the break arm above"),
                             },
                             renewals,
+                            true, // timeout / reader error ⇒ transient ⇒ retriable
                         );
                     }
                 }
@@ -981,6 +996,7 @@ async fn establish_refresh_dialog(
         return RefreshOutcome::Declined(
             std::io::Error::new(std::io::ErrorKind::InvalidData, "no SIP status line"),
             renewals,
+            true, // malformed response ⇒ transient ⇒ retriable
         );
     };
     if !(200..300).contains(&status) {
@@ -993,6 +1009,7 @@ async fn establish_refresh_dialog(
         return RefreshOutcome::Declined(
             std::io::Error::other(format!("refresh INVITE rejected with {status}")),
             renewals,
+            false, // a definitive panel refusal (e.g. single-owner 486) ⇒ do NOT retry, latch off
         );
     }
 
@@ -1003,6 +1020,7 @@ async fn establish_refresh_dialog(
                 "2xx to refresh INVITE has no To-tag — cannot form a confirmed dialog for ACK/BYE",
             ),
             renewals,
+            true, // a malformed 2xx ⇒ transient ⇒ retriable
         );
     };
     d.to_tag = tag;
@@ -1015,7 +1033,7 @@ async fn establish_refresh_dialog(
         // caller keeps its current dialog. Use ack_bye_reconnect (ACK then BYE): a bare BYE is unreliable
         // against a 2xx we never ACKed, so the dialog must be confirmed before it is torn down.
         ack_bye_reconnect(cfg, &d).await;
-        return RefreshOutcome::Declined(e, renewals);
+        return RefreshOutcome::Declined(e, renewals, true); // transport ⇒ transient ⇒ retriable
     }
     // Hand back any bytes wait_final_response left in `acc` AFTER the 2xx: flexisip can coalesce the final
     // response with an immediate in-dialog request (an OPTIONS, or even a BYE) into one TCP read, and over
@@ -1218,6 +1236,9 @@ async fn session(
     // run()'s recycle.
     let mut refresh_at = now0 + SESSION_REFRESH_AFTER;
     let mut refresh_disabled = false;
+    // When the CURRENT dialog was established (updated on each adoption), so a transient-refresh retry can
+    // check there is still budget (a whole RESPONSE_TIMEOUT) before this dialog's ~PANEL_SESSION_LIMIT cut.
+    let mut dialog_started_at = now0;
     'dialog: loop {
         if stopping.load(Ordering::Relaxed) {
             break;
@@ -1246,7 +1267,12 @@ async fn session(
                     eprintln!(
                         "btmqttd: on-demand session refreshed before the panel cut (make-before-break)"
                     );
-                    let _ = teardown_bye(&mut sock, &d).await;
+                    // BYE the old dialog; if its (possibly dead) socket can't take the BYE, retry over a
+                    // FRESH connection like every other teardown path — otherwise the old dialog could
+                    // linger until the panel cuts it, undermining the clean handover.
+                    if teardown_bye(&mut sock, &d).await.is_err() {
+                        bye_reconnect(cfg, &d).await;
+                    }
                     sock = new_sock;
                     d = *new_d;
                     // Seed the adopted dialog's buffer with any bytes flexisip coalesced AFTER the 2xx (an
@@ -1268,26 +1294,33 @@ async fn session(
                     // Apply any Start/Hold that arrived DURING the attempt (held out of the hold loop while
                     // we established the successor) to the adopted dialog — never dropped.
                     apply_refresh_renewals(&renewals, now, window, &mut start_deadline, &mut hold_deadline);
+                    dialog_started_at = now; // the adopted dialog starts its own ~60 s clock now
                     refresh_at = now + SESSION_REFRESH_AFTER;
                     continue; // re-evaluate with the adopted dialog
                 }
-                RefreshOutcome::Declined(e, renewals) => {
-                    // Refused (a single-owner plant's `486 Busy`) or errored: keep THIS dialog untouched,
-                    // stop retrying, and let the panel's ~60 s BYE + run()'s re-INVITE recycle take over (a
-                    // brief blip, never a permanent freeze). The refusal itself is the hardware probe. Still
-                    // apply any Start/Hold seen during the attempt to THIS dialog's deadlines — a press
-                    // during a failed refresh must renew the window just as it would in the hold loop.
-                    apply_refresh_renewals(
-                        &renewals,
-                        tokio::time::Instant::now(),
-                        window,
-                        &mut start_deadline,
-                        &mut hold_deadline,
-                    );
-                    eprintln!(
-                        "btmqttd: on-demand session refresh declined ({e}) — falling back to the panel recycle"
-                    );
-                    refresh_disabled = true;
+                RefreshOutcome::Declined(e, renewals, retriable) => {
+                    // Apply any Start/Hold seen during the attempt to THIS dialog's deadlines first — a
+                    // press during a failed refresh must renew the window just as it would in the hold loop.
+                    let now = tokio::time::Instant::now();
+                    apply_refresh_renewals(&renewals, now, window, &mut start_deadline, &mut hold_deadline);
+                    // A DEFINITIVE panel refusal (486 on a single-owner plant) won't change mid-dialog, so
+                    // latch off and ride this dialog to the panel's BYE + run()'s recycle. A TRANSIENT
+                    // transport error (a momentary flexisip refuse/reset/timeout), by contrast, must NOT
+                    // permanently forfeit make-before-break — that would force the freeze-prone recycle for a
+                    // blip. So if a whole retry attempt still fits before this dialog's cut, schedule one
+                    // after a short backoff; only latch once there's no budget left.
+                    let cut = dialog_started_at + PANEL_SESSION_LIMIT;
+                    if retriable && now + REFRESH_RETRY_BACKOFF + RESPONSE_TIMEOUT < cut {
+                        eprintln!(
+                            "btmqttd: on-demand session refresh failed transiently ({e}) — retrying before the panel cut"
+                        );
+                        refresh_at = now + REFRESH_RETRY_BACKOFF;
+                    } else {
+                        eprintln!(
+                            "btmqttd: on-demand session refresh declined ({e}) — falling back to the panel recycle"
+                        );
+                        refresh_disabled = true;
+                    }
                 }
                 RefreshOutcome::Aborted => break, // Stop or shutdown mid-refresh (INVITE already cancelled)
             }
@@ -1961,7 +1994,7 @@ mod tests {
             other => panic!(
                 "a confirmable 2xx refresh must be adopted, got {}",
                 match other {
-                    RefreshOutcome::Declined(e, _) => format!("Declined({e})"),
+                    RefreshOutcome::Declined(e, _, _) => format!("Declined({e})"),
                     RefreshOutcome::Aborted => "Aborted".to_string(),
                     RefreshOutcome::Established(..) => unreachable!(),
                 }
@@ -2019,7 +2052,10 @@ mod tests {
         let err = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
             .await
         {
-            RefreshOutcome::Declined(e, _renewals) => e,
+            RefreshOutcome::Declined(e, _renewals, retriable) => {
+                assert!(!retriable, "a 486 panel refusal must NOT be marked retriable");
+                e
+            }
             RefreshOutcome::Established(..) => {
                 panic!("a 486 must not be adopted — the caller must keep its current dialog")
             }
@@ -2027,6 +2063,31 @@ mod tests {
         };
         assert!(err.to_string().contains("486"), "error should name the status, got: {err}");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_marks_a_transport_error_retriable() {
+        // A transport failure (no SIP listener ⇒ connection refused) is TRANSIENT and must be marked
+        // retriable, so the caller re-attempts before the panel cut instead of forfeiting make-before-break
+        // (a definitive panel refusal, by contrast, is NOT retriable — see the 486 test).
+        use std::collections::HashMap;
+        // A loopback port with (almost certainly) no listener: bind one to reserve a free port, then drop it.
+        let dead_port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), dead_port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
+        match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da").await {
+            RefreshOutcome::Declined(_e, _renewals, retriable) => {
+                assert!(retriable, "a transport error (connect refused) must be retriable")
+            }
+            _ => panic!("a connect to a dead port must decline"),
+        }
     }
 
     // NB: the timing invariant `SESSION_REFRESH_AFTER + RESPONSE_TIMEOUT (+margin) < PANEL_SESSION_LIMIT`
