@@ -779,8 +779,9 @@ enum InDialog {
 /// Drain every COMPLETE in-dialog message buffered in `inbound` on a CONFIRMED dialog, applying the panel's
 /// mid-session traffic exactly as the hold loop must: a BYE ends the dialog (200 OK, then PanelEnded); a
 /// retransmitted INVITE 2xx is re-ACKed; any other request gets its final response (OPTIONS/other → 200,
-/// re-INVITE/UPDATE → 488). A cap overflow or a write to a dead socket tears down over a fresh connection
-/// and returns Failed. Shared by the socket-read arm AND the adopted-successor path (a refresh 2xx that
+/// re-INVITE/UPDATE → 488). A cap overflow or a write to a dead socket tears the dialog down (BYE on the
+/// live socket, falling back to a fresh connection only if that write fails) and returns Failed. Shared by
+/// the socket-read arm AND the adopted-successor path (a refresh 2xx that
 /// flexisip coalesced with an in-dialog request leaves that request buffered — it must be processed here,
 /// not dropped). None of this renews a viewing-window deadline; only a real viewer poke does.
 async fn process_in_dialog(
@@ -884,18 +885,30 @@ async fn establish_refresh_dialog(
     // reach the ACTIVE dialog's teardown. (view_rx is watched from the response wait, which begins the
     // instant the loopback setup completes.)
     let attempt_deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
-    let mut sock = tokio::select! {
-        biased;
-        _ = wait_until_stopping(stopping) => return RefreshOutcome::Aborted,
-        r = tokio::time::timeout_at(attempt_deadline, TcpStream::connect(("127.0.0.1", cfg.sip_port))) => {
-            match r {
-                Ok(Ok(s)) => s,
-                Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals, true), // transient ⇒ retriable
-                Err(_) => return RefreshOutcome::Declined(
-                    std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh connect timed out"),
-                    renewals,
-                    true, // transient ⇒ retriable
-                ),
+    // Connect in a loop-select so a queued `Stop` (or shutdown) aborts even if a hung flexisip stalls the
+    // loopback connect — no `sock` exists yet, so watching `view_rx` here is free of borrow conflicts. A
+    // Start/Hold seen while connecting is RECORDED (not dropped) and we keep connecting; the pinned future
+    // continues across iterations and the absolute `attempt_deadline` still bounds it.
+    let mut sock = {
+        let connect = TcpStream::connect(("127.0.0.1", cfg.sip_port));
+        tokio::pin!(connect);
+        loop {
+            tokio::select! {
+                biased;
+                _ = wait_until_stopping(stopping) => return RefreshOutcome::Aborted,
+                v = view_rx.recv() => match v {
+                    Some(cmd @ (ViewCmd::Start | ViewCmd::Hold(_))) => renewals.record(&cmd),
+                    Some(ViewCmd::Stop) | None => return RefreshOutcome::Aborted,
+                },
+                r = tokio::time::timeout_at(attempt_deadline, &mut connect) => match r {
+                    Ok(Ok(s)) => break s,
+                    Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals, true), // transient ⇒ retriable
+                    Err(_) => return RefreshOutcome::Declined(
+                        std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh connect timed out"),
+                        renewals,
+                        true, // transient ⇒ retriable
+                    ),
+                },
             }
         }
     };
@@ -1005,16 +1018,21 @@ async fn establish_refresh_dialog(
         );
     };
     if !(200..300).contains(&status) {
-        // ACK the non-2xx (486 Busy / other) so flexisip doesn't hold the INVITE server transaction to
-        // Timer H, then surface the status so the caller keeps the current dialog and falls back. A refresh
-        // rejection is EXPECTED on single-owner plants and is non-fatal — the caller only logs it.
+        // ACK the non-2xx (RFC 3261 §17.1.1.3) so flexisip doesn't hold the INVITE server transaction to
+        // Timer H, then surface the status. Distinguish a DEFINITIVE refusal from a TEMPORARY one: only a
+        // permanent "this caller can't have the camera" answer (busy/decline/forbidden) should latch refresh
+        // off, whereas a transient server/transaction failure (408 timeout, 5xx, 480 unavailable, 491
+        // pending, …) may well succeed on a retry before the panel cut, so it stays retriable. A fixed
+        // REFRESH_RETRY_BACKOFF (bounded by the caller's pre-cut budget) is used rather than parsing
+        // Retry-After — flexisip rarely sets it and any value is dwarfed by the ~60 s window.
         if let Some(tag) = to_tag(&final_resp) {
             let _ = write_all_flush(&mut sock, build_ack_failure(&d, &tag).as_bytes()).await;
         }
+        let permanent_refusal = matches!(status, 403 | 486 | 600 | 603);
         return RefreshOutcome::Declined(
             std::io::Error::other(format!("refresh INVITE rejected with {status}")),
             renewals,
-            false, // a definitive panel refusal (e.g. single-owner 486) ⇒ do NOT retry, latch off
+            !permanent_refusal, // busy/decline/forbidden ⇒ latch; transient server errors ⇒ retry
         );
     }
 
@@ -2115,31 +2133,33 @@ mod tests {
 
     #[tokio::test]
     async fn establish_refresh_dialog_aborts_on_stop_and_cancels() {
-        // A `Stop`/"Stop Camera" (or shutdown) observed while the refresh INVITE is in flight must abort
-        // PROMPTLY with the INVITE CANCELled — not block up to RESPONSE_TIMEOUT inside the wait. This is the
-        // interruptibility that keeps a daemon shutdown within main.rs's budget and never leaves a refresh
-        // INVITE dangling (a late 2xx to which would pin the panel). The panel here never sends a final
-        // response; the abort must come from the `view_rx` Stop, and a CANCEL must go out afterwards.
+        // A `Stop` observed while the refresh INVITE is in flight — in the RESPONSE wait, AFTER the INVITE
+        // was sent — must abort PROMPTLY and CANCEL the INVITE, not block up to RESPONSE_TIMEOUT. The panel
+        // here never answers; the mock signals once it has the INVITE so the Stop is delivered during the
+        // response wait (the connect arm also honours Stop, but this exercises the mid-INVITE CANCEL path).
         use std::collections::HashMap;
         use tokio::io::AsyncReadExt;
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
             let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let invite = read_one_sip(&mut s, &mut acc).await; // wait for the whole INVITE
+            assert!(invite.starts_with("INVITE "), "expected the refresh INVITE, got: {invite}");
+            let _ = ready_tx.send(()); // INVITE received ⇒ establish is now in the response wait
+            // Never answer; accumulate the rest until the client drops, looking for the CANCEL.
+            let mut all = String::from_utf8_lossy(&acc).into_owned();
             let mut buf = [0u8; 4096];
-            // Never answer the INVITE; keep the socket open so the client's CANCEL has somewhere to land.
-            // Accumulate ALL received bytes and check at the end — the INVITE and the CANCEL can arrive in
-            // one read, so a per-read "first is INVITE, rest is CANCEL" split would miss the coalesced case.
-            let mut all = String::new();
             loop {
                 match s.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
-                    Ok(m) => all.push_str(&String::from_utf8_lossy(&buf[..m])),
+                    Ok(n) => all.push_str(&String::from_utf8_lossy(&buf[..n])),
                 }
             }
-            (all.contains("INVITE "), all.contains("CANCEL "))
+            all.contains("CANCEL ")
         });
 
         let mut m = HashMap::new();
@@ -2148,17 +2168,22 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         let stopping = Arc::new(AtomicBool::new(false));
         let (view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
-        view_tx.send(ViewCmd::Stop).await.unwrap(); // a Stop waiting before the panel ever responds
+        // Send Stop only AFTER the mock has the INVITE, so it lands in the response wait (not at connect).
+        let stopper = tokio::spawn(async move {
+            let _ = ready_rx.await;
+            let _ = view_tx.send(ViewCmd::Stop).await;
+        });
         let outcome =
             establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da").await;
         assert!(
             matches!(outcome, RefreshOutcome::Aborted),
             "a mid-flight Stop must abort the refresh, not block on the response"
         );
-        drop(view_tx);
-        let (saw_invite, saw_cancel) = server.await.unwrap();
-        assert!(saw_invite, "the refresh must have sent an INVITE");
-        assert!(saw_cancel, "the aborted refresh must CANCEL its in-flight INVITE");
+        stopper.await.unwrap();
+        assert!(
+            server.await.unwrap(),
+            "the aborted refresh must CANCEL its in-flight INVITE"
+        );
     }
 
     #[tokio::test]
