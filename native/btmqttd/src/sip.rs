@@ -766,27 +766,25 @@ impl RefreshRenewals {
     }
 }
 
-/// The viewing deadline a refresh attempt should honor GIVEN the renewals seen so far, or `None` to not
-/// abort on the deadline at all. Pure, so it is unit-testable and shared by both the connect and response
-/// waits.
-///
-/// - A manual `Start` mid-attempt → `None`: the caller re-arms the FULL window on return, so the attempt
-///   should run to its normal budget rather than being cut by a now-stale deadline.
-/// - Otherwise the effective deadline is the LATER of the pre-attempt `base` and any `Hold` expiry recorded
-///   mid-attempt — so a poke PUSHES the abort out to that poke's own linger (not disarms it forever, which
-///   would let a nonresponsive panel hold the dialog for the full response budget after the viewer left).
+/// The viewing deadline a refresh attempt should honor GIVEN the renewals seen so far: the LATER of the
+/// pre-attempt `base`, a manual `Start`'s re-armed window (`start_at + window`), and any `Hold` expiry —
+/// each recorded mid-attempt. Pure, so it is unit-testable and shared by both the connect and response
+/// waits. It never returns "no deadline": a `Start` PUSHES the abort out to its own re-armed window (not
+/// disarms it), so a manual view with a SHORT `camera_view_idle_secs` (down to 1 s) still hangs up on time
+/// even if a hung panel never answers the refresh — mirroring what the hold loop would do for a live press.
 fn effective_refresh_deadline(
     renewals: &RefreshRenewals,
     base: tokio::time::Instant,
-) -> Option<tokio::time::Instant> {
-    if renewals.start_at.is_some() {
-        None
-    } else {
-        Some(match renewals.hold_expiry {
-            Some(e) => base.max(e),
-            None => base,
-        })
+    window: Duration,
+) -> tokio::time::Instant {
+    let mut deadline = base;
+    if let Some(s) = renewals.start_at {
+        deadline = deadline.max(s + window);
     }
+    if let Some(e) = renewals.hold_expiry {
+        deadline = deadline.max(e);
+    }
+    deadline
 }
 
 /// Apply renewals captured during a refresh attempt to the caller's viewing-window deadlines, with the
@@ -885,8 +883,11 @@ async fn process_in_dialog(
 /// successor whose leg flexisip half-closed right after the 2xx — no BYE, just a FIN — is caught as EOF
 /// (`Failed`) here instead of surfacing as an EOF on the next hold-loop read once the old dialog is already
 /// gone. A terminal outcome short-circuits; if the bound elapses with the successor idle (no data, no EOF)
-/// it answered our INVITE and has sent no teardown, so we adopt it. The old dialog is still up (and the
-/// bus-driven RTP siphon still armed) throughout, so this brief wait never blips the view.
+/// it answered our INVITE and has sent no teardown, so we adopt it. On a read EOF/error the successor was
+/// CONFIRMED (we ACKed its 2xx) but its socket then died, so it is BYE'd over a fresh connection before we
+/// return `Failed` — otherwise that orphaned dialog would pin the panel until its own timeout. The old
+/// dialog is still up (and the bus-driven RTP siphon still armed) throughout, so this brief wait never blips
+/// the view.
 async fn validate_successor(
     sock: &mut TcpStream,
     inbound: &mut Vec<u8>,
@@ -901,16 +902,23 @@ async fn validate_successor(
         }
         // Read more (bounded) whether or not a partial remains: complete a split request, OR detect an
         // immediate half-close (Ok(0) EOF) on an otherwise-empty buffer, before committing the handover.
+        // A read EOF/error means the successor's socket died AFTER we ACKed its 2xx, so that dialog is
+        // CONFIRMED-but-orphaned on the panel; BYE it over a fresh connection (its own socket is dead) so the
+        // panel isn't pinned by it until its own timeout, then surface Failed so the caller keeps the old one.
         let mut buf = [0u8; 4096];
         match tokio::time::timeout_at(deadline, sock.read(&mut buf)).await {
             Ok(Ok(0)) => {
+                bye_reconnect(cfg, d).await;
                 return InDialog::Failed(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "successor closed before adoption",
                 ));
             }
             Ok(Ok(n)) => inbound.extend_from_slice(&buf[..n]),
-            Ok(Err(e)) => return InDialog::Failed(e),
+            Ok(Err(e)) => {
+                bye_reconnect(cfg, d).await;
+                return InDialog::Failed(e);
+            }
             Err(_) => return InDialog::Continue, // idle within the bound ⇒ live ⇒ adopt
         }
     }
@@ -958,9 +966,13 @@ enum RefreshOutcome {
 /// start): if that window lapses mid-attempt WITHOUT a fresh poke, the attempt aborts (cancelling any
 /// pending INVITE) instead of blocking for the full response budget — so an auto-only session that loses its
 /// viewer just as the refresh begins still hangs up ~`VIEWER_LINGER` later, not up to `RESPONSE_TIMEOUT`
-/// later. A `Hold` seen during the attempt PUSHES that abort out to the poke's own linger (see
-/// [`effective_refresh_deadline`]) rather than forfeiting it; a manual `Start` disarms it entirely (the
-/// caller re-arms the full window on return).
+/// later. A `Hold` seen during the attempt PUSHES that abort out to the poke's own linger, and a manual
+/// `Start` to its re-armed `start_at + window` (see [`effective_refresh_deadline`]) — never forfeiting the
+/// deadline — so even a manual view with a short `camera_view_idle_secs` hangs up on time if the panel hangs.
+// Every parameter is a distinct input the refresh genuinely needs (connection config, shutdown/stop
+// signals, the dialog identity to mint from, and the two viewing-window bounds); bundling them would only
+// move the same fields behind a one-use struct, so the arg count is accepted here deliberately.
+#[allow(clippy::too_many_arguments)]
 async fn establish_refresh_dialog(
     cfg: &Arc<Config>,
     stopping: &Arc<AtomicBool>,
@@ -969,6 +981,7 @@ async fn establish_refresh_dialog(
     domain: &str,
     devaddr: &str,
     viewing_deadline: tokio::time::Instant,
+    window: Duration,
 ) -> RefreshOutcome {
     // Viewing-window commands seen while the INVITE is in flight, folded in and handed back so the caller
     // applies them (see RefreshRenewals). Empty on the pre-INVITE error paths below.
@@ -992,8 +1005,8 @@ async fn establish_refresh_dialog(
         loop {
             // The deadline to honor THIS iteration: the pre-attempt window, pushed out by any Hold recorded
             // so far; `None` once a manual Start was seen (the caller re-arms the full window). Recomputed
-            // each iteration so a Hold arriving mid-setup moves it out rather than disarming it forever.
-            let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline);
+            // each iteration so a Hold/Start arriving mid-setup moves it out rather than being lost.
+            let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline, window);
             tokio::select! {
                 biased;
                 _ = wait_until_stopping(stopping) => return RefreshOutcome::Aborted,
@@ -1003,7 +1016,7 @@ async fn establish_refresh_dialog(
                 },
                 // The viewer's effective window lapsed with no fresh poke during setup: no INVITE has been
                 // sent yet, so just abort and let the caller tear the current dialog down at its deadline.
-                _ = tokio::time::sleep_until(eff_deadline.unwrap_or(viewing_deadline)), if eff_deadline.is_some() => {
+                _ = tokio::time::sleep_until(eff_deadline) => {
                     return RefreshOutcome::Aborted;
                 }
                 r = tokio::time::timeout_at(attempt_deadline, &mut connect) => match r {
@@ -1080,8 +1093,8 @@ async fn establish_refresh_dialog(
     let final_resp = loop {
         // The deadline to honor THIS iteration: the pre-attempt window, pushed out by any Hold recorded so
         // far; `None` once a manual Start was seen. Recomputed each iteration so a Hold that arrived moves it
-        // out to that poke's linger rather than disarming it forever.
-        let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline);
+        // out to that poke's linger (a Start to its re-armed start_at + window) rather than being lost.
+        let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline, window);
         tokio::select! {
             biased;
             _ = wait_until_stopping(stopping) => {
@@ -1106,8 +1119,8 @@ async fn establish_refresh_dialog(
             // refresh began, or its last Hold's linger elapsed): CANCEL the pending INVITE (a late 2xx must
             // not pin the panel) and hand back Aborted so the caller hangs up now — honoring VIEWER_LINGER
             // instead of blocking here for the full response budget. A Hold seen during the attempt PUSHES
-            // this out to that poke's expiry; a manual Start disarms it (eff_deadline == None).
-            _ = tokio::time::sleep_until(eff_deadline.unwrap_or(viewing_deadline)), if eff_deadline.is_some() => {
+            // this out to that poke's expiry; a manual Start to its re-armed start_at + window.
+            _ = tokio::time::sleep_until(eff_deadline) => {
                 let seed = std::mem::take(&mut acc);
                 cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
                 return RefreshOutcome::Aborted;
@@ -1425,6 +1438,7 @@ async fn session(
                 &d.domain,
                 &devaddr,
                 viewing_deadline,
+                window,
             )
             .await
             {
@@ -2210,7 +2224,7 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4); // kept open: no Stop/None mid-attempt
-        let d = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600))
+        let d = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
             .await
         {
             RefreshOutcome::Established(_sock, d, _renewals, _residual) => d,
@@ -2272,7 +2286,7 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
-        let err = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600))
+        let err = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
             .await
         {
             RefreshOutcome::Declined(e, _renewals, retriable) => {
@@ -2316,7 +2330,7 @@ mod tests {
         // returns well inside that budget (a regression that waited out the timeout would still be
         // "retriable" but slow).
         let started = std::time::Instant::now();
-        let outcome = establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600)).await;
+        let outcome = establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30)).await;
         assert!(
             started.elapsed() < RESPONSE_TIMEOUT / 2,
             "a peer-close transport error must be reported promptly, not after RESPONSE_TIMEOUT (took {:?})",
@@ -2378,7 +2392,7 @@ mod tests {
             let _ = view_tx.send(ViewCmd::Stop).await;
         });
         let outcome =
-            establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600)).await;
+            establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30)).await;
         assert!(
             matches!(outcome, RefreshOutcome::Aborted),
             "a mid-flight Stop must abort the refresh, not block on the response"
@@ -2438,6 +2452,7 @@ mod tests {
             "dev.example",
             "da",
             viewing_deadline,
+            Duration::from_secs(30),
         )
         .await;
         assert!(
@@ -2492,7 +2507,7 @@ mod tests {
         let hold_at = tokio::time::Instant::now() + Duration::from_secs(30);
         view_tx.send(ViewCmd::Hold(hold_at)).await.unwrap(); // queued before the panel responds
         let renewals =
-            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600))
+            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
                 .await
             {
                 RefreshOutcome::Established(_sock, _d, r, _residual) => r,
@@ -2550,7 +2565,7 @@ mod tests {
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
         let residual =
-            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600))
+            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
                 .await
             {
                 RefreshOutcome::Established(_sock, _d, _r, residual) => residual,
@@ -2621,13 +2636,14 @@ mod tests {
     }
 
     #[test]
-    fn effective_refresh_deadline_pushes_out_on_hold_and_disarms_on_start() {
+    fn effective_refresh_deadline_pushes_out_on_hold_and_start() {
         let base = tokio::time::Instant::now() + Duration::from_secs(5);
+        let window = Duration::from_secs(30);
 
         // No renewals ⇒ honor the pre-attempt base deadline unchanged.
         assert_eq!(
-            effective_refresh_deadline(&RefreshRenewals::default(), base),
-            Some(base),
+            effective_refresh_deadline(&RefreshRenewals::default(), base, window),
+            base,
             "no poke ⇒ the base viewing deadline governs"
         );
 
@@ -2635,24 +2651,38 @@ mod tests {
         // panel can't hold the dialog past the poke's own linger after the viewer leaves.
         let later = base + Duration::from_secs(4);
         assert_eq!(
-            effective_refresh_deadline(&RefreshRenewals { start_at: None, hold_expiry: Some(later) }, base),
-            Some(later),
+            effective_refresh_deadline(&RefreshRenewals { start_at: None, hold_expiry: Some(later) }, base, window),
+            later,
             "a later Hold expiry moves the abort out to that linger"
         );
 
         // A Hold that is EARLIER than the base never moves the deadline backwards (max).
         let earlier = base - Duration::from_secs(2);
         assert_eq!(
-            effective_refresh_deadline(&RefreshRenewals { start_at: None, hold_expiry: Some(earlier) }, base),
-            Some(base),
+            effective_refresh_deadline(&RefreshRenewals { start_at: None, hold_expiry: Some(earlier) }, base, window),
+            base,
             "an earlier Hold expiry must not pull the abort in"
         );
 
-        // A manual Start disarms the abort entirely — the caller re-arms the full window on return.
+        // A manual Start PUSHES the deadline out to its RE-ARMED window (start_at + window), NOT disarms it —
+        // so a short camera_view_idle_secs still hangs up on time even if the panel never answers.
+        let start_at = base + Duration::from_secs(1);
         assert_eq!(
-            effective_refresh_deadline(&RefreshRenewals { start_at: Some(base), hold_expiry: Some(later) }, base),
-            None,
-            "a manual Start ⇒ no deadline abort during the attempt"
+            effective_refresh_deadline(&RefreshRenewals { start_at: Some(start_at), hold_expiry: None }, base, window),
+            start_at + window,
+            "a manual Start re-arms the deadline to start_at + window"
+        );
+
+        // The effective deadline is the MAX across base, start_at + window, and hold_expiry.
+        let far_hold = start_at + window + Duration::from_secs(10);
+        assert_eq!(
+            effective_refresh_deadline(
+                &RefreshRenewals { start_at: Some(start_at), hold_expiry: Some(far_hold) },
+                base,
+                window,
+            ),
+            far_hold,
+            "the later of the Start window and the Hold expiry governs"
         );
     }
 
@@ -2716,6 +2746,9 @@ mod tests {
         // flexisip 2xx's the refresh then half-closes that leg WITHOUT a BYE (residual empty). Even with an
         // empty buffer, validate_successor must do a bounded read, observe the EOF, and report Failed — so
         // the caller keeps the old dialog instead of adopting a dead successor and freezing on the next read.
+        // It also BYEs the orphaned (already-ACKed) successor over a fresh connection; SIP_PORT points at the
+        // listener's port, which is CLOSED once the peer task ends, so that reconnect refuses instantly and
+        // the elapsed-time assertion stays tight.
         use std::collections::HashMap;
         use tokio::net::{TcpListener, TcpStream};
 
@@ -2728,6 +2761,7 @@ mod tests {
 
         let mut m = HashMap::new();
         m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), addr.port().to_string());
         let cfg = crate::config::Config::from_map(m);
         let d = Dialog {
             aor: "c100x".into(),
