@@ -65,6 +65,11 @@ const MAIN_ENTRANCE_OWN_ADDR: &str = "20";
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long we keep draining (framing responses, tearing down a racing 2xx) after sending CANCEL.
 const CANCEL_DRAIN: Duration = Duration::from_secs(2);
+/// Ceiling on a single cleanup/teardown SIP write or a reconnect `connect` to loopback flexisip. Normal
+/// loopback I/O is sub-millisecond; this only bounds a stalled peer so a failure ACK, ACK/BYE cleanup,
+/// CANCEL retry, or confirmed-dialog BYE reconnect can never block `Stop`/shutdown/refresh-fallback
+/// indefinitely (`RESPONSE_TIMEOUT`/`CANCEL_DRAIN` bound only the setup+response and the CANCEL drain).
+const SIP_IO_TIMEOUT: Duration = Duration::from_secs(2);
 /// Bounded wait to COMPLETE a partial in-dialog request that flexisip coalesced after a refresh 2xx, before
 /// the caller retires the old dialog and adopts the successor. If the successor is about to BYE (a plant
 /// that admits then immediately drops the second dialog), that BYE can be split across TCP reads: without
@@ -876,9 +881,12 @@ async fn process_in_dialog(
 /// in-dialog request was buffered — `process_in_dialog` cannot frame it and would report `Continue` — this
 /// does bounded reads (up to [`SUCCESSOR_VALIDATE`]) to COMPLETE and reprocess it, so a coalesced-but-split
 /// BYE is observed NOW (`PanelEnded`) rather than only after we have already dropped the old dialog and can
-/// do nothing but freeze. A terminal outcome short-circuits; a fully-drained buffer means healthy; if the
-/// bound elapses with a partial still pending we treat the successor as live (it answered our INVITE and has
-/// sent no complete teardown) and adopt.
+/// do nothing but freeze. It ALWAYS does at least one bounded read (even on an empty residual), so a
+/// successor whose leg flexisip half-closed right after the 2xx — no BYE, just a FIN — is caught as EOF
+/// (`Failed`) here instead of surfacing as an EOF on the next hold-loop read once the old dialog is already
+/// gone. A terminal outcome short-circuits; if the bound elapses with the successor idle (no data, no EOF)
+/// it answered our INVITE and has sent no teardown, so we adopt it. The old dialog is still up (and the
+/// bus-driven RTP siphon still armed) throughout, so this brief wait never blips the view.
 async fn validate_successor(
     sock: &mut TcpStream,
     inbound: &mut Vec<u8>,
@@ -891,21 +899,19 @@ async fn validate_successor(
             InDialog::Continue => {}
             terminal => return terminal, // PanelEnded / Failed — successor is not adoptable
         }
-        if inbound.is_empty() {
-            return InDialog::Continue; // nothing pending → healthy
-        }
-        // A partial request remains buffered; read more (bounded) to complete it, then reprocess.
+        // Read more (bounded) whether or not a partial remains: complete a split request, OR detect an
+        // immediate half-close (Ok(0) EOF) on an otherwise-empty buffer, before committing the handover.
         let mut buf = [0u8; 4096];
         match tokio::time::timeout_at(deadline, sock.read(&mut buf)).await {
             Ok(Ok(0)) => {
                 return InDialog::Failed(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
-                    "successor closed mid-request before adoption",
+                    "successor closed before adoption",
                 ));
             }
             Ok(Ok(n)) => inbound.extend_from_slice(&buf[..n]),
             Ok(Err(e)) => return InDialog::Failed(e),
-            Err(_) => return InDialog::Continue, // no completion within the bound ⇒ adopt as live
+            Err(_) => return InDialog::Continue, // idle within the bound ⇒ live ⇒ adopt
         }
     }
 }
@@ -1398,7 +1404,13 @@ async fn session(
         // viewer holds, hold.rs re-pokes every ~1 s so this loop iterates well inside SESSION_REFRESH_AFTER
         // and the attempt fires within ~1 s of it.
         let now = tokio::time::Instant::now();
-        if !refresh_disabled && now >= refresh_at && hold_deadline > now {
+        // Re-check the cutoff HERE (not just when scheduling `refresh_at`): if the loop was delayed, a whole
+        // fresh RESPONSE_TIMEOUT-bounded attempt must still fit before this dialog's ~PANEL_SESSION_LIMIT cut,
+        // or a late attempt could complete after the panel has already BYE'd — the make-before-break window
+        // would be missed and we'd ride the recycle anyway. Skip (latch) a doomed attempt instead.
+        let fits_before_cut =
+            now + RESPONSE_TIMEOUT < dialog_started_at + PANEL_SESSION_LIMIT;
+        if !refresh_disabled && now >= refresh_at && hold_deadline > now && fits_before_cut {
             // Bound the attempt by the governing hang-up deadline (the LATER of the manual and linger
             // windows): if BOTH lapse mid-attempt with no renewing poke, the refresh aborts promptly rather
             // than blocking for the full response budget, so a viewer that leaves as the refresh begins still
@@ -1583,7 +1595,7 @@ async fn session(
 /// the camera session ends instead of running to the panel's own timeout. Best-effort: if we
 /// can't even reconnect, there's nothing more we can do from here.
 async fn bye_reconnect(cfg: &Config, d: &Dialog) {
-    if let Ok(mut sock) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
+    if let Ok(mut sock) = connect_sip(cfg).await {
         // Reuse the dialog identity but advertise the NEW local port in Via/Contact so the 200-to-BYE
         // routes back on this connection.
         let mut d2 = d.clone();
@@ -1598,8 +1610,28 @@ async fn bye_reconnect(cfg: &Config, d: &Dialog) {
 /// send (e.g. the ACK) can route a `ConnectionReset`/`BrokenPipe` through the fresh-connection
 /// teardown instead of a bare `?` that would skip it.
 async fn write_all_flush(sock: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
-    sock.write_all(bytes).await?;
-    sock.flush().await
+    // Bound the write so a stalled peer can't block a cleanup/teardown path indefinitely (loopback SIP
+    // writes are otherwise sub-millisecond). A timeout is surfaced as an error, exactly like a dead socket,
+    // so callers take their existing fresh-connection fallback / error path.
+    match tokio::time::timeout(SIP_IO_TIMEOUT, async {
+        sock.write_all(bytes).await?;
+        sock.flush().await
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "SIP write timed out")),
+    }
+}
+
+/// Connect to loopback flexisip for a reconnect/teardown, bounded by [`SIP_IO_TIMEOUT`] so a stalled accept
+/// can't wedge a cleanup path. A timeout is surfaced as an error (like a refused connect), so callers fall
+/// through their existing best-effort "couldn't reconnect" branch.
+async fn connect_sip(cfg: &Config) -> std::io::Result<TcpStream> {
+    match tokio::time::timeout(SIP_IO_TIMEOUT, TcpStream::connect(("127.0.0.1", cfg.sip_port))).await {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "SIP connect timed out")),
+    }
 }
 
 /// ACK a racing INVITE 2xx then BYE it on `sock`, reading the `200`-to-BYE best-effort. Returns Err
@@ -1617,7 +1649,7 @@ async fn ack_then_bye(sock: &mut TcpStream, d: &Dialog) -> std::io::Result<()> {
 /// the original socket died before/between the ACK and BYE. Best-effort — if we can't reconnect,
 /// there's nothing more we can do.
 async fn ack_bye_reconnect(cfg: &Config, d: &Dialog) {
-    if let Ok(mut sock) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
+    if let Ok(mut sock) = connect_sip(cfg).await {
         let mut d2 = d.clone();
         if let Ok(a) = sock.local_addr() {
             d2.local_port = a.port();
@@ -1659,7 +1691,7 @@ async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialo
     if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_ok() {
         // Same socket: `acc` was read from `sock`, so a trailing partial is a valid continuation.
         drain_after_cancel(sock, cfg, d, acc, false).await;
-    } else if let Ok(mut fresh) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
+    } else if let Ok(mut fresh) = connect_sip(cfg).await {
         // The original socket was dead. Resend over a fresh connection, but KEEP the INVITE's original
         // `Via` (branch AND sent-by port) unchanged: both the CANCEL and the drained non-2xx (487) ACK
         // are part of the INVITE client transaction and MUST reuse its top `Via`, or flexisip won't
@@ -1818,7 +1850,14 @@ fn complete_message_len(buf: &[u8]) -> Option<usize> {
         .find(|(h, _)| h.trim().eq_ignore_ascii_case("Content-Length"))
         .and_then(|(_, v)| v.trim().parse::<usize>().ok())
         .unwrap_or(0);
-    let total = header_end + content_length;
+    // `content_length` is peer-supplied; on the 32-bit target `header_end + content_length` could overflow
+    // `usize` and wrap to a SMALL total, misframing the stream (release wraps silently; debug panics). Use
+    // checked_add and reject any total over the message cap — the read loops' own MAX_SIP_BYTES guard then
+    // tears the oversized buffer down rather than us framing a bogus short message.
+    let total = header_end.checked_add(content_length)?;
+    if total > MAX_SIP_BYTES {
+        return None;
+    }
     (buf.len() >= total).then_some(total)
 }
 
@@ -2134,7 +2173,7 @@ mod tests {
         // A confirmable 200 OK to the refresh INVITE is adopted: the helper parses the To-tag + Contact
         // and ACKs, returning the confirmed successor dialog for the make-before-break handover.
         use std::collections::HashMap;
-        use tokio::io::{AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2273,7 +2312,17 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
-        match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600)).await {
+        // The peer-close must surface PROMPTLY — not after the full RESPONSE_TIMEOUT — so assert the call
+        // returns well inside that budget (a regression that waited out the timeout would still be
+        // "retriable" but slow).
+        let started = std::time::Instant::now();
+        let outcome = establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600)).await;
+        assert!(
+            started.elapsed() < RESPONSE_TIMEOUT / 2,
+            "a peer-close transport error must be reported promptly, not after RESPONSE_TIMEOUT (took {:?})",
+            started.elapsed()
+        );
+        match outcome {
             RefreshOutcome::Declined(_e, _renewals, retriable) => {
                 assert!(retriable, "a transport error (peer closed) must be retriable")
             }
@@ -2346,8 +2395,10 @@ mod tests {
         // If the viewer leaves just as the refresh begins (no renewing poke) and the panel never answers,
         // the attempt must abort at the governing viewing deadline — honoring VIEWER_LINGER — instead of
         // blocking for the full RESPONSE_TIMEOUT. It must also CANCEL the in-flight INVITE so a late 2xx
-        // can't pin the panel. The deadline is set comfortably past the (sub-millisecond loopback) connect
-        // + INVITE write, so the abort lands in the response wait after the INVITE is on the wire.
+        // can't pin the panel. The deadline is set to 1 s — comfortably past the (sub-millisecond loopback)
+        // connect + INVITE write even on a loaded CI runner, so the abort deterministically lands in the
+        // response wait after the INVITE is on the wire — yet far below RESPONSE_TIMEOUT (10 s), so the
+        // elapsed-time assertion still proves it aborted at the deadline rather than blocking on the response.
         use std::collections::HashMap;
         use tokio::io::AsyncReadExt;
         use tokio::net::TcpListener;
@@ -2377,7 +2428,8 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4); // no pokes ⇒ deadline is honored
-        let viewing_deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        let viewing_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let started = std::time::Instant::now();
         let outcome = establish_refresh_dialog(
             &cfg,
             &stopping,
@@ -2391,6 +2443,11 @@ mod tests {
         assert!(
             matches!(outcome, RefreshOutcome::Aborted),
             "a lapsed viewing deadline (no poke) must abort the refresh, not block on the response"
+        );
+        assert!(
+            started.elapsed() < RESPONSE_TIMEOUT / 2,
+            "the abort must fire at the ~1 s viewing deadline, not block for RESPONSE_TIMEOUT (took {:?})",
+            started.elapsed()
         );
         assert!(
             server.await.unwrap(),
@@ -2652,6 +2709,51 @@ mod tests {
         );
         let ok = peer.await.unwrap();
         assert!(ok.starts_with("SIP/2.0 200 "), "the completed BYE must be 200-OK'd, got: {ok}");
+    }
+
+    #[tokio::test]
+    async fn validate_successor_detects_an_immediate_half_close() {
+        // flexisip 2xx's the refresh then half-closes that leg WITHOUT a BYE (residual empty). Even with an
+        // empty buffer, validate_successor must do a bounded read, observe the EOF, and report Failed — so
+        // the caller keeps the old dialog instead of adopting a dead successor and freezing on the next read.
+        use std::collections::HashMap;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (s, _) = listener.accept().await.unwrap();
+            drop(s); // immediate close ⇒ the client sees EOF
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = crate::config::Config::from_map(m);
+        let d = Dialog {
+            aor: "c100x".into(),
+            domain: "dev.example".into(),
+            local_port: 5599,
+            call_id: "callid".into(),
+            from_tag: "ft".into(),
+            branch: "z9hG4bKrefresh".into(),
+            cseq: 21,
+            to_tag: "srv123".into(),
+            remote_target: "sip:c100x@127.0.0.1:5599".into(),
+        };
+        let mut sock = TcpStream::connect(addr).await.unwrap();
+        peer.await.unwrap();
+        let mut inbound: Vec<u8> = Vec::new(); // empty residual
+        let started = std::time::Instant::now();
+        let outcome = validate_successor(&mut sock, &mut inbound, &cfg, &d).await;
+        assert!(
+            matches!(outcome, InDialog::Failed(_)),
+            "an immediate half-close on an empty residual must be caught as Failed before adoption"
+        );
+        assert!(
+            started.elapsed() < SUCCESSOR_VALIDATE,
+            "the EOF must be seen at once, not after the full SUCCESSOR_VALIDATE bound (took {:?})",
+            started.elapsed()
+        );
     }
 
     #[test]
