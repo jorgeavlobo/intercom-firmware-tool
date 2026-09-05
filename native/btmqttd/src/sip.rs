@@ -129,15 +129,23 @@ const PANEL_SESSION_LIMIT: Duration = Duration::from_secs(60);
 /// inside the pre-cut window.
 const REFRESH_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 
+/// Slack the make-before-break handover needs AFTER the INVITE response, before the panel's cut: the
+/// successor validation ([`SUCCESSOR_VALIDATE`]) plus a bounded old-dialog BYE ([`SIP_IO_TIMEOUT`]), with a
+/// little headroom. Both the compile-time invariant below AND the runtime refresh gate budget this on top of
+/// `RESPONSE_TIMEOUT`, so a refresh (first or retried) is only launched when the WHOLE handover still fits
+/// before `PANEL_SESSION_LIMIT` — never so late that the successor lands after the panel already BYE'd.
+const HANDOVER_MARGIN: Duration = Duration::from_secs(3);
+
 /// Compile-time invariant (issue #174, Finding #3): the make-before-break successor must be fully stood up
-/// — its start (`SESSION_REFRESH_AFTER`) plus the WORST-CASE response budget (`RESPONSE_TIMEOUT`) — with a
-/// few seconds of handover margin left BELOW the panel's hard cut, or a slow refresh could complete only
-/// after the panel has already dropped the old dialog, defeating the whole point. A const assert is
+/// — its start (`SESSION_REFRESH_AFTER`) plus the WORST-CASE response budget (`RESPONSE_TIMEOUT`) — with the
+/// handover margin ([`HANDOVER_MARGIN`]) left BELOW the panel's hard cut, or a slow refresh could complete
+/// only after the panel has already dropped the old dialog, defeating the whole point. A const assert is
 /// stronger than a runtime test (it cannot be bypassed) and keeps `PANEL_SESSION_LIMIT` a live reference.
 /// Compared in MILLISECONDS (not `as_secs()`, which truncates) so the guard stays exact if any of these
-/// constants ever gains sub-second granularity — the margin is 3_000 ms.
+/// constants ever gains sub-second granularity.
 const _: () = assert!(
-    SESSION_REFRESH_AFTER.as_millis() + RESPONSE_TIMEOUT.as_millis() + 3_000 <= PANEL_SESSION_LIMIT.as_millis(),
+    SESSION_REFRESH_AFTER.as_millis() + RESPONSE_TIMEOUT.as_millis() + HANDOVER_MARGIN.as_millis()
+        <= PANEL_SESSION_LIMIT.as_millis(),
     "make-before-break refresh must complete with handover margin before the panel's session cut",
 );
 
@@ -1417,12 +1425,14 @@ async fn session(
         // viewer holds, hold.rs re-pokes every ~1 s so this loop iterates well inside SESSION_REFRESH_AFTER
         // and the attempt fires within ~1 s of it.
         let now = tokio::time::Instant::now();
-        // Re-check the cutoff HERE (not just when scheduling `refresh_at`): if the loop was delayed, a whole
-        // fresh RESPONSE_TIMEOUT-bounded attempt must still fit before this dialog's ~PANEL_SESSION_LIMIT cut,
-        // or a late attempt could complete after the panel has already BYE'd — the make-before-break window
-        // would be missed and we'd ride the recycle anyway. Skip (latch) a doomed attempt instead.
+        // Re-check the cutoff HERE (not just when scheduling `refresh_at`): if the loop was delayed, the whole
+        // fresh handover — the RESPONSE_TIMEOUT-bounded attempt PLUS the post-2xx handover (successor
+        // validation + old-dialog BYE), budgeted together as HANDOVER_MARGIN, the same slack the compile-time
+        // invariant reserves — must still fit before this dialog's ~PANEL_SESSION_LIMIT cut, or a late attempt
+        // could land the successor after the panel has already BYE'd and we'd ride the recycle anyway. Skip a
+        // doomed attempt instead.
         let fits_before_cut =
-            now + RESPONSE_TIMEOUT < dialog_started_at + PANEL_SESSION_LIMIT;
+            now + RESPONSE_TIMEOUT + HANDOVER_MARGIN < dialog_started_at + PANEL_SESSION_LIMIT;
         if !refresh_disabled && now >= refresh_at && hold_deadline > now && fits_before_cut {
             // Bound the attempt by the governing hang-up deadline (the LATER of the manual and linger
             // windows): if BOTH lapse mid-attempt with no renewing poke, the refresh aborts promptly rather
@@ -1499,7 +1509,7 @@ async fn session(
                             // Treat like a transient miss: retry before the cut if budget remains, else latch
                             // and let the panel BYE + run()'s recycle take over.
                             let cut = dialog_started_at + PANEL_SESSION_LIMIT;
-                            if now + REFRESH_RETRY_BACKOFF + RESPONSE_TIMEOUT < cut {
+                            if now + REFRESH_RETRY_BACKOFF + RESPONSE_TIMEOUT + HANDOVER_MARGIN < cut {
                                 refresh_at = now + REFRESH_RETRY_BACKOFF;
                             } else {
                                 refresh_disabled = true;
@@ -1520,7 +1530,7 @@ async fn session(
                     // blip. So if a whole retry attempt still fits before this dialog's cut, schedule one
                     // after a short backoff; only latch once there's no budget left.
                     let cut = dialog_started_at + PANEL_SESSION_LIMIT;
-                    if retriable && now + REFRESH_RETRY_BACKOFF + RESPONSE_TIMEOUT < cut {
+                    if retriable && now + REFRESH_RETRY_BACKOFF + RESPONSE_TIMEOUT + HANDOVER_MARGIN < cut {
                         eprintln!(
                             "btmqttd: on-demand session refresh failed transiently ({e}) — retrying before the panel cut"
                         );
