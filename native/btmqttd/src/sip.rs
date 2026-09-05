@@ -875,16 +875,19 @@ async fn establish_refresh_dialog(
     // Viewing-window commands seen while the INVITE is in flight, folded in and handed back so the caller
     // applies them (see RefreshRenewals). Empty on the pre-INVITE error paths below.
     let mut renewals = RefreshRenewals::default();
-    // Bound + interrupt the SETUP too (connect, then the INVITE write). These are loopback and normally
-    // instant, but a hung flexisip must not wedge the whole session in here — that would keep a daemon
-    // shutdown (and a `Stop`) from ever reaching the ACTIVE dialog's teardown. A shutdown aborts at once via
-    // `stopping`; a stall is bounded by RESPONSE_TIMEOUT. (view_rx is watched from the response wait below,
-    // which begins the instant the loopback setup completes.)
-    let setup_deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
+    // ONE absolute deadline for the WHOLE attempt — setup (connect + INVITE write) AND the response wait
+    // below share it, so the entire refresh is bounded by a single RESPONSE_TIMEOUT. That is what the
+    // compile-time timing invariant (`SESSION_REFRESH_AFTER + RESPONSE_TIMEOUT + margin ≤ PANEL_SESSION_LIMIT`)
+    // assumes; giving setup its own fresh budget would let a slow-connect-then-slow-response attempt run up
+    // to ~2× and complete AFTER the panel cut. Bounding + interrupting the setup also matters on its own: a
+    // hung flexisip must not wedge the session here, or a daemon shutdown (`stopping`) / `Stop` could never
+    // reach the ACTIVE dialog's teardown. (view_rx is watched from the response wait, which begins the
+    // instant the loopback setup completes.)
+    let attempt_deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
     let mut sock = tokio::select! {
         biased;
         _ = wait_until_stopping(stopping) => return RefreshOutcome::Aborted,
-        r = tokio::time::timeout_at(setup_deadline, TcpStream::connect(("127.0.0.1", cfg.sip_port))) => {
+        r = tokio::time::timeout_at(attempt_deadline, TcpStream::connect(("127.0.0.1", cfg.sip_port))) => {
             match r {
                 Ok(Ok(s)) => s,
                 Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals, true), // transient ⇒ retriable
@@ -921,7 +924,7 @@ async fn establish_refresh_dialog(
             cancel_pending_invite(&mut sock, cfg, &mut d, Vec::new()).await;
             return RefreshOutcome::Aborted;
         }
-        r = tokio::time::timeout_at(setup_deadline, write_all_flush(&mut sock, invite.as_bytes())) => {
+        r = tokio::time::timeout_at(attempt_deadline, write_all_flush(&mut sock, invite.as_bytes())) => {
             match r {
                 Ok(Ok(())) => {}
                 // socket dead ⇒ nothing pinned; transient ⇒ retriable
@@ -946,7 +949,9 @@ async fn establish_refresh_dialog(
     // an uncancelled INVITE. The accumulator is owned here so a timeout mid-2xx carries its partial bytes
     // into that drain. Mirrors `session`'s open select.
     let mut acc: Vec<u8> = Vec::new();
-    let resp_deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
+    // REUSE the setup deadline — do NOT start a fresh budget — so setup + response together stay within one
+    // RESPONSE_TIMEOUT (the whole-attempt bound the compile-time invariant relies on).
+    let resp_deadline = attempt_deadline;
     let final_resp = loop {
         tokio::select! {
             biased;
@@ -1285,14 +1290,13 @@ async fn session(
                         InDialog::Failed(e) => return Err(e),
                     }
                     let now = tokio::time::Instant::now();
-                    // Establishing the successor may have parked this loop briefly (bounded, interruptible),
-                    // during which auto-hold `Hold` pokes went unread. The refresh only fires with a viewer
-                    // actively holding, so renew the linger here (equivalent to a poke at refresh time) so a
-                    // stale deadline can't spuriously hang the freshly-adopted dialog up before the next poke
-                    // arrives. A longer manual window, if any, still governs via `start_deadline`.
-                    hold_deadline = hold_deadline.max(now + VIEWER_LINGER);
                     // Apply any Start/Hold that arrived DURING the attempt (held out of the hold loop while
-                    // we established the successor) to the adopted dialog — never dropped.
+                    // we established the successor) to the adopted dialog — never dropped. These recorded
+                    // pokes are the ONLY bridge across the establish latency: a genuinely-connected viewer is
+                    // polled by hold.rs every ~1 s, so a multi-second refresh captures its pokes here and the
+                    // adopted hold_deadline stays fresh. We deliberately do NOT invent an unconditional
+                    // linger from completion time — that would keep the panel up ~VIEWER_LINGER past the
+                    // refresh even when the viewer left mid-attempt (no pokes recorded ⇒ correct hang-up).
                     apply_refresh_renewals(&renewals, now, window, &mut start_deadline, &mut hold_deadline);
                     dialog_started_at = now; // the adopted dialog starts its own ~60 s clock now
                     refresh_at = now + SESSION_REFRESH_AFTER;
