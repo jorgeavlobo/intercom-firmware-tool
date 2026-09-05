@@ -1235,10 +1235,11 @@ async fn session(
     // Make-before-break refresh state (issue #174, Finding #3). `refresh_at` (absolute) is when we try to
     // stand up the successor dialog — SESSION_REFRESH_AFTER into this one, before the panel's hard ~60 s
     // BYE — so its shared media never tears down and av.rs's siphon to go2rtc never lapses. On a successful
-    // refresh it is pushed out past the new dialog; `refresh_disabled` latches after ANY non-adoption —
-    // a refusal (a single-owner plant `486`) OR an error/timeout — so we stop hammering the panel and
-    // simply ride this dialog to the panel's BYE +
-    // run()'s recycle.
+    // refresh it is pushed out past the new dialog. `refresh_disabled` latches when a refresh cannot be
+    // usefully retried: a DEFINITIVE panel refusal (a single-owner plant `486`), or a transient failure
+    // once there is no budget left for another attempt before the cut — a transient failure WITH budget
+    // reschedules instead (see the Declined arm). Once latched we stop retrying and ride this dialog to the
+    // panel's BYE + run()'s recycle.
     let mut refresh_at = now0 + SESSION_REFRESH_AFTER;
     let mut refresh_disabled = false;
     // When the CURRENT dialog was established (updated on each adoption), so a transient-refresh retry can
@@ -1262,45 +1263,59 @@ async fn session(
         if !refresh_disabled && now >= refresh_at && hold_deadline > now {
             match establish_refresh_dialog(cfg, stopping, view_rx, &d.aor, &d.domain, &devaddr).await {
                 RefreshOutcome::Established(new_sock, new_d, renewals, residual) => {
-                    // The panel ADMITTED a concurrent dialog. BYE the old one on its own socket
-                    // (best-effort) and adopt the new. When the plant shares its single media session
-                    // across the two — the seamless case, and the likely one since it just accepted a
-                    // second dialog — av.rs never sees the panel's `*7*0*##` teardown, so the RTP siphon to
-                    // go2rtc holds and the view never blips. (If a plant instead tore media on this BYE it
-                    // would surface as an av.rs siphon released/armed pair around the refresh — a brief
-                    // blip, still far better than the ~60 s freeze; the recycle fallback covers it.)
-                    eprintln!(
-                        "btmqttd: on-demand session refreshed before the panel cut (make-before-break)"
-                    );
-                    // BYE the old dialog; if its (possibly dead) socket can't take the BYE, retry over a
-                    // FRESH connection like every other teardown path — otherwise the old dialog could
-                    // linger until the panel cuts it, undermining the clean handover.
-                    if teardown_bye(&mut sock, &d).await.is_err() {
-                        bye_reconnect(cfg, &d).await;
-                    }
-                    sock = new_sock;
-                    d = *new_d;
-                    // Seed the adopted dialog's buffer with any bytes flexisip coalesced AFTER the 2xx (an
-                    // in-dialog request delivered ONCE over TCP) and process them now, so a coalesced
-                    // BYE/OPTIONS on the successor isn't dropped and treated as a live-but-terminated dialog.
-                    inbound = residual;
-                    match process_in_dialog(&mut sock, &mut inbound, cfg, &d).await {
-                        InDialog::Continue => {}
-                        InDialog::PanelEnded => { panel_ended = true; break 'dialog; }
-                        InDialog::Failed(e) => return Err(e),
-                    }
+                    // The panel admitted a concurrent dialog — but adopt it ONLY after confirming it is
+                    // actually alive. Process any bytes flexisip coalesced after its 2xx (an in-dialog
+                    // request delivered ONCE over TCP) on the NEW dialog FIRST, BEFORE retiring the old one.
+                    // If that request is a BYE — a plant that accepts then immediately tears the second
+                    // dialog — the successor is already dead, and trading the still-healthy old dialog for a
+                    // corpse would drop the media and cause the very freeze this prevents.
+                    let mut new_sock = new_sock;
+                    let new_d = *new_d;
+                    let mut new_inbound = residual;
                     let now = tokio::time::Instant::now();
-                    // Apply any Start/Hold that arrived DURING the attempt (held out of the hold loop while
-                    // we established the successor) to the adopted dialog — never dropped. These recorded
-                    // pokes are the ONLY bridge across the establish latency: a genuinely-connected viewer is
-                    // polled by hold.rs every ~1 s, so a multi-second refresh captures its pokes here and the
-                    // adopted hold_deadline stays fresh. We deliberately do NOT invent an unconditional
-                    // linger from completion time — that would keep the panel up ~VIEWER_LINGER past the
-                    // refresh even when the viewer left mid-attempt (no pokes recorded ⇒ correct hang-up).
+                    // The recorded renewals are the ONLY bridge across the establish latency: a genuinely-
+                    // connected viewer is polled by hold.rs every ~1 s, so a multi-second refresh captures
+                    // its pokes and keeps the deadline fresh — applied to whichever dialog we end up on. We
+                    // deliberately do NOT invent an unconditional linger from completion time (that would
+                    // hold the panel up past VIEWER_LINGER when the viewer left mid-attempt).
                     apply_refresh_renewals(&renewals, now, window, &mut start_deadline, &mut hold_deadline);
-                    dialog_started_at = now; // the adopted dialog starts its own ~60 s clock now
-                    refresh_at = now + SESSION_REFRESH_AFTER;
-                    continue; // re-evaluate with the adopted dialog
+                    match process_in_dialog(&mut new_sock, &mut new_inbound, cfg, &new_d).await {
+                        InDialog::Continue => {
+                            // Successor healthy → NOW retire the old dialog and adopt. When the plant shares
+                            // its single media session across the two — the seamless case, and the likely
+                            // one since it just accepted a second dialog — av.rs never sees the panel's
+                            // `*7*0*##` teardown, so the RTP siphon to go2rtc holds and the view never blips.
+                            eprintln!(
+                                "btmqttd: on-demand session refreshed before the panel cut (make-before-break)"
+                            );
+                            // BYE the old dialog; if its (possibly dead) socket can't take it, retry over a
+                            // FRESH connection like every teardown path, so it can't linger until the cut.
+                            if teardown_bye(&mut sock, &d).await.is_err() {
+                                bye_reconnect(cfg, &d).await;
+                            }
+                            sock = new_sock;
+                            d = new_d;
+                            inbound = new_inbound; // residual already drained by process_in_dialog
+                            dialog_started_at = now; // the adopted dialog starts its own ~60 s clock now
+                            refresh_at = now + SESSION_REFRESH_AFTER;
+                        }
+                        InDialog::PanelEnded | InDialog::Failed(_) => {
+                            // The successor terminated (or its socket died) before we committed — its BYE was
+                            // ACKed / its teardown done by process_in_dialog, so drop it and KEEP the healthy
+                            // OLD dialog. Treat like a transient miss: retry before the cut if budget
+                            // remains, else latch and let the panel BYE + run()'s recycle take over.
+                            eprintln!(
+                                "btmqttd: on-demand refresh successor ended before adoption — keeping the current dialog"
+                            );
+                            let cut = dialog_started_at + PANEL_SESSION_LIMIT;
+                            if now + REFRESH_RETRY_BACKOFF + RESPONSE_TIMEOUT < cut {
+                                refresh_at = now + REFRESH_RETRY_BACKOFF;
+                            } else {
+                                refresh_disabled = true;
+                            }
+                        }
+                    }
+                    continue; // re-evaluate (with the adopted successor, or the retained old dialog)
                 }
                 RefreshOutcome::Declined(e, renewals, retriable) => {
                     // Apply any Start/Hold seen during the attempt to THIS dialog's deadlines first — a
