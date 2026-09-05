@@ -1012,8 +1012,8 @@ async fn establish_refresh_dialog(
         tokio::pin!(connect);
         loop {
             // The deadline to honor THIS iteration: the pre-attempt window, pushed out by any Hold recorded
-            // so far; `None` once a manual Start was seen (the caller re-arms the full window). Recomputed
-            // each iteration so a Hold/Start arriving mid-setup moves it out rather than being lost.
+            // so far (to that poke's expiry) and by a manual Start (to its re-armed start_at + window).
+            // Recomputed each iteration so a Hold/Start arriving mid-setup moves it out rather than being lost.
             let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline, window);
             tokio::select! {
                 biased;
@@ -1100,8 +1100,8 @@ async fn establish_refresh_dialog(
     let resp_deadline = attempt_deadline;
     let final_resp = loop {
         // The deadline to honor THIS iteration: the pre-attempt window, pushed out by any Hold recorded so
-        // far; `None` once a manual Start was seen. Recomputed each iteration so a Hold that arrived moves it
-        // out to that poke's linger (a Start to its re-armed start_at + window) rather than being lost.
+        // far (to that poke's expiry) and by a manual Start (to its re-armed start_at + window). Recomputed
+        // each iteration so a Hold/Start that arrived moves it out rather than being lost.
         let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline, window);
         tokio::select! {
             biased;
