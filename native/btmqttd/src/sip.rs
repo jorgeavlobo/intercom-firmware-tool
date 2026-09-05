@@ -1088,11 +1088,12 @@ async fn establish_refresh_dialog(
     // Write the INVITE in a loop-select so a `Stop`, a viewing-deadline lapse, or shutdown is observed even
     // if the loopback write stalls (a Start/Hold is RECORDED, not dropped) — exactly like the connect and
     // response phases. The pinned write future borrows `sock`, so we break out of the loop with a WriteStep
-    // and only then (borrow released) run cancel/return. An interrupted/errored write may have left a
-    // PARTIAL INVITE on `sock`, so we CANCEL over a FRESH connection (cancel_invite_over_fresh), never on
-    // `sock`: appending a CANCEL to a half-written INVITE would concatenate into one corrupt message
-    // flexisip can't frame. A dropped TCP socket does NOT cancel the transaction, so if the INVITE did make
-    // it whole the fresh CANCEL (same Via) still stops a late 2xx from pinning the panel.
+    // and only then (borrow released) run cancel/return via cancel_partial_write_invite: an interrupted or
+    // errored write may have left a PARTIAL INVITE on `sock`, so the CANCEL goes over a FRESH connection
+    // (never appended to a half-written INVITE), while the INVITE's own final response — a racing 2xx if the
+    // whole request did reach flexisip before the write was cut — is drained from the ORIGINAL socket and
+    // ACK/BYE'd there. A dropped TCP socket does NOT cancel the transaction, so the fresh CANCEL (same Via)
+    // is what stops a late 2xx from pinning the panel.
     enum WriteStep {
         Sent,
         Aborted,
@@ -1135,11 +1136,11 @@ async fn establish_refresh_dialog(
     match write_step {
         WriteStep::Sent => {}
         WriteStep::Aborted => {
-            cancel_invite_over_fresh(cfg, &mut d, Vec::new()).await;
+            cancel_partial_write_invite(&mut sock, cfg, &mut d).await;
             return RefreshOutcome::Aborted;
         }
         WriteStep::Declined(e) => {
-            cancel_invite_over_fresh(cfg, &mut d, Vec::new()).await;
+            cancel_partial_write_invite(&mut sock, cfg, &mut d).await;
             return RefreshOutcome::Declined(e, renewals, true);
         }
     }
@@ -1251,17 +1252,23 @@ async fn establish_refresh_dialog(
 
     let Some(tag) = to_tag(&final_resp).filter(|t| !t.trim().is_empty()) else {
         // A 2xx with NO (or an empty/whitespace) To-tag is malformed (flexisip always sets one). The panel
-        // has still ACCEPTED the INVITE, but WITHOUT a remote tag we cannot form a confirmed dialog:
-        // build_ack / build_bye have no To-tag to address, so an ACK/BYE built here can't be matched to the
-        // accepted dialog and would NOT tear it down. There is therefore no useful teardown to attempt — and
-        // retrying would just reproduce the same unaddressable 2xx, stacking one orphan per attempt. So LATCH
-        // refresh off (retriable=false): stop spawning successors, ride the current dialog to the panel's
-        // cut, and let that cut reclaim the orphan on its own timeout. (Cannot happen against a conformant
-        // flexisip; defensive.)
+        // has still ACCEPTED the INVITE, so a UAC MUST ACK the 2xx (RFC 3261 §13.2.2.4) or flexisip keeps
+        // retransmitting it. We CAN ACK — echoing the received To exactly (its empty/absent tag) with the
+        // Request-URI taken from the 2xx's Contact — even though we canNOT form a reliable in-dialog BYE
+        // without a remote tag. So ACK on THIS connection (where the 2xx arrived and the dialog lives), then
+        // LATCH (retriable=false): a BYE here would be unaddressable (empty remote tag), and retrying only
+        // reproduces the same tagless 2xx and stacks one orphan per attempt, so we ride the current dialog to
+        // the panel's cut, which reclaims this successor on its own timeout. (Cannot happen against a
+        // conformant flexisip; defensive.)
+        d.to_tag = to_tag(&final_resp).unwrap_or_default(); // echo the received tag verbatim (may be empty)
+        d.remote_target =
+            contact_uri(&final_resp).unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
+        let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
+        let _ = write_all_flush(&mut sock, ack.as_bytes()).await;
         return RefreshOutcome::Declined(
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "2xx to refresh INVITE has no To-tag — cannot form a confirmed dialog for ACK/BYE",
+                "2xx to refresh INVITE has no To-tag — ACKed, but cannot form a confirmed dialog for BYE",
             ),
             renewals,
             false, // unaddressable dialog: retrying only stacks orphans ⇒ latch, let the panel's cut reclaim it
@@ -1795,12 +1802,10 @@ async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialo
     }
 }
 
-/// CANCEL a pending INVITE over a FRESH loopback connection, never the caller's socket. Two callers:
-///  - `cancel_pending_invite`, when its CANCEL write to the original socket already failed (dead socket);
-///  - the refresh WRITE phase, where an interrupted/errored INVITE write may have left a PARTIAL INVITE
-///    on the original socket — appending a CANCEL there would concatenate into one corrupt message
-///    flexisip can neither frame nor match, so it must NOT be reused (a dropped TCP socket does not cancel
-///    the transaction, so if the INVITE did make it whole we still need this CANCEL).
+/// CANCEL a pending INVITE over a FRESH loopback connection, never the caller's socket. Called by
+/// `cancel_pending_invite` when its CANCEL write to the original socket already failed (dead socket): a
+/// dropped TCP socket does not cancel the SIP transaction, so if the INVITE did make it whole we still
+/// need this CANCEL to stop a late 2xx pinning the panel.
 ///
 /// KEEP the INVITE's original `Via` (branch AND sent-by port) unchanged: both the CANCEL and the drained
 /// non-2xx (487) ACK are part of the INVITE client transaction and MUST reuse its top `Via`, or flexisip
@@ -1817,10 +1822,33 @@ async fn cancel_invite_over_fresh(cfg: &Config, d: &mut Dialog, acc: Vec<u8>) {
         // it frames the seed's COMPLETE messages first, then DISCARDS any trailing partial from the dead
         // stream before reading the fresh socket — otherwise that partial would concatenate with the fresh
         // socket's 200-to-CANCEL into one synthetic message and trigger a bogus ACK/BYE with mismatched
-        // dialog data. (In the write-phase caller `acc` is empty, so there is nothing to frame or discard.)
+        // dialog data.
         drain_after_cancel(&mut fresh, cfg, d, acc, true).await;
     }
     // else: couldn't even reconnect — nothing more we can do.
+}
+
+/// Clean up a refresh INVITE whose WRITE was interrupted or errored. The original socket may hold a
+/// PARTIAL INVITE, so the CANCEL goes over a FRESH connection — appending it to `sock` could concatenate
+/// with a half-written INVITE into one corrupt message flexisip can neither frame nor match. BUT the
+/// INVITE's own final response — a racing 2xx if the whole INVITE actually reached flexisip before the
+/// write was cut, or the 487 to our CANCEL — comes back on the ORIGINAL connection the INVITE arrived on
+/// (RFC 3261 §18.2.2), NOT the fresh CANCEL connection, so we must also drain `sock` for it and ACK/BYE a
+/// racing 2xx there. Reading `sock` is always safe; `drain_after_cancel` only WRITES (a 2xx's ACK+BYE, or a
+/// 487's ACK) AFTER it frames a COMPLETE response — which can only exist if the whole INVITE arrived, i.e.
+/// the socket was never partial — so those in-dialog writes are well-formed. If the INVITE was truly
+/// partial, flexisip formed no transaction, nothing is framed, and the drain simply times out.
+async fn cancel_partial_write_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog) {
+    if let Ok(mut fresh) = connect_sip(cfg).await {
+        let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
+        // Absorb the 200-to-CANCEL on the fresh connection best-effort (it needs no ACK); the INVITE's own
+        // final response is drained from the ORIGINAL socket below.
+        let mut scratch = [0u8; 256];
+        let _ = tokio::time::timeout(Duration::from_millis(200), fresh.read(&mut scratch)).await;
+    }
+    // `acc` is empty here (nothing was read from `sock` during the write phase) and the seed is native to
+    // `sock`, so `seed_foreign = false`.
+    drain_after_cancel(sock, cfg, d, Vec::new(), false).await;
 }
 
 /// Drain framed responses after a CANCEL for `CANCEL_DRAIN`, ACK+BYE-ing a racing INVITE 2xx.
@@ -2428,14 +2456,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn establish_refresh_dialog_latches_on_a_2xx_with_no_or_empty_to_tag() {
-        // A 2xx with an EMPTY (or absent) To-tag is malformed: the panel ACCEPTED the INVITE but WITHOUT a
-        // remote tag we cannot form a confirmed dialog — build_ack/build_bye have nothing to address, so any
-        // ACK/BYE would be unmatchable and could NOT tear it down. Retrying would only reproduce the same
-        // unaddressable 2xx and stack one orphan per attempt, so the helper must LATCH (decline
-        // NON-retriably), must NOT adopt the dialog, and must NOT open a (useless) teardown connection — the
-        // panel's own cut reclaims the orphan. The mock sends a 200 OK with `;tag=` (empty), then asserts NO
-        // second connection is opened.
+    async fn establish_refresh_dialog_acks_then_latches_on_a_2xx_with_no_or_empty_to_tag() {
+        // A 2xx with an EMPTY (or absent) To-tag is malformed: the panel ACCEPTED the INVITE, so a UAC MUST
+        // still ACK the 2xx (RFC 3261 §13.2.2.4) or flexisip keeps retransmitting it. The helper must ACK on
+        // the ORIGINAL connection — echoing the received (empty) tag, Request-URI = the response Contact —
+        // but must NOT send a BYE (unaddressable without a remote tag) and must NOT open a teardown
+        // reconnect. It must then LATCH (decline NON-retriably) and NOT adopt the dialog, so the caller keeps
+        // its current dialog and the panel's own cut reclaims the orphan. The mock sends a 200 OK with
+        // `;tag=` (empty), asserts the ACK arrives on the same connection with the Contact as Request-URI,
+        // and asserts NO second connection opens.
         use std::collections::HashMap;
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
@@ -2461,11 +2490,17 @@ mod tests {
             .await
             .unwrap();
             s.flush().await.unwrap();
-            drop(s);
-            // 2) There must be NO teardown reconnect: an unaddressable dialog can't be ACK/BYE'd, so the
-            // helper must not open a second connection. Assert none arrives within a short window (true =
-            // no reconnect, which is the pass condition).
-            tokio::time::timeout(Duration::from_millis(500), listener.accept()).await.is_err()
+            // 2) The 2xx ACK MUST arrive on THIS connection, addressed to the response Contact, and must NOT
+            //    be a BYE (the dialog is unaddressable). read_one_sip returns after one complete message.
+            let ack = read_one_sip(&mut s, &mut acc).await;
+            assert!(ack.starts_with("ACK "), "expected the 2xx ACK on the original connection, got: {ack}");
+            assert!(
+                ack.contains("sip:c100x@127.0.0.1:5599"),
+                "the 2xx ACK Request-URI must be the response Contact, got: {ack}"
+            );
+            assert!(!ack.contains("BYE"), "must NOT BYE an unaddressable dialog, got: {ack}");
+            // 3) No teardown reconnect: assert no second connection arrives (true = no reconnect = pass).
+            tokio::time::timeout(Duration::from_millis(400), listener.accept()).await.is_err()
         });
 
         let mut m = HashMap::new();
@@ -2484,7 +2519,7 @@ mod tests {
         }
         assert!(
             server.await.unwrap(),
-            "a tagless-2xx decline must NOT open a teardown connection (the dialog is unaddressable)"
+            "a tagless-2xx decline must ACK on the original connection and NOT open a teardown connection"
         );
     }
 
