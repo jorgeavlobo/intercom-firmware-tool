@@ -1072,37 +1072,51 @@ async fn establish_refresh_dialog(
     };
     let sdp = build_sdp_offer(cfg.camera_video_port, cfg.camera_audio_port, &srtp_key(), devaddr);
     let invite = build_invite(&d, &sdp);
-    tokio::select! {
-        biased;
-        _ = wait_until_stopping(stopping) => {
-            // Shutdown mid-write: any partial INVITE on the wire must be CANCELled (a dropped TCP socket
-            // does NOT cancel it) before we go, so a late 2xx can't pin the panel.
+    // Write the INVITE in a loop-select so a `Stop`, a viewing-deadline lapse, or shutdown is observed even
+    // if the loopback write stalls (a Start/Hold is RECORDED, not dropped) — exactly like the connect and
+    // response phases. The pinned write future borrows `sock`, so we break out of the loop with a WriteStep
+    // and only then (borrow released) run cancel/return; every abort/error CANCELs any partial INVITE (a
+    // dropped TCP socket does NOT cancel it, so a late 2xx could otherwise pin the panel).
+    enum WriteStep {
+        Sent,
+        Aborted,
+        Declined(std::io::Error),
+    }
+    let write_step = {
+        let write = write_all_flush(&mut sock, invite.as_bytes());
+        tokio::pin!(write);
+        loop {
+            let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline, window);
+            tokio::select! {
+                biased;
+                _ = wait_until_stopping(stopping) => break WriteStep::Aborted,
+                v = view_rx.recv() => match v {
+                    Some(cmd @ (ViewCmd::Start | ViewCmd::Hold(_))) => renewals.record(&cmd),
+                    Some(ViewCmd::Stop) | None => break WriteStep::Aborted,
+                },
+                _ = tokio::time::sleep_until(eff_deadline) => break WriteStep::Aborted,
+                r = tokio::time::timeout_at(attempt_deadline, &mut write) => break match r {
+                    Ok(Ok(())) => WriteStep::Sent,
+                    // A write error can still leave a COMPLETE INVITE delivered to flexisip before the socket
+                    // died (a partial flush, or a reset landing after the last byte) ⇒ transient/retriable.
+                    Ok(Err(e)) => WriteStep::Declined(e),
+                    Err(_) => WriteStep::Declined(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "refresh INVITE write timed out (CANCEL sent)",
+                    )),
+                },
+            }
+        }
+    };
+    match write_step {
+        WriteStep::Sent => {}
+        WriteStep::Aborted => {
             cancel_pending_invite(&mut sock, cfg, &mut d, Vec::new()).await;
             return RefreshOutcome::Aborted;
         }
-        r = tokio::time::timeout_at(attempt_deadline, write_all_flush(&mut sock, invite.as_bytes())) => {
-            match r {
-                Ok(Ok(())) => {}
-                // A write error can still leave a COMPLETE INVITE delivered to flexisip before the socket
-                // died (a partial flush, or the reset landing after the last byte). Over TCP a dropped
-                // socket does NOT cancel it, so run the best-effort CANCEL (which reconnects when the
-                // original socket is dead) before returning; transient ⇒ retriable.
-                Ok(Err(e)) => {
-                    cancel_pending_invite(&mut sock, cfg, &mut d, Vec::new()).await;
-                    return RefreshOutcome::Declined(e, renewals, true);
-                }
-                Err(_) => {
-                    cancel_pending_invite(&mut sock, cfg, &mut d, Vec::new()).await;
-                    return RefreshOutcome::Declined(
-                        std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "refresh INVITE write timed out (CANCEL sent)",
-                        ),
-                        renewals,
-                        true, // transient ⇒ retriable
-                    );
-                }
-            }
+        WriteStep::Declined(e) => {
+            cancel_pending_invite(&mut sock, cfg, &mut d, Vec::new()).await;
+            return RefreshOutcome::Declined(e, renewals, true);
         }
     }
 
