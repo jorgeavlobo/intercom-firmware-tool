@@ -90,8 +90,9 @@ pub const VIEWER_LINGER: Duration = Duration::from_secs(5);
 /// to accept (just a plain BYE). Left alone, a continuously-watched view freezes at that cut: the BYE
 /// stops the RTP, `av.rs` sees the panel's `*7*0*##` teardown and releases the go2rtc siphon, and by the
 /// time a fresh dialog re-establishes the media, go2rtc's producer has already timed out and dropped every
-/// consumer. So while a viewer is still holding the session, we proactively stand up the NEXT dialog a few
-/// seconds BEFORE the panel's BYE. IF the plant keeps its single shared media session up while the new
+/// consumer. So while a viewer is still holding the session, we proactively stand up the NEXT dialog part
+/// way through this one (at `SESSION_REFRESH_AFTER`, ~15 s before the ~60 s cut), so even a slow refresh
+/// COMPLETES before the panel's BYE. IF the plant keeps its single shared media session up while the new
 /// dialog holds it (multiudpsink is fan-out, and `av.rs` arms/releases the siphon off the BUS media
 /// lifecycle, NOT per-dialog), the panel never emits `*7*0*##`, the siphon never lapses, and the view is
 /// SEAMLESS. IF the plant refuses a second concurrent dialog (some installs are single-owner — a `486`
@@ -756,11 +757,76 @@ fn apply_refresh_renewals(
     }
 }
 
+/// What draining the in-dialog buffer decided for the hold loop.
+enum InDialog {
+    /// Nothing terminal — keep holding the dialog.
+    Continue,
+    /// The panel BYE'd (we ACKed it); the caller must NOT send its own BYE to the dead dialog.
+    PanelEnded,
+    /// The confirmed dialog's socket is dead (or the buffer blew its cap); teardown was already attempted
+    /// over a fresh connection, so the caller propagates this error for the session-backoff path.
+    Failed(std::io::Error),
+}
+
+/// Drain every COMPLETE in-dialog message buffered in `inbound` on a CONFIRMED dialog, applying the panel's
+/// mid-session traffic exactly as the hold loop must: a BYE ends the dialog (200 OK, then PanelEnded); a
+/// retransmitted INVITE 2xx is re-ACKed; any other request gets its final response (OPTIONS/other → 200,
+/// re-INVITE/UPDATE → 488). A cap overflow or a write to a dead socket tears down over a fresh connection
+/// and returns Failed. Shared by the socket-read arm AND the adopted-successor path (a refresh 2xx that
+/// flexisip coalesced with an in-dialog request leaves that request buffered — it must be processed here,
+/// not dropped). None of this renews a viewing-window deadline; only a real viewer poke does.
+async fn process_in_dialog(
+    sock: &mut TcpStream,
+    inbound: &mut Vec<u8>,
+    cfg: &Config,
+    d: &Dialog,
+) -> InDialog {
+    if inbound.len() > MAX_SIP_BYTES {
+        // CONFIRMED dialog ⇒ CANCEL is invalid; a best-effort BYE is what releases the panel.
+        if teardown_bye(sock, d).await.is_err() {
+            bye_reconnect(cfg, d).await;
+        }
+        return InDialog::Failed(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "in-dialog SIP request exceeded cap",
+        ));
+    }
+    while let Some(len) = complete_message_len(inbound) {
+        let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
+        inbound.drain(..len);
+        if is_bye(&msg) {
+            if let Some(ok) = build_ok_to(&msg) {
+                let _ = write_all_flush(sock, ok.as_bytes()).await;
+            }
+            return InDialog::PanelEnded;
+        }
+        // A RETRANSMITTED INVITE 2xx (our first ACK was lost) must be re-ACKed — a UAC ACKs every 2xx or
+        // the panel times out the confirmed dialog and the camera stops. Best-effort.
+        if is_established_invite_2xx(&msg) {
+            let ack = build_ack(d, &format!("z9hG4bK{}", rand_hex(8)));
+            let _ = write_all_flush(sock, ack.as_bytes()).await;
+            continue;
+        }
+        // Answer in-dialog REQUESTS the panel sends mid-session so its transaction completes. A write
+        // failure proves the socket is dead — tear down over a fresh connection and surface the error.
+        if let Some(resp) = in_dialog_answer(&msg) {
+            if let Err(e) = write_all_flush(sock, resp.as_bytes()).await {
+                bye_reconnect(cfg, d).await;
+                return InDialog::Failed(e);
+            }
+        }
+    }
+    InDialog::Continue
+}
+
 /// Outcome of a make-before-break refresh attempt ([`establish_refresh_dialog`]).
 enum RefreshOutcome {
-    /// The panel admitted a concurrent dialog: the confirmed successor socket + `Dialog`, plus any
-    /// viewing-window renewals seen mid-attempt for the caller to apply to the ADOPTED dialog.
-    Established(TcpStream, Dialog, RefreshRenewals),
+    /// The panel admitted a concurrent dialog: the confirmed successor socket + `Dialog`, any viewing-window
+    /// renewals seen mid-attempt for the caller to apply to the ADOPTED dialog, and any RESIDUAL bytes left
+    /// after the 2xx (an in-dialog request flexisip coalesced with it) for the caller to seed as the adopted
+    /// dialog's inbound buffer — so a coalesced BYE/OPTIONS is not dropped. `Dialog` is boxed to keep this
+    /// (much larger) variant from bloating every `RefreshOutcome` value.
+    Established(TcpStream, Box<Dialog>, RefreshRenewals, Vec<u8>),
     /// The panel refused (e.g. `486 Busy` on a single-owner plant) or the attempt errored. The pending
     /// INVITE was CANCELled / the non-2xx ACKed, so nothing dangles; the caller keeps its current dialog
     /// and falls back to the panel's recycle — applying any renewals seen mid-attempt to that dialog.
@@ -798,9 +864,25 @@ async fn establish_refresh_dialog(
     // Viewing-window commands seen while the INVITE is in flight, folded in and handed back so the caller
     // applies them (see RefreshRenewals). Empty on the pre-INVITE error paths below.
     let mut renewals = RefreshRenewals::default();
-    let mut sock = match TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
-        Ok(s) => s,
-        Err(e) => return RefreshOutcome::Declined(e, renewals),
+    // Bound + interrupt the SETUP too (connect, then the INVITE write). These are loopback and normally
+    // instant, but a hung flexisip must not wedge the whole session in here — that would keep a daemon
+    // shutdown (and a `Stop`) from ever reaching the ACTIVE dialog's teardown. A shutdown aborts at once via
+    // `stopping`; a stall is bounded by RESPONSE_TIMEOUT. (view_rx is watched from the response wait below,
+    // which begins the instant the loopback setup completes.)
+    let setup_deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
+    let mut sock = tokio::select! {
+        biased;
+        _ = wait_until_stopping(stopping) => return RefreshOutcome::Aborted,
+        r = tokio::time::timeout_at(setup_deadline, TcpStream::connect(("127.0.0.1", cfg.sip_port))) => {
+            match r {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals),
+                Err(_) => return RefreshOutcome::Declined(
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh connect timed out"),
+                    renewals,
+                ),
+            }
+        }
     };
     let local_port = match sock.local_addr() {
         Ok(a) => a.port(),
@@ -819,8 +901,30 @@ async fn establish_refresh_dialog(
     };
     let sdp = build_sdp_offer(cfg.camera_video_port, cfg.camera_audio_port, &srtp_key(), devaddr);
     let invite = build_invite(&d, &sdp);
-    if let Err(e) = write_all_flush(&mut sock, invite.as_bytes()).await {
-        return RefreshOutcome::Declined(e, renewals);
+    tokio::select! {
+        biased;
+        _ = wait_until_stopping(stopping) => {
+            // Shutdown mid-write: any partial INVITE on the wire must be CANCELled (a dropped TCP socket
+            // does NOT cancel it) before we go, so a late 2xx can't pin the panel.
+            cancel_pending_invite(&mut sock, cfg, &mut d, Vec::new()).await;
+            return RefreshOutcome::Aborted;
+        }
+        r = tokio::time::timeout_at(setup_deadline, write_all_flush(&mut sock, invite.as_bytes())) => {
+            match r {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals), // socket dead ⇒ nothing pinned
+                Err(_) => {
+                    cancel_pending_invite(&mut sock, cfg, &mut d, Vec::new()).await;
+                    return RefreshOutcome::Declined(
+                        std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "refresh INVITE write timed out (CANCEL sent)",
+                        ),
+                        renewals,
+                    );
+                }
+            }
+        }
     }
 
     // Bounded, INTERRUPTIBLE wait for the final response. Every non-2xx / error / abort routes through
@@ -907,12 +1011,17 @@ async fn establish_refresh_dialog(
     let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
     if let Err(e) = write_all_flush(&mut sock, ack.as_bytes()).await {
         // The panel accepted (2xx) but our ACK couldn't be written — the dialog may be live at the panel,
-        // so BYE it over a FRESH connection rather than leaving it streaming, and decline so the caller
-        // keeps its current dialog. Same last-resort reasoning as `session`'s post-2xx ACK failure.
-        bye_reconnect(cfg, &d).await;
+        // so tear it down over a FRESH connection rather than leaving it streaming, and decline so the
+        // caller keeps its current dialog. Use ack_bye_reconnect (ACK then BYE): a bare BYE is unreliable
+        // against a 2xx we never ACKed, so the dialog must be confirmed before it is torn down.
+        ack_bye_reconnect(cfg, &d).await;
         return RefreshOutcome::Declined(e, renewals);
     }
-    RefreshOutcome::Established(sock, d, renewals)
+    // Hand back any bytes wait_final_response left in `acc` AFTER the 2xx: flexisip can coalesce the final
+    // response with an immediate in-dialog request (an OPTIONS, or even a BYE) into one TCP read, and over
+    // TCP that request is delivered ONCE — if we dropped it the successor could be treated as live after it
+    // was actually terminated. The caller seeds the adopted dialog's inbound buffer with this residual.
+    RefreshOutcome::Established(sock, Box::new(d), renewals, acc)
 }
 
 /// One on-demand session: INVITE → ACK, hold while views keep arriving, then BYE. `initial` is the
@@ -1103,8 +1212,9 @@ async fn session(
     // Make-before-break refresh state (issue #174, Finding #3). `refresh_at` (absolute) is when we try to
     // stand up the successor dialog — SESSION_REFRESH_AFTER into this one, before the panel's hard ~60 s
     // BYE — so its shared media never tears down and av.rs's siphon to go2rtc never lapses. On a successful
-    // refresh it is pushed out past the new dialog; `refresh_disabled` latches after a refusal (a
-    // single-owner plant `486`) so we stop hammering and simply ride this dialog to the panel's BYE +
+    // refresh it is pushed out past the new dialog; `refresh_disabled` latches after ANY non-adoption —
+    // a refusal (a single-owner plant `486`) OR an error/timeout — so we stop hammering the panel and
+    // simply ride this dialog to the panel's BYE +
     // run()'s recycle.
     let mut refresh_at = now0 + SESSION_REFRESH_AFTER;
     let mut refresh_disabled = false;
@@ -1125,7 +1235,7 @@ async fn session(
         let now = tokio::time::Instant::now();
         if !refresh_disabled && now >= refresh_at && hold_deadline > now {
             match establish_refresh_dialog(cfg, stopping, view_rx, &d.aor, &d.domain, &devaddr).await {
-                RefreshOutcome::Established(new_sock, new_d, renewals) => {
+                RefreshOutcome::Established(new_sock, new_d, renewals, residual) => {
                     // The panel ADMITTED a concurrent dialog. BYE the old one on its own socket
                     // (best-effort) and adopt the new. When the plant shares its single media session
                     // across the two — the seamless case, and the likely one since it just accepted a
@@ -1138,8 +1248,16 @@ async fn session(
                     );
                     let _ = teardown_bye(&mut sock, &d).await;
                     sock = new_sock;
-                    d = new_d;
-                    inbound.clear(); // fresh socket ⇒ discard any partial framing from the old leg
+                    d = *new_d;
+                    // Seed the adopted dialog's buffer with any bytes flexisip coalesced AFTER the 2xx (an
+                    // in-dialog request delivered ONCE over TCP) and process them now, so a coalesced
+                    // BYE/OPTIONS on the successor isn't dropped and treated as a live-but-terminated dialog.
+                    inbound = residual;
+                    match process_in_dialog(&mut sock, &mut inbound, cfg, &d).await {
+                        InDialog::Continue => {}
+                        InDialog::PanelEnded => { panel_ended = true; break 'dialog; }
+                        InDialog::Failed(e) => return Err(e),
+                    }
                     let now = tokio::time::Instant::now();
                     // Establishing the successor may have parked this loop briefly (bounded, interruptible),
                     // during which auto-hold `Hold` pokes went unread. The refresh only fires with a viewer
@@ -1202,60 +1320,12 @@ async fn session(
                 Ok(0) => { transport_lost = true; break; }
                 Ok(n) => {
                     inbound.extend_from_slice(&scratch[..n]);
-                    if inbound.len() > MAX_SIP_BYTES {
-                        // The dialog is CONFIRMED here (we ACKed a 2xx), so CANCEL is invalid — a
-                        // best-effort BYE is what releases the panel. Returning without it would skip
-                        // the teardown below and leave the camera session up until the panel's own
-                        // timeout. If the BYE write fails the socket is dead ⇒ reconnect.
-                        if teardown_bye(&mut sock, &d).await.is_err() {
-                            bye_reconnect(cfg, &d).await;
-                        }
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "in-dialog SIP request exceeded cap",
-                        ));
-                    }
-                    // Drain every complete message now buffered. A panel-initiated BYE ends the
-                    // dialog: acknowledge it (200 OK, else the panel retransmits) and stop — we must
-                    // NOT then send our own BYE to a dead dialog. Every OTHER in-dialog request gets a
-                    // final response so the panel's transaction completes instead of timing out, but
-                    // NONE of them renews the viewing-window deadline (only a real viewer poke does).
-                    while let Some(len) = complete_message_len(&inbound) {
-                        let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
-                        inbound.drain(..len);
-                        if is_bye(&msg) {
-                            if let Some(ok) = build_ok_to(&msg) {
-                                let _ = sock.write_all(ok.as_bytes()).await;
-                                let _ = sock.flush().await;
-                            }
-                            panel_ended = true;
-                            break 'dialog;
-                        }
-                        // A RETRANSMITTED INVITE 2xx (our first ACK was lost between flexisip and the
-                        // panel) must be re-ACKed — a UAC ACKs every 2xx or the panel times out the
-                        // confirmed dialog and the camera stops. Best-effort; a dead socket surfaces on
-                        // the next read as EOF/error and routes through bye_reconnect.
-                        if is_established_invite_2xx(&msg) {
-                            let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
-                            let _ = write_all_flush(&mut sock, ack.as_bytes()).await;
-                            continue;
-                        }
-                        // Answer in-dialog REQUESTS the panel sends mid-session. Leaving them
-                        // unanswered lets the peer transaction time out — and a session-refresh
-                        // re-INVITE that times out can make the panel tear down the camera dialog
-                        // BEFORE our window deadline. `in_dialog_answer` picks the response
-                        // (OPTIONS/other → 200 OK; re-INVITE/UPDATE → 488, no media renegotiation).
-                        // A write failure here (BrokenPipe/ConnectionReset) proves the confirmed
-                        // dialog's signalling socket is dead — do NOT discard it and wait for the next
-                        // read / user command / window deadline, which would leave the panel streaming
-                        // meanwhile. Tear down over a FRESH connection and surface the error for the
-                        // session-backoff path, exactly like the read-error arm below.
-                        if let Some(resp) = in_dialog_answer(&msg) {
-                            if let Err(e) = write_all_flush(&mut sock, resp.as_bytes()).await {
-                                bye_reconnect(cfg, &d).await;
-                                return Err(e);
-                            }
-                        }
+                    // Drain every complete message now buffered (see process_in_dialog). A panel BYE ends
+                    // the dialog; a cap overflow / dead socket returns Failed with teardown already done.
+                    match process_in_dialog(&mut sock, &mut inbound, cfg, &d).await {
+                        InDialog::Continue => {}
+                        InDialog::PanelEnded => { panel_ended = true; break 'dialog; }
+                        InDialog::Failed(e) => return Err(e),
                     }
                 }
                 // A socket error on a CONFIRMED dialog (ConnectionReset / BrokenPipe / …) means the
@@ -1887,7 +1957,7 @@ mod tests {
         let d = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
             .await
         {
-            RefreshOutcome::Established(_sock, d, _renewals) => d,
+            RefreshOutcome::Established(_sock, d, _renewals, _residual) => d,
             other => panic!(
                 "a confirmable 2xx refresh must be adopted, got {}",
                 match other {
@@ -2051,7 +2121,7 @@ mod tests {
             match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
                 .await
             {
-                RefreshOutcome::Established(_sock, _d, r) => r,
+                RefreshOutcome::Established(_sock, _d, r, _residual) => r,
                 _ => panic!("a 2xx refresh must be adopted"),
             };
         assert_eq!(
@@ -2060,6 +2130,62 @@ mod tests {
             "a Hold seen mid-refresh must be recorded, not dropped"
         );
         drop(view_tx);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_carries_coalesced_residual() {
+        // flexisip can coalesce the 2xx with an immediate in-dialog request into ONE TCP read;
+        // wait_final_response returns the 2xx and leaves the request in the accumulator. That residual must
+        // be handed back (so the caller can process it) rather than dropped — a dropped BYE would leave a
+        // terminated successor looking live. Here the panel sends 200 OK + an OPTIONS in one write.
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let _invite = read_one_sip(&mut s, &mut acc).await;
+            // 2xx and an in-dialog OPTIONS coalesced into a single write.
+            s.write_all(
+                b"SIP/2.0 200 OK\r\n\
+                  To: <sip:c100x@dev.example>;tag=srv123\r\n\
+                  CSeq: 21 INVITE\r\n\
+                  Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+                  Content-Length: 0\r\n\r\n\
+                  OPTIONS sip:btmqttd@127.0.0.1 SIP/2.0\r\n\
+                  From: <sip:c100x@dev.example>;tag=srv123\r\n\
+                  To: <sip:btmqttd@dev.example>;tag=cf\r\n\
+                  Call-ID: xyz\r\n\
+                  CSeq: 50 OPTIONS\r\n\
+                  Content-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            s.flush().await.unwrap();
+            let _ack = read_one_sip(&mut s, &mut acc).await;
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
+        let residual =
+            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da")
+                .await
+            {
+                RefreshOutcome::Established(_sock, _d, _r, residual) => residual,
+                _ => panic!("a 2xx refresh must be adopted"),
+            };
+        assert!(
+            String::from_utf8_lossy(&residual).contains("OPTIONS "),
+            "a request coalesced after the 2xx must be carried in the residual, not dropped"
+        );
         server.await.unwrap();
     }
 
