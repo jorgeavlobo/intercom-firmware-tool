@@ -130,12 +130,14 @@ const PANEL_SESSION_LIMIT: Duration = Duration::from_secs(60);
 /// inside the pre-cut window.
 const REFRESH_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 
-/// Slack the make-before-break handover needs AFTER the INVITE response, before the panel's cut: the
-/// successor validation ([`SUCCESSOR_VALIDATE`]) plus a bounded old-dialog BYE ([`SIP_IO_TIMEOUT`]), with a
-/// little headroom. Both the compile-time invariant below AND the runtime refresh gate budget this on top of
-/// `RESPONSE_TIMEOUT`, so a refresh (first or retried) is only launched when the WHOLE handover still fits
-/// before `PANEL_SESSION_LIMIT` — never so late that the successor lands after the panel already BYE'd.
-const HANDOVER_MARGIN: Duration = Duration::from_secs(3);
+/// Slack the make-before-break handover needs AFTER the INVITE 2xx, before the panel's cut: the successor
+/// ACK, the successor validation ([`SUCCESSOR_VALIDATE`]), and a bounded old-dialog BYE (its live-socket
+/// write plus a fresh-connection [`SIP_IO_TIMEOUT`] reconnect+write fallback), with headroom. Sized to cover
+/// that whole post-2xx handover. Both the compile-time invariants below AND the runtime refresh gate budget
+/// this on top of `RESPONSE_TIMEOUT`, so a refresh (first or retried) is only launched when the whole
+/// attempt-plus-handover still fits before `PANEL_SESSION_LIMIT` — never so late that the handover would run
+/// past the panel's cut.
+const HANDOVER_MARGIN: Duration = Duration::from_secs(5);
 
 /// Compile-time invariant (issue #174, Finding #3): the make-before-break successor must be fully stood up
 /// — its start (`SESSION_REFRESH_AFTER`) plus the WORST-CASE response budget (`RESPONSE_TIMEOUT`) — with the
@@ -1027,6 +1029,17 @@ async fn establish_refresh_dialog(
         let connect = TcpStream::connect(("127.0.0.1", cfg.sip_port));
         tokio::pin!(connect);
         loop {
+            // Enforce the whole-attempt budget UNCONDITIONALLY at the top of each iteration: a `biased`
+            // select polls arms in order, so a continuously-ready `view_rx` (a flood of Start/Hold) could
+            // otherwise starve the `timeout_at` arm and let the attempt run past `attempt_deadline`. No
+            // INVITE has been sent yet here, so no CANCEL is needed.
+            if tokio::time::Instant::now() >= attempt_deadline {
+                return RefreshOutcome::Declined(
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh connect timed out"),
+                    renewals,
+                    true, // transient ⇒ retriable
+                );
+            }
             // The deadline to honor THIS iteration: the pre-attempt window, pushed out by any Hold recorded
             // so far (to that poke's expiry) and by a manual Start (to its re-armed start_at + window).
             // Recomputed each iteration so a Hold/Start arriving mid-setup moves it out rather than being lost.
@@ -1086,6 +1099,14 @@ async fn establish_refresh_dialog(
         let write = write_all_flush(&mut sock, invite.as_bytes());
         tokio::pin!(write);
         loop {
+            // Enforce the whole-attempt budget unconditionally (a biased select could otherwise let a
+            // continuously-ready view_rx starve the timeout arm); the post-loop match CANCELs on Declined.
+            if tokio::time::Instant::now() >= attempt_deadline {
+                break WriteStep::Declined(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "refresh INVITE write timed out (CANCEL sent)",
+                ));
+            }
             let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline, window);
             tokio::select! {
                 biased;
@@ -1129,6 +1150,18 @@ async fn establish_refresh_dialog(
     // RESPONSE_TIMEOUT (the whole-attempt bound the compile-time invariant relies on).
     let resp_deadline = attempt_deadline;
     let final_resp = loop {
+        // Enforce the whole-attempt budget unconditionally at the top: a biased select could otherwise let a
+        // continuously-ready view_rx starve the response/timeout arm and run past resp_deadline. CANCEL the
+        // pending INVITE (a late 2xx must not pin the panel) before declining.
+        if tokio::time::Instant::now() >= resp_deadline {
+            let seed = std::mem::take(&mut acc);
+            cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
+            return RefreshOutcome::Declined(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh INVITE timed out (CANCEL sent)"),
+                renewals,
+                true, // timeout ⇒ transient ⇒ retriable
+            );
+        }
         // The deadline to honor THIS iteration: the pre-attempt window, pushed out by any Hold recorded so
         // far (to that poke's expiry) and by a manual Start (to its re-armed start_at + window). Recomputed
         // each iteration so a Hold/Start that arrived moves it out rather than being lost.
@@ -1213,8 +1246,8 @@ async fn establish_refresh_dialog(
         );
     }
 
-    let Some(tag) = to_tag(&final_resp) else {
-        // A 2xx with NO To-tag is malformed (flexisip always sets one), but the panel has still ACCEPTED the
+    let Some(tag) = to_tag(&final_resp).filter(|t| !t.trim().is_empty()) else {
+        // A 2xx with NO (or an empty/whitespace) To-tag is malformed (flexisip always sets one), but the panel has still ACCEPTED the
         // INVITE — so the successor may be live even though we can't form a properly-tagged confirmed dialog.
         // Doing nothing would leak that dialog until the panel's own timeout (and stack up on retries). Tear
         // it down BEST-EFFORT over a fresh connection with what we have (ACK-then-BYE, tag empty), exactly as
@@ -1904,12 +1937,17 @@ fn complete_message_len(buf: &[u8]) -> Option<usize> {
     let sep = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
     let header_end = sep + 4;
     let headers = std::str::from_utf8(&buf[..sep]).ok()?;
-    let content_length = headers
+    // A Content-Length header that is PRESENT but unparseable must reject the message (None), not silently
+    // default to 0 — treating a garbage length as 0 would drain only the headers and mis-frame the body as
+    // the next message, desynchronizing the stream. 0 is used ONLY when the header is absent.
+    let content_length = match headers
         .lines()
         .filter_map(|l| l.split_once(':'))
         .find(|(h, _)| h.trim().eq_ignore_ascii_case("Content-Length"))
-        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
-        .unwrap_or(0);
+    {
+        Some((_, v)) => v.trim().parse::<usize>().ok()?,
+        None => 0,
+    };
     // `content_length` is peer-supplied; on the 32-bit target `header_end + content_length` could overflow
     // `usize` and wrap to a SMALL total, misframing the stream (release wraps silently; debug panics). Use
     // checked_add and reject any total over the message cap — the read loops' own MAX_SIP_BYTES guard then
@@ -1930,6 +1968,29 @@ mod tests {
         assert_eq!(aor_user_for_hostname("Bticino_Classe_100_X\n"), Some("c100x"));
         assert_eq!(aor_user_for_hostname("Bticino_Classe_300_X"), Some("c300x"));
         assert_eq!(aor_user_for_hostname("SomethingElse"), None);
+    }
+
+    #[test]
+    fn complete_message_len_frames_and_rejects_bad_content_length() {
+        // Absent Content-Length ⇒ body is empty; the message ends at the header terminator.
+        let no_cl = b"OPTIONS sip:x SIP/2.0\r\nCall-ID: a\r\n\r\n";
+        assert_eq!(complete_message_len(no_cl), Some(no_cl.len()));
+
+        // Present, valid, and the body has arrived ⇒ full length; not yet arrived ⇒ None.
+        let with_body = b"MSG\r\nContent-Length: 3\r\n\r\nabc";
+        assert_eq!(complete_message_len(with_body), Some(with_body.len()));
+        assert_eq!(complete_message_len(b"MSG\r\nContent-Length: 3\r\n\r\nab"), None);
+
+        // Present but UNPARSEABLE ⇒ reject (None), never default to 0 and mis-frame the body as the next msg.
+        assert_eq!(complete_message_len(b"MSG\r\nContent-Length: notanumber\r\n\r\nbody"), None);
+        // Overflowing/huge value ⇒ rejected by the checked_add + MAX_SIP_BYTES cap.
+        assert_eq!(
+            complete_message_len(b"MSG\r\nContent-Length: 99999999999999999999\r\n\r\n"),
+            None
+        );
+
+        // Incomplete headers (no CRLFCRLF) ⇒ None.
+        assert_eq!(complete_message_len(b"MSG\r\nCall-ID: a\r\n"), None);
     }
 
     #[test]
@@ -2349,11 +2410,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn establish_refresh_dialog_tears_down_a_2xx_with_no_to_tag() {
-        // A malformed 2xx WITHOUT a To-tag still means the panel ACCEPTED the INVITE, so the successor may be
-        // live. The helper must decline retriably AND tear that dialog down best-effort over a fresh
-        // connection (ACK-then-BYE), not leak it until the panel timeout. The mock accepts the INVITE, sends a
-        // tagless 200 OK, then accepts the reconnect and checks a BYE arrives.
+    async fn establish_refresh_dialog_tears_down_a_2xx_with_no_or_empty_to_tag() {
+        // A malformed 2xx with an EMPTY (or absent) To-tag still means the panel ACCEPTED the INVITE, so the
+        // successor may be live. The helper must decline retriably AND tear that dialog down best-effort over
+        // a fresh connection (ACK-then-BYE), not leak it until the panel timeout — and it must NOT ACK/adopt
+        // with the empty tag. The mock sends a 200 OK with `;tag=` (empty), then accepts the reconnect and
+        // checks a BYE arrives.
         use std::collections::HashMap;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -2361,7 +2423,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
-            // 1) The INVITE connection: read the INVITE, answer 200 OK with NO To-tag.
+            // 1) The INVITE connection: read the INVITE, answer 200 OK with an EMPTY To-tag (`;tag=`).
             let (mut s, _) = listener.accept().await.unwrap();
             let mut acc: Vec<u8> = Vec::new();
             let invite = read_one_sip(&mut s, &mut acc).await;
@@ -2370,7 +2432,7 @@ mod tests {
                 b"SIP/2.0 200 OK\r\n\
                   Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
                   From: <sip:btmqttd@dev.example>;tag=cf\r\n\
-                  To: <sip:c100x@dev.example>\r\n\
+                  To: <sip:c100x@dev.example>;tag=\r\n\
                   Call-ID: xyz\r\n\
                   CSeq: 21 INVITE\r\n\
                   Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
