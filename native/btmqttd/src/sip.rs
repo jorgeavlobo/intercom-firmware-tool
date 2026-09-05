@@ -122,8 +122,10 @@ const REFRESH_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 /// few seconds of handover margin left BELOW the panel's hard cut, or a slow refresh could complete only
 /// after the panel has already dropped the old dialog, defeating the whole point. A const assert is
 /// stronger than a runtime test (it cannot be bypassed) and keeps `PANEL_SESSION_LIMIT` a live reference.
+/// Compared in MILLISECONDS (not `as_secs()`, which truncates) so the guard stays exact if any of these
+/// constants ever gains sub-second granularity — the margin is 3_000 ms.
 const _: () = assert!(
-    SESSION_REFRESH_AFTER.as_secs() + RESPONSE_TIMEOUT.as_secs() + 3 <= PANEL_SESSION_LIMIT.as_secs(),
+    SESSION_REFRESH_AFTER.as_millis() + RESPONSE_TIMEOUT.as_millis() + 3_000 <= PANEL_SESSION_LIMIT.as_millis(),
     "make-before-break refresh must complete with handover margin before the panel's session cut",
 );
 
