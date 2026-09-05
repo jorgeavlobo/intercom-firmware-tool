@@ -744,13 +744,28 @@ impl RefreshRenewals {
             ViewCmd::Stop => {}
         }
     }
+}
 
-    /// Whether ANY viewing renewal (a manual `Start` or an auto-hold `Hold` poke) was seen during the
-    /// attempt. Used to DISARM the viewing-deadline abort: a poke arriving mid-attempt proves the viewer is
-    /// still there, so the stale pre-attempt deadline must not cut the refresh short — the caller will extend
-    /// the real deadline from these renewals once the attempt returns.
-    fn any(&self) -> bool {
-        self.saw_start || self.hold_expiry.is_some()
+/// The viewing deadline a refresh attempt should honor GIVEN the renewals seen so far, or `None` to not
+/// abort on the deadline at all. Pure, so it is unit-testable and shared by both the connect and response
+/// waits.
+///
+/// - A manual `Start` mid-attempt → `None`: the caller re-arms the FULL window on return, so the attempt
+///   should run to its normal budget rather than being cut by a now-stale deadline.
+/// - Otherwise the effective deadline is the LATER of the pre-attempt `base` and any `Hold` expiry recorded
+///   mid-attempt — so a poke PUSHES the abort out to that poke's own linger (not disarms it forever, which
+///   would let a nonresponsive panel hold the dialog for the full response budget after the viewer left).
+fn effective_refresh_deadline(
+    renewals: &RefreshRenewals,
+    base: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    if renewals.saw_start {
+        None
+    } else {
+        Some(match renewals.hold_expiry {
+            Some(e) => base.max(e),
+            None => base,
+        })
     }
 }
 
@@ -878,11 +893,12 @@ enum RefreshOutcome {
 /// lost), mirroring how `session`'s own establish records `want_start` / the latest `hold_expiry`.
 ///
 /// It also honors the caller's `viewing_deadline` (the governing hang-up deadline captured at the attempt's
-/// start): if that window lapses mid-attempt WITHOUT a renewing poke, the attempt aborts (cancelling any
+/// start): if that window lapses mid-attempt WITHOUT a fresh poke, the attempt aborts (cancelling any
 /// pending INVITE) instead of blocking for the full response budget — so an auto-only session that loses its
 /// viewer just as the refresh begins still hangs up ~`VIEWER_LINGER` later, not up to `RESPONSE_TIMEOUT`
-/// later. A poke seen during the attempt DISARMS that abort (see [`RefreshRenewals::any`]): the viewer is
-/// still there and the caller will extend the real deadline from the recorded renewals.
+/// later. A `Hold` seen during the attempt PUSHES that abort out to the poke's own linger (see
+/// [`effective_refresh_deadline`]) rather than forfeiting it; a manual `Start` disarms it entirely (the
+/// caller re-arms the full window on return).
 async fn establish_refresh_dialog(
     cfg: &Arc<Config>,
     stopping: &Arc<AtomicBool>,
@@ -912,6 +928,10 @@ async fn establish_refresh_dialog(
         let connect = TcpStream::connect(("127.0.0.1", cfg.sip_port));
         tokio::pin!(connect);
         loop {
+            // The deadline to honor THIS iteration: the pre-attempt window, pushed out by any Hold recorded
+            // so far; `None` once a manual Start was seen (the caller re-arms the full window). Recomputed
+            // each iteration so a Hold arriving mid-setup moves it out rather than disarming it forever.
+            let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline);
             tokio::select! {
                 biased;
                 _ = wait_until_stopping(stopping) => return RefreshOutcome::Aborted,
@@ -919,9 +939,9 @@ async fn establish_refresh_dialog(
                     Some(cmd @ (ViewCmd::Start | ViewCmd::Hold(_))) => renewals.record(&cmd),
                     Some(ViewCmd::Stop) | None => return RefreshOutcome::Aborted,
                 },
-                // The viewer's window lapsed with no renewing poke during setup: no INVITE has been sent yet,
-                // so just abort and let the caller tear the current dialog down at its deadline.
-                _ = tokio::time::sleep_until(viewing_deadline), if !renewals.any() => {
+                // The viewer's effective window lapsed with no fresh poke during setup: no INVITE has been
+                // sent yet, so just abort and let the caller tear the current dialog down at its deadline.
+                _ = tokio::time::sleep_until(eff_deadline.unwrap_or(viewing_deadline)), if eff_deadline.is_some() => {
                     return RefreshOutcome::Aborted;
                 }
                 r = tokio::time::timeout_at(attempt_deadline, &mut connect) => match r {
@@ -996,6 +1016,10 @@ async fn establish_refresh_dialog(
     // RESPONSE_TIMEOUT (the whole-attempt bound the compile-time invariant relies on).
     let resp_deadline = attempt_deadline;
     let final_resp = loop {
+        // The deadline to honor THIS iteration: the pre-attempt window, pushed out by any Hold recorded so
+        // far; `None` once a manual Start was seen. Recomputed each iteration so a Hold that arrived moves it
+        // out to that poke's linger rather than disarming it forever.
+        let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline);
         tokio::select! {
             biased;
             _ = wait_until_stopping(stopping) => {
@@ -1016,11 +1040,12 @@ async fn establish_refresh_dialog(
                     return RefreshOutcome::Aborted; // Stop/closed: INVITE cancelled, caller hangs up
                 }
             },
-            // The viewing window lapsed mid-attempt with no renewing poke (the viewer left just as the
-            // refresh began): CANCEL the pending INVITE (a late 2xx must not pin the panel) and hand back
-            // Aborted so the caller hangs up now — honoring VIEWER_LINGER instead of blocking here for the
-            // full response budget. A poke seen during the attempt DISARMS this (renewals.any()).
-            _ = tokio::time::sleep_until(viewing_deadline), if !renewals.any() => {
+            // The viewer's effective window lapsed mid-attempt with no fresh poke (the viewer left as the
+            // refresh began, or its last Hold's linger elapsed): CANCEL the pending INVITE (a late 2xx must
+            // not pin the panel) and hand back Aborted so the caller hangs up now — honoring VIEWER_LINGER
+            // instead of blocking here for the full response budget. A Hold seen during the attempt PUSHES
+            // this out to that poke's expiry; a manual Start disarms it (eff_deadline == None).
+            _ = tokio::time::sleep_until(eff_deadline.unwrap_or(viewing_deadline)), if eff_deadline.is_some() => {
                 let seed = std::mem::take(&mut acc);
                 cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
                 return RefreshOutcome::Aborted;
@@ -1321,7 +1346,8 @@ async fn session(
             // Bound the attempt by the governing hang-up deadline (the LATER of the manual and linger
             // windows): if BOTH lapse mid-attempt with no renewing poke, the refresh aborts promptly rather
             // than blocking for the full response budget, so a viewer that leaves as the refresh begins still
-            // hangs up ~VIEWER_LINGER later. A poke during the attempt disarms that (renewals.any()).
+            // hangs up ~VIEWER_LINGER later. A Hold during the attempt pushes it out to that poke's linger; a
+            // manual Start disarms it (see effective_refresh_deadline).
             let viewing_deadline = governing_deadline(start_deadline, hold_deadline);
             match establish_refresh_dialog(
                 cfg,
@@ -2454,6 +2480,42 @@ mod tests {
         );
         assert_eq!(s3, base, "no Start ⇒ start_deadline untouched");
         assert_eq!(h3, now + Duration::from_secs(20), "a past hold_expiry must not move hold_deadline");
+    }
+
+    #[test]
+    fn effective_refresh_deadline_pushes_out_on_hold_and_disarms_on_start() {
+        let base = tokio::time::Instant::now() + Duration::from_secs(5);
+
+        // No renewals ⇒ honor the pre-attempt base deadline unchanged.
+        assert_eq!(
+            effective_refresh_deadline(&RefreshRenewals::default(), base),
+            Some(base),
+            "no poke ⇒ the base viewing deadline governs"
+        );
+
+        // A later Hold PUSHES the deadline out to that poke's expiry (not disarms it) — so a nonresponsive
+        // panel can't hold the dialog past the poke's own linger after the viewer leaves.
+        let later = base + Duration::from_secs(4);
+        assert_eq!(
+            effective_refresh_deadline(&RefreshRenewals { saw_start: false, hold_expiry: Some(later) }, base),
+            Some(later),
+            "a later Hold expiry moves the abort out to that linger"
+        );
+
+        // A Hold that is EARLIER than the base never moves the deadline backwards (max).
+        let earlier = base - Duration::from_secs(2);
+        assert_eq!(
+            effective_refresh_deadline(&RefreshRenewals { saw_start: false, hold_expiry: Some(earlier) }, base),
+            Some(base),
+            "an earlier Hold expiry must not pull the abort in"
+        );
+
+        // A manual Start disarms the abort entirely — the caller re-arms the full window on return.
+        assert_eq!(
+            effective_refresh_deadline(&RefreshRenewals { saw_start: true, hold_expiry: Some(later) }, base),
+            None,
+            "a manual Start ⇒ no deadline abort during the attempt"
+        );
     }
 
     #[test]
