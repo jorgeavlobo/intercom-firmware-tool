@@ -65,6 +65,13 @@ const MAIN_ENTRANCE_OWN_ADDR: &str = "20";
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long we keep draining (framing responses, tearing down a racing 2xx) after sending CANCEL.
 const CANCEL_DRAIN: Duration = Duration::from_secs(2);
+/// Bounded wait to COMPLETE a partial in-dialog request that flexisip coalesced after a refresh 2xx, before
+/// the caller retires the old dialog and adopts the successor. If the successor is about to BYE (a plant
+/// that admits then immediately drops the second dialog), that BYE can be split across TCP reads: without
+/// this, `process_in_dialog` frames nothing, reports the successor healthy, and we retire the old dialog —
+/// then the next read completes the BYE and the last dialog ends (the very freeze this guards). A coalesced
+/// split completes within one loopback RTT, so this is short; if nothing completes we adopt anyway.
+const SUCCESSOR_VALIDATE: Duration = Duration::from_millis(500);
 /// Cap on a single SIP message we will buffer (offer/answer are ~2–3 KB; this bounds a hostile peer).
 const MAX_SIP_BYTES: usize = 65536;
 /// Reconnect backoff for the (rare) case the SIP socket / dialog fails.
@@ -728,8 +735,11 @@ fn governing_deadline(
 /// `session`'s own establish records `want_start` / the latest `hold_expiry` seen during establishment.
 #[derive(Default)]
 struct RefreshRenewals {
-    /// A manual `view_camera` (`ViewCmd::Start`) arrived: the caller must re-arm the FULL window.
-    saw_start: bool,
+    /// The LATEST manual `view_camera` (`ViewCmd::Start`) press instant seen, if any: the caller re-arms
+    /// the FULL window anchored at THAT press (`start_at + window`), NOT at refresh completion — so a slow
+    /// attempt cannot stretch the per-press window by its own latency (recorded absolute, exactly as
+    /// `hold_expiry` is, rather than as a bare flag).
+    start_at: Option<tokio::time::Instant>,
     /// The LATEST auto-hold `ViewCmd::Hold` expiry seen (absolute), if any: the caller lifts `hold_deadline`
     /// to it (max), so a poke buffered during the attempt still keeps the view alive.
     hold_expiry: Option<tokio::time::Instant>,
@@ -739,7 +749,12 @@ impl RefreshRenewals {
     /// Fold one command seen during the attempt into the accumulated renewals.
     fn record(&mut self, cmd: &ViewCmd) {
         match cmd {
-            ViewCmd::Start => self.saw_start = true,
+            ViewCmd::Start => {
+                // Anchor to WHEN the press arrived, keeping the latest, so `start_at + window` reflects the
+                // press moment rather than the (possibly much later) refresh-completion time.
+                let now = tokio::time::Instant::now();
+                self.start_at = Some(self.start_at.map_or(now, |cur| cur.max(now)));
+            }
             ViewCmd::Hold(e) => self.hold_expiry = Some(self.hold_expiry.map_or(*e, |cur| cur.max(*e))),
             ViewCmd::Stop => {}
         }
@@ -759,7 +774,7 @@ fn effective_refresh_deadline(
     renewals: &RefreshRenewals,
     base: tokio::time::Instant,
 ) -> Option<tokio::time::Instant> {
-    if renewals.saw_start {
+    if renewals.start_at.is_some() {
         None
     } else {
         Some(match renewals.hold_expiry {
@@ -770,9 +785,11 @@ fn effective_refresh_deadline(
 }
 
 /// Apply renewals captured during a refresh attempt to the caller's viewing-window deadlines, with the
-/// SAME rules the hold loop uses for a live command: a `Start` re-arms the FULL `window` from `now`; a
-/// `Hold` lifts `hold_deadline` to its absolute expiry (max), ignoring one already elapsed by `now`. Pure,
-/// so the deadline arithmetic is unit-testable.
+/// SAME rules the hold loop uses for a live command: a `Start` re-arms the FULL `window` anchored at the
+/// press (`start_at + window`), NOT at `now` — so a slow refresh cannot stretch the per-press window by its
+/// own latency; a `Hold` lifts `hold_deadline` to its absolute expiry (max), ignoring one already elapsed by
+/// `now`. Both use `max` so a renewal never shortens a still-longer existing deadline. Pure, so the deadline
+/// arithmetic is unit-testable.
 fn apply_refresh_renewals(
     renewals: &RefreshRenewals,
     now: tokio::time::Instant,
@@ -780,8 +797,8 @@ fn apply_refresh_renewals(
     start_deadline: &mut tokio::time::Instant,
     hold_deadline: &mut tokio::time::Instant,
 ) {
-    if renewals.saw_start {
-        *start_deadline = now + window;
+    if let Some(s) = renewals.start_at {
+        *start_deadline = (*start_deadline).max(s + window);
     }
     if let Some(e) = renewals.hold_expiry {
         if e > now {
@@ -852,6 +869,45 @@ async fn process_in_dialog(
         }
     }
     InDialog::Continue
+}
+
+/// Confirm a freshly-established successor dialog is actually live BEFORE the caller retires the still-healthy
+/// old one. Processes the residual coalesced after the 2xx (via [`process_in_dialog`]); if only a PARTIAL
+/// in-dialog request was buffered — `process_in_dialog` cannot frame it and would report `Continue` — this
+/// does bounded reads (up to [`SUCCESSOR_VALIDATE`]) to COMPLETE and reprocess it, so a coalesced-but-split
+/// BYE is observed NOW (`PanelEnded`) rather than only after we have already dropped the old dialog and can
+/// do nothing but freeze. A terminal outcome short-circuits; a fully-drained buffer means healthy; if the
+/// bound elapses with a partial still pending we treat the successor as live (it answered our INVITE and has
+/// sent no complete teardown) and adopt.
+async fn validate_successor(
+    sock: &mut TcpStream,
+    inbound: &mut Vec<u8>,
+    cfg: &Config,
+    d: &Dialog,
+) -> InDialog {
+    let deadline = tokio::time::Instant::now() + SUCCESSOR_VALIDATE;
+    loop {
+        match process_in_dialog(sock, inbound, cfg, d).await {
+            InDialog::Continue => {}
+            terminal => return terminal, // PanelEnded / Failed — successor is not adoptable
+        }
+        if inbound.is_empty() {
+            return InDialog::Continue; // nothing pending → healthy
+        }
+        // A partial request remains buffered; read more (bounded) to complete it, then reprocess.
+        let mut buf = [0u8; 4096];
+        match tokio::time::timeout_at(deadline, sock.read(&mut buf)).await {
+            Ok(Ok(0)) => {
+                return InDialog::Failed(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "successor closed mid-request before adoption",
+                ));
+            }
+            Ok(Ok(n)) => inbound.extend_from_slice(&buf[..n]),
+            Ok(Err(e)) => return InDialog::Failed(e),
+            Err(_) => return InDialog::Continue, // no completion within the bound ⇒ adopt as live
+        }
+    }
 }
 
 /// Outcome of a make-before-break refresh attempt ([`establish_refresh_dialog`]).
@@ -1366,7 +1422,9 @@ async fn session(
                     // request delivered ONCE over TCP) on the NEW dialog FIRST, BEFORE retiring the old one.
                     // If that request is a BYE — a plant that accepts then immediately tears the second
                     // dialog — the successor is already dead, and trading the still-healthy old dialog for a
-                    // corpse would drop the media and cause the very freeze this prevents.
+                    // corpse would drop the media and cause the very freeze this prevents. `validate_successor`
+                    // also completes a PARTIAL coalesced request (a BYE split across TCP reads) with a bounded
+                    // read, so a split teardown is caught here rather than after we have adopted.
                     let mut new_sock = new_sock;
                     let new_d = *new_d;
                     let mut new_inbound = residual;
@@ -1377,7 +1435,7 @@ async fn session(
                     // deliberately do NOT invent an unconditional linger from completion time (that would
                     // hold the panel up past VIEWER_LINGER when the viewer left mid-attempt).
                     apply_refresh_renewals(&renewals, now, window, &mut start_deadline, &mut hold_deadline);
-                    match process_in_dialog(&mut new_sock, &mut new_inbound, cfg, &new_d).await {
+                    match validate_successor(&mut new_sock, &mut new_inbound, cfg, &new_d).await {
                         InDialog::Continue => {
                             // Successor healthy → NOW retire the old dialog and adopt. When the plant shares
                             // its single media session across the two — the seamless case, and the likely
@@ -2454,18 +2512,20 @@ mod tests {
         let window = Duration::from_secs(30);
         let now = base + Duration::from_secs(10);
 
-        // saw_start re-arms the FULL window from now; a future hold_expiry lifts hold_deadline (max).
+        // A Start re-arms the FULL window ANCHORED AT THE PRESS (start_at + window), not at `now`; a future
+        // hold_expiry lifts hold_deadline (max).
         let mut start = base; // an already-elapsed regime
         let mut hold = base;
+        let start_at = base + Duration::from_secs(2); // pressed early in the attempt
         let future_hold = now + Duration::from_secs(4);
         apply_refresh_renewals(
-            &RefreshRenewals { saw_start: true, hold_expiry: Some(future_hold) },
+            &RefreshRenewals { start_at: Some(start_at), hold_expiry: Some(future_hold) },
             now,
             window,
             &mut start,
             &mut hold,
         );
-        assert_eq!(start, now + window);
+        assert_eq!(start, start_at + window, "the window is anchored at the press, not at `now`");
         assert_eq!(hold, future_hold);
 
         // Nothing recorded ⇒ deadlines unchanged.
@@ -2480,7 +2540,7 @@ mod tests {
         let mut s3 = base;
         let mut h3 = now + Duration::from_secs(20);
         apply_refresh_renewals(
-            &RefreshRenewals { saw_start: false, hold_expiry: Some(now - Duration::from_secs(1)) },
+            &RefreshRenewals { start_at: None, hold_expiry: Some(now - Duration::from_secs(1)) },
             now,
             window,
             &mut s3,
@@ -2488,6 +2548,19 @@ mod tests {
         );
         assert_eq!(s3, base, "no Start ⇒ start_deadline untouched");
         assert_eq!(h3, now + Duration::from_secs(20), "a past hold_expiry must not move hold_deadline");
+
+        // A Start whose `start_at + window` is EARLIER than an existing (longer) start_deadline must not
+        // shorten it (max).
+        let mut s4 = now + Duration::from_secs(100);
+        let mut h4 = base;
+        apply_refresh_renewals(
+            &RefreshRenewals { start_at: Some(base), hold_expiry: None },
+            now,
+            window,
+            &mut s4,
+            &mut h4,
+        );
+        assert_eq!(s4, now + Duration::from_secs(100), "a shorter anchored window must not cut an existing one");
     }
 
     #[test]
@@ -2505,7 +2578,7 @@ mod tests {
         // panel can't hold the dialog past the poke's own linger after the viewer leaves.
         let later = base + Duration::from_secs(4);
         assert_eq!(
-            effective_refresh_deadline(&RefreshRenewals { saw_start: false, hold_expiry: Some(later) }, base),
+            effective_refresh_deadline(&RefreshRenewals { start_at: None, hold_expiry: Some(later) }, base),
             Some(later),
             "a later Hold expiry moves the abort out to that linger"
         );
@@ -2513,17 +2586,72 @@ mod tests {
         // A Hold that is EARLIER than the base never moves the deadline backwards (max).
         let earlier = base - Duration::from_secs(2);
         assert_eq!(
-            effective_refresh_deadline(&RefreshRenewals { saw_start: false, hold_expiry: Some(earlier) }, base),
+            effective_refresh_deadline(&RefreshRenewals { start_at: None, hold_expiry: Some(earlier) }, base),
             Some(base),
             "an earlier Hold expiry must not pull the abort in"
         );
 
         // A manual Start disarms the abort entirely — the caller re-arms the full window on return.
         assert_eq!(
-            effective_refresh_deadline(&RefreshRenewals { saw_start: true, hold_expiry: Some(later) }, base),
+            effective_refresh_deadline(&RefreshRenewals { start_at: Some(base), hold_expiry: Some(later) }, base),
             None,
             "a manual Start ⇒ no deadline abort during the attempt"
         );
+    }
+
+    #[tokio::test]
+    async fn validate_successor_completes_a_split_bye_and_reports_panel_ended() {
+        // The residual after the refresh 2xx holds only the START of an in-dialog BYE (split across TCP
+        // reads). validate_successor must READ the rest, frame it, and report PanelEnded — so the caller
+        // keeps the healthy old dialog instead of adopting a successor that is about to die. It also 200-OKs
+        // the BYE, which the peer reads back.
+        use std::collections::HashMap;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            // Send the REMAINDER of the BYE (the residual below stops mid-headers).
+            s.write_all(b"CSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+            s.flush().await.unwrap();
+            // Read the 200 OK validate_successor sends for the BYE.
+            let mut b = [0u8; 1024];
+            let n = s.read(&mut b).await.unwrap();
+            String::from_utf8_lossy(&b[..n]).into_owned()
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = crate::config::Config::from_map(m);
+        let d = Dialog {
+            aor: "c100x".into(),
+            domain: "dev.example".into(),
+            local_port: 5599,
+            call_id: "callid".into(),
+            from_tag: "ft".into(),
+            branch: "z9hG4bKrefresh".into(),
+            cseq: 21,
+            to_tag: "srv123".into(),
+            remote_target: "sip:c100x@127.0.0.1:5599".into(),
+        };
+        let mut sock = TcpStream::connect(addr).await.unwrap();
+        // A PARTIAL BYE: headers not yet terminated, so complete_message_len() returns None until the peer
+        // sends the rest.
+        let mut inbound = b"BYE sip:btmqttd@127.0.0.1:5599 SIP/2.0\r\n\
+            Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKbye\r\n\
+            From: <sip:c100x@dev.example>;tag=srv123\r\n\
+            To: <sip:btmqttd@dev.example>;tag=ft\r\n\
+            Call-ID: callid\r\n"
+            .to_vec();
+        let outcome = validate_successor(&mut sock, &mut inbound, &cfg, &d).await;
+        assert!(
+            matches!(outcome, InDialog::PanelEnded),
+            "a split coalesced BYE must be completed and reported before adoption"
+        );
+        let ok = peer.await.unwrap();
+        assert!(ok.starts_with("SIP/2.0 200 "), "the completed BYE must be 200-OK'd, got: {ok}");
     }
 
     #[test]
