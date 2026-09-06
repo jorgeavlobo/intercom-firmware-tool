@@ -1313,19 +1313,23 @@ async fn establish_refresh_dialog(
     let Some(tag) = to_tag(&final_resp).filter(|t| !t.trim().is_empty()) else {
         // A 2xx with NO (or an empty/whitespace) To-tag is malformed (flexisip always sets one). The panel
         // has still ACCEPTED the INVITE, so a UAC MUST ACK the 2xx (RFC 3261 §13.2.2.4) or flexisip keeps
-        // retransmitting it. We CAN ACK — echoing the received `To` value (as trimmed by header_value),
-        // PRESERVING whether its tag is empty OR absent (build_ack always emits `;tag=`, so it can't do that)
-        // with the Request-URI taken from the 2xx's Contact — even though we canNOT form a reliable in-dialog
-        // BYE without a remote tag. So ACK on THIS connection (where the 2xx arrived and the dialog lives),
-        // then LATCH (retriable=false): a BYE here would be unaddressable, and retrying only reproduces the
-        // same tagless 2xx and stacks one orphan per attempt, so we ride the current dialog to the panel's
-        // cut, which reclaims this successor on its own timeout. (Cannot happen against a conformant flexisip;
-        // defensive.)
-        let to_hdr = header_value(&final_resp, "To").unwrap_or_default();
+        // retransmitting it. We CAN ACK — echoing the received `To` (via ack_to_header: whitespace trimmed,
+        // synthesized `<sip:aor@domain>` if the header is somehow absent, tag empty/absent preserved) with
+        // the Request-URI from the 2xx's Contact — even though we canNOT form a reliable in-dialog BYE
+        // without a remote tag. So ACK on THIS connection (where the 2xx arrived and the dialog lives),
+        // falling back to a fresh connection if that write fails (the socket may have closed after
+        // delivering the 2xx), then LATCH (retriable=false): a BYE here would be unaddressable, and retrying
+        // only reproduces the same tagless 2xx and stacks one orphan per attempt, so we ride the current
+        // dialog to the panel's cut, which reclaims this successor on its own timeout. (Cannot happen against
+        // a conformant flexisip; defensive.)
         let target =
             contact_uri(&final_resp).unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
-        let ack = build_ack_echoing_to(&d, &format!("z9hG4bK{}", rand_hex(8)), &target, to_hdr);
-        let _ = write_all_flush(&mut sock, ack.as_bytes()).await;
+        let ack = build_ack_echoing_to(&d, &format!("z9hG4bK{}", rand_hex(8)), &target, &ack_to_header(&final_resp, &d));
+        if write_all_flush(&mut sock, ack.as_bytes()).await.is_err() {
+            if let Ok(mut fresh) = connect_sip(cfg).await {
+                let _ = write_all_flush(&mut fresh, ack.as_bytes()).await;
+            }
+        }
         return RefreshOutcome::Declined(
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
