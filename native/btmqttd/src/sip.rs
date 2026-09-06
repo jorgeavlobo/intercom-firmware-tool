@@ -394,10 +394,12 @@ pub fn build_ack(d: &Dialog, ack_branch: &str) -> String {
     )
 }
 
-/// ACK for a 2xx whose `To` header we echo VERBATIM. Used only for a MALFORMED 2xx whose To-tag is empty
-/// or entirely absent: RFC 3261 §13.2.2.4 requires the ACK's `To` to equal the 2xx's `To`, so we must
-/// reproduce the received header exactly rather than synthesize `;tag=` (which `build_ack` always does).
-/// `to_header` is the raw `To` value from the 2xx; `target` is its `Contact` (the ACK Request-URI).
+/// ACK for a 2xx whose `To` header we echo back. Used only for a MALFORMED 2xx whose To-tag is empty or
+/// entirely absent: RFC 3261 §13.2.2.4 requires the ACK's `To` to equal the 2xx's `To`, so we must
+/// reproduce the received `To` value — critically PRESERVING whether the tag is empty or absent — rather
+/// than synthesize `;tag=` (which `build_ack` always does). `to_header` is that `To` value as returned by
+/// `header_value` (surrounding whitespace already trimmed; tag presence/absence preserved), placed after
+/// `To: ` verbatim; `target` is the 2xx's `Contact` (the ACK Request-URI).
 pub fn build_ack_echoing_to(d: &Dialog, ack_branch: &str, target: &str, to_header: &str) -> String {
     format!(
         "ACK {target} SIP/2.0\r\n\
@@ -1265,6 +1267,10 @@ async fn establish_refresh_dialog(
         }
     };
 
+    // DEFENSIVE (not normally reachable): `wait_final_response` only ever returns a framed message whose
+    // `parse_status` is `Some(s >= 200)`, so `status` is present here. Kept as a guarded fallback rather than
+    // an `.expect()` — should that coupling ever change, a malformed final should decline retriably, never
+    // panic the session task.
     let Some(status) = parse_status(&final_resp) else {
         return RefreshOutcome::Declined(
             std::io::Error::new(std::io::ErrorKind::InvalidData, "no SIP status line"),
