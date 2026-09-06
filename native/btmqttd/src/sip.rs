@@ -451,10 +451,11 @@ pub fn build_cancel(d: &Dialog) -> String {
 /// ACK a NON-2xx final response to the INVITE (RFC 3261 §17.1.1.3). Unlike the 2xx ACK (a new
 /// transaction to the panel's Contact), this ACK is part of the INVITE CLIENT transaction: same
 /// Request-URI as the INVITE (`sip:<aor>@<domain>`), the SAME top `Via` branch and CSeq NUMBER. `to_header`
-/// is the failure response's `To` value echoed VERBATIM (§13.2.2.4-style: the ACK's `To` must equal the
-/// response's), so even a MALFORMED final (empty or absent tag) is still ACKed and absorbed rather than
-/// skipped — otherwise the proxy/panel hold the server transaction until Timer H. Callers pass the raw
-/// `To` from the response (with a synthesized `<sip:aor@domain>` fallback if the header is somehow absent).
+/// is the failure response's `To` value as parsed by `ack_to_header` (surrounding whitespace trimmed by
+/// `header_value`; the tag — empty or absent — preserved), so the ACK's `To` matches the response's
+/// (RFC 3261 §13.2.2.4-style) and even a MALFORMED final (empty or absent tag) is still ACKed and absorbed
+/// rather than skipped — otherwise the proxy/panel hold the server transaction until Timer H. Callers pass
+/// that `To` (with a synthesized `<sip:aor@domain>` fallback if the header is somehow absent).
 pub fn build_ack_failure(d: &Dialog, to_header: &str) -> String {
     format!(
         "ACK sip:{aor}@{domain} SIP/2.0\r\n\
@@ -477,8 +478,9 @@ pub fn build_ack_failure(d: &Dialog, to_header: &str) -> String {
     )
 }
 
-/// The `To` header value to echo back in an ACK for a received response: the response's raw `To` verbatim
-/// (so an empty/absent tag is preserved), or a synthesized `<sip:aor@domain>` if the header is absent.
+/// The `To` header value to echo back in an ACK for a received response: the response's `To` as returned
+/// by `header_value` (surrounding whitespace trimmed; an empty/absent tag preserved), or a synthesized
+/// `<sip:aor@domain>` if the header is absent.
 fn ack_to_header(msg: &str, d: &Dialog) -> String {
     header_value(msg, "To")
         .map(str::to_string)
@@ -1296,7 +1298,7 @@ async fn establish_refresh_dialog(
         // pending, …) may well succeed on a retry before the panel cut, so it stays retriable. A fixed
         // REFRESH_RETRY_BACKOFF (bounded by the caller's pre-cut budget) is used rather than parsing
         // Retry-After — flexisip rarely sets it and any value is dwarfed by the ~60 s window. ACK
-        // unconditionally, echoing the response's To verbatim (via ack_to_header), so even a malformed
+        // unconditionally, echoing the response's To (via ack_to_header), so even a malformed
         // (empty/absent-tag) final is absorbed rather than left to Timer H.
         let _ = write_all_flush(&mut sock, build_ack_failure(&d, &ack_to_header(&final_resp, &d)).as_bytes())
             .await;
@@ -1468,7 +1470,7 @@ async fn session(
     if !(200..300).contains(&status) {
         // ACK any NON-2xx final (486 Busy, 401/407, other rejects) — RFC 3261 §17.1.1.3. The ACK is
         // part of the INVITE client transaction: same Request-URI, top Via branch and CSeq number,
-        // echoing the response's To verbatim (via ack_to_header). Without it flexisip holds the INVITE
+        // echoing the response's To (via ack_to_header). Without it flexisip holds the INVITE
         // server transaction until Timer H, so repeated busy/failed views would pile up stale
         // transactions. ACK unconditionally so even a malformed (empty/absent-tag) final is absorbed.
         let _ = write_all_flush(&mut sock, build_ack_failure(&d, &ack_to_header(&final_resp, &d)).as_bytes())
@@ -1958,8 +1960,8 @@ async fn drain_after_cancel(
                         }
                         None => {
                             // Malformed 2xx (empty/absent tag): ACK to stop retransmits, echoing the received
-                            // To verbatim, but no addressable BYE — the panel's own cut reclaims the orphan
-                            // (mirrors establish_refresh_dialog's tagless-2xx handling).
+                            // To (via ack_to_header), but no addressable BYE — the panel's own cut reclaims
+                            // the orphan (mirrors establish_refresh_dialog's tagless-2xx handling).
                             let ack = build_ack_echoing_to(
                                 d,
                                 &format!("z9hG4bK{}", rand_hex(8)),
@@ -1979,7 +1981,7 @@ async fn drain_after_cancel(
                 // another non-2xx). That is ALSO a non-2xx final and requires an in-transaction ACK
                 // (build_ack_failure), or flexisip holds the server transaction until Timer H — the same
                 // stale-transaction accumulation the reject-path ACK fixes. ACK unconditionally, echoing the
-                // response's To verbatim (via ack_to_header) so even a malformed final is absorbed. Send it
+                // response's To (via ack_to_header) so even a malformed final is absorbed. Send it
                 // over a FRESH connection when `sock` is write-tainted (the ACK keeps the INVITE's `Via`, so
                 // flexisip still matches it); otherwise on the live socket.
                 Some(s) if s >= 300 => {
@@ -2387,13 +2389,13 @@ mod tests {
         // In-transaction: SAME top Via branch and CSeq NUMBER as the INVITE, method ACK.
         assert!(ack.contains("branch=z9hG4bKinvitebranch\r\n"));
         assert!(ack.contains("CSeq: 21 ACK\r\n"));
-        // Echoes the failure response's To VERBATIM.
+        // Echoes the failure response's To value (as passed by the caller).
         assert!(ack.contains("To: <sip:c100x@dev.example>;tag=paneltag\r\n"));
         // Its top Via matches the INVITE's (branch + sent-by), like the CANCEL.
         let invite = build_invite(&d, &build_sdp_offer(1, 2, "k", "da"));
         let via = |m: &str| m.lines().find(|l| l.starts_with("Via:")).unwrap().to_string();
         assert_eq!(via(&ack), via(&invite));
-        // A MALFORMED final's To (no tag param) is echoed verbatim too — no synthesized `;tag=` — so even a
+        // A MALFORMED final's To (no tag param) is echoed as-is too — no synthesized `;tag=` — so even a
         // tagless reject is still absorbed rather than skipped.
         let ack_no_tag = build_ack_failure(&d, "<sip:c100x@dev.example>");
         assert!(ack_no_tag.contains("To: <sip:c100x@dev.example>\r\n"));
@@ -2722,7 +2724,7 @@ mod tests {
 
     // A MALFORMED racing 2xx (empty OR absent To-tag) drained during cancellation must still be ACKed — a
     // UAC MUST ACK every 2xx (RFC 3261 §13.2.2.4) or the panel keeps retransmitting it — echoing the received
-    // To verbatim, but must NOT be BYE'd (unaddressable without a remote tag; the panel's cut reclaims it).
+    // To (via ack_to_header), but must NOT be BYE'd (unaddressable without a remote tag; the cut reclaims it).
     // With `sock_write_ok = false` the ACK goes over a FRESH connection and nothing is written to `sock`.
     async fn assert_drain_malformed_2xx_acks_over_fresh(to_line: &'static str, expect_to: &'static str) {
         use std::collections::HashMap;
@@ -2783,7 +2785,7 @@ mod tests {
         assert!(sent.starts_with("ACK "), "a malformed racing 2xx must be ACKed on the fresh connection, got: {sent}");
         assert!(
             sent.contains(&format!("\r\n{expect_to}\r\n")),
-            "the ACK must echo the received To verbatim ({expect_to}), got: {sent}"
+            "the ACK must reproduce the received To ({expect_to}), got: {sent}"
         );
         assert!(!sent.contains("BYE"), "an unaddressable racing 2xx must NOT be BYE'd, got: {sent}");
 
