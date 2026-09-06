@@ -1846,24 +1846,29 @@ async fn wait_until_stopping(stopping: &AtomicBool) {
 /// response (a racing 2xx, or the 487) routes back on the connection the INVITE arrived on (§18.2.2), NOT
 /// the fresh CANCEL connection — so even when the original CANCEL write failed we must read the original
 /// socket for it (a genuinely dead socket just EOFs at once; a slow-but-live one still delivers the 2xx).
-/// `acc` was read from that original stream, so a trailing partial is a valid continuation
-/// (`seed_foreign = false`). Reads are always safe; if a racing-2xx ACK/BYE can't be written back to the
-/// slow/dead original socket, `drain_after_cancel` falls back to a fresh connection itself. The retried
-/// CANCEL keeps the INVITE's original `Via` (branch AND sent-by port) so flexisip matches it to the client
-/// transaction (RFC 3261 §9.1 / §17.1.1.3); hence we do NOT overwrite `d.local_port`.
+/// `acc` was read from that original stream, so a trailing partial is a valid continuation. READS are always
+/// safe; WRITES are not: a FAILED CANCEL write may have left a partial CANCEL on the socket, so any response
+/// ACK/BYE we send must NOT be appended to it — we pass `sock_write_ok = false` and `drain_after_cancel`
+/// then routes those writes over a fresh connection. The retried CANCEL keeps the INVITE's original `Via`
+/// (branch AND sent-by port) so flexisip matches it to the client transaction (RFC 3261 §9.1 / §17.1.1.3);
+/// hence we do NOT overwrite `d.local_port`.
 async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, acc: Vec<u8>) {
-    if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_err() {
+    let sock_write_ok = if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_err() {
         // Original CANCEL write failed (dead or merely stalled): resend over a FRESH connection so flexisip
         // still cancels the forwarded transaction, then absorb its 200-to-CANCEL best-effort (needs no ACK).
+        // The original socket is now WRITE-TAINTED (a partial CANCEL may sit on it) ⇒ sock_write_ok = false.
         if let Ok(mut fresh) = connect_sip(cfg).await {
             let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
             let mut scratch = [0u8; 256];
             let _ = tokio::time::timeout(Duration::from_millis(200), fresh.read(&mut scratch)).await;
         }
-    }
+        false
+    } else {
+        true // the whole CANCEL flushed cleanly ⇒ the socket is still write-safe for the response ACK/BYE
+    };
     // Drain the ORIGINAL socket for the INVITE's own final response (see the fn doc): a racing 2xx there is
-    // ACK+BYE'd, a 487 is ACKed; a dead socket EOFs immediately.
-    drain_after_cancel(sock, cfg, d, acc).await;
+    // ACK+BYE'd, a 487 is ACKed — over this socket if still write-safe, else over a fresh connection.
+    drain_after_cancel(sock, cfg, d, acc, sock_write_ok).await;
 }
 
 /// Clean up a refresh INVITE whose WRITE was interrupted or errored. The original socket may hold a
@@ -1872,10 +1877,10 @@ async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialo
 /// INVITE's own final response — a racing 2xx if the whole INVITE actually reached flexisip before the
 /// write was cut, or the 487 to our CANCEL — comes back on the ORIGINAL connection the INVITE arrived on
 /// (RFC 3261 §18.2.2), NOT the fresh CANCEL connection, so we must also drain `sock` for it and ACK/BYE a
-/// racing 2xx there. Reading `sock` is always safe; `drain_after_cancel` only WRITES (a 2xx's ACK+BYE, or a
-/// 487's ACK) AFTER it frames a COMPLETE response — which can only exist if the whole INVITE arrived, i.e.
-/// the socket was never partial — so those in-dialog writes are well-formed. If the INVITE was truly
-/// partial, flexisip formed no transaction, nothing is framed, and the drain simply times out.
+/// racing 2xx there. Reading `sock` is always safe; but the socket may hold a PARTIAL INVITE, so it is
+/// WRITE-TAINTED — we pass `sock_write_ok = false` and `drain_after_cancel` routes any response ACK/BYE over
+/// a fresh connection rather than appending it to the partial INVITE. If the INVITE was truly partial,
+/// flexisip formed no transaction, nothing is framed, and the drain simply times out.
 async fn cancel_partial_write_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog) {
     if let Ok(mut fresh) = connect_sip(cfg).await {
         let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
@@ -1885,8 +1890,8 @@ async fn cancel_partial_write_invite(sock: &mut TcpStream, cfg: &Config, d: &mut
         let _ = tokio::time::timeout(Duration::from_millis(200), fresh.read(&mut scratch)).await;
     }
     // `acc` is empty here (nothing was read from `sock` during the write phase); the drain reads the
-    // ORIGINAL socket for the INVITE's final response.
-    drain_after_cancel(sock, cfg, d, Vec::new()).await;
+    // ORIGINAL socket for the INVITE's final response. The socket is write-tainted (partial INVITE) ⇒ false.
+    drain_after_cancel(sock, cfg, d, Vec::new(), false).await;
 }
 
 /// Drain framed responses after a CANCEL for `CANCEL_DRAIN`, ACK+BYE-ing a racing INVITE 2xx.
@@ -1894,7 +1899,20 @@ async fn cancel_partial_write_invite(sock: &mut TcpStream, cfg: &Config, d: &mut
 /// Always drains the ORIGINAL INVITE socket (both callers pass it), and `acc` is the bytes already read
 /// from that same stream, so a trailing partial is the valid start of the NEXT message on it and is kept
 /// and completed by later reads — no cross-stream seed to discard.
-async fn drain_after_cancel(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, mut acc: Vec<u8>) {
+///
+/// `sock_write_ok` says whether it is safe to WRITE the response ACK/BYE back on `sock`. It is `false` when
+/// the caller's last write to `sock` FAILED (a partial CANCEL, or a partial INVITE on the write-phase path)
+/// may sit on the stream: appending the ACK/BYE would concatenate into one malformed request. In that case
+/// a racing 2xx is torn down (`ack_bye_reconnect`) and a 487 is ACKed over a FRESH connection instead —
+/// both keep the INVITE's original `Via`, so flexisip still matches them. When `true`, we try the live
+/// socket first and fall back to a fresh connection only if that write fails.
+async fn drain_after_cancel(
+    sock: &mut TcpStream,
+    cfg: &Config,
+    d: &mut Dialog,
+    mut acc: Vec<u8>,
+    sock_write_ok: bool,
+) {
     // `acc` is seeded with whatever `wait_final_response` had already read when the timeout fired —
     // possibly a partial (or even complete) INVITE 2xx — so we can finish framing it below.
     let mut buf = [0u8; 4096];
@@ -1911,7 +1929,9 @@ async fn drain_after_cancel(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, 
             }
             match parse_status(&msg) {
                 // A 2xx to the INVITE means the dialog established despite our CANCEL. It was never
-                // ACKed on a live socket, so ACK-then-BYE; if EITHER write fails (socket reset before
+                // ACKed on a live socket, so ACK-then-BYE. If `sock` is write-tainted (a failed prior write
+                // may have left a partial CANCEL/INVITE on it), do NOT write to it — tear down over a FRESH
+                // connection. Otherwise try the live socket first and, if EITHER write fails (reset before
                 // the ACK reaches flexisip, or between ACK and BYE), redo BOTH over a fresh connection
                 // (a BYE alone to an unacknowledged 2xx is unreliable).
                 Some(s) if (200..300).contains(&s) => {
@@ -1919,7 +1939,7 @@ async fn drain_after_cancel(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, 
                         d.to_tag = tag;
                         d.remote_target = contact_uri(&msg)
                             .unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
-                        if ack_then_bye(sock, d).await.is_err() {
+                        if !sock_write_ok || ack_then_bye(sock, d).await.is_err() {
                             ack_bye_reconnect(cfg, d).await;
                         }
                     }
@@ -1928,10 +1948,17 @@ async fn drain_after_cancel(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, 
                 // The normal terminal response to a cancelled INVITE is `487 Request Terminated` (or
                 // another non-2xx). That is ALSO a non-2xx final and requires an in-transaction ACK
                 // (build_ack_failure), or flexisip holds the server transaction until Timer H — the
-                // same stale-transaction accumulation the reject-path ACK fixes.
+                // same stale-transaction accumulation the reject-path ACK fixes. Send it over a FRESH
+                // connection when `sock` is write-tainted (the ACK keeps the INVITE's `Via`, so flexisip
+                // still matches it); otherwise on the live socket.
                 Some(s) if s >= 300 => {
                     if let Some(tag) = to_tag(&msg) {
-                        let _ = write_all_flush(sock, build_ack_failure(d, &tag).as_bytes()).await;
+                        let ack = build_ack_failure(d, &tag);
+                        if sock_write_ok {
+                            let _ = write_all_flush(sock, ack.as_bytes()).await;
+                        } else if let Ok(mut fresh) = connect_sip(cfg).await {
+                            let _ = write_all_flush(&mut fresh, ack.as_bytes()).await;
+                        }
                     }
                     return;
                 }
@@ -2568,6 +2595,96 @@ mod tests {
             "To: <sip:c100x@dev.example>",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn drain_after_cancel_tears_down_a_racing_2xx_over_fresh_when_sock_write_tainted() {
+        // After a FAILED CANCEL write the original socket may hold a PARTIAL CANCEL (write-tainted). A racing
+        // INVITE 2xx drained from it must be ACK/BYE'd over a FRESH connection — never written back on the
+        // tainted socket, which would concatenate into one malformed request and leave the successor pinned.
+        use std::collections::HashMap;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        // ack_bye_reconnect connects here for the fresh-connection teardown.
+        let fresh = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fresh_port = fresh.local_addr().unwrap().port();
+
+        // Stand-in ORIGINAL socket: a real connected pair; keep the peer end to prove NOTHING is written.
+        let orig_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let orig_addr = orig_l.local_addr().unwrap();
+        let accept = tokio::spawn(async move { orig_l.accept().await.unwrap().0 });
+        let mut orig = TcpStream::connect(orig_addr).await.unwrap();
+        let mut orig_peer = accept.await.unwrap();
+
+        // The fresh teardown connection must carry ACK then BYE for the accepted dialog.
+        let fresh_srv = tokio::spawn(async move {
+            let (mut s, _) = fresh.accept().await.unwrap();
+            let mut all = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        all.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if all.contains("ACK ") && all.contains("BYE ") {
+                            break;
+                        }
+                    }
+                    _ => break, // EOF, error, or the 2s bound elapsed
+                }
+            }
+            all
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), fresh_port.to_string());
+        let cfg = crate::config::Config::from_map(m);
+
+        let mut d = Dialog {
+            aor: "c100x".to_string(),
+            domain: "dev.example".to_string(),
+            local_port: 5060,
+            call_id: "xyz".to_string(),
+            from_tag: "cf".to_string(),
+            branch: "z9hG4bKorig".to_string(),
+            cseq: 21,
+            to_tag: String::new(),
+            remote_target: String::new(),
+        };
+
+        // A COMPLETE 200 OK to the INVITE, already buffered on the original stream (as if read before the
+        // CANCEL write failed): it carries a To-tag and Contact so a confirmed dialog can be torn down.
+        let racing_2xx = b"SIP/2.0 200 OK\r\n\
+              Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+              From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+              To: <sip:c100x@dev.example>;tag=srv200\r\n\
+              Call-ID: xyz\r\n\
+              CSeq: 21 INVITE\r\n\
+              Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+              Content-Length: 0\r\n\r\n"
+            .to_vec();
+
+        // sock_write_ok = false (tainted): the teardown must NOT touch `orig`.
+        drain_after_cancel(&mut orig, &cfg, &mut d, racing_2xx, false).await;
+
+        let teardown = fresh_srv.await.unwrap();
+        assert!(
+            teardown.contains("ACK "),
+            "the racing 2xx must be ACKed on the fresh connection, got: {teardown}"
+        );
+        assert!(
+            teardown.contains("BYE "),
+            "the racing 2xx dialog must be BYE'd on the fresh connection, got: {teardown}"
+        );
+
+        // NOTHING may have been written to the write-tainted original socket.
+        let mut buf = [0u8; 64];
+        let wrote_to_orig = matches!(
+            tokio::time::timeout(Duration::from_millis(300), orig_peer.read(&mut buf)).await,
+            Ok(Ok(n)) if n > 0
+        );
+        assert!(!wrote_to_orig, "no ACK/BYE may be written to the write-tainted original socket");
     }
 
     #[tokio::test]
