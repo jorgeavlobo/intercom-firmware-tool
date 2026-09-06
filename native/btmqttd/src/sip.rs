@@ -1570,6 +1570,14 @@ async fn session(
         }
     };
 
+    // The panel's ~PANEL_SESSION_LIMIT clock for THIS dialog begins when it generated the 2xx we just
+    // received — NOT when our ACK finishes below. Capture the acceptance instant here so the refresh
+    // schedule and pre-cut retry gate are anchored to it: a stalled-but-successful ACK write (up to
+    // SIP_IO_TIMEOUT) would otherwise push dialog_started_at / refresh_at up to ~2 s late, and with only
+    // ~1 s of slack in the fast-failure budget the gate could admit a refresh that finishes after the real
+    // cut (mirrors the successor-adoption anchoring via RefreshOutcome::Established's accepted_at).
+    let accepted_at0 = tokio::time::Instant::now();
+
     let status = parse_status(&final_resp)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no SIP status line"))?;
     if !(200..300).contains(&status) {
@@ -1654,11 +1662,11 @@ async fn session(
     // once there is no budget left for another attempt before the cut — a transient failure WITH budget
     // reschedules instead (see the Declined arm). Once latched we stop retrying and ride this dialog to the
     // panel's BYE + run()'s recycle.
-    let mut refresh_at = now0 + SESSION_REFRESH_AFTER;
+    let mut refresh_at = accepted_at0 + SESSION_REFRESH_AFTER;
     let mut refresh_disabled = false;
     // When the CURRENT dialog was established (updated on each adoption), so a transient-refresh retry can
     // check there is still budget (a whole RESPONSE_TIMEOUT) before this dialog's ~PANEL_SESSION_LIMIT cut.
-    let mut dialog_started_at = now0;
+    let mut dialog_started_at = accepted_at0;
     'dialog: loop {
         if stopping.load(Ordering::Relaxed) {
             break;
@@ -1743,15 +1751,6 @@ async fn session(
                             // the pre-cut gate below could otherwise admit a retry finishing after the real cut.
                             dialog_started_at = accepted_at;
                             refresh_at = accepted_at + SESSION_REFRESH_AFTER;
-                            // The teardown above can outlast VIEWER_LINGER while hold.rs keeps poking ~1 s, so
-                            // pokes queued during validate + teardown are not yet in hold_deadline. Apply them
-                            // NOW — before the next select! re-evaluates the deadline — so an auto-only view
-                            // isn't BYE'd by a stale deadline that the unbiased select! could pick over the
-                            // queued Holds. A Stop / closed channel drained here ends the session, like the
-                            // select! arms.
-                            if drain_queued_view_cmds(view_rx, window, &mut start_deadline, &mut hold_deadline) {
-                                break 'dialog;
-                            }
                         }
                         // The successor terminated (PanelEnded) or its socket died / buffer overflowed
                         // (Failed) before we committed — its BYE was ACKed / its teardown done by
@@ -1778,6 +1777,16 @@ async fn session(
                             }
                         }
                     }
+                    // Whether we ADOPTED the successor or KEPT the old dialog, the arms above can run a teardown
+                    // (a BYE, or a fresh-connection reconnect bounded by SIP_IO_TIMEOUT) that outlasts
+                    // VIEWER_LINGER while hold.rs keeps poking ~1 s. Those pokes queue unread in view_rx and are
+                    // not yet in hold_deadline, so the next select! could reach an already-expired deadline WITH
+                    // fresh Holds still queued and — being unbiased — pick expiry and BYE a dialog under a
+                    // still-connected viewer. Apply the queued pokes before re-evaluating the deadline. A Stop /
+                    // closed channel drained here ends the session, like the select! arms.
+                    if drain_queued_view_cmds(view_rx, window, &mut start_deadline, &mut hold_deadline) {
+                        break 'dialog;
+                    }
                     continue; // re-evaluate (with the adopted successor, or the retained old dialog)
                 }
                 RefreshOutcome::Declined(e, renewals, retriable) => {
@@ -1802,6 +1811,14 @@ async fn session(
                             "btmqttd: on-demand session refresh declined ({e}) — falling back to the panel recycle"
                         );
                         refresh_disabled = true;
+                    }
+                    // establish_refresh_dialog's own cleanup on a decline (ACK / fresh-connection BYE, each
+                    // bounded by SIP_IO_TIMEOUT) can likewise outlast VIEWER_LINGER while hold.rs keeps poking.
+                    // This arm falls straight through to the select! below, so apply any queued pokes first for
+                    // the same reason as the adoption paths above — otherwise the unbiased select! could pick a
+                    // stale expiry over a queued Hold and BYE the dialog under a still-connected viewer.
+                    if drain_queued_view_cmds(view_rx, window, &mut start_deadline, &mut hold_deadline) {
+                        break 'dialog;
                     }
                 }
                 RefreshOutcome::Aborted => break, // Stop or shutdown mid-refresh (INVITE already cancelled)
