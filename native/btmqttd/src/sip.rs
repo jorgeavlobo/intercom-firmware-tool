@@ -103,18 +103,19 @@ pub const VIEWER_LINGER: Duration = Duration::from_secs(5);
 /// stops the RTP, `av.rs` sees the panel's `*7*0*##` teardown and releases the go2rtc siphon, and by the
 /// time a fresh dialog re-establishes the media, go2rtc's producer has already timed out and dropped every
 /// consumer. So while a viewer is still holding the session, we proactively stand up the NEXT dialog part
-/// way through this one (at `SESSION_REFRESH_AFTER`, ~20 s before the ~60 s cut), so even a slow refresh
+/// way through this one (at `SESSION_REFRESH_AFTER`, ~22 s before the ~60 s cut), so even a slow refresh
 /// COMPLETES before the panel's BYE. IF the plant keeps its single shared media session up while the new
 /// dialog holds it (multiudpsink is fan-out, and `av.rs` arms/releases the siphon off the BUS media
 /// lifecycle, NOT per-dialog), the panel never emits `*7*0*##`, the siphon never lapses, and the view is
 /// SEAMLESS. IF the plant refuses a second concurrent dialog (some installs are single-owner — a `486`
 /// busy), the refresh is abandoned for this dialog and we fall back to the panel's BYE + `run()`'s
-/// re-INVITE recycle: a brief blip, never a permanent freeze. Sized so the WHOLE attempt — start plus its
-/// worst-case [`RESPONSE_TIMEOUT`] budget and the [`HANDOVER_MARGIN`] — completes before [`PANEL_SESSION_LIMIT`]
-/// AND leaves room for at least one transient retry ([`REFRESH_RETRY_BACKOFF`] + a full attempt) inside the
-/// window, so a momentary flexisip blip doesn't forfeit make-before-break (both guaranteed by the two
-/// `const _: () = assert!(…)` timing invariants just below [`PANEL_SESSION_LIMIT`]).
-const SESSION_REFRESH_AFTER: Duration = Duration::from_secs(40);
+/// re-INVITE recycle: a brief blip, never a permanent freeze. Sized (~22 s before the ~60 s cut) so the
+/// WHOLE attempt — start plus its worst-case [`RESPONSE_TIMEOUT`] budget and the [`HANDOVER_MARGIN`] —
+/// completes before [`PANEL_SESSION_LIMIT`] AND leaves room for at least one transient retry
+/// ([`REFRESH_RETRY_BACKOFF`] + a full attempt) inside the window, so a momentary flexisip blip doesn't
+/// forfeit make-before-break (both guaranteed by the two `const _: () = assert!(…)` timing invariants just
+/// below [`PANEL_SESSION_LIMIT`]).
+const SESSION_REFRESH_AFTER: Duration = Duration::from_secs(38);
 
 /// The panel's observed HARD lifetime on an on-demand camera dialog before it BYEs (issue #174,
 /// Finding #3) — ~60 s on the C100X, and it binds every consumer (BTicino's own app included). Not a knob
@@ -130,14 +131,19 @@ const PANEL_SESSION_LIMIT: Duration = Duration::from_secs(60);
 /// inside the pre-cut window.
 const REFRESH_RETRY_BACKOFF: Duration = Duration::from_secs(3);
 
-/// Slack the make-before-break handover needs AFTER the INVITE 2xx, before the panel's cut: the successor
-/// ACK, the successor validation ([`SUCCESSOR_VALIDATE`]), and a bounded old-dialog BYE (its live-socket
-/// write plus a fresh-connection [`SIP_IO_TIMEOUT`] reconnect+write fallback), with headroom. Sized to cover
-/// that whole post-2xx handover. Both the compile-time invariants below AND the runtime refresh gate budget
-/// this on top of `RESPONSE_TIMEOUT`, so a refresh (first or retried) is only launched when the whole
-/// attempt-plus-handover still fits before `PANEL_SESSION_LIMIT` — never so late that the handover would run
-/// past the panel's cut.
-const HANDOVER_MARGIN: Duration = Duration::from_secs(5);
+/// Slack the make-before-break handover needs AFTER the INVITE 2xx, before the panel's cut. It covers the
+/// MEDIA-CRITICAL part in full — the successor ACK (bounded by [`SIP_IO_TIMEOUT`], written inside
+/// `establish_refresh_dialog`) plus the successor validation ([`SUCCESSOR_VALIDATE`]) — so the successor is
+/// ADOPTED and streaming before the old dialog's RTP stops, plus a live-socket old-dialog BYE
+/// (`teardown_bye`: one bounded write + a short read) with headroom: 2 s + 0.5 s + ~3 s ≈ 5.5 s, inside the
+/// 8 s. Deliberately NOT sized to also cover the old-dialog BYE's fresh-connection reconnect FALLBACK
+/// (`bye_reconnect`, another connect+ACK+BYE+read): that path is best-effort CLEANUP and is not
+/// media-critical — by the time it runs the successor is already adopted and carrying the shared media, so a
+/// reconnecting old BYE that finishes after the cut is harmless (the panel has torn the old dialog down
+/// itself). Both the compile-time invariants below AND the runtime refresh gate budget this on top of
+/// `RESPONSE_TIMEOUT`, so a refresh (first or retried) is only launched when the whole attempt-plus-handover
+/// still fits before `PANEL_SESSION_LIMIT` — never so late that the successor would be adopted after the cut.
+const HANDOVER_MARGIN: Duration = Duration::from_secs(8);
 
 /// Compile-time invariant (issue #174, Finding #3): the make-before-break successor must be fully stood up
 /// — its start (`SESSION_REFRESH_AFTER`) plus the WORST-CASE response budget (`RESPONSE_TIMEOUT`) — with the
