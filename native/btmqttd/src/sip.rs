@@ -1100,11 +1100,14 @@ async fn validate_successor(
 /// Outcome of a make-before-break refresh attempt ([`establish_refresh_dialog`]).
 enum RefreshOutcome {
     /// The panel admitted a concurrent dialog: the confirmed successor socket + `Dialog`, any viewing-window
-    /// renewals seen mid-attempt for the caller to apply to the ADOPTED dialog, and any RESIDUAL bytes left
+    /// renewals seen mid-attempt for the caller to apply to the ADOPTED dialog, any RESIDUAL bytes left
     /// after the 2xx (an in-dialog request flexisip coalesced with it) for the caller to seed as the adopted
-    /// dialog's inbound buffer — so a coalesced BYE/OPTIONS is not dropped. `Dialog` is boxed to keep this
-    /// (much larger) variant from bloating every `RefreshOutcome` value.
-    Established(TcpStream, Box<Dialog>, RefreshRenewals, Vec<u8>),
+    /// dialog's inbound buffer — so a coalesced BYE/OPTIONS is not dropped — and the `Instant` the 2xx was
+    /// RECEIVED (the panel's ~`PANEL_SESSION_LIMIT` clock for this dialog started at its acceptance, before our
+    /// ACK), so the caller anchors `dialog_started_at`/`refresh_at` to it rather than to a post-ACK `now` that
+    /// a stalled ACK write could push late. `Dialog` is boxed to keep this (much larger) variant from bloating
+    /// every `RefreshOutcome` value.
+    Established(TcpStream, Box<Dialog>, RefreshRenewals, Vec<u8>, tokio::time::Instant),
     /// The panel refused (e.g. `486 Busy` on a single-owner plant) or the attempt errored. The pending
     /// INVITE was CANCELled / the non-2xx ACKed, so nothing dangles; the caller keeps its current dialog
     /// and applies any renewals seen mid-attempt to it. The `bool` is `retriable`: `false` for a definitive
@@ -1371,6 +1374,13 @@ async fn establish_refresh_dialog(
         }
     };
 
+    // The panel's ~PANEL_SESSION_LIMIT lifetime for THIS dialog begins when it generated the 2xx we just
+    // received — NOT when our ACK finishes. Capture the acceptance instant now so the caller can anchor the
+    // adopted dialog's clock (dialog_started_at / refresh_at) to it: a stalled-but-successful ACK write (up to
+    // SIP_IO_TIMEOUT) would otherwise push those up to ~2 s late, and with only ~1 s of slack in the retry
+    // budget the pre-cut gate could admit a retry whose handover finishes after the panel's real cut.
+    let accepted_at = tokio::time::Instant::now();
+
     // DEFENSIVE (not normally reachable): `wait_final_response` only ever returns a framed message whose
     // `parse_status` is `Some(s >= 200)`, so `status` is present here. Kept as a guarded fallback rather than
     // an `.expect()` — should that coupling ever change, a malformed final should decline retriably, never
@@ -1446,7 +1456,7 @@ async fn establish_refresh_dialog(
     // response with an immediate in-dialog request (an OPTIONS, or even a BYE) into one TCP read, and over
     // TCP that request is delivered ONCE — if we dropped it the successor could be treated as live after it
     // was actually terminated. The caller seeds the adopted dialog's inbound buffer with this residual.
-    RefreshOutcome::Established(sock, Box::new(d), renewals, acc)
+    RefreshOutcome::Established(sock, Box::new(d), renewals, acc, accepted_at)
 }
 
 /// One on-demand session: INVITE → ACK, hold while views keep arriving, then BYE. `initial` is the
@@ -1691,7 +1701,7 @@ async fn session(
             )
             .await
             {
-                RefreshOutcome::Established(new_sock, new_d, renewals, residual) => {
+                RefreshOutcome::Established(new_sock, new_d, renewals, residual, accepted_at) => {
                     // The panel admitted a concurrent dialog — but adopt it ONLY after confirming it is
                     // actually alive. Process any bytes flexisip coalesced after its 2xx (an in-dialog
                     // request delivered ONCE over TCP) on the NEW dialog FIRST, BEFORE retiring the old one.
@@ -1727,8 +1737,12 @@ async fn session(
                             sock = new_sock;
                             d = new_d;
                             inbound = new_inbound; // residual already drained by process_in_dialog
-                            dialog_started_at = now; // the adopted dialog starts its own ~60 s clock now
-                            refresh_at = now + SESSION_REFRESH_AFTER;
+                            // Anchor the adopted dialog's ~60 s clock to when the panel ACCEPTED it (the 2xx it
+                            // sent), NOT to this post-ACK `now`: a stalled-but-successful ACK write could push
+                            // `now` up to SIP_IO_TIMEOUT late, and with only ~1 s of slack in the retry budget
+                            // the pre-cut gate below could otherwise admit a retry finishing after the real cut.
+                            dialog_started_at = accepted_at;
+                            refresh_at = accepted_at + SESSION_REFRESH_AFTER;
                             // The teardown above can outlast VIEWER_LINGER while hold.rs keeps poking ~1 s, so
                             // pokes queued during validate + teardown are not yet in hold_deadline. Apply them
                             // NOW — before the next select! re-evaluates the deadline — so an auto-only view
@@ -2666,10 +2680,11 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         let stopping = Arc::new(AtomicBool::new(false));
         let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4); // kept open: no Stop/None mid-attempt
-        let d = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
+        let before = tokio::time::Instant::now();
+        let (d, accepted_at) = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
             .await
         {
-            RefreshOutcome::Established(_sock, d, _renewals, _residual) => d,
+            RefreshOutcome::Established(_sock, d, _renewals, _residual, accepted) => (d, accepted),
             other => panic!(
                 "a confirmable 2xx refresh must be adopted, got {}",
                 match other {
@@ -2684,6 +2699,13 @@ mod tests {
             d.remote_target.contains("127.0.0.1:5599"),
             "remote target should be the panel's Contact, got: {}",
             d.remote_target
+        );
+        // The acceptance instant is captured at 2xx RECEIPT (before the ACK), so the caller can anchor the
+        // adopted dialog's ~60 s clock to it rather than to a post-ACK `now`. It must fall within the call.
+        let after = tokio::time::Instant::now();
+        assert!(
+            accepted_at >= before && accepted_at <= after,
+            "accepted_at must be captured during the attempt (before {before:?}..after {after:?}), got {accepted_at:?}"
         );
         server.await.unwrap();
     }
@@ -3438,7 +3460,7 @@ mod tests {
             match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
                 .await
             {
-                RefreshOutcome::Established(_sock, _d, r, _residual) => r,
+                RefreshOutcome::Established(_sock, _d, r, _residual, _accepted) => r,
                 _ => panic!("a 2xx refresh must be adopted"),
             };
         assert_eq!(
@@ -3496,7 +3518,7 @@ mod tests {
             match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
                 .await
             {
-                RefreshOutcome::Established(_sock, _d, _r, residual) => residual,
+                RefreshOutcome::Established(_sock, _d, _r, residual, _accepted) => residual,
                 _ => panic!("a 2xx refresh must be adopted"),
             };
         assert!(
