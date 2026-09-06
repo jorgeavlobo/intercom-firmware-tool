@@ -943,7 +943,23 @@ async fn process_in_dialog(
             "in-dialog SIP request exceeded cap",
         ));
     }
-    while let Some(len) = complete_message_len(inbound) {
+    loop {
+        let len = match frame_message(inbound) {
+            Frame::Complete(len) => len,
+            Frame::Incomplete => break, // wait for more bytes on the next read
+            Frame::Malformed => {
+                // A malformed frame at the head can never advance: leaving it there would wedge framing, so a
+                // later valid BYE would never be seen and the held view would stay pinned to a dead dialog.
+                // Tear the dialog down (BYE on the live socket, fresh connection on failure) and surface it.
+                if teardown_bye(sock, d).await.is_err() {
+                    bye_reconnect(cfg, d).await;
+                }
+                return InDialog::Failed(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed in-dialog SIP frame",
+                ));
+            }
+        };
         let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
         inbound.drain(..len);
         if is_bye(&msg) {
@@ -1980,7 +1996,16 @@ async fn drain_after_cancel(
     let mut buf = [0u8; 4096];
     let deadline = tokio::time::Instant::now() + CANCEL_DRAIN;
     loop {
-        while let Some(len) = complete_message_len(&acc) {
+        loop {
+            let len = match frame_message(&acc) {
+                Frame::Complete(len) => len,
+                Frame::Incomplete => break, // read more (bounded by CANCEL_DRAIN) below
+                // A malformed frame at the head can never parse, so we can't identify the INVITE's final
+                // response in this buffer; there is nothing more to ACK/BYE here. Stop — the pending INVITE
+                // was already CANCELled, and a late 2xx that never arrives cleanly is reclaimed by the panel's
+                // own cut. (This is best-effort teardown, not a held view, so no error is surfaced.)
+                Frame::Malformed => return,
+            };
             let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
             acc.drain(..len);
             // We only act on responses to the INVITE transaction. The `200 OK` to our CANCEL is also
@@ -2067,7 +2092,19 @@ async fn wait_final_response(sock: &mut TcpStream, acc: &mut Vec<u8>) -> std::io
         // have all arrived — returning on the status line alone could hand back a 200 whose
         // To-tag/Contact haven't been read yet, so the ACK would carry an empty tag and the dialog
         // would never confirm even though the panel accepted the INVITE.
-        while let Some(len) = complete_message_len(acc) {
+        loop {
+            let len = match frame_message(acc) {
+                Frame::Complete(len) => len,
+                Frame::Incomplete => break, // read more below
+                Frame::Malformed => {
+                    // A malformed frame at the head can never parse; treating it as "read more" would spin to
+                    // the outer RESPONSE_TIMEOUT. Reject now so the caller's CANCEL path reclaims the INVITE.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "malformed SIP response frame",
+                    ));
+                }
+            };
             let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
             acc.drain(..len);
             match parse_status(&msg) {
@@ -2095,38 +2132,80 @@ async fn wait_final_response(sock: &mut TcpStream, acc: &mut Vec<u8>) -> std::io
     }
 }
 
-/// If `buf` begins with a COMPLETE SIP message — headers terminated by CRLFCRLF, followed by a body
-/// of `Content-Length` bytes (0 when the header is absent) — return that message's total byte length.
-/// Returns `None` in two distinct cases: the buffer does not YET hold a complete message (more bytes
-/// needed), OR the framed message is MALFORMED and must be rejected — a present-but-unparseable
-/// `Content-Length`, or a total that overflows `usize` or exceeds `MAX_SIP_BYTES` (the read loops' own
-/// `MAX_SIP_BYTES` guard then tears the oversized buffer down rather than us framing a bogus message).
-/// Frames one message at a time, so pipelined 100/180/200 responses (and a 200's SDP body) are handled
-/// without ever returning a half-read message.
-fn complete_message_len(buf: &[u8]) -> Option<usize> {
-    let sep = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
+/// The result of framing the SIP message at the head of a buffer. Distinguishing INCOMPLETE from MALFORMED
+/// matters: the first is a "read more" signal, the second means the head can NEVER parse — so a caller that
+/// conflated them (treating malformed as "read more") would leave the bad message wedged at the head of the
+/// buffer forever, never advancing framing, so a subsequent valid BYE is neither ACKed nor reported and a
+/// held view stays pinned to a terminated dialog.
+enum Frame {
+    /// A complete message occupies the first `usize` bytes of the buffer.
+    Complete(usize),
+    /// No complete message YET — the CRLFCRLF header terminator or the declared body has not fully arrived.
+    /// Reading more bytes may complete it, so the caller keeps the buffer and reads on.
+    Incomplete,
+    /// The head can never be validly framed however many more bytes arrive: non-UTF-8 headers, a
+    /// present-but-nonnumeric or `usize`-overflowing `Content-Length`, or a total exceeding `MAX_SIP_BYTES`.
+    /// Reading more cannot fix it (and defaulting a garbage length to 0 would mis-frame the body as the next
+    /// message, desynchronizing the stream), so the caller must tear the dialog/transaction down.
+    Malformed,
+}
+
+/// Frame the SIP message at the head of `buf`: a header block terminated by CRLFCRLF followed by a body of
+/// `Content-Length` bytes (0 when the header is absent). Returns [`Frame::Complete`] with the message's total
+/// byte length once all of it has arrived, [`Frame::Incomplete`] when more bytes are needed, or
+/// [`Frame::Malformed`] when the head can never parse (see that variant). Frames one message at a time, so
+/// pipelined 100/180/200 responses (and a 200's SDP body) are handled without ever returning a half-read
+/// message.
+fn frame_message(buf: &[u8]) -> Frame {
+    let Some(sep) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Frame::Incomplete; // header terminator not yet seen — more bytes may complete it
+    };
     let header_end = sep + 4;
-    let headers = std::str::from_utf8(&buf[..sep]).ok()?;
-    // A Content-Length header that is PRESENT but unparseable must reject the message (None), not silently
-    // default to 0 — treating a garbage length as 0 would drain only the headers and mis-frame the body as
-    // the next message, desynchronizing the stream. 0 is used ONLY when the header is absent.
+    let Ok(headers) = std::str::from_utf8(&buf[..sep]) else {
+        return Frame::Malformed; // non-UTF-8 headers can never parse
+    };
+    // A Content-Length header that is PRESENT but unparseable must reject the message (Malformed), not
+    // silently default to 0 — treating a garbage length as 0 would drain only the headers and mis-frame the
+    // body as the next message, desynchronizing the stream. 0 is used ONLY when the header is absent.
     let content_length = match headers
         .lines()
         .filter_map(|l| l.split_once(':'))
         .find(|(h, _)| h.trim().eq_ignore_ascii_case("Content-Length"))
     {
-        Some((_, v)) => v.trim().parse::<usize>().ok()?,
+        Some((_, v)) => match v.trim().parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => return Frame::Malformed,
+        },
         None => 0,
     };
     // `content_length` is peer-supplied; on the 32-bit target `header_end + content_length` could overflow
     // `usize` and wrap to a SMALL total, misframing the stream (release wraps silently; debug panics). Use
-    // checked_add and reject any total over the message cap — the read loops' own MAX_SIP_BYTES guard then
-    // tears the oversized buffer down rather than us framing a bogus short message.
-    let total = header_end.checked_add(content_length)?;
+    // checked_add and reject any total over the message cap as Malformed — reading more can never make an
+    // overflowing or over-cap frame valid (the read loops' own MAX_SIP_BYTES guard remains a backstop for a
+    // header block that itself grows past the cap before any CRLFCRLF arrives).
+    let Some(total) = header_end.checked_add(content_length) else {
+        return Frame::Malformed;
+    };
     if total > MAX_SIP_BYTES {
-        return None;
+        return Frame::Malformed;
     }
-    (buf.len() >= total).then_some(total)
+    if buf.len() >= total {
+        Frame::Complete(total)
+    } else {
+        Frame::Incomplete
+    }
+}
+
+#[cfg(test)]
+impl Frame {
+    /// The framed length when [`Complete`](Frame::Complete), else `None` — a convenience for tests that only
+    /// care about the complete case.
+    fn complete_len(self) -> Option<usize> {
+        match self {
+            Frame::Complete(n) => Some(n),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2141,26 +2220,31 @@ mod tests {
     }
 
     #[test]
-    fn complete_message_len_frames_and_rejects_bad_content_length() {
-        // Absent Content-Length ⇒ body is empty; the message ends at the header terminator.
+    fn frame_message_frames_and_distinguishes_malformed_from_incomplete() {
+        // Absent Content-Length ⇒ body is empty; the message ends at the header terminator ⇒ Complete.
         let no_cl = b"OPTIONS sip:x SIP/2.0\r\nCall-ID: a\r\n\r\n";
-        assert_eq!(complete_message_len(no_cl), Some(no_cl.len()));
+        assert!(matches!(frame_message(no_cl), Frame::Complete(n) if n == no_cl.len()));
 
-        // Present, valid, and the body has arrived ⇒ full length; not yet arrived ⇒ None.
+        // Present, valid, and the body has arrived ⇒ Complete; not yet arrived ⇒ Incomplete (read more).
         let with_body = b"MSG\r\nContent-Length: 3\r\n\r\nabc";
-        assert_eq!(complete_message_len(with_body), Some(with_body.len()));
-        assert_eq!(complete_message_len(b"MSG\r\nContent-Length: 3\r\n\r\nab"), None);
+        assert!(matches!(frame_message(with_body), Frame::Complete(n) if n == with_body.len()));
+        assert!(matches!(frame_message(b"MSG\r\nContent-Length: 3\r\n\r\nab"), Frame::Incomplete));
 
-        // Present but UNPARSEABLE ⇒ reject (None), never default to 0 and mis-frame the body as the next msg.
-        assert_eq!(complete_message_len(b"MSG\r\nContent-Length: notanumber\r\n\r\nbody"), None);
-        // Overflowing/huge value ⇒ rejected by the checked_add + MAX_SIP_BYTES cap.
-        assert_eq!(
-            complete_message_len(b"MSG\r\nContent-Length: 99999999999999999999\r\n\r\n"),
-            None
-        );
+        // Present but UNPARSEABLE ⇒ Malformed (never default to 0 and mis-frame the body as the next msg).
+        // This is the distinction that keeps a bad frame from wedging framing: it must NOT read as Incomplete,
+        // or a valid BYE appended after it would never be framed and a held view would pin to a dead dialog.
+        assert!(matches!(
+            frame_message(b"MSG\r\nContent-Length: notanumber\r\n\r\nbody"),
+            Frame::Malformed
+        ));
+        // Overflowing/huge value ⇒ Malformed via checked_add + the MAX_SIP_BYTES cap.
+        assert!(matches!(
+            frame_message(b"MSG\r\nContent-Length: 99999999999999999999\r\n\r\n"),
+            Frame::Malformed
+        ));
 
-        // Incomplete headers (no CRLFCRLF) ⇒ None.
-        assert_eq!(complete_message_len(b"MSG\r\nCall-ID: a\r\n"), None);
+        // Incomplete headers (no CRLFCRLF) ⇒ Incomplete, NOT Malformed — more bytes may still complete it.
+        assert!(matches!(frame_message(b"MSG\r\nCall-ID: a\r\n"), Frame::Incomplete));
     }
 
     #[test]
@@ -2244,19 +2328,20 @@ mod tests {
     fn frames_complete_messages_and_skips_provisional() {
         // Completeness needs BOTH the CRLFCRLF header terminator and the Content-Length body.
         let full = b"SIP/2.0 200 Ok\r\nContent-Length: 4\r\n\r\nabcd";
-        assert_eq!(complete_message_len(full), Some(full.len()));
-        assert_eq!(complete_message_len(b"SIP/2.0 200 Ok\r\nContent-Length: 4\r\n\r\nab"), None); // body short
-        assert_eq!(complete_message_len(b"SIP/2.0 200 Ok\r\nContent-Len"), None); // headers unterminated
+        assert_eq!(frame_message(full).complete_len(), Some(full.len()));
+        // body short / headers unterminated ⇒ Incomplete (read more), NOT Malformed.
+        assert!(matches!(frame_message(b"SIP/2.0 200 Ok\r\nContent-Length: 4\r\n\r\nab"), Frame::Incomplete));
+        assert!(matches!(frame_message(b"SIP/2.0 200 Ok\r\nContent-Len"), Frame::Incomplete));
 
         // Pipelined 100 then 200: frame one at a time; the provisional is skipped and the final's
         // To-tag parses (the bug the framing fixes: a half-read 200 would lose the tag).
         let mut acc =
             b"SIP/2.0 100 Trying\r\nContent-Length: 0\r\n\r\nSIP/2.0 200 Ok\r\nTo: <sip:x>;tag=t\r\nContent-Length: 0\r\n\r\n"
                 .to_vec();
-        let l1 = complete_message_len(&acc).unwrap();
+        let l1 = frame_message(&acc).complete_len().unwrap();
         assert_eq!(parse_status(&String::from_utf8_lossy(&acc[..l1])), Some(100));
         acc.drain(..l1);
-        let l2 = complete_message_len(&acc).unwrap();
+        let l2 = frame_message(&acc).complete_len().unwrap();
         let final_msg = String::from_utf8_lossy(&acc[..l2]).into_owned();
         assert_eq!(parse_status(&final_msg), Some(200));
         assert_eq!(to_tag(&final_msg).as_deref(), Some("t"));
@@ -2481,13 +2566,13 @@ mod tests {
     // --- make-before-break refresh (issue #174, Finding #3) --------------------------------------
 
     /// Read exactly ONE complete SIP message from `sock`, framing across TCP chunk boundaries the same way
-    /// `complete_message_len` does (and preserving any trailing bytes of the NEXT message in `acc`), so a
+    /// `frame_message` does (and preserving any trailing bytes of the NEXT message in `acc`), so a
     /// refresh-test mock can't misclassify a partial or coalesced read (e.g. INVITE + ACK in one packet).
     async fn read_one_sip(sock: &mut tokio::net::TcpStream, acc: &mut Vec<u8>) -> String {
         use tokio::io::AsyncReadExt;
         let mut buf = [0u8; 4096];
         loop {
-            if let Some(len) = complete_message_len(acc) {
+            if let Some(len) = frame_message(acc).complete_len() {
                 let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
                 acc.drain(..len);
                 return msg;
@@ -3035,6 +3120,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn process_in_dialog_tears_down_on_a_malformed_in_dialog_frame() {
+        // A malformed frame at the head of `inbound` (here a nonnumeric Content-Length) can never advance
+        // framing. Left in place it would wedge the loop so a subsequent valid BYE is never seen and the view
+        // stays pinned to a dead dialog. process_in_dialog must instead tear the dialog down (BYE) and return
+        // Failed, rather than treating the malformed frame as "incomplete / read more".
+        use std::collections::HashMap;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let orig_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let orig_addr = orig_l.local_addr().unwrap();
+        let accept = tokio::spawn(async move { orig_l.accept().await.unwrap().0 });
+        let mut orig = TcpStream::connect(orig_addr).await.unwrap();
+        let mut orig_peer = accept.await.unwrap();
+
+        // The live-socket teardown BYE must land on the peer (so no fresh connection is needed).
+        let peer_srv = tokio::spawn(async move {
+            let mut all = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(Duration::from_millis(500), orig_peer.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        all.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if all.contains("BYE ") {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            all
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = crate::config::Config::from_map(m);
+        // A CONFIRMED dialog so teardown_bye can address the BYE on the live socket.
+        let d = Dialog {
+            aor: "c100x".to_string(),
+            domain: "dev.example".to_string(),
+            local_port: 5060,
+            call_id: "xyz".to_string(),
+            from_tag: "cf".to_string(),
+            branch: "z9hG4bKorig".to_string(),
+            cseq: 21,
+            to_tag: "srv200".to_string(),
+            remote_target: "sip:c100x@127.0.0.1:5599".to_string(),
+        };
+        // A malformed frame (nonnumeric Content-Length) at the head, then a well-formed BYE that would be
+        // reached ONLY if framing advanced. The malformed head must trigger teardown before the BYE is framed.
+        let mut inbound = b"OPTIONS sip:c100x@dev.example SIP/2.0\r\n\
+              Call-ID: xyz\r\n\
+              CSeq: 22 OPTIONS\r\n\
+              Content-Length: notanumber\r\n\r\n\
+              BYE sip:btmqttd@127.0.0.1:5060 SIP/2.0\r\n\
+              Call-ID: xyz\r\n\
+              CSeq: 23 BYE\r\n\
+              Content-Length: 0\r\n\r\n"
+            .to_vec();
+
+        match process_in_dialog(&mut orig, &mut inbound, &cfg, &d).await {
+            InDialog::Failed(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+            _ => panic!("a malformed in-dialog frame must surface Failed, not wedge framing"),
+        }
+
+        let sent = peer_srv.await.unwrap();
+        assert!(sent.contains("BYE "), "the dialog must be torn down with a BYE, got: {sent}");
+    }
+
+    #[tokio::test]
     async fn establish_refresh_dialog_marks_a_transport_error_retriable() {
         // A transport failure (the loopback SIP peer drops the connection without answering) is TRANSIENT
         // and must be marked retriable, so the caller re-attempts before the panel cut instead of forfeiting
@@ -3456,7 +3611,7 @@ mod tests {
             remote_target: "sip:c100x@127.0.0.1:5599".into(),
         };
         let mut sock = TcpStream::connect(addr).await.unwrap();
-        // A PARTIAL BYE: headers not yet terminated, so complete_message_len() returns None until the peer
+        // A PARTIAL BYE: headers not yet terminated, so frame_message() returns Incomplete until the peer
         // sends the rest.
         let mut inbound = b"BYE sip:btmqttd@127.0.0.1:5599 SIP/2.0\r\n\
             Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKbye\r\n\
@@ -3555,7 +3710,7 @@ mod tests {
     fn a_panel_bye_split_across_reads_is_framed_before_acting() {
         // Regression for the in-dialog framing fix: a BYE that arrives in two TCP
         // chunks must only be recognized once BOTH halves have accumulated. Mirrors the loop's logic:
-        // accumulate, then act only on a message complete_message_len() confirms.
+        // accumulate, then act only on a message frame_message() confirms.
         let bye = "BYE sip:btmqttd@127.0.0.1:5060 SIP/2.0\r\n\
                    Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKsplit\r\n\
                    From: <sip:app@d>;tag=ft\r\n\
@@ -3566,10 +3721,10 @@ mod tests {
         let (head, tail) = bye.split_at(40); // split mid-headers
         let mut inbound = head.as_bytes().to_vec();
         // First chunk: not yet a complete message, so nothing is acted upon.
-        assert_eq!(complete_message_len(&inbound), None);
+        assert!(matches!(frame_message(&inbound), Frame::Incomplete));
         // Second chunk completes it: now it frames, and the framed message is the BYE.
         inbound.extend_from_slice(tail.as_bytes());
-        let len = complete_message_len(&inbound).expect("now complete");
+        let len = frame_message(&inbound).complete_len().expect("now complete");
         let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
         assert!(is_bye(&msg));
         assert!(build_ok_to(&msg).is_some()); // the 200 OK we must send back is well-formed
