@@ -990,9 +990,13 @@ async fn process_in_dialog(
 /// gone. A terminal outcome short-circuits; if the bound elapses with the successor idle (no data, no EOF)
 /// it answered our INVITE and has sent no teardown, so we adopt it. On a read EOF/error the successor was
 /// CONFIRMED (we ACKed its 2xx) but its socket then died, so it is BYE'd over a fresh connection before we
-/// return `Failed` — otherwise that orphaned dialog would pin the panel until its own timeout. The old
-/// dialog is still up (and the bus-driven RTP siphon still armed) throughout, so this brief wait never blips
-/// the view.
+/// return `Failed` — otherwise that orphaned dialog would pin the panel until its own timeout. The WHOLE
+/// bound — not just the read — is [`SUCCESSOR_VALIDATE`]: `process_in_dialog` is itself run under the same
+/// deadline, so a successor peer that stops draining our in-dialog responses (each `write_all_flush` would
+/// otherwise block up to [`SIP_IO_TIMEOUT`]) cannot stretch validation, or the [`HANDOVER_MARGIN`] it sits
+/// inside, past the bound; that timeout is treated as an unadoptable successor (BYE'd over a fresh
+/// connection, `Failed`) since its socket may hold a partial write. The old dialog is still up (and the
+/// bus-driven RTP siphon still armed) throughout, so this brief wait never blips the view.
 async fn validate_successor(
     sock: &mut TcpStream,
     inbound: &mut Vec<u8>,
@@ -1001,9 +1005,25 @@ async fn validate_successor(
 ) -> InDialog {
     let deadline = tokio::time::Instant::now() + SUCCESSOR_VALIDATE;
     loop {
-        match process_in_dialog(sock, inbound, cfg, d).await {
-            InDialog::Continue => {}
-            terminal => return terminal, // PanelEnded / Failed — successor is not adoptable
+        // Bound in-dialog servicing by the SAME deadline as the read below. process_in_dialog does no socket
+        // reads, but it may write_all_flush() one or more responses (200 to a coalesced OPTIONS, 488 to a
+        // re-INVITE, a re-ACK to a retransmitted 2xx), each of which can block up to SIP_IO_TIMEOUT if the
+        // successor peer stops draining our writes. Without this bound the validation — and the HANDOVER_MARGIN
+        // it sits inside — could overrun SUCCESSOR_VALIDATE by seconds. On timeout the successor can't be
+        // serviced within the window and its socket may hold a partial write, so it is NOT adoptable: BYE it
+        // over a FRESH connection (its own socket is tainted) and surface Failed so the caller keeps the
+        // still-healthy old dialog. Cancelling process_in_dialog mid-write is safe here — the successor is
+        // discarded, never adopted, so a truncated response or a partly-drained `inbound` cannot be observed.
+        match tokio::time::timeout_at(deadline, process_in_dialog(sock, inbound, cfg, d)).await {
+            Ok(InDialog::Continue) => {}
+            Ok(terminal) => return terminal, // PanelEnded / Failed — successor is not adoptable
+            Err(_) => {
+                bye_reconnect(cfg, d).await;
+                return InDialog::Failed(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "successor validation timed out servicing in-dialog traffic",
+                ));
+            }
         }
         // Read more (bounded) whether or not a partial remains: complete a split request, OR detect an
         // immediate half-close (Ok(0) EOF) on an otherwise-empty buffer, before committing the handover.
