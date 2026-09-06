@@ -951,10 +951,17 @@ async fn process_in_dialog(
             return InDialog::PanelEnded;
         }
         // A RETRANSMITTED INVITE 2xx (our first ACK was lost) must be re-ACKed — a UAC ACKs every 2xx or
-        // the panel times out the confirmed dialog and the camera stops. Best-effort.
+        // the panel times out the confirmed dialog and the camera stops. A write failure here proves the
+        // socket is dead: discarding it would let this return Continue while the peer still has no ACK (and,
+        // during successor validation, a half-closed socket then reads idle and the healthy old dialog gets
+        // retired for a dying successor). So tear down over a fresh connection and surface Failed, exactly
+        // like the in-dialog-request path below.
         if is_established_invite_2xx(&msg) {
             let ack = build_ack(d, &format!("z9hG4bK{}", rand_hex(8)));
-            let _ = write_all_flush(sock, ack.as_bytes()).await;
+            if let Err(e) = write_all_flush(sock, ack.as_bytes()).await {
+                bye_reconnect(cfg, d).await;
+                return InDialog::Failed(e);
+            }
             continue;
         }
         // Answer in-dialog REQUESTS the panel sends mid-session so its transaction completes. A write
@@ -1313,9 +1320,11 @@ async fn establish_refresh_dialog(
         // REFRESH_RETRY_BACKOFF (bounded by the caller's pre-cut budget) is used rather than parsing
         // Retry-After — flexisip rarely sets it and any value is dwarfed by the ~60 s window. ACK
         // unconditionally, echoing the response's To (via ack_to_header), so even a malformed
-        // (empty/absent-tag) final is absorbed rather than left to Timer H.
-        let _ = write_all_flush(&mut sock, build_ack_failure(&d, &ack_to_header(&final_resp, &d)).as_bytes())
-            .await;
+        // (empty/absent-tag) final is absorbed rather than left to Timer H — on the live socket, falling
+        // back to a fresh connection if that write fails (the socket may close right after the reject, and a
+        // transient status schedules another refresh, so a lost ACK would otherwise linger + stack).
+        let ack = build_ack_failure(&d, &ack_to_header(&final_resp, &d));
+        send_cleanup_ack(&mut sock, cfg, true, &ack).await;
         let permanent_refusal = matches!(status, 403 | 486 | 600 | 603);
         return RefreshOutcome::Declined(
             std::io::Error::other(format!("refresh INVITE rejected with {status}")),
@@ -1487,9 +1496,10 @@ async fn session(
         // part of the INVITE client transaction: same Request-URI, top Via branch and CSeq number,
         // echoing the response's To (via ack_to_header). Without it flexisip holds the INVITE
         // server transaction until Timer H, so repeated busy/failed views would pile up stale
-        // transactions. ACK unconditionally so even a malformed (empty/absent-tag) final is absorbed.
-        let _ = write_all_flush(&mut sock, build_ack_failure(&d, &ack_to_header(&final_resp, &d)).as_bytes())
-            .await;
+        // transactions. ACK unconditionally so even a malformed (empty/absent-tag) final is absorbed, on the
+        // live socket with a fresh-connection fallback if that write fails.
+        let ack = build_ack_failure(&d, &ack_to_header(&final_resp, &d));
+        send_cleanup_ack(&mut sock, cfg, true, &ack).await;
         if status == 401 || status == 407 {
             // flexisip challenged our loopback INVITE — trusted-hosts should prevent this. If it ever
             // happens we need a registered identity + digest; surface it clearly for the hardware pass.
