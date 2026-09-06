@@ -111,10 +111,11 @@ pub const VIEWER_LINGER: Duration = Duration::from_secs(5);
 /// busy), the refresh is abandoned for this dialog and we fall back to the panel's BYE + `run()`'s
 /// re-INVITE recycle: a brief blip, never a permanent freeze. Sized (~22 s before the ~60 s cut) so the
 /// WHOLE attempt — start plus its worst-case [`RESPONSE_TIMEOUT`] budget and the [`HANDOVER_MARGIN`] —
-/// completes before [`PANEL_SESSION_LIMIT`] AND leaves room for at least one transient retry
-/// ([`REFRESH_RETRY_BACKOFF`] + a full attempt) inside the window, so a momentary flexisip blip doesn't
-/// forfeit make-before-break (both guaranteed by the two `const _: () = assert!(…)` timing invariants just
-/// below [`PANEL_SESSION_LIMIT`]).
+/// completes before [`PANEL_SESSION_LIMIT`] AND leaves room for one retry after a FAST transient failure
+/// ([`REFRESH_RETRY_BACKOFF`] + a full attempt), so a momentary flexisip blip (a refused/reset connect)
+/// doesn't forfeit make-before-break (both guaranteed by the two `const _: () = assert!(…)` timing
+/// invariants just below [`PANEL_SESSION_LIMIT`]; a first attempt that instead burns its full response
+/// budget falls back to the panel recycle, per the retry invariant's note).
 const SESSION_REFRESH_AFTER: Duration = Duration::from_secs(38);
 
 /// The panel's observed HARD lifetime on an on-demand camera dialog before it BYEs (issue #174,
@@ -158,19 +159,27 @@ const _: () = assert!(
     "make-before-break refresh must complete with handover margin before the panel's session cut",
 );
 
-/// Compile-time invariant (issue #174, Finding #3 review): at least ONE transient retry must still fit
-/// inside the window. The first attempt starts at `SESSION_REFRESH_AFTER`; a retry after `REFRESH_RETRY_BACKOFF`
-/// plus a whole fresh attempt (`RESPONSE_TIMEOUT` + `HANDOVER_MARGIN`) must land before the cut, or the retry
-/// path is dead — every transient blip would latch `refresh_disabled` and force the freeze-prone recycle,
-/// defeating the whole point of having a retry. This is what the runtime retry gate budgets, enforced here so
-/// the constants can't drift the retry out of reach.
+/// Compile-time invariant (issue #174, Finding #3 review): the retry PATH must be REACHABLE — a retry
+/// after a FAST transient failure must still fit before the cut, or the retry logic is dead code. The
+/// realistic transient the retry exists for is a momentary flexisip blip (a refused/reset loopback
+/// connect) that fails in well under a second; this models it as the first attempt failing
+/// near-instantly, so its `REFRESH_RETRY_BACKOFF` + one whole fresh attempt (`RESPONSE_TIMEOUT` +
+/// `HANDOVER_MARGIN`) still lands before `PANEL_SESSION_LIMIT`. We deliberately do NOT size
+/// `SESSION_REFRESH_AFTER` to also fit a retry after a first attempt that burned its FULL
+/// `RESPONSE_TIMEOUT`: that would force refresh to ~19 s (doubling the panel-overlap window on EVERY
+/// session) to cover a case — flexisip accepting the TCP connect but staying silent for 10 s, then
+/// answering a retry 3 s later — that is both unlikely and unlikely to recover. The runtime retry gate
+/// makes the exact per-attempt decision (it schedules a retry only when `now + REFRESH_RETRY_BACKOFF +
+/// RESPONSE_TIMEOUT + HANDOVER_MARGIN` still fits this dialog's cut), so a slow first attempt falls back
+/// to the panel recycle rather than launching a doomed retry. Enforced here so the constants can't drift
+/// the fast-failure retry out of reach.
 const _: () = assert!(
     SESSION_REFRESH_AFTER.as_millis()
         + REFRESH_RETRY_BACKOFF.as_millis()
         + RESPONSE_TIMEOUT.as_millis()
         + HANDOVER_MARGIN.as_millis()
         <= PANEL_SESSION_LIMIT.as_millis(),
-    "a transient-refresh retry must still fit before the panel's session cut",
+    "a fast-failure transient-refresh retry must still fit before the panel's session cut",
 );
 
 // ---- runtime discovery (pure helpers take file contents, so they unit-test) ------------------
@@ -2009,9 +2018,13 @@ async fn wait_final_response(sock: &mut TcpStream, acc: &mut Vec<u8>) -> std::io
 }
 
 /// If `buf` begins with a COMPLETE SIP message — headers terminated by CRLFCRLF, followed by a body
-/// of `Content-Length` bytes (0 when the header is absent) — return that message's total byte length;
-/// else `None` (more bytes needed). Frames one message at a time, so pipelined 100/180/200 responses
-/// (and a 200's SDP body) are handled without ever returning a half-read message.
+/// of `Content-Length` bytes (0 when the header is absent) — return that message's total byte length.
+/// Returns `None` in two distinct cases: the buffer does not YET hold a complete message (more bytes
+/// needed), OR the framed message is MALFORMED and must be rejected — a present-but-unparseable
+/// `Content-Length`, or a total that overflows `usize` or exceeds `MAX_SIP_BYTES` (the read loops' own
+/// `MAX_SIP_BYTES` guard then tears the oversized buffer down rather than us framing a bogus message).
+/// Frames one message at a time, so pipelined 100/180/200 responses (and a 200's SDP body) are handled
+/// without ever returning a half-read message.
 fn complete_message_len(buf: &[u8]) -> Option<usize> {
     let sep = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
     let header_end = sep + 4;
