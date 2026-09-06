@@ -65,6 +65,18 @@ const MAIN_ENTRANCE_OWN_ADDR: &str = "20";
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long we keep draining (framing responses, tearing down a racing 2xx) after sending CANCEL.
 const CANCEL_DRAIN: Duration = Duration::from_secs(2);
+/// Ceiling on a single cleanup/teardown SIP write or a reconnect `connect` to loopback flexisip. Normal
+/// loopback I/O is sub-millisecond; this only bounds a stalled peer so a failure ACK, ACK/BYE cleanup,
+/// CANCEL retry, or confirmed-dialog BYE reconnect can never block `Stop`/shutdown/refresh-fallback
+/// indefinitely (`RESPONSE_TIMEOUT`/`CANCEL_DRAIN` bound only the setup+response and the CANCEL drain).
+const SIP_IO_TIMEOUT: Duration = Duration::from_secs(2);
+/// Bounded wait to COMPLETE a partial in-dialog request that flexisip coalesced after a refresh 2xx, before
+/// the caller retires the old dialog and adopts the successor. If the successor is about to BYE (a plant
+/// that admits then immediately drops the second dialog), that BYE can be split across TCP reads: without
+/// this, `process_in_dialog` frames nothing, reports the successor healthy, and we retire the old dialog —
+/// then the next read completes the BYE and the last dialog ends (the very freeze this guards). A coalesced
+/// split completes within one loopback RTT, so this is short; if nothing completes we adopt anyway.
+const SUCCESSOR_VALIDATE: Duration = Duration::from_millis(500);
 /// Cap on a single SIP message we will buffer (offer/answer are ~2–3 KB; this bounds a hostile peer).
 const MAX_SIP_BYTES: usize = 65536;
 /// Reconnect backoff for the (rare) case the SIP socket / dialog fails.
@@ -83,6 +95,92 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// it never lapses between them (it only has to exceed `hold.rs`'s poll cadence). Must stay strictly
 /// greater than that cadence (`hold::POLL_INTERVAL`).
 pub const VIEWER_LINGER: Duration = Duration::from_secs(5);
+
+/// Make-before-break refresh window (issue #174, Finding #3). The panel enforces a HARD ~60 s lifetime
+/// on the on-demand camera dialog and then BYEs it — hardware-confirmed, and it is the PLANT's limit, not
+/// ours: even BTicino's own app is cut at ~60 s, and the panel sends NO session-refresh re-INVITE/UPDATE
+/// to accept (just a plain BYE). Left alone, a continuously-watched view freezes at that cut: the BYE
+/// stops the RTP, `av.rs` sees the panel's `*7*0*##` teardown and releases the go2rtc siphon, and by the
+/// time a fresh dialog re-establishes the media, go2rtc's producer has already timed out and dropped every
+/// consumer. So while a viewer is still holding the session, we proactively stand up the NEXT dialog part
+/// way through this one (at `SESSION_REFRESH_AFTER`, ~22 s before the ~60 s cut), so even a slow refresh
+/// COMPLETES before the panel's BYE. IF the plant keeps its single shared media session up while the new
+/// dialog holds it (multiudpsink is fan-out, and `av.rs` arms/releases the siphon off the BUS media
+/// lifecycle, NOT per-dialog), the panel never emits `*7*0*##`, the siphon never lapses, and the view is
+/// SEAMLESS. IF the plant refuses a second concurrent dialog (some installs are single-owner — a `486`
+/// busy), the refresh is abandoned for this dialog and we fall back to the panel's BYE + `run()`'s
+/// re-INVITE recycle: a brief blip, never a permanent freeze. Sized (~22 s before the ~60 s cut) so the
+/// WHOLE attempt — start plus its worst-case [`RESPONSE_TIMEOUT`] budget and the [`HANDOVER_MARGIN`] —
+/// completes before [`PANEL_SESSION_LIMIT`] AND leaves room for one retry after a FAST transient failure
+/// ([`REFRESH_RETRY_BACKOFF`] + a full attempt), so a momentary flexisip blip (a refused/reset connect)
+/// doesn't forfeit make-before-break (both guaranteed by the two `const _: () = assert!(…)` timing
+/// invariants just below [`PANEL_SESSION_LIMIT`]; a first attempt that instead burns its full response
+/// budget falls back to the panel recycle, per the retry invariant's note).
+const SESSION_REFRESH_AFTER: Duration = Duration::from_secs(38);
+
+/// The panel's observed HARD lifetime on an on-demand camera dialog before it BYEs (issue #174,
+/// Finding #3) — ~60 s on the C100X, and it binds every consumer (BTicino's own app included). Not a knob
+/// we set; documented here only so the make-before-break timing invariant below is checked against the
+/// real cutoff, not a bare constant.
+const PANEL_SESSION_LIMIT: Duration = Duration::from_secs(60);
+
+/// Backoff before RE-attempting a refresh that failed TRANSIENTLY (a transport error — flexisip briefly
+/// refusing the loopback connect, a reset socket, a timeout — NOT a panel `486` refusal). A transient
+/// failure must not permanently disable make-before-break for the dialog: as long as there is still budget
+/// before the panel cut, we retry after this short delay so a momentary signalling hiccup doesn't force the
+/// view through the freeze-prone recycle (issue #174, Finding #3 review). Short, so a retry still lands
+/// inside the pre-cut window.
+const REFRESH_RETRY_BACKOFF: Duration = Duration::from_secs(3);
+
+/// Slack the make-before-break handover needs AFTER the INVITE 2xx, before the panel's cut. It covers the
+/// MEDIA-CRITICAL part in full — the successor ACK (bounded by [`SIP_IO_TIMEOUT`], written inside
+/// `establish_refresh_dialog`) plus the successor validation ([`SUCCESSOR_VALIDATE`]) — so the successor is
+/// ADOPTED and streaming before the old dialog's RTP stops, plus a live-socket old-dialog BYE
+/// (`teardown_bye`: one bounded write + a short read) with headroom: 2 s + 0.5 s + ~3 s ≈ 5.5 s, inside the
+/// 8 s. Deliberately NOT sized to also cover the old-dialog BYE's fresh-connection reconnect FALLBACK
+/// (`bye_reconnect`, another connect+ACK+BYE+read): that path is best-effort CLEANUP and is not
+/// media-critical — by the time it runs the successor is already adopted and carrying the shared media, so a
+/// reconnecting old BYE that finishes after the cut is harmless (the panel has torn the old dialog down
+/// itself). Both the compile-time invariants below AND the runtime refresh gate budget this on top of
+/// `RESPONSE_TIMEOUT`, so a refresh (first or retried) is only launched when the whole attempt-plus-handover
+/// still fits before `PANEL_SESSION_LIMIT` — never so late that the successor would be adopted after the cut.
+const HANDOVER_MARGIN: Duration = Duration::from_secs(8);
+
+/// Compile-time invariant (issue #174, Finding #3): the make-before-break successor must be fully stood up
+/// — its start (`SESSION_REFRESH_AFTER`) plus the WORST-CASE response budget (`RESPONSE_TIMEOUT`) — with the
+/// handover margin ([`HANDOVER_MARGIN`]) left BELOW the panel's hard cut, or a slow refresh could complete
+/// only after the panel has already dropped the old dialog, defeating the whole point. A const assert is
+/// stronger than a runtime test (it cannot be bypassed) and keeps `PANEL_SESSION_LIMIT` a live reference.
+/// Compared in MILLISECONDS (not `as_secs()`, which truncates) so the guard stays exact if any of these
+/// constants ever gains sub-second granularity.
+const _: () = assert!(
+    SESSION_REFRESH_AFTER.as_millis() + RESPONSE_TIMEOUT.as_millis() + HANDOVER_MARGIN.as_millis()
+        <= PANEL_SESSION_LIMIT.as_millis(),
+    "make-before-break refresh must complete with handover margin before the panel's session cut",
+);
+
+/// Compile-time invariant (issue #174, Finding #3 review): the retry PATH must be REACHABLE — a retry
+/// after a FAST transient failure must still fit before the cut, or the retry logic is dead code. The
+/// realistic transient the retry exists for is a momentary flexisip blip (a refused/reset loopback
+/// connect) that fails in well under a second; this models it as the first attempt failing
+/// near-instantly, so its `REFRESH_RETRY_BACKOFF` + one whole fresh attempt (`RESPONSE_TIMEOUT` +
+/// `HANDOVER_MARGIN`) still lands before `PANEL_SESSION_LIMIT`. We deliberately do NOT size
+/// `SESSION_REFRESH_AFTER` to also fit a retry after a first attempt that burned its FULL
+/// `RESPONSE_TIMEOUT`: that would force refresh to ~19 s (doubling the panel-overlap window on EVERY
+/// session) to cover a case — flexisip accepting the TCP connect but staying silent for 10 s, then
+/// answering a retry 3 s later — that is both unlikely and unlikely to recover. The runtime retry gate
+/// makes the exact per-attempt decision (it schedules a retry only when `now + REFRESH_RETRY_BACKOFF +
+/// RESPONSE_TIMEOUT + HANDOVER_MARGIN` still fits this dialog's cut), so a slow first attempt falls back
+/// to the panel recycle rather than launching a doomed retry. Enforced here so the constants can't drift
+/// the fast-failure retry out of reach.
+const _: () = assert!(
+    SESSION_REFRESH_AFTER.as_millis()
+        + REFRESH_RETRY_BACKOFF.as_millis()
+        + RESPONSE_TIMEOUT.as_millis()
+        + HANDOVER_MARGIN.as_millis()
+        <= PANEL_SESSION_LIMIT.as_millis(),
+    "a fast-failure transient-refresh retry must still fit before the panel's session cut",
+);
 
 // ---- runtime discovery (pure helpers take file contents, so they unit-test) ------------------
 
@@ -296,6 +394,34 @@ pub fn build_ack(d: &Dialog, ack_branch: &str) -> String {
     )
 }
 
+/// ACK for a 2xx whose `To` header we echo back. Used only for a MALFORMED 2xx whose To-tag is empty or
+/// entirely absent: RFC 3261 §13.2.2.4 requires the ACK's `To` to equal the 2xx's `To`, so we must
+/// reproduce the received `To` value — critically PRESERVING whether the tag is empty or absent — rather
+/// than synthesize `;tag=` (which `build_ack` always does). `to_header` is that `To` value as returned by
+/// `header_value` (surrounding whitespace already trimmed; tag presence/absence preserved), placed after
+/// `To: ` verbatim; `target` is the 2xx's `Contact` (the ACK Request-URI).
+pub fn build_ack_echoing_to(d: &Dialog, ack_branch: &str, target: &str, to_header: &str) -> String {
+    format!(
+        "ACK {target} SIP/2.0\r\n\
+         Via: SIP/2.0/TCP 127.0.0.1:{lport};rport;branch={branch}\r\n\
+         Max-Forwards: 70\r\n\
+         From: <sip:btmqttd@{domain}>;tag={ftag}\r\n\
+         To: {to}\r\n\
+         Call-ID: {callid}\r\n\
+         CSeq: {cseq} ACK\r\n\
+         Content-Length: 0\r\n\
+         \r\n",
+        target = target,
+        lport = d.local_port,
+        branch = ack_branch,
+        domain = d.domain,
+        ftag = d.from_tag,
+        to = to_header,
+        callid = d.call_id,
+        cseq = d.cseq,
+    )
+}
+
 /// CANCEL a still-pending INVITE (RFC 3261 §9.1). It MUST reuse the INVITE's Request-URI, `Call-ID`,
 /// `From`-tag, `To` (no tag yet — the transaction isn't confirmed), CSeq NUMBER (method `CANCEL`) and,
 /// critically, the SAME top `Via` branch as the INVITE it cancels, so the proxy matches it to that
@@ -324,16 +450,19 @@ pub fn build_cancel(d: &Dialog) -> String {
 
 /// ACK a NON-2xx final response to the INVITE (RFC 3261 §17.1.1.3). Unlike the 2xx ACK (a new
 /// transaction to the panel's Contact), this ACK is part of the INVITE CLIENT transaction: same
-/// Request-URI as the INVITE (`sip:<aor>@<domain>`), the SAME top `Via` branch and CSeq NUMBER, plus
-/// the failure response's `To`-tag. It absorbs the transaction so the proxy/panel don't hold the
-/// server transaction until Timer H after a reject (486/401/407/…).
-pub fn build_ack_failure(d: &Dialog, to_tag: &str) -> String {
+/// Request-URI as the INVITE (`sip:<aor>@<domain>`), the SAME top `Via` branch and CSeq NUMBER. `to_header`
+/// is the failure response's `To` value as parsed by `ack_to_header` (surrounding whitespace trimmed by
+/// `header_value`; the tag — empty or absent — preserved), so the ACK's `To` matches the response's
+/// (RFC 3261 §13.2.2.4-style) and even a MALFORMED final (empty or absent tag) is still ACKed and absorbed
+/// rather than skipped — otherwise the proxy/panel hold the server transaction until Timer H. Callers pass
+/// that `To` (with a synthesized `<sip:aor@domain>` fallback if the header is somehow absent).
+pub fn build_ack_failure(d: &Dialog, to_header: &str) -> String {
     format!(
         "ACK sip:{aor}@{domain} SIP/2.0\r\n\
          Via: SIP/2.0/TCP 127.0.0.1:{lport};rport;branch={branch}\r\n\
          Max-Forwards: 70\r\n\
          From: <sip:btmqttd@{domain}>;tag={ftag}\r\n\
-         To: <sip:{aor}@{domain}>;tag={ttag}\r\n\
+         To: {to}\r\n\
          Call-ID: {callid}\r\n\
          CSeq: {cseq} ACK\r\n\
          Content-Length: 0\r\n\
@@ -343,10 +472,34 @@ pub fn build_ack_failure(d: &Dialog, to_tag: &str) -> String {
         lport = d.local_port,
         branch = d.branch,
         ftag = d.from_tag,
-        ttag = to_tag,
+        to = to_header,
         callid = d.call_id,
         cseq = d.cseq,
     )
+}
+
+/// The `To` header value to echo back in an ACK for a received response: the response's `To` as returned
+/// by `header_value` (surrounding whitespace trimmed; an empty/absent tag preserved), or a synthesized
+/// `<sip:aor@domain>` if the header is absent OR its value is empty/whitespace-only (which `header_value`
+/// trims to `Some("")`). An empty value would emit an invalid `To: \r\n` line, so we treat it like absent.
+fn ack_to_header(msg: &str, d: &Dialog) -> String {
+    match header_value(msg, "To") {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => format!("<sip:{}@{}>", d.aor, d.domain),
+    }
+}
+
+/// Send a cleanup ACK for a received response on the live `sock` when it is write-safe, falling back to a
+/// FRESH loopback connection if that write FAILS (the socket may have closed after delivering the response)
+/// OR the socket is write-tainted (`sock_write_ok == false`: a failed prior write may have left a partial
+/// request on it). The ACK carries the INVITE's original `Via`, so flexisip matches it on either connection.
+/// Best-effort: a failed fresh write is nothing more we can do.
+async fn send_cleanup_ack(sock: &mut TcpStream, cfg: &Config, sock_write_ok: bool, ack: &str) {
+    if !sock_write_ok || write_all_flush(sock, ack.as_bytes()).await.is_err() {
+        if let Ok(mut fresh) = connect_sip(cfg).await {
+            let _ = write_all_flush(&mut fresh, ack.as_bytes()).await;
+        }
+    }
 }
 
 /// BYE to end the dialog (CSeq incremented; request-URI = the panel's learned Contact).
@@ -677,6 +830,635 @@ fn governing_deadline(
     start_deadline.max(hold_deadline)
 }
 
+/// Viewing-window renewals observed on `view_rx` WHILE a refresh INVITE was in flight, carried back so the
+/// caller can apply them — a `Start`/`Hold` that arrives during the attempt must renew the deadlines just
+/// as it would in the hold loop, not be silently dropped (issue #174, Finding #3 review). Mirrors how
+/// `session`'s own establish records `want_start` / the latest `hold_expiry` seen during establishment.
+#[derive(Default)]
+struct RefreshRenewals {
+    /// The LATEST manual `view_camera` (`ViewCmd::Start`) OBSERVED instant seen, if any: the caller re-arms
+    /// the FULL window anchored at when the Start was DEQUEUED here (`start_at + window`), NOT at refresh
+    /// completion — so a slow attempt cannot stretch the per-press window by its own (multi-second) latency.
+    /// `ViewCmd::Start` carries no timestamp, so this is receipt time (modulo mpsc-channel latency), a close
+    /// proxy for the press instant, recorded absolute exactly as `hold_expiry` is rather than as a bare flag.
+    start_at: Option<tokio::time::Instant>,
+    /// The LATEST auto-hold `ViewCmd::Hold` expiry seen (absolute), if any: the caller lifts `hold_deadline`
+    /// to it (max), so a poke buffered during the attempt still keeps the view alive.
+    hold_expiry: Option<tokio::time::Instant>,
+}
+
+impl RefreshRenewals {
+    /// Fold one command seen during the attempt into the accumulated renewals.
+    fn record(&mut self, cmd: &ViewCmd) {
+        match cmd {
+            ViewCmd::Start => {
+                // Anchor to WHEN the press arrived, keeping the latest, so `start_at + window` reflects the
+                // press moment rather than the (possibly much later) refresh-completion time.
+                let now = tokio::time::Instant::now();
+                self.start_at = Some(self.start_at.map_or(now, |cur| cur.max(now)));
+            }
+            ViewCmd::Hold(e) => self.hold_expiry = Some(self.hold_expiry.map_or(*e, |cur| cur.max(*e))),
+            ViewCmd::Stop => {}
+        }
+    }
+}
+
+/// The viewing deadline a refresh attempt should honor GIVEN the renewals seen so far: the LATER of the
+/// pre-attempt `base`, a manual `Start`'s re-armed window (`start_at + window`), and any `Hold` expiry —
+/// each recorded mid-attempt. Pure, so it is unit-testable and shared by both the connect and response
+/// waits. It never returns "no deadline": a `Start` PUSHES the abort out to its own re-armed window (not
+/// disarms it), so a manual view with a SHORT `camera_view_idle_secs` (down to 1 s) still hangs up on time
+/// even if a hung panel never answers the refresh — mirroring what the hold loop would do for a live press.
+fn effective_refresh_deadline(
+    renewals: &RefreshRenewals,
+    base: tokio::time::Instant,
+    window: Duration,
+) -> tokio::time::Instant {
+    let mut deadline = base;
+    if let Some(s) = renewals.start_at {
+        deadline = deadline.max(s + window);
+    }
+    if let Some(e) = renewals.hold_expiry {
+        deadline = deadline.max(e);
+    }
+    deadline
+}
+
+/// Apply renewals captured during a refresh attempt to the caller's viewing-window deadlines, with the
+/// SAME rules the hold loop uses for a live command: a `Start` re-arms the FULL `window` anchored at the
+/// press (`start_at + window`), NOT at `now` — so a slow refresh cannot stretch the per-press window by its
+/// own latency; a `Hold` lifts `hold_deadline` to its absolute expiry (max), ignoring one already elapsed by
+/// `now`. Both use `max` so a renewal never shortens a still-longer existing deadline. Pure, so the deadline
+/// arithmetic is unit-testable.
+fn apply_refresh_renewals(
+    renewals: &RefreshRenewals,
+    now: tokio::time::Instant,
+    window: Duration,
+    start_deadline: &mut tokio::time::Instant,
+    hold_deadline: &mut tokio::time::Instant,
+) {
+    if let Some(s) = renewals.start_at {
+        *start_deadline = (*start_deadline).max(s + window);
+    }
+    if let Some(e) = renewals.hold_expiry {
+        if e > now {
+            *hold_deadline = (*hold_deadline).max(e);
+        }
+    }
+}
+
+/// Drain every `ViewCmd` ALREADY queued in `view_rx` (non-blocking) and fold each into the viewing-window
+/// deadlines with the SAME rules as the main hold loop's `select!`: a `Start` re-arms the full `window` from
+/// now; a `Hold` lifts `hold_deadline` to its absolute expiry (a poke already elapsed by now is ignored, so
+/// stragglers can't revive a viewerless session); `max` keeps both monotonic. Returns `true` if a `Stop` — or
+/// a closed channel (shutdown) — was seen, meaning the caller must hang up.
+///
+/// Used right after a make-before-break adoption: the old-dialog teardown (a BYE on a possibly-dead socket,
+/// then a `bye_reconnect` fallback that can take up to ~`SIP_IO_TIMEOUT` to connect and write) can outlast
+/// `VIEWER_LINGER` while `hold.rs` keeps poking ~1 s. Those pokes sit unread in `view_rx`, so without this the
+/// next `select!` could reach an ALREADY-expired deadline WITH fresh `Hold`s still queued and — being
+/// unbiased — pick expiry and BYE the dialog we just adopted, dropping a still-connected viewer's view.
+fn drain_queued_view_cmds(
+    view_rx: &mut mpsc::Receiver<ViewCmd>,
+    window: Duration,
+    start_deadline: &mut tokio::time::Instant,
+    hold_deadline: &mut tokio::time::Instant,
+) -> bool {
+    loop {
+        match view_rx.try_recv() {
+            Ok(ViewCmd::Start) => *start_deadline = tokio::time::Instant::now() + window,
+            Ok(ViewCmd::Hold(expiry)) => {
+                if expiry > tokio::time::Instant::now() {
+                    *hold_deadline = (*hold_deadline).max(expiry);
+                }
+            }
+            Ok(ViewCmd::Stop) => return true, // user pressed "Stop Camera" ⇒ hang up
+            Err(mpsc::error::TryRecvError::Empty) => return false, // nothing more queued
+            Err(mpsc::error::TryRecvError::Disconnected) => return true, // channel closed ⇒ shutting down
+        }
+    }
+}
+
+/// What draining the in-dialog buffer decided for the hold loop.
+enum InDialog {
+    /// Nothing terminal — keep holding the dialog.
+    Continue,
+    /// The panel BYE'd (we ACKed it); the caller must NOT send its own BYE to the dead dialog.
+    PanelEnded,
+    /// The confirmed dialog's socket is dead (or the buffer blew its cap); teardown was already attempted
+    /// (BYE on the live socket, falling back to a fresh connection only if that write fails), so the caller
+    /// propagates this error for the session-backoff path.
+    Failed(std::io::Error),
+}
+
+/// Drain every COMPLETE in-dialog message buffered in `inbound` on a CONFIRMED dialog, applying the panel's
+/// mid-session traffic exactly as the hold loop must: a BYE ends the dialog (200 OK, then PanelEnded); a
+/// retransmitted INVITE 2xx is re-ACKed; any other request gets its final response (OPTIONS/other → 200,
+/// re-INVITE/UPDATE → 488). A cap overflow or a write to a dead socket tears the dialog down (BYE on the
+/// live socket, falling back to a fresh connection only if that write fails) and returns Failed. Shared by
+/// the socket-read arm AND the adopted-successor path (a refresh 2xx that
+/// flexisip coalesced with an in-dialog request leaves that request buffered — it must be processed here,
+/// not dropped). None of this renews a viewing-window deadline; only a real viewer poke does.
+async fn process_in_dialog(
+    sock: &mut TcpStream,
+    inbound: &mut Vec<u8>,
+    cfg: &Config,
+    d: &Dialog,
+) -> InDialog {
+    if inbound.len() > MAX_SIP_BYTES {
+        // CONFIRMED dialog ⇒ CANCEL is invalid; a best-effort BYE is what releases the panel.
+        if teardown_bye(sock, d).await.is_err() {
+            bye_reconnect(cfg, d).await;
+        }
+        return InDialog::Failed(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "in-dialog SIP request exceeded cap",
+        ));
+    }
+    loop {
+        let len = match frame_message(inbound) {
+            Frame::Complete(len) => len,
+            Frame::Incomplete => break, // wait for more bytes on the next read
+            Frame::Malformed => {
+                // A malformed frame at the head can never advance: leaving it there would wedge framing, so a
+                // later valid BYE would never be seen and the held view would stay pinned to a dead dialog.
+                // Tear the dialog down (BYE on the live socket, fresh connection on failure) and surface it.
+                if teardown_bye(sock, d).await.is_err() {
+                    bye_reconnect(cfg, d).await;
+                }
+                return InDialog::Failed(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed in-dialog SIP frame",
+                ));
+            }
+        };
+        let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
+        inbound.drain(..len);
+        if is_bye(&msg) {
+            if let Some(ok) = build_ok_to(&msg) {
+                let _ = write_all_flush(sock, ok.as_bytes()).await;
+            }
+            return InDialog::PanelEnded;
+        }
+        // A RETRANSMITTED INVITE 2xx (our first ACK was lost) must be re-ACKed — a UAC ACKs every 2xx or
+        // the panel times out the confirmed dialog and the camera stops. A write failure here proves the
+        // socket is dead: discarding it would let this return Continue while the peer still has no ACK (and,
+        // during successor validation, a half-closed socket then reads idle and the healthy old dialog gets
+        // retired for a dying successor). So tear down over a fresh connection and surface Failed — via
+        // ack_bye_reconnect (ACK then BYE), NOT a bare bye_reconnect: the retransmission proves the peer
+        // never saw our ACK, so the dialog is still UNCONFIRMED and a BYE alone would be unreliable against it.
+        if is_established_invite_2xx(&msg) {
+            let ack = build_ack(d, &format!("z9hG4bK{}", rand_hex(8)));
+            if let Err(e) = write_all_flush(sock, ack.as_bytes()).await {
+                ack_bye_reconnect(cfg, d).await;
+                return InDialog::Failed(e);
+            }
+            continue;
+        }
+        // Answer in-dialog REQUESTS the panel sends mid-session so its transaction completes. A write
+        // failure proves the socket is dead — tear down over a fresh connection and surface the error.
+        if let Some(resp) = in_dialog_answer(&msg) {
+            if let Err(e) = write_all_flush(sock, resp.as_bytes()).await {
+                bye_reconnect(cfg, d).await;
+                return InDialog::Failed(e);
+            }
+        }
+    }
+    InDialog::Continue
+}
+
+/// Confirm a freshly-established successor dialog is actually live BEFORE the caller retires the still-healthy
+/// old one. Processes the residual coalesced after the 2xx (via [`process_in_dialog`]); if only a PARTIAL
+/// in-dialog request was buffered — `process_in_dialog` cannot frame it and would report `Continue` — this
+/// does bounded reads (up to [`SUCCESSOR_VALIDATE`]) to COMPLETE and reprocess it, so a coalesced-but-split
+/// BYE is observed NOW (`PanelEnded`) rather than only after we have already dropped the old dialog and can
+/// do nothing but freeze. It ALWAYS does at least one bounded read (even on an empty residual), so a
+/// successor whose leg flexisip half-closed right after the 2xx — no BYE, just a FIN — is caught as EOF
+/// (`Failed`) here instead of surfacing as an EOF on the next hold-loop read once the old dialog is already
+/// gone. A terminal outcome short-circuits; if the bound elapses with the successor idle (no data, no EOF)
+/// it answered our INVITE and has sent no teardown, so we adopt it. On a read EOF/error the successor was
+/// CONFIRMED (we ACKed its 2xx) but its socket then died, so it is BYE'd over a fresh connection before we
+/// return `Failed` — otherwise that orphaned dialog would pin the panel until its own timeout. The WHOLE
+/// bound — not just the read — is [`SUCCESSOR_VALIDATE`]: `process_in_dialog` is itself run under the same
+/// deadline, so a successor peer that stops draining our in-dialog responses (each `write_all_flush` would
+/// otherwise block up to [`SIP_IO_TIMEOUT`]) cannot stretch validation, or the [`HANDOVER_MARGIN`] it sits
+/// inside, past the bound; that timeout is treated as an unadoptable successor (BYE'd over a fresh
+/// connection, `Failed`) since its socket may hold a partial write. The old dialog is still up (and the
+/// bus-driven RTP siphon still armed) throughout, so this brief wait never blips the view.
+async fn validate_successor(
+    sock: &mut TcpStream,
+    inbound: &mut Vec<u8>,
+    cfg: &Config,
+    d: &Dialog,
+) -> InDialog {
+    let deadline = tokio::time::Instant::now() + SUCCESSOR_VALIDATE;
+    loop {
+        // Bound in-dialog servicing by the SAME deadline as the read below. process_in_dialog does no socket
+        // reads, but it may write_all_flush() one or more responses (200 to a coalesced OPTIONS, 488 to a
+        // re-INVITE, a re-ACK to a retransmitted 2xx), each of which can block up to SIP_IO_TIMEOUT if the
+        // successor peer stops draining our writes. Without this bound the validation — and the HANDOVER_MARGIN
+        // it sits inside — could overrun SUCCESSOR_VALIDATE by seconds. On timeout the successor can't be
+        // serviced within the window and its socket may hold a partial write, so it is NOT adoptable: BYE it
+        // over a FRESH connection (its own socket is tainted) and surface Failed so the caller keeps the
+        // still-healthy old dialog. Cancelling process_in_dialog mid-write is safe here — the successor is
+        // discarded, never adopted, so a truncated response or a partly-drained `inbound` cannot be observed.
+        match tokio::time::timeout_at(deadline, process_in_dialog(sock, inbound, cfg, d)).await {
+            Ok(InDialog::Continue) => {}
+            Ok(terminal) => return terminal, // PanelEnded / Failed — successor is not adoptable
+            Err(_) => {
+                bye_reconnect(cfg, d).await;
+                return InDialog::Failed(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "successor validation timed out servicing in-dialog traffic",
+                ));
+            }
+        }
+        // Read more (bounded) whether or not a partial remains: complete a split request, OR detect an
+        // immediate half-close (Ok(0) EOF) on an otherwise-empty buffer, before committing the handover.
+        // A read EOF/error means the successor's socket died AFTER we ACKed its 2xx, so that dialog is
+        // CONFIRMED-but-orphaned on the panel; BYE it over a fresh connection (its own socket is dead) so the
+        // panel isn't pinned by it until its own timeout, then surface Failed so the caller keeps the old one.
+        let mut buf = [0u8; 4096];
+        match tokio::time::timeout_at(deadline, sock.read(&mut buf)).await {
+            Ok(Ok(0)) => {
+                bye_reconnect(cfg, d).await;
+                return InDialog::Failed(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "successor closed before adoption",
+                ));
+            }
+            Ok(Ok(n)) => inbound.extend_from_slice(&buf[..n]),
+            Ok(Err(e)) => {
+                bye_reconnect(cfg, d).await;
+                return InDialog::Failed(e);
+            }
+            Err(_) => return InDialog::Continue, // idle within the bound ⇒ live ⇒ adopt
+        }
+    }
+}
+
+/// Outcome of a make-before-break refresh attempt ([`establish_refresh_dialog`]).
+enum RefreshOutcome {
+    /// The panel admitted a concurrent dialog: the confirmed successor socket + `Dialog`, any viewing-window
+    /// renewals seen mid-attempt for the caller to apply to the ADOPTED dialog, any RESIDUAL bytes left
+    /// after the 2xx (an in-dialog request flexisip coalesced with it) for the caller to seed as the adopted
+    /// dialog's inbound buffer — so a coalesced BYE/OPTIONS is not dropped — and the `Instant` the 2xx was
+    /// RECEIVED (the panel's ~`PANEL_SESSION_LIMIT` clock for this dialog started at its acceptance, before our
+    /// ACK), so the caller anchors `dialog_started_at`/`refresh_at` to it rather than to a post-ACK `now` that
+    /// a stalled ACK write could push late. `Dialog` is boxed to keep this (much larger) variant from bloating
+    /// every `RefreshOutcome` value.
+    Established(TcpStream, Box<Dialog>, RefreshRenewals, Vec<u8>, tokio::time::Instant),
+    /// The panel refused (e.g. `486 Busy` on a single-owner plant) or the attempt errored. The pending
+    /// INVITE was CANCELled / the non-2xx ACKed, so nothing dangles; the caller keeps its current dialog
+    /// and applies any renewals seen mid-attempt to it. The `bool` is `retriable`: `false` for a definitive
+    /// panel refusal (a SIP `>=300` final response — a single-owner plant won't change its mind mid-dialog,
+    /// so the caller latches and falls back); `true` for a TRANSIENT transport error (connect/write/timeout/
+    /// malformed) the caller may re-attempt while budget remains before the panel cut.
+    Declined(std::io::Error, RefreshRenewals, bool),
+    /// Shutdown (`stopping`) or a `Stop`/closed channel was observed mid-attempt. The pending INVITE was
+    /// CANCELled (over TCP a dropped socket does NOT cancel it, so a late 2xx could otherwise pin the
+    /// panel), so nothing dangles; the caller tears the CURRENT dialog down (a Stop means the viewer wants
+    /// the camera off; a shutdown means we are going away). No renewals — the session is ending.
+    Aborted,
+}
+
+/// Make-before-break (issue #174, Finding #3): stand up a FRESH on-demand dialog (INVITE → 2xx → ACK)
+/// while an existing one is still up, so the panel's single shared media session stays alive across its
+/// hard ~60 s BYE and `av.rs`'s RTP siphon to go2rtc never lapses (see [`SESSION_REFRESH_AFTER`]). It
+/// reuses the live dialog's identity (`aor`/`domain`/`devaddr`) but mints a NEW Call-ID/tags/branch and a
+/// throwaway SRTP key, so the panel sees a distinct dialog it can admit alongside the current one.
+///
+/// INTERRUPTIBLE, and that matters: the response wait races `stopping` and `view_rx` — exactly like
+/// `session`'s own establish — so a daemon shutdown (main.rs bounds shutdown to a few seconds) or a
+/// `Stop`/"Stop Camera" press aborts PROMPTLY instead of blocking up to `RESPONSE_TIMEOUT + CANCEL_DRAIN`.
+/// Every exit that is not a clean 2xx — refusal, error, timeout, or abort — first runs the cancellation
+/// routine (CANCEL a pending INVITE / ACK a non-2xx), because over TCP a dropped socket does NOT cancel an
+/// INVITE and a late 2xx would otherwise pin the panel. `Start`/`Hold` that arrive mid-attempt are NOT
+/// dropped: they are RECORDED into the returned [`RefreshRenewals`] so the caller re-arms the viewing-window
+/// deadlines exactly as the hold loop would (a manual press or a hold poke during the attempt must not be
+/// lost), mirroring how `session`'s own establish records `want_start` / the latest `hold_expiry`.
+///
+/// It also honors the caller's `viewing_deadline` (the governing hang-up deadline captured at the attempt's
+/// start): if that window lapses mid-attempt WITHOUT a fresh poke, the attempt aborts (cancelling any
+/// pending INVITE) instead of blocking for the full response budget — so an auto-only session that loses its
+/// viewer just as the refresh begins still hangs up ~`VIEWER_LINGER` later, not up to `RESPONSE_TIMEOUT`
+/// later. A `Hold` seen during the attempt PUSHES that abort out to the poke's own linger, and a manual
+/// `Start` to its re-armed `start_at + window` (see [`effective_refresh_deadline`]) — never forfeiting the
+/// deadline — so even a manual view with a short `camera_view_idle_secs` hangs up on time if the panel hangs.
+// Every parameter is a distinct input the refresh genuinely needs (connection config, shutdown/stop
+// signals, the dialog identity to mint from, and the two viewing-window bounds); bundling them would only
+// move the same fields behind a one-use struct, so the arg count is accepted here deliberately.
+#[allow(clippy::too_many_arguments)]
+async fn establish_refresh_dialog(
+    cfg: &Arc<Config>,
+    stopping: &Arc<AtomicBool>,
+    view_rx: &mut mpsc::Receiver<ViewCmd>,
+    aor: &str,
+    domain: &str,
+    devaddr: &str,
+    viewing_deadline: tokio::time::Instant,
+    window: Duration,
+) -> RefreshOutcome {
+    // Viewing-window commands seen while the INVITE is in flight, folded in and handed back so the caller
+    // applies them (see RefreshRenewals). Empty on the pre-INVITE error paths below.
+    let mut renewals = RefreshRenewals::default();
+    // ONE absolute deadline for the WHOLE attempt — setup (connect + INVITE write) AND the response wait
+    // below share it, so the entire refresh is bounded by a single RESPONSE_TIMEOUT. That is what the
+    // compile-time timing invariant (`SESSION_REFRESH_AFTER + RESPONSE_TIMEOUT + margin ≤ PANEL_SESSION_LIMIT`)
+    // assumes; giving setup its own fresh budget would let a slow-connect-then-slow-response attempt run up
+    // to ~2× and complete AFTER the panel cut. Bounding + interrupting the setup also matters on its own: a
+    // hung flexisip must not wedge the session here, or a daemon shutdown (`stopping`) / `Stop` could never
+    // reach the ACTIVE dialog's teardown. (view_rx is watched from the response wait, which begins the
+    // instant the loopback setup completes.)
+    let attempt_deadline = tokio::time::Instant::now() + RESPONSE_TIMEOUT;
+    // Connect in a loop-select so a queued `Stop` (or shutdown) aborts even if a hung flexisip stalls the
+    // loopback connect — no `sock` exists yet, so watching `view_rx` here is free of borrow conflicts. A
+    // Start/Hold seen while connecting is RECORDED (not dropped) and we keep connecting; the pinned future
+    // continues across iterations and the absolute `attempt_deadline` still bounds it.
+    let mut sock = {
+        let connect = TcpStream::connect(("127.0.0.1", cfg.sip_port));
+        tokio::pin!(connect);
+        loop {
+            // Enforce the whole-attempt budget UNCONDITIONALLY at the top of each iteration: a `biased`
+            // select polls arms in order, so a continuously-ready `view_rx` (a flood of Start/Hold) could
+            // otherwise starve the `timeout_at` arm and let the attempt run past `attempt_deadline`. No
+            // INVITE has been sent yet here, so no CANCEL is needed.
+            if tokio::time::Instant::now() >= attempt_deadline {
+                return RefreshOutcome::Declined(
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh connect timed out"),
+                    renewals,
+                    true, // transient ⇒ retriable
+                );
+            }
+            // The deadline to honor THIS iteration: the pre-attempt window, pushed out by any Hold recorded
+            // so far (to that poke's expiry) and by a manual Start (to its re-armed start_at + window).
+            // Recomputed each iteration so a Hold/Start arriving mid-setup moves it out rather than being lost.
+            let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline, window);
+            tokio::select! {
+                biased;
+                _ = wait_until_stopping(stopping) => return RefreshOutcome::Aborted,
+                v = view_rx.recv() => match v {
+                    Some(cmd @ (ViewCmd::Start | ViewCmd::Hold(_))) => renewals.record(&cmd),
+                    Some(ViewCmd::Stop) | None => return RefreshOutcome::Aborted,
+                },
+                // The viewer's effective window lapsed with no fresh poke during setup: no INVITE has been
+                // sent yet, so just abort and let the caller tear the current dialog down at its deadline.
+                _ = tokio::time::sleep_until(eff_deadline) => {
+                    return RefreshOutcome::Aborted;
+                }
+                r = tokio::time::timeout_at(attempt_deadline, &mut connect) => match r {
+                    Ok(Ok(s)) => break s,
+                    Ok(Err(e)) => return RefreshOutcome::Declined(e, renewals, true), // transient ⇒ retriable
+                    Err(_) => return RefreshOutcome::Declined(
+                        std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh connect timed out"),
+                        renewals,
+                        true, // transient ⇒ retriable
+                    ),
+                },
+            }
+        }
+    };
+    let local_port = match sock.local_addr() {
+        Ok(a) => a.port(),
+        Err(e) => return RefreshOutcome::Declined(e, renewals, true), // transient ⇒ retriable
+    };
+    let mut d = Dialog {
+        aor: aor.to_string(),
+        domain: domain.to_string(),
+        local_port,
+        call_id: rand_hex(8),
+        from_tag: rand_hex(6),
+        branch: format!("z9hG4bK{}", rand_hex(8)),
+        cseq: 21,
+        to_tag: String::new(),
+        remote_target: String::new(),
+    };
+    let sdp = build_sdp_offer(cfg.camera_video_port, cfg.camera_audio_port, &srtp_key(), devaddr);
+    let invite = build_invite(&d, &sdp);
+    // Write the INVITE in a loop-select so a `Stop`, a viewing-deadline lapse, or shutdown is observed even
+    // if the loopback write stalls (a Start/Hold is RECORDED, not dropped) — exactly like the connect and
+    // response phases. The pinned write future borrows `sock`, so we break out of the loop with a WriteStep
+    // and only then (borrow released) run cancel/return via cancel_partial_write_invite: an interrupted or
+    // errored write may have left a PARTIAL INVITE on `sock`, so the CANCEL goes over a FRESH connection
+    // (never appended to a half-written INVITE), while the INVITE's own final response — a racing 2xx if the
+    // whole request did reach flexisip before the write was cut — is drained from the ORIGINAL socket and
+    // ACK/BYE'd there. A dropped TCP socket does NOT cancel the transaction, so the fresh CANCEL (same Via)
+    // is what stops a late 2xx from pinning the panel.
+    enum WriteStep {
+        Sent,
+        Aborted,
+        Declined(std::io::Error),
+    }
+    let write_step = {
+        let write = write_all_flush(&mut sock, invite.as_bytes());
+        tokio::pin!(write);
+        loop {
+            // Enforce the whole-attempt budget unconditionally (a biased select could otherwise let a
+            // continuously-ready view_rx starve the timeout arm); the post-loop match CANCELs on Declined.
+            if tokio::time::Instant::now() >= attempt_deadline {
+                break WriteStep::Declined(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "refresh INVITE write timed out (cancelling)",
+                ));
+            }
+            let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline, window);
+            tokio::select! {
+                biased;
+                _ = wait_until_stopping(stopping) => break WriteStep::Aborted,
+                v = view_rx.recv() => match v {
+                    Some(cmd @ (ViewCmd::Start | ViewCmd::Hold(_))) => renewals.record(&cmd),
+                    Some(ViewCmd::Stop) | None => break WriteStep::Aborted,
+                },
+                _ = tokio::time::sleep_until(eff_deadline) => break WriteStep::Aborted,
+                r = tokio::time::timeout_at(attempt_deadline, &mut write) => break match r {
+                    Ok(Ok(())) => WriteStep::Sent,
+                    // A write error can still leave a COMPLETE INVITE delivered to flexisip before the socket
+                    // died (a partial flush, or a reset landing after the last byte) ⇒ transient/retriable.
+                    Ok(Err(e)) => WriteStep::Declined(e),
+                    Err(_) => WriteStep::Declined(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "refresh INVITE write timed out (cancelling)",
+                    )),
+                },
+            }
+        }
+    };
+    match write_step {
+        WriteStep::Sent => {}
+        WriteStep::Aborted => {
+            cancel_partial_write_invite(&mut sock, cfg, &mut d).await;
+            return RefreshOutcome::Aborted;
+        }
+        WriteStep::Declined(e) => {
+            cancel_partial_write_invite(&mut sock, cfg, &mut d).await;
+            return RefreshOutcome::Declined(e, renewals, true);
+        }
+    }
+
+    // Bounded, INTERRUPTIBLE wait for the final response. Every non-2xx / error / abort routes through
+    // cancel_pending_invite (CANCEL + drain + ACK/BYE a racing 2xx) so the panel is never left pinned by
+    // an uncancelled INVITE. The accumulator is owned here so a timeout mid-2xx carries its partial bytes
+    // into that drain. Mirrors `session`'s open select.
+    let mut acc: Vec<u8> = Vec::new();
+    // REUSE the setup deadline — do NOT start a fresh budget — so setup + response together stay within one
+    // RESPONSE_TIMEOUT (the whole-attempt bound the compile-time invariant relies on).
+    let resp_deadline = attempt_deadline;
+    let final_resp = loop {
+        // Enforce the whole-attempt budget unconditionally at the top: a biased select could otherwise let a
+        // continuously-ready view_rx starve the response/timeout arm and run past resp_deadline. CANCEL the
+        // pending INVITE (a late 2xx must not pin the panel) before declining.
+        if tokio::time::Instant::now() >= resp_deadline {
+            let seed = std::mem::take(&mut acc);
+            cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
+            return RefreshOutcome::Declined(
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "refresh INVITE timed out (cancelling)"),
+                renewals,
+                true, // timeout ⇒ transient ⇒ retriable
+            );
+        }
+        // The deadline to honor THIS iteration: the pre-attempt window, pushed out by any Hold recorded so
+        // far (to that poke's expiry) and by a manual Start (to its re-armed start_at + window). Recomputed
+        // each iteration so a Hold/Start that arrived moves it out rather than being lost.
+        let eff_deadline = effective_refresh_deadline(&renewals, viewing_deadline, window);
+        tokio::select! {
+            biased;
+            _ = wait_until_stopping(stopping) => {
+                let seed = std::mem::take(&mut acc);
+                cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
+                return RefreshOutcome::Aborted; // shutdown: INVITE cancelled, caller BYEs the live dialog
+            }
+            v = view_rx.recv() => match v {
+                // Start/Hold mid-refresh: RECORD it so the caller re-arms the deadline it renews (never
+                // drop it), then keep waiting for the response.
+                Some(cmd @ (ViewCmd::Start | ViewCmd::Hold(_))) => {
+                    renewals.record(&cmd);
+                    continue;
+                }
+                Some(ViewCmd::Stop) | None => {
+                    let seed = std::mem::take(&mut acc);
+                    cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
+                    return RefreshOutcome::Aborted; // Stop/closed: INVITE cancelled, caller hangs up
+                }
+            },
+            // The viewer's effective window lapsed mid-attempt with no fresh poke (the viewer left as the
+            // refresh began, or its last Hold's linger elapsed): CANCEL the pending INVITE (a late 2xx must
+            // not pin the panel) and hand back Aborted so the caller hangs up now — honoring VIEWER_LINGER
+            // instead of blocking here for the full response budget. A Hold seen during the attempt PUSHES
+            // this out to that poke's expiry; a manual Start to its re-armed start_at + window.
+            _ = tokio::time::sleep_until(eff_deadline) => {
+                let seed = std::mem::take(&mut acc);
+                cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
+                return RefreshOutcome::Aborted;
+            }
+            res = tokio::time::timeout_at(resp_deadline, wait_final_response(&mut sock, &mut acc)) => {
+                match res {
+                    Ok(Ok(resp)) => break resp,
+                    other => {
+                        let seed = std::mem::take(&mut acc);
+                        cancel_pending_invite(&mut sock, cfg, &mut d, seed).await;
+                        return RefreshOutcome::Declined(
+                            match other {
+                                Err(_) => std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "refresh INVITE timed out (cancelling)",
+                                ),
+                                Ok(Err(e)) => e,
+                                Ok(Ok(_)) => unreachable!("handled by the break arm above"),
+                            },
+                            renewals,
+                            true, // timeout / reader error ⇒ transient ⇒ retriable
+                        );
+                    }
+                }
+            }
+        }
+    };
+
+    // The panel's ~PANEL_SESSION_LIMIT lifetime for THIS dialog begins when it generated the 2xx we just
+    // received — NOT when our ACK finishes. Capture the acceptance instant now so the caller can anchor the
+    // adopted dialog's clock (dialog_started_at / refresh_at) to it: a stalled-but-successful ACK write (up to
+    // SIP_IO_TIMEOUT) would otherwise push those up to ~2 s late, and with only ~1 s of slack in the retry
+    // budget the pre-cut gate could admit a retry whose handover finishes after the panel's real cut.
+    let accepted_at = tokio::time::Instant::now();
+
+    // DEFENSIVE (not normally reachable): `wait_final_response` only ever returns a framed message whose
+    // `parse_status` is `Some(s >= 200)`, so `status` is present here. Kept as a guarded fallback rather than
+    // an `.expect()` — should that coupling ever change, a malformed final should decline retriably, never
+    // panic the session task.
+    let Some(status) = parse_status(&final_resp) else {
+        return RefreshOutcome::Declined(
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "no SIP status line"),
+            renewals,
+            true, // malformed response ⇒ transient ⇒ retriable
+        );
+    };
+    if !(200..300).contains(&status) {
+        // ACK the non-2xx (RFC 3261 §17.1.1.3) so flexisip doesn't hold the INVITE server transaction to
+        // Timer H, then surface the status. Distinguish a DEFINITIVE refusal from a TEMPORARY one: only a
+        // permanent "this caller can't have the camera" answer (busy/decline/forbidden) should latch refresh
+        // off, whereas a transient server/transaction failure (408 timeout, 5xx, 480 unavailable, 491
+        // pending, …) may well succeed on a retry before the panel cut, so it stays retriable. A fixed
+        // REFRESH_RETRY_BACKOFF (bounded by the caller's pre-cut budget) is used rather than parsing
+        // Retry-After — flexisip rarely sets it and any value is dwarfed by the ~60 s window. ACK
+        // unconditionally, echoing the response's To (via ack_to_header), so even a malformed
+        // (empty/absent-tag) final is absorbed rather than left to Timer H — on the live socket, falling
+        // back to a fresh connection if that write fails (the socket may close right after the reject, and a
+        // transient status schedules another refresh, so a lost ACK would otherwise linger + stack).
+        let ack = build_ack_failure(&d, &ack_to_header(&final_resp, &d));
+        send_cleanup_ack(&mut sock, cfg, true, &ack).await;
+        let permanent_refusal = matches!(status, 403 | 486 | 600 | 603);
+        return RefreshOutcome::Declined(
+            std::io::Error::other(format!("refresh INVITE rejected with {status}")),
+            renewals,
+            !permanent_refusal, // busy/decline/forbidden ⇒ latch; transient server errors ⇒ retry
+        );
+    }
+
+    let Some(tag) = to_tag(&final_resp).filter(|t| !t.trim().is_empty()) else {
+        // A 2xx with NO (or an empty/whitespace) To-tag is malformed (flexisip always sets one). The panel
+        // has still ACCEPTED the INVITE, so a UAC MUST ACK the 2xx (RFC 3261 §13.2.2.4) or flexisip keeps
+        // retransmitting it. We CAN ACK — echoing the received `To` (via ack_to_header: whitespace trimmed,
+        // synthesized `<sip:aor@domain>` if the header is somehow absent, tag empty/absent preserved) with
+        // the Request-URI from the 2xx's Contact — even though we canNOT form a reliable in-dialog BYE
+        // without a remote tag. So ACK on THIS connection (where the 2xx arrived and the dialog lives),
+        // falling back to a fresh connection if that write fails (the socket may have closed after
+        // delivering the 2xx), then LATCH (retriable=false): a BYE here would be unaddressable, and retrying
+        // only reproduces the same tagless 2xx and stacks one orphan per attempt, so we ride the current
+        // dialog to the panel's cut, which reclaims this successor on its own timeout. (Cannot happen against
+        // a conformant flexisip; defensive.)
+        let target =
+            contact_uri(&final_resp).unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
+        let ack = build_ack_echoing_to(&d, &format!("z9hG4bK{}", rand_hex(8)), &target, &ack_to_header(&final_resp, &d));
+        // Live response socket (write-safe), falling back to a fresh connection if that write fails.
+        send_cleanup_ack(&mut sock, cfg, true, &ack).await;
+        return RefreshOutcome::Declined(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "2xx to refresh INVITE has no To-tag — ACKed, but cannot form a confirmed dialog for BYE",
+            ),
+            renewals,
+            false, // unaddressable dialog: retrying only stacks orphans ⇒ latch, let the panel's cut reclaim it
+        );
+    };
+    d.to_tag = tag;
+    d.remote_target =
+        contact_uri(&final_resp).unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
+    let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
+    if let Err(e) = write_all_flush(&mut sock, ack.as_bytes()).await {
+        // The panel accepted (2xx) but our ACK couldn't be written — the dialog may be live at the panel,
+        // so tear it down over a FRESH connection rather than leaving it streaming, and decline so the
+        // caller keeps its current dialog. Use ack_bye_reconnect (ACK then BYE): a bare BYE is unreliable
+        // against a 2xx we never ACKed, so the dialog must be confirmed before it is torn down.
+        ack_bye_reconnect(cfg, &d).await;
+        return RefreshOutcome::Declined(e, renewals, true); // transport ⇒ transient ⇒ retriable
+    }
+    // Hand back any bytes wait_final_response left in `acc` AFTER the 2xx: flexisip can coalesce the final
+    // response with an immediate in-dialog request (an OPTIONS, or even a BYE) into one TCP read, and over
+    // TCP that request is delivered ONCE — if we dropped it the successor could be treated as live after it
+    // was actually terminated. The caller seeds the adopted dialog's inbound buffer with this residual.
+    RefreshOutcome::Established(sock, Box::new(d), renewals, acc, accepted_at)
+}
+
 /// One on-demand session: INVITE → ACK, hold while views keep arriving, then BYE. `initial` is the
 /// command that opened the session (`Start` or `Hold`); it — together with any command that arrives
 /// while the INVITE establishes — seeds the matching deadline(s). While the session is up, every extra
@@ -777,7 +1559,7 @@ async fn session(
                         return match other {
                             Err(_) => Err(std::io::Error::new(
                                 std::io::ErrorKind::TimedOut,
-                                "INVITE response timed out (CANCEL sent)",
+                                "INVITE response timed out (cancelling)",
                             )),
                             Ok(Err(e)) => Err(e), // reader error; cancelled best-effort
                             Ok(Ok(_)) => unreachable!("handled by the break arm above"),
@@ -788,16 +1570,25 @@ async fn session(
         }
     };
 
+    // The panel's ~PANEL_SESSION_LIMIT clock for THIS dialog begins when it generated the 2xx we just
+    // received — NOT when our ACK finishes below. Capture the acceptance instant here so the refresh
+    // schedule and pre-cut retry gate are anchored to it: a stalled-but-successful ACK write (up to
+    // SIP_IO_TIMEOUT) would otherwise push dialog_started_at / refresh_at up to ~2 s late, and with only
+    // ~1 s of slack in the fast-failure budget the gate could admit a refresh that finishes after the real
+    // cut (mirrors the successor-adoption anchoring via RefreshOutcome::Established's accepted_at).
+    let accepted_at0 = tokio::time::Instant::now();
+
     let status = parse_status(&final_resp)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "no SIP status line"))?;
     if !(200..300).contains(&status) {
         // ACK any NON-2xx final (486 Busy, 401/407, other rejects) — RFC 3261 §17.1.1.3. The ACK is
         // part of the INVITE client transaction: same Request-URI, top Via branch and CSeq number,
-        // plus the response's To-tag. Without it flexisip holds the INVITE server transaction until
-        // Timer H, so repeated busy/failed views would pile up stale transactions. Best-effort.
-        if let Some(tag) = to_tag(&final_resp) {
-            let _ = write_all_flush(&mut sock, build_ack_failure(&d, &tag).as_bytes()).await;
-        }
+        // echoing the response's To (via ack_to_header). Without it flexisip holds the INVITE
+        // server transaction until Timer H, so repeated busy/failed views would pile up stale
+        // transactions. ACK unconditionally so even a malformed (empty/absent-tag) final is absorbed, on the
+        // live socket with a fresh-connection fallback if that write fails.
+        let ack = build_ack_failure(&d, &ack_to_header(&final_resp, &d));
+        send_cleanup_ack(&mut sock, cfg, true, &ack).await;
         if status == 401 || status == 407 {
             // flexisip challenged our loopback INVITE — trusted-hosts should prevent this. If it ever
             // happens we need a registered identity + digest; surface it clearly for the hardware pass.
@@ -823,13 +1614,14 @@ async fn session(
         .unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
 
     // Confirm the dialog. If the ACK can't be written/flushed, the signalling socket died AFTER the
-    // panel accepted our INVITE (2xx) — the dialog may be active, so tear it down over a FRESH
-    // connection rather than leaving the panel streaming. This is the last confirmed-
-    // dialog exit; together with the hold-loop's EOF/read-error/cap arms, no post-2xx path can strand
-    // the panel.
+    // panel accepted our INVITE (2xx) — the dialog may be active, so tear it down over a FRESH connection
+    // rather than leaving the panel streaming. Use ack_bye_reconnect (ACK then BYE), NOT a bare
+    // bye_reconnect: a failed ACK means the panel never confirmed the dialog, and a BYE alone to an
+    // unacknowledged 2xx is unreliable (same reasoning as the refresh and retransmitted-2xx paths).
+    // Together with the hold-loop's EOF/read-error/cap arms, no post-2xx path can strand the panel.
     let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
     if let Err(e) = write_all_flush(&mut sock, ack.as_bytes()).await {
-        bye_reconnect(cfg, &d).await;
+        ack_bye_reconnect(cfg, &d).await;
         return Err(e);
     }
     eprintln!("btmqttd: on-demand session up (sip:{}@{})", d.aor, d.domain);
@@ -862,9 +1654,175 @@ async fn session(
     let mut inbound: Vec<u8> = Vec::new();
     let mut panel_ended = false; // the panel tore the dialog down first ⇒ don't send our own BYE
     let mut transport_lost = false; // the signalling socket died ⇒ BYE over a fresh connection
+    // Make-before-break refresh state (issue #174, Finding #3). `refresh_at` (absolute) is when we try to
+    // stand up the successor dialog — SESSION_REFRESH_AFTER into this one, before the panel's hard ~60 s
+    // BYE — so its shared media never tears down and av.rs's siphon to go2rtc never lapses. On a successful
+    // refresh it is pushed out past the new dialog. `refresh_disabled` latches when a refresh cannot be
+    // usefully retried: a DEFINITIVE panel refusal (a single-owner plant `486`), or a transient failure
+    // once there is no budget left for another attempt before the cut — a transient failure WITH budget
+    // reschedules instead (see the Declined arm). Once latched we stop retrying and ride this dialog to the
+    // panel's BYE + run()'s recycle.
+    let mut refresh_at = accepted_at0 + SESSION_REFRESH_AFTER;
+    let mut refresh_disabled = false;
+    // When the CURRENT dialog was established (updated on each adoption), so a transient-refresh retry can
+    // check there is still budget (a whole RESPONSE_TIMEOUT) before this dialog's ~PANEL_SESSION_LIMIT cut.
+    let mut dialog_started_at = accepted_at0;
     'dialog: loop {
         if stopping.load(Ordering::Relaxed) {
             break;
+        }
+        // Make-before-break, done as a PRE-select step (not a select arm) so the attempt can watch
+        // `view_rx` + `stopping` internally without a second mutable borrow of `view_rx` colliding with the
+        // `view_rx.recv()` arm below. It fires only once the dialog is old enough AND an AUTO-HOLD is still
+        // live (`hold_deadline` ahead of now — a viewer is genuinely watching). Deliberately gated on
+        // `hold_deadline`, NOT the governing deadline: a manual `view_camera` press with a long
+        // `camera_view_idle_secs` must NOT trigger a viewerless refresh (it would also let the linger renew
+        // on adopt push the session a few seconds past that manual window). A manual-only view keeps its
+        // existing behavior — the panel's ~60 s cut bounds it, exactly as before this feature. While a
+        // viewer holds, hold.rs re-pokes every ~1 s so this loop iterates well inside SESSION_REFRESH_AFTER
+        // and the attempt fires within ~1 s of it.
+        let now = tokio::time::Instant::now();
+        // Re-check the cutoff HERE (not just when scheduling `refresh_at`): if the loop was delayed, the whole
+        // fresh handover — the RESPONSE_TIMEOUT-bounded attempt PLUS the post-2xx handover (successor
+        // validation + old-dialog BYE), budgeted together as HANDOVER_MARGIN, the same slack the compile-time
+        // invariant reserves — must still fit before this dialog's ~PANEL_SESSION_LIMIT cut, or a late attempt
+        // could land the successor after the panel has already BYE'd and we'd ride the recycle anyway. Skip a
+        // doomed attempt instead.
+        let fits_before_cut =
+            now + RESPONSE_TIMEOUT + HANDOVER_MARGIN < dialog_started_at + PANEL_SESSION_LIMIT;
+        if !refresh_disabled && now >= refresh_at && hold_deadline > now && fits_before_cut {
+            // Bound the attempt by the governing hang-up deadline (the LATER of the manual and linger
+            // windows): if BOTH lapse mid-attempt with no renewing poke, the refresh aborts promptly rather
+            // than blocking for the full response budget, so a viewer that leaves as the refresh begins still
+            // hangs up ~VIEWER_LINGER later. A Hold during the attempt pushes it out to that poke's linger; a
+            // manual Start pushes it to its re-armed start_at + window (see effective_refresh_deadline).
+            let viewing_deadline = governing_deadline(start_deadline, hold_deadline);
+            match establish_refresh_dialog(
+                cfg,
+                stopping,
+                view_rx,
+                &d.aor,
+                &d.domain,
+                &devaddr,
+                viewing_deadline,
+                window,
+            )
+            .await
+            {
+                RefreshOutcome::Established(new_sock, new_d, renewals, residual, accepted_at) => {
+                    // The panel admitted a concurrent dialog — but adopt it ONLY after confirming it is
+                    // actually alive. Process any bytes flexisip coalesced after its 2xx (an in-dialog
+                    // request delivered ONCE over TCP) on the NEW dialog FIRST, BEFORE retiring the old one.
+                    // If that request is a BYE — a plant that accepts then immediately tears the second
+                    // dialog — the successor is already dead, and trading the still-healthy old dialog for a
+                    // corpse would drop the media and cause the very freeze this prevents. `validate_successor`
+                    // also completes a PARTIAL coalesced request (a BYE split across TCP reads) with a bounded
+                    // read, so a split teardown is caught here rather than after we have adopted.
+                    let mut new_sock = new_sock;
+                    let new_d = *new_d;
+                    let mut new_inbound = residual;
+                    let now = tokio::time::Instant::now();
+                    // The recorded renewals are the ONLY bridge across the establish latency: a genuinely-
+                    // connected viewer is polled by hold.rs every ~1 s, so a multi-second refresh captures
+                    // its pokes and keeps the deadline fresh — applied to whichever dialog we end up on. We
+                    // deliberately do NOT invent an unconditional linger from completion time (that would
+                    // hold the panel up past VIEWER_LINGER when the viewer left mid-attempt).
+                    apply_refresh_renewals(&renewals, now, window, &mut start_deadline, &mut hold_deadline);
+                    match validate_successor(&mut new_sock, &mut new_inbound, cfg, &new_d).await {
+                        InDialog::Continue => {
+                            // Successor healthy → NOW retire the old dialog and adopt. When the plant shares
+                            // its single media session across the two — the seamless case, and the likely
+                            // one since it just accepted a second dialog — av.rs never sees the panel's
+                            // `*7*0*##` teardown, so the RTP siphon to go2rtc holds and the view never blips.
+                            eprintln!(
+                                "btmqttd: on-demand session refreshed before the panel cut (make-before-break)"
+                            );
+                            // BYE the old dialog; if its (possibly dead) socket can't take it, retry over a
+                            // FRESH connection like every teardown path, so it can't linger until the cut.
+                            if teardown_bye(&mut sock, &d).await.is_err() {
+                                bye_reconnect(cfg, &d).await;
+                            }
+                            sock = new_sock;
+                            d = new_d;
+                            inbound = new_inbound; // residual already drained by process_in_dialog
+                            // Anchor the adopted dialog's ~60 s clock to when the panel ACCEPTED it (the 2xx it
+                            // sent), NOT to this post-ACK `now`: a stalled-but-successful ACK write could push
+                            // `now` up to SIP_IO_TIMEOUT late, and with only ~1 s of slack in the retry budget
+                            // the pre-cut gate below could otherwise admit a retry finishing after the real cut.
+                            dialog_started_at = accepted_at;
+                            refresh_at = accepted_at + SESSION_REFRESH_AFTER;
+                        }
+                        // The successor terminated (PanelEnded) or its socket died / buffer overflowed
+                        // (Failed) before we committed — its BYE was ACKed / its teardown done by
+                        // process_in_dialog, so drop it and KEEP the healthy OLD dialog. Both are handled the
+                        // same way (retry-or-latch below), but the arms are split so a Failed carries its
+                        // error into the log — a dead socket vs a cap overflow vs a real panel BYE are very
+                        // different to diagnose.
+                        adopt @ (InDialog::PanelEnded | InDialog::Failed(_)) => {
+                            match adopt {
+                                InDialog::Failed(e) => eprintln!(
+                                    "btmqttd: on-demand refresh successor failed before adoption ({e}) — keeping the current dialog"
+                                ),
+                                _ => eprintln!(
+                                    "btmqttd: on-demand refresh successor ended before adoption — keeping the current dialog"
+                                ),
+                            }
+                            // Treat like a transient miss: retry before the cut if budget remains, else latch
+                            // and let the panel BYE + run()'s recycle take over.
+                            let cut = dialog_started_at + PANEL_SESSION_LIMIT;
+                            if now + REFRESH_RETRY_BACKOFF + RESPONSE_TIMEOUT + HANDOVER_MARGIN < cut {
+                                refresh_at = now + REFRESH_RETRY_BACKOFF;
+                            } else {
+                                refresh_disabled = true;
+                            }
+                        }
+                    }
+                    // Whether we ADOPTED the successor or KEPT the old dialog, the arms above can run a teardown
+                    // (a BYE, or a fresh-connection reconnect bounded by SIP_IO_TIMEOUT) that outlasts
+                    // VIEWER_LINGER while hold.rs keeps poking ~1 s. Those pokes queue unread in view_rx and are
+                    // not yet in hold_deadline, so the next select! could reach an already-expired deadline WITH
+                    // fresh Holds still queued and — being unbiased — pick expiry and BYE a dialog under a
+                    // still-connected viewer. Apply the queued pokes before re-evaluating the deadline. A Stop /
+                    // closed channel drained here ends the session, like the select! arms.
+                    if drain_queued_view_cmds(view_rx, window, &mut start_deadline, &mut hold_deadline) {
+                        break 'dialog;
+                    }
+                    continue; // re-evaluate (with the adopted successor, or the retained old dialog)
+                }
+                RefreshOutcome::Declined(e, renewals, retriable) => {
+                    // Apply any Start/Hold seen during the attempt to THIS dialog's deadlines first — a
+                    // press during a failed refresh must renew the window just as it would in the hold loop.
+                    let now = tokio::time::Instant::now();
+                    apply_refresh_renewals(&renewals, now, window, &mut start_deadline, &mut hold_deadline);
+                    // A DEFINITIVE panel refusal (486 on a single-owner plant) won't change mid-dialog, so
+                    // latch off and ride this dialog to the panel's BYE + run()'s recycle. A TRANSIENT
+                    // transport error (a momentary flexisip refuse/reset/timeout), by contrast, must NOT
+                    // permanently forfeit make-before-break — that would force the freeze-prone recycle for a
+                    // blip. So if a whole retry attempt still fits before this dialog's cut, schedule one
+                    // after a short backoff; only latch once there's no budget left.
+                    let cut = dialog_started_at + PANEL_SESSION_LIMIT;
+                    if retriable && now + REFRESH_RETRY_BACKOFF + RESPONSE_TIMEOUT + HANDOVER_MARGIN < cut {
+                        eprintln!(
+                            "btmqttd: on-demand session refresh failed transiently ({e}) — retrying before the panel cut"
+                        );
+                        refresh_at = now + REFRESH_RETRY_BACKOFF;
+                    } else {
+                        eprintln!(
+                            "btmqttd: on-demand session refresh declined ({e}) — falling back to the panel recycle"
+                        );
+                        refresh_disabled = true;
+                    }
+                    // establish_refresh_dialog's own cleanup on a decline (ACK / fresh-connection BYE, each
+                    // bounded by SIP_IO_TIMEOUT) can likewise outlast VIEWER_LINGER while hold.rs keeps poking.
+                    // This arm falls straight through to the select! below, so apply any queued pokes first for
+                    // the same reason as the adoption paths above — otherwise the unbiased select! could pick a
+                    // stale expiry over a queued Hold and BYE the dialog under a still-connected viewer.
+                    if drain_queued_view_cmds(view_rx, window, &mut start_deadline, &mut hold_deadline) {
+                        break 'dialog;
+                    }
+                }
+                RefreshOutcome::Aborted => break, // Stop or shutdown mid-refresh (INVITE already cancelled)
+            }
         }
         // Hang up once BOTH windows have elapsed: the later deadline governs (see the seeding above).
         let deadline = governing_deadline(start_deadline, hold_deadline);
@@ -894,60 +1852,12 @@ async fn session(
                 Ok(0) => { transport_lost = true; break; }
                 Ok(n) => {
                     inbound.extend_from_slice(&scratch[..n]);
-                    if inbound.len() > MAX_SIP_BYTES {
-                        // The dialog is CONFIRMED here (we ACKed a 2xx), so CANCEL is invalid — a
-                        // best-effort BYE is what releases the panel. Returning without it would skip
-                        // the teardown below and leave the camera session up until the panel's own
-                        // timeout. If the BYE write fails the socket is dead ⇒ reconnect.
-                        if teardown_bye(&mut sock, &d).await.is_err() {
-                            bye_reconnect(cfg, &d).await;
-                        }
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "in-dialog SIP request exceeded cap",
-                        ));
-                    }
-                    // Drain every complete message now buffered. A panel-initiated BYE ends the
-                    // dialog: acknowledge it (200 OK, else the panel retransmits) and stop — we must
-                    // NOT then send our own BYE to a dead dialog. Every OTHER in-dialog request gets a
-                    // final response so the panel's transaction completes instead of timing out, but
-                    // NONE of them renews the viewing-window deadline (only a real viewer poke does).
-                    while let Some(len) = complete_message_len(&inbound) {
-                        let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
-                        inbound.drain(..len);
-                        if is_bye(&msg) {
-                            if let Some(ok) = build_ok_to(&msg) {
-                                let _ = sock.write_all(ok.as_bytes()).await;
-                                let _ = sock.flush().await;
-                            }
-                            panel_ended = true;
-                            break 'dialog;
-                        }
-                        // A RETRANSMITTED INVITE 2xx (our first ACK was lost between flexisip and the
-                        // panel) must be re-ACKed — a UAC ACKs every 2xx or the panel times out the
-                        // confirmed dialog and the camera stops. Best-effort; a dead socket surfaces on
-                        // the next read as EOF/error and routes through bye_reconnect.
-                        if is_established_invite_2xx(&msg) {
-                            let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
-                            let _ = write_all_flush(&mut sock, ack.as_bytes()).await;
-                            continue;
-                        }
-                        // Answer in-dialog REQUESTS the panel sends mid-session. Leaving them
-                        // unanswered lets the peer transaction time out — and a session-refresh
-                        // re-INVITE that times out can make the panel tear down the camera dialog
-                        // BEFORE our window deadline. `in_dialog_answer` picks the response
-                        // (OPTIONS/other → 200 OK; re-INVITE/UPDATE → 488, no media renegotiation).
-                        // A write failure here (BrokenPipe/ConnectionReset) proves the confirmed
-                        // dialog's signalling socket is dead — do NOT discard it and wait for the next
-                        // read / user command / window deadline, which would leave the panel streaming
-                        // meanwhile. Tear down over a FRESH connection and surface the error for the
-                        // session-backoff path, exactly like the read-error arm below.
-                        if let Some(resp) = in_dialog_answer(&msg) {
-                            if let Err(e) = write_all_flush(&mut sock, resp.as_bytes()).await {
-                                bye_reconnect(cfg, &d).await;
-                                return Err(e);
-                            }
-                        }
+                    // Drain every complete message now buffered (see process_in_dialog). A panel BYE ends
+                    // the dialog; a cap overflow / dead socket returns Failed with teardown already done.
+                    match process_in_dialog(&mut sock, &mut inbound, cfg, &d).await {
+                        InDialog::Continue => {}
+                        InDialog::PanelEnded => { panel_ended = true; break 'dialog; }
+                        InDialog::Failed(e) => return Err(e),
                     }
                 }
                 // A socket error on a CONFIRMED dialog (ConnectionReset / BrokenPipe / …) means the
@@ -988,7 +1898,7 @@ async fn session(
 /// the camera session ends instead of running to the panel's own timeout. Best-effort: if we
 /// can't even reconnect, there's nothing more we can do from here.
 async fn bye_reconnect(cfg: &Config, d: &Dialog) {
-    if let Ok(mut sock) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
+    if let Ok(mut sock) = connect_sip(cfg).await {
         // Reuse the dialog identity but advertise the NEW local port in Via/Contact so the 200-to-BYE
         // routes back on this connection.
         let mut d2 = d.clone();
@@ -1003,8 +1913,28 @@ async fn bye_reconnect(cfg: &Config, d: &Dialog) {
 /// send (e.g. the ACK) can route a `ConnectionReset`/`BrokenPipe` through the fresh-connection
 /// teardown instead of a bare `?` that would skip it.
 async fn write_all_flush(sock: &mut TcpStream, bytes: &[u8]) -> std::io::Result<()> {
-    sock.write_all(bytes).await?;
-    sock.flush().await
+    // Bound the write so a stalled peer can't block a cleanup/teardown path indefinitely (loopback SIP
+    // writes are otherwise sub-millisecond). A timeout is surfaced as an error, exactly like a dead socket,
+    // so callers take their existing fresh-connection fallback / error path.
+    match tokio::time::timeout(SIP_IO_TIMEOUT, async {
+        sock.write_all(bytes).await?;
+        sock.flush().await
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "SIP write timed out")),
+    }
+}
+
+/// Connect to loopback flexisip for a reconnect/teardown, bounded by [`SIP_IO_TIMEOUT`] so a stalled accept
+/// can't wedge a cleanup path. A timeout is surfaced as an error (like a refused connect), so callers fall
+/// through their existing best-effort "couldn't reconnect" branch.
+async fn connect_sip(cfg: &Config) -> std::io::Result<TcpStream> {
+    match tokio::time::timeout(SIP_IO_TIMEOUT, TcpStream::connect(("127.0.0.1", cfg.sip_port))).await {
+        Ok(r) => r,
+        Err(_) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "SIP connect timed out")),
+    }
 }
 
 /// ACK a racing INVITE 2xx then BYE it on `sock`, reading the `200`-to-BYE best-effort. Returns Err
@@ -1022,7 +1952,7 @@ async fn ack_then_bye(sock: &mut TcpStream, d: &Dialog) -> std::io::Result<()> {
 /// the original socket died before/between the ACK and BYE. Best-effort — if we can't reconnect,
 /// there's nothing more we can do.
 async fn ack_bye_reconnect(cfg: &Config, d: &Dialog) {
-    if let Ok(mut sock) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
+    if let Ok(mut sock) = connect_sip(cfg).await {
         let mut d2 = d.clone();
         if let Ok(a) = sock.local_addr() {
             d2.local_port = a.port();
@@ -1054,61 +1984,100 @@ async fn wait_until_stopping(stopping: &AtomicBool) {
 
 /// Best-effort teardown when the INVITE never gets a timely final response. Over TCP, closing the
 /// socket does NOT cancel a pending INVITE transaction, so:
-///  1. send `CANCEL` (matched to the INVITE by branch + CSeq) — and if that write fails because the
-///     signalling socket already died (EOF/reset that ended the response wait), retry it over a FRESH
-///     loopback connection so flexisip still cancels the forwarded transaction, then
+///  1. send `CANCEL` (matched to the INVITE by branch + CSeq) — and if that write fails (the signalling
+///     socket died, OR merely stalled long enough to trip `write_all_flush`'s bounded timeout — a timeout
+///     does NOT prove the socket dead), retry it over a FRESH loopback connection so flexisip still cancels
+///     the forwarded transaction, then
 ///  2. drain framed responses for a bounded window — and if a 2xx to the INVITE *raced in* (the panel
 ///     answered right as we gave up), CANCEL can't undo it, so we MUST confirm and tear that dialog
 ///     down (`ACK` then `BYE`) or the panel keeps its camera streaming.
+///
+/// The drain ALWAYS runs on the ORIGINAL socket, in BOTH branches: over TCP the INVITE's own final
+/// response (a racing 2xx, or the 487) routes back on the connection the INVITE arrived on (§18.2.2), NOT
+/// the fresh CANCEL connection — so even when the original CANCEL write failed we must read the original
+/// socket for it (a genuinely dead socket just EOFs at once; a slow-but-live one still delivers the 2xx).
+/// `acc` was read from that original stream, so a trailing partial is a valid continuation. READS are always
+/// safe; WRITES are not: a FAILED CANCEL write may have left a partial CANCEL on the socket, so any response
+/// ACK/BYE we send must NOT be appended to it — we pass `sock_write_ok = false` and `drain_after_cancel`
+/// then routes those writes over a fresh connection. The retried CANCEL keeps the INVITE's original `Via`
+/// (branch AND sent-by port) so flexisip matches it to the client transaction (RFC 3261 §9.1 / §17.1.1.3);
+/// hence we do NOT overwrite `d.local_port`.
 async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, acc: Vec<u8>) {
-    if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_ok() {
-        // Same socket: `acc` was read from `sock`, so a trailing partial is a valid continuation.
-        drain_after_cancel(sock, cfg, d, acc, false).await;
-    } else if let Ok(mut fresh) = TcpStream::connect(("127.0.0.1", cfg.sip_port)).await {
-        // The original socket was dead. Resend over a fresh connection, but KEEP the INVITE's original
-        // `Via` (branch AND sent-by port) unchanged: both the CANCEL and the drained non-2xx (487) ACK
-        // are part of the INVITE client transaction and MUST reuse its top `Via`, or flexisip won't
-        // match them and the transaction lingers until Timer H (RFC 3261 §9.1 / §17.1.1.3). Over TCP
-        // that's also fine for the drain's racing-2xx ACK/BYE: SIP sends responses back
-        // on the connection the request arrived on (§18.2.2), so the original sent-by port doesn't
-        // misroute the 200-to-BYE. Hence we do NOT overwrite `d.local_port` here.
+    let sock_write_ok = if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_err() {
+        // Original CANCEL write failed (dead or merely stalled): resend over a FRESH connection so flexisip
+        // still cancels the forwarded transaction, then absorb its 200-to-CANCEL best-effort (needs no ACK).
+        // The original socket is now WRITE-TAINTED (a partial CANCEL may sit on it) ⇒ sock_write_ok = false.
+        if let Ok(mut fresh) = connect_sip(cfg).await {
+            let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
+            let mut scratch = [0u8; 256];
+            let _ = tokio::time::timeout(Duration::from_millis(200), fresh.read(&mut scratch)).await;
+        }
+        false
+    } else {
+        true // the whole CANCEL flushed cleanly ⇒ the socket is still write-safe for the response ACK/BYE
+    };
+    // Drain the ORIGINAL socket for the INVITE's own final response (see the fn doc): a racing 2xx there is
+    // ACK+BYE'd, a 487 is ACKed — over this socket if still write-safe, else over a fresh connection.
+    drain_after_cancel(sock, cfg, d, acc, sock_write_ok).await;
+}
+
+/// Clean up a refresh INVITE whose WRITE was interrupted or errored. The original socket may hold a
+/// PARTIAL INVITE, so the CANCEL goes over a FRESH connection — appending it to `sock` could concatenate
+/// with a half-written INVITE into one corrupt message flexisip can neither frame nor match. BUT the
+/// INVITE's own final response — a racing 2xx if the whole INVITE actually reached flexisip before the
+/// write was cut, or the 487 to our CANCEL — comes back on the ORIGINAL connection the INVITE arrived on
+/// (RFC 3261 §18.2.2), NOT the fresh CANCEL connection, so we must also drain `sock` for it and ACK/BYE a
+/// racing 2xx there. Reading `sock` is always safe; but the socket may hold a PARTIAL INVITE, so it is
+/// WRITE-TAINTED — we pass `sock_write_ok = false` and `drain_after_cancel` routes any response ACK/BYE over
+/// a fresh connection rather than appending it to the partial INVITE. If the INVITE was truly partial,
+/// flexisip formed no transaction, nothing is framed, and the drain simply times out.
+async fn cancel_partial_write_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog) {
+    if let Ok(mut fresh) = connect_sip(cfg).await {
         let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
-        // Carry `acc` (the bytes wait_final_response had already read) into the drain even on the
-        // reconnect path: if it holds a COMPLETE INVITE 2xx buffered just before the old socket died,
-        // drain_after_cancel frames and tears it down (ACK+BYE) — dropping it would leave the accepted
-        // camera session up. `seed_foreign = true`: it frames the seed's COMPLETE messages
-        // first, then DISCARDS any trailing partial from the dead stream before reading the fresh socket
-        // — otherwise that partial would concatenate with the fresh socket's 200-to-CANCEL into one
-        // synthetic message and trigger a bogus ACK/BYE with mismatched dialog data.
-        drain_after_cancel(&mut fresh, cfg, d, acc, true).await;
+        // Absorb the 200-to-CANCEL on the fresh connection best-effort (it needs no ACK); the INVITE's own
+        // final response is drained from the ORIGINAL socket below.
+        let mut scratch = [0u8; 256];
+        let _ = tokio::time::timeout(Duration::from_millis(200), fresh.read(&mut scratch)).await;
     }
-    // else: couldn't even reconnect — nothing more we can do.
+    // `acc` is empty here (nothing was read from `sock` during the write phase); the drain reads the
+    // ORIGINAL socket for the INVITE's final response. The socket is write-tainted (partial INVITE) ⇒ false.
+    drain_after_cancel(sock, cfg, d, Vec::new(), false).await;
 }
 
 /// Drain framed responses after a CANCEL for `CANCEL_DRAIN`, ACK+BYE-ing a racing INVITE 2xx.
 ///
-/// `seed_foreign` distinguishes where `acc`'s seed bytes came from relative to `sock`:
-/// - `false` (same-socket path): `acc` was read from `sock` itself, so a trailing partial is the
-///   valid start of the NEXT message on that stream and must be kept and completed by later reads.
-/// - `true` (reconnect path): `acc` was read from a now-dead ORIGINAL socket while `sock` is a
-///   fresh connection. After framing the seed's COMPLETE messages, any trailing partial belongs to
-///   the dead stream and must be DISCARDED — concatenating it with `sock`'s bytes (e.g. the fresh
-///   socket's `200`-to-CANCEL) would frame a synthetic message whose status line and headers come
-///   from two different streams, causing a bogus ACK/BYE with mismatched dialog data.
+/// Always drains the ORIGINAL INVITE socket (both callers pass it), and `acc` is the bytes already read
+/// from that same stream, so a trailing partial is the valid start of the NEXT message on it and is kept
+/// and completed by later reads — no cross-stream seed to discard.
+///
+/// `sock_write_ok` says whether it is safe to WRITE the response ACK/BYE back on `sock`. It is `false` when
+/// the caller's last write to `sock` FAILED (a partial CANCEL, or a partial INVITE on the write-phase path)
+/// may sit on the stream: appending the ACK/BYE would concatenate into one malformed request. In that case
+/// a racing 2xx is torn down (`ack_bye_reconnect`) and a 487 is ACKed over a FRESH connection instead —
+/// both keep the INVITE's original `Via`, so flexisip still matches them. When `true`, we try the live
+/// socket first and fall back to a fresh connection only if that write fails.
 async fn drain_after_cancel(
     sock: &mut TcpStream,
     cfg: &Config,
     d: &mut Dialog,
     mut acc: Vec<u8>,
-    seed_foreign: bool,
+    sock_write_ok: bool,
 ) {
     // `acc` is seeded with whatever `wait_final_response` had already read when the timeout fired —
     // possibly a partial (or even complete) INVITE 2xx — so we can finish framing it below.
     let mut buf = [0u8; 4096];
-    let mut first_pass = true;
     let deadline = tokio::time::Instant::now() + CANCEL_DRAIN;
     loop {
-        while let Some(len) = complete_message_len(&acc) {
+        loop {
+            let len = match frame_message(&acc) {
+                Frame::Complete(len) => len,
+                Frame::Incomplete => break, // read more (bounded by CANCEL_DRAIN) below
+                // A malformed frame at the head can never parse, so we can't identify the INVITE's final
+                // response in this buffer; there is nothing more to ACK/BYE here. Stop — the pending INVITE
+                // was already CANCELled, and a late 2xx that never arrives cleanly is reclaimed by the panel's
+                // own cut. (This is best-effort teardown, not a held view, so no error is surfaced.)
+                Frame::Malformed => return,
+            };
             let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
             acc.drain(..len);
             // We only act on responses to the INVITE transaction. The `200 OK` to our CANCEL is also
@@ -1118,42 +2087,56 @@ async fn drain_after_cancel(
                 continue;
             }
             match parse_status(&msg) {
-                // A 2xx to the INVITE means the dialog established despite our CANCEL. It was never
-                // ACKed on a live socket, so ACK-then-BYE; if EITHER write fails (socket reset before
-                // the ACK reaches flexisip, or between ACK and BYE), redo BOTH over a fresh connection
-                // (a BYE alone to an unacknowledged 2xx is unreliable).
+                // A 2xx to the INVITE means the dialog established despite our CANCEL. It was never ACKed on
+                // a live socket, so it must be ACKed (RFC 3261 §13.2.2.4) — and, when the dialog is
+                // ADDRESSABLE (a usable remote To-tag), BYE'd. If `sock` is write-tainted (a failed prior
+                // write may have left a partial CANCEL/INVITE on it), do NOT write to it — go over a FRESH
+                // connection; otherwise try the live socket first, falling back to fresh on a write error.
                 Some(s) if (200..300).contains(&s) => {
-                    if let Some(tag) = to_tag(&msg) {
-                        d.to_tag = tag;
-                        d.remote_target = contact_uri(&msg)
-                            .unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
-                        if ack_then_bye(sock, d).await.is_err() {
-                            ack_bye_reconnect(cfg, d).await;
+                    let target = contact_uri(&msg)
+                        .unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
+                    match to_tag(&msg).filter(|t| !t.trim().is_empty()) {
+                        Some(tag) => {
+                            // Addressable: ACK then BYE (a BYE alone to an unacknowledged 2xx is unreliable).
+                            d.to_tag = tag;
+                            d.remote_target = target;
+                            if !sock_write_ok || ack_then_bye(sock, d).await.is_err() {
+                                ack_bye_reconnect(cfg, d).await;
+                            }
+                        }
+                        None => {
+                            // Malformed 2xx (empty/absent tag): ACK to stop retransmits, echoing the received
+                            // To (via ack_to_header), but no addressable BYE — the panel's own cut reclaims
+                            // the orphan (mirrors establish_refresh_dialog's tagless-2xx handling). Live socket
+                            // when write-safe, else/on failure a fresh connection.
+                            let ack = build_ack_echoing_to(
+                                d,
+                                &format!("z9hG4bK{}", rand_hex(8)),
+                                &target,
+                                &ack_to_header(&msg, d),
+                            );
+                            send_cleanup_ack(sock, cfg, sock_write_ok, &ack).await;
                         }
                     }
                     return;
                 }
                 // The normal terminal response to a cancelled INVITE is `487 Request Terminated` (or
                 // another non-2xx). That is ALSO a non-2xx final and requires an in-transaction ACK
-                // (build_ack_failure), or flexisip holds the server transaction until Timer H — the
-                // same stale-transaction accumulation the reject-path ACK fixes.
+                // (build_ack_failure), or flexisip holds the server transaction until Timer H — the same
+                // stale-transaction accumulation the reject-path ACK fixes. ACK unconditionally, echoing the
+                // response's To (via ack_to_header) so even a malformed final is absorbed. Send it
+                // over a FRESH connection when `sock` is write-tainted (the ACK keeps the INVITE's `Via`, so
+                // flexisip still matches it); otherwise on the live socket.
                 Some(s) if s >= 300 => {
-                    if let Some(tag) = to_tag(&msg) {
-                        let _ = write_all_flush(sock, build_ack_failure(d, &tag).as_bytes()).await;
-                    }
+                    let ack = build_ack_failure(d, &ack_to_header(&msg, d));
+                    send_cleanup_ack(sock, cfg, sock_write_ok, &ack).await;
                     return;
                 }
                 _ => {} // a 1xx provisional to the INVITE (unlikely post-CANCEL) — keep draining
             }
         }
-        // Seed fully framed. If it came from the dead original socket, drop any trailing partial
-        // now — before the first read from the fresh `sock` — so the two streams' bytes never merge
-        // into one synthetic message. On the same-socket path the residue is a legitimate
-        // continuation and is kept.
-        if first_pass && seed_foreign {
-            acc.clear();
-        }
-        first_pass = false;
+        // Seed fully framed; any trailing partial is a legitimate continuation of `sock`'s own stream
+        // (that is where `acc` was read from) and is kept to be completed by the next read below.
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return;
@@ -1181,7 +2164,19 @@ async fn wait_final_response(sock: &mut TcpStream, acc: &mut Vec<u8>) -> std::io
         // have all arrived — returning on the status line alone could hand back a 200 whose
         // To-tag/Contact haven't been read yet, so the ACK would carry an empty tag and the dialog
         // would never confirm even though the panel accepted the INVITE.
-        while let Some(len) = complete_message_len(acc) {
+        loop {
+            let len = match frame_message(acc) {
+                Frame::Complete(len) => len,
+                Frame::Incomplete => break, // read more below
+                Frame::Malformed => {
+                    // A malformed frame at the head can never parse; treating it as "read more" would spin to
+                    // the outer RESPONSE_TIMEOUT. Reject now so the caller's CANCEL path reclaims the INVITE.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "malformed SIP response frame",
+                    ));
+                }
+            };
             let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
             acc.drain(..len);
             match parse_status(&msg) {
@@ -1209,22 +2204,80 @@ async fn wait_final_response(sock: &mut TcpStream, acc: &mut Vec<u8>) -> std::io
     }
 }
 
-/// If `buf` begins with a COMPLETE SIP message — headers terminated by CRLFCRLF, followed by a body
-/// of `Content-Length` bytes (0 when the header is absent) — return that message's total byte length;
-/// else `None` (more bytes needed). Frames one message at a time, so pipelined 100/180/200 responses
-/// (and a 200's SDP body) are handled without ever returning a half-read message.
-fn complete_message_len(buf: &[u8]) -> Option<usize> {
-    let sep = buf.windows(4).position(|w| w == b"\r\n\r\n")?;
+/// The result of framing the SIP message at the head of a buffer. Distinguishing INCOMPLETE from MALFORMED
+/// matters: the first is a "read more" signal, the second means the head can NEVER parse — so a caller that
+/// conflated them (treating malformed as "read more") would leave the bad message wedged at the head of the
+/// buffer forever, never advancing framing, so a subsequent valid BYE is neither ACKed nor reported and a
+/// held view stays pinned to a terminated dialog.
+enum Frame {
+    /// A complete message occupies the first `usize` bytes of the buffer.
+    Complete(usize),
+    /// No complete message YET — the CRLFCRLF header terminator or the declared body has not fully arrived.
+    /// Reading more bytes may complete it, so the caller keeps the buffer and reads on.
+    Incomplete,
+    /// The head can never be validly framed however many more bytes arrive: non-UTF-8 headers, a
+    /// present-but-nonnumeric or `usize`-overflowing `Content-Length`, or a total exceeding `MAX_SIP_BYTES`.
+    /// Reading more cannot fix it (and defaulting a garbage length to 0 would mis-frame the body as the next
+    /// message, desynchronizing the stream), so the caller must tear the dialog/transaction down.
+    Malformed,
+}
+
+/// Frame the SIP message at the head of `buf`: a header block terminated by CRLFCRLF followed by a body of
+/// `Content-Length` bytes (0 when the header is absent). Returns [`Frame::Complete`] with the message's total
+/// byte length once all of it has arrived, [`Frame::Incomplete`] when more bytes are needed, or
+/// [`Frame::Malformed`] when the head can never parse (see that variant). Frames one message at a time, so
+/// pipelined 100/180/200 responses (and a 200's SDP body) are handled without ever returning a half-read
+/// message.
+fn frame_message(buf: &[u8]) -> Frame {
+    let Some(sep) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return Frame::Incomplete; // header terminator not yet seen — more bytes may complete it
+    };
     let header_end = sep + 4;
-    let headers = std::str::from_utf8(&buf[..sep]).ok()?;
-    let content_length = headers
+    let Ok(headers) = std::str::from_utf8(&buf[..sep]) else {
+        return Frame::Malformed; // non-UTF-8 headers can never parse
+    };
+    // A Content-Length header that is PRESENT but unparseable must reject the message (Malformed), not
+    // silently default to 0 — treating a garbage length as 0 would drain only the headers and mis-frame the
+    // body as the next message, desynchronizing the stream. 0 is used ONLY when the header is absent.
+    let content_length = match headers
         .lines()
         .filter_map(|l| l.split_once(':'))
         .find(|(h, _)| h.trim().eq_ignore_ascii_case("Content-Length"))
-        .and_then(|(_, v)| v.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    let total = header_end + content_length;
-    (buf.len() >= total).then_some(total)
+    {
+        Some((_, v)) => match v.trim().parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => return Frame::Malformed,
+        },
+        None => 0,
+    };
+    // `content_length` is peer-supplied; on the 32-bit target `header_end + content_length` could overflow
+    // `usize` and wrap to a SMALL total, misframing the stream (release wraps silently; debug panics). Use
+    // checked_add and reject any total over the message cap as Malformed — reading more can never make an
+    // overflowing or over-cap frame valid (the read loops' own MAX_SIP_BYTES guard remains a backstop for a
+    // header block that itself grows past the cap before any CRLFCRLF arrives).
+    let Some(total) = header_end.checked_add(content_length) else {
+        return Frame::Malformed;
+    };
+    if total > MAX_SIP_BYTES {
+        return Frame::Malformed;
+    }
+    if buf.len() >= total {
+        Frame::Complete(total)
+    } else {
+        Frame::Incomplete
+    }
+}
+
+#[cfg(test)]
+impl Frame {
+    /// The framed length when [`Complete`](Frame::Complete), else `None` — a convenience for tests that only
+    /// care about the complete case.
+    fn complete_len(self) -> Option<usize> {
+        match self {
+            Frame::Complete(n) => Some(n),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1236,6 +2289,34 @@ mod tests {
         assert_eq!(aor_user_for_hostname("Bticino_Classe_100_X\n"), Some("c100x"));
         assert_eq!(aor_user_for_hostname("Bticino_Classe_300_X"), Some("c300x"));
         assert_eq!(aor_user_for_hostname("SomethingElse"), None);
+    }
+
+    #[test]
+    fn frame_message_frames_and_distinguishes_malformed_from_incomplete() {
+        // Absent Content-Length ⇒ body is empty; the message ends at the header terminator ⇒ Complete.
+        let no_cl = b"OPTIONS sip:x SIP/2.0\r\nCall-ID: a\r\n\r\n";
+        assert!(matches!(frame_message(no_cl), Frame::Complete(n) if n == no_cl.len()));
+
+        // Present, valid, and the body has arrived ⇒ Complete; not yet arrived ⇒ Incomplete (read more).
+        let with_body = b"MSG\r\nContent-Length: 3\r\n\r\nabc";
+        assert!(matches!(frame_message(with_body), Frame::Complete(n) if n == with_body.len()));
+        assert!(matches!(frame_message(b"MSG\r\nContent-Length: 3\r\n\r\nab"), Frame::Incomplete));
+
+        // Present but UNPARSEABLE ⇒ Malformed (never default to 0 and mis-frame the body as the next msg).
+        // This is the distinction that keeps a bad frame from wedging framing: it must NOT read as Incomplete,
+        // or a valid BYE appended after it would never be framed and a held view would pin to a dead dialog.
+        assert!(matches!(
+            frame_message(b"MSG\r\nContent-Length: notanumber\r\n\r\nbody"),
+            Frame::Malformed
+        ));
+        // Overflowing/huge value ⇒ Malformed via checked_add + the MAX_SIP_BYTES cap.
+        assert!(matches!(
+            frame_message(b"MSG\r\nContent-Length: 99999999999999999999\r\n\r\n"),
+            Frame::Malformed
+        ));
+
+        // Incomplete headers (no CRLFCRLF) ⇒ Incomplete, NOT Malformed — more bytes may still complete it.
+        assert!(matches!(frame_message(b"MSG\r\nCall-ID: a\r\n"), Frame::Incomplete));
     }
 
     #[test]
@@ -1319,19 +2400,20 @@ mod tests {
     fn frames_complete_messages_and_skips_provisional() {
         // Completeness needs BOTH the CRLFCRLF header terminator and the Content-Length body.
         let full = b"SIP/2.0 200 Ok\r\nContent-Length: 4\r\n\r\nabcd";
-        assert_eq!(complete_message_len(full), Some(full.len()));
-        assert_eq!(complete_message_len(b"SIP/2.0 200 Ok\r\nContent-Length: 4\r\n\r\nab"), None); // body short
-        assert_eq!(complete_message_len(b"SIP/2.0 200 Ok\r\nContent-Len"), None); // headers unterminated
+        assert_eq!(frame_message(full).complete_len(), Some(full.len()));
+        // body short / headers unterminated ⇒ Incomplete (read more), NOT Malformed.
+        assert!(matches!(frame_message(b"SIP/2.0 200 Ok\r\nContent-Length: 4\r\n\r\nab"), Frame::Incomplete));
+        assert!(matches!(frame_message(b"SIP/2.0 200 Ok\r\nContent-Len"), Frame::Incomplete));
 
         // Pipelined 100 then 200: frame one at a time; the provisional is skipped and the final's
         // To-tag parses (the bug the framing fixes: a half-read 200 would lose the tag).
         let mut acc =
             b"SIP/2.0 100 Trying\r\nContent-Length: 0\r\n\r\nSIP/2.0 200 Ok\r\nTo: <sip:x>;tag=t\r\nContent-Length: 0\r\n\r\n"
                 .to_vec();
-        let l1 = complete_message_len(&acc).unwrap();
+        let l1 = frame_message(&acc).complete_len().unwrap();
         assert_eq!(parse_status(&String::from_utf8_lossy(&acc[..l1])), Some(100));
         acc.drain(..l1);
-        let l2 = complete_message_len(&acc).unwrap();
+        let l2 = frame_message(&acc).complete_len().unwrap();
         let final_msg = String::from_utf8_lossy(&acc[..l2]).into_owned();
         assert_eq!(parse_status(&final_msg), Some(200));
         assert_eq!(to_tag(&final_msg).as_deref(), Some("t"));
@@ -1370,6 +2452,41 @@ mod tests {
         assert!(bye.starts_with("BYE sip:c100x@127.0.0.1:41044;transport=tcp SIP/2.0\r\n"));
         assert!(bye.contains("CSeq: 22 BYE\r\n")); // incremented
         assert!(bye.contains("tag=paneltag"));
+    }
+
+    #[test]
+    fn ack_to_header_echoes_a_present_to_and_synthesizes_for_absent_or_empty() {
+        let d = Dialog {
+            aor: "c100x".into(),
+            domain: "dev.example".into(),
+            local_port: 5555,
+            call_id: "abcd".into(),
+            from_tag: "ft".into(),
+            branch: "z9hG4bKdeadbeef".into(),
+            cseq: 21,
+            to_tag: String::new(),
+            remote_target: String::new(),
+        };
+        let synthesized = "<sip:c100x@dev.example>";
+
+        // A present, non-empty To value is echoed verbatim (whitespace trimmed by header_value).
+        let with_to = "SIP/2.0 200 OK\r\nTo: <sip:c100x@dev.example>;tag=t\r\n\r\n";
+        assert_eq!(ack_to_header(with_to, &d), "<sip:c100x@dev.example>;tag=t");
+
+        // An empty-tag To is still a non-empty VALUE, so it is echoed (the trailing `;tag=` preserved).
+        let empty_tag = "SIP/2.0 200 OK\r\nTo: <sip:c100x@dev.example>;tag=\r\n\r\n";
+        assert_eq!(ack_to_header(empty_tag, &d), "<sip:c100x@dev.example>;tag=");
+
+        // An absent To header falls back to the synthesized <sip:aor@domain>.
+        let no_to = "SIP/2.0 200 OK\r\nCSeq: 21 INVITE\r\n\r\n";
+        assert_eq!(ack_to_header(no_to, &d), synthesized);
+
+        // An empty/whitespace-only To VALUE (header_value trims to Some("")) must NOT emit `To: \r\n` —
+        // it falls back to the synthesized value, exactly like an absent header.
+        let empty_to = "SIP/2.0 200 OK\r\nTo:\r\nCSeq: 21 INVITE\r\n\r\n";
+        assert_eq!(ack_to_header(empty_to, &d), synthesized);
+        let ws_to = "SIP/2.0 200 OK\r\nTo:   \r\nCSeq: 21 INVITE\r\n\r\n";
+        assert_eq!(ack_to_header(ws_to, &d), synthesized);
     }
 
     #[test]
@@ -1500,18 +2617,1186 @@ mod tests {
             to_tag: String::new(),
             remote_target: "sip:c100x@127.0.0.1:41044".into(), // NOT used by the failure ACK
         };
-        let ack = build_ack_failure(&d, "paneltag");
+        let ack = build_ack_failure(&d, "<sip:c100x@dev.example>;tag=paneltag");
         // Request-URI is the ORIGINAL INVITE R-URI (the AOR), not the panel's Contact.
         assert!(ack.starts_with("ACK sip:c100x@dev.example SIP/2.0\r\n"));
         // In-transaction: SAME top Via branch and CSeq NUMBER as the INVITE, method ACK.
         assert!(ack.contains("branch=z9hG4bKinvitebranch\r\n"));
         assert!(ack.contains("CSeq: 21 ACK\r\n"));
-        // Carries the failure response's To-tag.
+        // Echoes the failure response's To value (as passed by the caller).
         assert!(ack.contains("To: <sip:c100x@dev.example>;tag=paneltag\r\n"));
         // Its top Via matches the INVITE's (branch + sent-by), like the CANCEL.
         let invite = build_invite(&d, &build_sdp_offer(1, 2, "k", "da"));
         let via = |m: &str| m.lines().find(|l| l.starts_with("Via:")).unwrap().to_string();
         assert_eq!(via(&ack), via(&invite));
+        // A MALFORMED final's To (no tag param) is echoed as-is too — no synthesized `;tag=` — so even a
+        // tagless reject is still absorbed rather than skipped.
+        let ack_no_tag = build_ack_failure(&d, "<sip:c100x@dev.example>");
+        assert!(ack_no_tag.contains("To: <sip:c100x@dev.example>\r\n"));
+    }
+
+    // --- make-before-break refresh (issue #174, Finding #3) --------------------------------------
+
+    /// Read exactly ONE complete SIP message from `sock`, framing across TCP chunk boundaries the same way
+    /// `frame_message` does (and preserving any trailing bytes of the NEXT message in `acc`), so a
+    /// refresh-test mock can't misclassify a partial or coalesced read (e.g. INVITE + ACK in one packet).
+    async fn read_one_sip(sock: &mut tokio::net::TcpStream, acc: &mut Vec<u8>) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut buf = [0u8; 4096];
+        loop {
+            if let Some(len) = frame_message(acc).complete_len() {
+                let msg = String::from_utf8_lossy(&acc[..len]).into_owned();
+                acc.drain(..len);
+                return msg;
+            }
+            let n = sock.read(&mut buf).await.unwrap();
+            assert!(n > 0, "peer closed before a complete SIP message");
+            acc.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_adopts_a_2xx_and_acks() {
+        // A confirmable 200 OK to the refresh INVITE is adopted: the helper parses the To-tag + Contact
+        // and ACKs, returning the confirmed successor dialog for the make-before-break handover.
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let invite = read_one_sip(&mut s, &mut acc).await; // framed, not a raw chunk
+            assert!(
+                invite.starts_with("INVITE sip:c100x@dev.example SIP/2.0\r\n"),
+                "expected a fresh INVITE, got: {invite}"
+            );
+            s.write_all(
+                b"SIP/2.0 200 OK\r\n\
+                  Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+                  From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+                  To: <sip:c100x@dev.example>;tag=srv123\r\n\
+                  Call-ID: xyz\r\n\
+                  CSeq: 21 INVITE\r\n\
+                  Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+                  Content-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            s.flush().await.unwrap();
+            // The UAC MUST ACK the confirmed dialog (else the panel retransmits the 2xx).
+            let ack = read_one_sip(&mut s, &mut acc).await;
+            assert!(ack.starts_with("ACK "), "expected an ACK, got: {ack}");
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4); // kept open: no Stop/None mid-attempt
+        let before = tokio::time::Instant::now();
+        let (d, accepted_at) = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
+            .await
+        {
+            RefreshOutcome::Established(_sock, d, _renewals, _residual, accepted) => (d, accepted),
+            other => panic!(
+                "a confirmable 2xx refresh must be adopted, got {}",
+                match other {
+                    RefreshOutcome::Declined(e, _, _) => format!("Declined({e})"),
+                    RefreshOutcome::Aborted => "Aborted".to_string(),
+                    RefreshOutcome::Established(..) => unreachable!(),
+                }
+            ),
+        };
+        assert_eq!(d.to_tag, "srv123");
+        assert!(
+            d.remote_target.contains("127.0.0.1:5599"),
+            "remote target should be the panel's Contact, got: {}",
+            d.remote_target
+        );
+        // The acceptance instant is captured at 2xx RECEIPT (before the ACK), so the caller can anchor the
+        // adopted dialog's ~60 s clock to it rather than to a post-ACK `now`. It must fall within the call.
+        let after = tokio::time::Instant::now();
+        assert!(
+            accepted_at >= before && accepted_at <= after,
+            "accepted_at must be captured during the attempt (before {before:?}..after {after:?}), got {accepted_at:?}"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_surfaces_a_486_busy() {
+        // A single-owner plant refuses a concurrent dialog with 486 Busy Here. The helper ACKs the
+        // failure (so flexisip doesn't hold the transaction) and returns Err, so the caller keeps its
+        // current dialog and falls back to the panel's recycle — never a panic, never a stuck view.
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let invite = read_one_sip(&mut s, &mut acc).await; // framed, not a raw chunk
+            assert!(invite.starts_with("INVITE "), "expected the refresh INVITE, got: {invite}");
+            s.write_all(
+                b"SIP/2.0 486 Busy Here\r\n\
+                  Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+                  From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+                  To: <sip:c100x@dev.example>;tag=srv486\r\n\
+                  Call-ID: xyz\r\n\
+                  CSeq: 21 INVITE\r\n\
+                  Content-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            s.flush().await.unwrap();
+            // The UAC MUST ACK the non-2xx final (RFC 3261 §17.1.1.3), carrying the failure To-tag.
+            let ack = read_one_sip(&mut s, &mut acc).await;
+            assert!(ack.starts_with("ACK "), "expected a failure ACK, got: {ack}");
+            assert!(ack.contains("tag=srv486"), "failure ACK must echo the To-tag, got: {ack}");
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
+        let err = match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
+            .await
+        {
+            RefreshOutcome::Declined(e, _renewals, retriable) => {
+                assert!(!retriable, "a 486 panel refusal must NOT be marked retriable");
+                e
+            }
+            RefreshOutcome::Established(..) => {
+                panic!("a 486 must not be adopted — the caller must keep its current dialog")
+            }
+            RefreshOutcome::Aborted => panic!("a 486 is a decline, not an abort"),
+        };
+        assert!(err.to_string().contains("486"), "error should name the status, got: {err}");
+        server.await.unwrap();
+    }
+
+    // A malformed 2xx whose To-tag is EMPTY (`;tag=`) or ENTIRELY ABSENT still means the panel ACCEPTED the
+    // INVITE, so a UAC MUST ACK the 2xx (RFC 3261 §13.2.2.4) or flexisip keeps retransmitting it. The helper
+    // must ACK on the ORIGINAL connection, reproducing the received `To` value (as trimmed by header_value)
+    // and PRESERVING whether its tag is empty or absent (Request-URI = the response Contact), must NOT send a
+    // BYE (unaddressable without a remote tag), must NOT open a teardown reconnect, and must LATCH (decline
+    // NON-retriably) without adopting — so the caller keeps its current dialog and the panel's own cut
+    // reclaims the orphan. `to_line`/`expect_to` parametrize the sent `To` header line and the exact `To`
+    // line the ACK must reproduce.
+    async fn assert_tagless_2xx_ack_preserves_tag(to_line: &'static str, expect_to: &'static str) {
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // 1) The INVITE connection: read the INVITE, answer 200 OK with the parametrized (bad) To.
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let invite = read_one_sip(&mut s, &mut acc).await;
+            assert!(invite.starts_with("INVITE "), "expected the refresh INVITE, got: {invite}");
+            let resp = format!(
+                "SIP/2.0 200 OK\r\n\
+                 Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+                 From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+                 {to_line}\r\n\
+                 Call-ID: xyz\r\n\
+                 CSeq: 21 INVITE\r\n\
+                 Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+                 Content-Length: 0\r\n\r\n"
+            );
+            s.write_all(resp.as_bytes()).await.unwrap();
+            s.flush().await.unwrap();
+            // 2) The 2xx ACK MUST arrive on THIS connection, addressed to the response Contact, reproducing
+            //    the received To (tag empty/absent preserved), and must NOT be a BYE. read_one_sip returns one.
+            let ack = read_one_sip(&mut s, &mut acc).await;
+            assert!(ack.starts_with("ACK "), "expected the 2xx ACK on the original connection, got: {ack}");
+            assert!(
+                ack.contains("sip:c100x@127.0.0.1:5599"),
+                "the 2xx ACK Request-URI must be the response Contact, got: {ack}"
+            );
+            assert!(
+                ack.contains(&format!("\r\n{expect_to}\r\n")),
+                "the 2xx ACK must reproduce the received To ({expect_to}), got: {ack}"
+            );
+            assert!(!ack.contains("BYE"), "must NOT BYE an unaddressable dialog, got: {ack}");
+            // 3) No teardown reconnect: assert no second connection arrives (true = no reconnect = pass).
+            tokio::time::timeout(Duration::from_millis(400), listener.accept()).await.is_err()
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
+        match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
+            .await
+        {
+            RefreshOutcome::Declined(_e, _renewals, retriable) => {
+                assert!(!retriable, "an unaddressable (tagless) 2xx must LATCH ⇒ non-retriable")
+            }
+            _ => panic!("a tagless 2xx must decline (it can't form a confirmed dialog to adopt)"),
+        }
+        assert!(
+            server.await.unwrap(),
+            "a tagless-2xx decline must ACK on the original connection and NOT open a teardown connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_acks_a_2xx_with_empty_to_tag() {
+        // An explicit but EMPTY tag param (`;tag=`) must be reproduced exactly — including the trailing `;tag=`.
+        assert_tagless_2xx_ack_preserves_tag(
+            "To: <sip:c100x@dev.example>;tag=",
+            "To: <sip:c100x@dev.example>;tag=",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_acks_a_2xx_with_absent_to_tag() {
+        // No tag param at all: the ACK must NOT synthesize `;tag=` (as build_ack would) — it must reproduce
+        // the bare `To`, or a peer may fail to match the ACK and keep retransmitting the 2xx.
+        assert_tagless_2xx_ack_preserves_tag(
+            "To: <sip:c100x@dev.example>",
+            "To: <sip:c100x@dev.example>",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drain_after_cancel_tears_down_a_racing_2xx_over_fresh_when_sock_write_tainted() {
+        // After a FAILED CANCEL write the original socket may hold a PARTIAL CANCEL (write-tainted). A racing
+        // INVITE 2xx drained from it must be ACK/BYE'd over a FRESH connection — never written back on the
+        // tainted socket, which would concatenate into one malformed request and leave the successor pinned.
+        use std::collections::HashMap;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        // ack_bye_reconnect connects here for the fresh-connection teardown.
+        let fresh = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fresh_port = fresh.local_addr().unwrap().port();
+
+        // Stand-in ORIGINAL socket: a real connected pair; keep the peer end to prove NOTHING is written.
+        let orig_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let orig_addr = orig_l.local_addr().unwrap();
+        let accept = tokio::spawn(async move { orig_l.accept().await.unwrap().0 });
+        let mut orig = TcpStream::connect(orig_addr).await.unwrap();
+        let mut orig_peer = accept.await.unwrap();
+
+        // The fresh teardown connection must carry ACK then BYE for the accepted dialog.
+        let fresh_srv = tokio::spawn(async move {
+            let (mut s, _) = fresh.accept().await.unwrap();
+            let mut all = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(Duration::from_secs(2), s.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        all.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if all.contains("ACK ") && all.contains("BYE ") {
+                            break;
+                        }
+                    }
+                    _ => break, // EOF, error, or the 2s bound elapsed
+                }
+            }
+            all
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), fresh_port.to_string());
+        let cfg = crate::config::Config::from_map(m);
+
+        let mut d = Dialog {
+            aor: "c100x".to_string(),
+            domain: "dev.example".to_string(),
+            local_port: 5060,
+            call_id: "xyz".to_string(),
+            from_tag: "cf".to_string(),
+            branch: "z9hG4bKorig".to_string(),
+            cseq: 21,
+            to_tag: String::new(),
+            remote_target: String::new(),
+        };
+
+        // A COMPLETE 200 OK to the INVITE, already buffered on the original stream (as if read before the
+        // CANCEL write failed): it carries a To-tag and Contact so a confirmed dialog can be torn down.
+        let racing_2xx = b"SIP/2.0 200 OK\r\n\
+              Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+              From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+              To: <sip:c100x@dev.example>;tag=srv200\r\n\
+              Call-ID: xyz\r\n\
+              CSeq: 21 INVITE\r\n\
+              Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+              Content-Length: 0\r\n\r\n"
+            .to_vec();
+
+        // sock_write_ok = false (tainted): the teardown must NOT touch `orig`.
+        drain_after_cancel(&mut orig, &cfg, &mut d, racing_2xx, false).await;
+
+        let teardown = fresh_srv.await.unwrap();
+        assert!(
+            teardown.contains("ACK "),
+            "the racing 2xx must be ACKed on the fresh connection, got: {teardown}"
+        );
+        assert!(
+            teardown.contains("BYE "),
+            "the racing 2xx dialog must be BYE'd on the fresh connection, got: {teardown}"
+        );
+
+        // NOTHING may have been written to the write-tainted original socket.
+        let mut buf = [0u8; 64];
+        let wrote_to_orig = matches!(
+            tokio::time::timeout(Duration::from_millis(300), orig_peer.read(&mut buf)).await,
+            Ok(Ok(n)) if n > 0
+        );
+        assert!(!wrote_to_orig, "no ACK/BYE may be written to the write-tainted original socket");
+    }
+
+    // A MALFORMED racing 2xx (empty OR absent To-tag) drained during cancellation must still be ACKed — a
+    // UAC MUST ACK every 2xx (RFC 3261 §13.2.2.4) or the panel keeps retransmitting it — echoing the received
+    // To (via ack_to_header), but must NOT be BYE'd (unaddressable without a remote tag; the cut reclaims it).
+    // With `sock_write_ok = false` the ACK goes over a FRESH connection and nothing is written to `sock`.
+    async fn assert_drain_malformed_2xx_acks_over_fresh(to_line: &'static str, expect_to: &'static str) {
+        use std::collections::HashMap;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let fresh = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fresh_port = fresh.local_addr().unwrap().port();
+        let orig_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let orig_addr = orig_l.local_addr().unwrap();
+        let accept = tokio::spawn(async move { orig_l.accept().await.unwrap().0 });
+        let mut orig = TcpStream::connect(orig_addr).await.unwrap();
+        let mut orig_peer = accept.await.unwrap();
+
+        let fresh_srv = tokio::spawn(async move {
+            let (mut s, _) = fresh.accept().await.unwrap();
+            let mut all = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(Duration::from_millis(500), s.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    _ => break,
+                }
+            }
+            all
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), fresh_port.to_string());
+        let cfg = crate::config::Config::from_map(m);
+        let mut d = Dialog {
+            aor: "c100x".to_string(),
+            domain: "dev.example".to_string(),
+            local_port: 5060,
+            call_id: "xyz".to_string(),
+            from_tag: "cf".to_string(),
+            branch: "z9hG4bKorig".to_string(),
+            cseq: 21,
+            to_tag: String::new(),
+            remote_target: String::new(),
+        };
+        let racing_2xx = format!(
+            "SIP/2.0 200 OK\r\n\
+             Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+             From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+             {to_line}\r\n\
+             Call-ID: xyz\r\n\
+             CSeq: 21 INVITE\r\n\
+             Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+             Content-Length: 0\r\n\r\n"
+        )
+        .into_bytes();
+
+        drain_after_cancel(&mut orig, &cfg, &mut d, racing_2xx, false).await;
+
+        let sent = fresh_srv.await.unwrap();
+        assert!(sent.starts_with("ACK "), "a malformed racing 2xx must be ACKed on the fresh connection, got: {sent}");
+        assert!(
+            sent.contains(&format!("\r\n{expect_to}\r\n")),
+            "the ACK must reproduce the received To ({expect_to}), got: {sent}"
+        );
+        assert!(!sent.contains("BYE"), "an unaddressable racing 2xx must NOT be BYE'd, got: {sent}");
+
+        let mut buf = [0u8; 64];
+        let wrote_to_orig = matches!(
+            tokio::time::timeout(Duration::from_millis(300), orig_peer.read(&mut buf)).await,
+            Ok(Ok(n)) if n > 0
+        );
+        assert!(!wrote_to_orig, "no ACK may be written to the write-tainted original socket");
+    }
+
+    #[tokio::test]
+    async fn drain_after_cancel_acks_a_malformed_racing_2xx_with_empty_to_tag() {
+        assert_drain_malformed_2xx_acks_over_fresh(
+            "To: <sip:c100x@dev.example>;tag=",
+            "To: <sip:c100x@dev.example>;tag=",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drain_after_cancel_acks_a_malformed_racing_2xx_with_absent_to_tag() {
+        assert_drain_malformed_2xx_acks_over_fresh(
+            "To: <sip:c100x@dev.example>",
+            "To: <sip:c100x@dev.example>",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn drain_after_cancel_retries_ack_over_fresh_when_the_live_socket_write_fails() {
+        // sock_write_ok = true, but the live socket's write half is CLOSED, so the ACK write fails. A racing
+        // 2xx must then be re-ACKed over a FRESH connection rather than left unacknowledged — a completed
+        // CANCEL write does not guarantee the socket is still writable when the 2xx arrives.
+        use std::collections::HashMap;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let fresh = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fresh_port = fresh.local_addr().unwrap().port();
+        let orig_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let orig_addr = orig_l.local_addr().unwrap();
+        let accept = tokio::spawn(async move { orig_l.accept().await.unwrap().0 });
+        let mut orig = TcpStream::connect(orig_addr).await.unwrap();
+        let _orig_peer = accept.await.unwrap();
+        // Shut the write half so any ACK write on `orig` fails deterministically.
+        orig.shutdown().await.unwrap();
+
+        let fresh_srv = tokio::spawn(async move {
+            let (mut s, _) = fresh.accept().await.unwrap();
+            let mut all = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(Duration::from_millis(500), s.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    _ => break,
+                }
+            }
+            all
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), fresh_port.to_string());
+        let cfg = crate::config::Config::from_map(m);
+        let mut d = Dialog {
+            aor: "c100x".to_string(),
+            domain: "dev.example".to_string(),
+            local_port: 5060,
+            call_id: "xyz".to_string(),
+            from_tag: "cf".to_string(),
+            branch: "z9hG4bKorig".to_string(),
+            cseq: 21,
+            to_tag: String::new(),
+            remote_target: String::new(),
+        };
+        // A MALFORMED racing 2xx (empty tag ⇒ the None/send_cleanup_ack arm): the live ACK write fails on the
+        // closed socket, so the ACK must fall back to a fresh connection — with NO BYE (unaddressable).
+        let racing_2xx = b"SIP/2.0 200 OK\r\n\
+              Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+              From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+              To: <sip:c100x@dev.example>;tag=\r\n\
+              Call-ID: xyz\r\n\
+              CSeq: 21 INVITE\r\n\
+              Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+              Content-Length: 0\r\n\r\n"
+            .to_vec();
+
+        // sock_write_ok = true, but the live write fails ⇒ fall back to fresh.
+        drain_after_cancel(&mut orig, &cfg, &mut d, racing_2xx, true).await;
+
+        let sent = fresh_srv.await.unwrap();
+        assert!(
+            sent.starts_with("ACK "),
+            "a malformed racing 2xx whose live-socket ACK fails must be re-ACKed over a fresh connection, got: {sent}"
+        );
+        assert!(!sent.contains("BYE"), "an unaddressable racing 2xx must NOT be BYE'd, got: {sent}");
+    }
+
+    #[tokio::test]
+    async fn process_in_dialog_acks_then_byes_a_retransmitted_2xx_over_fresh_on_write_failure() {
+        // A retransmitted INVITE 2xx means our earlier ACK was lost ⇒ the dialog is still UNCONFIRMED. If the
+        // re-ACK write fails (dead socket), the fresh-connection teardown must ACK THEN BYE (a bare BYE is
+        // unreliable against an unacknowledged 2xx), and process_in_dialog must return Failed.
+        use std::collections::HashMap;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let fresh = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fresh_port = fresh.local_addr().unwrap().port();
+        let orig_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let orig_addr = orig_l.local_addr().unwrap();
+        let accept = tokio::spawn(async move { orig_l.accept().await.unwrap().0 });
+        let mut orig = TcpStream::connect(orig_addr).await.unwrap();
+        let _orig_peer = accept.await.unwrap();
+        orig.shutdown().await.unwrap(); // any ACK write on `orig` now fails
+
+        let fresh_srv = tokio::spawn(async move {
+            let (mut s, _) = fresh.accept().await.unwrap();
+            let mut all = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(Duration::from_millis(500), s.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    _ => break,
+                }
+            }
+            all
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), fresh_port.to_string());
+        let cfg = crate::config::Config::from_map(m);
+        // A CONFIRMED dialog (to_tag + remote_target set) so ack_bye_reconnect can address the ACK/BYE.
+        let d = Dialog {
+            aor: "c100x".to_string(),
+            domain: "dev.example".to_string(),
+            local_port: 5060,
+            call_id: "xyz".to_string(),
+            from_tag: "cf".to_string(),
+            branch: "z9hG4bKorig".to_string(),
+            cseq: 21,
+            to_tag: "srv200".to_string(),
+            remote_target: "sip:c100x@127.0.0.1:5599".to_string(),
+        };
+        let mut inbound = b"SIP/2.0 200 OK\r\n\
+              Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+              From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+              To: <sip:c100x@dev.example>;tag=srv200\r\n\
+              Call-ID: xyz\r\n\
+              CSeq: 21 INVITE\r\n\
+              Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+              Content-Length: 0\r\n\r\n"
+            .to_vec();
+
+        match process_in_dialog(&mut orig, &mut inbound, &cfg, &d).await {
+            InDialog::Failed(_) => {}
+            _ => panic!("a failed re-ACK of a retransmitted 2xx must surface Failed"),
+        }
+
+        let sent = fresh_srv.await.unwrap();
+        let ack_pos = sent.find("ACK ");
+        let bye_pos = sent.find("BYE ");
+        assert!(
+            ack_pos.is_some() && bye_pos.is_some(),
+            "the fresh teardown of an unconfirmed retransmitted 2xx must ACK then BYE, got: {sent}"
+        );
+        assert!(ack_pos < bye_pos, "the ACK must precede the BYE on the fresh connection, got: {sent}");
+    }
+
+    #[tokio::test]
+    async fn process_in_dialog_tears_down_on_a_malformed_in_dialog_frame() {
+        // A malformed frame at the head of `inbound` (here a nonnumeric Content-Length) can never advance
+        // framing. Left in place it would wedge the loop so a subsequent valid BYE is never seen and the view
+        // stays pinned to a dead dialog. process_in_dialog must instead tear the dialog down (BYE) and return
+        // Failed, rather than treating the malformed frame as "incomplete / read more".
+        use std::collections::HashMap;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let orig_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let orig_addr = orig_l.local_addr().unwrap();
+        let accept = tokio::spawn(async move { orig_l.accept().await.unwrap().0 });
+        let mut orig = TcpStream::connect(orig_addr).await.unwrap();
+        let mut orig_peer = accept.await.unwrap();
+
+        // The live-socket teardown BYE must land on the peer (so no fresh connection is needed).
+        let peer_srv = tokio::spawn(async move {
+            let mut all = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(Duration::from_millis(500), orig_peer.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => {
+                        all.push_str(&String::from_utf8_lossy(&buf[..n]));
+                        if all.contains("BYE ") {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            all
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = crate::config::Config::from_map(m);
+        // A CONFIRMED dialog so teardown_bye can address the BYE on the live socket.
+        let d = Dialog {
+            aor: "c100x".to_string(),
+            domain: "dev.example".to_string(),
+            local_port: 5060,
+            call_id: "xyz".to_string(),
+            from_tag: "cf".to_string(),
+            branch: "z9hG4bKorig".to_string(),
+            cseq: 21,
+            to_tag: "srv200".to_string(),
+            remote_target: "sip:c100x@127.0.0.1:5599".to_string(),
+        };
+        // A malformed frame (nonnumeric Content-Length) at the head, then a well-formed BYE that would be
+        // reached ONLY if framing advanced. The malformed head must trigger teardown before the BYE is framed.
+        let mut inbound = b"OPTIONS sip:c100x@dev.example SIP/2.0\r\n\
+              Call-ID: xyz\r\n\
+              CSeq: 22 OPTIONS\r\n\
+              Content-Length: notanumber\r\n\r\n\
+              BYE sip:btmqttd@127.0.0.1:5060 SIP/2.0\r\n\
+              Call-ID: xyz\r\n\
+              CSeq: 23 BYE\r\n\
+              Content-Length: 0\r\n\r\n"
+            .to_vec();
+
+        match process_in_dialog(&mut orig, &mut inbound, &cfg, &d).await {
+            InDialog::Failed(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidData),
+            _ => panic!("a malformed in-dialog frame must surface Failed, not wedge framing"),
+        }
+
+        let sent = peer_srv.await.unwrap();
+        assert!(sent.contains("BYE "), "the dialog must be torn down with a BYE, got: {sent}");
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_marks_a_transport_error_retriable() {
+        // A transport failure (the loopback SIP peer drops the connection without answering) is TRANSIENT
+        // and must be marked retriable, so the caller re-attempts before the panel cut instead of forfeiting
+        // make-before-break (a definitive panel refusal, by contrast, is NOT retriable — see the 486 test).
+        // A real listener that ACCEPTS then immediately CLOSES is deterministic (no dead-port reuse race)
+        // and fast: the peer-close surfaces at once as a write error or an EOF on the response read, rather
+        // than only after RESPONSE_TIMEOUT.
+        use std::collections::HashMap;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // Accept once and drop the connection immediately, without sending any response.
+            let _ = listener.accept().await;
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
+        // The peer-close must surface PROMPTLY — not after the full RESPONSE_TIMEOUT — so assert the call
+        // returns well inside that budget (a regression that waited out the timeout would still be
+        // "retriable" but slow).
+        let started = std::time::Instant::now();
+        let outcome = establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30)).await;
+        assert!(
+            started.elapsed() < RESPONSE_TIMEOUT / 2,
+            "a peer-close transport error must be reported promptly, not after RESPONSE_TIMEOUT (took {:?})",
+            started.elapsed()
+        );
+        match outcome {
+            RefreshOutcome::Declined(_e, _renewals, retriable) => {
+                assert!(retriable, "a transport error (peer closed) must be retriable")
+            }
+            _ => panic!("a dropped connection must decline"),
+        }
+        server.await.unwrap();
+    }
+
+    // NB: the timing invariant `SESSION_REFRESH_AFTER + RESPONSE_TIMEOUT (+margin) < PANEL_SESSION_LIMIT`
+    // is enforced at COMPILE TIME by the `const _: () = assert!(…)` next to the constants — stronger than a
+    // runtime test (it cannot be bypassed), so there is deliberately no unit test duplicating it here.
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_aborts_on_stop_and_cancels() {
+        // A `Stop` observed while the refresh INVITE is in flight — in the RESPONSE wait, AFTER the INVITE
+        // was sent — must abort PROMPTLY and CANCEL the INVITE, not block up to RESPONSE_TIMEOUT. The panel
+        // here never answers; the mock signals once it has the INVITE so the Stop is delivered during the
+        // response wait (the connect arm also honours Stop, but this exercises the mid-INVITE CANCEL path).
+        use std::collections::HashMap;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let invite = read_one_sip(&mut s, &mut acc).await; // wait for the whole INVITE
+            assert!(invite.starts_with("INVITE "), "expected the refresh INVITE, got: {invite}");
+            let _ = ready_tx.send(()); // INVITE received ⇒ establish is now in the response wait
+            // Never answer; accumulate the rest until the client drops, looking for the CANCEL.
+            let mut all = String::from_utf8_lossy(&acc).into_owned();
+            let mut buf = [0u8; 4096];
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+                }
+            }
+            all.contains("CANCEL ")
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
+        // Send Stop only AFTER the mock has the INVITE, so it lands in the response wait (not at connect).
+        let stopper = tokio::spawn(async move {
+            let _ = ready_rx.await;
+            let _ = view_tx.send(ViewCmd::Stop).await;
+        });
+        let outcome =
+            establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30)).await;
+        assert!(
+            matches!(outcome, RefreshOutcome::Aborted),
+            "a mid-flight Stop must abort the refresh, not block on the response"
+        );
+        stopper.await.unwrap();
+        assert!(
+            server.await.unwrap(),
+            "the aborted refresh must CANCEL its in-flight INVITE"
+        );
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_aborts_when_the_viewing_deadline_lapses() {
+        // If the viewer leaves just as the refresh begins (no renewing poke) and the panel never answers,
+        // the attempt must abort at the governing viewing deadline — honoring VIEWER_LINGER — instead of
+        // blocking for the full RESPONSE_TIMEOUT. It must also CANCEL the in-flight INVITE so a late 2xx
+        // can't pin the panel. The deadline is set to 1 s — comfortably past the (sub-millisecond loopback)
+        // connect + INVITE write even on a loaded CI runner, so the abort deterministically lands in the
+        // response wait after the INVITE is on the wire — yet far below RESPONSE_TIMEOUT (10 s), so the
+        // elapsed-time assertion still proves it aborted at the deadline rather than blocking on the response.
+        use std::collections::HashMap;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let invite = read_one_sip(&mut s, &mut acc).await; // wait for the whole INVITE
+            assert!(invite.starts_with("INVITE "), "expected the refresh INVITE, got: {invite}");
+            // Never answer; accumulate until the client drops, looking for the CANCEL.
+            let mut all = String::from_utf8_lossy(&acc).into_owned();
+            let mut buf = [0u8; 4096];
+            loop {
+                match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+                }
+            }
+            all.contains("CANCEL ")
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4); // no pokes ⇒ deadline is honored
+        let viewing_deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let started = std::time::Instant::now();
+        let outcome = establish_refresh_dialog(
+            &cfg,
+            &stopping,
+            &mut view_rx,
+            "c100x",
+            "dev.example",
+            "da",
+            viewing_deadline,
+            Duration::from_secs(30),
+        )
+        .await;
+        assert!(
+            matches!(outcome, RefreshOutcome::Aborted),
+            "a lapsed viewing deadline (no poke) must abort the refresh, not block on the response"
+        );
+        assert!(
+            started.elapsed() < RESPONSE_TIMEOUT / 2,
+            "the abort must fire at the ~1 s viewing deadline, not block for RESPONSE_TIMEOUT (took {:?})",
+            started.elapsed()
+        );
+        assert!(
+            server.await.unwrap(),
+            "the deadline-aborted refresh must CANCEL its in-flight INVITE"
+        );
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_records_a_hold_seen_mid_attempt() {
+        // A Hold poke that arrives while the refresh INVITE is in flight must be CAPTURED (not dropped),
+        // so the caller can renew the adopted dialog's hold_deadline. The panel here answers 200 OK; the
+        // queued Hold is processed first (biased select), then the response is read.
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let _invite = read_one_sip(&mut s, &mut acc).await;
+            s.write_all(
+                b"SIP/2.0 200 OK\r\n\
+                  To: <sip:c100x@dev.example>;tag=srv123\r\n\
+                  CSeq: 21 INVITE\r\n\
+                  Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+                  Content-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            s.flush().await.unwrap();
+            let _ack = read_one_sip(&mut s, &mut acc).await;
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
+        let hold_at = tokio::time::Instant::now() + Duration::from_secs(30);
+        view_tx.send(ViewCmd::Hold(hold_at)).await.unwrap(); // queued before the panel responds
+        let renewals =
+            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
+                .await
+            {
+                RefreshOutcome::Established(_sock, _d, r, _residual, _accepted) => r,
+                _ => panic!("a 2xx refresh must be adopted"),
+            };
+        assert_eq!(
+            renewals.hold_expiry,
+            Some(hold_at),
+            "a Hold seen mid-refresh must be recorded, not dropped"
+        );
+        drop(view_tx);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn establish_refresh_dialog_carries_coalesced_residual() {
+        // flexisip can coalesce the 2xx with an immediate in-dialog request into ONE TCP read;
+        // wait_final_response returns the 2xx and leaves the request in the accumulator. That residual must
+        // be handed back (so the caller can process it) rather than dropped — a dropped BYE would leave a
+        // terminated successor looking live. Here the panel sends 200 OK + an OPTIONS in one write.
+        use std::collections::HashMap;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut acc: Vec<u8> = Vec::new();
+            let _invite = read_one_sip(&mut s, &mut acc).await;
+            // 2xx and an in-dialog OPTIONS coalesced into a single write.
+            s.write_all(
+                b"SIP/2.0 200 OK\r\n\
+                  To: <sip:c100x@dev.example>;tag=srv123\r\n\
+                  CSeq: 21 INVITE\r\n\
+                  Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+                  Content-Length: 0\r\n\r\n\
+                  OPTIONS sip:btmqttd@127.0.0.1 SIP/2.0\r\n\
+                  From: <sip:c100x@dev.example>;tag=srv123\r\n\
+                  To: <sip:btmqttd@dev.example>;tag=cf\r\n\
+                  Call-ID: xyz\r\n\
+                  CSeq: 50 OPTIONS\r\n\
+                  Content-Length: 0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            s.flush().await.unwrap();
+            let _ack = read_one_sip(&mut s, &mut acc).await;
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), port.to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        let stopping = Arc::new(AtomicBool::new(false));
+        let (_view_tx, mut view_rx) = mpsc::channel::<ViewCmd>(4);
+        let residual =
+            match establish_refresh_dialog(&cfg, &stopping, &mut view_rx, "c100x", "dev.example", "da", tokio::time::Instant::now() + Duration::from_secs(3600), Duration::from_secs(30))
+                .await
+            {
+                RefreshOutcome::Established(_sock, _d, _r, residual, _accepted) => residual,
+                _ => panic!("a 2xx refresh must be adopted"),
+            };
+        assert!(
+            String::from_utf8_lossy(&residual).contains("OPTIONS "),
+            "a request coalesced after the 2xx must be carried in the residual, not dropped"
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn apply_refresh_renewals_rearms_start_and_lifts_hold() {
+        let base = tokio::time::Instant::now();
+        let window = Duration::from_secs(30);
+        let now = base + Duration::from_secs(10);
+
+        // A Start re-arms the FULL window ANCHORED AT THE PRESS (start_at + window), not at `now`; a future
+        // hold_expiry lifts hold_deadline (max).
+        let mut start = base; // an already-elapsed regime
+        let mut hold = base;
+        let start_at = base + Duration::from_secs(2); // pressed early in the attempt
+        let future_hold = now + Duration::from_secs(4);
+        apply_refresh_renewals(
+            &RefreshRenewals { start_at: Some(start_at), hold_expiry: Some(future_hold) },
+            now,
+            window,
+            &mut start,
+            &mut hold,
+        );
+        assert_eq!(start, start_at + window, "the window is anchored at the press, not at `now`");
+        assert_eq!(hold, future_hold);
+
+        // Nothing recorded ⇒ deadlines unchanged.
+        let mut s2 = base;
+        let mut h2 = base;
+        apply_refresh_renewals(&RefreshRenewals::default(), now, window, &mut s2, &mut h2);
+        assert_eq!(s2, base);
+        assert_eq!(h2, base);
+
+        // A hold_expiry already in the past is ignored (mirrors the hold loop dropping a stale poke), and
+        // `max` never moves hold_deadline backwards.
+        let mut s3 = base;
+        let mut h3 = now + Duration::from_secs(20);
+        apply_refresh_renewals(
+            &RefreshRenewals { start_at: None, hold_expiry: Some(now - Duration::from_secs(1)) },
+            now,
+            window,
+            &mut s3,
+            &mut h3,
+        );
+        assert_eq!(s3, base, "no Start ⇒ start_deadline untouched");
+        assert_eq!(h3, now + Duration::from_secs(20), "a past hold_expiry must not move hold_deadline");
+
+        // A Start whose `start_at + window` is EARLIER than an existing (longer) start_deadline must not
+        // shorten it (max).
+        let mut s4 = now + Duration::from_secs(100);
+        let mut h4 = base;
+        apply_refresh_renewals(
+            &RefreshRenewals { start_at: Some(base), hold_expiry: None },
+            now,
+            window,
+            &mut s4,
+            &mut h4,
+        );
+        assert_eq!(s4, now + Duration::from_secs(100), "a shorter anchored window must not cut an existing one");
+    }
+
+    #[tokio::test]
+    async fn drain_queued_view_cmds_applies_holds_and_reports_stop() {
+        let window = Duration::from_secs(30);
+        let base = tokio::time::Instant::now();
+
+        // Holds queued by hold.rs during a stalled teardown must lift a stale hold_deadline; an already-
+        // elapsed straggler is ignored (a viewerless session can't be revived). No Start ⇒ start untouched.
+        let (tx, mut rx) = mpsc::channel::<ViewCmd>(8);
+        tx.try_send(ViewCmd::Hold(base + Duration::from_secs(5))).unwrap();
+        tx.try_send(ViewCmd::Hold(base + Duration::from_secs(9))).unwrap();
+        tx.try_send(ViewCmd::Hold(base - Duration::from_secs(1))).unwrap(); // already elapsed ⇒ ignored
+        let mut start = base;
+        let mut hold = base; // stale after the long teardown
+        assert!(!drain_queued_view_cmds(&mut rx, window, &mut start, &mut hold));
+        assert_eq!(hold, base + Duration::from_secs(9), "hold_deadline lifted to the latest FUTURE poke");
+        assert_eq!(start, base, "no Start queued ⇒ start_deadline untouched");
+
+        // A queued Start re-arms the full window from now.
+        let (tx2, mut rx2) = mpsc::channel::<ViewCmd>(4);
+        tx2.try_send(ViewCmd::Start).unwrap();
+        let mut s2 = base;
+        let mut h2 = base;
+        let before = tokio::time::Instant::now();
+        assert!(!drain_queued_view_cmds(&mut rx2, window, &mut s2, &mut h2));
+        assert!(s2 >= before + window && s2 <= tokio::time::Instant::now() + window, "Start re-arms window from now");
+
+        // A queued Stop reports hang-up.
+        let (tx3, mut rx3) = mpsc::channel::<ViewCmd>(4);
+        tx3.try_send(ViewCmd::Hold(base + Duration::from_secs(3))).unwrap();
+        tx3.try_send(ViewCmd::Stop).unwrap();
+        let mut s3 = base;
+        let mut h3 = base;
+        assert!(drain_queued_view_cmds(&mut rx3, window, &mut s3, &mut h3), "a drained Stop must report hang-up");
+
+        // A closed channel (all senders dropped ⇒ shutdown) also reports hang-up.
+        let (tx4, mut rx4) = mpsc::channel::<ViewCmd>(1);
+        drop(tx4);
+        let mut s4 = base;
+        let mut h4 = base;
+        assert!(drain_queued_view_cmds(&mut rx4, window, &mut s4, &mut h4), "a closed channel must report hang-up");
+    }
+
+    #[test]
+    fn effective_refresh_deadline_pushes_out_on_hold_and_start() {
+        let base = tokio::time::Instant::now() + Duration::from_secs(5);
+        let window = Duration::from_secs(30);
+
+        // No renewals ⇒ honor the pre-attempt base deadline unchanged.
+        assert_eq!(
+            effective_refresh_deadline(&RefreshRenewals::default(), base, window),
+            base,
+            "no poke ⇒ the base viewing deadline governs"
+        );
+
+        // A later Hold PUSHES the deadline out to that poke's expiry (not disarms it) — so a nonresponsive
+        // panel can't hold the dialog past the poke's own linger after the viewer leaves.
+        let later = base + Duration::from_secs(4);
+        assert_eq!(
+            effective_refresh_deadline(&RefreshRenewals { start_at: None, hold_expiry: Some(later) }, base, window),
+            later,
+            "a later Hold expiry moves the abort out to that linger"
+        );
+
+        // A Hold that is EARLIER than the base never moves the deadline backwards (max).
+        let earlier = base - Duration::from_secs(2);
+        assert_eq!(
+            effective_refresh_deadline(&RefreshRenewals { start_at: None, hold_expiry: Some(earlier) }, base, window),
+            base,
+            "an earlier Hold expiry must not pull the abort in"
+        );
+
+        // A manual Start PUSHES the deadline out to its RE-ARMED window (start_at + window), NOT disarms it —
+        // so a short camera_view_idle_secs still hangs up on time even if the panel never answers.
+        let start_at = base + Duration::from_secs(1);
+        assert_eq!(
+            effective_refresh_deadline(&RefreshRenewals { start_at: Some(start_at), hold_expiry: None }, base, window),
+            start_at + window,
+            "a manual Start re-arms the deadline to start_at + window"
+        );
+
+        // The effective deadline is the MAX across base, start_at + window, and hold_expiry.
+        let far_hold = start_at + window + Duration::from_secs(10);
+        assert_eq!(
+            effective_refresh_deadline(
+                &RefreshRenewals { start_at: Some(start_at), hold_expiry: Some(far_hold) },
+                base,
+                window,
+            ),
+            far_hold,
+            "the later of the Start window and the Hold expiry governs"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_successor_completes_a_split_bye_and_reports_panel_ended() {
+        // The residual after the refresh 2xx holds only the START of an in-dialog BYE (split across TCP
+        // reads). validate_successor must READ the rest, frame it, and report PanelEnded — so the caller
+        // keeps the healthy old dialog instead of adopting a successor that is about to die. It also 200-OKs
+        // the BYE, which the peer reads back.
+        use std::collections::HashMap;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            // Send the REMAINDER of the BYE (the residual below stops mid-headers).
+            s.write_all(b"CSeq: 2 BYE\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+            s.flush().await.unwrap();
+            // Read the 200 OK validate_successor sends for the BYE.
+            let mut b = [0u8; 1024];
+            let n = s.read(&mut b).await.unwrap();
+            String::from_utf8_lossy(&b[..n]).into_owned()
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = crate::config::Config::from_map(m);
+        let d = Dialog {
+            aor: "c100x".into(),
+            domain: "dev.example".into(),
+            local_port: 5599,
+            call_id: "callid".into(),
+            from_tag: "ft".into(),
+            branch: "z9hG4bKrefresh".into(),
+            cseq: 21,
+            to_tag: "srv123".into(),
+            remote_target: "sip:c100x@127.0.0.1:5599".into(),
+        };
+        let mut sock = TcpStream::connect(addr).await.unwrap();
+        // A PARTIAL BYE: headers not yet terminated, so frame_message() returns Incomplete until the peer
+        // sends the rest.
+        let mut inbound = b"BYE sip:btmqttd@127.0.0.1:5599 SIP/2.0\r\n\
+            Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKbye\r\n\
+            From: <sip:c100x@dev.example>;tag=srv123\r\n\
+            To: <sip:btmqttd@dev.example>;tag=ft\r\n\
+            Call-ID: callid\r\n"
+            .to_vec();
+        let outcome = validate_successor(&mut sock, &mut inbound, &cfg, &d).await;
+        assert!(
+            matches!(outcome, InDialog::PanelEnded),
+            "a split coalesced BYE must be completed and reported before adoption"
+        );
+        let ok = peer.await.unwrap();
+        assert!(ok.starts_with("SIP/2.0 200 "), "the completed BYE must be 200-OK'd, got: {ok}");
+    }
+
+    #[tokio::test]
+    async fn validate_successor_detects_an_immediate_half_close() {
+        // flexisip 2xx's the refresh then half-closes that leg WITHOUT a BYE (residual empty). Even with an
+        // empty buffer, validate_successor must do a bounded read, observe the EOF, and report Failed — so
+        // the caller keeps the old dialog instead of adopting a dead successor and freezing on the next read.
+        // It also BYEs the orphaned (already-ACKed) successor over a fresh connection; SIP_PORT points at the
+        // listener's port, which is CLOSED once the peer task ends, so that reconnect refuses instantly and
+        // the elapsed-time assertion stays tight.
+        use std::collections::HashMap;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (s, _) = listener.accept().await.unwrap();
+            drop(s); // immediate close ⇒ the client sees EOF
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), addr.port().to_string());
+        let cfg = crate::config::Config::from_map(m);
+        let d = Dialog {
+            aor: "c100x".into(),
+            domain: "dev.example".into(),
+            local_port: 5599,
+            call_id: "callid".into(),
+            from_tag: "ft".into(),
+            branch: "z9hG4bKrefresh".into(),
+            cseq: 21,
+            to_tag: "srv123".into(),
+            remote_target: "sip:c100x@127.0.0.1:5599".into(),
+        };
+        let mut sock = TcpStream::connect(addr).await.unwrap();
+        peer.await.unwrap();
+        let mut inbound: Vec<u8> = Vec::new(); // empty residual
+        let started = std::time::Instant::now();
+        let outcome = validate_successor(&mut sock, &mut inbound, &cfg, &d).await;
+        assert!(
+            matches!(outcome, InDialog::Failed(_)),
+            "an immediate half-close on an empty residual must be caught as Failed before adoption"
+        );
+        assert!(
+            started.elapsed() < SUCCESSOR_VALIDATE,
+            "the EOF must be seen at once, not after the full SUCCESSOR_VALIDATE bound (took {:?})",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -1547,7 +3832,7 @@ mod tests {
     fn a_panel_bye_split_across_reads_is_framed_before_acting() {
         // Regression for the in-dialog framing fix: a BYE that arrives in two TCP
         // chunks must only be recognized once BOTH halves have accumulated. Mirrors the loop's logic:
-        // accumulate, then act only on a message complete_message_len() confirms.
+        // accumulate, then act only on a message frame_message() confirms.
         let bye = "BYE sip:btmqttd@127.0.0.1:5060 SIP/2.0\r\n\
                    Via: SIP/2.0/TCP 127.0.0.1;branch=z9hG4bKsplit\r\n\
                    From: <sip:app@d>;tag=ft\r\n\
@@ -1558,10 +3843,10 @@ mod tests {
         let (head, tail) = bye.split_at(40); // split mid-headers
         let mut inbound = head.as_bytes().to_vec();
         // First chunk: not yet a complete message, so nothing is acted upon.
-        assert_eq!(complete_message_len(&inbound), None);
+        assert!(matches!(frame_message(&inbound), Frame::Incomplete));
         // Second chunk completes it: now it frames, and the framed message is the BYE.
         inbound.extend_from_slice(tail.as_bytes());
-        let len = complete_message_len(&inbound).expect("now complete");
+        let len = frame_message(&inbound).complete_len().expect("now complete");
         let msg = String::from_utf8_lossy(&inbound[..len]).into_owned();
         assert!(is_bye(&msg));
         assert!(build_ok_to(&msg).is_some()); // the 200 OK we must send back is well-formed
