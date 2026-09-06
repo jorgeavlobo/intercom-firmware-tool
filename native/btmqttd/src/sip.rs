@@ -1526,13 +1526,14 @@ async fn session(
         .unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
 
     // Confirm the dialog. If the ACK can't be written/flushed, the signalling socket died AFTER the
-    // panel accepted our INVITE (2xx) — the dialog may be active, so tear it down over a FRESH
-    // connection rather than leaving the panel streaming. This is the last confirmed-
-    // dialog exit; together with the hold-loop's EOF/read-error/cap arms, no post-2xx path can strand
-    // the panel.
+    // panel accepted our INVITE (2xx) — the dialog may be active, so tear it down over a FRESH connection
+    // rather than leaving the panel streaming. Use ack_bye_reconnect (ACK then BYE), NOT a bare
+    // bye_reconnect: a failed ACK means the panel never confirmed the dialog, and a BYE alone to an
+    // unacknowledged 2xx is unreliable (same reasoning as the refresh and retransmitted-2xx paths).
+    // Together with the hold-loop's EOF/read-error/cap arms, no post-2xx path can strand the panel.
     let ack = build_ack(&d, &format!("z9hG4bK{}", rand_hex(8)));
     if let Err(e) = write_all_flush(&mut sock, ack.as_bytes()).await {
-        bye_reconnect(cfg, &d).await;
+        ack_bye_reconnect(cfg, &d).await;
         return Err(e);
     }
     eprintln!("btmqttd: on-demand session up (sip:{}@{})", d.aor, d.domain);
