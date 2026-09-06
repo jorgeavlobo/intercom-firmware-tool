@@ -480,11 +480,13 @@ pub fn build_ack_failure(d: &Dialog, to_header: &str) -> String {
 
 /// The `To` header value to echo back in an ACK for a received response: the response's `To` as returned
 /// by `header_value` (surrounding whitespace trimmed; an empty/absent tag preserved), or a synthesized
-/// `<sip:aor@domain>` if the header is absent.
+/// `<sip:aor@domain>` if the header is absent OR its value is empty/whitespace-only (which `header_value`
+/// trims to `Some("")`). An empty value would emit an invalid `To: \r\n` line, so we treat it like absent.
 fn ack_to_header(msg: &str, d: &Dialog) -> String {
-    header_value(msg, "To")
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("<sip:{}@{}>", d.aor, d.domain))
+    match header_value(msg, "To") {
+        Some(v) if !v.is_empty() => v.to_string(),
+        _ => format!("<sip:{}@{}>", d.aor, d.domain),
+    }
 }
 
 /// Send a cleanup ACK for a received response on the live `sock` when it is write-safe, falling back to a
@@ -2273,6 +2275,41 @@ mod tests {
         assert!(bye.starts_with("BYE sip:c100x@127.0.0.1:41044;transport=tcp SIP/2.0\r\n"));
         assert!(bye.contains("CSeq: 22 BYE\r\n")); // incremented
         assert!(bye.contains("tag=paneltag"));
+    }
+
+    #[test]
+    fn ack_to_header_echoes_a_present_to_and_synthesizes_for_absent_or_empty() {
+        let d = Dialog {
+            aor: "c100x".into(),
+            domain: "dev.example".into(),
+            local_port: 5555,
+            call_id: "abcd".into(),
+            from_tag: "ft".into(),
+            branch: "z9hG4bKdeadbeef".into(),
+            cseq: 21,
+            to_tag: String::new(),
+            remote_target: String::new(),
+        };
+        let synthesized = "<sip:c100x@dev.example>";
+
+        // A present, non-empty To value is echoed verbatim (whitespace trimmed by header_value).
+        let with_to = "SIP/2.0 200 OK\r\nTo: <sip:c100x@dev.example>;tag=t\r\n\r\n";
+        assert_eq!(ack_to_header(with_to, &d), "<sip:c100x@dev.example>;tag=t");
+
+        // An empty-tag To is still a non-empty VALUE, so it is echoed (the trailing `;tag=` preserved).
+        let empty_tag = "SIP/2.0 200 OK\r\nTo: <sip:c100x@dev.example>;tag=\r\n\r\n";
+        assert_eq!(ack_to_header(empty_tag, &d), "<sip:c100x@dev.example>;tag=");
+
+        // An absent To header falls back to the synthesized <sip:aor@domain>.
+        let no_to = "SIP/2.0 200 OK\r\nCSeq: 21 INVITE\r\n\r\n";
+        assert_eq!(ack_to_header(no_to, &d), synthesized);
+
+        // An empty/whitespace-only To VALUE (header_value trims to Some("")) must NOT emit `To: \r\n` —
+        // it falls back to the synthesized value, exactly like an absent header.
+        let empty_to = "SIP/2.0 200 OK\r\nTo:\r\nCSeq: 21 INVITE\r\n\r\n";
+        assert_eq!(ack_to_header(empty_to, &d), synthesized);
+        let ws_to = "SIP/2.0 200 OK\r\nTo:   \r\nCSeq: 21 INVITE\r\n\r\n";
+        assert_eq!(ack_to_header(ws_to, &d), synthesized);
     }
 
     #[test]
