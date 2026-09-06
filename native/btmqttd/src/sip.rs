@@ -1567,7 +1567,7 @@ async fn session(
             // windows): if BOTH lapse mid-attempt with no renewing poke, the refresh aborts promptly rather
             // than blocking for the full response budget, so a viewer that leaves as the refresh begins still
             // hangs up ~VIEWER_LINGER later. A Hold during the attempt pushes it out to that poke's linger; a
-            // manual Start disarms it (see effective_refresh_deadline).
+            // manual Start pushes it to its re-armed start_at + window (see effective_refresh_deadline).
             let viewing_deadline = governing_deadline(start_deadline, hold_deadline);
             match establish_refresh_dialog(
                 cfg,
