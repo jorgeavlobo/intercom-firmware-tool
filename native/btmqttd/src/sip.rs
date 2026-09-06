@@ -487,6 +487,19 @@ fn ack_to_header(msg: &str, d: &Dialog) -> String {
         .unwrap_or_else(|| format!("<sip:{}@{}>", d.aor, d.domain))
 }
 
+/// Send a cleanup ACK for a received response on the live `sock` when it is write-safe, falling back to a
+/// FRESH loopback connection if that write FAILS (the socket may have closed after delivering the response)
+/// OR the socket is write-tainted (`sock_write_ok == false`: a failed prior write may have left a partial
+/// request on it). The ACK carries the INVITE's original `Via`, so flexisip matches it on either connection.
+/// Best-effort: a failed fresh write is nothing more we can do.
+async fn send_cleanup_ack(sock: &mut TcpStream, cfg: &Config, sock_write_ok: bool, ack: &str) {
+    if !sock_write_ok || write_all_flush(sock, ack.as_bytes()).await.is_err() {
+        if let Ok(mut fresh) = connect_sip(cfg).await {
+            let _ = write_all_flush(&mut fresh, ack.as_bytes()).await;
+        }
+    }
+}
+
 /// BYE to end the dialog (CSeq incremented; request-URI = the panel's learned Contact).
 pub fn build_bye(d: &Dialog, bye_branch: &str) -> String {
     format!(
@@ -821,10 +834,11 @@ fn governing_deadline(
 /// `session`'s own establish records `want_start` / the latest `hold_expiry` seen during establishment.
 #[derive(Default)]
 struct RefreshRenewals {
-    /// The LATEST manual `view_camera` (`ViewCmd::Start`) press instant seen, if any: the caller re-arms
-    /// the FULL window anchored at THAT press (`start_at + window`), NOT at refresh completion — so a slow
-    /// attempt cannot stretch the per-press window by its own latency (recorded absolute, exactly as
-    /// `hold_expiry` is, rather than as a bare flag).
+    /// The LATEST manual `view_camera` (`ViewCmd::Start`) OBSERVED instant seen, if any: the caller re-arms
+    /// the FULL window anchored at when the Start was DEQUEUED here (`start_at + window`), NOT at refresh
+    /// completion — so a slow attempt cannot stretch the per-press window by its own (multi-second) latency.
+    /// `ViewCmd::Start` carries no timestamp, so this is receipt time (modulo mpsc-channel latency), a close
+    /// proxy for the press instant, recorded absolute exactly as `hold_expiry` is rather than as a bare flag.
     start_at: Option<tokio::time::Instant>,
     /// The LATEST auto-hold `ViewCmd::Hold` expiry seen (absolute), if any: the caller lifts `hold_deadline`
     /// to it (max), so a poke buffered during the attempt still keeps the view alive.
@@ -1325,11 +1339,8 @@ async fn establish_refresh_dialog(
         let target =
             contact_uri(&final_resp).unwrap_or_else(|| format!("sip:{}@{}", d.aor, d.domain));
         let ack = build_ack_echoing_to(&d, &format!("z9hG4bK{}", rand_hex(8)), &target, &ack_to_header(&final_resp, &d));
-        if write_all_flush(&mut sock, ack.as_bytes()).await.is_err() {
-            if let Ok(mut fresh) = connect_sip(cfg).await {
-                let _ = write_all_flush(&mut fresh, ack.as_bytes()).await;
-            }
-        }
+        // Live response socket (write-safe), falling back to a fresh connection if that write fails.
+        send_cleanup_ack(&mut sock, cfg, true, &ack).await;
         return RefreshOutcome::Declined(
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1965,18 +1976,15 @@ async fn drain_after_cancel(
                         None => {
                             // Malformed 2xx (empty/absent tag): ACK to stop retransmits, echoing the received
                             // To (via ack_to_header), but no addressable BYE — the panel's own cut reclaims
-                            // the orphan (mirrors establish_refresh_dialog's tagless-2xx handling).
+                            // the orphan (mirrors establish_refresh_dialog's tagless-2xx handling). Live socket
+                            // when write-safe, else/on failure a fresh connection.
                             let ack = build_ack_echoing_to(
                                 d,
                                 &format!("z9hG4bK{}", rand_hex(8)),
                                 &target,
                                 &ack_to_header(&msg, d),
                             );
-                            if sock_write_ok {
-                                let _ = write_all_flush(sock, ack.as_bytes()).await;
-                            } else if let Ok(mut fresh) = connect_sip(cfg).await {
-                                let _ = write_all_flush(&mut fresh, ack.as_bytes()).await;
-                            }
+                            send_cleanup_ack(sock, cfg, sock_write_ok, &ack).await;
                         }
                     }
                     return;
@@ -1990,11 +1998,7 @@ async fn drain_after_cancel(
                 // flexisip still matches it); otherwise on the live socket.
                 Some(s) if s >= 300 => {
                     let ack = build_ack_failure(d, &ack_to_header(&msg, d));
-                    if sock_write_ok {
-                        let _ = write_all_flush(sock, ack.as_bytes()).await;
-                    } else if let Ok(mut fresh) = connect_sip(cfg).await {
-                        let _ = write_all_flush(&mut fresh, ack.as_bytes()).await;
-                    }
+                    send_cleanup_ack(sock, cfg, sock_write_ok, &ack).await;
                     return;
                 }
                 _ => {} // a 1xx provisional to the INVITE (unlikely post-CANCEL) — keep draining
@@ -2817,6 +2821,76 @@ mod tests {
             "To: <sip:c100x@dev.example>",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn drain_after_cancel_retries_ack_over_fresh_when_the_live_socket_write_fails() {
+        // sock_write_ok = true, but the live socket's write half is CLOSED, so the ACK write fails. A racing
+        // 2xx must then be re-ACKed over a FRESH connection rather than left unacknowledged — a completed
+        // CANCEL write does not guarantee the socket is still writable when the 2xx arrives.
+        use std::collections::HashMap;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let fresh = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fresh_port = fresh.local_addr().unwrap().port();
+        let orig_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let orig_addr = orig_l.local_addr().unwrap();
+        let accept = tokio::spawn(async move { orig_l.accept().await.unwrap().0 });
+        let mut orig = TcpStream::connect(orig_addr).await.unwrap();
+        let _orig_peer = accept.await.unwrap();
+        // Shut the write half so any ACK write on `orig` fails deterministically.
+        orig.shutdown().await.unwrap();
+
+        let fresh_srv = tokio::spawn(async move {
+            let (mut s, _) = fresh.accept().await.unwrap();
+            let mut all = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(Duration::from_millis(500), s.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    _ => break,
+                }
+            }
+            all
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), fresh_port.to_string());
+        let cfg = crate::config::Config::from_map(m);
+        let mut d = Dialog {
+            aor: "c100x".to_string(),
+            domain: "dev.example".to_string(),
+            local_port: 5060,
+            call_id: "xyz".to_string(),
+            from_tag: "cf".to_string(),
+            branch: "z9hG4bKorig".to_string(),
+            cseq: 21,
+            to_tag: String::new(),
+            remote_target: String::new(),
+        };
+        // A MALFORMED racing 2xx (empty tag ⇒ the None/send_cleanup_ack arm): the live ACK write fails on the
+        // closed socket, so the ACK must fall back to a fresh connection — with NO BYE (unaddressable).
+        let racing_2xx = b"SIP/2.0 200 OK\r\n\
+              Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+              From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+              To: <sip:c100x@dev.example>;tag=\r\n\
+              Call-ID: xyz\r\n\
+              CSeq: 21 INVITE\r\n\
+              Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+              Content-Length: 0\r\n\r\n"
+            .to_vec();
+
+        // sock_write_ok = true, but the live write fails ⇒ fall back to fresh.
+        drain_after_cancel(&mut orig, &cfg, &mut d, racing_2xx, true).await;
+
+        let sent = fresh_srv.await.unwrap();
+        assert!(
+            sent.starts_with("ACK "),
+            "a malformed racing 2xx whose live-socket ACK fails must be re-ACKed over a fresh connection, got: {sent}"
+        );
+        assert!(!sent.contains("BYE"), "an unaddressable racing 2xx must NOT be BYE'd, got: {sent}");
     }
 
     #[tokio::test]
