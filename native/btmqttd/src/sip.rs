@@ -1834,46 +1834,36 @@ async fn wait_until_stopping(stopping: &AtomicBool) {
 
 /// Best-effort teardown when the INVITE never gets a timely final response. Over TCP, closing the
 /// socket does NOT cancel a pending INVITE transaction, so:
-///  1. send `CANCEL` (matched to the INVITE by branch + CSeq) — and if that write fails because the
-///     signalling socket already died (EOF/reset that ended the response wait), retry it over a FRESH
-///     loopback connection so flexisip still cancels the forwarded transaction, then
+///  1. send `CANCEL` (matched to the INVITE by branch + CSeq) — and if that write fails (the signalling
+///     socket died, OR merely stalled long enough to trip `write_all_flush`'s bounded timeout — a timeout
+///     does NOT prove the socket dead), retry it over a FRESH loopback connection so flexisip still cancels
+///     the forwarded transaction, then
 ///  2. drain framed responses for a bounded window — and if a 2xx to the INVITE *raced in* (the panel
 ///     answered right as we gave up), CANCEL can't undo it, so we MUST confirm and tear that dialog
 ///     down (`ACK` then `BYE`) or the panel keeps its camera streaming.
-async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, acc: Vec<u8>) {
-    if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_ok() {
-        // Same socket: `acc` was read from `sock`, so a trailing partial is a valid continuation.
-        drain_after_cancel(sock, cfg, d, acc, false).await;
-    } else {
-        // The original socket was dead ⇒ CANCEL over a fresh connection instead.
-        cancel_invite_over_fresh(cfg, d, acc).await;
-    }
-}
-
-/// CANCEL a pending INVITE over a FRESH loopback connection, never the caller's socket. Called by
-/// `cancel_pending_invite` when its CANCEL write to the original socket already failed (dead socket): a
-/// dropped TCP socket does not cancel the SIP transaction, so if the INVITE did make it whole we still
-/// need this CANCEL to stop a late 2xx pinning the panel.
 ///
-/// KEEP the INVITE's original `Via` (branch AND sent-by port) unchanged: both the CANCEL and the drained
-/// non-2xx (487) ACK are part of the INVITE client transaction and MUST reuse its top `Via`, or flexisip
-/// won't match them and the transaction lingers until Timer H (RFC 3261 §9.1 / §17.1.1.3). Over TCP that's
-/// also fine for the drain's racing-2xx ACK/BYE: SIP sends responses back on the connection the request
-/// arrived on (§18.2.2), so the original sent-by port doesn't misroute the 200-to-BYE. Hence we do NOT
-/// overwrite `d.local_port` here.
-async fn cancel_invite_over_fresh(cfg: &Config, d: &mut Dialog, acc: Vec<u8>) {
-    if let Ok(mut fresh) = connect_sip(cfg).await {
-        let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
-        // Carry `acc` (bytes already read before the original socket died) into the drain: if it holds a
-        // COMPLETE INVITE 2xx buffered just before the socket died, drain_after_cancel frames and tears it
-        // down (ACK+BYE) — dropping it would leave the accepted camera session up. `seed_foreign = true`:
-        // it frames the seed's COMPLETE messages first, then DISCARDS any trailing partial from the dead
-        // stream before reading the fresh socket — otherwise that partial would concatenate with the fresh
-        // socket's 200-to-CANCEL into one synthetic message and trigger a bogus ACK/BYE with mismatched
-        // dialog data.
-        drain_after_cancel(&mut fresh, cfg, d, acc, true).await;
+/// The drain ALWAYS runs on the ORIGINAL socket, in BOTH branches: over TCP the INVITE's own final
+/// response (a racing 2xx, or the 487) routes back on the connection the INVITE arrived on (§18.2.2), NOT
+/// the fresh CANCEL connection — so even when the original CANCEL write failed we must read the original
+/// socket for it (a genuinely dead socket just EOFs at once; a slow-but-live one still delivers the 2xx).
+/// `acc` was read from that original stream, so a trailing partial is a valid continuation
+/// (`seed_foreign = false`). Reads are always safe; if a racing-2xx ACK/BYE can't be written back to the
+/// slow/dead original socket, `drain_after_cancel` falls back to a fresh connection itself. The retried
+/// CANCEL keeps the INVITE's original `Via` (branch AND sent-by port) so flexisip matches it to the client
+/// transaction (RFC 3261 §9.1 / §17.1.1.3); hence we do NOT overwrite `d.local_port`.
+async fn cancel_pending_invite(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, acc: Vec<u8>) {
+    if write_all_flush(sock, build_cancel(d).as_bytes()).await.is_err() {
+        // Original CANCEL write failed (dead or merely stalled): resend over a FRESH connection so flexisip
+        // still cancels the forwarded transaction, then absorb its 200-to-CANCEL best-effort (needs no ACK).
+        if let Ok(mut fresh) = connect_sip(cfg).await {
+            let _ = write_all_flush(&mut fresh, build_cancel(d).as_bytes()).await;
+            let mut scratch = [0u8; 256];
+            let _ = tokio::time::timeout(Duration::from_millis(200), fresh.read(&mut scratch)).await;
+        }
     }
-    // else: couldn't even reconnect — nothing more we can do.
+    // Drain the ORIGINAL socket for the INVITE's own final response (see the fn doc): a racing 2xx there is
+    // ACK+BYE'd, a 487 is ACKed; a dead socket EOFs immediately.
+    drain_after_cancel(sock, cfg, d, acc).await;
 }
 
 /// Clean up a refresh INVITE whose WRITE was interrupted or errored. The original socket may hold a
@@ -1894,32 +1884,20 @@ async fn cancel_partial_write_invite(sock: &mut TcpStream, cfg: &Config, d: &mut
         let mut scratch = [0u8; 256];
         let _ = tokio::time::timeout(Duration::from_millis(200), fresh.read(&mut scratch)).await;
     }
-    // `acc` is empty here (nothing was read from `sock` during the write phase) and the seed is native to
-    // `sock`, so `seed_foreign = false`.
-    drain_after_cancel(sock, cfg, d, Vec::new(), false).await;
+    // `acc` is empty here (nothing was read from `sock` during the write phase); the drain reads the
+    // ORIGINAL socket for the INVITE's final response.
+    drain_after_cancel(sock, cfg, d, Vec::new()).await;
 }
 
 /// Drain framed responses after a CANCEL for `CANCEL_DRAIN`, ACK+BYE-ing a racing INVITE 2xx.
 ///
-/// `seed_foreign` distinguishes where `acc`'s seed bytes came from relative to `sock`:
-/// - `false` (same-socket path): `acc` was read from `sock` itself, so a trailing partial is the
-///   valid start of the NEXT message on that stream and must be kept and completed by later reads.
-/// - `true` (reconnect path): `acc` was read from a now-dead ORIGINAL socket while `sock` is a
-///   fresh connection. After framing the seed's COMPLETE messages, any trailing partial belongs to
-///   the dead stream and must be DISCARDED — concatenating it with `sock`'s bytes (e.g. the fresh
-///   socket's `200`-to-CANCEL) would frame a synthetic message whose status line and headers come
-///   from two different streams, causing a bogus ACK/BYE with mismatched dialog data.
-async fn drain_after_cancel(
-    sock: &mut TcpStream,
-    cfg: &Config,
-    d: &mut Dialog,
-    mut acc: Vec<u8>,
-    seed_foreign: bool,
-) {
+/// Always drains the ORIGINAL INVITE socket (both callers pass it), and `acc` is the bytes already read
+/// from that same stream, so a trailing partial is the valid start of the NEXT message on it and is kept
+/// and completed by later reads — no cross-stream seed to discard.
+async fn drain_after_cancel(sock: &mut TcpStream, cfg: &Config, d: &mut Dialog, mut acc: Vec<u8>) {
     // `acc` is seeded with whatever `wait_final_response` had already read when the timeout fired —
     // possibly a partial (or even complete) INVITE 2xx — so we can finish framing it below.
     let mut buf = [0u8; 4096];
-    let mut first_pass = true;
     let deadline = tokio::time::Instant::now() + CANCEL_DRAIN;
     loop {
         while let Some(len) = complete_message_len(&acc) {
@@ -1960,14 +1938,8 @@ async fn drain_after_cancel(
                 _ => {} // a 1xx provisional to the INVITE (unlikely post-CANCEL) — keep draining
             }
         }
-        // Seed fully framed. If it came from the dead original socket, drop any trailing partial
-        // now — before the first read from the fresh `sock` — so the two streams' bytes never merge
-        // into one synthetic message. On the same-socket path the residue is a legitimate
-        // continuation and is kept.
-        if first_pass && seed_foreign {
-            acc.clear();
-        }
-        first_pass = false;
+        // Seed fully framed; any trailing partial is a legitimate continuation of `sock`'s own stream
+        // (that is where `acc` was read from) and is kept to be completed by the next read below.
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return;
