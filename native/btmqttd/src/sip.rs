@@ -954,12 +954,13 @@ async fn process_in_dialog(
         // the panel times out the confirmed dialog and the camera stops. A write failure here proves the
         // socket is dead: discarding it would let this return Continue while the peer still has no ACK (and,
         // during successor validation, a half-closed socket then reads idle and the healthy old dialog gets
-        // retired for a dying successor). So tear down over a fresh connection and surface Failed, exactly
-        // like the in-dialog-request path below.
+        // retired for a dying successor). So tear down over a fresh connection and surface Failed — via
+        // ack_bye_reconnect (ACK then BYE), NOT a bare bye_reconnect: the retransmission proves the peer
+        // never saw our ACK, so the dialog is still UNCONFIRMED and a BYE alone would be unreliable against it.
         if is_established_invite_2xx(&msg) {
             let ack = build_ack(d, &format!("z9hG4bK{}", rand_hex(8)));
             if let Err(e) = write_all_flush(sock, ack.as_bytes()).await {
-                bye_reconnect(cfg, d).await;
+                ack_bye_reconnect(cfg, d).await;
                 return InDialog::Failed(e);
             }
             continue;
@@ -2901,6 +2902,78 @@ mod tests {
             "a malformed racing 2xx whose live-socket ACK fails must be re-ACKed over a fresh connection, got: {sent}"
         );
         assert!(!sent.contains("BYE"), "an unaddressable racing 2xx must NOT be BYE'd, got: {sent}");
+    }
+
+    #[tokio::test]
+    async fn process_in_dialog_acks_then_byes_a_retransmitted_2xx_over_fresh_on_write_failure() {
+        // A retransmitted INVITE 2xx means our earlier ACK was lost ⇒ the dialog is still UNCONFIRMED. If the
+        // re-ACK write fails (dead socket), the fresh-connection teardown must ACK THEN BYE (a bare BYE is
+        // unreliable against an unacknowledged 2xx), and process_in_dialog must return Failed.
+        use std::collections::HashMap;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::{TcpListener, TcpStream};
+
+        let fresh = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fresh_port = fresh.local_addr().unwrap().port();
+        let orig_l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let orig_addr = orig_l.local_addr().unwrap();
+        let accept = tokio::spawn(async move { orig_l.accept().await.unwrap().0 });
+        let mut orig = TcpStream::connect(orig_addr).await.unwrap();
+        let _orig_peer = accept.await.unwrap();
+        orig.shutdown().await.unwrap(); // any ACK write on `orig` now fails
+
+        let fresh_srv = tokio::spawn(async move {
+            let (mut s, _) = fresh.accept().await.unwrap();
+            let mut all = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match tokio::time::timeout(Duration::from_millis(500), s.read(&mut buf)).await {
+                    Ok(Ok(n)) if n > 0 => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+                    _ => break,
+                }
+            }
+            all
+        });
+
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        m.insert("SIP_PORT".to_string(), fresh_port.to_string());
+        let cfg = crate::config::Config::from_map(m);
+        // A CONFIRMED dialog (to_tag + remote_target set) so ack_bye_reconnect can address the ACK/BYE.
+        let d = Dialog {
+            aor: "c100x".to_string(),
+            domain: "dev.example".to_string(),
+            local_port: 5060,
+            call_id: "xyz".to_string(),
+            from_tag: "cf".to_string(),
+            branch: "z9hG4bKorig".to_string(),
+            cseq: 21,
+            to_tag: "srv200".to_string(),
+            remote_target: "sip:c100x@127.0.0.1:5599".to_string(),
+        };
+        let mut inbound = b"SIP/2.0 200 OK\r\n\
+              Via: SIP/2.0/TCP 127.0.0.1:5060;branch=z9hG4bKsrv\r\n\
+              From: <sip:btmqttd@dev.example>;tag=cf\r\n\
+              To: <sip:c100x@dev.example>;tag=srv200\r\n\
+              Call-ID: xyz\r\n\
+              CSeq: 21 INVITE\r\n\
+              Contact: <sip:c100x@127.0.0.1:5599;transport=tcp>\r\n\
+              Content-Length: 0\r\n\r\n"
+            .to_vec();
+
+        match process_in_dialog(&mut orig, &mut inbound, &cfg, &d).await {
+            InDialog::Failed(_) => {}
+            _ => panic!("a failed re-ACK of a retransmitted 2xx must surface Failed"),
+        }
+
+        let sent = fresh_srv.await.unwrap();
+        let ack_pos = sent.find("ACK ");
+        let bye_pos = sent.find("BYE ");
+        assert!(
+            ack_pos.is_some() && bye_pos.is_some(),
+            "the fresh teardown of an unconfirmed retransmitted 2xx must ACK then BYE, got: {sent}"
+        );
+        assert!(ack_pos < bye_pos, "the ACK must precede the BYE on the fresh connection, got: {sent}");
     }
 
     #[tokio::test]
