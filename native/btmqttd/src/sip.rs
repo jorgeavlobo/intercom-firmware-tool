@@ -907,6 +907,38 @@ fn apply_refresh_renewals(
     }
 }
 
+/// Drain every `ViewCmd` ALREADY queued in `view_rx` (non-blocking) and fold each into the viewing-window
+/// deadlines with the SAME rules as the main hold loop's `select!`: a `Start` re-arms the full `window` from
+/// now; a `Hold` lifts `hold_deadline` to its absolute expiry (a poke already elapsed by now is ignored, so
+/// stragglers can't revive a viewerless session); `max` keeps both monotonic. Returns `true` if a `Stop` — or
+/// a closed channel (shutdown) — was seen, meaning the caller must hang up.
+///
+/// Used right after a make-before-break adoption: the old-dialog teardown (a BYE on a possibly-dead socket,
+/// then a `bye_reconnect` fallback that can take up to ~`SIP_IO_TIMEOUT` to connect and write) can outlast
+/// `VIEWER_LINGER` while `hold.rs` keeps poking ~1 s. Those pokes sit unread in `view_rx`, so without this the
+/// next `select!` could reach an ALREADY-expired deadline WITH fresh `Hold`s still queued and — being
+/// unbiased — pick expiry and BYE the dialog we just adopted, dropping a still-connected viewer's view.
+fn drain_queued_view_cmds(
+    view_rx: &mut mpsc::Receiver<ViewCmd>,
+    window: Duration,
+    start_deadline: &mut tokio::time::Instant,
+    hold_deadline: &mut tokio::time::Instant,
+) -> bool {
+    loop {
+        match view_rx.try_recv() {
+            Ok(ViewCmd::Start) => *start_deadline = tokio::time::Instant::now() + window,
+            Ok(ViewCmd::Hold(expiry)) => {
+                if expiry > tokio::time::Instant::now() {
+                    *hold_deadline = (*hold_deadline).max(expiry);
+                }
+            }
+            Ok(ViewCmd::Stop) => return true, // user pressed "Stop Camera" ⇒ hang up
+            Err(mpsc::error::TryRecvError::Empty) => return false, // nothing more queued
+            Err(mpsc::error::TryRecvError::Disconnected) => return true, // channel closed ⇒ shutting down
+        }
+    }
+}
+
 /// What draining the in-dialog buffer decided for the hold loop.
 enum InDialog {
     /// Nothing terminal — keep holding the dialog.
@@ -1697,6 +1729,15 @@ async fn session(
                             inbound = new_inbound; // residual already drained by process_in_dialog
                             dialog_started_at = now; // the adopted dialog starts its own ~60 s clock now
                             refresh_at = now + SESSION_REFRESH_AFTER;
+                            // The teardown above can outlast VIEWER_LINGER while hold.rs keeps poking ~1 s, so
+                            // pokes queued during validate + teardown are not yet in hold_deadline. Apply them
+                            // NOW — before the next select! re-evaluates the deadline — so an auto-only view
+                            // isn't BYE'd by a stale deadline that the unbiased select! could pick over the
+                            // queued Holds. A Stop / closed channel drained here ends the session, like the
+                            // select! arms.
+                            if drain_queued_view_cmds(view_rx, window, &mut start_deadline, &mut hold_deadline) {
+                                break 'dialog;
+                            }
                         }
                         // The successor terminated (PanelEnded) or its socket died / buffer overflowed
                         // (Failed) before we committed — its BYE was ACKed / its teardown done by
@@ -3520,6 +3561,48 @@ mod tests {
             &mut h4,
         );
         assert_eq!(s4, now + Duration::from_secs(100), "a shorter anchored window must not cut an existing one");
+    }
+
+    #[tokio::test]
+    async fn drain_queued_view_cmds_applies_holds_and_reports_stop() {
+        let window = Duration::from_secs(30);
+        let base = tokio::time::Instant::now();
+
+        // Holds queued by hold.rs during a stalled teardown must lift a stale hold_deadline; an already-
+        // elapsed straggler is ignored (a viewerless session can't be revived). No Start ⇒ start untouched.
+        let (tx, mut rx) = mpsc::channel::<ViewCmd>(8);
+        tx.try_send(ViewCmd::Hold(base + Duration::from_secs(5))).unwrap();
+        tx.try_send(ViewCmd::Hold(base + Duration::from_secs(9))).unwrap();
+        tx.try_send(ViewCmd::Hold(base - Duration::from_secs(1))).unwrap(); // already elapsed ⇒ ignored
+        let mut start = base;
+        let mut hold = base; // stale after the long teardown
+        assert!(!drain_queued_view_cmds(&mut rx, window, &mut start, &mut hold));
+        assert_eq!(hold, base + Duration::from_secs(9), "hold_deadline lifted to the latest FUTURE poke");
+        assert_eq!(start, base, "no Start queued ⇒ start_deadline untouched");
+
+        // A queued Start re-arms the full window from now.
+        let (tx2, mut rx2) = mpsc::channel::<ViewCmd>(4);
+        tx2.try_send(ViewCmd::Start).unwrap();
+        let mut s2 = base;
+        let mut h2 = base;
+        let before = tokio::time::Instant::now();
+        assert!(!drain_queued_view_cmds(&mut rx2, window, &mut s2, &mut h2));
+        assert!(s2 >= before + window && s2 <= tokio::time::Instant::now() + window, "Start re-arms window from now");
+
+        // A queued Stop reports hang-up.
+        let (tx3, mut rx3) = mpsc::channel::<ViewCmd>(4);
+        tx3.try_send(ViewCmd::Hold(base + Duration::from_secs(3))).unwrap();
+        tx3.try_send(ViewCmd::Stop).unwrap();
+        let mut s3 = base;
+        let mut h3 = base;
+        assert!(drain_queued_view_cmds(&mut rx3, window, &mut s3, &mut h3), "a drained Stop must report hang-up");
+
+        // A closed channel (all senders dropped ⇒ shutdown) also reports hang-up.
+        let (tx4, mut rx4) = mpsc::channel::<ViewCmd>(1);
+        drop(tx4);
+        let mut s4 = base;
+        let mut h4 = base;
+        assert!(drain_queued_view_cmds(&mut rx4, window, &mut s4, &mut h4), "a closed channel must report hang-up");
     }
 
     #[test]
