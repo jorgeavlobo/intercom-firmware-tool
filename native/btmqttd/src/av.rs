@@ -77,7 +77,7 @@ pub(crate) const CAMERA_LIVE_SIGNAL_PATH: &str = "/var/run/btmqttd/camera-live";
 /// `READY=` path the generated wrapper writes (`Go2RtcConfig.OnDeviceCameraLiveReadyPath`).
 const LIVE_READY_PATH: &str = "/var/run/btmqttd/camera-live-ready";
 
-/// A monotonic generation stamped once per SIPHON ARM (issue #180, Codex P2), so a consumer can bind a
+/// A monotonic generation stamped once per SIPHON ARM (issue #180), so a consumer can bind a
 /// capture to the SPECIFIC camera session it started in and detect a session change mid-capture. Bumped the
 /// instant [`monitor`] arms a new siphon (a media-start after the previous session tore down) — NOT on the
 /// per-iteration cutover retries, which never re-arm — so each armed session carries a distinct value.
@@ -361,7 +361,7 @@ async fn monitor(
                         siphon = Some(s);
                         // Stamp a fresh session generation BEFORE creating the live marker below, so any
                         // consumer that observes this session's marker also observes its generation (issue
-                        // #180, Codex P2). Bumped only here — on a genuine re-arm — never on the retries.
+                        // #180). Bumped only here — on a genuine re-arm — never on the retries.
                         CAMERA_SESSION_GEN.fetch_add(1, Ordering::Relaxed);
                         live_marked = cut_over_to_live(
                             cfg,

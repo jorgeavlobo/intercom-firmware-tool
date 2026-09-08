@@ -448,13 +448,13 @@ async fn wait_for_live_marker(cfg: &Config) -> bool {
 /// teardown may belong to a DIFFERENT session (a newer ring, OR a non-ring re-arm such as a manual view),
 /// which presence alone cannot detect — a newer ring is caught by the ring runner's post-grab newest-ring
 /// re-check, and any re-arm (ring or not) is caught by [`ring_session_unchanged`] against the per-arm
-/// generation the ring capture snapshots (issue #180, Codex P2).
+/// generation the ring capture snapshots (issue #180).
 async fn live_still_marked(cfg: &Config) -> bool {
     !cfg.camera_ondevice || live_marker_present_at(crate::av::CAMERA_LIVE_SIGNAL_PATH).await
 }
 
 /// Whether the camera siphon session is STILL the one a ring capture snapshotted — i.e. no re-arm has
-/// happened since (issue #180, Codex P2). av.rs bumps [`crate::av::CAMERA_SESSION_GEN`] once per arm, so a
+/// happened since (issue #180). av.rs bumps [`crate::av::CAMERA_SESSION_GEN`] once per arm, so a
 /// changed value means the ringing session ended mid-capture and a DIFFERENT session re-armed the live
 /// marker (a manual view, possibly of another entrance panel). The marker/`live_still_marked` presence
 /// checks cannot tell one live session from another; this can. `Relaxed` is sufficient — the bump is a lone
@@ -976,7 +976,7 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
         );
         return false;
     }
-    // Bind this ring snapshot to the camera SESSION that is live right now (issue #180, Codex P2). The marker
+    // Bind this ring snapshot to the camera SESSION that is live right now (issue #180). The marker
     // and the presence re-checks below only test that SOME session is live — they cannot tell one live
     // session from another. If the ringing session ends mid-capture and a DIFFERENT session (a manual view,
     // possibly of another entrance panel) re-arms the marker before the grab, presence stays true but the
@@ -1116,7 +1116,7 @@ mod tests {
 
     #[test]
     fn ring_session_unchanged_detects_a_re_arm() {
-        // Codex P2 (#180): a ring capture binds to the camera SESSION it started in via av.rs's per-arm
+        // Issue #180 (ring-session binding): a ring capture binds to the camera SESSION it started in via av.rs's per-arm
         // generation, so a mid-capture re-arm — the ringing session ended and a DIFFERENT session (a manual
         // view, possibly of another entrance panel) re-armed the live marker — reads as a different session
         // and the snapshot is discarded rather than stored under this ring's id. Hold the counter lock: this
