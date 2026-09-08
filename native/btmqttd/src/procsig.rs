@@ -31,6 +31,15 @@
 /// because the wrapper `exec`s ffmpeg IN PLACE — replacing the `sh` PID — so its parent stays go2rtc.
 pub(crate) const GO2RTC_DAEMON_PATH: &str = "/usr/sbin/go2rtc";
 
+/// The go2rtc exec-source WRAPPER script go2rtc runs as `/bin/sh <this> <output>`
+/// (`Go2RtcConfig.OnDeviceProducerScriptPath`). During its transient `/bin/sh` phase — before it `exec`s
+/// ffmpeg IN PLACE — the process is NOT yet a matchable ffmpeg producer ([`cmdline_is_producer`] requires
+/// argv[0] to be ffmpeg, excluding `/bin/sh`), yet it has ALREADY chosen its branch and written/removed the
+/// readiness file accordingly. `capture.rs`'s pre-grab frame-source gate counts this in-flight wrapper as "a
+/// producer is present" (via [`any_producer_or_wrapper`]) so it waits for readiness rather than attaching to
+/// a filler that is about to serve (issue #180). Only ever a direct child of the go2rtc daemon.
+pub(crate) const PRODUCER_SCRIPT_PATH: &str = "/etc/btmqttd/go2rtc/camera-producer.sh";
+
 /// SIGTERM every go2rtc `exec:` ffmpeg producer currently reading one of `inputs`, so go2rtc respawns it
 /// and it re-reads its input. `inputs` is the set of `-i` paths that identify OUR producer(s): a single
 /// runtime-SDP entry for the sprop self-heal, or the runtime SDP + the filler clip for the av cutover.
@@ -171,6 +180,92 @@ pub(crate) fn scan_go2rtc_producers(
         }
     }
     Ok(found)
+}
+
+/// Whether ANY go2rtc `exec:` ffmpeg producer reading one of `inputs` OR its in-flight `/bin/sh` wrapper is
+/// currently running, WITHOUT signalling it (issue #180). Used by `capture.rs`'s PRE-grab frame-source gate:
+/// unlike [`any_producer_matches`] (ffmpeg only), this ALSO counts a wrapper still in its transient `/bin/sh`
+/// phase (before it `exec`s ffmpeg), so a filler wrapper that has not yet become a matchable ffmpeg is not
+/// misread as "no producer running" — which would let the capture attach to a filler about to serve and then
+/// accept its bytes if readiness flips right after the grab. Offloads the blocking scan to `spawn_blocking`
+/// INTERNALLY (callers just `.await`). A scan that could not run returns `true` CONSERVATIVELY (assume one
+/// MAY be running, so the gate waits for readiness rather than risk grabbing the filler).
+pub(crate) async fn any_producer_or_wrapper(inputs: &'static [&'static str]) -> bool {
+    match tokio::task::spawn_blocking(move || {
+        scan_producers_or_wrappers(
+            crate::capture::DEFAULT_FFMPEG_BIN,
+            GO2RTC_DAEMON_PATH,
+            inputs,
+            PRODUCER_SCRIPT_PATH,
+        )
+    })
+    .await
+    {
+        Ok(Ok(n)) => n > 0,
+        Ok(Err(e)) => {
+            eprintln!("btmqttd: could not scan /proc for a go2rtc producer/wrapper before a capture ({e}); assuming one may be running");
+            true
+        }
+        Err(e) => {
+            eprintln!("btmqttd: /proc producer/wrapper-scan task failed ({e}); assuming one may be running");
+            true
+        }
+    }
+}
+
+/// Scan `/proc` and COUNT the go2rtc `exec:` ffmpeg producers reading one of `inputs` PLUS any in-flight
+/// `/bin/sh` wrapper running `script_path` — each a direct child of the go2rtc daemon (issue #180). `Ok(n)` =
+/// a completed scan found `n`; `Err` = `/proc` itself could not be opened. Blocking; the wrapper-aware
+/// sibling of [`scan_go2rtc_producers`], kept separate so the SIGTERM/cutover-confirm paths (which target
+/// only the ffmpeg producer, never the transient shell) are unaffected. Any unreadable entry is skipped.
+pub(crate) fn scan_producers_or_wrappers(
+    ffmpeg_path: &str,
+    daemon_path: &str,
+    inputs: &[&str],
+    script_path: &str,
+) -> std::io::Result<usize> {
+    let mut found = 0usize;
+    for entry in std::fs::read_dir("/proc")?.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue; // not a numeric pid directory
+        };
+        if pid_is_producer_or_wrapper(pid, ffmpeg_path, daemon_path, inputs, script_path) {
+            found += 1;
+        }
+    }
+    Ok(found)
+}
+
+/// True iff `/proc/<pid>` is CURRENTLY either a go2rtc `exec:` ffmpeg producer reading one of `inputs`
+/// ([`cmdline_is_producer`]) OR its in-flight `/bin/sh` wrapper running `script_path` ([`cmdline_is_wrapper`])
+/// — AND its direct parent is the go2rtc daemon ([`parent_is`]). The cmdline is read once and tested against
+/// both shapes. Blocking; any unreadable entry ⇒ `false`.
+fn pid_is_producer_or_wrapper(
+    pid: i32,
+    ffmpeg_path: &str,
+    daemon_path: &str,
+    inputs: &[&str],
+    script_path: &str,
+) -> bool {
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    (cmdline_is_producer(&cmdline, ffmpeg_path, inputs) || cmdline_is_wrapper(&cmdline, script_path))
+        && parent_is(pid, daemon_path)
+}
+
+/// True iff a raw `/proc/<pid>/cmdline` (arguments NUL-separated) is the go2rtc exec WRAPPER still in its
+/// transient `/bin/sh` phase: some argument is EXACTLY `script_path` (go2rtc runs it as
+/// `/bin/sh <script_path> <output>`). An EXACT-argument match (not a substring) rejects a `<script_path>.bak`
+/// lookalike; once the wrapper `exec`s ffmpeg IN PLACE its argv no longer contains the script path, so this
+/// matches ONLY the pre-`exec` phase (after which [`cmdline_is_producer`] takes over). The caller pairs this
+/// with a parent-is-go2rtc check, so it need not itself re-derive the shell. Pure — no I/O — unit-tested.
+pub(crate) fn cmdline_is_wrapper(cmdline: &[u8], script_path: &str) -> bool {
+    cmdline
+        .split(|&b| b == 0)
+        .filter(|a| !a.is_empty())
+        .any(|arg| arg == script_path.as_bytes())
 }
 
 /// True iff `/proc/<pid>` is CURRENTLY a go2rtc `exec:` ffmpeg producer reading one of `inputs`: its
@@ -331,6 +426,39 @@ mod tests {
 
         // Empty cmdline (e.g. a kernel thread) never matches.
         assert!(!cmdline_is_producer(&[], ff, inputs));
+    }
+
+    /// The go2rtc exec WRAPPER script path (mirrors `av::PRODUCER_SCRIPT_PATH` / the go2rtc.yaml exec).
+    const SCRIPT: &str = "/etc/btmqttd/go2rtc/camera-producer.sh";
+
+    #[test]
+    fn cmdline_matches_the_inflight_wrapper_and_rejects_lookalikes() {
+        let ff = crate::capture::DEFAULT_FFMPEG_BIN;
+
+        // The in-flight wrapper (issue #180): go2rtc runs it as `/bin/sh <script> <output>` while it is still
+        // in its `/bin/sh` phase, before it `exec`s ffmpeg in place. The exact script path is argv[1], so this
+        // matches — letting the capture pre-grab gate count it as "a producer is present" and wait for
+        // readiness rather than attach to a filler about to serve.
+        let wrapper = [b"/bin/sh".as_ref(), SCRIPT.as_bytes(), b"rtsp://127.0.0.1:8554/doorbell"].join(&0u8);
+        assert!(cmdline_is_wrapper(&wrapper, SCRIPT));
+
+        // Once the wrapper `exec`s ffmpeg IN PLACE, its argv no longer contains the script path — it is now a
+        // matchable ffmpeg producer (covered above), NOT a wrapper.
+        let live = [ff.as_bytes(), b"-i", SDP.as_bytes(), b"-c:v", b"copy"].join(&0u8);
+        assert!(!cmdline_is_wrapper(&live, SCRIPT));
+        let filler = [ff.as_bytes(), b"-stream_loop", b"-1", b"-i", CLIP.as_bytes()].join(&0u8);
+        assert!(!cmdline_is_wrapper(&filler, SCRIPT));
+
+        // go2rtc itself (takes -config <yaml>, never the script path) must NOT match.
+        let go2rtc = [b"/usr/sbin/go2rtc".as_ref(), b"-config", b"/etc/btmqttd/go2rtc/go2rtc.yaml"].join(&0u8);
+        assert!(!cmdline_is_wrapper(&go2rtc, SCRIPT));
+
+        // An EXACT-argument match, not a substring: a `<script>.bak` lookalike must NOT match.
+        let script_bak = [b"/bin/sh".as_ref(), b"/etc/btmqttd/go2rtc/camera-producer.sh.bak"].join(&0u8);
+        assert!(!cmdline_is_wrapper(&script_bak, SCRIPT));
+
+        // Empty cmdline (e.g. a kernel thread) never matches.
+        assert!(!cmdline_is_wrapper(&[], SCRIPT));
     }
 
     // NB: the `/proc` walk (`terminate_go2rtc_producers`) has no host-/proc test of its own — an assertion

@@ -506,16 +506,19 @@ async fn live_ready_or_no_producer(cfg: &Config) -> bool {
     if live_marker_present_at(crate::av::LIVE_READY_PATH).await {
         return true;
     }
-    // Readiness absent. Only a concern if a producer is ALREADY running (a filler mid-cutover). If none is,
-    // this capture's connection starts one that reads the present marker and serves live from frame one —
-    // and waiting would deadlock (no producer ⇒ no readiness file) — so proceed and let the post-grab check
+    // Readiness absent. Only a concern if a producer is ALREADY running (a filler mid-cutover) — where
+    // "producer" INCLUDES a wrapper still in its `/bin/sh` phase that chose the filler branch but has not yet
+    // `exec`ed ffmpeg (`any_producer_present` is wrapper-aware, issue #180). If none is running, this
+    // capture's connection starts one that reads the present marker and serves live from frame one — and
+    // waiting would deadlock (no producer ⇒ no readiness file) — so proceed and let the post-grab check
     // validate it.
     if !crate::av::any_producer_present(cfg).await {
         return true;
     }
-    // A filler producer is running: wait (bounded by the short [`LIVE_READY_GRAB_WAIT`], which is folded into
-    // CAPTURE_HOLD) for the filler→live cutover to write readiness before grabbing. Poll the SAME readiness
-    // file the wrapper writes, at the same cheap cadence as the marker wait.
+    // A filler producer (or an in-flight filler wrapper) is running: wait (bounded by the short
+    // [`LIVE_READY_GRAB_WAIT`], which is folded into CAPTURE_HOLD) for the filler→live cutover to write
+    // readiness before grabbing. Poll the SAME readiness file the wrapper writes, at the same cheap cadence
+    // as the marker wait.
     let deadline = tokio::time::Instant::now() + LIVE_READY_GRAB_WAIT;
     loop {
         if live_marker_present_at(crate::av::LIVE_READY_PATH).await {

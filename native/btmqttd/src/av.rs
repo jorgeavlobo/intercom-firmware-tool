@@ -852,20 +852,24 @@ async fn any_live_producer(cfg: &Arc<Config>) -> bool {
     cfg.camera_ondevice && crate::procsig::any_producer_matches(LIVE_INPUTS).await
 }
 
-/// Whether ANY go2rtc producer — the live SDP reader OR the "Loading camera…" filler — is currently running
-/// (issue #180). `capture.rs` reads this PRE-grab to tell two states apart: "no producer yet, so this
-/// capture's own connection will start one that reads the already-set live marker and serves live from frame
-/// one" (nothing to wait for — a pre-grab readiness wait would deadlock, no producer ⇒ no wrapper ⇒ no
-/// readiness file) versus "a filler producer is ALREADY running mid-cutover", where the grab must wait for
-/// the cutover so it cannot pull a "Loading…" keyframe that a readiness flip landing just after the grab
-/// would then wrongly validate. Targets [`PRODUCER_INPUTS`] (SDP or filler) — the transient `/bin/sh`
-/// wrapper is never matched (only the exec'd ffmpeg is), which is fine: a producer momentarily in its
-/// `/bin/sh` phase is about to `exec` ffmpeg on the present marker (live). ON-DEVICE ONLY (off-device there
-/// are no producers ⇒ `false`); a `/proc` scan that could not run reads as `true`
-/// ([`crate::procsig::any_producer_matches`] is conservative), so the caller waits for readiness rather than
-/// risk grabbing the filler. Takes `&Config` (not `&Arc`) so `capture.rs`, which holds a `&Config`, can call it.
+/// Whether ANY go2rtc producer — the live SDP reader OR the "Loading camera…" filler — OR its in-flight
+/// `/bin/sh` wrapper is currently running (issue #180). `capture.rs` reads this PRE-grab to tell two states
+/// apart: "no producer yet, so this capture's own connection will start one that reads the already-set live
+/// marker and serves live from frame one" (nothing to wait for — a pre-grab readiness wait would deadlock,
+/// no producer ⇒ no wrapper ⇒ no readiness file) versus "a filler producer is ALREADY running mid-cutover",
+/// where the grab must wait for the cutover so it cannot pull a "Loading…" keyframe that a readiness flip
+/// landing just after the grab would then wrongly validate. Uses the wrapper-aware
+/// [`crate::procsig::any_producer_or_wrapper`] over [`PRODUCER_INPUTS`] (SDP or filler): unlike the
+/// ffmpeg-only cutover scan, it ALSO counts a wrapper still in its transient `/bin/sh` phase — a wrapper that
+/// read the marker absent and chose the FILLER branch but has not yet `exec`ed ffmpeg (e.g. descheduled)
+/// would otherwise read as "no producer", let the capture attach to that pending filler, and slip its bytes
+/// through. (A wrapper that chose the LIVE branch has already written the readiness file, so the caller's
+/// readiness fast-path returns before this is even reached.) ON-DEVICE ONLY (off-device there are no
+/// producers ⇒ `false`); a `/proc` scan that could not run reads as `true` (conservative), so the caller
+/// waits for readiness rather than risk grabbing the filler. Takes `&Config` (not `&Arc`) so `capture.rs`,
+/// which holds a `&Config`, can call it.
 pub(crate) async fn any_producer_present(cfg: &Config) -> bool {
-    cfg.camera_ondevice && crate::procsig::any_producer_matches(PRODUCER_INPUTS).await
+    cfg.camera_ondevice && crate::procsig::any_producer_or_wrapper(PRODUCER_INPUTS).await
 }
 
 /// Best-effort camera-live cleanup for daemon SHUTDOWN (issue #180). When btmqttd is STOPPED (`btmqttd
