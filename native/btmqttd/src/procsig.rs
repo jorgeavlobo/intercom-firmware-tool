@@ -50,9 +50,18 @@ pub(crate) async fn respawn_go2rtc_producers(
     })
     .await
     {
-        Ok(n) => n,
-        // The blocking task panicked. Log the JoinError so a "no respawn happened" report isn't confused
-        // with "no producer found"; non-fatal — the change still takes effect on the next open/boot.
+        Ok(Ok(n)) => n,
+        // The `/proc` scan itself failed to open — log it DISTINCTLY from "found no producer" so a real scan
+        // failure isn't misread as "nothing was running". Non-fatal — the change takes effect on the next
+        // open/boot.
+        Ok(Err(e)) => {
+            eprintln!(
+                "btmqttd: could not scan /proc to respawn go2rtc producers ({e}) ({reason}); the change takes effect on the next open/boot"
+            );
+            return;
+        }
+        // The blocking task panicked/was cancelled. Log the JoinError so a "no respawn happened" report
+        // isn't confused with "no producer found"; non-fatal — same next-open/boot fallback.
         Err(e) => {
             eprintln!("btmqttd: go2rtc producer-respawn task failed ({e}); relying on the next open/boot");
             return;
@@ -125,22 +134,22 @@ pub(crate) fn scan_any_producer(
     }))
 }
 
-/// Scan `/proc` and SIGTERM every go2rtc `exec:` ffmpeg producer whose `-i` input is one of `inputs`,
-/// returning how many were signalled. Each PID is VALIDATED and signalled in the SAME loop iteration —
-/// identity checked ([`pid_is_producer`]) immediately before `kill`, with no async yield between — so PID
-/// reuse between discovery and the signal can't make us terminate an unrelated process (see the module
-/// note). Blocking (`read_dir` + per-pid reads); only numeric `/proc/<pid>` entries are considered and
-/// any unreadable entry is skipped (best-effort). `reason` only shapes the per-signal log line.
+/// Scan `/proc` and SIGTERM every go2rtc `exec:` ffmpeg producer whose `-i` input is one of `inputs`:
+/// `Ok(n)` = a COMPLETED scan signalled `n` producers, `Err` = `/proc` itself could not be opened. Each PID
+/// is VALIDATED and signalled in the SAME loop iteration — identity checked ([`pid_is_producer`])
+/// immediately before `kill`, with no async yield between — so PID reuse between discovery and the signal
+/// can't make us terminate an unrelated process (see the module note). Propagating the open failure as
+/// `Err` (rather than the old `0`) lets the caller log a real scan failure distinctly from "found none".
+/// Blocking (`read_dir` + per-pid reads); only numeric `/proc/<pid>` entries are considered and any
+/// unreadable per-pid entry is skipped (best-effort). `reason` only shapes the per-signal log line.
 pub(crate) fn terminate_go2rtc_producers(
     ffmpeg_path: &str,
     daemon_path: &str,
     inputs: &[&str],
     reason: &str,
-) -> usize {
+) -> std::io::Result<usize> {
     let mut signalled = 0usize;
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return 0;
-    };
+    let entries = std::fs::read_dir("/proc")?;
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
@@ -165,7 +174,7 @@ pub(crate) fn terminate_go2rtc_producers(
             );
         }
     }
-    signalled
+    Ok(signalled)
 }
 
 /// True iff `/proc/<pid>` is CURRENTLY a go2rtc `exec:` ffmpeg producer reading one of `inputs`: its
