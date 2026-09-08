@@ -607,6 +607,17 @@ async fn cut_over_to_live(
     if !ensure_arm_ready_cleared(cfg, ready_cleared).await {
         return false;
     }
+    // Already live? Then the cutover is COMPLETE — return without respawning (issue #180). This matters on the
+    // RETRY: the arm's own respawn restarts the producer onto the live branch, but the arm's `live_ready_present`
+    // stat almost always runs before that restart finishes writing readiness, so `live_marked` stays false and
+    // the ~1s retry lands here with a healthy live producer already serving. Without this early return the
+    // retry would SIGTERM that producer again — a needless SECOND RTSP reconnect right as the cold-open cutover
+    // succeeds. Safe because the per-arm readiness clear has already LATCHED above, so a `true` here reflects a
+    // wrapper that went live AFTER this arm's clear, never a stale prior-session file. (At the ARM itself the
+    // clear just removed readiness, so this is false and the respawn below runs as normal.)
+    if live_ready_present().await {
+        return true;
+    }
     if !set_camera_live_signal(cfg).await {
         return false;
     }
