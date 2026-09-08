@@ -153,6 +153,16 @@ const MAX_CTRL_BYTES: usize = 4096;
 /// frames arrive — but the bound guarantees responsiveness regardless).
 const READ_IDLE: Duration = Duration::from_secs(15);
 
+/// Minimum gap between filler→live cutover RETRIES (issue #180). The retry runs while the siphon is armed
+/// but not yet CONFIRMED live, and each attempt does a blocking full `/proc` scan. On a live session monitor
+/// frames arrive many times a second, so retrying every frame would rescan `/proc` continuously — pure waste
+/// on the constrained panel — while the siphon is armed but UNWATCHED (no consumer ⇒ no producer, the
+/// expected steady state until a viewer connects). Throttling to once per this interval keeps the scan rare
+/// without hurting the transition: a producer that a connecting consumer starts reads the already-set marker
+/// and serves LIVE from frame one (the retry's respawn is only a fallback for a producer already mid-filler),
+/// so this only bounds how soon `live_marked` flips true, not when the live feed actually appears.
+const CUTOVER_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Reconnect backoff bounds for the monitor session (a gateway restart / boot race).
 const BACKOFF_INIT: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -290,6 +300,11 @@ async fn monitor(
     // re-attempts it (never trusting a prior session's file) while a retry after a SUCCESSFUL clear skips it
     // (never wiping a READY a wrapper wrote for this arm). Threaded into every `cut_over_to_live` call.
     let mut ready_cleared = false;
+    // `last_cutover_retry`: when the cutover last ran, so the per-frame retry below is THROTTLED to
+    // [`CUTOVER_RETRY_INTERVAL`] (issue #180) instead of rescanning `/proc` every monitor frame while the
+    // siphon is armed but unwatched. Set to "now" at each arm (the arm's own cutover counts as the latest
+    // scan), so the first retry waits one interval rather than rescanning immediately after the arm.
+    let mut last_cutover_retry = tokio::time::Instant::now();
 
     // Confirm the monitor ACK before trusting the stream. The gateway may accept the TCP
     // connection yet REFUSE the monitor with a NACK (`*#*0##`) and then stay idle — the
@@ -382,6 +397,9 @@ async fn monitor(
                             &mut ready_cleared,
                         )
                         .await;
+                        // The arm's cutover just scanned /proc — count it as the latest, so the throttled
+                        // retry below waits one interval before rescanning (issue #180).
+                        last_cutover_retry = tokio::time::Instant::now();
                         eprintln!(
                             "btmqttd: camera siphon armed -> {}:{}/{} (branch {})",
                             cfg.camera_target,
@@ -411,7 +429,14 @@ async fn monitor(
         // spam the log at the loop cadence. The shared `ready_cleared` latch (below `cut_over_to_live`) is
         // threaded in so a retry after a failed ARM-time clear re-attempts it, while a retry after a
         // successful clear skips it — never wiping a READY a wrapper wrote for this arm.
-        if siphon.is_some() && !live_marked {
+        //
+        // THROTTLED to [`CUTOVER_RETRY_INTERVAL`]: each attempt does a blocking full `/proc` scan, and a live
+        // session delivers monitor frames many times a second, so retrying every frame would rescan `/proc`
+        // continuously on the constrained panel while armed-but-unwatched. The interval keeps it rare without
+        // hurting the transition (a connecting consumer's producer reads the set marker and serves live from
+        // frame one; the retry only bounds when `live_marked` flips true — issue #180).
+        if siphon.is_some() && !live_marked && last_cutover_retry.elapsed() >= CUTOVER_RETRY_INTERVAL {
+            last_cutover_retry = tokio::time::Instant::now();
             live_marked = cut_over_to_live(
                 cfg,
                 FILLER_INPUTS,
