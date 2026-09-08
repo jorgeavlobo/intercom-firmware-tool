@@ -107,14 +107,6 @@ const LOADING_CLIP_PATH: &str = "/etc/btmqttd/go2rtc/loading.mp4";
 /// live producer), so only THIS caller carries the wider set.
 const PRODUCER_INPUTS: &[&str] = &[crate::sprop::SDP_PATH, LOADING_CLIP_PATH];
 
-/// The FILLER-ONLY producer input (issue #180): identifies a running "Loading camera…" producer by its
-/// `-i loading.mp4`, distinct from the live producer (`-i` runtime SDP). The cutover uses it two ways: the
-/// per-iteration RETRY SIGTERMs with this set alone, so a retry can only ever restart a lingering filler and
-/// NEVER churns the live feed; and [`cut_over_to_live`] then confirms the switch from the wrapper-written
-/// [`LIVE_READY_PATH`] readiness file (a POSITIVE "wrapper committed to live" signal), not by re-scanning
-/// `/proc` for a lingering filler (see there).
-const FILLER_INPUTS: &[&str] = &[LOADING_CLIP_PATH];
-
 /// The LIVE-ONLY producer input (issue #180): identifies a producer reading the runtime SDP (`-i`
 /// [`crate::sprop::SDP_PATH`]), i.e. the LIVE feed — distinct from the filler. The session-EXIT cutover uses
 /// it because that path fires on EVERY monitor drop, including cold sessions that never armed: targeting the
@@ -431,13 +423,17 @@ async fn monitor(
         frames.clear();
 
         // Retry the filler→live cutover while the siphon is armed but not yet CONFIRMED live (issue #180,
-        // Finding A). This covers two transient gaps: `arm()` succeeded but `set_camera_live_signal` failed
-        // (fan-out flowing while the viewer is on "Loading…"), and the respawn raced a filler wrapper still
-        // mid-exec so one is still looping. It respawns the FILLER ONLY ([`FILLER_INPUTS`]) so a retry can
-        // never SIGTERM the live producer, and `cut_over_to_live` confirms the switch from the wrapper's own
-        // readiness file ([`LIVE_READY_PATH`]) — the positive "wrapper committed to live" signal — before it
-        // reports live. Runs each loop pass — as frames arrive (frequently, on a live session) or on the
-        // READ_IDLE wakeup — so it recovers within seconds. On-device-gated and best-effort (off-device
+        // Finding A). This covers the transient gaps: `arm()` succeeded but `set_camera_live_signal` failed
+        // (fan-out flowing while the viewer is on "Loading…"), a filler wrapper was still mid-exec when the arm
+        // respawn ran, OR a LIVE producer SURVIVED the arm respawn (a missed/raced SIGTERM). That last case
+        // matters because the arm-time readiness clear removed the survivor's `camera-live-ready`, and since it
+        // keeps running the SAME ffmpeg it never recreates it — so `live_marked` would stay false and every
+        // idle/ring snapshot be discarded (by `live_producer_ready`) for the whole session even though live RTP
+        // is flowing. So the retry respawns [`PRODUCER_INPUTS`] (SDP AND filler), forcing a surviving live
+        // producer to restart and re-write readiness (it reads the now-present marker ⇒ live branch). It can't
+        // churn a CONFIRMED-live producer: readiness present ⇒ `live_marked` is already true ⇒ this retry does
+        // not run. `cut_over_to_live` confirms the switch from the wrapper's own readiness file
+        // ([`LIVE_READY_PATH`]) before it reports live. On-device-gated and best-effort (off-device
         // `set_camera_live_signal` is false, so this reports not-live without touching a producer or the
         // readiness file, and — the off-device target never routes here — it never spins). Passes
         // `warn_if_none: false`: this path runs precisely while the siphon is armed but UNWATCHED (no consumer
@@ -455,7 +451,7 @@ async fn monitor(
             last_cutover_retry = tokio::time::Instant::now();
             live_marked = cut_over_to_live(
                 cfg,
-                FILLER_INPUTS,
+                PRODUCER_INPUTS,
                 "retry cutting the loading filler over to the live camera feed",
                 false,
                 &mut ready_cleared,
@@ -568,8 +564,8 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
 /// reflects the truth: a wrapper that took the filler removed it ⇒ this returns false ⇒ the retry re-drives
 /// the cutover until a wrapper takes the LIVE branch and creates it. This never churns the live producer:
 /// once the wrapper is live the file exists and the retry stops; an armed-but-UNWATCHED siphon has no
-/// producer, so the file stays absent and the retry keeps cheaply re-asserting the marker (respawning only
-/// the filler, [`FILLER_INPUTS`], which is a no-op when none runs) until a viewer connects and goes live.
+/// producer, so the file stays absent and the retry keeps cheaply re-asserting the marker (respawning
+/// [`PRODUCER_INPUTS`], a no-op when none runs) until a viewer connects and goes live.
 ///
 /// STALE-FILE RACE (issue #180): av.rs never writes [`LIVE_READY_PATH`], and a filler wrapper removes it only
 /// just before its `exec`, so a READY left by a PRIOR live session — or by a filler wrapper preempted before
@@ -589,9 +585,10 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
 /// never a black wait) and returns false, so the retry re-drives the cutover next pass. On-device-only:
 /// [`set_camera_live_signal`] creates nothing and returns false off-device — there is no on-device
 /// producer/filler and the target never routes here in practice — so this returns false WITHOUT touching a
-/// producer or the readiness file. Shared by the arm branch (which respawns [`PRODUCER_INPUTS`], catching a
-/// filler OR a stale live producer) and the retry (which respawns [`FILLER_INPUTS`] only, so it can't churn
-/// the live feed) so the "marker-then-respawn-then-confirm" sequence lives in ONE place and can't drift.
+/// producer or the readiness file. Both the arm branch and the retry respawn [`PRODUCER_INPUTS`] (filler OR a
+/// stale/surviving live producer), so the "marker-then-respawn-then-confirm" sequence lives in ONE place and
+/// can't drift; churning a CONFIRMED-live producer is impossible because readiness present ⇒ `live_marked`
+/// true ⇒ the retry does not run.
 async fn cut_over_to_live(
     cfg: &Arc<Config>,
     respawn_inputs: &'static [&'static str],
@@ -1209,9 +1206,6 @@ mod tests {
         // and the filler producer (reading loading.mp4) — whichever is running when the siphon arms — so
         // its input set is exactly those two, and the paths match their single sources of truth.
         assert_eq!(PRODUCER_INPUTS, &[crate::sprop::SDP_PATH, LOADING_CLIP_PATH]);
-        // The FILLER-only set is exactly the loading clip: the retry SIGTERMs with it (so it can't churn the
-        // live SDP producer) and the completion re-scan uses it to confirm no filler remains.
-        assert_eq!(FILLER_INPUTS, &[LOADING_CLIP_PATH]);
         // The LIVE-only set is exactly the runtime SDP: the session-EXIT cutover SIGTERMs with it so a bare
         // monitor drop cuts a silent live feed to the filler without needlessly restarting a cold filler.
         assert_eq!(LIVE_INPUTS, &[crate::sprop::SDP_PATH]);
