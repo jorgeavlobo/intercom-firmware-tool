@@ -401,11 +401,15 @@ fn capture_argv(rtsp_url: &str, out_path: &str) -> Vec<String> {
     .collect()
 }
 
-/// Whether av.rs's live-camera marker exists at `path` — a pure, path-injected `stat` so the presence
-/// check is unit-testable on a temp file rather than the fixed tmpfs location. Only the file's EXISTENCE
-/// is the signal (av.rs writes it empty), so a bare existence test is the whole check.
-fn live_marker_present_at(path: &str) -> bool {
-    std::path::Path::new(path).exists()
+/// Whether av.rs's live-camera marker exists at `path` — a path-injected `stat` so the presence check is
+/// unit-testable on a temp file rather than the fixed tmpfs location. Only the file's EXISTENCE is the
+/// signal (av.rs writes it empty), so a bare existence test is the whole check. ASYNC on purpose: btmqttd
+/// runs on a single-threaded Tokio runtime and this is polled from [`wait_for_live_marker`]'s loop, so a
+/// blocking `std::path::Path::exists` would briefly stall the executor (sockets/timers) each poll; the
+/// `tokio::fs` stat offloads to the blocking pool instead. `metadata(..).is_ok()` matches `Path::exists`'s
+/// semantics exactly (any stat error — including a permission error — reads as "absent").
+async fn live_marker_present_at(path: &str) -> bool {
+    tokio::fs::metadata(path).await.is_ok()
 }
 
 /// Wait (bounded by [`LIVE_MARKER_WAIT`]) for av.rs's live-camera marker to appear, so a capture grabs the
@@ -424,7 +428,7 @@ async fn wait_for_live_marker(cfg: &Config) -> bool {
     }
     let deadline = tokio::time::Instant::now() + LIVE_MARKER_WAIT;
     loop {
-        if live_marker_present_at(crate::av::CAMERA_LIVE_SIGNAL_PATH) {
+        if live_marker_present_at(crate::av::CAMERA_LIVE_SIGNAL_PATH).await {
             return true;
         }
         if tokio::time::Instant::now() >= deadline {
@@ -1054,20 +1058,21 @@ mod tests {
         assert!(argv.windows(2).any(|w| w == ["-update", "1"]));
     }
 
-    #[test]
-    fn live_marker_present_at_detects_the_marker_file() {
+    #[tokio::test]
+    async fn live_marker_present_at_detects_the_marker_file() {
         // #180 Finding #4: a capture gates on av.rs's live-camera marker so it never grabs the "Loading
         // camera…" filler. Only the file's EXISTENCE is the signal, so the path-injected presence check is
         // false when absent and true once created. Exercised on a temp path (never the fixed tmpfs one).
+        // The check is async (tokio::fs) so it can't stall the single-threaded runtime it polls on.
         let dir = std::env::temp_dir().join(format!("btmqttd-capture-livemarker-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let _ = tokio::fs::create_dir_all(&dir).await;
         let path = dir.join("camera-live");
         let path_str = path.to_str().unwrap();
-        let _ = std::fs::remove_file(&path);
-        assert!(!live_marker_present_at(path_str), "no marker → not live");
-        std::fs::File::create(&path).unwrap();
-        assert!(live_marker_present_at(path_str), "marker present → live");
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = tokio::fs::remove_file(&path).await;
+        assert!(!live_marker_present_at(path_str).await, "no marker → not live");
+        tokio::fs::File::create(&path).await.unwrap();
+        assert!(live_marker_present_at(path_str).await, "marker present → live");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]

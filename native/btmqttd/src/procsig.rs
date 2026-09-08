@@ -65,6 +65,39 @@ pub(crate) async fn respawn_go2rtc_producers(
     }
 }
 
+/// Whether ANY go2rtc `exec:` ffmpeg producer reading one of `inputs` is CURRENTLY running — a read-only
+/// `/proc` scan with the exact same producer identification as [`terminate_go2rtc_producers`], signalling
+/// nothing (issue #180). The av cutover uses it, passing the FILLER-only input, to confirm the "Loading
+/// camera…" producer is actually gone before it declares the filler→live switch complete: the SIGTERM
+/// respawn is best-effort and could race a producer whose wrapper is still in its transient `/bin/sh` exec
+/// phase (not yet the matchable ffmpeg), so re-confirming the filler is gone — rather than trusting the
+/// signal — closes that gap. The `/proc` scan is blocking, so THIS fn offloads it to `spawn_blocking`
+/// INTERNALLY; callers just `.await` it. A scan/join failure reads as "none running" (best-effort): the
+/// caller then treats the cutover as complete, exactly as it would when the marker-driven producer is live.
+pub(crate) async fn any_producer_running(inputs: &'static [&'static str]) -> bool {
+    tokio::task::spawn_blocking(move || {
+        scan_any_producer(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, inputs)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Scan `/proc` for a go2rtc `exec:` ffmpeg producer reading one of `inputs`, returning whether one exists.
+/// Same identification as [`terminate_go2rtc_producers`] ([`pid_is_producer`]) but read-only — it signals
+/// nothing. Blocking; an unreadable `/proc` or entry is skipped (best-effort ⇒ `false`).
+pub(crate) fn scan_any_producer(ffmpeg_path: &str, daemon_path: &str, inputs: &[&str]) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<i32>().ok())
+            .is_some_and(|pid| pid_is_producer(pid, ffmpeg_path, daemon_path, inputs))
+    })
+}
+
 /// Scan `/proc` and SIGTERM every go2rtc `exec:` ffmpeg producer whose `-i` input is one of `inputs`,
 /// returning how many were signalled. Each PID is VALIDATED and signalled in the SAME loop iteration —
 /// identity checked ([`pid_is_producer`]) immediately before `kill`, with no async yield between — so PID
@@ -266,6 +299,18 @@ mod tests {
 
         // Empty cmdline (e.g. a kernel thread) never matches.
         assert!(!cmdline_is_producer(&[], ff, inputs));
+    }
+
+    #[test]
+    fn scan_any_producer_finds_nothing_without_a_matching_producer() {
+        // scan_any_producer re-uses the SAME identification as the SIGTERM path (argv[0] == ffmpeg AND
+        // `-i <input>` AND parent == go2rtc daemon), so with no such producer alive it reports false. The
+        // test env has no `/usr/sbin/ffmpeg -i /etc/btmqttd/go2rtc/loading.mp4` child of `/usr/sbin/go2rtc`,
+        // so the real `/proc` scan is deterministically false here — this pins that the read-only scan does
+        // not over-match some unrelated running process (e.g. this test binary). The positive path (a real
+        // go2rtc filler child) is exercised by the on-device cutover, like the SIGTERM path above.
+        assert!(!scan_any_producer(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, &[CLIP]));
+        assert!(!scan_any_producer(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, &[SDP, CLIP]));
     }
 
     #[test]

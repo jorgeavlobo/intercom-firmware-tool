@@ -81,6 +81,13 @@ const LOADING_CLIP_PATH: &str = "/etc/btmqttd/go2rtc/loading.mp4";
 /// live producer), so only THIS caller carries the wider set.
 const PRODUCER_INPUTS: &[&str] = &[crate::sprop::SDP_PATH, LOADING_CLIP_PATH];
 
+/// The FILLER-ONLY producer input (issue #180): identifies a running "Loading camera…" producer by its
+/// `-i loading.mp4`, distinct from the live producer (`-i` runtime SDP). The cutover uses it two ways: the
+/// per-iteration RETRY SIGTERMs with this set alone, so a retry can only ever restart a lingering filler and
+/// NEVER churns the live feed; and [`cut_over_to_live`] re-scans with it to confirm no filler remains before
+/// it declares the filler→live switch complete (see there).
+const FILLER_INPUTS: &[&str] = &[LOADING_CLIP_PATH];
+
 /// A/V daemon reply frames. These are the SAME OpenWebNet control frames as the monitor
 /// ACK/NACK, so alias the shared `crate::own` definitions rather than re-spelling the bytes —
 /// the control-frame definition then has one source of truth and cannot drift.
@@ -333,9 +340,12 @@ async fn monitor(
                         // the cutover each loop pass — so the viewer reaches the live feed within seconds
                         // instead of staying on "Loading…" until TEARDOWN (issue #180, Finding A).
                         siphon = Some(s);
-                        *live_marked =
-                            cut_over_to_live(cfg, "cut the loading filler over to the live camera feed")
-                                .await;
+                        *live_marked = cut_over_to_live(
+                            cfg,
+                            PRODUCER_INPUTS,
+                            "cut the loading filler over to the live camera feed",
+                        )
+                        .await;
                         eprintln!(
                             "btmqttd: camera siphon armed -> {}:{}/{} (branch {})",
                             cfg.camera_target,
@@ -350,15 +360,22 @@ async fn monitor(
         }
         frames.clear();
 
-        // Retry the filler→live cutover if the siphon is armed but the marker write has not yet succeeded
-        // (issue #180, Finding A). This closes the gap where `arm()` succeeded but `set_camera_live_signal`
-        // failed transiently: the fan-out is flowing while the viewer is stuck on the "Loading…" filler.
-        // Runs each loop pass — as frames arrive (frequently, on a live session) or on the READ_IDLE wakeup
-        // — so a transient tmpfs failure recovers within seconds. `cut_over_to_live` is on-device-gated and
-        // best-effort (it returns false off-device, where nothing is ever marked live, so this never spins).
+        // Retry the filler→live cutover while the siphon is armed but not yet CONFIRMED live (issue #180,
+        // Finding A). This covers two transient gaps: `arm()` succeeded but `set_camera_live_signal` failed
+        // (fan-out flowing while the viewer is on "Loading…"), and the respawn raced a filler wrapper still
+        // mid-exec so one is still looping. It respawns the FILLER ONLY ([`FILLER_INPUTS`]) so a retry can
+        // never SIGTERM the live producer, and `cut_over_to_live` re-checks that no filler remains before it
+        // reports live. Runs each loop pass — as frames arrive (frequently, on a live session) or on the
+        // READ_IDLE wakeup — so it recovers within seconds. On-device-gated and best-effort (off-device
+        // `set_camera_live_signal` is false, so this reports not-live without scanning `/proc`, and — the
+        // off-device target never routes here — it never spins).
         if siphon.is_some() && !*live_marked {
-            *live_marked =
-                cut_over_to_live(cfg, "retry cutting the loading filler over to the live camera feed").await;
+            *live_marked = cut_over_to_live(
+                cfg,
+                FILLER_INPUTS,
+                "retry cutting the loading filler over to the live camera feed",
+            )
+            .await;
         }
 
         let n = match tokio::time::timeout(READ_IDLE, sock.read(&mut buf)).await {
@@ -420,27 +437,44 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
 }
 
 /// Drive the filler→live cutover for the CURRENTLY-armed siphon (issue #180): create the camera-live
-/// marker and, ONLY if that succeeded, respawn the go2rtc producer so its wrapper re-reads the
-/// now-present marker and `exec`s the live feed. Returns whether the cutover is confirmed — the caller's
-/// `live_marked`. ORDER MATTERS: marker FIRST, then respawn — the respawned wrapper must observe the
-/// marker present, or it would `exec` the filler AGAIN while the siphon is armed and leave the viewer
-/// stuck on "Loading…" though live is available. Gating the respawn on the write is what makes a transient
-/// marker-write failure SAFE: it leaves the running filler producer untouched (a stale "loading", never a
-/// black wait) and returns false, so the monitor loop's per-iteration retry re-drives the cutover on its
-/// next pass. On-device-only: [`set_camera_live_signal`] creates nothing and returns false off-device —
-/// there is no on-device producer/filler and the target never routes here in practice — so this returns
-/// false without touching the producer (a no-op there regardless). Shared by the arm branch and the retry
-/// so the "marker-then-gated-respawn" sequence lives in ONE place and the two can't drift.
-async fn cut_over_to_live(cfg: &Arc<Config>, reason: &'static str) -> bool {
-    if set_camera_live_signal(cfg).await {
-        // The marker exists now, so a respawned wrapper reads "live". The respawn is still a no-op if no
-        // producer is running (nobody watching yet — a fresh producer then reads the marker on its first
-        // start), which is why an armed-but-unwatched siphon reports live_marked=true and needs no retry.
-        crate::procsig::respawn_go2rtc_producers(PRODUCER_INPUTS, reason).await;
-        true
-    } else {
-        false
+/// marker and, ONLY if that succeeded, respawn the go2rtc producer(s) in `respawn_inputs` so a running
+/// wrapper re-reads the now-present marker and `exec`s the live feed. Returns whether the cutover is
+/// CONFIRMED complete — the caller's `live_marked`.
+///
+/// Completion is defined as "no filler producer remains running", RE-SCANNED after the respawn — not merely
+/// "the marker was written". The SIGTERM respawn is best-effort and can miss a producer whose wrapper is
+/// momentarily still in its transient `/bin/sh` exec phase (not yet the matchable ffmpeg); returning `true`
+/// on the marker write alone would then set `live_marked`, DISABLE the monitor loop's per-iteration retry,
+/// and leave that filler looping for the rest of the session while the viewer stays on "Loading…". Gating on
+/// [`crate::procsig::any_producer_running`] over [`FILLER_INPUTS`] instead makes the retry re-fire until the
+/// filler is actually replaced by the live feed. This never churns the LIVE producer: it reads the SDP (not
+/// `loading.mp4`), so once live the scan is false and the retry stops; an armed-but-UNWATCHED siphon has no
+/// producer at all, also false (a fresh producer reads the now-present marker on its first start).
+///
+/// ORDER MATTERS: marker FIRST, then respawn — the respawned wrapper must observe the marker present, or it
+/// would `exec` the filler AGAIN while the siphon is armed. Gating everything on the marker write is what
+/// makes a transient marker-write failure SAFE: it leaves the running filler untouched (a stale "loading",
+/// never a black wait) and returns false, so the retry re-drives the cutover next pass. On-device-only:
+/// [`set_camera_live_signal`] creates nothing and returns false off-device — there is no on-device
+/// producer/filler and the target never routes here in practice — so this returns false WITHOUT scanning
+/// `/proc` or touching a producer. Shared by the arm branch (which respawns [`PRODUCER_INPUTS`], catching a
+/// filler OR a stale live producer) and the retry (which respawns [`FILLER_INPUTS`] only, so it can't churn
+/// the live feed) so the "marker-then-respawn-then-confirm" sequence lives in ONE place and can't drift.
+async fn cut_over_to_live(
+    cfg: &Arc<Config>,
+    respawn_inputs: &'static [&'static str],
+    reason: &'static str,
+) -> bool {
+    if !set_camera_live_signal(cfg).await {
+        return false;
     }
+    // The marker exists now, so a respawned wrapper reads "live". SIGTERM whichever producer(s) the caller
+    // targets so go2rtc respawns them onto the live feed.
+    crate::procsig::respawn_go2rtc_producers(respawn_inputs, reason).await;
+    // Confirm the switch actually happened: the cutover is complete only once no filler producer is left
+    // running (a live producer, or none at all, both read as "not a filler"). If one lingers — the respawn
+    // raced a wrapper mid-exec — report NOT complete so the loop retries.
+    !crate::procsig::any_producer_running(FILLER_INPUTS).await
 }
 
 /// Create the [`CAMERA_LIVE_SIGNAL_PATH`] marker (issue #180), best-effort, ON-DEVICE ONLY. Its presence
@@ -890,6 +924,9 @@ mod tests {
         // and the filler producer (reading loading.mp4) — whichever is running when the siphon arms — so
         // its input set is exactly those two, and the paths match their single sources of truth.
         assert_eq!(PRODUCER_INPUTS, &[crate::sprop::SDP_PATH, LOADING_CLIP_PATH]);
+        // The FILLER-only set is exactly the loading clip: the retry SIGTERMs with it (so it can't churn the
+        // live SDP producer) and the completion re-scan uses it to confirm no filler remains.
+        assert_eq!(FILLER_INPUTS, &[LOADING_CLIP_PATH]);
         assert_eq!(crate::sprop::SDP_PATH, "/var/run/btmqttd/doorbell.sdp");
         assert_eq!(LOADING_CLIP_PATH, "/etc/btmqttd/go2rtc/loading.mp4");
         // The signal path lives on tmpfs (cleared every boot ⇒ defaults to "not live") and must match the
@@ -947,8 +984,8 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         assert!(!cfg.camera_ondevice);
         assert!(
-            !cut_over_to_live(&cfg, "test: off-device cutover is a no-op").await,
-            "off-device: no marker, so the cutover reports not-live and the loop won't retry-spin"
+            !cut_over_to_live(&cfg, PRODUCER_INPUTS, "test: off-device cutover is a no-op").await,
+            "off-device: no marker, so the cutover reports not-live (without scanning /proc) and won't spin"
         );
     }
 
