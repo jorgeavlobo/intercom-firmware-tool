@@ -105,6 +105,20 @@ const CAPTURE_TEARDOWN_GRACE: Duration = Duration::from_secs(2);
 /// before we try to wake the panel on a fresh boot.
 pub const FIRST_RUN_DELAY: Duration = Duration::from_secs(60);
 
+/// How long a capture waits for the live-camera marker (av.rs's [`crate::av::CAMERA_LIVE_SIGNAL_PATH`],
+/// issue #180) to appear before grabbing a frame. With the #180 cold-open filler, go2rtc serves the
+/// "Loading camera…" clip until btmqttd arms the real siphon and cuts the wrapper over to the live feed —
+/// and only THEN does the marker exist. A grab before that would persist the FILLER as idle.jpg or a ring
+/// snapshot, both wrong. So a capture waits (bounded) for the marker: comfortably longer than the panel's
+/// ~3 s SIP warm-up plus the arm + wrapper respawn, yet well within the idle path's [`CAPTURE_HOLD`] and
+/// the ffmpeg [`CAPTURE_TIMEOUT`] that follow it. If it never appears within this bound the capture is
+/// SKIPPED (a missing snapshot beats a "Loading…" one) — see [`wait_for_live_marker`].
+const LIVE_MARKER_WAIT: Duration = Duration::from_secs(15);
+
+/// Poll interval while waiting for the live-camera marker to appear ([`wait_for_live_marker`]). A cheap
+/// tmpfs `stat` every quarter-second resolves the wait within a beat of the cutover without busy-looping.
+const LIVE_MARKER_POLL: Duration = Duration::from_millis(250);
+
 /// One idle capture at a time — a try-lock the persisted idle thumbnail uses. A mashed "Update idle
 /// snapshot" button (or first-run overlapping the button) just SKIPS while one is running: the earlier
 /// grab is as good as the later, and idle has no ordering requirement. Separate from the ring path
@@ -361,6 +375,39 @@ fn capture_argv(rtsp_url: &str, out_path: &str) -> Vec<String> {
     .collect()
 }
 
+/// Whether av.rs's live-camera marker exists at `path` — a pure, path-injected `stat` so the presence
+/// check is unit-testable on a temp file rather than the fixed tmpfs location. Only the file's EXISTENCE
+/// is the signal (av.rs writes it empty), so a bare existence test is the whole check.
+fn live_marker_present_at(path: &str) -> bool {
+    std::path::Path::new(path).exists()
+}
+
+/// Wait (bounded by [`LIVE_MARKER_WAIT`]) for av.rs's live-camera marker to appear, so a capture grabs the
+/// LIVE feed and never the cold-open "Loading camera…" filler (issue #180). Returns `true` once the marker
+/// is present (grab may proceed) or `false` if it never appeared within the bound (the caller SKIPS the
+/// grab rather than persist a filler frame). The marker path is av.rs's [`crate::av::CAMERA_LIVE_SIGNAL_PATH`]
+/// — the SAME file the go2rtc wrapper reads — so the reader and the writer can never drift.
+///
+/// ON-DEVICE ONLY: off-device there is no on-device producer/filler and the marker is never created, so
+/// this returns `true` immediately and leaves the off-device capture path (if any is ever wired) exactly
+/// as it was. On-device, a marker that is already present (a warm capture during a live session) returns
+/// on the first poll with no wait.
+async fn wait_for_live_marker(cfg: &Config) -> bool {
+    if !cfg.camera_ondevice {
+        return true;
+    }
+    let deadline = tokio::time::Instant::now() + LIVE_MARKER_WAIT;
+    loop {
+        if live_marker_present_at(crate::av::CAMERA_LIVE_SIGNAL_PATH) {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(LIVE_MARKER_POLL).await;
+    }
+}
+
 /// Grab one JPEG frame, returning the bytes. Assumes the caller already holds its exclusivity guard
 /// (the [`CAPTURING_IDLE`] try-lock for an idle/button grab, or the single-runner slot —
 /// [`RING_RUNNER_ACTIVE`] — for a ring grab) and (for an idle/button grab) has poked the panel up.
@@ -569,12 +616,27 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // on the linger below WITHOUT dropping the guards early. `_wake` and the `CAPTURING_IDLE` lock stay
     // held across both the capture and the linger.
     let result = 'capture: {
-        if _wake.is_some() {
-            // Give the SIP INVITE + the panel's media-start a moment before ffmpeg connects, so go2rtc's
-            // producer has RTP to serve rather than opening onto silence. ffmpeg still waits for the first
-            // keyframe within CAPTURE_TIMEOUT, so this is only a head start, not a correctness dependency.
-            tokio::time::sleep(Duration::from_secs(2)).await;
+        // Wait (bounded) for btmqttd's live-camera cutover before grabbing, so we photograph the LIVE feed
+        // and never persist the cold-open "Loading camera…" filler as the idle thumbnail (issue #180). On a
+        // successful wake the panel warms up (~3 s SIP), av.rs arms the siphon and cuts go2rtc over to the
+        // live feed, and only THEN does the marker appear — this wait also serves as the media-start head
+        // start the old blind 2 s settle gave (ffmpeg still waits for the first keyframe within
+        // CAPTURE_TIMEOUT, so it is not a correctness dependency). If the marker never appears within the
+        // bound — no wake (viewing off / channel closed, `_wake` is None), or the panel never streamed — SKIP
+        // rather than grab the filler: a missing idle update beats a "Loading…" one (first-run retries next
+        // boot; the button can be re-pressed). Off-device this returns immediately (no filler to guard).
+        if !wait_for_live_marker(cfg).await {
+            eprintln!(
+                "btmqttd: capture: idle capture skipped — camera did not go live within {}s (would have \
+                 captured the loading filler); keeping the existing idle thumbnail",
+                LIVE_MARKER_WAIT.as_secs()
+            );
+            break 'capture false;
         }
+        // Brief settle after the cutover so go2rtc's freshly-respawned LIVE producer has RTP to serve
+        // rather than ffmpeg opening onto a producer that is still re-exec'ing. ffmpeg still waits for the
+        // first keyframe within CAPTURE_TIMEOUT, so this stays a head start, not a correctness dependency.
+        tokio::time::sleep(Duration::from_secs(2)).await;
         let bytes = match grab_jpeg(cfg).await {
             Ok(b) => b,
             Err(e) => {
@@ -811,6 +873,19 @@ pub async fn run_ring_captures<F: Fn(u64, u64)>(cfg: &Config, guard: RingRunnerG
 /// `idle.jpg`. Returns whether the frame was captured AND written. Each ring is independent: it has its
 /// own immutable file, so no ring's notification can ever carry another ring's picture.
 async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
+    // The panel is already streaming (it is ringing), but on a COLD open go2rtc is still serving the
+    // "Loading camera…" filler until av.rs arms the siphon and cuts the wrapper over to the live feed. Wait
+    // (bounded) for the live-camera marker so the who-rang snapshot is the VISITOR, not the filler (issue
+    // #180); if it never goes live within the bound, SKIP rather than persist a "Loading…" ring frame — a
+    // missing snapshot beats a misleading one (the ring MQTT event itself still fired regardless).
+    if !wait_for_live_marker(cfg).await {
+        eprintln!(
+            "btmqttd: capture: ring capture skipped (event {id}) — camera did not go live within {}s \
+             (would have captured the loading filler)",
+            LIVE_MARKER_WAIT.as_secs()
+        );
+        return false;
+    }
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
         Err(e) => {
@@ -943,6 +1018,38 @@ mod tests {
         // (swscale) — which build.sh now enables. `-update 1` writes a single image file.
         assert!(argv.windows(2).any(|w| w == ["-pix_fmt", "yuvj420p"]));
         assert!(argv.windows(2).any(|w| w == ["-update", "1"]));
+    }
+
+    #[test]
+    fn live_marker_present_at_detects_the_marker_file() {
+        // #180 Finding #4: a capture gates on av.rs's live-camera marker so it never grabs the "Loading
+        // camera…" filler. Only the file's EXISTENCE is the signal, so the path-injected presence check is
+        // false when absent and true once created. Exercised on a temp path (never the fixed tmpfs one).
+        let dir = std::env::temp_dir().join(format!("btmqttd-capture-livemarker-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("camera-live");
+        let path_str = path.to_str().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(!live_marker_present_at(path_str), "no marker → not live");
+        std::fs::File::create(&path).unwrap();
+        assert!(live_marker_present_at(path_str), "marker present → live");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn wait_for_live_marker_is_a_noop_off_device() {
+        // Off-device there is no on-device producer/filler and the marker is never created, so a capture
+        // must NOT block on it: wait_for_live_marker returns true immediately, leaving the off-device path
+        // exactly as it was (#180 Finding #4 gates ON-DEVICE only). Proven by the near-zero elapsed time —
+        // a bug that waited the on-device path off-device would burn LIVE_MARKER_WAIT here.
+        use std::collections::HashMap;
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = crate::config::Config::from_map(m);
+        assert!(!cfg.camera_ondevice);
+        let start = tokio::time::Instant::now();
+        assert!(wait_for_live_marker(&cfg).await, "off-device: grab may proceed immediately");
+        assert!(start.elapsed() < LIVE_MARKER_WAIT, "off-device must not block on the marker wait");
     }
 
     #[test]

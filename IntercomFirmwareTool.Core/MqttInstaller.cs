@@ -831,7 +831,11 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// The on-device <c>go2rtc.yaml</c> for these options: a fixed <see cref="OnDeviceStreamName"/>
-        /// stream reading the loopback SDP through the vendored ffmpeg, with the RTSP credentials from
+        /// stream whose <c>exec:</c> source is the producer WRAPPER (<c>camera-producer.sh</c>, issue #180)
+        /// — NOT ffmpeg reading the loopback SDP directly. The wrapper
+        /// (<see cref="Go2RtcConfig.BuildOnDeviceProducerScript"/>) switches the "Loading camera…" filler
+        /// over to the live feed on the camera-live signal and itself invokes the vendored ffmpeg (with the
+        /// runtime-SDP <c>-i</c>); this yaml just names the wrapper and carries the RTSP credentials from
         /// <see cref="MqttOptions.CameraRtspUser"/>/<see cref="MqttOptions.CameraRtspPass"/>. Single
         /// source of truth for both the install write and the <see cref="ValidateMqtt"/> read-back.
         /// (<see cref="Validate"/> has already guaranteed the credentials are non-empty on-device.)
