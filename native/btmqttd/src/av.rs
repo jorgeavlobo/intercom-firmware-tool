@@ -191,16 +191,18 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     // per-exit clear can be bypassed, and the per-session TEARDOWN clear only fires once THIS run has armed
     // (a fresh session starts `siphon = None`). A leftover marker would make the first cold producer open
     // `exec` the LIVE SDP with no RTP behind it instead of the "Loading camera…" filler — recreating the
-    // black cold-open. Clearing it here guarantees a cold open always starts on the filler. On-device-only +
-    // best-effort (a no-op off-device, and where the marker is already absent — the usual case).
+    // black cold-open. Clearing it here guarantees a cold open always starts on the filler. Best-effort:
+    // off-device it does nothing; on-device it always runs — the marker unlink is a cheap no-op when the
+    // marker is already absent (the usual clean-boot case), but the `/proc` respawn scan below still runs.
     // ...and reset any go2rtc producer that SURVIVED this restart (issue #180, Finding B). A btmqttd
     // restart / re-exec / crash within a boot drops the old siphon but does NOT stop a go2rtc `exec:`
     // producer already running: its live-branch ffmpeg keeps reading the now-SILENT live SDP and would sit
     // there until go2rtc's ~15 s i/o-timeout finally cut it back to the filler on its own. Clearing the
     // marker and respawning it here (the respawn GATED on the clear succeeding, so a lost removal never
     // serves the stale marker's live SDP) makes the wrapper re-read the now-absent marker and cut to the
-    // "Loading camera…" filler PROMPTLY instead of a black wait. On-device-only and best-effort: a no-op on
-    // a clean boot, where no producer is running yet.
+    // "Loading camera…" filler PROMPTLY instead of a black wait. Best-effort and on-device-only (off-device
+    // does nothing); on a clean boot the `/proc` scan simply finds no producer to reset — cheap, not a
+    // literal no-op.
     clear_and_respawn_to_filler(
         &cfg,
         PRODUCER_INPUTS,
