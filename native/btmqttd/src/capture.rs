@@ -1287,9 +1287,13 @@ mod tests {
         m.insert("MQTT_HOST".to_string(), "h".to_string());
         let cfg = crate::config::Config::from_map(m);
         assert!(!cfg.camera_ondevice);
-        let start = tokio::time::Instant::now();
-        assert!(wait_for_live_marker(&cfg).await, "off-device: grab may proceed immediately");
-        assert!(start.elapsed() < LIVE_MARKER_WAIT, "off-device must not block on the marker wait");
+        // Bound it TIGHTLY (1s ≪ the 15s LIVE_MARKER_WAIT): the intent is "returns immediately", so a
+        // regression that blocked the off-device path for even a few seconds must fail here, not slip through
+        // just because it stayed under the 15s wait. The timeout returning `Ok` proves it did not block.
+        let returned = tokio::time::timeout(Duration::from_secs(1), wait_for_live_marker(&cfg))
+            .await
+            .expect("off-device: must return well within 1s, not block on the marker wait");
+        assert!(returned, "off-device: grab may proceed immediately");
     }
 
     #[tokio::test]
