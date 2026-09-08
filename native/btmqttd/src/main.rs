@@ -35,6 +35,7 @@ mod lock;
 mod mdns;
 mod own;
 mod persist;
+mod procsig;
 mod receiver;
 mod rediscovery;
 mod sender;

@@ -67,6 +67,11 @@
 # executed as `/bin/sh\r` and the init/MQTT entrypoints would fail to start on
 # the Linux rootfs. (The ARM binaries in Phase 1b live outside this directory.)
 IntercomFirmwareTool.Core/Payload/mqtt/** text eol=lf
+# EXCEPTION: the "Loading camera…" filler clip (issue #180) is a binary MP4, not a
+# script — force binary handling so the eol=lf rule above never line-ending-normalizes
+# it (which would corrupt the bytes and break the SHA-256 verification). Listed AFTER
+# the directory rule so this more-specific pattern wins.
+IntercomFirmwareTool.Core/Payload/mqtt/loading.mp4 binary
 
 # FFmpeg build recipe (issue #120) — build.sh + check-doc-versions.sh are POSIX shell scripts
 # and pins.env is sourced by shell; they MUST stay LF (a CRLF `set -eu\r` / shebang breaks under

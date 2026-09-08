@@ -445,6 +445,11 @@ namespace IntercomFirmwareTool.Core
         public const string OnDeviceStreamName = Go2RtcConfig.DefaultStreamName;    // "doorbell"
         private const string Go2RtcYamlPath = Go2RtcDir + "/go2rtc.yaml";   // holds the RTSP password → 0600
         private const string Go2RtcSdpPath = Go2RtcDir + "/" + OnDeviceStreamName + ".sdp";
+        // Cold-open filler (issue #180): the generated producer wrapper (0755) go2rtc runs as its exec:
+        // source, and the "Loading camera…" clip (0644) that wrapper loops until btmqttd arms the siphon.
+        // Both live in Go2RtcDir; the paths are the single-source-of-truth constants btmqttd also matches.
+        private const string Go2RtcProducerScriptPath = Go2RtcConfig.OnDeviceProducerScriptPath;  // camera-producer.sh → 0755
+        private const string Go2RtcLoadingClipPath = Go2RtcConfig.OnDeviceLoadingClipPath;        // loading.mp4 → 0644
         private const string Go2RtcdInitPath = "/etc/init.d/go2rtcd";       // its own SysV init script
         private const string Go2RtcBootLink = "/etc/rc5.d/S99zGo2rtc";      // boot symlink (after factory S99)
         private const string Go2RtcBootTarget = "../init.d/go2rtcd";
@@ -750,7 +755,9 @@ namespace IntercomFirmwareTool.Core
         /// Deterministic: the yaml/SDP come from <see cref="MqttOptions"/>, so <see cref="ValidateMqtt"/>
         /// re-generates and byte-compares them.
         /// </summary>
-        private static void InstallOnDeviceMediaServer(IExtFs fs, MqttOptions opts)
+        // internal (not private) so MqttLoadingClipTests can drive the on-device media-server write against
+        // an in-memory filesystem (issue #180), like the factory-firewall image tests — no SharpExt4 needed.
+        internal static void InstallOnDeviceMediaServer(IExtFs fs, MqttOptions opts)
         {
             if (!(opts.CameraEnabled && opts.CameraOnDevice)) return;
 
@@ -805,6 +812,18 @@ namespace IntercomFirmwareTool.Core
             WriteConfigFile(fs, Go2RtcYamlPath, BuildOnDeviceGo2RtcYaml(opts), 600);
             WriteConfigFile(fs, Go2RtcSdpPath, Go2RtcConfig.BuildOnDeviceSdp(opts), 644);
 
+            // Cold-open filler (issue #180). The producer WRAPPER go2rtc runs as its exec: source (0755
+            // root:root — a script, like go2rtcd; no secret) and the "Loading camera…" clip it loops
+            // (0644 root:root — no secret, a static seed on the read-only rootfs, so no runtime write is
+            // needed). The wrapper serves the filler until btmqttd arms the siphon and signals the cutover
+            // to the live feed. Both are byte-exact re-checked by ValidateMqtt (the script from these
+            // options, the clip against its embedded, SHA-verified bytes).
+            WriteConfigFile(fs, Go2RtcProducerScriptPath,
+                Go2RtcConfig.BuildOnDeviceProducerScript(PayloadBinaries.Ffmpeg.InstallPath), 755);
+            WriteBytesFile(fs, Go2RtcLoadingClipPath, LoadLoadingClip());
+            fs.SetMode(Go2RtcLoadingClipPath, ToMode(644));
+            fs.SetOwner(Go2RtcLoadingClipPath, 0, 0);
+
             // Boot symlink — the S99z prefix sorts it AFTER the factory S99<Capital> services, like the
             // btmqttd/watchdog links, so go2rtc starts once the network + apps are up.
             CreateSymLinkTolerant(fs, Go2RtcBootLink, Go2RtcBootTarget);
@@ -820,9 +839,10 @@ namespace IntercomFirmwareTool.Core
         private static string BuildOnDeviceGo2RtcYaml(MqttOptions opts) =>
             Go2RtcConfig.BuildOnDeviceYaml(
                 OnDeviceStreamName,
-                PayloadBinaries.Ffmpeg.InstallPath,
-                // The yaml's exec -i is fixed to the tmpfs runtime SDP (Go2RtcConfig.OnDeviceRuntimeSdpPath);
-                // the installer still writes the TEMPLATE to Go2RtcSdpPath (/etc/.../doorbell.sdp) below.
+                // The yaml's exec: source is the producer WRAPPER (camera-producer.sh), not ffmpeg — the
+                // wrapper (BuildOnDeviceProducerScript) carries the ffmpeg path and the runtime-SDP -i, and
+                // switches the "Loading camera…" filler over to the live feed on the camera-live signal
+                // (issue #180). The installer still writes the SDP TEMPLATE to Go2RtcSdpPath below.
                 opts.CameraRtspUser,
                 opts.CameraRtspPass!);
 
@@ -1502,6 +1522,21 @@ namespace IntercomFirmwareTool.Core
                     checks.Add(new("doorbell.sdp matches the generated on-device SDP",
                         sdp == Go2RtcConfig.BuildOnDeviceSdp(opts), ""));
 
+                    // Cold-open producer wrapper (0755 — a script, no secret) byte-for-byte equals what
+                    // these options generate, like the go2rtcd/init-script checks (issue #180).
+                    CheckFile(fs, checks, Go2RtcProducerScriptPath, 755);
+                    string producer = fs.FileExists(Go2RtcProducerScriptPath)
+                        ? ReadAllText(fs, Go2RtcProducerScriptPath) : "";
+                    checks.Add(new("camera-producer.sh matches the generated producer wrapper",
+                        producer == Go2RtcConfig.BuildOnDeviceProducerScript(PayloadBinaries.Ffmpeg.InstallPath), ""));
+
+                    // The "Loading camera…" filler clip (0644 — no secret): presence/mode/owner + a
+                    // byte-exact length + SHA-256 read-back against the embedded, verified asset — the same
+                    // integrity check the vendored binaries get (a truncated/replaced clip with the right
+                    // mode/owner would pass metadata yet break the cold-open filler at runtime).
+                    CheckFile(fs, checks, Go2RtcLoadingClipPath, 644);
+                    CheckLoadingClipBytes(fs, checks);
+
                     // Boot symlink.
                     string got = "";
                     bool ok = false;
@@ -1521,6 +1556,8 @@ namespace IntercomFirmwareTool.Core
                         ("go2rtcd init script", Go2RtcdInitPath),
                         ("go2rtc if-up.d hook", Go2RtcNetHookPath),
                         ("go2rtc config dir", Go2RtcDir),
+                        ("camera-producer.sh wrapper", Go2RtcProducerScriptPath),
+                        ("loading.mp4 filler clip", Go2RtcLoadingClipPath),
                         ("S99zGo2rtc boot link", Go2RtcBootLink),
                     })
                         checks.Add(new($"{label} absent (off-device build)",
@@ -3372,6 +3409,45 @@ namespace IntercomFirmwareTool.Core
                 .Replace("\r\n", "\n").Replace('\r', '\n');
         }
 
+        /// <summary>Embedded resource name of the "Loading camera…" filler clip (issue #180).</summary>
+        private const string LoadingClipResource = ResourcePrefix + "loading.mp4";
+
+        /// <summary>Expected byte length of the embedded <see cref="LoadingClipResource"/>.</summary>
+        private const int LoadingClipLength = 19_486;
+
+        /// <summary>Lower-case hex SHA-256 of the embedded <see cref="LoadingClipResource"/> bytes.</summary>
+        private const string LoadingClipSha256Hex =
+            "49950e62a6ea6516c8f970f512e5c655e001fc197993cf2371f7680debd402c3";
+
+        /// <summary>
+        /// Load the embedded "Loading camera…" filler clip (issue #180) as RAW bytes, verifying its
+        /// length and SHA-256 first — the same verify-on-read discipline <see cref="PayloadBinaries.Read"/>
+        /// applies to the ARM binaries, so a corrupted or swapped resource can never be written onto a
+        /// device. Unlike <see cref="LoadScript"/> this is a BINARY payload (a real <c>.mp4</c>), so it is
+        /// loaded verbatim (never LF-normalized) and content-checked by hash rather than by text read-back.
+        /// </summary>
+        private static byte[] LoadLoadingClip()
+        {
+            var asm = typeof(MqttInstaller).Assembly;
+            using Stream? stream = asm.GetManifestResourceStream(LoadingClipResource);
+            if (stream is null)
+                throw new InvalidOperationException(
+                    CoreStrings.Format("Mqtt_ResourceMissing", LoadingClipResource));
+            using var buffer = new MemoryStream();
+            stream.CopyTo(buffer);
+            byte[] bytes = buffer.ToArray();
+            if (bytes.Length != LoadingClipLength)
+                throw new InvalidOperationException(
+                    $"Embedded '{LoadingClipResource}' is {bytes.Length} bytes, expected " +
+                    $"{LoadingClipLength}. The assembly is corrupt or the wrong file was embedded.");
+            string sha = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            if (!string.Equals(sha, LoadingClipSha256Hex, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"Embedded '{LoadingClipResource}' SHA-256 {sha} does not match the expected " +
+                    $"{LoadingClipSha256Hex}. Refusing to install an unverified asset.");
+            return bytes;
+        }
+
         private static void WriteConfigFile(IExtFs fs, string path, string text, int mode)
         {
             WriteTextFile(fs, path, text);
@@ -3478,6 +3554,38 @@ namespace IntercomFirmwareTool.Core
                 ? Convert.ToHexStringLower(SHA256.HashData(buf)) : "";
             checks.Add(new($"{bin.InstallPath} SHA-256 matches embedded {bin.Name}",
                 string.Equals(sha, bin.Sha256Hex, StringComparison.Ordinal), sha));
+        }
+
+        /// <summary>
+        /// Read-back integrity check for the installed "Loading camera…" filler clip (issue #180): its
+        /// on-image bytes must match the embedded resource's recorded length and SHA-256. Catches a
+        /// partial/truncated/corrupted write that presence+mode+owner would miss — the binary-payload
+        /// analogue of <see cref="CheckBinaryBytes"/> (the clip is not an <see cref="ArmBinary"/>, so it
+        /// uses the <see cref="LoadingClipLength"/>/<see cref="LoadingClipSha256Hex"/> constants directly).
+        /// Skips silently if the file is absent (existence is already reported by <see cref="CheckFile"/>).
+        /// </summary>
+        private static void CheckLoadingClipBytes(IExtFs fs, List<Ext4Check> checks)
+        {
+            if (!fs.FileExists(Go2RtcLoadingClipPath)) return;
+            using var file = fs.OpenFile(Go2RtcLoadingClipPath, FileMode.Open, FileAccess.Read);
+            long length = file.Length;
+            bool lenOk = length == LoadingClipLength;
+            checks.Add(new($"{Go2RtcLoadingClipPath} length {LoadingClipLength} bytes",
+                lenOk, $"actual {length}"));
+            // A wrong length is already a failure; don't hash a mismatched buffer.
+            if (!lenOk) return;
+            var buf = new byte[LoadingClipLength];
+            int total = 0;
+            while (total < buf.Length)
+            {
+                int n = file.Read(buf, total, buf.Length - total);
+                if (n <= 0) break;
+                total += n;
+            }
+            string sha = total == buf.Length
+                ? Convert.ToHexStringLower(SHA256.HashData(buf)) : "";
+            checks.Add(new($"{Go2RtcLoadingClipPath} SHA-256 matches the embedded loading clip",
+                string.Equals(sha, LoadingClipSha256Hex, StringComparison.Ordinal), sha));
         }
 
         /// <summary>A hostname or an IPv4 literal — but NOT an IPv6 literal. Used for the camera

@@ -138,6 +138,20 @@
     <EmbeddedResource Include="Payload\mqtt\go2rtc-net-hook">
       <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.go2rtc-net-hook</LogicalName>
     </EmbeddedResource>
+    <!-- "Loading camera…" filler clip (issue #180): a small, self-generated H.264/MP4 the on-device
+         go2rtc producer wrapper loops on a COLD open so go2rtc's lazy exec:ffmpeg producer ALWAYS has
+         decodable frames and never i/o-times-out during the panel's ~3 s SIP warm-up — Home Assistant
+         holds the picture instantly, then btmqttd cuts over to the live feed the moment the siphon arms.
+         Written to /etc/btmqttd/go2rtc/loading.mp4 on the on-device camera path (gated in MqttInstaller),
+         verified byte-for-byte on read (length + SHA-256) via MqttInstaller.LoadLoadingClip. This is a
+         BINARY payload (a real .mp4, unlike the LF scripts in this directory) — .gitattributes forces
+         binary handling so it is never line-ending-normalized. It is a FIRST-PARTY asset (self-generated,
+         MIT/own, NOT third-party); its provenance + regenerate recipe live in Payload/mqtt/README.md.
+         Same Remove-then-EmbeddedResource + explicit LogicalName pattern as the scripts above. -->
+    <None Remove="Payload\mqtt\loading.mp4" />
+    <EmbeddedResource Include="Payload\mqtt\loading.mp4">
+      <LogicalName>IntercomFirmwareTool.Core.Payload.mqtt.loading.mp4</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>
