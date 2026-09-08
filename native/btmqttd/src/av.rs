@@ -283,6 +283,11 @@ async fn monitor(
     // cutover each pass (see below) instead of leaving it stuck until TEARDOWN. Reset to false whenever
     // `siphon` drops. Purely LOCAL: the session-exit respawn no longer keys off it (see [`session`]).
     let mut live_marked = false;
+    // `ready_cleared`: whether this arm's stale-readiness-file clear has succeeded yet (issue #180). Reset to
+    // false at each arm and LATCHED true once the clear succeeds, so a retry after a FAILED arm-time clear
+    // re-attempts it (never trusting a prior session's file) while a retry after a SUCCESSFUL clear skips it
+    // (never wiping a READY a wrapper wrote for this arm). Threaded into every `cut_over_to_live` call.
+    let mut ready_cleared = false;
 
     // Confirm the monitor ACK before trusting the stream. The gateway may accept the TCP
     // connection yet REFUSE the monitor with a NACK (`*#*0##`) and then stay idle — the
@@ -363,13 +368,16 @@ async fn monitor(
                         // consumer that observes this session's marker also observes its generation (issue
                         // #180). Bumped only here — on a genuine re-arm — never on the retries.
                         CAMERA_SESSION_GEN.fetch_add(1, Ordering::Relaxed);
+                        // New arm: re-arm the stale-readiness-file clear latch so this arm re-clears any file a
+                        // prior session left before it trusts readiness (issue #180).
+                        ready_cleared = false;
                         live_marked = cut_over_to_live(
                             cfg,
                             PRODUCER_INPUTS,
                             "cut the loading filler over to the live camera feed",
-                            true, // arm_time: clear any stale readiness file up front, and log a missing
-                                  // producer (a filler is normally running — HA is watching). See
-                                  // cut_over_to_live.
+                            true, // warn_if_none: a filler producer is normally running (HA is watching), so a
+                                  // missing one is unexpected and worth a log line.
+                            &mut ready_cleared,
                         )
                         .await;
                         eprintln!(
@@ -396,16 +404,18 @@ async fn monitor(
         // READ_IDLE wakeup — so it recovers within seconds. On-device-gated and best-effort (off-device
         // `set_camera_live_signal` is false, so this reports not-live without touching a producer or the
         // readiness file, and — the off-device target never routes here — it never spins). Passes
-        // `arm_time: false`: this path runs precisely while the siphon is armed but UNWATCHED (no consumer ⇒
-        // no producer to respawn yet), so a zero-producer respawn is the normal steady state and must not
-        // spam the log at the loop cadence; and it must NOT clear the readiness file (only the arm does, up
-        // front), or it would wipe a READY a wrapper legitimately wrote for this arm and never confirm live.
+        // `warn_if_none: false`: this path runs precisely while the siphon is armed but UNWATCHED (no consumer
+        // ⇒ no producer to respawn yet), so a zero-producer respawn is the normal steady state and must not
+        // spam the log at the loop cadence. The shared `ready_cleared` latch (below `cut_over_to_live`) is
+        // threaded in so a retry after a failed ARM-time clear re-attempts it, while a retry after a
+        // successful clear skips it — never wiping a READY a wrapper wrote for this arm.
         if siphon.is_some() && !live_marked {
             live_marked = cut_over_to_live(
                 cfg,
                 FILLER_INPUTS,
                 "retry cutting the loading filler over to the live camera feed",
                 false,
+                &mut ready_cleared,
             )
             .await;
         }
@@ -490,11 +500,13 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
 /// just before its `exec`, so a READY left by a PRIOR live session — or by a filler wrapper preempted before
 /// its own `rm` — can still be on disk when a new siphon arms, and the SIGTERM respawn can miss the transient
 /// `/bin/sh` so nothing else clears it first. Left alone, `live_ready_present` would read that stale file as
-/// THIS arm going live, set `live_marked`, stop the retry, and strand the viewer on the filler. So the ARM
-/// (only) clears the readiness file UP FRONT (`arm_time` ⇒ [`clear_live_ready_signal`]) BEFORE creating the
-/// marker: a READY can then exist only if a wrapper wrote it AFTER this arm's marker, i.e. one that committed
-/// to THIS session's live branch. The retries never clear, so a READY a wrapper legitimately wrote for this
-/// arm is never wiped; a failed arm-time clear returns false so the cutover stays unconfirmed and re-drives.
+/// THIS arm going live, set `live_marked`, stop the retry, and strand the viewer on the filler. So the cutover
+/// clears the readiness file UP FRONT — LATCHED per arm via `ready_cleared` ([`ensure_arm_ready_cleared`]) —
+/// BEFORE creating the marker, and only trusts readiness once the clear has succeeded. Because the marker is
+/// created only AFTER a successful clear, no wrapper can go live until then, so there is no genuine READY to
+/// protect while the clear is still failing: a retry after a FAILED clear safely re-attempts it (never
+/// trusting the stale file), while a retry after a SUCCESSFUL clear skips it (`ready_cleared` latched) so a
+/// READY a wrapper wrote for this arm is never wiped. The monitor resets the latch at each new arm.
 ///
 /// ORDER MATTERS: marker FIRST, then respawn — the respawned wrapper must observe the marker present, or it
 /// would `exec` the filler AGAIN while the siphon is armed. Gating everything on the marker write is what
@@ -509,24 +521,26 @@ async fn cut_over_to_live(
     cfg: &Arc<Config>,
     respawn_inputs: &'static [&'static str],
     reason: &'static str,
-    arm_time: bool,
+    warn_if_none: bool,
+    ready_cleared: &mut bool,
 ) -> bool {
-    // At the ARM (not the per-iteration retries), remove any STALE readiness file a prior session's wrapper
-    // left, BEFORE creating the live marker, so `live_ready_present` below can only ever observe a READY a
-    // wrapper wrote for THIS arm (issue #180). A failed clear leaves the cutover unconfirmed (return false) so
-    // the retry re-drives it. The retries must NOT clear — that would wipe a READY a wrapper legitimately just
-    // wrote and prevent this session from ever confirming live.
-    if arm_time && !clear_live_ready_signal(cfg).await {
+    // Clear the STALE readiness file BEFORE trusting it, LATCHED per arm (`ready_cleared`), so a wrapper's
+    // fresh READY is never wiped yet a prior session's file is never trusted (issue #180). The clear is
+    // re-attempted every cutover pass UNTIL it succeeds once for this arm; only then does the marker get
+    // created, so before it succeeds no wrapper can go live and there is no legit READY to protect. If it has
+    // not yet succeeded, the cutover is unconfirmed (return false) and the retry re-drives it — INCLUDING a
+    // retry after a failed ARM-time clear, which re-attempts the clear rather than trusting the stale file.
+    if !ensure_arm_ready_cleared(cfg, ready_cleared).await {
         return false;
     }
     if !set_camera_live_signal(cfg).await {
         return false;
     }
     // The marker exists now, so a respawned wrapper reads "live". SIGTERM whichever producer(s) the caller
-    // targets so go2rtc respawns them onto the live feed. `arm_time` doubles as the "warn if no producer"
-    // flag forwarded here: the arm-time cutover expects a producer (a missing one is worth a log line), while
-    // the RETRY runs in the armed-but-unwatched steady state (no producer yet) and stays quiet.
-    crate::procsig::respawn_go2rtc_producers(respawn_inputs, reason, arm_time).await;
+    // targets so go2rtc respawns them onto the live feed. `warn_if_none` is forwarded so the RETRY caller
+    // stays quiet in the armed-but-unwatched steady state (no producer yet) while the arm-time caller still
+    // logs a genuinely-missing producer.
+    crate::procsig::respawn_go2rtc_producers(respawn_inputs, reason, warn_if_none).await;
     // Confirm the switch from the wrapper's own readiness file: complete only once a wrapper has committed
     // to the LIVE branch (created [`LIVE_READY_PATH`]). A wrapper still mid-exec into the filler has already
     // removed it, so this reports NOT complete and the loop retries — closing the `/bin/sh`-exec race.
@@ -622,39 +636,45 @@ async fn clear_camera_live_signal(cfg: &Arc<Config>) -> bool {
     false
 }
 
-/// Remove the wrapper-written [`LIVE_READY_PATH`] readiness file at the START of an arm's cutover, BEFORE
-/// [`CAMERA_LIVE_SIGNAL_PATH`] is (re)created (issue #180), ON-DEVICE ONLY. av.rs never writes this file —
-/// the producer wrapper does — and a filler wrapper removes it only just before it `exec`s, so a READY left
-/// by a PRIOR live session, or by a filler wrapper preempted before its own `rm`, can still be on disk when a
-/// new siphon arms. Clearing it here means [`live_ready_present`] can only observe a READY a wrapper wrote
-/// AFTER this arm created the marker — i.e. one that committed to THIS session's live branch — so a stale
-/// file cannot falsely confirm the cutover and strand the viewer on the filler. RETURNS whether it is
-/// confirmed ABSENT (`true` when removed, already gone, or off-device); a transient failure is retried like
-/// [`clear_camera_live_signal`], and a persistent one returns `false` so the ARM reports the cutover
-/// unconfirmed and the per-iteration retry re-drives it. Only the ARM calls this; the retries must NOT, or
-/// they would wipe a READY a wrapper legitimately wrote for this arm. Reuses the path-injected
-/// [`clear_signal_at`] (an already-absent file is `Ok` ⇒ `true`).
-async fn clear_live_ready_signal(cfg: &Arc<Config>) -> bool {
-    if !cfg.camera_ondevice {
-        return true; // off-device: the wrapper never writes it, so it is trivially "absent"
+/// Latch the removal of any STALE [`LIVE_READY_PATH`] readiness file for the CURRENT arm (issue #180). av.rs
+/// never writes this file — the producer wrapper does — and a filler wrapper removes it only just before it
+/// `exec`s, so a READY left by a PRIOR live session, or by a filler wrapper preempted before its own `rm`,
+/// can still be on disk when a new siphon arms. [`cut_over_to_live`] must not trust [`live_ready_present`]
+/// until this stale file is gone, or a prior file would falsely confirm the cutover and strand the viewer on
+/// the filler.
+///
+/// `cleared` LATCHES per arm (the monitor resets it to `false` on each new arm): the removal is re-attempted
+/// every cutover pass UNTIL it succeeds once, then skipped. This is what makes a FAILED arm-time clear safe —
+/// the next retry re-attempts it instead of trusting the stale file — while never wiping a READY a wrapper
+/// legitimately wrote for this arm: the cutover creates [`CAMERA_LIVE_SIGNAL_PATH`] only AFTER this returns
+/// `true`, so before the clear succeeds no wrapper can have taken the live branch, and there is no genuine
+/// READY to protect; once it succeeds (`cleared` set), later passes skip the removal. RETURNS whether the file
+/// is confirmed absent for this arm. ON-DEVICE ONLY — off-device the wrapper never writes it, so it is
+/// trivially cleared.
+async fn ensure_arm_ready_cleared(cfg: &Arc<Config>, cleared: &mut bool) -> bool {
+    ensure_ready_cleared_at(cfg.camera_ondevice, LIVE_READY_PATH, cleared).await
+}
+
+/// Gate/path-injected core of [`ensure_arm_ready_cleared`], unit-tested against temp paths. Short-circuits
+/// `true` once `cleared` is set (never re-clearing). Otherwise, off-device (`!ondevice`) it latches `true`
+/// without touching disk; on-device it removes `path` via the path-injected [`clear_signal_at`] (an
+/// already-absent file is `Ok`) and latches `true` only on success — a removal error leaves `cleared` false
+/// and returns false, so the caller's retry re-attempts. Single attempt per call: the monitor loop provides
+/// the re-attempts, so a transient blip is re-driven next pass rather than spun on here.
+async fn ensure_ready_cleared_at(ondevice: bool, path: &str, cleared: &mut bool) -> bool {
+    if *cleared {
+        return true;
     }
-    for attempt in 1..=MARKER_CLEAR_ATTEMPTS {
-        match clear_signal_at(LIVE_READY_PATH).await {
-            Ok(()) => return true,
-            Err(e) => {
-                eprintln!(
-                    "btmqttd: camera: could not remove the stale readiness file {LIVE_READY_PATH} (attempt {attempt}/{MARKER_CLEAR_ATTEMPTS}): {e}"
-                );
-                if attempt < MARKER_CLEAR_ATTEMPTS {
-                    tokio::time::sleep(MARKER_CLEAR_RETRY).await;
-                }
-            }
-        }
+    if !ondevice {
+        *cleared = true;
+    } else if let Err(e) = clear_signal_at(path).await {
+        eprintln!(
+            "btmqttd: camera: could not remove the stale readiness file {path} ({e}); treating this cutover as unconfirmed so the retry re-attempts the clear"
+        );
+    } else {
+        *cleared = true;
     }
-    eprintln!(
-        "btmqttd: camera: the stale readiness file {LIVE_READY_PATH} could not be cleared; treating this cutover as unconfirmed so the retry re-drives it"
-    );
-    false
+    *cleared
 }
 
 /// Clear the marker and — ONLY if the clear is CONFIRMED (marker now absent) — respawn the go2rtc producer
@@ -1169,17 +1189,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_live_ready_signal_is_a_noop_off_device() {
-        // Stale-READY race (#180): the ARM clears LIVE_READY_PATH up front so a prior session's readiness file
-        // cannot falsely confirm this arm's cutover. Off-device the wrapper never writes that file, so the
-        // clear is trivially "absent" → true and the arm's `cut_over_to_live` is not gated out by it. (The
-        // on-device removal writes the FIXED tmpfs path, covered by the clear_signal_at temp-file test.)
-        use std::collections::HashMap;
-        let mut m = HashMap::new();
-        m.insert("MQTT_HOST".to_string(), "h".to_string());
-        let cfg = Arc::new(crate::config::Config::from_map(m));
-        assert!(!cfg.camera_ondevice);
-        assert!(clear_live_ready_signal(&cfg).await, "off-device: readiness file trivially absent → true");
+    async fn ensure_ready_cleared_at_latches_and_re_attempts_a_failed_clear() {
+        // Stale-READY race (#180): the arm clears any stale readiness file before the cutover trusts it,
+        // LATCHED per arm. A FAILED clear must leave the latch false so the retry re-attempts (never trusting
+        // a prior session's file); a SUCCESSFUL clear sets the latch so later retries skip it (never wiping a
+        // wrapper's fresh READY); once latched it short-circuits without re-clearing. Simulate a failing
+        // removal with a DIRECTORY path (`remove_file` errors) and a succeeding one with an absent file
+        // (NotFound → Ok). Exercised on temp paths so it never touches the fixed tmpfs location.
+        let dir = std::env::temp_dir().join(format!("btmqttd-ready-latch-{}", std::process::id()));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let failing = dir.to_string_lossy().into_owned(); // remove_file on a dir → Err
+        let absent = dir.join("camera-live-ready").to_string_lossy().into_owned();
+
+        // Off-device: latches true without touching disk.
+        let mut cleared = false;
+        assert!(ensure_ready_cleared_at(false, &failing, &mut cleared).await);
+        assert!(cleared, "off-device: trivially cleared");
+
+        // On-device, a FAILED clear (removing a directory) must NOT latch — the retry re-attempts.
+        let mut cleared = false;
+        assert!(!ensure_ready_cleared_at(true, &failing, &mut cleared).await, "failed clear ⇒ not cleared");
+        assert!(!cleared, "a failed clear must not latch (readiness stays untrusted, retry re-attempts)");
+
+        // The retry: a now-succeeding clear (absent file → Ok) latches the flag true.
+        assert!(ensure_ready_cleared_at(true, &absent, &mut cleared).await, "successful clear ⇒ cleared");
+        assert!(cleared, "a successful clear latches");
+
+        // Latched: a later call short-circuits true even against the failing path — no re-clear.
+        assert!(
+            ensure_ready_cleared_at(true, &failing, &mut cleared).await,
+            "latched ⇒ short-circuit true without re-clearing"
+        );
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
@@ -1195,8 +1237,9 @@ mod tests {
         m.insert("MQTT_HOST".to_string(), "h".to_string());
         let cfg = Arc::new(crate::config::Config::from_map(m));
         assert!(!cfg.camera_ondevice);
+        let mut ready_cleared = false;
         assert!(
-            !cut_over_to_live(&cfg, PRODUCER_INPUTS, "test: off-device cutover is a no-op", true).await,
+            !cut_over_to_live(&cfg, PRODUCER_INPUTS, "test: off-device cutover is a no-op", true, &mut ready_cleared).await,
             "off-device: no marker, so the cutover reports not-live (without touching a producer or the readiness file) and won't spin"
         );
     }
