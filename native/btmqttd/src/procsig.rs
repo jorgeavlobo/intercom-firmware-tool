@@ -39,9 +39,18 @@ pub(crate) const GO2RTC_DAEMON_PATH: &str = "/usr/sbin/go2rtc";
 /// The `/proc` scan is blocking, so THIS fn offloads it to `spawn_blocking` INTERNALLY — callers just
 /// `.await` it (do NOT wrap it again); the scan-validate-SIGTERM stays one synchronous pass in the
 /// offloaded [`terminate_go2rtc_producers`] (no async yield between identifying a PID and signalling it).
+///
+/// `warn_if_none` gates the "no running producer to respawn" line for the `signalled == 0` case: the
+/// lifecycle callers (arm-time cutover, teardown/startup/shutdown, sprop self-heal) expect a producer to be
+/// running and pass `true` so a missing one is logged, but the A/V monitor's per-iteration cutover RETRY
+/// runs precisely while the siphon is armed but UNWATCHED (no consumer ⇒ no producer yet), where zero is the
+/// normal steady state, and passes `false` so it does not spam the log at the loop cadence. A genuine scan
+/// FAILURE (the `/proc` open or the blocking task failing) is always logged regardless — it is never the
+/// expected steady state.
 pub(crate) async fn respawn_go2rtc_producers(
     inputs: &'static [&'static str],
     reason: &'static str,
+    warn_if_none: bool,
 ) {
     // Do the whole scan-validate-signal in ONE blocking pass (no async yield between identifying a
     // producer and SIGTERMing it), so a PID can't be recycled out from under us across an await.
@@ -67,7 +76,7 @@ pub(crate) async fn respawn_go2rtc_producers(
             return;
         }
     };
-    if signalled == 0 {
+    if signalled == 0 && warn_if_none {
         eprintln!(
             "btmqttd: no running go2rtc exec producer to respawn ({reason}); the change takes effect on its next start"
         );

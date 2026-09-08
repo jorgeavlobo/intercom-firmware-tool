@@ -96,8 +96,9 @@ const PRODUCER_INPUTS: &[&str] = &[crate::sprop::SDP_PATH, LOADING_CLIP_PATH];
 /// The FILLER-ONLY producer input (issue #180): identifies a running "Loading camera…" producer by its
 /// `-i loading.mp4`, distinct from the live producer (`-i` runtime SDP). The cutover uses it two ways: the
 /// per-iteration RETRY SIGTERMs with this set alone, so a retry can only ever restart a lingering filler and
-/// NEVER churns the live feed; and [`cut_over_to_live`] re-scans with it to confirm no filler remains before
-/// it declares the filler→live switch complete (see there).
+/// NEVER churns the live feed; and [`cut_over_to_live`] then confirms the switch from the wrapper-written
+/// [`LIVE_READY_PATH`] readiness file (a POSITIVE "wrapper committed to live" signal), not by re-scanning
+/// `/proc` for a lingering filler (see there).
 const FILLER_INPUTS: &[&str] = &[LOADING_CLIP_PATH];
 
 /// The LIVE-ONLY producer input (issue #180): identifies a producer reading the runtime SDP (`-i`
@@ -350,6 +351,8 @@ async fn monitor(
                             cfg,
                             PRODUCER_INPUTS,
                             "cut the loading filler over to the live camera feed",
+                            true, // arm time: a filler producer is normally running (HA is watching) — a
+                                  // missing one is unexpected and worth a log line.
                         )
                         .await;
                         eprintln!(
@@ -370,16 +373,21 @@ async fn monitor(
         // Finding A). This covers two transient gaps: `arm()` succeeded but `set_camera_live_signal` failed
         // (fan-out flowing while the viewer is on "Loading…"), and the respawn raced a filler wrapper still
         // mid-exec so one is still looping. It respawns the FILLER ONLY ([`FILLER_INPUTS`]) so a retry can
-        // never SIGTERM the live producer, and `cut_over_to_live` re-checks that no filler remains before it
+        // never SIGTERM the live producer, and `cut_over_to_live` confirms the switch from the wrapper's own
+        // readiness file ([`LIVE_READY_PATH`]) — the positive "wrapper committed to live" signal — before it
         // reports live. Runs each loop pass — as frames arrive (frequently, on a live session) or on the
         // READ_IDLE wakeup — so it recovers within seconds. On-device-gated and best-effort (off-device
-        // `set_camera_live_signal` is false, so this reports not-live without scanning `/proc`, and — the
-        // off-device target never routes here — it never spins).
+        // `set_camera_live_signal` is false, so this reports not-live without touching a producer or the
+        // readiness file, and — the off-device target never routes here — it never spins). Passes
+        // `warn_if_none: false`: this path runs precisely while the siphon is armed but UNWATCHED (no
+        // consumer ⇒ no producer to respawn yet), so a zero-producer respawn is the normal steady state here
+        // and must not spam the log at the loop cadence.
         if siphon.is_some() && !live_marked {
             live_marked = cut_over_to_live(
                 cfg,
                 FILLER_INPUTS,
                 "retry cutting the loading filler over to the live camera feed",
+                false,
             )
             .await;
         }
@@ -473,13 +481,16 @@ async fn cut_over_to_live(
     cfg: &Arc<Config>,
     respawn_inputs: &'static [&'static str],
     reason: &'static str,
+    warn_if_none: bool,
 ) -> bool {
     if !set_camera_live_signal(cfg).await {
         return false;
     }
     // The marker exists now, so a respawned wrapper reads "live". SIGTERM whichever producer(s) the caller
-    // targets so go2rtc respawns them onto the live feed.
-    crate::procsig::respawn_go2rtc_producers(respawn_inputs, reason).await;
+    // targets so go2rtc respawns them onto the live feed. `warn_if_none` is forwarded so the RETRY caller
+    // stays quiet in the armed-but-unwatched steady state (no producer yet) while the arm-time caller still
+    // logs a genuinely-missing producer.
+    crate::procsig::respawn_go2rtc_producers(respawn_inputs, reason, warn_if_none).await;
     // Confirm the switch from the wrapper's own readiness file: complete only once a wrapper has committed
     // to the LIVE branch (created [`LIVE_READY_PATH`]). A wrapper still mid-exec into the filler has already
     // removed it, so this reports NOT complete and the loop retries — closing the `/bin/sh`-exec race.
@@ -596,7 +607,9 @@ async fn clear_and_respawn_to_filler(
         return false;
     }
     if cfg.camera_ondevice {
-        crate::procsig::respawn_go2rtc_producers(respawn_inputs, reason).await;
+        // Lifecycle reset (teardown / session-exit / startup / shutdown): a producer is normally attached, so
+        // log a missing one (`warn_if_none: true`). This is not the high-cadence retry path.
+        crate::procsig::respawn_go2rtc_producers(respawn_inputs, reason, true).await;
     }
     true
 }
@@ -1098,8 +1111,8 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         assert!(!cfg.camera_ondevice);
         assert!(
-            !cut_over_to_live(&cfg, PRODUCER_INPUTS, "test: off-device cutover is a no-op").await,
-            "off-device: no marker, so the cutover reports not-live (without scanning /proc) and won't spin"
+            !cut_over_to_live(&cfg, PRODUCER_INPUTS, "test: off-device cutover is a no-op", true).await,
+            "off-device: no marker, so the cutover reports not-live (without touching a producer or the readiness file) and won't spin"
         );
     }
 

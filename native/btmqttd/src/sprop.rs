@@ -517,6 +517,9 @@ async fn respawn_go2rtc_producer() {
     crate::procsig::respawn_go2rtc_producers(
         RESPAWN_INPUTS,
         "re-read the patched SDP with the learned parameter sets",
+        // The learn only ever fires on a live view, so the live producer is running when this fires — a
+        // missing one is unexpected and worth logging (not the A/V monitor's high-cadence retry path).
+        true,
     )
     .await;
 }
