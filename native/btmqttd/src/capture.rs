@@ -698,6 +698,16 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
                 break 'capture false;
             }
         };
+        // Re-confirm live after the grab too (same window as the ring path, issue #180): a teardown during
+        // the up-to-CAPTURE_TIMEOUT grab could yield a filler frame. The Hold normally keeps this path live,
+        // so this is defense-in-depth; discard rather than persist a "Loading camera…" frame as idle.jpg.
+        if !live_still_marked(cfg).await {
+            eprintln!(
+                "btmqttd: capture: idle capture discarded — camera went not-live during the grab; keeping \
+                 the existing idle thumbnail rather than a loading-filler frame"
+            );
+            break 'capture false;
+        }
         if ring_recent() {
             // A ring became recent/active while we were waking the panel or grabbing — discard the (visitor)
             // frame. (The commit gate below re-checks once more, right before the atomic rename.)
@@ -966,6 +976,18 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
             return false;
         }
     };
+    // Re-confirm live AFTER the grab too (issue #180): grab_jpeg can run up to CAPTURE_TIMEOUT, and if the
+    // ring session tears down during it, av.rs clears the marker and respawns the filler — the frame we just
+    // grabbed may be the "Loading camera…" filler. Discard rather than persist it as the who-rang snapshot.
+    // (A newer ring re-arming during the grab is handled by the runner's post-grab newest-ring re-check;
+    // this guards the went-not-live case.)
+    if !live_still_marked(cfg).await {
+        eprintln!(
+            "btmqttd: capture: ring snapshot discarded (event {id}) — camera went not-live during the grab \
+             (session ended); not persisting a loading-filler frame"
+        );
+        return false;
+    }
     // Write this event's own immutable file, then prune aged-out ring files. Blocking std::fs — offload it.
     let stored = tokio::task::spawn_blocking(move || store_ring_event(id, &bytes)).await.unwrap_or(false);
     if stored {

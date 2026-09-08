@@ -530,6 +530,28 @@ async fn clear_camera_live_signal(cfg: &Arc<Config>) {
     }
 }
 
+/// Best-effort camera-live cleanup for daemon SHUTDOWN (issue #180). When btmqttd is STOPPED (`btmqttd
+/// stop`, or a re-exec) the A/V task is ABORTED (`main`'s `stop()` calls `JoinHandle::abort`), so neither
+/// [`session`]'s per-exit clear nor [`run`]'s startup clear runs on the way down and the `camera-live`
+/// marker would survive on tmpfs. go2rtc is separately supervised, so on a plain stop it keeps running and
+/// a new producer would read the stale marker and `exec` the now-SILENT live SDP (the siphon socket is
+/// gone) instead of the "Loading camera…" filler — a black wait until btmqttd starts again. `main` calls
+/// this from the shutdown path (AFTER the task is aborted, so it can't re-mark) to clear the marker AND
+/// respawn any running producer to the filler — mirroring the TEARDOWN/monitor-drop branches, since
+/// clearing alone would leave an attached viewer on the silent SDP until go2rtc's i/o-timeout. Best-effort
+/// and on-device-only (a no-op off-device, on a clean marker, and where no producer is attached or go2rtc
+/// is going down too).
+pub(crate) async fn shutdown_cleanup(cfg: &Arc<Config>) {
+    clear_camera_live_signal(cfg).await;
+    if cfg.camera_ondevice {
+        crate::procsig::respawn_go2rtc_producers(
+            PRODUCER_INPUTS,
+            "cut the live feed back to the loading filler as btmqttd shuts down",
+        )
+        .await;
+    }
+}
+
 /// [`clear_camera_live_signal`] with the target path injected (unit-tested on a temp file). An
 /// ALREADY-ABSENT file is SUCCESS — the common case, since most sessions never arm and this also runs as
 /// the per-session backstop in [`session`], so a missing marker must not surface as an error to log.

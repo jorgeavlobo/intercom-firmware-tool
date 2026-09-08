@@ -72,14 +72,28 @@ pub(crate) async fn respawn_go2rtc_producers(
 /// respawn is best-effort and could race a producer whose wrapper is still in its transient `/bin/sh` exec
 /// phase (not yet the matchable ffmpeg), so re-confirming the filler is gone — rather than trusting the
 /// signal — closes that gap. The `/proc` scan is blocking, so THIS fn offloads it to `spawn_blocking`
-/// INTERNALLY; callers just `.await` it. A scan/join failure reads as "none running" (best-effort): the
-/// caller then treats the cutover as complete, exactly as it would when the marker-driven producer is live.
+/// INTERNALLY; callers just `.await` it.
+///
+/// A scan-task JoinError (panic/cancellation) does NOT map to `false`: that would be indistinguishable
+/// from "confirmed no producer", which in the av cutover would wrongly mark the switch complete and DISABLE
+/// the retry, stranding the viewer on the filler. It returns the CONSERVATIVE `true` instead — "a producer
+/// MAY still be running" — so the cutover treats the switch as not-yet-complete and RETRIES, and logs the
+/// failure so a "still not live" isn't mistaken for "none found". (A `scan_any_producer` that merely can't
+/// read `/proc` still returns `false` — that is a real, completed scan that found nothing.)
 pub(crate) async fn any_producer_running(inputs: &'static [&'static str]) -> bool {
-    tokio::task::spawn_blocking(move || {
+    match tokio::task::spawn_blocking(move || {
         scan_any_producer(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, inputs)
     })
     .await
-    .unwrap_or(false)
+    {
+        Ok(found) => found,
+        Err(e) => {
+            eprintln!(
+                "btmqttd: go2rtc producer scan task failed ({e}); assuming a producer may still be running"
+            );
+            true
+        }
+    }
 }
 
 /// Scan `/proc` for a go2rtc `exec:` ffmpeg producer reading one of `inputs`, returning whether one exists.

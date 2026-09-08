@@ -1183,6 +1183,11 @@ async fn run() -> Result<bool, String> {
     if let Some(h) = av_task {
         av_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
+        // Aborting the A/V task skips `session()`'s per-exit clear, so clear the `camera-live` marker here
+        // (and cut any still-supervised go2rtc producer to the "Loading camera…" filler) AFTER the task is
+        // gone — otherwise a plain `btmqttd stop` would leave the stale marker and a new producer would open
+        // the now-silent live SDP instead of the filler (issue #180). Best-effort + on-device-only.
+        av::shutdown_cleanup(&cfg).await;
     }
     // Viewer-activity auto-hold (hold.rs): stop it FIRST. It holds a `view_tx` clone, so it must be gone
     // before the SIP block below drops the LAST sender to close `view_rx` — otherwise a surviving clone
