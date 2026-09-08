@@ -645,6 +645,14 @@ async fn cut_over_to_live(
     warn_if_none: bool,
     ready_cleared: &mut bool,
 ) -> bool {
+    // Off-device there is no producer/filler/readiness file and the monitor never routes here in practice, so
+    // short-circuit to "not live" BEFORE touching anything (issue #180). This keeps the readiness-first check
+    // and `set_camera_live_signal` strictly on-device — `live_ready_present` is never stat'd off-device — so
+    // the "on-device-only in practice" notes below (and on `live_ready_present`) stay literally true; the
+    // off-device caller reaches the same `false` it would have anyway, just without the readiness stat.
+    if !cfg.camera_ondevice {
+        return false;
+    }
     // Clear the STALE readiness file BEFORE trusting it, LATCHED per arm (`ready_cleared`), so a wrapper's
     // fresh READY is never wiped yet a prior session's file is never trusted (issue #180). The clear is
     // re-attempted every cutover pass UNTIL it succeeds once for this arm; only then does the marker get
@@ -683,8 +691,8 @@ async fn cut_over_to_live(
 /// committed to the LIVE branch (issue #180). Async `tokio::fs` so it never blocks the single-threaded
 /// runtime; `metadata(..).is_ok()` treats any stat error (including "not present") as "not ready", which is
 /// the conservative direction for the cutover (keep retrying). The wrapper only ever writes this file
-/// on-device, so off-device it is always absent — but `cut_over_to_live` returns before reaching here
-/// off-device (its `set_camera_live_signal` is false), so this is on-device-only in practice.
+/// on-device, so off-device it is always absent — but `cut_over_to_live` early-returns when `!camera_ondevice`
+/// before reaching here, so this is on-device-only in practice.
 async fn live_ready_present() -> bool {
     tokio::fs::metadata(LIVE_READY_PATH).await.is_ok()
 }
@@ -1405,11 +1413,11 @@ mod tests {
     #[tokio::test]
     async fn cut_over_to_live_is_a_noop_off_device() {
         // Finding A (#180): `cut_over_to_live` is the shared "marker-then-gated-respawn" step used by BOTH
-        // the arm branch and the per-iteration retry. Off-device set_camera_live_signal returns false, so
-        // the helper returns false WITHOUT touching the producer — the arm branch then records
-        // live_marked=false and the retry never spins (there is nothing to mark live off-device). (The
-        // on-device true path SIGTERMs a live /proc scan against the fixed daemon path, so it is covered by
-        // the integration behaviour rather than exercised against /proc here.)
+        // the arm branch and the per-iteration retry. Off-device it early-returns on the `!camera_ondevice`
+        // guard, so the helper reports false WITHOUT touching the readiness file, the marker, or a producer —
+        // the arm branch then records live_marked=false and the retry never spins (there is nothing to mark
+        // live off-device). (The on-device true path SIGTERMs a live /proc scan against the fixed daemon path,
+        // so it is covered by the integration behaviour rather than exercised against /proc here.)
         use std::collections::HashMap;
         let mut m = HashMap::new();
         m.insert("MQTT_HOST".to_string(), "h".to_string());
