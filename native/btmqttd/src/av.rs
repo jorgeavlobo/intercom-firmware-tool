@@ -305,20 +305,24 @@ async fn monitor(
                     // go2rtc's ~15 s i/o-timeout before falling back). This fires only on a genuine media-end
                     // TEARDOWN — the make-before-break SIP refresh keeps media continuous and never emits
                     // `*7*0*##` — and the respawn is a no-op when no producer is attached (nobody watching).
-                    // The siphon is gone, so the CURRENT-siphon live cutover no longer applies — reset the
-                    // flag so a future re-arm starts from "not yet live", and so `session` does not respawn
-                    // AGAIN on exit for a siphon this branch already handled (issue #180).
-                    *live_marked = false;
+                    // The siphon is gone, so cut a still-attached consumer back to the filler. Reset
+                    // `live_marked` (so a future re-arm starts from "not yet live", and `session` does not
+                    // respawn AGAIN on exit for a siphon this branch handled) ONLY once the cutover is
+                    // CONFIRMED. If the clear/respawn FAILS (a transient unlink failure left the marker and
+                    // the live producer in place), KEEP `live_marked` set — do NOT reset it — so `session`'s
+                    // exit path retries the clear+respawn once the fs recovers, instead of taking its
+                    // no-respawn branch and abandoning an attached viewer on the silent SDP (issue #180).
                     if clear_and_respawn_to_filler(
                         cfg,
                         "cut the live feed back to the loading filler after the panel session ended",
                     )
                     .await
                     {
+                        *live_marked = false;
                         eprintln!("btmqttd: camera siphon released (session ended)");
                     } else {
                         eprintln!(
-                            "btmqttd: camera siphon released (session ended) but the live marker could not be cleared; relying on go2rtc's i/o-timeout to fall back to the filler"
+                            "btmqttd: camera siphon released (session ended) but the live marker could not be cleared; keeping the pending-respawn state so the session-exit path retries the cutover to the filler"
                         );
                     }
                 }
