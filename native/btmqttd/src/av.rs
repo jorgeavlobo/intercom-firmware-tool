@@ -203,7 +203,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     // "Loading camera…" filler PROMPTLY instead of a black wait. Best-effort and on-device-only (off-device
     // does nothing); on a clean boot the `/proc` scan simply finds no producer to reset — cheap, not a
     // literal no-op.
-    clear_and_respawn_to_filler(
+    let startup_cleared = clear_and_respawn_to_filler(
         &cfg,
         PRODUCER_INPUTS,
         "reset any surviving go2rtc producer to the loading filler after a btmqttd restart",
@@ -215,8 +215,13 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     // the SIGTERM missed), the flag stays set so the NEXT session's monitor loop — or the between-reconnect
     // retry below — re-drives it, instead of the failure being discarded and an attached viewer stranded on
     // the silent live SDP until another arm/teardown/restart. Owned here so it survives each `session` call;
-    // a later arm clears it (a fresh live session wants the marker set).
-    let mut pending_filler_cleanup = false;
+    // a later arm clears it (a fresh live session wants the marker set). SEEDED from the STARTUP reset just
+    // above — that reset has the SAME failure mode as `session`'s exit cutover (a btmqttd restart/re-exec
+    // during a live view can leave a stale marker or a producer its best-effort `/proc` scan missed), so a
+    // failed startup cleanup must feed the retry latch too rather than wait for the next arm. On a clean boot
+    // the clear is a confirmed no-op and no producer runs, so this seeds `false`. `||` short-circuits, so the
+    // `/proc` scan runs only when the startup clear itself succeeded.
+    let mut pending_filler_cleanup = !startup_cleared || any_live_producer(&cfg).await;
     let mut backoff = BACKOFF_INIT;
     while !stopping.load(Ordering::Relaxed) {
         let start = tokio::time::Instant::now();
