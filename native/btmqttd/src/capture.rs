@@ -94,18 +94,20 @@ const CAPTURE_HOLD_SLACK: Duration = Duration::from_secs(5);
 
 /// How long to hold the panel up for an idle/button capture. Sized to cover the ENTIRE worst-case grab
 /// path an idle capture now runs before it finishes — the bounded live-marker wait, the post-cutover
-/// settle, and the ffmpeg grab itself — plus [`CAPTURE_HOLD_SLACK`]:
-/// [`LIVE_MARKER_WAIT`] + [`LIVE_CUTOVER_SETTLE`] + [`CAPTURE_TIMEOUT`] + slack. Computing it from those
-/// constituents (rather than a bare constant) guarantees the SIP session can't lapse mid-grab even in the
-/// worst case where the marker takes its full bound to appear and ffmpeg then runs to its own timeout —
-/// otherwise a 30 s hold could expire ~12 s into a grab that started ~17 s after the wake (issue #180
-/// added the marker wait + settle ahead of the grab; without this the hold budget no longer covered them).
-/// We use `ViewCmd::Hold` with this ABSOLUTE expiry: its deadline governs independently of the manual
-/// `CAMERA_VIEW_IDLE_SECS` window (which a `ViewCmd::Start` could cap at 1 s), see `sip::governing_deadline`,
-/// so a short manual window can't starve the capture, and this longer hold doesn't shorten a manual view.
+/// settle, the pre-grab frame-source readiness wait, and the ffmpeg grab itself — plus [`CAPTURE_HOLD_SLACK`]:
+/// [`LIVE_MARKER_WAIT`] + [`LIVE_CUTOVER_SETTLE`] + [`LIVE_READY_GRAB_WAIT`] + [`CAPTURE_TIMEOUT`] + slack.
+/// Computing it from those constituents (rather than a bare constant) guarantees the SIP session can't lapse
+/// mid-grab even in the worst case where the marker takes its full bound to appear, a filler producer then
+/// takes the full pre-grab wait to commit, and ffmpeg finally runs to its own timeout — otherwise a 30 s hold
+/// could expire mid-grab (issue #180 added the marker wait + settle + pre-grab readiness wait ahead of the
+/// grab; without this the hold budget no longer covered them). We use `ViewCmd::Hold` with this ABSOLUTE
+/// expiry: its deadline governs independently of the manual `CAMERA_VIEW_IDLE_SECS` window (which a
+/// `ViewCmd::Start` could cap at 1 s), see `sip::governing_deadline`, so a short manual window can't starve
+/// the capture, and this longer hold doesn't shorten a manual view.
 const CAPTURE_HOLD: Duration = Duration::from_secs(
     LIVE_MARKER_WAIT.as_secs()
         + LIVE_CUTOVER_SETTLE.as_secs()
+        + LIVE_READY_GRAB_WAIT.as_secs()
         + CAPTURE_TIMEOUT.as_secs()
         + CAPTURE_HOLD_SLACK.as_secs(),
 );
@@ -144,6 +146,15 @@ const LIVE_MARKER_POLL: Duration = Duration::from_millis(250);
 /// still waits for the first keyframe within [`CAPTURE_TIMEOUT`], so a slightly-late producer is tolerated
 /// either way — the settle just closes the COMMON window where another consumer was already on the filler.
 const LIVE_CUTOVER_SETTLE: Duration = Duration::from_secs(2);
+
+/// How long the PRE-grab frame-source gate ([`live_ready_or_no_producer`], issue #180) waits for an
+/// already-running FILLER producer to commit to the live branch before grabbing, so the grab can only pull
+/// live bytes. Deliberately SHORT — by the time this runs the `camera-live` marker is already present and the
+/// post-marker settle has elapsed, so a filler still running is the tail of an unusually slow cutover; av.rs
+/// re-drives that cutover every ~1 s, so a few seconds covers several of its retries. If the producer never
+/// commits within this bound the capture is SKIPPED (a missing snapshot beats a "Loading…" one). Included in
+/// [`CAPTURE_HOLD`] below so the idle path's SIP hold still covers the WHOLE worst-case grab path.
+const LIVE_READY_GRAB_WAIT: Duration = Duration::from_secs(5);
 
 /// One idle capture at a time — a try-lock the persisted idle thumbnail uses. A mashed "Update idle
 /// snapshot" button (or first-run overlapping the button) just SKIPS while one is running: the earlier
@@ -467,6 +478,56 @@ async fn live_producer_ready(cfg: &Config) -> bool {
     !cfg.camera_ondevice || live_marker_present_at(crate::av::LIVE_READY_PATH).await
 }
 
+/// Make sure a grab about to run can only pull LIVE bytes, by identifying the source of the producer that
+/// would serve it BEFORE grabbing (issue #180). The post-grab [`live_producer_ready`] check alone samples
+/// readiness only AFTER `grab_jpeg` returns, so a frame the shared producer served from the "Loading camera…"
+/// filler (an existing Home Assistant consumer was still on it while the cutover ran long) can be accepted if
+/// the cutover then completes in the tiny window between the grab returning and that stat — the readiness now
+/// reads present though the bytes are the filler. This closes that window by gating the grab on the source:
+///
+///   * Readiness ALREADY present ⇒ the shared producer has committed to the live branch ⇒ grab now (live).
+///   * No producer running at all ⇒ THIS capture's own connection starts one, and since av.rs has already set
+///     the `camera-live` marker that fresh producer reads it and serves live from frame one ⇒ grab now; the
+///     post-grab readiness check stays authoritative for it. A pre-grab wait here would DEADLOCK this common
+///     cold case (no producer ⇒ no wrapper ⇒ no readiness file ever), which is exactly why plain readiness is
+///     a post-grab check — so we must NOT wait when nothing is running.
+///   * A producer running but readiness ABSENT ⇒ it is the filler mid-cutover ⇒ WAIT (bounded) for the
+///     cutover to complete so the grab pulls live bytes; if it never commits within the bound, return `false`
+///     so the caller SKIPS rather than grab a filler frame (a missing snapshot beats a "Loading…" one).
+///
+/// Returns `true` when the grab may proceed. ON-DEVICE ONLY: off-device there is no producer/filler, so it
+/// returns `true` immediately (matching the other on-device-only gates). The post-grab checks still run and
+/// catch a teardown DURING the grab (the marker/readiness clear + the ring session-generation re-check).
+async fn live_ready_or_no_producer(cfg: &Config) -> bool {
+    if !cfg.camera_ondevice {
+        return true;
+    }
+    // Fast path: the shared producer has already committed to the live branch — grab now.
+    if live_marker_present_at(crate::av::LIVE_READY_PATH).await {
+        return true;
+    }
+    // Readiness absent. Only a concern if a producer is ALREADY running (a filler mid-cutover). If none is,
+    // this capture's connection starts one that reads the present marker and serves live from frame one —
+    // and waiting would deadlock (no producer ⇒ no readiness file) — so proceed and let the post-grab check
+    // validate it.
+    if !crate::av::any_producer_present(cfg).await {
+        return true;
+    }
+    // A filler producer is running: wait (bounded by the short [`LIVE_READY_GRAB_WAIT`], which is folded into
+    // CAPTURE_HOLD) for the filler→live cutover to write readiness before grabbing. Poll the SAME readiness
+    // file the wrapper writes, at the same cheap cadence as the marker wait.
+    let deadline = tokio::time::Instant::now() + LIVE_READY_GRAB_WAIT;
+    loop {
+        if live_marker_present_at(crate::av::LIVE_READY_PATH).await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(LIVE_MARKER_POLL).await;
+    }
+}
+
 /// Whether the camera siphon session is STILL the one a ring capture snapshotted — i.e. no re-arm has
 /// happened since (issue #180). av.rs bumps [`crate::av::CAMERA_SESSION_GEN`] once per arm, so a
 /// changed value means the ringing session ended mid-capture and a DIFFERENT session re-armed the live
@@ -740,6 +801,19 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
             eprintln!(
                 "btmqttd: capture: idle capture skipped — camera went not-live during the settle; keeping \
                  the existing idle thumbnail rather than a loading-filler frame"
+            );
+            break 'capture false;
+        }
+        // Gate the grab on the SOURCE of the frame it will pull (issue #180): if the shared go2rtc producer
+        // is still serving the "Loading camera…" filler mid-cutover, wait for it to commit to the live branch
+        // before grabbing — otherwise a filler keyframe could be captured and then wrongly validated by a
+        // readiness flip that lands between the grab returning and the post-grab check below. If no producer
+        // is running yet, this capture's own connection starts a live one (marker already set), so it
+        // proceeds immediately. Skip only when a filler producer never commits within the bound.
+        if !live_ready_or_no_producer(cfg).await {
+            eprintln!(
+                "btmqttd: capture: idle capture skipped — the shared producer was still serving the loading \
+                 filler and did not commit to the live branch in time; keeping the existing idle thumbnail"
             );
             break 'capture false;
         }
@@ -1062,6 +1136,19 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
         );
         return false;
     }
+    // Gate the grab on the SOURCE of the frame it will pull (issue #180): if the shared go2rtc producer is
+    // still serving the "Loading camera…" filler mid-cutover, wait for it to commit to the live branch before
+    // grabbing — otherwise a filler keyframe could be captured and then wrongly validated by a readiness flip
+    // that lands between the grab returning and the post-grab check below. If no producer is running yet, this
+    // capture's own connection starts a live one (marker already set), so it proceeds immediately. Skip only
+    // when a filler producer never commits within the bound (a missing who-rang image beats a filler one).
+    if !live_ready_or_no_producer(cfg).await {
+        eprintln!(
+            "btmqttd: capture: ring capture skipped (event {id}) — the shared producer was still serving the \
+             loading filler and did not commit to the live branch in time; not grabbing a filler frame"
+        );
+        return false;
+    }
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
         Err(e) => {
@@ -1323,20 +1410,39 @@ mod tests {
         assert!(live_producer_ready(&cfg).await, "off-device: always considered ready (no filler to guard)");
     }
 
+    #[tokio::test]
+    async fn live_ready_or_no_producer_is_true_off_device() {
+        // The PRE-grab frame-source gate (issue #180) must not stall or skip the OFF-DEVICE grab path: there
+        // is no producer/filler and no readiness file there, so it returns true immediately WITHOUT the
+        // producer scan or the bounded readiness wait the on-device path uses. Bound it tightly (1 s ≪ the
+        // 15 s LIVE_MARKER_WAIT) so a regression that ran the on-device wait off-device would time out here.
+        use std::collections::HashMap;
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = crate::config::Config::from_map(m);
+        assert!(!cfg.camera_ondevice);
+        let proceed = tokio::time::timeout(Duration::from_secs(1), live_ready_or_no_producer(&cfg))
+            .await
+            .expect("off-device: must return immediately, not run the on-device producer scan / readiness wait");
+        assert!(proceed, "off-device: always safe to grab (no filler to guard)");
+    }
+
     #[test]
     fn capture_hold_covers_the_worst_case_grab_path() {
-        // #180 / review finding: the idle/button capture now waits for the live-marker cutover and settles
-        // BEFORE the ffmpeg grab, so the SIP `Hold` must outlast that whole path — the bounded marker wait,
-        // the post-cutover settle, AND the grab's own timeout — or the session could tear down mid-grab and
-        // make captures flaky again. CAPTURE_HOLD is computed as that sum plus slack, so the budget holds by
-        // construction; this test pins the invariant so a later tweak to any constituent that would break it
-        // (e.g. bumping CAPTURE_TIMEOUT without the hold) fails here instead of silently on hardware.
+        // #180 / review finding: the idle/button capture now waits for the live-marker cutover, settles, AND
+        // waits for the pre-grab frame-source readiness BEFORE the ffmpeg grab, so the SIP `Hold` must outlast
+        // that whole path — the bounded marker wait, the post-cutover settle, the pre-grab readiness wait, AND
+        // the grab's own timeout — or the session could tear down mid-grab and make captures flaky again.
+        // CAPTURE_HOLD is computed as that sum plus slack, so the budget holds by construction; this test pins
+        // the invariant so a later tweak to any constituent that would break it (e.g. bumping CAPTURE_TIMEOUT
+        // or LIVE_READY_GRAB_WAIT without the hold) fails here instead of silently on hardware.
+        let worst_case = LIVE_MARKER_WAIT + LIVE_CUTOVER_SETTLE + LIVE_READY_GRAB_WAIT + CAPTURE_TIMEOUT;
         assert!(
-            CAPTURE_HOLD >= LIVE_MARKER_WAIT + LIVE_CUTOVER_SETTLE + CAPTURE_TIMEOUT,
-            "the idle-capture SIP hold must cover the full worst-case marker-wait + settle + grab path"
+            CAPTURE_HOLD >= worst_case,
+            "the idle-capture SIP hold must cover the full worst-case marker-wait + settle + readiness-wait + grab path"
         );
         assert!(
-            CAPTURE_HOLD > LIVE_MARKER_WAIT + LIVE_CUTOVER_SETTLE + CAPTURE_TIMEOUT,
+            CAPTURE_HOLD > worst_case,
             "the hold must carry positive slack over the tight worst-case bound, not sit exactly on it"
         );
     }

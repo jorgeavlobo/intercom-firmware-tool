@@ -209,10 +209,18 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
         "reset any surviving go2rtc producer to the loading filler after a btmqttd restart",
     )
     .await;
+    // Carries a NOT-yet-confirmed back-to-filler cutover ACROSS monitor reconnects (issue #180). A session
+    // that drops while a live siphon was armed cuts the producer back to the filler on its way out (see
+    // `session`); if that clear/respawn does not fully confirm (a failed tmpfs marker clear, or a producer
+    // the SIGTERM missed), the flag stays set so the NEXT session's monitor loop — or the between-reconnect
+    // retry below — re-drives it, instead of the failure being discarded and an attached viewer stranded on
+    // the silent live SDP until another arm/teardown/restart. Owned here so it survives each `session` call;
+    // a later arm clears it (a fresh live session wants the marker set).
+    let mut pending_filler_cleanup = false;
     let mut backoff = BACKOFF_INIT;
     while !stopping.load(Ordering::Relaxed) {
         let start = tokio::time::Instant::now();
-        match session(&cfg, &stopping).await {
+        match session(&cfg, &stopping, &mut pending_filler_cleanup).await {
             // A clean return means `stopping` was observed — leave the loop.
             Ok(()) => break,
             // Log host AND port (and the "unavailable" suffix) so a mismatched OWN_HOST/port is
@@ -224,6 +232,23 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
         }
         if stopping.load(Ordering::Relaxed) {
             break;
+        }
+        // Retry a still-unconfirmed back-to-filler cutover BETWEEN reconnects (issue #180). The monitor loop
+        // retries it while CONNECTED, but a gateway that will not reconnect (so `session` keeps erroring at
+        // connect) would otherwise strand a stale marker / a lingering live producer; retry it here at the
+        // reconnect (backoff) cadence too. Best-effort and on-device-only: it clears once the marker is
+        // confirmed absent AND no producer remains on the live SDP; a later successful session's arm also
+        // clears it. `&&` short-circuits, so the `/proc` scan runs only when the marker clear succeeded.
+        if pending_filler_cleanup {
+            let cleared = clear_and_respawn_to_filler(
+                &cfg,
+                LIVE_INPUTS,
+                "retry cutting the live feed back to the loading filler after the monitor session dropped",
+            )
+            .await;
+            if cleared && !any_live_producer(&cfg).await {
+                pending_filler_cleanup = false;
+            }
         }
         // A session that ran healthy for a while shouldn't inherit a maxed-out backoff from
         // earlier startup churn — reset so the reconnect is prompt (a 30 s wait could miss a ring).
@@ -240,15 +265,21 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
 /// Returns `Ok(())` only when `stopping` was seen; any I/O error is returned so `run` backs off and
 /// reconnects. The armed `:30007` socket lives in `monitor`'s `siphon`; its exit (on teardown, error, or
 /// return) drops it and stops the fan-out.
-async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Result<()> {
+async fn session(
+    cfg: &Arc<Config>,
+    stopping: &Arc<AtomicBool>,
+    pending_filler_cleanup: &mut bool,
+) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
     sock.flush().await?;
 
     // Drive the monitor to completion; whatever ends it (a clean stop or an I/O error), the armed :30007
     // siphon — if any — drops with `sock`, so the fan-out has stopped and any producer reading the runtime
-    // SDP is now SILENT.
-    let result = monitor(&mut sock, cfg, stopping).await;
+    // SDP is now SILENT. `pending_filler_cleanup` is threaded in so a cleanup a TEARDOWN left unconfirmed is
+    // carried across the reconnect and retried here / by the next session (issue #180). NB: an early `?`
+    // above (connect/write failed) returns WITHOUT touching it, so a carried-in pending stays pending.
+    let result = monitor(&mut sock, cfg, stopping, pending_filler_cleanup).await;
     // On ANY monitor exit, clear the live signal (issue #180) and respawn the LIVE producer to the filler —
     // UNCONDITIONALLY, not gated on whether the in-monitor cutover confirmed. A producer can reach the live
     // SDP ASYNCHRONOUSLY after `cut_over_to_live` returned false (the SIGTERM'd filler exits and go2rtc
@@ -258,12 +289,19 @@ async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Resu
     // confirmed (a lost removal must not serve the stale marker's live SDP). Target [`LIVE_INPUTS`] (the SDP
     // producer only): this fires on EVERY monitor drop, so a cold session that only ever served the filler
     // must not have it needlessly restarted. On-device-only no-op off-device (and when nothing is attached).
-    clear_and_respawn_to_filler(
+    let cleared = clear_and_respawn_to_filler(
         cfg,
         LIVE_INPUTS,
         "cut the live feed back to the loading filler after the camera monitor session dropped",
     )
     .await;
+    // RECORD — do not discard — whether this exit cutover fully cut back to the filler (issue #180): it is
+    // complete only when the marker cleared AND no producer remains on the live SDP. If it did NOT, KEEP
+    // `pending_filler_cleanup` set so the next session's monitor loop (threaded in above) or `run`'s
+    // between-reconnect retry re-drives it, rather than losing a failed clear across the reconnect and
+    // stranding an attached viewer on the silent SDP. A clean cut clears any flag carried in. `||`
+    // short-circuits, so the `/proc` scan runs only when the marker clear itself succeeded.
+    *pending_filler_cleanup = !cleared || any_live_producer(cfg).await;
     result
 }
 
@@ -271,12 +309,15 @@ async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Resu
 /// the `camera-live` signal and respawn on EVERY exit path, not just the clean ones). Owns the armed
 /// `:30007` `siphon` socket, so returning from here drops it and stops the fan-out. Returns `Ok(())` only
 /// when `stopping` was seen; any I/O error is propagated so `run` backs off and reconnects. The back-to-
-/// filler cutover on exit is the caller's ([`session`]) responsibility and is UNCONDITIONAL — it does not
-/// depend on any state this loop reports — so no out-parameter is needed (issue #180).
+/// filler cutover on exit is the caller's ([`session`]) responsibility and is UNCONDITIONAL, but a cutover a
+/// TEARDOWN left UNCONFIRMED must not be lost when the monitor socket drops, so `pending_filler_cleanup` is
+/// threaded in and out (issue #180): the loop retries a carried-in pending cleanup and, because it mutates
+/// the caller's flag directly, leaves its final state visible to `session`/`run` on EVERY exit path.
 async fn monitor(
     sock: &mut TcpStream,
     cfg: &Arc<Config>,
     stopping: &Arc<AtomicBool>,
+    pending_filler_cleanup: &mut bool,
 ) -> std::io::Result<()> {
     let mut framer = Framer::default();
     let mut buf = [0u8; 4096];
@@ -300,13 +341,14 @@ async fn monitor(
     // scan), so the first retry waits one interval rather than rescanning immediately after the arm. Shared
     // with the back-to-filler cleanup retry below (the two are mutually exclusive on `siphon` state).
     let mut last_cutover_retry = tokio::time::Instant::now();
-    // `pending_filler_cleanup`: a TEARDOWN cleared the siphon but the back-to-filler cutover is NOT yet
-    // confirmed (issue #180) — either the marker clear FAILED (a stale marker makes every producer restart
-    // serve the silent live SDP), or a producer the respawn MISSED is still on the live feed. Processing
-    // TEARDOWN does NOT return from this loop, so the monitor-session exit that would otherwise retry the
-    // cutover can be far off; so retain the pending state and retry the clear/respawn each loop pass
-    // (throttled) while the siphon stays absent, until the marker is cleared AND no live producer remains.
-    let mut pending_filler_cleanup = false;
+    // `pending_filler_cleanup` (threaded in/out via the parameter, so it CARRIES across monitor reconnects —
+    // issue #180): a TEARDOWN cleared the siphon but the back-to-filler cutover is NOT yet confirmed — either
+    // the marker clear FAILED (a stale marker makes every producer restart serve the silent live SDP), or a
+    // producer the respawn MISSED is still on the live feed. Processing TEARDOWN does NOT return from this
+    // loop, so the monitor-session exit that would otherwise retry the cutover can be far off; so retain the
+    // pending state and retry the clear/respawn each loop pass (throttled) while the siphon stays absent,
+    // until the marker is cleared AND no live producer remains. A value carried IN from a PRIOR session's
+    // unconfirmed exit cutover is retried here just the same; a new arm clears it (it wants the marker set).
 
     // Confirm the monitor ACK before trusting the stream. The gateway may accept the TCP
     // connection yet REFUSE the monitor with a NACK (`*#*0##`) and then stay idle — the
@@ -366,10 +408,10 @@ async fn monitor(
                     // missed SIGTERM would otherwise sit on the silent live feed until go2rtc's i/o-timeout
                     // (issue #180). Otherwise retain `pending_filler_cleanup` and retry below.
                     if cleared && !any_live_producer(cfg).await {
-                        pending_filler_cleanup = false;
+                        *pending_filler_cleanup = false;
                         eprintln!("btmqttd: camera siphon released (session ended)");
                     } else {
-                        pending_filler_cleanup = true;
+                        *pending_filler_cleanup = true;
                         last_cutover_retry = tokio::time::Instant::now(); // throttle the first cleanup retry
                         eprintln!(
                             "btmqttd: camera siphon released (session ended); back-to-filler cutover not yet confirmed (marker clear failed or a producer is still on the live feed) — retrying while the siphon is absent"
@@ -397,7 +439,7 @@ async fn monitor(
                         // prior session left before it trusts readiness (issue #180). A new live session also
                         // supersedes any pending back-to-filler cleanup — it WANTS the marker set — so drop it.
                         ready_cleared = false;
-                        pending_filler_cleanup = false;
+                        *pending_filler_cleanup = false;
                         live_marked = cut_over_to_live(
                             cfg,
                             PRODUCER_INPUTS,
@@ -465,7 +507,7 @@ async fn monitor(
         // like the cutover retry (they never overlap — one needs `siphon.is_some()`, the other `is_none()`).
         // Without this, a stale marker left by a failed teardown clear would make every producer restart serve
         // the silent live SDP until the far-off monitor-session exit. Cleared once the marker is confirmed gone.
-        if siphon.is_none() && pending_filler_cleanup && last_cutover_retry.elapsed() >= CUTOVER_RETRY_INTERVAL {
+        if siphon.is_none() && *pending_filler_cleanup && last_cutover_retry.elapsed() >= CUTOVER_RETRY_INTERVAL {
             last_cutover_retry = tokio::time::Instant::now();
             // Respawn LIVE_INPUTS only — re-SIGTERM a lingering LIVE producer without churning a filler
             // producer that has already cut over. Complete once the marker is cleared AND no live producer
@@ -477,7 +519,7 @@ async fn monitor(
             )
             .await;
             if cleared && !any_live_producer(cfg).await {
-                pending_filler_cleanup = false;
+                *pending_filler_cleanup = false;
                 eprintln!(
                     "btmqttd: camera: back-to-filler cutover confirmed on retry (marker cleared, no producer on the live feed)"
                 );
@@ -487,7 +529,7 @@ async fn monitor(
         // While a cutover or a back-to-filler cleanup is PENDING, cap the read at [`CUTOVER_RETRY_INTERVAL`] so
         // those retries fire on time even on a QUIET bus (issue #180) — otherwise a viewer could sit on the
         // filler for up to READ_IDLE despite the 1 s interval. Idle at READ_IDLE otherwise.
-        let read_timeout = if (siphon.is_some() && !live_marked) || (siphon.is_none() && pending_filler_cleanup)
+        let read_timeout = if (siphon.is_some() && !live_marked) || (siphon.is_none() && *pending_filler_cleanup)
         {
             CUTOVER_RETRY_INTERVAL
         } else {
@@ -803,6 +845,22 @@ async fn clear_and_respawn_to_filler(
 /// more pass before go2rtc restarts it onto the filler — the throttled retry simply confirms next pass.
 async fn any_live_producer(cfg: &Arc<Config>) -> bool {
     cfg.camera_ondevice && crate::procsig::any_producer_matches(LIVE_INPUTS).await
+}
+
+/// Whether ANY go2rtc producer — the live SDP reader OR the "Loading camera…" filler — is currently running
+/// (issue #180). `capture.rs` reads this PRE-grab to tell two states apart: "no producer yet, so this
+/// capture's own connection will start one that reads the already-set live marker and serves live from frame
+/// one" (nothing to wait for — a pre-grab readiness wait would deadlock, no producer ⇒ no wrapper ⇒ no
+/// readiness file) versus "a filler producer is ALREADY running mid-cutover", where the grab must wait for
+/// the cutover so it cannot pull a "Loading…" keyframe that a readiness flip landing just after the grab
+/// would then wrongly validate. Targets [`PRODUCER_INPUTS`] (SDP or filler) — the transient `/bin/sh`
+/// wrapper is never matched (only the exec'd ffmpeg is), which is fine: a producer momentarily in its
+/// `/bin/sh` phase is about to `exec` ffmpeg on the present marker (live). ON-DEVICE ONLY (off-device there
+/// are no producers ⇒ `false`); a `/proc` scan that could not run reads as `true`
+/// ([`crate::procsig::any_producer_matches`] is conservative), so the caller waits for readiness rather than
+/// risk grabbing the filler. Takes `&Config` (not `&Arc`) so `capture.rs`, which holds a `&Config`, can call it.
+pub(crate) async fn any_producer_present(cfg: &Config) -> bool {
+    cfg.camera_ondevice && crate::procsig::any_producer_matches(PRODUCER_INPUTS).await
 }
 
 /// Best-effort camera-live cleanup for daemon SHUTDOWN (issue #180). When btmqttd is STOPPED (`btmqttd
@@ -1283,6 +1341,20 @@ mod tests {
         let cfg = Arc::new(crate::config::Config::from_map(m));
         assert!(!cfg.camera_ondevice);
         assert!(!set_camera_live_signal(&cfg).await, "off-device: nothing created, so no respawn is gated in");
+    }
+
+    #[tokio::test]
+    async fn any_producer_present_is_false_off_device() {
+        // The capture pre-grab frame-source gate (#180) reads this to tell "no producer running" from "a
+        // filler producer is running". Off-device there are no producers, so it must SHORT-CIRCUIT to false
+        // WITHOUT the `/proc` scan (the `camera_ondevice &&` guard) — mirroring any_live_producer. (On-device
+        // it scans `/proc`, exercised end-to-end by the cutover; a host `/proc` assertion would be flaky.)
+        use std::collections::HashMap;
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        assert!(!cfg.camera_ondevice);
+        assert!(!any_producer_present(&cfg).await, "off-device: no producers, so the pre-grab gate never waits");
     }
 
     #[tokio::test]
