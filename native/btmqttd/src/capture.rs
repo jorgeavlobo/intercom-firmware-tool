@@ -477,6 +477,18 @@ fn ring_session_unchanged(snapshot: u64) -> bool {
     crate::av::CAMERA_SESSION_GEN.load(Ordering::Relaxed) == snapshot
 }
 
+/// Whether the session generation observed when the ring's camera went live is the ring's OWN session (issue
+/// #180). The ring is served either by a session already live when it was detected (`gen_before`, a warm ring
+/// ⇒ generation unchanged) or by the FIRST arm it triggers (⇒ `gen_before + 1`). Any larger jump means
+/// multiple arms cycled during the bounded live wait — the ring's session ended and unrelated one(s) armed —
+/// so the live feed is not this ring's and the snapshot must be skipped. `CAMERA_SESSION_GEN` only ever
+/// increases, so a value below `gen_before` is likewise not this ring's. (This tightens the pre-wait window;
+/// the fully-decoupled case where a ring triggers NO arm at all before an unrelated single arm is inherently
+/// indistinguishable here — that ring produced no video session of its own.)
+fn ring_arm_is_this_rings(gen_before: u64, gen_now: u64) -> bool {
+    gen_now == gen_before || gen_now == gen_before + 1
+}
+
 /// Grab one JPEG frame, returning the bytes. Assumes the caller already holds its exclusivity guard
 /// (the [`CAPTURING_IDLE`] try-lock for an idle/button grab, or the single-runner slot —
 /// [`RING_RUNNER_ACTIVE`] — for a ring grab) and (for an idle/button grab) has poked the panel up.
@@ -992,6 +1004,12 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
     // (bounded) for the live-camera marker so the who-rang snapshot is the VISITOR, not the filler (issue
     // #180); if it never goes live within the bound, SKIP rather than persist a "Loading…" ring frame — a
     // missing snapshot beats a misleading one (the ring MQTT event itself still fired regardless).
+    // Snapshot the camera session generation BEFORE the wait (issue #180): the ring's OWN session is either
+    // one already live when the ring was detected (a warm ring ⇒ generation unchanged) or the FIRST arm the
+    // ring triggers (⇒ generation + 1). Reading it only AFTER the wait would bind to whichever session
+    // happened to be live when the marker was observed — so if the ring's session ended before its marker was
+    // even seen and an unrelated view armed during the wait, we would snapshot that later session.
+    let gen_before = crate::av::CAMERA_SESSION_GEN.load(Ordering::Relaxed);
     if !wait_for_live_marker(cfg).await {
         eprintln!(
             "btmqttd: capture: ring capture skipped (event {id}) — camera did not go live within {}s \
@@ -1000,13 +1018,24 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
         );
         return false;
     }
-    // Bind this ring snapshot to the camera SESSION that is live right now (issue #180). The marker
-    // and the presence re-checks below only test that SOME session is live — they cannot tell one live
-    // session from another. If the ringing session ends mid-capture and a DIFFERENT session (a manual view,
-    // possibly of another entrance panel) re-arms the marker before the grab, presence stays true but the
-    // frame would be that other session's. Snapshot the per-arm generation now and re-check it at each stage;
-    // a change means a re-arm, so discard rather than store another session's frame under this ring's id.
+    // Bind this ring snapshot to the camera SESSION that went live for it. The marker and the presence
+    // re-checks below only test that SOME session is live — they cannot tell one live session from another.
+    // Accept only the ring's own session: the generation now must be `gen_before` (warm — already live) or
+    // `gen_before + 1` (the ring armed the camera). A larger jump means MULTIPLE arms happened during the wait
+    // — the ring's session ended and unrelated session(s) armed — so the live feed is not this ring's; skip
+    // rather than store another session's frame under this ring's id (the ring MQTT event already fired; a
+    // missing image beats a mislabeled one). `session_gen` (the value now) is then re-checked after the settle
+    // and grab so a re-arm DURING the capture is caught too. (On-device only; off-device the generation never
+    // bumps, so `gen_before == session_gen` and this always passes.)
     let session_gen = crate::av::CAMERA_SESSION_GEN.load(Ordering::Relaxed);
+    if !ring_arm_is_this_rings(gen_before, session_gen) {
+        eprintln!(
+            "btmqttd: capture: ring capture skipped (event {id}) — {} camera sessions armed during the live \
+             wait; the live feed is not this ring's — not persisting another session's frame",
+            session_gen.wrapping_sub(gen_before)
+        );
+        return false;
+    }
     // Same post-marker settle as the idle path: the marker signals the live cutover has STARTED, but
     // av.rs SIGTERM-respawns the go2rtc producer only AFTER creating it, so this pause lets that respawned
     // LIVE producer begin serving before ffmpeg connects (issue #180). Usually a ring capture is itself the
@@ -1167,6 +1196,19 @@ mod tests {
         );
         // Restore so parallel/subsequent readers see a stable value.
         crate::av::CAMERA_SESSION_GEN.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn ring_arm_accepts_only_warm_or_single_arm() {
+        // Issue #180: snapshotting the generation BEFORE the live wait, a ring is served by a session already
+        // live at detection (warm ⇒ unchanged) or the first arm it triggers (+1). Two+ arms during the wait
+        // mean the ring's session ended and unrelated one(s) armed — reject so a later session's frame is not
+        // stored under this ring's id.
+        assert!(ring_arm_is_this_rings(5, 5), "warm: already live at detection");
+        assert!(ring_arm_is_this_rings(5, 6), "the ring armed the camera (exactly one arm)");
+        assert!(!ring_arm_is_this_rings(5, 7), "two arms during the wait ⇒ not this ring's session");
+        assert!(!ring_arm_is_this_rings(0, 3), "several arms cycled ⇒ reject");
+        assert!(!ring_arm_is_this_rings(5, 4), "generation only increases; a lower value is not this ring's");
     }
 
     #[test]

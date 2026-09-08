@@ -127,6 +127,52 @@ pub(crate) fn terminate_go2rtc_producers(
     Ok(signalled)
 }
 
+/// Whether ANY go2rtc `exec:` ffmpeg producer is currently reading one of `inputs`, WITHOUT signalling it
+/// (issue #180). Used to CONFIRM a back-to-filler cutover: a producer still on the live SDP means a viewer
+/// can sit on the now-silent live feed until go2rtc's i/o-timeout, so the caller keeps retrying until none
+/// remains. Offloads the blocking scan to `spawn_blocking` INTERNALLY (callers just `.await`). A scan that
+/// could not run — the `/proc` open failed, or the blocking task did — returns `true` CONSERVATIVELY (assume
+/// one MAY be running, so the caller keeps retrying) rather than a false "all clear".
+pub(crate) async fn any_producer_matches(inputs: &'static [&'static str]) -> bool {
+    match tokio::task::spawn_blocking(move || {
+        scan_go2rtc_producers(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, inputs)
+    })
+    .await
+    {
+        Ok(Ok(n)) => n > 0,
+        Ok(Err(e)) => {
+            eprintln!("btmqttd: could not scan /proc to confirm the filler cutover ({e}); assuming a producer may still be live");
+            true
+        }
+        Err(e) => {
+            eprintln!("btmqttd: /proc producer-scan task failed ({e}); assuming a producer may still be live");
+            true
+        }
+    }
+}
+
+/// Scan `/proc` and COUNT the go2rtc `exec:` ffmpeg producers reading one of `inputs`, WITHOUT signalling any
+/// (issue #180) — the read-only mirror of [`terminate_go2rtc_producers`]. `Ok(n)` = a completed scan found
+/// `n`; `Err` = `/proc` itself could not be opened. Blocking; each numeric `/proc/<pid>` is validated with
+/// [`pid_is_producer`] and any unreadable entry is skipped (best-effort).
+pub(crate) fn scan_go2rtc_producers(
+    ffmpeg_path: &str,
+    daemon_path: &str,
+    inputs: &[&str],
+) -> std::io::Result<usize> {
+    let mut found = 0usize;
+    for entry in std::fs::read_dir("/proc")?.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue; // not a numeric pid directory
+        };
+        if pid_is_producer(pid, ffmpeg_path, daemon_path, inputs) {
+            found += 1;
+        }
+    }
+    Ok(found)
+}
+
 /// True iff `/proc/<pid>` is CURRENTLY a go2rtc `exec:` ffmpeg producer reading one of `inputs`: its
 /// command line is `<ffmpeg_path> … -i <one of inputs> …` ([`cmdline_is_producer`]) AND its direct
 /// parent is the go2rtc daemon ([`parent_is`]). Both are read live from `/proc`, so calling this

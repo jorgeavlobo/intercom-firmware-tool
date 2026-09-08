@@ -306,11 +306,12 @@ async fn monitor(
     // scan), so the first retry waits one interval rather than rescanning immediately after the arm. Shared
     // with the back-to-filler cleanup retry below (the two are mutually exclusive on `siphon` state).
     let mut last_cutover_retry = tokio::time::Instant::now();
-    // `pending_filler_cleanup`: a TEARDOWN cleared the siphon but the back-to-filler `clear_and_respawn` FAILED
-    // (issue #180). Processing TEARDOWN does NOT return from this loop, so the monitor-session exit that would
-    // otherwise retry the cutover can be far off; meanwhile a stale marker makes every producer restart serve
-    // the silent live SDP (a black wait). So retain the pending state and retry the clear/respawn each loop
-    // pass (throttled) while the siphon stays absent, until the marker is confirmed cleared.
+    // `pending_filler_cleanup`: a TEARDOWN cleared the siphon but the back-to-filler cutover is NOT yet
+    // confirmed (issue #180) — either the marker clear FAILED (a stale marker makes every producer restart
+    // serve the silent live SDP), or a producer the respawn MISSED is still on the live feed. Processing
+    // TEARDOWN does NOT return from this loop, so the monitor-session exit that would otherwise retry the
+    // cutover can be far off; so retain the pending state and retry the clear/respawn each loop pass
+    // (throttled) while the siphon stays absent, until the marker is cleared AND no live producer remains.
     let mut pending_filler_cleanup = false;
 
     // Confirm the monitor ACK before trusting the stream. The gateway may accept the TCP
@@ -361,20 +362,23 @@ async fn monitor(
                     // emits `*7*0*##` — and the respawn is a no-op when nobody is watching. Reset `live_marked`:
                     // its only role is the retry gate below (also guarded by `siphon.is_some()`, now `None`).
                     live_marked = false;
-                    if clear_and_respawn_to_filler(
+                    let cleared = clear_and_respawn_to_filler(
                         cfg,
                         PRODUCER_INPUTS,
                         "cut the live feed back to the loading filler after the panel session ended",
                     )
-                    .await
-                    {
+                    .await;
+                    // Complete only when the marker is cleared AND no producer is still on the live SDP — a
+                    // missed SIGTERM would otherwise sit on the silent live feed until go2rtc's i/o-timeout
+                    // (issue #180). Otherwise retain `pending_filler_cleanup` and retry below.
+                    if cleared && !any_live_producer(cfg).await {
                         pending_filler_cleanup = false;
                         eprintln!("btmqttd: camera siphon released (session ended)");
                     } else {
                         pending_filler_cleanup = true;
                         last_cutover_retry = tokio::time::Instant::now(); // throttle the first cleanup retry
                         eprintln!(
-                            "btmqttd: camera siphon released (session ended) but the live marker could not be cleared; retrying the back-to-filler cutover while the siphon is absent"
+                            "btmqttd: camera siphon released (session ended); back-to-filler cutover not yet confirmed (marker clear failed or a producer is still on the live feed) — retrying while the siphon is absent"
                         );
                     }
                 }
@@ -465,16 +469,19 @@ async fn monitor(
         // the silent live SDP until the far-off monitor-session exit. Cleared once the marker is confirmed gone.
         if siphon.is_none() && pending_filler_cleanup && last_cutover_retry.elapsed() >= CUTOVER_RETRY_INTERVAL {
             last_cutover_retry = tokio::time::Instant::now();
-            if clear_and_respawn_to_filler(
+            // Respawn LIVE_INPUTS only — re-SIGTERM a lingering LIVE producer without churning a filler
+            // producer that has already cut over. Complete once the marker is cleared AND no live producer
+            // remains on the silent SDP (issue #180).
+            let cleared = clear_and_respawn_to_filler(
                 cfg,
-                PRODUCER_INPUTS,
-                "retry cutting the live feed back to the loading filler after a failed teardown clear",
+                LIVE_INPUTS,
+                "retry cutting the live feed back to the loading filler until the cutover is confirmed",
             )
-            .await
-            {
+            .await;
+            if cleared && !any_live_producer(cfg).await {
                 pending_filler_cleanup = false;
                 eprintln!(
-                    "btmqttd: camera: back-to-filler cutover completed on retry after the teardown clear failed"
+                    "btmqttd: camera: back-to-filler cutover confirmed on retry (marker cleared, no producer on the live feed)"
                 );
             }
         }
@@ -773,6 +780,19 @@ async fn clear_and_respawn_to_filler(
         crate::procsig::respawn_go2rtc_producers(respawn_inputs, reason, true).await;
     }
     true
+}
+
+/// Whether a go2rtc producer is STILL running on the live SDP (issue #180). After a back-to-filler
+/// clear+respawn the marker is absent, so ANY producer restart picks the filler — but a producer the SIGTERM
+/// missed (a transient `/bin/sh` wrapper not yet a matchable ffmpeg, or a `kill` that raced) keeps serving the
+/// now-silent live feed until go2rtc's own i/o-timeout. Confirming its absence lets the TEARDOWN/cleanup keep
+/// retrying the respawn until the live producer is gone, instead of clearing the pending state on a
+/// best-effort respawn. ON-DEVICE ONLY (off-device there are no producers ⇒ `false`); a `/proc` scan that
+/// could not run reads as `true` ([`crate::procsig::any_producer_matches`] is conservative), so the retry
+/// persists. NB: a just-SIGTERMed producer can still be mid-exit in `/proc`, so this can read `true` for one
+/// more pass before go2rtc restarts it onto the filler — the throttled retry simply confirms next pass.
+async fn any_live_producer(cfg: &Arc<Config>) -> bool {
+    cfg.camera_ondevice && crate::procsig::any_producer_matches(LIVE_INPUTS).await
 }
 
 /// Best-effort camera-live cleanup for daemon SHUTDOWN (issue #180). When btmqttd is STOPPED (`btmqttd
