@@ -659,15 +659,29 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
     // on the linger below WITHOUT dropping the guards early. `_wake` and the `CAPTURING_IDLE` lock stay
     // held across both the capture and the linger.
     let result = 'capture: {
+        // Fast-skip when there is genuinely no self-view to wait for: on-device, `_wake` is `None` only when
+        // wake_panel could NOT queue a Hold (on-demand viewing off, or the SIP UA channel closed), so THIS
+        // capture never wakes the panel and the live marker can never appear — blocking wait_for_live_marker
+        // for the full LIVE_MARKER_WAIT would just stall ~15 s before the same skip. Bail immediately instead.
+        // (A concurrent REAL call could have set the marker, but its frame is a VISITOR, not the empty
+        // doorway — `ring_recent()` declines that anyway.) Off-device wait_for_live_marker returns instantly,
+        // so it has no such stall and is left to the normal path below.
+        if cfg.camera_ondevice && _wake.is_none() {
+            eprintln!(
+                "btmqttd: capture: idle capture skipped — on-demand viewing is off or the SIP UA is gone, so \
+                 the panel cannot be woken; keeping the existing idle thumbnail"
+            );
+            break 'capture false;
+        }
         // Wait (bounded) for btmqttd's live-camera cutover before grabbing, so we photograph the LIVE feed
         // and never persist the cold-open "Loading camera…" filler as the idle thumbnail (issue #180). On a
         // successful wake the panel warms up (~3 s SIP), av.rs arms the siphon and cuts go2rtc over to the
         // live feed, and only THEN does the marker appear — this wait also serves as the media-start head
         // start the old blind 2 s settle gave (ffmpeg still waits for the first keyframe within
         // CAPTURE_TIMEOUT, so it is not a correctness dependency). If the marker never appears within the
-        // bound — no wake (viewing off / channel closed, `_wake` is None), or the panel never streamed — SKIP
-        // rather than grab the filler: a missing idle update beats a "Loading…" one (first-run retries next
-        // boot; the button can be re-pressed). Off-device this returns immediately (no filler to guard).
+        // bound (the panel warmed but never streamed) SKIP rather than grab the filler: a missing idle
+        // update beats a "Loading…" one (first-run retries next boot; the button can be re-pressed).
+        // Off-device this returns immediately (no filler to guard).
         if !wait_for_live_marker(cfg).await {
             eprintln!(
                 "btmqttd: capture: idle capture skipped — camera did not go live within {}s (would have \
