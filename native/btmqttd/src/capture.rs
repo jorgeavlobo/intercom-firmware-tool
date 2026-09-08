@@ -453,6 +453,20 @@ async fn live_still_marked(cfg: &Config) -> bool {
     !cfg.camera_ondevice || live_marker_present_at(crate::av::CAMERA_LIVE_SIGNAL_PATH).await
 }
 
+/// Whether the go2rtc producer has actually COMMITTED to the LIVE branch — the wrapper-written
+/// [`crate::av::LIVE_READY_PATH`] readiness file is present (issue #180). Checked POST-grab: [`live_still_marked`]
+/// only proves av.rs set the `camera-live` marker at ARM, not that the producer serving this frame selected
+/// the live branch. If the `/proc` respawn missed a filler wrapper, signalling failed, or the transition ran
+/// past [`LIVE_CUTOVER_SETTLE`], go2rtc can still be serving the OLD filler when the grab lands even though
+/// the marker is present; the wrapper's readiness file distinguishes them (the filler branch removes it, the
+/// live branch creates it, both BEFORE `exec`), so a grab is discarded unless it is present. A PRE-grab wait
+/// on it would deadlock the common case where the capture's own connection is what starts the producer (no
+/// producer ⇒ no wrapper ⇒ no file), which is why this is a post-grab check only. ON-DEVICE ONLY: off-device
+/// the wrapper never writes it, so this is always `true`, matching the other on-device-only capture gates.
+async fn live_producer_ready(cfg: &Config) -> bool {
+    !cfg.camera_ondevice || live_marker_present_at(crate::av::LIVE_READY_PATH).await
+}
+
 /// Whether the camera siphon session is STILL the one a ring capture snapshotted — i.e. no re-arm has
 /// happened since (issue #180). av.rs bumps [`crate::av::CAMERA_SESSION_GEN`] once per arm, so a
 /// changed value means the ringing session ended mid-capture and a DIFFERENT session re-armed the live
@@ -731,6 +745,16 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
             eprintln!(
                 "btmqttd: capture: idle capture discarded — camera went not-live during the grab; keeping \
                  the existing idle thumbnail rather than a loading-filler frame"
+            );
+            break 'capture false;
+        }
+        // Confirm the producer actually committed to the LIVE branch (readiness file present), not just that
+        // av.rs set the arm marker (issue #180): if a slow/failed cutover left go2rtc still serving the filler
+        // when this grab landed, the marker reads present but the frame is "Loading camera…". Discard it.
+        if !live_producer_ready(cfg).await {
+            eprintln!(
+                "btmqttd: capture: idle capture discarded — the producer had not committed to the live branch \
+                 (camera-live-ready absent); keeping the existing idle thumbnail rather than a loading-filler frame"
             );
             break 'capture false;
         }
@@ -1035,6 +1059,17 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
         );
         return false;
     }
+    // Confirm the producer actually committed to the LIVE branch (readiness file present), not just that av.rs
+    // set the arm marker (issue #180): if a slow/failed cutover left go2rtc still serving the filler when this
+    // grab landed, the marker reads present but the frame is "Loading camera…". Discard rather than persist it
+    // as the who-rang snapshot (the ring MQTT event already fired; a missing image beats a filler one).
+    if !live_producer_ready(cfg).await {
+        eprintln!(
+            "btmqttd: capture: ring snapshot discarded (event {id}) — the producer had not committed to the \
+             live branch (camera-live-ready absent); not persisting a loading-filler frame"
+        );
+        return false;
+    }
     // Write this event's own immutable file, then prune aged-out ring files. Blocking std::fs — offload it.
     let stored = tokio::task::spawn_blocking(move || store_ring_event(id, &bytes)).await.unwrap_or(false);
     if stored {
@@ -1227,6 +1262,19 @@ mod tests {
         let cfg = crate::config::Config::from_map(m);
         assert!(!cfg.camera_ondevice);
         assert!(live_still_marked(&cfg).await, "off-device: always considered live (no filler to guard)");
+    }
+
+    #[tokio::test]
+    async fn live_producer_ready_is_true_off_device() {
+        // The post-grab readiness gate (issue #180) must not skip the OFF-DEVICE grab path: the wrapper never
+        // writes camera-live-ready there, so it is always "ready", mirroring the other on-device-only gates.
+        // (On-device it stats the fixed tmpfs readiness file — exercised by the integration behaviour.)
+        use std::collections::HashMap;
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = crate::config::Config::from_map(m);
+        assert!(!cfg.camera_ondevice);
+        assert!(live_producer_ready(&cfg).await, "off-device: always considered ready (no filler to guard)");
     }
 
     #[test]

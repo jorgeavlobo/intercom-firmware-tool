@@ -69,13 +69,15 @@ pub(crate) const CAMERA_LIVE_SIGNAL_PATH: &str = "/var/run/btmqttd/camera-live";
 /// by the go2rtc producer WRAPPER — NOT by this daemon: the wrapper creates it on the branch that `exec`s
 /// the live feed and removes it on the branch that `exec`s the filler, BEFORE the `exec`, so it records the
 /// branch the wrapper committed to even during its transient `/bin/sh` phase. This daemon only READS its
-/// existence, in [`cut_over_to_live`], to confirm the filler→live cutover actually completed — a POSITIVE
-/// signal that closes the sub-millisecond race a "no filler process in `/proc`" check could not (a wrapper
-/// that read the marker absent and is mid-`exec` into the filler is not yet a matchable ffmpeg, but it has
-/// already removed this file, so the cutover keeps retrying until live). On tmpfs (cleared every boot ⇒
-/// absent = "not live yet"); the first cold producer's filler branch removes any stale copy. MUST equal the
-/// `READY=` path the generated wrapper writes (`Go2RtcConfig.OnDeviceCameraLiveReadyPath`).
-const LIVE_READY_PATH: &str = "/var/run/btmqttd/camera-live-ready";
+/// existence: in [`cut_over_to_live`], to confirm the filler→live cutover actually completed, and in
+/// `capture.rs` POST-grab, to confirm the producer served the LIVE branch before a snapshot is persisted
+/// (`pub(crate)` for that reader) — a POSITIVE signal that closes the sub-millisecond race a "no filler
+/// process in `/proc`" check could not (a wrapper that read the marker absent and is mid-`exec` into the
+/// filler is not yet a matchable ffmpeg, but it has already removed this file, so the cutover keeps retrying
+/// until live). On tmpfs (cleared every boot ⇒ absent = "not live yet"); the first cold producer's filler
+/// branch removes any stale copy. MUST equal the `READY=` path the generated wrapper writes
+/// (`Go2RtcConfig.OnDeviceCameraLiveReadyPath`).
+pub(crate) const LIVE_READY_PATH: &str = "/var/run/btmqttd/camera-live-ready";
 
 /// A monotonic generation stamped once per SIPHON ARM (issue #180), so a consumer can bind a
 /// capture to the SPECIFIC camera session it started in and detect a session change mid-capture. Bumped the
@@ -679,7 +681,9 @@ async fn ensure_ready_cleared_at(ondevice: bool, path: &str, cleared: &mut bool)
 
 /// Clear the marker and — ONLY if the clear is CONFIRMED (marker now absent) — respawn the go2rtc producer
 /// so its wrapper re-reads the absent marker and cuts to the "Loading camera…" filler (issue #180). Returns
-/// whether that back-to-filler cutover completed. Shared by every "media ended → filler" path (the panel
+/// whether the marker CLEAR was confirmed (and, on-device, a respawn was then issued) — NOT that go2rtc has
+/// actually restarted a producer onto the filler, which is asynchronous and best-effort. Shared by every
+/// "media ended → filler" path (the panel
 /// TEARDOWN, the monitor-drop session exit, the startup reset, and shutdown) so the marker-then-gated-respawn
 /// order lives in ONE place. If the clear fails the respawn is SKIPPED — respawning would make the wrapper
 /// re-read the stale PRESENT marker and serve the silent live SDP instead of the filler; the running producer

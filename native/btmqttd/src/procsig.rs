@@ -62,17 +62,18 @@ pub(crate) async fn respawn_go2rtc_producers(
         Ok(Ok(n)) => n,
         // The `/proc` scan itself failed to open — log it DISTINCTLY from "found no producer" so a real scan
         // failure isn't misread as "nothing was running". Non-fatal — the change takes effect on the next
-        // open/boot.
+        // producer (re)start (caller-agnostic: this helper serves sprop self-heal AND the A/V cutover/teardown
+        // paths, where the fallback is the next producer start, not necessarily an open/boot).
         Ok(Err(e)) => {
             eprintln!(
-                "btmqttd: could not scan /proc to respawn go2rtc producers ({e}) ({reason}); the change takes effect on the next open/boot"
+                "btmqttd: could not scan /proc to respawn go2rtc producers ({e}) ({reason}); the change takes effect on the next producer start"
             );
             return;
         }
         // The blocking task panicked/was cancelled. Log the JoinError so a "no respawn happened" report
-        // isn't confused with "no producer found"; non-fatal — same next-open/boot fallback.
+        // isn't confused with "no producer found"; non-fatal — same next-producer-start fallback.
         Err(e) => {
-            eprintln!("btmqttd: go2rtc producer-respawn task failed ({e}); relying on the next open/boot");
+            eprintln!("btmqttd: go2rtc producer-respawn task failed ({e}); relying on the next producer start");
             return;
         }
     };
