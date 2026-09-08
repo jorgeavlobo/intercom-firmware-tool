@@ -444,11 +444,23 @@ async fn wait_for_live_marker(cfg: &Config) -> bool {
 /// the filler, so a grab that proceeded anyway could persist the "Loading camera…" frame as the snapshot.
 /// One tmpfs `stat`. ON-DEVICE ONLY: off-device there is no marker/filler, so this is always `true` —
 /// matching [`wait_for_live_marker`], and so it never wrongly aborts an off-device grab that had no marker
-/// to begin with. (If the session tore down and a NEWER ring re-armed within the settle, the marker reads
-/// present again but for the new visitor; the ring runner's post-grab newest-ring re-check discards the
-/// superseded frame, so this need only guard the "went not-live" case.)
+/// to begin with. This guards only the "went not-live" case: a marker that reads present again after a
+/// teardown may belong to a DIFFERENT session (a newer ring, OR a non-ring re-arm such as a manual view),
+/// which presence alone cannot detect — a newer ring is caught by the ring runner's post-grab newest-ring
+/// re-check, and any re-arm (ring or not) is caught by [`ring_session_unchanged`] against the per-arm
+/// generation the ring capture snapshots (issue #180, Codex P2).
 async fn live_still_marked(cfg: &Config) -> bool {
     !cfg.camera_ondevice || live_marker_present_at(crate::av::CAMERA_LIVE_SIGNAL_PATH).await
+}
+
+/// Whether the camera siphon session is STILL the one a ring capture snapshotted — i.e. no re-arm has
+/// happened since (issue #180, Codex P2). av.rs bumps [`crate::av::CAMERA_SESSION_GEN`] once per arm, so a
+/// changed value means the ringing session ended mid-capture and a DIFFERENT session re-armed the live
+/// marker (a manual view, possibly of another entrance panel). The marker/`live_still_marked` presence
+/// checks cannot tell one live session from another; this can. `Relaxed` is sufficient — the bump is a lone
+/// counter with no other state to order against, and the multi-second capture window dwarfs any reordering.
+fn ring_session_unchanged(snapshot: u64) -> bool {
+    crate::av::CAMERA_SESSION_GEN.load(Ordering::Relaxed) == snapshot
 }
 
 /// Grab one JPEG frame, returning the bytes. Assumes the caller already holds its exclusivity guard
@@ -964,6 +976,13 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
         );
         return false;
     }
+    // Bind this ring snapshot to the camera SESSION that is live right now (issue #180, Codex P2). The marker
+    // and the presence re-checks below only test that SOME session is live — they cannot tell one live
+    // session from another. If the ringing session ends mid-capture and a DIFFERENT session (a manual view,
+    // possibly of another entrance panel) re-arms the marker before the grab, presence stays true but the
+    // frame would be that other session's. Snapshot the per-arm generation now and re-check it at each stage;
+    // a change means a re-arm, so discard rather than store another session's frame under this ring's id.
+    let session_gen = crate::av::CAMERA_SESSION_GEN.load(Ordering::Relaxed);
     // Same post-marker settle as the idle path: the marker signals the live cutover has STARTED, but
     // av.rs SIGTERM-respawns the go2rtc producer only AFTER creating it, so this pause lets that respawned
     // LIVE producer begin serving before ffmpeg connects (issue #180). Usually a ring capture is itself the
@@ -983,6 +1002,13 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
         );
         return false;
     }
+    if !ring_session_unchanged(session_gen) {
+        eprintln!(
+            "btmqttd: capture: ring capture skipped (event {id}) — a different camera session re-armed \
+             during the settle; not persisting another session's frame"
+        );
+        return false;
+    }
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
         Err(e) => {
@@ -999,6 +1025,13 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
         eprintln!(
             "btmqttd: capture: ring snapshot discarded (event {id}) — camera went not-live during the grab \
              (session ended); not persisting a loading-filler frame"
+        );
+        return false;
+    }
+    if !ring_session_unchanged(session_gen) {
+        eprintln!(
+            "btmqttd: capture: ring snapshot discarded (event {id}) — a different camera session re-armed \
+             during the grab; not persisting another session's frame"
         );
         return false;
     }
@@ -1080,6 +1113,26 @@ mod tests {
     /// without this their snapshot/mutate/restore sequences would race each other. Each such test holds it
     /// for its whole body; tests that only read pure helpers (e.g. `ring_seed_base`) need not take it.
     static RING_COUNTER_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn ring_session_unchanged_detects_a_re_arm() {
+        // Codex P2 (#180): a ring capture binds to the camera SESSION it started in via av.rs's per-arm
+        // generation, so a mid-capture re-arm — the ringing session ended and a DIFFERENT session (a manual
+        // view, possibly of another entrance panel) re-armed the live marker — reads as a different session
+        // and the snapshot is discarded rather than stored under this ring's id. Hold the counter lock: this
+        // mutates a process-global atomic another counter test could otherwise observe mid-sequence.
+        let _guard = RING_COUNTER_TEST_LOCK.lock().unwrap();
+        let snapshot = crate::av::CAMERA_SESSION_GEN.load(Ordering::Relaxed);
+        assert!(ring_session_unchanged(snapshot), "same generation ⇒ same session, the capture may proceed");
+        // A genuine re-arm bumps the generation (av.rs does this once per siphon arm).
+        crate::av::CAMERA_SESSION_GEN.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            !ring_session_unchanged(snapshot),
+            "a re-arm (generation bump) must read as a different session so the snapshot is discarded"
+        );
+        // Restore so parallel/subsequent readers see a stable value.
+        crate::av::CAMERA_SESSION_GEN.fetch_sub(1, Ordering::Relaxed);
+    }
 
     #[test]
     fn pct_encode_userinfo_passes_base64url_and_escapes_punctuation() {

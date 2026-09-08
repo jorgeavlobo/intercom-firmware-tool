@@ -27,7 +27,7 @@
 //! and tear down a session — not here.)
 
 use std::net::{IpAddr, Ipv4Addr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,6 +76,18 @@ pub(crate) const CAMERA_LIVE_SIGNAL_PATH: &str = "/var/run/btmqttd/camera-live";
 /// absent = "not live yet"); the first cold producer's filler branch removes any stale copy. MUST equal the
 /// `READY=` path the generated wrapper writes (`Go2RtcConfig.OnDeviceCameraLiveReadyPath`).
 const LIVE_READY_PATH: &str = "/var/run/btmqttd/camera-live-ready";
+
+/// A monotonic generation stamped once per SIPHON ARM (issue #180, Codex P2), so a consumer can bind a
+/// capture to the SPECIFIC camera session it started in and detect a session change mid-capture. Bumped the
+/// instant [`monitor`] arms a new siphon (a media-start after the previous session tore down) — NOT on the
+/// per-iteration cutover retries, which never re-arm — so each armed session carries a distinct value.
+/// `capture.rs`'s ring snapshot reads it when the camera first goes live and re-checks it before persisting:
+/// the live-marker and its presence re-checks only test that SOME session is live, not that it is the SAME
+/// one, so if the ringing session ends mid-capture and a different session (a manual view, possibly of
+/// another entrance panel) re-arms the marker, this generation changes and the snapshot is discarded rather
+/// than stored under the wrong ring event. Starts at 0; off-device it never bumps (the monitor never routes
+/// there), so an off-device reader always sees a stable 0.
+pub(crate) static CAMERA_SESSION_GEN: AtomicU64 = AtomicU64::new(0);
 
 /// The "Loading camera…" filler clip the go2rtc producer wrapper loops while the siphon is NOT armed
 /// (issue #180). Named here ONLY so the filler→live cutover can identify a running filler producer by its
@@ -347,6 +359,10 @@ async fn monitor(
                         // the cutover each loop pass — so the viewer reaches the live feed within seconds
                         // instead of staying on "Loading…" until TEARDOWN (issue #180, Finding A).
                         siphon = Some(s);
+                        // Stamp a fresh session generation BEFORE creating the live marker below, so any
+                        // consumer that observes this session's marker also observes its generation (issue
+                        // #180, Codex P2). Bumped only here — on a genuine re-arm — never on the retries.
+                        CAMERA_SESSION_GEN.fetch_add(1, Ordering::Relaxed);
                         live_marked = cut_over_to_live(
                             cfg,
                             PRODUCER_INPUTS,
