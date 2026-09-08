@@ -117,8 +117,8 @@ namespace IntercomFirmwareTool.Core
         public static readonly ArmBinary Ffmpeg = new(
             Name: "ffmpeg",
             InstallPath: "/usr/sbin/ffmpeg",
-            Length: 2_996_128,
-            Sha256Hex: "c8a6810d4862a37f9501f4870068d300adbfd2a882f088002ad12efff42eb5b4",
+            Length: 2_996_144,
+            Sha256Hex: "eeaf8fc0983038f165074ccadae8ead437fe72d30828a4149993875b97674443",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.ffmpeg",
             LicenseResourceName:
                 "IntercomFirmwareTool.Core.licenses.ffmpeg-COPYING.LGPLv2.1.txt",
