@@ -315,17 +315,12 @@ mod tests {
         assert!(!cmdline_is_producer(&[], ff, inputs));
     }
 
-    #[test]
-    fn scan_any_producer_finds_nothing_without_a_matching_producer() {
-        // scan_any_producer re-uses the SAME identification as the SIGTERM path (argv[0] == ffmpeg AND
-        // `-i <input>` AND parent == go2rtc daemon), so with no such producer alive it reports false. The
-        // test env has no `/usr/sbin/ffmpeg -i /etc/btmqttd/go2rtc/loading.mp4` child of `/usr/sbin/go2rtc`,
-        // so the real `/proc` scan is deterministically false here — this pins that the read-only scan does
-        // not over-match some unrelated running process (e.g. this test binary). The positive path (a real
-        // go2rtc filler child) is exercised by the on-device cutover, like the SIGTERM path above.
-        assert!(!scan_any_producer(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, &[CLIP]));
-        assert!(!scan_any_producer(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, &[SDP, CLIP]));
-    }
+    // NB: `scan_any_producer` (the read-only /proc walk) has no host-/proc test of its own — an assertion
+    // over the live `/proc` would depend on ambient host processes (it could flake if a machine happened to
+    // run a `/usr/sbin/go2rtc` parent with a matching `/usr/sbin/ffmpeg -i <input>` child). Its matching
+    // logic IS covered hermetically by the pure `cmdline_is_producer` / `parse_ppid` tests above, exactly as
+    // the analogous SIGTERM walk (`terminate_go2rtc_producers`) is; the live scan is exercised end-to-end by
+    // the on-device cutover.
 
     #[test]
     fn parse_ppid_reads_the_parent_pid_field() {
