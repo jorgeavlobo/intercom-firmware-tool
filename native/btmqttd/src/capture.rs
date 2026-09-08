@@ -87,12 +87,28 @@ const RING_FRESH_WINDOW: Duration = Duration::from_secs(120);
 /// two, so this must comfortably exceed that; ffmpeg is killed if it overruns.
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// How long to hold the panel up for an idle/button capture. Comfortably longer than the warm-up
-/// delay plus [`CAPTURE_TIMEOUT`], so the SIP session can't lapse mid-grab even under a very short
-/// `CAMERA_VIEW_IDLE_SECS` (which a `ViewCmd::Start` window would honour and could cap at 1 s). We use
-/// `ViewCmd::Hold` with this ABSOLUTE expiry: its deadline governs independently of that manual window
-/// (see `sip::governing_deadline`), so a short manual window can't starve the capture.
-const CAPTURE_HOLD: Duration = Duration::from_secs(30);
+/// Slack added on top of the worst-case idle-capture path when sizing [`CAPTURE_HOLD`], so the SIP hold
+/// still comfortably outlasts the grab rather than ending the instant the last sub-step's own deadline
+/// would (scheduler jitter, the brief steps around the timed ones).
+const CAPTURE_HOLD_SLACK: Duration = Duration::from_secs(5);
+
+/// How long to hold the panel up for an idle/button capture. Sized to cover the ENTIRE worst-case grab
+/// path an idle capture now runs before it finishes — the bounded live-marker wait, the post-cutover
+/// settle, and the ffmpeg grab itself — plus [`CAPTURE_HOLD_SLACK`]:
+/// [`LIVE_MARKER_WAIT`] + [`LIVE_CUTOVER_SETTLE`] + [`CAPTURE_TIMEOUT`] + slack. Computing it from those
+/// constituents (rather than a bare constant) guarantees the SIP session can't lapse mid-grab even in the
+/// worst case where the marker takes its full bound to appear and ffmpeg then runs to its own timeout —
+/// otherwise a 30 s hold could expire ~12 s into a grab that started ~17 s after the wake (issue #180
+/// added the marker wait + settle ahead of the grab; without this the hold budget no longer covered them).
+/// We use `ViewCmd::Hold` with this ABSOLUTE expiry: its deadline governs independently of the manual
+/// `CAMERA_VIEW_IDLE_SECS` window (which a `ViewCmd::Start` could cap at 1 s), see `sip::governing_deadline`,
+/// so a short manual window can't starve the capture, and this longer hold doesn't shorten a manual view.
+const CAPTURE_HOLD: Duration = Duration::from_secs(
+    LIVE_MARKER_WAIT.as_secs()
+        + LIVE_CUTOVER_SETTLE.as_secs()
+        + CAPTURE_TIMEOUT.as_secs()
+        + CAPTURE_HOLD_SLACK.as_secs(),
+);
 
 /// Extra grace added to the wake-suppression linger AFTER [`CAPTURE_HOLD`] expires, covering the SIP
 /// teardown tail: `sip::session` only BEGINS teardown at the Hold deadline, and `teardown_bye` then waits
@@ -1068,6 +1084,24 @@ mod tests {
         let start = tokio::time::Instant::now();
         assert!(wait_for_live_marker(&cfg).await, "off-device: grab may proceed immediately");
         assert!(start.elapsed() < LIVE_MARKER_WAIT, "off-device must not block on the marker wait");
+    }
+
+    #[test]
+    fn capture_hold_covers_the_worst_case_grab_path() {
+        // #180 / review finding: the idle/button capture now waits for the live-marker cutover and settles
+        // BEFORE the ffmpeg grab, so the SIP `Hold` must outlast that whole path — the bounded marker wait,
+        // the post-cutover settle, AND the grab's own timeout — or the session could tear down mid-grab and
+        // make captures flaky again. CAPTURE_HOLD is computed as that sum plus slack, so the budget holds by
+        // construction; this test pins the invariant so a later tweak to any constituent that would break it
+        // (e.g. bumping CAPTURE_TIMEOUT without the hold) fails here instead of silently on hardware.
+        assert!(
+            CAPTURE_HOLD >= LIVE_MARKER_WAIT + LIVE_CUTOVER_SETTLE + CAPTURE_TIMEOUT,
+            "the idle-capture SIP hold must cover the full worst-case marker-wait + settle + grab path"
+        );
+        assert!(
+            CAPTURE_HOLD > LIVE_MARKER_WAIT + LIVE_CUTOVER_SETTLE + CAPTURE_TIMEOUT,
+            "the hold must carry positive slack over the tight worst-case bound, not sit exactly on it"
+        );
     }
 
     #[test]

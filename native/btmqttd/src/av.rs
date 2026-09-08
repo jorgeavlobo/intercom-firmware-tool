@@ -193,22 +193,44 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
 }
 
 /// One monitor session: connect and request the stream, then drive the arm/disarm loop to completion
-/// and — on ANY exit — clear the `camera-live` signal. Returns `Ok(())` only when `stopping` was seen;
-/// any I/O error is returned so `run` backs off and reconnects. The armed `:30007` socket lives in
-/// `siphon`; dropping it (on teardown, error, or return) closes it.
+/// and — on ANY exit — clear the `camera-live` signal (and, when the exit dropped an armed+live siphon,
+/// respawn the go2rtc producer to the filler). Returns `Ok(())` only when `stopping` was seen; any I/O
+/// error is returned so `run` backs off and reconnects. The armed `:30007` socket lives in `monitor`'s
+/// `siphon`; its exit (on teardown, error, or return) drops it and stops the fan-out.
 async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
     sock.flush().await?;
 
     // Drive the monitor to completion; whatever ends it (a clean stop or an I/O error), the armed
-    // :30007 siphon — if any — drops with `sock`/`siphon`, so the fan-out has stopped. Clear the live
-    // signal (issue #180) as a BACKSTOP to the inline TEARDOWN clear below: a stale marker would make the
-    // next cold producer open serve a live feed with no RTP behind it instead of the "Loading camera…"
-    // filler. Best-effort; a no-op when this session never armed. (The signal is only ever set in
-    // on-device mode — off-device `arm()` never creates it — so this is a harmless no-op there too.)
-    let result = monitor(&mut sock, cfg, stopping).await;
+    // :30007 siphon — if any — drops with `sock`/`siphon`, so the fan-out has stopped. `monitor` reports
+    // via `live_marked` whether it exited while the producer was cut over to the LIVE feed (an armed,
+    // marker-set siphon), which the arm/teardown branches keep in step with the marker.
+    let mut live_marked = false;
+    let result = monitor(&mut sock, cfg, stopping, &mut live_marked).await;
+    // Clear the live signal (issue #180) as a BACKSTOP to the inline TEARDOWN clear inside `monitor`: a
+    // stale marker would make the next cold producer open serve a live feed with no RTP behind it instead
+    // of the "Loading camera…" filler. Best-effort; a no-op when this session never armed. (The signal is
+    // only ever set in on-device mode — off-device `arm()` never creates it — so this is a harmless no-op
+    // there too.)
     clear_camera_live_signal(cfg).await;
+    // If the monitor exited (an EOF / read error, or a clean stop) while it was still LIVE — the siphon was
+    // armed AND the producer had been cut over to the live feed — a still-attached Home Assistant producer
+    // is now reading the SILENT live SDP (the :30007 fan-out dropped with the socket). The TEARDOWN branch
+    // handles the panel-initiated end; THIS covers the monitor-socket-initiated end, which `monitor` cannot
+    // clear itself because it does not respawn on the way out. Respawn WHICHEVER producer is running so its
+    // wrapper re-reads the just-cleared marker and cuts to the filler PROMPTLY, instead of the HA view
+    // sitting on the silent SDP until go2rtc's ~15 s i/o-timeout falls back on its own (issue #180). The
+    // clear above already ran, so ORDER holds (marker gone before the respawn reads it). `live_marked` is
+    // only ever true in on-device mode (the marker is created off-device by nothing), so this never touches
+    // an off-device path, and it is a no-op when no producer is attached (nobody watching).
+    if live_marked {
+        crate::procsig::respawn_go2rtc_producers(
+            PRODUCER_INPUTS,
+            "cut the live feed back to the loading filler after the camera monitor session dropped",
+        )
+        .await;
+    }
     result
 }
 
@@ -216,21 +238,28 @@ async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Resu
 /// the `camera-live` signal on EVERY exit path, not just the clean ones). Owns the armed `:30007`
 /// `siphon` socket, so returning from here drops it and stops the fan-out. Returns `Ok(())` only when
 /// `stopping` was seen; any I/O error is propagated so `run` backs off and reconnects.
+///
+/// `live_marked` is an OUT-parameter the caller reads AFTER any return (including a `?`-propagated error):
+/// it is left `true` iff this session exits with the producer cut over to the LIVE feed (siphon armed AND
+/// marker set). [`session`] uses it to respawn the producer back to the filler on a monitor-socket-initiated
+/// exit — the case `monitor` cannot handle itself, since it does not respawn on the way out (issue #180).
 async fn monitor(
     sock: &mut TcpStream,
     cfg: &Arc<Config>,
     stopping: &Arc<AtomicBool>,
+    live_marked: &mut bool,
 ) -> std::io::Result<()> {
     let mut framer = Framer::default();
     let mut buf = [0u8; 4096];
     let mut frames: Vec<String> = Vec::new();
     let mut siphon: Option<TcpStream> = None; // Some(_) while our client is added
-    // Whether the camera-live marker is confirmed set AND the go2rtc producer cut over for the CURRENT
-    // `siphon` (issue #180, Finding A). Tracked ALONGSIDE `siphon` because the marker write can fail
-    // transiently (a tmpfs blip) even though the fan-out armed cleanly: the siphon is then `Some` while the
-    // viewer is still on the "Loading…" filler. This flag lets the loop RE-attempt the cutover each pass
-    // (see below) instead of leaving it stuck until TEARDOWN. Reset to false whenever `siphon` drops.
-    let mut live_marked = false;
+    // `*live_marked`: whether the camera-live marker is confirmed set AND the go2rtc producer cut over for
+    // the CURRENT `siphon` (issue #180, Finding A). Tracked ALONGSIDE `siphon` because the marker write can
+    // fail transiently (a tmpfs blip) even though the fan-out armed cleanly: the siphon is then `Some` while
+    // the viewer is still on the "Loading…" filler. This flag lets the loop RE-attempt the cutover each pass
+    // (see below) instead of leaving it stuck until TEARDOWN, and it is the OUT-parameter `session` reads on
+    // exit to decide whether to respawn the producer back to the filler. Reset to false whenever `siphon`
+    // drops. The caller seeds it `false`; a fresh session starts with no siphon, so that is correct.
 
     // Confirm the monitor ACK before trusting the stream. The gateway may accept the TCP
     // connection yet REFUSE the monitor with a NACK (`*#*0##`) and then stay idle — the
@@ -281,8 +310,9 @@ async fn monitor(
                     // watching).
                     clear_camera_live_signal(cfg).await;
                     // The siphon is gone, so the CURRENT-siphon live cutover no longer applies — reset the
-                    // flag so a future re-arm starts from "not yet live" (issue #180, Finding A).
-                    live_marked = false;
+                    // flag so a future re-arm starts from "not yet live", and so `session` does not respawn
+                    // AGAIN on exit for a siphon this branch already cut back to the filler (issue #180).
+                    *live_marked = false;
                     crate::procsig::respawn_go2rtc_producers(
                         PRODUCER_INPUTS,
                         "cut the live feed back to the loading filler after the panel session ended",
@@ -303,7 +333,7 @@ async fn monitor(
                         // the cutover each loop pass — so the viewer reaches the live feed within seconds
                         // instead of staying on "Loading…" until TEARDOWN (issue #180, Finding A).
                         siphon = Some(s);
-                        live_marked =
+                        *live_marked =
                             cut_over_to_live(cfg, "cut the loading filler over to the live camera feed")
                                 .await;
                         eprintln!(
@@ -326,8 +356,8 @@ async fn monitor(
         // Runs each loop pass — as frames arrive (frequently, on a live session) or on the READ_IDLE wakeup
         // — so a transient tmpfs failure recovers within seconds. `cut_over_to_live` is on-device-gated and
         // best-effort (it returns false off-device, where nothing is ever marked live, so this never spins).
-        if siphon.is_some() && !live_marked {
-            live_marked =
+        if siphon.is_some() && !*live_marked {
+            *live_marked =
                 cut_over_to_live(cfg, "retry cutting the loading filler over to the live camera feed").await;
         }
 
