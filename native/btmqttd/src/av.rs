@@ -88,6 +88,13 @@ const PRODUCER_INPUTS: &[&str] = &[crate::sprop::SDP_PATH, LOADING_CLIP_PATH];
 /// it declares the filler→live switch complete (see there).
 const FILLER_INPUTS: &[&str] = &[LOADING_CLIP_PATH];
 
+/// The LIVE-ONLY producer input (issue #180): identifies a producer reading the runtime SDP (`-i`
+/// [`crate::sprop::SDP_PATH`]), i.e. the LIVE feed — distinct from the filler. The session-EXIT cutover uses
+/// it because that path fires on EVERY monitor drop, including cold sessions that never armed: targeting the
+/// live producer alone cuts a now-SILENT live feed to the filler while leaving a cold filler (never silent)
+/// untouched, so a bare monitor reconnect can't needlessly blip a "Loading…" that was already correct.
+const LIVE_INPUTS: &[&str] = &[crate::sprop::SDP_PATH];
+
 /// A/V daemon reply frames. These are the SAME OpenWebNet control frames as the monitor
 /// ACK/NACK, so alias the shared `crate::own` definitions rather than re-spelling the bytes —
 /// the control-frame definition then has one source of truth and cannot drift.
@@ -167,6 +174,7 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     // a clean boot, where no producer is running yet.
     clear_and_respawn_to_filler(
         &cfg,
+        PRODUCER_INPUTS,
         "reset any surviving go2rtc producer to the loading filler after a btmqttd restart",
     )
     .await;
@@ -196,69 +204,60 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     }
 }
 
-/// One monitor session: connect and request the stream, then drive the arm/disarm loop to completion
-/// and — on ANY exit — clear the `camera-live` signal (and, when the exit dropped an armed+live siphon,
-/// respawn the go2rtc producer to the filler). Returns `Ok(())` only when `stopping` was seen; any I/O
-/// error is returned so `run` backs off and reconnects. The armed `:30007` socket lives in `monitor`'s
-/// `siphon`; its exit (on teardown, error, or return) drops it and stops the fan-out.
+/// One monitor session: connect and request the stream, then drive the arm/disarm loop to completion and —
+/// on ANY exit — clear the `camera-live` signal and cut a still-attached LIVE producer back to the filler.
+/// Returns `Ok(())` only when `stopping` was seen; any I/O error is returned so `run` backs off and
+/// reconnects. The armed `:30007` socket lives in `monitor`'s `siphon`; its exit (on teardown, error, or
+/// return) drops it and stops the fan-out.
 async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Result<()> {
     let mut sock = TcpStream::connect((cfg.own_host.as_str(), cfg.own_port_mon)).await?;
     sock.write_all(MONITOR_REQ).await?;
     sock.flush().await?;
 
-    // Drive the monitor to completion; whatever ends it (a clean stop or an I/O error), the armed
-    // :30007 siphon — if any — drops with `sock`/`siphon`, so the fan-out has stopped. `monitor` reports
-    // via `live_marked` whether it exited while the producer was cut over to the LIVE feed (an armed,
-    // marker-set siphon), which the arm/teardown branches keep in step with the marker.
-    let mut live_marked = false;
-    let result = monitor(&mut sock, cfg, stopping, &mut live_marked).await;
-    // On ANY monitor exit, clear the live signal (issue #180) as a BACKSTOP to the inline TEARDOWN clear:
-    // a stale marker would make the next cold producer serve a live feed with no RTP behind it instead of
-    // the "Loading camera…" filler. If the session exited while it was still LIVE — the siphon was armed
-    // AND the producer had been cut over (`live_marked`) — a still-attached Home Assistant producer is now
-    // reading the SILENT live SDP (the :30007 fan-out dropped with the socket), so ALSO respawn it to the
-    // filler: this covers the monitor-socket-initiated end the TEARDOWN branch can't reach. Route that
-    // through `clear_and_respawn_to_filler`, which respawns ONLY if the clear is confirmed (a lost removal
-    // must not serve the stale marker's live SDP). When the session never went live, just clear the marker
-    // as the backstop — no producer was ever cut to live. Both are on-device-only no-ops off-device.
-    if live_marked {
-        clear_and_respawn_to_filler(
-            cfg,
-            "cut the live feed back to the loading filler after the camera monitor session dropped",
-        )
-        .await;
-    } else {
-        clear_camera_live_signal(cfg).await;
-    }
+    // Drive the monitor to completion; whatever ends it (a clean stop or an I/O error), the armed :30007
+    // siphon — if any — drops with `sock`, so the fan-out has stopped and any producer reading the runtime
+    // SDP is now SILENT.
+    let result = monitor(&mut sock, cfg, stopping).await;
+    // On ANY monitor exit, clear the live signal (issue #180) and respawn the LIVE producer to the filler —
+    // UNCONDITIONALLY, not gated on whether the in-monitor cutover confirmed. A producer can reach the live
+    // SDP ASYNCHRONOUSLY after `cut_over_to_live` returned false (the SIGTERM'd filler exits and go2rtc
+    // restarts the wrapper onto the now-present marker), so "the cutover never confirmed" is NOT proof that
+    // no producer is live; gating the respawn on it would leave that async-live viewer on the silent SDP
+    // until go2rtc's i/o-timeout. `clear_and_respawn_to_filler` still respawns ONLY if the clear is
+    // confirmed (a lost removal must not serve the stale marker's live SDP). Target [`LIVE_INPUTS`] (the SDP
+    // producer only): this fires on EVERY monitor drop, so a cold session that only ever served the filler
+    // must not have it needlessly restarted. On-device-only no-op off-device (and when nothing is attached).
+    clear_and_respawn_to_filler(
+        cfg,
+        LIVE_INPUTS,
+        "cut the live feed back to the loading filler after the camera monitor session dropped",
+    )
+    .await;
     result
 }
 
 /// The monitor read/arm loop for one connected session (split from [`session`] so the caller can clear
-/// the `camera-live` signal on EVERY exit path, not just the clean ones). Owns the armed `:30007`
-/// `siphon` socket, so returning from here drops it and stops the fan-out. Returns `Ok(())` only when
-/// `stopping` was seen; any I/O error is propagated so `run` backs off and reconnects.
-///
-/// `live_marked` is an OUT-parameter the caller reads AFTER any return (including a `?`-propagated error):
-/// it is left `true` iff this session exits with the producer cut over to the LIVE feed (siphon armed AND
-/// marker set). [`session`] uses it to respawn the producer back to the filler on a monitor-socket-initiated
-/// exit — the case `monitor` cannot handle itself, since it does not respawn on the way out (issue #180).
+/// the `camera-live` signal and respawn on EVERY exit path, not just the clean ones). Owns the armed
+/// `:30007` `siphon` socket, so returning from here drops it and stops the fan-out. Returns `Ok(())` only
+/// when `stopping` was seen; any I/O error is propagated so `run` backs off and reconnects. The back-to-
+/// filler cutover on exit is the caller's ([`session`]) responsibility and is UNCONDITIONAL — it does not
+/// depend on any state this loop reports — so no out-parameter is needed (issue #180).
 async fn monitor(
     sock: &mut TcpStream,
     cfg: &Arc<Config>,
     stopping: &Arc<AtomicBool>,
-    live_marked: &mut bool,
 ) -> std::io::Result<()> {
     let mut framer = Framer::default();
     let mut buf = [0u8; 4096];
     let mut frames: Vec<String> = Vec::new();
     let mut siphon: Option<TcpStream> = None; // Some(_) while our client is added
-    // `*live_marked`: whether the camera-live marker is confirmed set AND the go2rtc producer cut over for
-    // the CURRENT `siphon` (issue #180, Finding A). Tracked ALONGSIDE `siphon` because the marker write can
-    // fail transiently (a tmpfs blip) even though the fan-out armed cleanly: the siphon is then `Some` while
-    // the viewer is still on the "Loading…" filler. This flag lets the loop RE-attempt the cutover each pass
-    // (see below) instead of leaving it stuck until TEARDOWN, and it is the OUT-parameter `session` reads on
-    // exit to decide whether to respawn the producer back to the filler. Reset to false whenever `siphon`
-    // drops. The caller seeds it `false`; a fresh session starts with no siphon, so that is correct.
+    // `live_marked`: whether the camera-live marker is confirmed set AND the go2rtc producer cut over for
+    // the CURRENT `siphon` (issue #180, Finding A). Tracked ALONGSIDE `siphon` because the marker write /
+    // cutover confirmation can fail transiently even though the fan-out armed cleanly: the siphon is then
+    // `Some` while the viewer is still on the "Loading…" filler. This flag lets the loop RE-attempt the
+    // cutover each pass (see below) instead of leaving it stuck until TEARDOWN. Reset to false whenever
+    // `siphon` drops. Purely LOCAL: the session-exit respawn no longer keys off it (see [`session`]).
+    let mut live_marked = false;
 
     // Confirm the monitor ACK before trusting the stream. The gateway may accept the TCP
     // connection yet REFUSE the monitor with a NACK (`*#*0##`) and then stay idle — the
@@ -305,24 +304,25 @@ async fn monitor(
                     // go2rtc's ~15 s i/o-timeout before falling back). This fires only on a genuine media-end
                     // TEARDOWN — the make-before-break SIP refresh keeps media continuous and never emits
                     // `*7*0*##` — and the respawn is a no-op when no producer is attached (nobody watching).
-                    // The siphon is gone, so cut a still-attached consumer back to the filler. Reset
-                    // `live_marked` (so a future re-arm starts from "not yet live", and `session` does not
-                    // respawn AGAIN on exit for a siphon this branch handled) ONLY once the cutover is
-                    // CONFIRMED. If the clear/respawn FAILS (a transient unlink failure left the marker and
-                    // the live producer in place), KEEP `live_marked` set — do NOT reset it — so `session`'s
-                    // exit path retries the clear+respawn once the fs recovers, instead of taking its
-                    // no-respawn branch and abandoning an attached viewer on the silent SDP (issue #180).
+                    // The siphon is gone — cut a still-attached consumer back to the filler.
+                    // `clear_and_respawn_to_filler` clears the marker FIRST and respawns ONLY if that is
+                    // confirmed (a lost removal must not serve the stale marker's live SDP). If the clear
+                    // fails, the running producer is left to go2rtc's i/o-timeout AND the session-exit cutover
+                    // retries it unconditionally, so the viewer is never abandoned on the silent SDP. Reset
+                    // `live_marked` — its only role is the retry gate below, itself also guarded by
+                    // `siphon.is_some()` (now `None`), so this is just tidiness for a future re-arm.
+                    live_marked = false;
                     if clear_and_respawn_to_filler(
                         cfg,
+                        PRODUCER_INPUTS,
                         "cut the live feed back to the loading filler after the panel session ended",
                     )
                     .await
                     {
-                        *live_marked = false;
                         eprintln!("btmqttd: camera siphon released (session ended)");
                     } else {
                         eprintln!(
-                            "btmqttd: camera siphon released (session ended) but the live marker could not be cleared; keeping the pending-respawn state so the session-exit path retries the cutover to the filler"
+                            "btmqttd: camera siphon released (session ended) but the live marker could not be cleared; the session-exit cutover will retry it"
                         );
                     }
                 }
@@ -339,7 +339,7 @@ async fn monitor(
                         // the cutover each loop pass — so the viewer reaches the live feed within seconds
                         // instead of staying on "Loading…" until TEARDOWN (issue #180, Finding A).
                         siphon = Some(s);
-                        *live_marked = cut_over_to_live(
+                        live_marked = cut_over_to_live(
                             cfg,
                             PRODUCER_INPUTS,
                             "cut the loading filler over to the live camera feed",
@@ -368,8 +368,8 @@ async fn monitor(
         // READ_IDLE wakeup — so it recovers within seconds. On-device-gated and best-effort (off-device
         // `set_camera_live_signal` is false, so this reports not-live without scanning `/proc`, and — the
         // off-device target never routes here — it never spins).
-        if siphon.is_some() && !*live_marked {
-            *live_marked = cut_over_to_live(
+        if siphon.is_some() && !live_marked {
+            live_marked = cut_over_to_live(
                 cfg,
                 FILLER_INPUTS,
                 "retry cutting the loading filler over to the live camera feed",
@@ -563,12 +563,20 @@ async fn clear_camera_live_signal(cfg: &Arc<Config>) -> bool {
 /// re-read the stale PRESENT marker and serve the silent live SDP instead of the filler; the running producer
 /// then falls back on go2rtc's own i/o-timeout. On-device-gated: off-device the clear is a no-op returning
 /// `true` and there is no producer to respawn, so this returns `true` without touching a producer.
-async fn clear_and_respawn_to_filler(cfg: &Arc<Config>, reason: &'static str) -> bool {
+///
+/// `respawn_inputs` names WHICH producer(s) to cut: [`PRODUCER_INPUTS`] (SDP or filler) for the lifecycle
+/// resets that may find either survivor (TEARDOWN, startup, shutdown), or [`LIVE_INPUTS`] (SDP only) for the
+/// session-EXIT cutover, which fires on every monitor drop and must leave a cold filler untouched.
+async fn clear_and_respawn_to_filler(
+    cfg: &Arc<Config>,
+    respawn_inputs: &'static [&'static str],
+    reason: &'static str,
+) -> bool {
     if !clear_camera_live_signal(cfg).await {
         return false;
     }
     if cfg.camera_ondevice {
-        crate::procsig::respawn_go2rtc_producers(PRODUCER_INPUTS, reason).await;
+        crate::procsig::respawn_go2rtc_producers(respawn_inputs, reason).await;
     }
     true
 }
@@ -585,8 +593,12 @@ async fn clear_and_respawn_to_filler(cfg: &Arc<Config>, reason: &'static str) ->
 /// and on-device-only (a no-op off-device, on a clean marker, and where no producer is attached or go2rtc
 /// is going down too).
 pub(crate) async fn shutdown_cleanup(cfg: &Arc<Config>) {
-    clear_and_respawn_to_filler(cfg, "cut the live feed back to the loading filler as btmqttd shuts down")
-        .await;
+    clear_and_respawn_to_filler(
+        cfg,
+        PRODUCER_INPUTS,
+        "cut the live feed back to the loading filler as btmqttd shuts down",
+    )
+    .await;
 }
 
 /// [`clear_camera_live_signal`] with the target path injected (unit-tested on a temp file). An
@@ -986,6 +998,9 @@ mod tests {
         // The FILLER-only set is exactly the loading clip: the retry SIGTERMs with it (so it can't churn the
         // live SDP producer) and the completion re-scan uses it to confirm no filler remains.
         assert_eq!(FILLER_INPUTS, &[LOADING_CLIP_PATH]);
+        // The LIVE-only set is exactly the runtime SDP: the session-EXIT cutover SIGTERMs with it so a bare
+        // monitor drop cuts a silent live feed to the filler without needlessly restarting a cold filler.
+        assert_eq!(LIVE_INPUTS, &[crate::sprop::SDP_PATH]);
         assert_eq!(crate::sprop::SDP_PATH, "/var/run/btmqttd/doorbell.sdp");
         assert_eq!(LOADING_CLIP_PATH, "/etc/btmqttd/go2rtc/loading.mp4");
         // The signal path lives on tmpfs (cleared every boot ⇒ defaults to "not live") and must match the
@@ -1028,7 +1043,7 @@ mod tests {
         assert!(!cfg.camera_ondevice);
         assert!(clear_camera_live_signal(&cfg).await, "off-device: marker trivially absent → true");
         assert!(
-            clear_and_respawn_to_filler(&cfg, "test: off-device clear+respawn is a no-op").await,
+            clear_and_respawn_to_filler(&cfg, LIVE_INPUTS, "test: off-device clear+respawn is a no-op").await,
             "off-device: clears (true) and skips the respawn"
         );
     }
