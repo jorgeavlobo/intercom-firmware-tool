@@ -66,6 +66,50 @@ namespace IntercomFirmwareTool.Core
         public const string OnDeviceFfmpegPath = "/usr/sbin/ffmpeg";
 
         /// <summary>
+        /// The on-device "Loading camera…" filler clip (issue #180). go2rtc's producer wrapper
+        /// (<see cref="BuildOnDeviceProducerScript"/>) loops this MP4 with <c>-stream_loop -1 -c copy</c>
+        /// on a COLD open — before btmqttd has armed the real siphon — so go2rtc's lazy <c>exec:</c>
+        /// producer ALWAYS has decodable H.264 to hand Home Assistant and never i/o-times-out during the
+        /// panel's ~3 s SIP warm-up (the blank-on-cold-open bug). The installer ships the embedded
+        /// <c>Payload/mqtt/loading.mp4</c> here (0644, static seed on the read-only rootfs — no runtime
+        /// write needed). A container-framed MP4 is required (a raw <c>.h264</c> does NOT loop cleanly
+        /// under <c>-stream_loop -c copy</c>).
+        /// </summary>
+        public const string OnDeviceLoadingClipPath = "/etc/btmqttd/go2rtc/loading.mp4";
+
+        /// <summary>
+        /// The on-device go2rtc producer WRAPPER script (issue #180) — a generated POSIX-sh script
+        /// (<see cref="BuildOnDeviceProducerScript"/>) go2rtc runs as its <c>exec:</c> source instead of
+        /// invoking ffmpeg directly. On each (re)start it checks <see cref="OnDeviceCameraLiveSignalPath"/>
+        /// and <c>exec</c>s EITHER the live feed (reads <see cref="OnDeviceRuntimeSdpPath"/>, exactly
+        /// today's live producer, so sprop learning is unchanged) or the filler
+        /// (<see cref="OnDeviceLoadingClipPath"/>). Installed 0755 root:root.
+        /// </summary>
+        public const string OnDeviceProducerScriptPath = "/etc/btmqttd/go2rtc/camera-producer.sh";
+
+        /// <summary>
+        /// The on-device "camera is live now" signal file (issue #180). btmqttd's <c>av.rs</c> CREATES it
+        /// the instant the real siphon arms (RTP now flowing) and REMOVES it when the siphon is released;
+        /// the producer wrapper reads its EXISTENCE to choose the live feed over the filler. On tmpfs
+        /// (<c>/var/run/btmqttd</c>, cleared every boot ⇒ defaults to "not live", so a cold boot serves the
+        /// filler). Must equal <c>av.rs</c>'s <c>CAMERA_LIVE_SIGNAL_PATH</c> and the wrapper's <c>SIG=</c>.
+        /// </summary>
+        public const string OnDeviceCameraLiveSignalPath = "/var/run/btmqttd/camera-live";
+
+        /// <summary>
+        /// The on-device "the producer is actually serving the LIVE feed now" readiness file (issue #180).
+        /// The producer WRAPPER writes it: it creates this file on the branch that <c>exec</c>s the live feed
+        /// and removes it on the branch that <c>exec</c>s the filler — BEFORE the <c>exec</c>, so it records
+        /// the branch the wrapper committed to even during its transient <c>/bin/sh</c> phase. btmqttd's
+        /// <c>av.rs</c> READS its existence to confirm the filler→live cutover actually completed (a POSITIVE
+        /// signal that closes the sub-millisecond race a "no filler process in <c>/proc</c>" check could not).
+        /// On tmpfs (cleared every boot ⇒ absent = "not live yet"); the first cold producer's filler branch
+        /// removes any stale copy. Must equal <c>av.rs</c>'s <c>LIVE_READY_PATH</c> and the wrapper's
+        /// <c>READY=</c>.
+        /// </summary>
+        public const string OnDeviceCameraLiveReadyPath = "/var/run/btmqttd/camera-live-ready";
+
+        /// <summary>
         /// The RUNTIME SDP go2rtc's <c>exec -i</c> reads on the device — on <b>tmpfs</b>, because the
         /// rootfs (including <c>/etc</c>) is mounted read-only. The installer writes the read-only
         /// TEMPLATE SDP under <c>/etc/btmqttd/go2rtc/</c>; the <c>go2rtcd</c> init script (re)assembles
@@ -197,21 +241,29 @@ namespace IntercomFirmwareTool.Core
 
         /// <summary>
         /// Build the COMPLETE on-device <c>go2rtc.yaml</c> (issue #120). go2rtc runs ON the panel: it
-        /// reads the panel's cleartext RTP from the loopback SDP via the on-device ffmpeg, copies the
-        /// H.264 into RTSP, and serves it to Home Assistant directly (no HA-side go2rtc). Policy:
+        /// serves the entrance camera as RTSP to Home Assistant directly (no HA-side go2rtc). Policy:
         /// <list type="bullet">
         /// <item>the control API + web UI bind <b>loopback only</b> (<c>127.0.0.1:1984</c>) — never LAN;</item>
         /// <item>RTSP is served on the LAN (<c>:8554</c>, the only port the firewall opens) with
         /// <b>mandatory</b> username/password auth;</item>
-        /// <item>the stream is <b>video-only</b> (Phase 1) — the ffmpeg <c>exec</c> uses <c>-an -c:v copy</c>.</item>
+        /// <item>the stream is <b>video-only</b> (Phase 1) — the ffmpeg the wrapper runs uses <c>-an -c:v copy</c>.</item>
         /// </list>
-        /// <paramref name="ffmpegPath"/> is an absolute on-device path. The <c>exec -i</c> input is fixed
-        /// to the tmpfs <see cref="OnDeviceRuntimeSdpPath"/> (NOT the read-only <c>/etc</c> template):
-        /// go2rtc reads the runtime SDP that <c>go2rtcd</c> reassembles at boot and that <c>sprop.rs</c>
-        /// patches. LF line endings, trailing newline.
+        /// The stream's <c>exec:</c> source is the generated producer WRAPPER
+        /// (<c>/bin/sh <see cref="OnDeviceProducerScriptPath"/> {output}</c>, see
+        /// <see cref="BuildOnDeviceProducerScript"/>) — NOT ffmpeg directly (issue #180). The shell is
+        /// named by its ABSOLUTE path (<c>/bin/sh</c> — present on the BusyBox device): go2rtc may spawn
+        /// its <c>exec:</c> command with a minimal <c>PATH</c>, so a bare <c>sh</c> could fail to resolve.
+        /// The wrapper
+        /// checks the <see cref="OnDeviceCameraLiveSignalPath"/> signal and <c>exec</c>s either the live
+        /// feed (reading the tmpfs <see cref="OnDeviceRuntimeSdpPath"/>, exactly the pre-#180 producer, so
+        /// sprop learning is unchanged) or the "Loading camera…" filler
+        /// (<see cref="OnDeviceLoadingClipPath"/>) on a cold open. That indirection is why this yaml no
+        /// longer names an ffmpeg path — the wrapper does. <c>{output}</c> stays go2rtc's own literal
+        /// placeholder (it substitutes its internal RTSP sink and passes it to the wrapper as <c>$1</c>).
+        /// LF line endings, trailing newline.
         /// </summary>
         public static string BuildOnDeviceYaml(
-            string streamName, string ffmpegPath, string rtspUser, string rtspPass)
+            string streamName, string rtspUser, string rtspPass)
         {
             // RTSP is LAN-facing, so auth is MANDATORY (issue #120, decision #3). go2rtc treats an
             // EMPTY username as "no auth" and serves the stream to any LAN client — so an empty
@@ -245,48 +297,94 @@ namespace IntercomFirmwareTool.Core
             sb.Append(string.Create(ci, $"  password: {YamlDoubleQuoted(rtspPass)}\n"));
             sb.Append("log:\n");
             sb.Append("  format: text\n");
-            // The stream: ffmpeg reads the loopback SDP and copies H.264 into go2rtc's internal RTSP
-            // ({output}). Video only — the minimal on-device ffmpeg has no audio codecs until Phase 3
-            // (#105), so -an drops the SDP's (absent) audio outright.
+            // The stream (issue #180). go2rtc's exec: source is the producer WRAPPER, not ffmpeg directly:
+            // go2rtc's lazy exec: producer is spawned only when a consumer asks for the stream, and on a
+            // COLD open (Home Assistant opening the still panel while the panel is still ~3 s into its SIP
+            // warm-up) an ffmpeg pointed straight at the not-yet-flowing RTP i/o-times-out before a single
+            // frame arrives — so HA, which just waits on the still, never gets a picture and the stream
+            // dies to a black wait. The wrapper fixes that: with no camera-live signal yet it exec's a
+            // filler that loops loading.mp4 (always-decodable H.264), so the producer locks on instantly
+            // and HA holds the "Loading camera…" card; the moment btmqttd arms the real siphon it creates
+            // the signal and SIGTERMs the producer, and go2rtc respawns the wrapper into the LIVE feed. The
+            // live branch is byte-for-byte the pre-#180 producer (same -i runtime SDP, same second
+            // sprop-RTP output), so sprop learning is unchanged — see BuildOnDeviceProducerScript for the
+            // full ffmpeg rationale (plain input defaults, the sprop-learning second output, etc.).
             //
-            // Deliberately PLAIN defaults on the input — no -analyzeduration/-probesize/-reorder_queue_size/
-            // -max_delay tuning. Two paths get `-c:v copy` its 640x480 dimensions. The FAST path is the
-            // sprop-parameter-sets in this SDP: btmqttd auto-provisions them into doorbell.sdp on first
-            // boot (native/btmqttd/src/sprop.rs), and the decoder-enabled ffmpeg (native/ffmpeg/build.sh)
-            // reads them at open — so it resolves the video IMMEDIATELY instead of waiting for the panel's
-            // next in-stream SPS/PPS. The FALLBACK — before that provisioning completes, or if on-demand
-            // is off — is the H.264 PARSER recovering the SPS/PPS from the in-stream data; correct but
-            // slow, since the panel emits an in-stream SPS only ~every 20 s. Either way `-c:v copy`
-            // publishes to go2rtc with no input tuning.
-            //
-            // HARDWARE-DIAGNOSED (issue #120, C100X): an earlier revision widened the RTP jitter buffer
-            // (-reorder_queue_size 3000 -max_delay 5000000) to catch the sparse in-stream SPS/PPS. That
-            // was ACTIVELY HARMFUL here: the ingest is loopback (127.0.0.2), which never reorders, so the
-            // oversized reorder queue made ffmpeg stall waiting for sequence numbers that never arrive and
-            // drop every packet as "RTP: dropping old packet received too late" — the producer never
-            // locked on and go2rtc answered DESCRIBE with 404. Reverting to plain defaults locks on in well
-            // under a second (hardware-verified: 94 frames in 8 s). The extract_extradata/dump_extra
-            // bitstream filters were likewise dropped — the parser already carries the parameter sets into
-            // the announce SDP, so they bought nothing.
-            //
-            // sprop LEARNING (issue #120, hardware-diagnosed on the C100X, revised in PR #129): the panel
-            // only sustains/feeds the video call for a REAL consumed view — a silent probe that brings the
-            // panel up just to run ffmpeg TIMES OUT and never learns. Hardware testing ALSO proved ffmpeg's
-            // -sdp_file CANNOT emit the panel's sprop-parameter-sets on this copy path: it parses the SPS
-            // only far enough to resolve the resolution and never writes the parameter sets into the SDP
-            // (confirmed even with a 25 s analyzeduration). So the derived-SDP mechanism is a dead end.
-            // Instead this SAME ffmpeg (which runs only while a client is watching) is given a SECOND
-            // output that ships a raw H.264 RTP copy to btmqttd:
-            //   -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}
-            // That RTP stream carries the panel's periodic in-band SPS/PPS. btmqttd's sprop.rs binds this
-            // exact loopback port, parses the SPS (NAL 7) / PPS (NAL 8) straight out of the RTP payload,
-            // base64-encodes them and persists sprop-parameter-sets=<b64SPS>,<b64PPS>. Because the output
-            // only runs while a client is actually watching, the learning stays transparent and never
-            // brings the panel up itself.
+            // {output} stays go2rtc's OWN literal placeholder: go2rtc substitutes its internal RTSP sink
+            // and passes it to the wrapper as $1.
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:{ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {OnDeviceRuntimeSdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp {{output}} -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}\"\n"));
+                $"    - \"exec:/bin/sh {OnDeviceProducerScriptPath} {{output}}\"\n"));
+            return sb.ToString();
+        }
+
+        /// <summary>
+        /// Build the on-device go2rtc producer WRAPPER script (issue #180) — a POSIX-<c>sh</c> script
+        /// go2rtc runs as its <c>exec:</c> source (see <see cref="BuildOnDeviceYaml"/>) INSTEAD of invoking
+        /// ffmpeg directly, so the lazy producer can serve an always-ready filler until the real feed is
+        /// live. On each (re)start the script tests <see cref="OnDeviceCameraLiveSignalPath"/> and
+        /// <c>exec</c>s one of two ffmpeg pipelines:
+        /// <list type="bullet">
+        /// <item><b>signal present (siphon armed)</b> → the LIVE feed. This command is byte-for-byte the
+        /// producer go2rtc ran before #180: read the tmpfs <see cref="OnDeviceRuntimeSdpPath"/>, copy H.264
+        /// into RTSP (<c>{output}</c>, passed here as <c>$1</c>), AND ship a second raw-H.264 RTP copy to
+        /// <see cref="OnDeviceSpropRtpEndpoint"/> — so <c>sprop.rs</c>'s parameter-set learning is entirely
+        /// unchanged. Video only (<c>-an</c>); plain input defaults (a widened RTP jitter buffer was
+        /// hardware-proven HARMFUL on the loopback ingest — issue #120).</item>
+        /// <item><b>signal absent (cold)</b> → the FILLER: loop <see cref="OnDeviceLoadingClipPath"/> with
+        /// <c>-re -stream_loop -1 -c copy</c> into RTSP. NO second/sprop output — the filler must never
+        /// feed <c>sprop.rs</c> its own parameter sets, and it never brings the panel up (it reads a local
+        /// file, not the panel), so the panel stays strictly on-demand.</item>
+        /// </list>
+        /// <c>exec</c> is used so the ffmpeg process REPLACES this shell — go2rtc tracks that ffmpeg PID
+        /// directly, so btmqttd's SIGTERM → go2rtc respawns this script → it re-reads the signal (the
+        /// filler→live cutover). <paramref name="ffmpegPath"/> is the absolute on-device ffmpeg path
+        /// (<see cref="OnDeviceFfmpegPath"/> / <c>PayloadBinaries.Ffmpeg.InstallPath</c>). Every path woven
+        /// into the script — <paramref name="ffmpegPath"/>, <see cref="OnDeviceRuntimeSdpPath"/> and
+        /// <see cref="OnDeviceLoadingClipPath"/> — is a FIXED compile-time constant under our control; NO
+        /// untrusted or operator-supplied input is ever interpolated here, so shell injection is not a
+        /// concern. The ffmpeg executable path and each <c>-i</c> input path are still DOUBLE-QUOTED (as
+        /// <c>"$1"</c> already is) as DEFENSIVE hygiene, so a constant that ever gained a SPACE would still
+        /// parse as a single argument — NOT as an injection defense: double quotes still permit
+        /// <c>$(…)</c>/backtick expansion, which is irrelevant precisely because these trusted constants
+        /// contain none. The fixed <c>rtp://…</c> sprop endpoint has no spaces, so it is left unquoted.
+        /// Emitted with LF line endings and a trailing newline (a CRLF shebang would run as
+        /// <c>/bin/sh\r</c>); installed <c>0755</c> at <see cref="OnDeviceProducerScriptPath"/>.
+        /// </summary>
+        public static string BuildOnDeviceProducerScript(string ffmpegPath)
+        {
+            var ci = CultureInfo.InvariantCulture;
+            var sb = new StringBuilder();
+            sb.Append("#!/bin/sh\n");
+            sb.Append("# go2rtc camera producer wrapper for the BTicino intercom (issue #180), generated by\n");
+            sb.Append("# IntercomFirmwareTool. go2rtc runs this as its exec: source: on each (re)start it checks\n");
+            sb.Append("# the camera-live signal and exec's EITHER the live feed OR the \"Loading camera…\" filler,\n");
+            sb.Append("# so go2rtc's lazy producer ALWAYS has decodable H.264 and never i/o-times-out on a cold\n");
+            sb.Append("# open. The installer regenerates this file — do not edit by hand.\n");
+            sb.Append("#\n");
+            sb.Append("# $1 is go2rtc's {output} RTSP sink. `exec` REPLACES this shell with ffmpeg so go2rtc tracks\n");
+            sb.Append("# the ffmpeg PID directly (btmqttd's SIGTERM -> go2rtc respawns this script -> re-check SIG).\n");
+            sb.Append("# READY records the branch we commit to (created for live, removed for filler) BEFORE exec,\n");
+            sb.Append("# so btmqttd can confirm the live cutover from a positive signal, not a /proc process scan.\n");
+            sb.Append(string.Create(ci, $"SIG={OnDeviceCameraLiveSignalPath}\n"));
+            sb.Append(string.Create(ci, $"READY={OnDeviceCameraLiveReadyPath}\n"));
+            sb.Append("if [ -e \"$SIG\" ]; then\n");
+            // Live feed — EXACTLY the pre-#180 producer (same -i runtime SDP + same second sprop-RTP
+            // output), so sprop.rs's learning is unchanged. Mark READY (we are serving live) BEFORE exec so
+            // the signal reflects our decision even while this shell is still resolving into ffmpeg.
+            sb.Append("\t: > \"$READY\"\n");
+            sb.Append(string.Create(ci,
+                $"\texec \"{ffmpegPath}\" -hide_banner -protocol_whitelist file,udp,rtp -i \"{OnDeviceRuntimeSdpPath}\" -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\" -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}\n"));
+            sb.Append("else\n");
+            // Not live — clear READY (we are serving the filler) BEFORE exec, so a wrapper that raced btmqttd
+            // and took the filler branch records that fact and btmqttd's cutover keeps retrying until live.
+            sb.Append("\trm -f \"$READY\"\n");
+            // Filler — loop the loading clip; NO sprop output (must not learn the filler's SPS/PPS) and no
+            // panel contact (reads a local file), so the panel stays strictly on-demand.
+            sb.Append(string.Create(ci,
+                $"\texec \"{ffmpegPath}\" -hide_banner -re -stream_loop -1 -i \"{OnDeviceLoadingClipPath}\" -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\"\n"));
+            sb.Append("fi\n");
             return sb.ToString();
         }
 

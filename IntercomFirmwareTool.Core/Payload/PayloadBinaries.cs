@@ -72,8 +72,8 @@ namespace IntercomFirmwareTool.Core
         public static readonly ArmBinary Btmqttd = new(
             Name: "btmqttd",
             InstallPath: "/usr/sbin/btmqttd",
-            Length: 1_705_624,
-            Sha256Hex: "9352186ac0ed711c91cdfb0d56cf94813c52f55a7f9e68786cfcb4a554a0c191",
+            Length: 1_737_584,
+            Sha256Hex: "74f6449ffc05f31fc13a5916feb221c0128a18c610e63eee98511ee17bb0a4c6",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.btmqttd",
             LicenseResourceName:
                 "IntercomFirmwareTool.Core.licenses.btmqttd-THIRD-PARTY-LICENSES.txt",
@@ -117,8 +117,8 @@ namespace IntercomFirmwareTool.Core
         public static readonly ArmBinary Ffmpeg = new(
             Name: "ffmpeg",
             InstallPath: "/usr/sbin/ffmpeg",
-            Length: 2_996_128,
-            Sha256Hex: "c8a6810d4862a37f9501f4870068d300adbfd2a882f088002ad12efff42eb5b4",
+            Length: 2_996_144,
+            Sha256Hex: "eeaf8fc0983038f165074ccadae8ead437fe72d30828a4149993875b97674443",
             ResourceName: "IntercomFirmwareTool.Core.Payload.vendor.armhf.ffmpeg",
             LicenseResourceName:
                 "IntercomFirmwareTool.Core.licenses.ffmpeg-COPYING.LGPLv2.1.txt",

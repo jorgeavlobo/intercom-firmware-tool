@@ -44,8 +44,8 @@ license texts and per-crate copyright notices travel with the binary in
 | Field | `btmqttd` |
 |---|---|
 | File | `armhf/btmqttd` |
-| Size | 1,705,624 bytes |
-| SHA-256 | `9352186ac0ed711c91cdfb0d56cf94813c52f55a7f9e68786cfcb4a554a0c191` |
+| Size | 1,737,584 bytes |
+| SHA-256 | `74f6449ffc05f31fc13a5916feb221c0128a18c610e63eee98511ee17bb0a4c6` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7 (`Tag_CPU_arch: v7`), **hard-float** (`Tag_FP_arch: VFPv3-D16`, `Tag_ABI_VFP_args: VFP registers`; ELF flags `0x5000400`) |
 | Build ID | none (stripped; `rust-lld` emits no GNU build-id note) |
@@ -164,13 +164,13 @@ JPEG snapshot); the GPL x264 *encoder* is never enabled.
 | Field | `ffmpeg` |
 |---|---|
 | File | `armhf/ffmpeg` |
-| Size | 2,996,128 bytes |
-| SHA-256 | `c8a6810d4862a37f9501f4870068d300adbfd2a882f088002ad12efff42eb5b4` |
+| Size | 2,996,144 bytes |
+| SHA-256 | `eeaf8fc0983038f165074ccadae8ead437fe72d30828a4149993875b97674443` |
 | ELF | 32-bit LSB, ARM EABI5, **statically linked** (musl), stripped |
 | ABI | armv7, **hard-float** (ELF flags `0x5000400`) |
 | Upstream | FFmpeg `n7.1.1` (release tag) |
 | Build toolchain | `zig cc` 0.13.0 (bundled musl) per `BUILD.md` |
-| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp` · `muxer=rtsp,rtp,image2` · `parser=h264,hevc` · `decoder=h264` · `encoder=mjpeg` · `filter=scale,format` · `--disable-asm` |
+| Configuration | `--disable-everything` + `protocol=file,udp,rtp,tcp` · `demuxer=sdp,rtsp,rtp,mov` · `muxer=rtsp,rtp,image2` · `parser=h264,hevc` · `decoder=h264` · `encoder=mjpeg` · `filter=scale,format` · `--disable-asm` |
 | License | **LGPL-2.1-or-later** (FFmpeg) **AND MIT** (statically-linked musl libc) |
 | License text | [`licenses/ffmpeg-COPYING.LGPLv2.1.txt`](../../../licenses/ffmpeg-COPYING.LGPLv2.1.txt) · [`licenses/musl-COPYRIGHT.txt`](../../../licenses/musl-COPYRIGHT.txt) |
 | SPDX expression | `LGPL-2.1-or-later AND MIT` |

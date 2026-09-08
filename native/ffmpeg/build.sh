@@ -40,7 +40,7 @@ cd "$src" || exit 1
   --disable-shared --enable-static --enable-small \
   --disable-programs --enable-ffmpeg --disable-asm --disable-stripping \
   --enable-protocol=file,udp,rtp,tcp \
-  --enable-demuxer=sdp,rtsp,rtp --enable-muxer=rtsp,rtp,image2 \
+  --enable-demuxer=sdp,rtsp,rtp,mov --enable-muxer=rtsp,rtp,image2 \
   --enable-parser=h264 --enable-parser=hevc \
   --enable-decoder=h264 \
   --enable-encoder=mjpeg \
@@ -106,6 +106,14 @@ cd "$src" || exit 1
 # NB: `rtsp` is deliberately NOT in --enable-protocol — FFmpeg has no `rtsp` URL protocol
 # (RTSP is the demuxer/muxer enabled just above; it runs over tcp/udp/rtp, which ARE listed).
 # `--enable-protocol=rtsp` matched nothing and only added a configure warning.
+# --enable-demuxer=mov: the "Loading camera…" cold-open filler (issue #180). go2rtc's producer
+# wrapper (Go2RtcConfig.BuildOnDeviceProducerScript) loops the vendored loading.mp4 with
+# `-stream_loop -1 -c copy` so the lazy exec: producer ALWAYS has decodable H.264 and never
+# i/o-times-out during the panel's ~3 s SIP warm-up. `-stream_loop` needs a SEEKABLE input, which a
+# raw .h264 Annex-B stream is NOT (its demuxer rejects the loop with "Operation not permitted") — so
+# the clip is MP4-framed and needs the `mov` demuxer (FFmpeg's mov/mp4/m4a reader). It only ever
+# demuxes our own committed clip; nothing on the panel path reaches it. `-c:v copy` still means no
+# decode, so the resident cost is one small extra demuxer, no new codec. LGPL (no gpl/nonfree).
 
 # -j1 (serial): FFmpeg's parallel build is not byte-reproducible across runs (object/archive
 # ordering follows parallel completion order); the serial build is deterministic.
