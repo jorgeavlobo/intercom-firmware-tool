@@ -157,22 +157,19 @@ pub async fn run(cfg: Arc<Config>, stopping: Arc<AtomicBool>) {
     // `exec` the LIVE SDP with no RTP behind it instead of the "Loading camera…" filler — recreating the
     // black cold-open. Clearing it here guarantees a cold open always starts on the filler. On-device-only +
     // best-effort (a no-op off-device, and where the marker is already absent — the usual case).
-    clear_camera_live_signal(&cfg).await;
-    // Then reset any go2rtc producer that SURVIVED this restart (issue #180, Finding B). A btmqttd
+    // ...and reset any go2rtc producer that SURVIVED this restart (issue #180, Finding B). A btmqttd
     // restart / re-exec / crash within a boot drops the old siphon but does NOT stop a go2rtc `exec:`
-    // producer already running: its live-branch ffmpeg keeps reading the now-SILENT live SDP and would
-    // sit there until go2rtc's ~15 s i/o-timeout finally cut it back to the filler on its own. Respawn it
-    // here — right after clearing the marker — so the wrapper re-reads the (now-absent) marker and cuts to
-    // the "Loading camera…" filler PROMPTLY instead of showing a black wait. On-device-only (PRODUCER_INPUTS
-    // is meaningful only on the panel, matching the clear above) and best-effort: a no-op on a clean boot,
-    // where no producer is running yet.
-    if cfg.camera_ondevice {
-        crate::procsig::respawn_go2rtc_producers(
-            PRODUCER_INPUTS,
-            "reset any surviving go2rtc producer to the loading filler after a btmqttd restart",
-        )
-        .await;
-    }
+    // producer already running: its live-branch ffmpeg keeps reading the now-SILENT live SDP and would sit
+    // there until go2rtc's ~15 s i/o-timeout finally cut it back to the filler on its own. Clearing the
+    // marker and respawning it here (the respawn GATED on the clear succeeding, so a lost removal never
+    // serves the stale marker's live SDP) makes the wrapper re-read the now-absent marker and cut to the
+    // "Loading camera…" filler PROMPTLY instead of a black wait. On-device-only and best-effort: a no-op on
+    // a clean boot, where no producer is running yet.
+    clear_and_respawn_to_filler(
+        &cfg,
+        "reset any surviving go2rtc producer to the loading filler after a btmqttd restart",
+    )
+    .await;
     let mut backoff = BACKOFF_INIT;
     while !stopping.load(Ordering::Relaxed) {
         let start = tokio::time::Instant::now();
@@ -215,28 +212,23 @@ async fn session(cfg: &Arc<Config>, stopping: &Arc<AtomicBool>) -> std::io::Resu
     // marker-set siphon), which the arm/teardown branches keep in step with the marker.
     let mut live_marked = false;
     let result = monitor(&mut sock, cfg, stopping, &mut live_marked).await;
-    // Clear the live signal (issue #180) as a BACKSTOP to the inline TEARDOWN clear inside `monitor`: a
-    // stale marker would make the next cold producer open serve a live feed with no RTP behind it instead
-    // of the "Loading camera…" filler. Best-effort; a no-op when this session never armed. (The signal is
-    // only ever set in on-device mode — off-device `arm()` never creates it — so this is a harmless no-op
-    // there too.)
-    clear_camera_live_signal(cfg).await;
-    // If the monitor exited (an EOF / read error, or a clean stop) while it was still LIVE — the siphon was
-    // armed AND the producer had been cut over to the live feed — a still-attached Home Assistant producer
-    // is now reading the SILENT live SDP (the :30007 fan-out dropped with the socket). The TEARDOWN branch
-    // handles the panel-initiated end; THIS covers the monitor-socket-initiated end, which `monitor` cannot
-    // clear itself because it does not respawn on the way out. Respawn WHICHEVER producer is running so its
-    // wrapper re-reads the just-cleared marker and cuts to the filler PROMPTLY, instead of the HA view
-    // sitting on the silent SDP until go2rtc's ~15 s i/o-timeout falls back on its own (issue #180). The
-    // clear above already ran, so ORDER holds (marker gone before the respawn reads it). `live_marked` is
-    // only ever true in on-device mode (the marker is created off-device by nothing), so this never touches
-    // an off-device path, and it is a no-op when no producer is attached (nobody watching).
+    // On ANY monitor exit, clear the live signal (issue #180) as a BACKSTOP to the inline TEARDOWN clear:
+    // a stale marker would make the next cold producer serve a live feed with no RTP behind it instead of
+    // the "Loading camera…" filler. If the session exited while it was still LIVE — the siphon was armed
+    // AND the producer had been cut over (`live_marked`) — a still-attached Home Assistant producer is now
+    // reading the SILENT live SDP (the :30007 fan-out dropped with the socket), so ALSO respawn it to the
+    // filler: this covers the monitor-socket-initiated end the TEARDOWN branch can't reach. Route that
+    // through `clear_and_respawn_to_filler`, which respawns ONLY if the clear is confirmed (a lost removal
+    // must not serve the stale marker's live SDP). When the session never went live, just clear the marker
+    // as the backstop — no producer was ever cut to live. Both are on-device-only no-ops off-device.
     if live_marked {
-        crate::procsig::respawn_go2rtc_producers(
-            PRODUCER_INPUTS,
+        clear_and_respawn_to_filler(
+            cfg,
             "cut the live feed back to the loading filler after the camera monitor session dropped",
         )
         .await;
+    } else {
+        clear_camera_live_signal(cfg).await;
     }
     result
 }
@@ -306,26 +298,29 @@ async fn monitor(
                 // Panel ended the session — our added client is gone with it; drop ours.
                 if siphon.take().is_some() {
                     // Real RTP has stopped: cut a still-attached consumer back to the "Loading camera…"
-                    // filler (issue #180). ORDER MATTERS: clear the live signal FIRST, then respawn the
-                    // go2rtc producer — the wrapper the respawn triggers must read "not live" so it `exec`s
-                    // the filler, not the now-silent live SDP. We DO respawn here: a still-connected Home
-                    // Assistant producer would otherwise sit on the silent LIVE SDP for up to go2rtc's ~15 s
-                    // i/o-timeout before falling back on its own, so SIGTERMing it switches the viewer to the
-                    // filler promptly instead. This fires only on a genuine media-end TEARDOWN — the
-                    // make-before-break SIP refresh keeps media continuous and never emits `*7*0*##`, so it
-                    // never reaches here — and the respawn is a no-op when no producer is attached (nobody
-                    // watching).
-                    clear_camera_live_signal(cfg).await;
+                    // filler (issue #180). `clear_and_respawn_to_filler` clears the live signal FIRST and,
+                    // ONLY if that is confirmed, respawns the go2rtc producer — the wrapper it triggers must
+                    // read "not live" so it `exec`s the filler, not the now-silent live SDP. We DO respawn (a
+                    // still-connected Home Assistant producer would otherwise sit on the silent LIVE SDP for
+                    // go2rtc's ~15 s i/o-timeout before falling back). This fires only on a genuine media-end
+                    // TEARDOWN — the make-before-break SIP refresh keeps media continuous and never emits
+                    // `*7*0*##` — and the respawn is a no-op when no producer is attached (nobody watching).
                     // The siphon is gone, so the CURRENT-siphon live cutover no longer applies — reset the
                     // flag so a future re-arm starts from "not yet live", and so `session` does not respawn
-                    // AGAIN on exit for a siphon this branch already cut back to the filler (issue #180).
+                    // AGAIN on exit for a siphon this branch already handled (issue #180).
                     *live_marked = false;
-                    crate::procsig::respawn_go2rtc_producers(
-                        PRODUCER_INPUTS,
+                    if clear_and_respawn_to_filler(
+                        cfg,
                         "cut the live feed back to the loading filler after the panel session ended",
                     )
-                    .await;
-                    eprintln!("btmqttd: camera siphon released (session ended)");
+                    .await
+                    {
+                        eprintln!("btmqttd: camera siphon released (session ended)");
+                    } else {
+                        eprintln!(
+                            "btmqttd: camera siphon released (session ended) but the live marker could not be cleared; relying on go2rtc's i/o-timeout to fall back to the filler"
+                        );
+                    }
                 }
             } else if siphon.is_none() && f.starts_with(DEVICE_MEDIA_PREFIX) {
                 // Media is live now: add our client and hand HA the stream.
@@ -516,18 +511,62 @@ async fn set_signal_at(path: &str) -> std::io::Result<()> {
     tokio::fs::File::create(path).await.map(|_| ())
 }
 
-/// Remove the [`CAMERA_LIVE_SIGNAL_PATH`] marker (issue #180), best-effort, ON-DEVICE ONLY, so the next
-/// cold producer open serves the filler again. Off-device is a no-op (nothing is ever created there). A
-/// failure is logged and non-fatal; the path-injected [`clear_signal_at`] does the work (unit-tested).
-async fn clear_camera_live_signal(cfg: &Arc<Config>) {
+/// Attempts to remove the marker before giving up (issue #180). A LOST removal leaves a STALE marker that
+/// makes the next producer serve the silent live SDP instead of the filler, so a transient tmpfs blip is
+/// retried a few times rather than accepted on the first error (a tmpfs unlink of a file we own essentially
+/// never fails, but the consequence of a lost one is bad enough to retry).
+const MARKER_CLEAR_ATTEMPTS: u32 = 3;
+/// Delay between marker-removal retries ([`MARKER_CLEAR_ATTEMPTS`]).
+const MARKER_CLEAR_RETRY: Duration = Duration::from_millis(50);
+
+/// Remove the [`CAMERA_LIVE_SIGNAL_PATH`] marker (issue #180), ON-DEVICE ONLY, so the next cold producer
+/// open serves the filler again. RETURNS whether the marker is confirmed ABSENT afterwards — `true` when it
+/// was removed, was already gone, or off-device (no marker exists there). Callers GATE the producer respawn
+/// on this (see [`clear_and_respawn_to_filler`]): respawning while the marker is still PRESENT would make
+/// go2rtc re-read it and serve the silent live SDP again instead of the filler, and on TEARDOWN `live_marked`
+/// is cleared so no retry follows — so a failed removal must NOT respawn. A transient failure is retried up
+/// to [`MARKER_CLEAR_ATTEMPTS`] times; a persistent one is logged and returns `false`, leaving the running
+/// producer to fall back on go2rtc's own i/o-timeout (the pre-#180 behaviour — no worse). The path-injected
+/// [`clear_signal_at`] does the work (unit-tested; an already-absent marker is `Ok` ⇒ `true`).
+async fn clear_camera_live_signal(cfg: &Arc<Config>) -> bool {
     if !cfg.camera_ondevice {
-        return;
+        return true; // off-device: no marker/filler exists, so it is trivially "absent"
     }
-    if let Err(e) = clear_signal_at(CAMERA_LIVE_SIGNAL_PATH).await {
-        eprintln!(
-            "btmqttd: camera: could not remove the live signal {CAMERA_LIVE_SIGNAL_PATH} ({e}); a stale marker may make the next cold open skip the filler"
-        );
+    for attempt in 1..=MARKER_CLEAR_ATTEMPTS {
+        match clear_signal_at(CAMERA_LIVE_SIGNAL_PATH).await {
+            Ok(()) => return true,
+            Err(e) => {
+                eprintln!(
+                    "btmqttd: camera: could not remove the live signal {CAMERA_LIVE_SIGNAL_PATH} (attempt {attempt}/{MARKER_CLEAR_ATTEMPTS}): {e}"
+                );
+                if attempt < MARKER_CLEAR_ATTEMPTS {
+                    tokio::time::sleep(MARKER_CLEAR_RETRY).await;
+                }
+            }
+        }
     }
+    eprintln!(
+        "btmqttd: camera: the live signal {CAMERA_LIVE_SIGNAL_PATH} could not be cleared; skipping the producer respawn so the wrapper does not re-read the stale marker (go2rtc's i/o-timeout will fall back)"
+    );
+    false
+}
+
+/// Clear the marker and — ONLY if the clear is CONFIRMED (marker now absent) — respawn the go2rtc producer
+/// so its wrapper re-reads the absent marker and cuts to the "Loading camera…" filler (issue #180). Returns
+/// whether that back-to-filler cutover completed. Shared by every "media ended → filler" path (the panel
+/// TEARDOWN, the monitor-drop session exit, the startup reset, and shutdown) so the marker-then-gated-respawn
+/// order lives in ONE place. If the clear fails the respawn is SKIPPED — respawning would make the wrapper
+/// re-read the stale PRESENT marker and serve the silent live SDP instead of the filler; the running producer
+/// then falls back on go2rtc's own i/o-timeout. On-device-gated: off-device the clear is a no-op returning
+/// `true` and there is no producer to respawn, so this returns `true` without touching a producer.
+async fn clear_and_respawn_to_filler(cfg: &Arc<Config>, reason: &'static str) -> bool {
+    if !clear_camera_live_signal(cfg).await {
+        return false;
+    }
+    if cfg.camera_ondevice {
+        crate::procsig::respawn_go2rtc_producers(PRODUCER_INPUTS, reason).await;
+    }
+    true
 }
 
 /// Best-effort camera-live cleanup for daemon SHUTDOWN (issue #180). When btmqttd is STOPPED (`btmqttd
@@ -542,14 +581,8 @@ async fn clear_camera_live_signal(cfg: &Arc<Config>) {
 /// and on-device-only (a no-op off-device, on a clean marker, and where no producer is attached or go2rtc
 /// is going down too).
 pub(crate) async fn shutdown_cleanup(cfg: &Arc<Config>) {
-    clear_camera_live_signal(cfg).await;
-    if cfg.camera_ondevice {
-        crate::procsig::respawn_go2rtc_producers(
-            PRODUCER_INPUTS,
-            "cut the live feed back to the loading filler as btmqttd shuts down",
-        )
+    clear_and_respawn_to_filler(cfg, "cut the live feed back to the loading filler as btmqttd shuts down")
         .await;
-    }
 }
 
 /// [`clear_camera_live_signal`] with the target path injected (unit-tested on a temp file). An
@@ -974,6 +1007,26 @@ mod tests {
         clear_signal_at(&path).await.unwrap();
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn clear_reports_absent_and_gates_respawn_off_device() {
+        // The removal now REPORTS whether the marker is confirmed ABSENT so callers can GATE the producer
+        // respawn on it (issue #180): a lost removal must not respawn, or the wrapper would re-read the stale
+        // marker and serve the silent live SDP. Off-device there is no marker/filler, so the clear is
+        // trivially "absent" → true, and `clear_and_respawn_to_filler` returns true having skipped the
+        // respawn. (The on-device removal + its retry write the FIXED tmpfs path, covered by the
+        // clear_signal_at temp-file test and integration.)
+        use std::collections::HashMap;
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = Arc::new(crate::config::Config::from_map(m));
+        assert!(!cfg.camera_ondevice);
+        assert!(clear_camera_live_signal(&cfg).await, "off-device: marker trivially absent → true");
+        assert!(
+            clear_and_respawn_to_filler(&cfg, "test: off-device clear+respawn is a no-op").await,
+            "off-device: clears (true) and skips the respawn"
+        );
     }
 
     #[tokio::test]
