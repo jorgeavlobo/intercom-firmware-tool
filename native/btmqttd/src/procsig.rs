@@ -74,19 +74,26 @@ pub(crate) async fn respawn_go2rtc_producers(
 /// signal — closes that gap. The `/proc` scan is blocking, so THIS fn offloads it to `spawn_blocking`
 /// INTERNALLY; callers just `.await` it.
 ///
-/// A scan-task JoinError (panic/cancellation) does NOT map to `false`: that would be indistinguishable
-/// from "confirmed no producer", which in the av cutover would wrongly mark the switch complete and DISABLE
-/// the retry, stranding the viewer on the filler. It returns the CONSERVATIVE `true` instead — "a producer
-/// MAY still be running" — so the cutover treats the switch as not-yet-complete and RETRIES, and logs the
-/// failure so a "still not live" isn't mistaken for "none found". (A `scan_any_producer` that merely can't
-/// read `/proc` still returns `false` — that is a real, completed scan that found nothing.)
+/// Neither a scan-task JoinError (panic/cancellation) NOR a `/proc` OPEN failure maps to `false`: both are
+/// indistinguishable from "confirmed no producer", which in the av cutover would wrongly mark the switch
+/// complete and DISABLE the retry, stranding the viewer on the filler. Both return the CONSERVATIVE `true`
+/// instead — "a producer MAY still be running" — so the cutover treats the switch as not-yet-complete and
+/// RETRIES, and each logs the failure so a "still not live" isn't mistaken for "none found". Only a
+/// COMPLETED scan that genuinely found no producer returns `false` (individual vanished `/proc` entries are
+/// skipped — those really are "not a producer").
 pub(crate) async fn any_producer_running(inputs: &'static [&'static str]) -> bool {
     match tokio::task::spawn_blocking(move || {
         scan_any_producer(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, inputs)
     })
     .await
     {
-        Ok(found) => found,
+        Ok(Ok(found)) => found,
+        Ok(Err(e)) => {
+            eprintln!(
+                "btmqttd: could not scan /proc for go2rtc producers ({e}); assuming a producer may still be running"
+            );
+            true
+        }
         Err(e) => {
             eprintln!(
                 "btmqttd: go2rtc producer scan task failed ({e}); assuming a producer may still be running"
@@ -96,20 +103,26 @@ pub(crate) async fn any_producer_running(inputs: &'static [&'static str]) -> boo
     }
 }
 
-/// Scan `/proc` for a go2rtc `exec:` ffmpeg producer reading one of `inputs`, returning whether one exists.
-/// Same identification as [`terminate_go2rtc_producers`] ([`pid_is_producer`]) but read-only — it signals
-/// nothing. Blocking; an unreadable `/proc` or entry is skipped (best-effort ⇒ `false`).
-pub(crate) fn scan_any_producer(ffmpeg_path: &str, daemon_path: &str, inputs: &[&str]) -> bool {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
+/// Scan `/proc` for a go2rtc `exec:` ffmpeg producer reading one of `inputs`: `Ok(true)` if one exists,
+/// `Ok(false)` after a COMPLETED scan found none, `Err` if `/proc` itself could not be opened. Same
+/// identification as [`terminate_go2rtc_producers`] ([`pid_is_producer`]) but read-only — it signals
+/// nothing. Propagating the open failure as `Err` (rather than mapping it to `false`) lets the caller tell
+/// "scanned, found nothing" from "could not scan" and treat the latter conservatively (see
+/// [`any_producer_running`]). Blocking; individual unreadable entries (a pid that vanished mid-scan) are
+/// skipped — they are genuinely "not a producer".
+pub(crate) fn scan_any_producer(
+    ffmpeg_path: &str,
+    daemon_path: &str,
+    inputs: &[&str],
+) -> std::io::Result<bool> {
+    let entries = std::fs::read_dir("/proc")?;
+    Ok(entries.flatten().any(|entry| {
         entry
             .file_name()
             .to_str()
             .and_then(|s| s.parse::<i32>().ok())
             .is_some_and(|pid| pid_is_producer(pid, ffmpeg_path, daemon_path, inputs))
-    })
+    }))
 }
 
 /// Scan `/proc` and SIGTERM every go2rtc `exec:` ffmpeg producer whose `-i` input is one of `inputs`,

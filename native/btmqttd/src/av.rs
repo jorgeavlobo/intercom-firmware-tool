@@ -297,20 +297,15 @@ async fn monitor(
                 // Panel ended the session — our added client is gone with it; drop ours.
                 if siphon.take().is_some() {
                     // Real RTP has stopped: cut a still-attached consumer back to the "Loading camera…"
-                    // filler (issue #180). `clear_and_respawn_to_filler` clears the live signal FIRST and,
-                    // ONLY if that is confirmed, respawns the go2rtc producer — the wrapper it triggers must
-                    // read "not live" so it `exec`s the filler, not the now-silent live SDP. We DO respawn (a
-                    // still-connected Home Assistant producer would otherwise sit on the silent LIVE SDP for
-                    // go2rtc's ~15 s i/o-timeout before falling back). This fires only on a genuine media-end
-                    // TEARDOWN — the make-before-break SIP refresh keeps media continuous and never emits
-                    // `*7*0*##` — and the respawn is a no-op when no producer is attached (nobody watching).
-                    // The siphon is gone — cut a still-attached consumer back to the filler.
-                    // `clear_and_respawn_to_filler` clears the marker FIRST and respawns ONLY if that is
-                    // confirmed (a lost removal must not serve the stale marker's live SDP). If the clear
-                    // fails, the running producer is left to go2rtc's i/o-timeout AND the session-exit cutover
-                    // retries it unconditionally, so the viewer is never abandoned on the silent SDP. Reset
-                    // `live_marked` — its only role is the retry gate below, itself also guarded by
-                    // `siphon.is_some()` (now `None`), so this is just tidiness for a future re-arm.
+                    // filler (issue #180), so a still-connected Home Assistant producer doesn't sit on the
+                    // silent LIVE SDP for go2rtc's ~15 s i/o-timeout. `clear_and_respawn_to_filler` clears the
+                    // marker FIRST and respawns ONLY if that is confirmed (a lost removal must not serve the
+                    // stale marker's live SDP); if the clear fails, the producer falls back on go2rtc's
+                    // i/o-timeout AND the session-exit cutover retries it unconditionally, so the viewer is
+                    // never abandoned. This fires only on a genuine media-end TEARDOWN — the make-before-break
+                    // SIP refresh keeps media continuous and never emits `*7*0*##` — and the respawn is a
+                    // no-op when nobody is watching. Reset `live_marked`: its only role is the retry gate
+                    // below (also guarded by `siphon.is_some()`, now `None`), so this is tidiness for a re-arm.
                     live_marked = false;
                     if clear_and_respawn_to_filler(
                         cfg,
