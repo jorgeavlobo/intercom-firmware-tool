@@ -115,11 +115,12 @@ public class Go2RtcConfigTests
         Assert.Contains("username: \"camera\"", yaml);
         Assert.Contains("password: \"s3cr3t\"", yaml);
         // Stream: sanitized key, and the exec: source is the producer WRAPPER (issue #180), NOT ffmpeg
-        // directly — go2rtc runs `sh camera-producer.sh {output}`. The wrapper carries the ffmpeg path,
-        // the runtime-SDP -i and the filler→live switch (asserted in the producer-script tests below), so
-        // the yaml itself no longer names ffmpeg, the SDP, or the sprop RTP output.
+        // directly — go2rtc runs `/bin/sh camera-producer.sh {output}`. The shell is named by its ABSOLUTE
+        // path (go2rtc may spawn exec: with a minimal PATH). The wrapper carries the ffmpeg path, the
+        // runtime-SDP -i and the filler→live switch (asserted in the producer-script tests below), so the
+        // yaml itself no longer names ffmpeg, the SDP, or the sprop RTP output.
         Assert.Contains("  frontdoor:", yaml);
-        Assert.Contains("exec:sh /etc/btmqttd/go2rtc/camera-producer.sh {output}", yaml);
+        Assert.Contains("exec:/bin/sh /etc/btmqttd/go2rtc/camera-producer.sh {output}", yaml);
         Assert.DoesNotContain("ffmpeg", yaml);
         Assert.DoesNotContain("/var/run/btmqttd/doorbell.sdp", yaml);
         Assert.DoesNotContain("rtp://127.0.0.1:40100", yaml);
@@ -142,19 +143,20 @@ public class Go2RtcConfigTests
         Assert.Contains("if [ -e \"$SIG\" ]; then", sh);
         // LIVE branch (signal present) — byte-for-byte the pre-#180 producer: reads the tmpfs RUNTIME SDP
         // (NOT the read-only /etc template), copies H.264 into {output} (passed as $1), AND ships the
-        // second raw-H.264 RTP copy to btmqttd so sprop.rs's parameter-set learning is unchanged.
+        // second raw-H.264 RTP copy to btmqttd so sprop.rs's parameter-set learning is unchanged. The
+        // ffmpeg path and the -i input are DOUBLE-QUOTED so a path with spaces/metacharacters is safe.
         Assert.Contains(
-            "exec /usr/sbin/ffmpeg -hide_banner -protocol_whitelist file,udp,rtp -i /var/run/btmqttd/doorbell.sdp -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\" -c:v copy -f rtp rtp://127.0.0.1:40100",
+            "exec \"/usr/sbin/ffmpeg\" -hide_banner -protocol_whitelist file,udp,rtp -i \"/var/run/btmqttd/doorbell.sdp\" -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\" -c:v copy -f rtp rtp://127.0.0.1:40100",
             sh);
         // FILLER branch (signal absent) — loops the loading clip; NO second/sprop output (must never
         // learn the filler's SPS/PPS) and reads a LOCAL file, never the panel, so the panel stays strictly
-        // on-demand (the filler can never bring it up — neighbours share one camera).
+        // on-demand (the filler can never bring it up — neighbours share one camera). Same quoting as live.
         Assert.Contains(
-            "exec /usr/sbin/ffmpeg -hide_banner -re -stream_loop -1 -i /etc/btmqttd/go2rtc/loading.mp4 -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\"",
+            "exec \"/usr/sbin/ffmpeg\" -hide_banner -re -stream_loop -1 -i \"/etc/btmqttd/go2rtc/loading.mp4\" -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\"",
             sh);
         // `exec` (not a plain call) so ffmpeg REPLACES the shell and go2rtc tracks the ffmpeg PID directly
         // — SIGTERM then makes go2rtc respawn the wrapper, which re-checks the signal.
-        Assert.Contains("\texec /usr/sbin/ffmpeg", sh);
+        Assert.Contains("\texec \"/usr/sbin/ffmpeg\"", sh);
         // The sprop second output appears EXACTLY ONCE — only the live branch has it; the filler must not.
         Assert.Equal(1, sh.Split("-f rtp rtp://127.0.0.1:40100").Length - 1);
         // The harmful/dead tuning the pre-#180 producer already avoided stays out of BOTH branches.
@@ -169,9 +171,9 @@ public class Go2RtcConfigTests
     public void BuildOnDeviceProducerScript_honours_the_ffmpeg_path()
     {
         // The wrapper must run the ffmpeg the installer actually placed on the device — both exec lines
-        // use the supplied absolute path, not a hard-coded one.
+        // use the supplied absolute path (double-quoted), not a hard-coded one.
         string sh = Go2RtcConfig.BuildOnDeviceProducerScript("/opt/custom/ffmpeg");
-        Assert.Equal(2, sh.Split("exec /opt/custom/ffmpeg ").Length - 1);
+        Assert.Equal(2, sh.Split("exec \"/opt/custom/ffmpeg\" ").Length - 1);
         Assert.DoesNotContain("/usr/sbin/ffmpeg", sh);
     }
 

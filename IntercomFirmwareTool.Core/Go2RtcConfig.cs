@@ -236,8 +236,11 @@ namespace IntercomFirmwareTool.Core
         /// <item>the stream is <b>video-only</b> (Phase 1) — the ffmpeg the wrapper runs uses <c>-an -c:v copy</c>.</item>
         /// </list>
         /// The stream's <c>exec:</c> source is the generated producer WRAPPER
-        /// (<c>sh <see cref="OnDeviceProducerScriptPath"/> {output}</c>, see
-        /// <see cref="BuildOnDeviceProducerScript"/>) — NOT ffmpeg directly (issue #180). The wrapper
+        /// (<c>/bin/sh <see cref="OnDeviceProducerScriptPath"/> {output}</c>, see
+        /// <see cref="BuildOnDeviceProducerScript"/>) — NOT ffmpeg directly (issue #180). The shell is
+        /// named by its ABSOLUTE path (<c>/bin/sh</c> — present on the BusyBox device): go2rtc may spawn
+        /// its <c>exec:</c> command with a minimal <c>PATH</c>, so a bare <c>sh</c> could fail to resolve.
+        /// The wrapper
         /// checks the <see cref="OnDeviceCameraLiveSignalPath"/> signal and <c>exec</c>s either the live
         /// feed (reading the tmpfs <see cref="OnDeviceRuntimeSdpPath"/>, exactly the pre-#180 producer, so
         /// sprop learning is unchanged) or the "Loading camera…" filler
@@ -299,7 +302,7 @@ namespace IntercomFirmwareTool.Core
             sb.Append("streams:\n");
             sb.Append(string.Create(ci, $"  {name}:\n"));
             sb.Append(string.Create(ci,
-                $"    - \"exec:sh {OnDeviceProducerScriptPath} {{output}}\"\n"));
+                $"    - \"exec:/bin/sh {OnDeviceProducerScriptPath} {{output}}\"\n"));
             return sb.ToString();
         }
 
@@ -324,7 +327,10 @@ namespace IntercomFirmwareTool.Core
         /// <c>exec</c> is used so the ffmpeg process REPLACES this shell — go2rtc tracks that ffmpeg PID
         /// directly, so btmqttd's SIGTERM → go2rtc respawns this script → it re-reads the signal (the
         /// filler→live cutover). <paramref name="ffmpegPath"/> is the absolute on-device ffmpeg path
-        /// (<see cref="OnDeviceFfmpegPath"/> / <c>PayloadBinaries.Ffmpeg.InstallPath</c>). Emitted with LF
+        /// (<see cref="OnDeviceFfmpegPath"/> / <c>PayloadBinaries.Ffmpeg.InstallPath</c>). The ffmpeg
+        /// executable path and each <c>-i</c> input path are DOUBLE-QUOTED (as <c>"$1"</c> already is), so
+        /// the wrapper is robust to any path carrying spaces or shell metacharacters; the fixed
+        /// <c>rtp://…</c> sprop endpoint has no such characters, so it is left unquoted. Emitted with LF
         /// line endings and a trailing newline (a CRLF shebang would run as <c>/bin/sh\r</c>); installed
         /// <c>0755</c> at <see cref="OnDeviceProducerScriptPath"/>.
         /// </summary>
@@ -346,12 +352,12 @@ namespace IntercomFirmwareTool.Core
             // Live feed — EXACTLY the pre-#180 producer (same -i runtime SDP + same second sprop-RTP
             // output), so sprop.rs's learning is unchanged.
             sb.Append(string.Create(ci,
-                $"\texec {ffmpegPath} -hide_banner -protocol_whitelist file,udp,rtp -i {OnDeviceRuntimeSdpPath} -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\" -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}\n"));
+                $"\texec \"{ffmpegPath}\" -hide_banner -protocol_whitelist file,udp,rtp -i \"{OnDeviceRuntimeSdpPath}\" -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\" -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}\n"));
             sb.Append("else\n");
             // Filler — loop the loading clip; NO sprop output (must not learn the filler's SPS/PPS) and no
             // panel contact (reads a local file), so the panel stays strictly on-demand.
             sb.Append(string.Create(ci,
-                $"\texec {ffmpegPath} -hide_banner -re -stream_loop -1 -i {OnDeviceLoadingClipPath} -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\"\n"));
+                $"\texec \"{ffmpegPath}\" -hide_banner -re -stream_loop -1 -i \"{OnDeviceLoadingClipPath}\" -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\"\n"));
             sb.Append("fi\n");
             return sb.ToString();
         }

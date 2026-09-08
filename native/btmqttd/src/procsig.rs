@@ -36,7 +36,9 @@ pub(crate) const GO2RTC_DAEMON_PATH: &str = "/usr/sbin/go2rtc";
 /// runtime-SDP entry for the sprop self-heal, or the runtime SDP + the filler clip for the av cutover.
 /// `reason` is woven into the log line so an operator can tell the two callers apart. Best-effort and
 /// non-fatal: a missing producer / a failed signal just defers the effect to the next producer start.
-/// The `/proc` scan is blocking, so callers run this inside `spawn_blocking`.
+/// The `/proc` scan is blocking, so THIS fn offloads it to `spawn_blocking` INTERNALLY — callers just
+/// `.await` it (do NOT wrap it again); the scan-validate-SIGTERM stays one synchronous pass in the
+/// offloaded [`terminate_go2rtc_producers`] (no async yield between identifying a PID and signalling it).
 pub(crate) async fn respawn_go2rtc_producers(
     inputs: &'static [&'static str],
     reason: &'static str,

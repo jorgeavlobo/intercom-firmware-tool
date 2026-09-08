@@ -119,6 +119,16 @@ const LIVE_MARKER_WAIT: Duration = Duration::from_secs(15);
 /// tmpfs `stat` every quarter-second resolves the wait within a beat of the cutover without busy-looping.
 const LIVE_MARKER_POLL: Duration = Duration::from_millis(250);
 
+/// Settle delay after the live-camera marker appears, before ffmpeg connects, on BOTH the idle and the
+/// ring capture paths (issue #180). av.rs CREATES the marker BEFORE it SIGTERM-respawns the go2rtc
+/// producer to cut the wrapper over to the live feed, so the marker signals the cutover has STARTED, not
+/// finished — a grab in that window could still open onto the producer mid-respawn and photograph the
+/// "Loading camera…" filler. This brief pause lets go2rtc's respawned LIVE producer begin serving first.
+/// It is a best-effort HEAD START, not a correctness dependency: `grab_jpeg` connects fresh and ffmpeg
+/// still waits for the first keyframe within [`CAPTURE_TIMEOUT`], so a slightly-late producer is tolerated
+/// either way — the settle just closes the COMMON window where another consumer was already on the filler.
+const LIVE_CUTOVER_SETTLE: Duration = Duration::from_secs(2);
+
 /// One idle capture at a time — a try-lock the persisted idle thumbnail uses. A mashed "Update idle
 /// snapshot" button (or first-run overlapping the button) just SKIPS while one is running: the earlier
 /// grab is as good as the later, and idle has no ordering requirement. Separate from the ring path
@@ -636,7 +646,7 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
         // Brief settle after the cutover so go2rtc's freshly-respawned LIVE producer has RTP to serve
         // rather than ffmpeg opening onto a producer that is still re-exec'ing. ffmpeg still waits for the
         // first keyframe within CAPTURE_TIMEOUT, so this stays a head start, not a correctness dependency.
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(LIVE_CUTOVER_SETTLE).await;
         let bytes = match grab_jpeg(cfg).await {
             Ok(b) => b,
             Err(e) => {
@@ -886,6 +896,14 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
         );
         return false;
     }
+    // Same post-marker settle as the idle path: the marker signals the live cutover has STARTED, but
+    // av.rs SIGTERM-respawns the go2rtc producer only AFTER creating it, so this pause lets that respawned
+    // LIVE producer begin serving before ffmpeg connects (issue #180). Usually a ring capture is itself the
+    // consumer that STARTS the producer — the wrapper reads the already-set marker and serves live from the
+    // first frame — so the settle is redundant then; it matters only when ANOTHER consumer was already on
+    // the filler and is mid-cutover. grab_jpeg still connects fresh and waits for the first keyframe within
+    // CAPTURE_TIMEOUT, so this stays a best-effort head start, not a correctness dependency.
+    tokio::time::sleep(LIVE_CUTOVER_SETTLE).await;
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
         Err(e) => {
