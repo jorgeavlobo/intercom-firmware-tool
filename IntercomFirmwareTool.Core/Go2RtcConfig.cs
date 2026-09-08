@@ -327,12 +327,17 @@ namespace IntercomFirmwareTool.Core
         /// <c>exec</c> is used so the ffmpeg process REPLACES this shell — go2rtc tracks that ffmpeg PID
         /// directly, so btmqttd's SIGTERM → go2rtc respawns this script → it re-reads the signal (the
         /// filler→live cutover). <paramref name="ffmpegPath"/> is the absolute on-device ffmpeg path
-        /// (<see cref="OnDeviceFfmpegPath"/> / <c>PayloadBinaries.Ffmpeg.InstallPath</c>). The ffmpeg
-        /// executable path and each <c>-i</c> input path are DOUBLE-QUOTED (as <c>"$1"</c> already is), so
-        /// the wrapper is robust to any path carrying spaces or shell metacharacters; the fixed
-        /// <c>rtp://…</c> sprop endpoint has no such characters, so it is left unquoted. Emitted with LF
-        /// line endings and a trailing newline (a CRLF shebang would run as <c>/bin/sh\r</c>); installed
-        /// <c>0755</c> at <see cref="OnDeviceProducerScriptPath"/>.
+        /// (<see cref="OnDeviceFfmpegPath"/> / <c>PayloadBinaries.Ffmpeg.InstallPath</c>). Every path woven
+        /// into the script — <paramref name="ffmpegPath"/>, <see cref="OnDeviceRuntimeSdpPath"/> and
+        /// <see cref="OnDeviceLoadingClipPath"/> — is a FIXED compile-time constant under our control; NO
+        /// untrusted or operator-supplied input is ever interpolated here, so shell injection is not a
+        /// concern. The ffmpeg executable path and each <c>-i</c> input path are still DOUBLE-QUOTED (as
+        /// <c>"$1"</c> already is) as DEFENSIVE hygiene, so a constant that ever gained a SPACE would still
+        /// parse as a single argument — NOT as an injection defense: double quotes still permit
+        /// <c>$(…)</c>/backtick expansion, which is irrelevant precisely because these trusted constants
+        /// contain none. The fixed <c>rtp://…</c> sprop endpoint has no spaces, so it is left unquoted.
+        /// Emitted with LF line endings and a trailing newline (a CRLF shebang would run as
+        /// <c>/bin/sh\r</c>); installed <c>0755</c> at <see cref="OnDeviceProducerScriptPath"/>.
         /// </summary>
         public static string BuildOnDeviceProducerScript(string ffmpegPath)
         {
