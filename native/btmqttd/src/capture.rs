@@ -438,6 +438,19 @@ async fn wait_for_live_marker(cfg: &Config) -> bool {
     }
 }
 
+/// Re-check — instantly, no wait — that the live-camera marker is STILL present, so a grab is aborted if
+/// the session tore down AFTER [`wait_for_live_marker`] confirmed it live but DURING the post-cutover
+/// [`LIVE_CUTOVER_SETTLE`] (issue #180). On a teardown in that window av.rs clears the marker and respawns
+/// the filler, so a grab that proceeded anyway could persist the "Loading camera…" frame as the snapshot.
+/// One tmpfs `stat`. ON-DEVICE ONLY: off-device there is no marker/filler, so this is always `true` —
+/// matching [`wait_for_live_marker`], and so it never wrongly aborts an off-device grab that had no marker
+/// to begin with. (If the session tore down and a NEWER ring re-armed within the settle, the marker reads
+/// present again but for the new visitor; the ring runner's post-grab newest-ring re-check discards the
+/// superseded frame, so this need only guard the "went not-live" case.)
+async fn live_still_marked(cfg: &Config) -> bool {
+    !cfg.camera_ondevice || live_marker_present_at(crate::av::CAMERA_LIVE_SIGNAL_PATH).await
+}
+
 /// Grab one JPEG frame, returning the bytes. Assumes the caller already holds its exclusivity guard
 /// (the [`CAPTURING_IDLE`] try-lock for an idle/button grab, or the single-runner slot —
 /// [`RING_RUNNER_ACTIVE`] — for a ring grab) and (for an idle/button grab) has poked the panel up.
@@ -667,6 +680,17 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
         // rather than ffmpeg opening onto a producer that is still re-exec'ing. ffmpeg still waits for the
         // first keyframe within CAPTURE_TIMEOUT, so this stays a head start, not a correctness dependency.
         tokio::time::sleep(LIVE_CUTOVER_SETTLE).await;
+        // Re-confirm live after the settle before grabbing, so a teardown during the settle (av.rs then
+        // clears the marker and respawns the filler) can't persist a "Loading camera…" frame as idle.jpg
+        // (issue #180). This path normally holds the panel up via `Hold(hold_deadline)`, so the session
+        // shouldn't lapse here — this is defense-in-depth and keeps the idle/ring paths symmetric.
+        if !live_still_marked(cfg).await {
+            eprintln!(
+                "btmqttd: capture: idle capture skipped — camera went not-live during the settle; keeping \
+                 the existing idle thumbnail rather than a loading-filler frame"
+            );
+            break 'capture false;
+        }
         let bytes = match grab_jpeg(cfg).await {
             Ok(b) => b,
             Err(e) => {
@@ -924,6 +948,17 @@ async fn capture_ring_frame(cfg: &Config, id: u64) -> bool {
     // the filler and is mid-cutover. grab_jpeg still connects fresh and waits for the first keyframe within
     // CAPTURE_TIMEOUT, so this stays a best-effort head start, not a correctness dependency.
     tokio::time::sleep(LIVE_CUTOVER_SETTLE).await;
+    // Re-confirm live AFTER the settle: the ring path does not hold the panel up (the panel owns the ring
+    // session), so if that session tore down during the settle av.rs has cleared the marker and respawned
+    // the filler — grabbing now would persist the "Loading camera…" frame as this ring's snapshot. Skip
+    // instead (the ring MQTT event already fired; a missing who-rang image beats a filler one). Issue #180.
+    if !live_still_marked(cfg).await {
+        eprintln!(
+            "btmqttd: capture: ring capture skipped (event {id}) — camera went not-live during the settle \
+             (session ended); not persisting a loading-filler frame"
+        );
+        return false;
+    }
     let bytes = match grab_jpeg(cfg).await {
         Ok(b) => b,
         Err(e) => {
@@ -1089,6 +1124,20 @@ mod tests {
         let start = tokio::time::Instant::now();
         assert!(wait_for_live_marker(&cfg).await, "off-device: grab may proceed immediately");
         assert!(start.elapsed() < LIVE_MARKER_WAIT, "off-device must not block on the marker wait");
+    }
+
+    #[tokio::test]
+    async fn live_still_marked_is_true_off_device() {
+        // The post-settle re-check (issue #180) must not skip the OFF-DEVICE grab path: there is no marker
+        // or filler there, so it is always "still marked", mirroring wait_for_live_marker returning true
+        // off-device. (On-device it stats the fixed tmpfs marker — exercised by the integration behaviour,
+        // like wait_for_live_marker's on-device path.)
+        use std::collections::HashMap;
+        let mut m = HashMap::new();
+        m.insert("MQTT_HOST".to_string(), "h".to_string());
+        let cfg = crate::config::Config::from_map(m);
+        assert!(!cfg.camera_ondevice);
+        assert!(live_still_marked(&cfg).await, "off-device: always considered live (no filler to guard)");
     }
 
     #[test]
