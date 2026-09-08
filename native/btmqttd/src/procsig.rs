@@ -74,66 +74,6 @@ pub(crate) async fn respawn_go2rtc_producers(
     }
 }
 
-/// Whether ANY go2rtc `exec:` ffmpeg producer reading one of `inputs` is CURRENTLY running — a read-only
-/// `/proc` scan with the exact same producer identification as [`terminate_go2rtc_producers`], signalling
-/// nothing (issue #180). The av cutover uses it, passing the FILLER-only input, to confirm the "Loading
-/// camera…" producer is actually gone before it declares the filler→live switch complete: the SIGTERM
-/// respawn is best-effort and could race a producer whose wrapper is still in its transient `/bin/sh` exec
-/// phase (not yet the matchable ffmpeg), so re-confirming the filler is gone — rather than trusting the
-/// signal — closes that gap. The `/proc` scan is blocking, so THIS fn offloads it to `spawn_blocking`
-/// INTERNALLY; callers just `.await` it.
-///
-/// Neither a scan-task JoinError (panic/cancellation) NOR a `/proc` OPEN failure maps to `false`: both are
-/// indistinguishable from "confirmed no producer", which in the av cutover would wrongly mark the switch
-/// complete and DISABLE the retry, stranding the viewer on the filler. Both return the CONSERVATIVE `true`
-/// instead — "a producer MAY still be running" — so the cutover treats the switch as not-yet-complete and
-/// RETRIES, and each logs the failure so a "still not live" isn't mistaken for "none found". Only a
-/// COMPLETED scan that genuinely found no producer returns `false` (individual vanished `/proc` entries are
-/// skipped — those really are "not a producer").
-pub(crate) async fn any_producer_running(inputs: &'static [&'static str]) -> bool {
-    match tokio::task::spawn_blocking(move || {
-        scan_any_producer(crate::capture::DEFAULT_FFMPEG_BIN, GO2RTC_DAEMON_PATH, inputs)
-    })
-    .await
-    {
-        Ok(Ok(found)) => found,
-        Ok(Err(e)) => {
-            eprintln!(
-                "btmqttd: could not scan /proc for go2rtc producers ({e}); assuming a producer may still be running"
-            );
-            true
-        }
-        Err(e) => {
-            eprintln!(
-                "btmqttd: go2rtc producer scan task failed ({e}); assuming a producer may still be running"
-            );
-            true
-        }
-    }
-}
-
-/// Scan `/proc` for a go2rtc `exec:` ffmpeg producer reading one of `inputs`: `Ok(true)` if one exists,
-/// `Ok(false)` after a COMPLETED scan found none, `Err` if `/proc` itself could not be opened. Same
-/// identification as [`terminate_go2rtc_producers`] ([`pid_is_producer`]) but read-only — it signals
-/// nothing. Propagating the open failure as `Err` (rather than mapping it to `false`) lets the caller tell
-/// "scanned, found nothing" from "could not scan" and treat the latter conservatively (see
-/// [`any_producer_running`]). Blocking; individual unreadable entries (a pid that vanished mid-scan) are
-/// skipped — they are genuinely "not a producer".
-pub(crate) fn scan_any_producer(
-    ffmpeg_path: &str,
-    daemon_path: &str,
-    inputs: &[&str],
-) -> std::io::Result<bool> {
-    let entries = std::fs::read_dir("/proc")?;
-    Ok(entries.flatten().any(|entry| {
-        entry
-            .file_name()
-            .to_str()
-            .and_then(|s| s.parse::<i32>().ok())
-            .is_some_and(|pid| pid_is_producer(pid, ffmpeg_path, daemon_path, inputs))
-    }))
-}
-
 /// Scan `/proc` and SIGTERM every go2rtc `exec:` ffmpeg producer whose `-i` input is one of `inputs`:
 /// `Ok(n)` = a COMPLETED scan signalled `n` producers, `Err` = `/proc` itself could not be opened. Each PID
 /// is VALIDATED and signalled in the SAME loop iteration — identity checked ([`pid_is_producer`])
@@ -337,12 +277,10 @@ mod tests {
         assert!(!cmdline_is_producer(&[], ff, inputs));
     }
 
-    // NB: `scan_any_producer` (the read-only /proc walk) has no host-/proc test of its own — an assertion
-    // over the live `/proc` would depend on ambient host processes (it could flake if a machine happened to
-    // run a `/usr/sbin/go2rtc` parent with a matching `/usr/sbin/ffmpeg -i <input>` child). Its matching
-    // logic IS covered hermetically by the pure `cmdline_is_producer` / `parse_ppid` tests above, exactly as
-    // the analogous SIGTERM walk (`terminate_go2rtc_producers`) is; the live scan is exercised end-to-end by
-    // the on-device cutover.
+    // NB: the `/proc` walk (`terminate_go2rtc_producers`) has no host-/proc test of its own — an assertion
+    // over the live `/proc` would depend on ambient host processes. Its producer-matching logic IS covered
+    // hermetically by the pure `cmdline_is_producer` / `parse_ppid` tests above; the live walk is exercised
+    // end-to-end by the on-device sprop self-heal and the av cutover.
 
     #[test]
     fn parse_ppid_reads_the_parent_pid_field() {

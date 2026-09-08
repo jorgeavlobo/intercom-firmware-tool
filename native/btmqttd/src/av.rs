@@ -65,6 +65,18 @@ const TEARDOWN: &str = "*7*0*##";
 /// live cutover so it never persists the "Loading camera…" filler frame — rather than re-spelling the path.
 pub(crate) const CAMERA_LIVE_SIGNAL_PATH: &str = "/var/run/btmqttd/camera-live";
 
+/// The on-device "the producer is actually serving the LIVE feed now" readiness file (issue #180). Written
+/// by the go2rtc producer WRAPPER — NOT by this daemon: the wrapper creates it on the branch that `exec`s
+/// the live feed and removes it on the branch that `exec`s the filler, BEFORE the `exec`, so it records the
+/// branch the wrapper committed to even during its transient `/bin/sh` phase. This daemon only READS its
+/// existence, in [`cut_over_to_live`], to confirm the filler→live cutover actually completed — a POSITIVE
+/// signal that closes the sub-millisecond race a "no filler process in `/proc`" check could not (a wrapper
+/// that read the marker absent and is mid-`exec` into the filler is not yet a matchable ffmpeg, but it has
+/// already removed this file, so the cutover keeps retrying until live). On tmpfs (cleared every boot ⇒
+/// absent = "not live yet"); the first cold producer's filler branch removes any stale copy. MUST equal the
+/// `READY=` path the generated wrapper writes (`Go2RtcConfig.OnDeviceCameraLiveReadyPath`).
+const LIVE_READY_PATH: &str = "/var/run/btmqttd/camera-live-ready";
+
 /// The "Loading camera…" filler clip the go2rtc producer wrapper loops while the siphon is NOT armed
 /// (issue #180). Named here ONLY so the filler→live cutover can identify a running filler producer by its
 /// `-i` argument (see [`PRODUCER_INPUTS`]); the clip itself is written to this path by the installer and
@@ -435,23 +447,26 @@ async fn arm(cfg: &Arc<Config>) -> std::io::Result<TcpStream> {
 /// wrapper re-reads the now-present marker and `exec`s the live feed. Returns whether the cutover is
 /// CONFIRMED complete — the caller's `live_marked`.
 ///
-/// Completion is defined as "no filler producer remains running", RE-SCANNED after the respawn — not merely
-/// "the marker was written". The SIGTERM respawn is best-effort and can miss a producer whose wrapper is
-/// momentarily still in its transient `/bin/sh` exec phase (not yet the matchable ffmpeg); returning `true`
-/// on the marker write alone would then set `live_marked`, DISABLE the monitor loop's per-iteration retry,
-/// and leave that filler looping for the rest of the session while the viewer stays on "Loading…". Gating on
-/// [`crate::procsig::any_producer_running`] over [`FILLER_INPUTS`] instead makes the retry re-fire until the
-/// filler is actually replaced by the live feed. This never churns the LIVE producer: it reads the SDP (not
-/// `loading.mp4`), so once live the scan is false and the retry stops; an armed-but-UNWATCHED siphon has no
-/// producer at all, also false (a fresh producer reads the now-present marker on its first start).
+/// Completion is defined as "the wrapper has COMMITTED to the live branch", read from the wrapper-written
+/// [`LIVE_READY_PATH`] readiness file — a POSITIVE signal, not the absence of a filler in `/proc`. The
+/// SIGTERM respawn is best-effort and can miss a producer whose wrapper is momentarily still in its
+/// transient `/bin/sh` exec phase (not yet a matchable ffmpeg); a "no filler process" check would then
+/// wrongly report complete, set `live_marked`, DISABLE the monitor loop's per-iteration retry, and strand
+/// the viewer on a filler about to `exec`. The wrapper instead records its branch decision in
+/// [`LIVE_READY_PATH`] BEFORE it `exec`s (create for live, remove for filler), so even mid-exec the file
+/// reflects the truth: a wrapper that took the filler removed it ⇒ this returns false ⇒ the retry re-drives
+/// the cutover until a wrapper takes the LIVE branch and creates it. This never churns the live producer:
+/// once the wrapper is live the file exists and the retry stops; an armed-but-UNWATCHED siphon has no
+/// producer, so the file stays absent and the retry keeps cheaply re-asserting the marker (respawning only
+/// the filler, [`FILLER_INPUTS`], which is a no-op when none runs) until a viewer connects and goes live.
 ///
 /// ORDER MATTERS: marker FIRST, then respawn — the respawned wrapper must observe the marker present, or it
 /// would `exec` the filler AGAIN while the siphon is armed. Gating everything on the marker write is what
 /// makes a transient marker-write failure SAFE: it leaves the running filler untouched (a stale "loading",
 /// never a black wait) and returns false, so the retry re-drives the cutover next pass. On-device-only:
 /// [`set_camera_live_signal`] creates nothing and returns false off-device — there is no on-device
-/// producer/filler and the target never routes here in practice — so this returns false WITHOUT scanning
-/// `/proc` or touching a producer. Shared by the arm branch (which respawns [`PRODUCER_INPUTS`], catching a
+/// producer/filler and the target never routes here in practice — so this returns false WITHOUT touching a
+/// producer or the readiness file. Shared by the arm branch (which respawns [`PRODUCER_INPUTS`], catching a
 /// filler OR a stale live producer) and the retry (which respawns [`FILLER_INPUTS`] only, so it can't churn
 /// the live feed) so the "marker-then-respawn-then-confirm" sequence lives in ONE place and can't drift.
 async fn cut_over_to_live(
@@ -465,10 +480,20 @@ async fn cut_over_to_live(
     // The marker exists now, so a respawned wrapper reads "live". SIGTERM whichever producer(s) the caller
     // targets so go2rtc respawns them onto the live feed.
     crate::procsig::respawn_go2rtc_producers(respawn_inputs, reason).await;
-    // Confirm the switch actually happened: the cutover is complete only once no filler producer is left
-    // running (a live producer, or none at all, both read as "not a filler"). If one lingers — the respawn
-    // raced a wrapper mid-exec — report NOT complete so the loop retries.
-    !crate::procsig::any_producer_running(FILLER_INPUTS).await
+    // Confirm the switch from the wrapper's own readiness file: complete only once a wrapper has committed
+    // to the LIVE branch (created [`LIVE_READY_PATH`]). A wrapper still mid-exec into the filler has already
+    // removed it, so this reports NOT complete and the loop retries — closing the `/bin/sh`-exec race.
+    live_ready_present().await
+}
+
+/// Whether the wrapper's [`LIVE_READY_PATH`] readiness file exists — i.e. the producer wrapper has
+/// committed to the LIVE branch (issue #180). Async `tokio::fs` so it never blocks the single-threaded
+/// runtime; `metadata(..).is_ok()` treats any stat error (including "not present") as "not ready", which is
+/// the conservative direction for the cutover (keep retrying). The wrapper only ever writes this file
+/// on-device, so off-device it is always absent — but `cut_over_to_live` returns before reaching here
+/// off-device (its `set_camera_live_signal` is false), so this is on-device-only in practice.
+async fn live_ready_present() -> bool {
+    tokio::fs::metadata(LIVE_READY_PATH).await.is_ok()
 }
 
 /// Create the [`CAMERA_LIVE_SIGNAL_PATH`] marker (issue #180), best-effort, ON-DEVICE ONLY. Its presence

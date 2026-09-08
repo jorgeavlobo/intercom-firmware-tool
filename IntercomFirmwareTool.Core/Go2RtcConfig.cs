@@ -97,6 +97,19 @@ namespace IntercomFirmwareTool.Core
         public const string OnDeviceCameraLiveSignalPath = "/var/run/btmqttd/camera-live";
 
         /// <summary>
+        /// The on-device "the producer is actually serving the LIVE feed now" readiness file (issue #180).
+        /// The producer WRAPPER writes it: it creates this file on the branch that <c>exec</c>s the live feed
+        /// and removes it on the branch that <c>exec</c>s the filler — BEFORE the <c>exec</c>, so it records
+        /// the branch the wrapper committed to even during its transient <c>/bin/sh</c> phase. btmqttd's
+        /// <c>av.rs</c> READS its existence to confirm the filler→live cutover actually completed (a POSITIVE
+        /// signal that closes the sub-millisecond race a "no filler process in <c>/proc</c>" check could not).
+        /// On tmpfs (cleared every boot ⇒ absent = "not live yet"); the first cold producer's filler branch
+        /// removes any stale copy. Must equal <c>av.rs</c>'s <c>LIVE_READY_PATH</c> and the wrapper's
+        /// <c>READY=</c>.
+        /// </summary>
+        public const string OnDeviceCameraLiveReadyPath = "/var/run/btmqttd/camera-live-ready";
+
+        /// <summary>
         /// The RUNTIME SDP go2rtc's <c>exec -i</c> reads on the device — on <b>tmpfs</b>, because the
         /// rootfs (including <c>/etc</c>) is mounted read-only. The installer writes the read-only
         /// TEMPLATE SDP under <c>/etc/btmqttd/go2rtc/</c>; the <c>go2rtcd</c> init script (re)assembles
@@ -352,13 +365,21 @@ namespace IntercomFirmwareTool.Core
             sb.Append("#\n");
             sb.Append("# $1 is go2rtc's {output} RTSP sink. `exec` REPLACES this shell with ffmpeg so go2rtc tracks\n");
             sb.Append("# the ffmpeg PID directly (btmqttd's SIGTERM -> go2rtc respawns this script -> re-check SIG).\n");
+            sb.Append("# READY records the branch we commit to (created for live, removed for filler) BEFORE exec,\n");
+            sb.Append("# so btmqttd can confirm the live cutover from a positive signal, not a /proc process scan.\n");
             sb.Append(string.Create(ci, $"SIG={OnDeviceCameraLiveSignalPath}\n"));
+            sb.Append(string.Create(ci, $"READY={OnDeviceCameraLiveReadyPath}\n"));
             sb.Append("if [ -e \"$SIG\" ]; then\n");
             // Live feed — EXACTLY the pre-#180 producer (same -i runtime SDP + same second sprop-RTP
-            // output), so sprop.rs's learning is unchanged.
+            // output), so sprop.rs's learning is unchanged. Mark READY (we are serving live) BEFORE exec so
+            // the signal reflects our decision even while this shell is still resolving into ffmpeg.
+            sb.Append("\t: > \"$READY\"\n");
             sb.Append(string.Create(ci,
                 $"\texec \"{ffmpegPath}\" -hide_banner -protocol_whitelist file,udp,rtp -i \"{OnDeviceRuntimeSdpPath}\" -an -c:v copy -rtsp_transport tcp -f rtsp \"$1\" -c:v copy -f rtp rtp://{OnDeviceSpropRtpEndpoint}\n"));
             sb.Append("else\n");
+            // Not live — clear READY (we are serving the filler) BEFORE exec, so a wrapper that raced btmqttd
+            // and took the filler branch records that fact and btmqttd's cutover keeps retrying until live.
+            sb.Append("\trm -f \"$READY\"\n");
             // Filler — loop the loading clip; NO sprop output (must not learn the filler's SPS/PPS) and no
             // panel contact (reads a local file), so the panel stays strictly on-demand.
             sb.Append(string.Create(ci,

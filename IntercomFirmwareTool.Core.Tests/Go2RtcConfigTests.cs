@@ -141,6 +141,15 @@ public class Go2RtcConfigTests
         // Branches on the camera-live signal file's existence.
         Assert.Contains("SIG=/var/run/btmqttd/camera-live", sh);
         Assert.Contains("if [ -e \"$SIG\" ]; then", sh);
+        // The wrapper records which branch it committed to via the READY file (issue #180): the live branch
+        // CREATES it and the filler branch REMOVES it, each BEFORE the exec, so btmqttd confirms the cutover
+        // from a positive wrapper-written signal instead of a /proc process scan (which races the /bin/sh
+        // exec window). READY is declared once and each write appears exactly once (one per branch).
+        Assert.Contains("READY=/var/run/btmqttd/camera-live-ready", sh);
+        Assert.Contains("\t: > \"$READY\"", sh);
+        Assert.Contains("\trm -f \"$READY\"", sh);
+        Assert.Equal(1, sh.Split(": > \"$READY\"").Length - 1);
+        Assert.Equal(1, sh.Split("rm -f \"$READY\"").Length - 1);
         // LIVE branch (signal present) — byte-for-byte the pre-#180 producer: reads the tmpfs RUNTIME SDP
         // (NOT the read-only /etc template), copies H.264 into {output} (passed as $1), AND ships the
         // second raw-H.264 RTP copy to btmqttd so sprop.rs's parameter-set learning is unchanged. The
