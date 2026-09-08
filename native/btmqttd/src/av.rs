@@ -303,8 +303,15 @@ async fn monitor(
     // `last_cutover_retry`: when the cutover last ran, so the per-frame retry below is THROTTLED to
     // [`CUTOVER_RETRY_INTERVAL`] (issue #180) instead of rescanning `/proc` every monitor frame while the
     // siphon is armed but unwatched. Set to "now" at each arm (the arm's own cutover counts as the latest
-    // scan), so the first retry waits one interval rather than rescanning immediately after the arm.
+    // scan), so the first retry waits one interval rather than rescanning immediately after the arm. Shared
+    // with the back-to-filler cleanup retry below (the two are mutually exclusive on `siphon` state).
     let mut last_cutover_retry = tokio::time::Instant::now();
+    // `pending_filler_cleanup`: a TEARDOWN cleared the siphon but the back-to-filler `clear_and_respawn` FAILED
+    // (issue #180). Processing TEARDOWN does NOT return from this loop, so the monitor-session exit that would
+    // otherwise retry the cutover can be far off; meanwhile a stale marker makes every producer restart serve
+    // the silent live SDP (a black wait). So retain the pending state and retry the clear/respawn each loop
+    // pass (throttled) while the siphon stays absent, until the marker is confirmed cleared.
+    let mut pending_filler_cleanup = false;
 
     // Confirm the monitor ACK before trusting the stream. The gateway may accept the TCP
     // connection yet REFUSE the monitor with a NACK (`*#*0##`) and then stay idle — the
@@ -347,12 +354,12 @@ async fn monitor(
                     // filler (issue #180), so a still-connected Home Assistant producer doesn't sit on the
                     // silent LIVE SDP for go2rtc's ~15 s i/o-timeout. `clear_and_respawn_to_filler` clears the
                     // marker FIRST and respawns ONLY if that is confirmed (a lost removal must not serve the
-                    // stale marker's live SDP); if the clear fails, the producer falls back on go2rtc's
-                    // i/o-timeout AND the session-exit cutover retries it unconditionally, so the viewer is
-                    // never abandoned. This fires only on a genuine media-end TEARDOWN — the make-before-break
-                    // SIP refresh keeps media continuous and never emits `*7*0*##` — and the respawn is a
-                    // no-op when nobody is watching. Reset `live_marked`: its only role is the retry gate
-                    // below (also guarded by `siphon.is_some()`, now `None`), so this is tidiness for a re-arm.
+                    // stale marker's live SDP); if the clear FAILS, we set `pending_filler_cleanup` so the loop
+                    // keeps retrying it while the siphon stays absent (below) rather than leaving the stale
+                    // marker until the possibly-far-off monitor-session exit. This fires only on a genuine
+                    // media-end TEARDOWN — the make-before-break SIP refresh keeps media continuous and never
+                    // emits `*7*0*##` — and the respawn is a no-op when nobody is watching. Reset `live_marked`:
+                    // its only role is the retry gate below (also guarded by `siphon.is_some()`, now `None`).
                     live_marked = false;
                     if clear_and_respawn_to_filler(
                         cfg,
@@ -361,10 +368,13 @@ async fn monitor(
                     )
                     .await
                     {
+                        pending_filler_cleanup = false;
                         eprintln!("btmqttd: camera siphon released (session ended)");
                     } else {
+                        pending_filler_cleanup = true;
+                        last_cutover_retry = tokio::time::Instant::now(); // throttle the first cleanup retry
                         eprintln!(
-                            "btmqttd: camera siphon released (session ended) but the live marker could not be cleared; the session-exit cutover will retry it"
+                            "btmqttd: camera siphon released (session ended) but the live marker could not be cleared; retrying the back-to-filler cutover while the siphon is absent"
                         );
                     }
                 }
@@ -386,8 +396,10 @@ async fn monitor(
                         // #180). Bumped only here — on a genuine re-arm — never on the retries.
                         CAMERA_SESSION_GEN.fetch_add(1, Ordering::Relaxed);
                         // New arm: re-arm the stale-readiness-file clear latch so this arm re-clears any file a
-                        // prior session left before it trusts readiness (issue #180).
+                        // prior session left before it trusts readiness (issue #180). A new live session also
+                        // supersedes any pending back-to-filler cleanup — it WANTS the marker set — so drop it.
                         ready_cleared = false;
+                        pending_filler_cleanup = false;
                         live_marked = cut_over_to_live(
                             cfg,
                             PRODUCER_INPUTS,
@@ -447,7 +459,36 @@ async fn monitor(
             .await;
         }
 
-        let n = match tokio::time::timeout(READ_IDLE, sock.read(&mut buf)).await {
+        // Retry a FAILED teardown's back-to-filler cutover while the siphon is absent (issue #180), throttled
+        // like the cutover retry (they never overlap — one needs `siphon.is_some()`, the other `is_none()`).
+        // Without this, a stale marker left by a failed teardown clear would make every producer restart serve
+        // the silent live SDP until the far-off monitor-session exit. Cleared once the marker is confirmed gone.
+        if siphon.is_none() && pending_filler_cleanup && last_cutover_retry.elapsed() >= CUTOVER_RETRY_INTERVAL {
+            last_cutover_retry = tokio::time::Instant::now();
+            if clear_and_respawn_to_filler(
+                cfg,
+                PRODUCER_INPUTS,
+                "retry cutting the live feed back to the loading filler after a failed teardown clear",
+            )
+            .await
+            {
+                pending_filler_cleanup = false;
+                eprintln!(
+                    "btmqttd: camera: back-to-filler cutover completed on retry after the teardown clear failed"
+                );
+            }
+        }
+
+        // While a cutover or a back-to-filler cleanup is PENDING, cap the read at [`CUTOVER_RETRY_INTERVAL`] so
+        // those retries fire on time even on a QUIET bus (issue #180) — otherwise a viewer could sit on the
+        // filler for up to READ_IDLE despite the 1 s interval. Idle at READ_IDLE otherwise.
+        let read_timeout = if (siphon.is_some() && !live_marked) || (siphon.is_none() && pending_filler_cleanup)
+        {
+            CUTOVER_RETRY_INTERVAL
+        } else {
+            READ_IDLE
+        };
+        let n = match tokio::time::timeout(read_timeout, sock.read(&mut buf)).await {
             Ok(Ok(0)) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
