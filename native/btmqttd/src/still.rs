@@ -544,13 +544,18 @@ mod tests {
             .build()
             .unwrap();
         // A literal loopback broker routes to a loopback source, which HA can never fetch — so the
-        // caller must get None (and omit `ip`) rather than advertise a 127.x address.
+        // caller must get None (and omit `ip`) rather than advertise a 127.x address. This is
+        // environment-independent: the address is parsed, not resolved.
         assert_eq!(rt.block_on(reachable_ipv4("127.0.0.1")), None);
-        // A NAMED broker is resolved to an IPv4 through the bounded resolver before route selection:
-        // "localhost" resolves to 127.0.0.1, whose route is loopback, so the result is still None —
-        // exercising the resolve path end to end. A hung resolver returns None within the bound
-        // instead of stalling (the bound itself is covered by av::resolve_ipv4's own tests).
-        assert_eq!(rt.block_on(reachable_ipv4("localhost")), None);
+        // A NAMED broker is resolved to an IPv4 through the bounded resolver before route selection.
+        // Exercise that resolve→route path end to end ONLY when this host actually maps "localhost"
+        // to an IPv4 loopback: on IPv6-only-localhost boxes the name yields no IPv4, reachable_ipv4
+        // falls back to its TEST-NET-1 probe destination and would select a real LAN source, so the
+        // None result no longer holds — gate the assertion on resolution rather than flake CI. (A hung
+        // resolver returning None within the bound is covered by av::resolve_ipv4's own tests.)
+        if rt.block_on(crate::av::resolve_ipv4("localhost")) == Some(std::net::Ipv4Addr::LOCALHOST) {
+            assert_eq!(rt.block_on(reachable_ipv4("localhost")), None);
+        }
     }
 
     #[test]
