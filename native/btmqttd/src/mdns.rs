@@ -614,11 +614,52 @@ async fn read_system_hostname() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// How long to wait for the reverse-PTR self-lookup answer (on-link, so quick); bounded so a silent
+/// network can't stall the announce.
+const REVERSE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Ask mDNS "what name does whoever owns `our_ip` advertise?" — a reverse (PTR) query for
+/// `<d.c.b.a>.in-addr.arpa`. On the C100X the factory Avahi answers with the name it is ACTUALLY
+/// advertising, which reflects a conflict-rename (`Bticino-Classe100X-2.local`) that the static
+/// `host-name` conf would not. `None` on no answer within `REVERSE_TIMEOUT` or any socket failure.
+async fn reverse_lookup_host(our_ip: Ipv4Addr) -> Option<String> {
+    let o = our_ip.octets();
+    let rev = format!("{}.{}.{}.{}.in-addr.arpa", o[3], o[2], o[1], o[0]);
+    let (sock, unicast) = open_socket().await.ok()?;
+    let q = build_query(&rev, QTYPE_PTR, unicast)?;
+    sock.send_to(&q, (MDNS_GROUP, MDNS_PORT)).await.ok()?;
+    let deadline = tokio::time::sleep(REVERSE_TIMEOUT);
+    tokio::pin!(deadline);
+    let mut buf = [0u8; 9000];
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return None,
+            r = sock.recv_from(&mut buf) => {
+                let Ok((n, _)) = r else { return None };
+                let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
+                // Passing the reverse name as the "service" makes parse_response record the PTR's
+                // RDATA (the advertised hostname) into `ptr`.
+                parse_response(&buf[..n], &[rev.as_str()], &mut ptr, &mut srv, &mut a);
+                if let Some(host) = ptr.into_iter().next() {
+                    return ensure_dot_local(&host);
+                }
+            }
+        }
+    }
+}
+
 /// C100X path — the name the FACTORY Avahi actually advertises, so the HA sensors match what it
-/// resolves: its configured `host-name` if set, else Avahi's own fallback, the RAW system hostname
-/// (NOT the model-derived name — Avahi doesn't reshape it). btmqttd only REPORTS this; it never runs
-/// its own responder where Avahi is present. `None` only if neither file yields a usable label.
-pub async fn resolve_avahi_or_system_host() -> Option<String> {
+/// resolves. Prefer Avahi's RUNTIME name via a reverse-PTR self-lookup of `our_ip` (this reflects a
+/// conflict-rename that the static conf can't show); fall back to the configured `host-name` if set,
+/// else the RAW system hostname (Avahi's own fallback — NOT the model-derived name). btmqttd only
+/// REPORTS this; it never runs its own responder where Avahi is present. `None` only if nothing yields
+/// a usable label.
+pub async fn resolve_avahi_or_system_host(our_ip: Option<Ipv4Addr>) -> Option<String> {
+    if let Some(ip) = our_ip {
+        if let Some(host) = reverse_lookup_host(ip).await {
+            return Some(host);
+        }
+    }
     let label = match read_avahi_host_name().await {
         Some(l) => l,
         None => read_system_hostname().await?,
@@ -1402,6 +1443,28 @@ mod tests {
         // A case-variant suffix is stripped case-insensitively and kept as-is, so the result is still a
         // valid mDNS name (the `-N` goes BEFORE the suffix, not after it).
         assert_eq!(next_conflict_name("host.LOCAL"), "host-2.LOCAL");
+    }
+
+    #[test]
+    fn reverse_ptr_response_yields_the_advertised_host() {
+        // A reverse (PTR) answer for our IP carries Avahi's ADVERTISED hostname as the PTR RDATA.
+        // Passing the reverse name as the "service" makes parse_response record that hostname — the
+        // mechanism reverse_lookup_host relies on to observe a conflict-renamed name (…-2.local).
+        let rev = "9.50.168.192.in-addr.arpa";
+        let mut b = vec![0, 0, 0x84, 0x00]; // response|AA
+        b.extend_from_slice(&[0, 0]); // QDCOUNT
+        b.extend_from_slice(&[0, 1]); // ANCOUNT = 1 (the PTR)
+        b.extend_from_slice(&[0, 0, 0, 0]); // NS, AR
+        enc_name(rev, &mut b);
+        b.extend_from_slice(&[0, 12, 0, 1]); // type PTR, class IN
+        b.extend_from_slice(&[0, 0, 0, 120]); // TTL
+        let mut rd = Vec::new();
+        enc_name("Bticino-Classe100X-2.local", &mut rd);
+        b.extend_from_slice(&[(rd.len() >> 8) as u8, rd.len() as u8]);
+        b.extend_from_slice(&rd);
+        let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
+        parse_response(&b, &[rev], &mut ptr, &mut srv, &mut a);
+        assert_eq!(ptr, vec!["bticino-classe100x-2.local".to_string()]); // read_name lower-cases
     }
 
     #[test]

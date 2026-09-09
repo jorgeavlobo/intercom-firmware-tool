@@ -1431,7 +1431,9 @@ async fn announce(
     let host = if cfg.camera_ondevice {
         match &camera_mdns_name {
             Some(rx) => rx.borrow().clone(),
-            None => mdns::resolve_avahi_or_system_host().await,
+            // C100X: report Avahi's advertised name — a reverse-PTR self-lookup (using the cached wlan0
+            // IP) reflects a conflict-rename, falling back to the configured host-name.
+            None => mdns::resolve_avahi_or_system_host(still::cached_self_ipv4()).await,
         }
     } else {
         None
