@@ -989,6 +989,15 @@ pub async fn run_responder(
         if stopping.load(Ordering::Relaxed) {
             return;
         }
+        // The chosen name must encode to a valid mDNS QNAME or we can neither announce nor answer for
+        // it (a label >63 bytes, or a whole name >255) — never publish a host the responder can't
+        // actually serve. A structurally-unusable name won't be fixed by a `-N` rename, so clear the
+        // retained topic (we own it on this path) and stop rather than spin.
+        if build_a_response(&name, our_ip).is_none() {
+            eprintln!("btmqttd: mdns responder: {name} is not a valid mDNS name — not advertising");
+            let _ = client.publish(&topic, QoS::AtMostOnce, true, Vec::new()).await;
+            return;
+        }
         // COMMIT: announce (§8.3), then publish the chosen name retained + expose it for announce()'s
         // reconnect re-assert. (A prior name's record just times out via its TTL — no goodbye packet.)
         announce_record(&sock, &name, our_ip, ANNOUNCE_COUNT).await;
