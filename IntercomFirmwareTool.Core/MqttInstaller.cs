@@ -1081,7 +1081,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
                                       opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicRingSnapshot,
+                                      opts.EffectiveTopicRingSnapshot, opts.EffectiveTopicCameraMdnsHost,
                                       opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
                                       opts.EffectiveTopicUpdate })
                 if (string.IsNullOrWhiteSpace(t) || t.Any(char.IsControl))
@@ -1096,7 +1096,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                       opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicRingSnapshot,
+                                      opts.EffectiveTopicRingSnapshot, opts.EffectiveTopicCameraMdnsHost,
                                       opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
                                       opts.EffectiveTopicUpdate })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
@@ -1129,6 +1129,10 @@ namespace IntercomFirmwareTool.Core
                 opts.EffectiveTopicMute, opts.EffectiveTopicEntrancePanelCall,
                 opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
                 opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
+                // The camera mDNS host diagnostic (#171) is published in EVERY state — the resolved host
+                // when on-device, an empty retained CLEAR otherwise (main.rs announce) — so, like the
+                // last-will / light-avail topics, an alias onto it must always be rejected.
+                opts.EffectiveTopicCameraMdnsHost,
             };
             // Ring-snapshot-ready (#169): btmqttd publishes to it ONLY under on-device capture
             // (camera_enabled && camera_ondevice); an off-device / camera-off build derives the topic
@@ -1209,6 +1213,7 @@ namespace IntercomFirmwareTool.Core
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                         opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                         opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
+                                        opts.EffectiveTopicCameraMdnsHost,
                                         opts.EffectiveTopicMaintenance })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(

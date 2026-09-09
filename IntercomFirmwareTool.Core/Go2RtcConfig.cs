@@ -498,15 +498,20 @@ namespace IntercomFirmwareTool.Core
             sb.Append("Add it to Home Assistant as a Generic Camera (Settings -> Devices &\n");
             sb.Append("Services -> Add Integration -> Generic Camera).\n\n");
 
-            // Preferred path (issue #171): the panel auto-creates three diagnostic sensors carrying
-            // ready-to-paste URLs built from its advertised <name>.local mDNS host, so they survive a
-            // DHCP address change with no edit in HA.
-            sb.Append("Easiest — copy the ready-made URLs Home Assistant already has: the panel\n");
-            sb.Append("auto-creates three diagnostic sensors — \"Camera mDNS host\", \"Camera RTSP\n");
-            sb.Append("URL\" and \"Camera still image URL\". Their values use the panel's\n");
-            sb.Append("<name>.local mDNS name, so they keep working if the panel's DHCP address\n");
-            sb.Append("changes. Paste \"Camera RTSP URL\" as the stream and \"Camera still image\n");
-            sb.Append("URL\" as the Still Image URL.\n\n");
+            // Preferred path (issue #171) — ONLY when HA discovery is enabled, because the three
+            // diagnostic sensors that carry the ready-to-paste URLs are created BY that discovery
+            // (btmqttd clears them when HA_DISCOVERY=0). With discovery off they don't exist, so the
+            // guide leads straight with the manual URLs instead of pointing at absent sensors.
+            bool haveSensors = opts.EnableHaDiscovery;
+            if (haveSensors)
+            {
+                sb.Append("Easiest — copy the ready-made URLs Home Assistant already has: the panel\n");
+                sb.Append("auto-creates three diagnostic sensors — \"Camera mDNS host\", \"Camera RTSP\n");
+                sb.Append("URL\" and \"Camera still image URL\". Their values use the panel's\n");
+                sb.Append("<name>.local mDNS name, so they keep working if the panel's DHCP address\n");
+                sb.Append("changes. Paste \"Camera RTSP URL\" as the stream and \"Camera still image\n");
+                sb.Append("URL\" as the Still Image URL.\n\n");
+            }
 
             // URL-encode the credentials for the URL's userinfo: Validate rejects control chars but not
             // RTSP-URL-reserved punctuation (@ : / #), so escape defensively (today's fixed "camera" +
@@ -515,11 +520,17 @@ namespace IntercomFirmwareTool.Core
             // <password> placeholder is left literal (not %3C…%3E) so it reads as a placeholder.
             string userEnc = Uri.EscapeDataString(user);
             string passInUrl = hasPass ? Uri.EscapeDataString(pass) : pass;
-            // Hand-entry fallback (no mDNS on the network): the same URLs with a literal host. Prefer a
-            // DHCP reservation so the IP stays put, or substitute the <name>.local host from the sensor.
-            sb.Append(hasPass
-                ? "Or enter them by hand — replace <intercom-ip> with the panel's IP (a DHCP\nreservation keeps it stable), or its <name>.local host from the sensor above:\n\n"
-                : "Or enter them by hand — replace <intercom-ip> with the panel's IP and\n<password> with the RTSP password:\n\n");
+            // Manual URLs: the hand-entry FALLBACK when the sensors exist, or the PRIMARY path when
+            // discovery is off (no "from the sensor above" pointer then). Prefer a DHCP reservation so
+            // the literal IP stays put.
+            string manualIntro = haveSensors
+                ? (hasPass
+                    ? "Or enter them by hand — replace <intercom-ip> with the panel's IP (a DHCP\nreservation keeps it stable), or its <name>.local host from the sensor above:\n\n"
+                    : "Or enter them by hand — replace <intercom-ip> with the panel's IP and\n<password> with the RTSP password:\n\n")
+                : (hasPass
+                    ? "Set the stream URL — replace <intercom-ip> with the panel's IP (a DHCP\nreservation keeps it stable):\n\n"
+                    : "Set the stream URL — replace <intercom-ip> with the panel's IP and\n<password> with the RTSP password:\n\n");
+            sb.Append(manualIntro);
             sb.Append(string.Create(ci,
                 $"    {OnDeviceRtspUrl("<intercom-ip>", userEnc, passInUrl, name)}\n\n"));
 

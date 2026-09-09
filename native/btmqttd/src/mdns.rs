@@ -597,22 +597,44 @@ pub(crate) fn model_host_from_hostname(etc_hostname: &str) -> Option<String> {
     Some(format!("Bticino-Classe{digits}X"))
 }
 
-/// Resolve the panel's advertised `<name>.local` — the factory Avahi `host-name` when set (C100X),
-/// else the `Bticino-Classe<model>X` name derived from the kernel hostname (C300X, where btmqttd's
-/// own responder advertises it). `None` only if neither file yields a usable label. Reads the two
-/// factory files off the runtime thread; never panics.
-pub async fn resolve_camera_mdns_host() -> Option<String> {
-    let label = match tokio::fs::read_to_string(AVAHI_CONF_PATH).await {
-        Ok(conf) => parse_avahi_host_name(&conf),
-        Err(_) => None,
+/// The configured Avahi `host-name` (`<value>`, no `.local`), or `None` if unset/unreadable.
+async fn read_avahi_host_name() -> Option<String> {
+    tokio::fs::read_to_string(AVAHI_CONF_PATH)
+        .await
+        .ok()
+        .and_then(|c| parse_avahi_host_name(&c))
+}
+
+/// The kernel hostname (trimmed), or `None` if empty/unreadable.
+async fn read_system_hostname() -> Option<String> {
+    tokio::fs::read_to_string(ETC_HOSTNAME_PATH)
+        .await
+        .ok()
+        .map(|h| h.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// C100X path — the name the FACTORY Avahi actually advertises, so the HA sensors match what it
+/// resolves: its configured `host-name` if set, else Avahi's own fallback, the RAW system hostname
+/// (NOT the model-derived name — Avahi doesn't reshape it). btmqttd only REPORTS this; it never runs
+/// its own responder where Avahi is present. `None` only if neither file yields a usable label.
+pub async fn resolve_avahi_or_system_host() -> Option<String> {
+    let label = match read_avahi_host_name().await {
+        Some(l) => l,
+        None => read_system_hostname().await?,
     };
-    let label = match label {
-        Some(l) => Some(l),
-        None => tokio::fs::read_to_string(ETC_HOSTNAME_PATH)
-            .await
-            .ok()
-            .and_then(|h| model_host_from_hostname(h.trim())),
-    }?;
+    ensure_dot_local(&label)
+}
+
+/// C300X path — the base `<name>.local` btmqttd's OWN responder advertises: a configured Avahi
+/// `host-name` if somehow present, else the `Bticino-Classe<model>X` name derived from the kernel
+/// hostname (the factory C100X convention, applied uniformly; conflict resolution may append `-N`).
+/// `None` if no model digits are present. Used only where no system responder owns the name.
+pub async fn resolve_responder_base_host() -> Option<String> {
+    let label = match read_avahi_host_name().await {
+        Some(l) => l,
+        None => model_host_from_hostname(read_system_hostname().await?.as_str())?,
+    };
     ensure_dot_local(&label)
 }
 

@@ -401,7 +401,7 @@ async fn run() -> Result<bool, String> {
             // there we only READ that name for the Part A diagnostic sensors. Shares the still stopping
             // flag; the loop exits on it (and the runtime cancels it at process exit regardless).
             let cell = if !mdns::system_mdns_responder_present().await {
-                match mdns::resolve_camera_mdns_host().await {
+                match mdns::resolve_responder_base_host().await {
                     Some(base) => {
                         let cell = Arc::new(std::sync::Mutex::new(None::<String>));
                         tokio::spawn(mdns::run_responder(
@@ -1420,16 +1420,24 @@ async fn announce(
     // ready-to-paste RTSP/still URLs from this one value). On-device only; a failed resolve just
     // omits it (the sensors stay unavailable, the literal-IP guide fallback still works). A
     // reconnect re-runs announce, so a broker that dropped its retained set is reconciled.
-    if cfg.camera_ondevice {
-        // C300X: our responder owns the (conflict-resolved) name and reports it via the shared cell;
-        // re-assert whatever it has settled on (None until its first probe completes — the responder
-        // itself publishes on commit, so this is just the reconnect re-assert). C100X: read the factory
-        // Avahi name directly. Retained, so HA re-discovers on connect.
-        let host = match &camera_mdns_name {
+    // Camera mDNS host diagnostic (#171). C300X: our responder owns the (conflict-resolved) name and
+    // reports it via the shared cell; re-assert whatever it has settled on. C100X: the name the factory
+    // Avahi advertises. When the feature is OFF or nothing resolves, publish an EMPTY retained payload
+    // to CLEAR a value a previous on-device build left on the broker (the discovery tombstones remove
+    // the HA entities, but not this retained state). The one case we must NOT clear is the C300X path
+    // before the responder has settled (cell still None): the responder itself publishes the name on
+    // commit, so clearing here would race and blank it — leave it untouched.
+    let responder_pending = camera_mdns_name.as_ref().is_some_and(|c| c.lock().ok().is_some_and(|s| s.is_none()));
+    let host = if cfg.camera_ondevice {
+        match &camera_mdns_name {
             Some(cell) => cell.lock().ok().and_then(|s| s.clone()),
-            None => mdns::resolve_camera_mdns_host().await,
-        };
-        if let Some(host) = host {
+            None => mdns::resolve_avahi_or_system_host().await,
+        }
+    } else {
+        None
+    };
+    match host {
+        Some(host) => {
             if let Err(e) = client
                 .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, host.into_bytes())
                 .await
@@ -1437,6 +1445,12 @@ async fn announce(
                 eprintln!("btmqttd: publish camera mDNS host failed: {e}");
             }
         }
+        None if !responder_pending => {
+            let _ = client
+                .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, Vec::new())
+                .await;
+        }
+        None => {}
     }
     // Re-publish the tracked light state on every connect (a restarted broker dropped its
     // retained topics; a changed WHERE reusing the topic left a stale value). This is
