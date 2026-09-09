@@ -829,11 +829,12 @@ async fn open_responder_socket() -> Option<UdpSocket> {
 fn next_conflict_name(name: &str) -> String {
     // Strip a trailing `.local` CASE-INSENSITIVELY, keeping the original suffix casing, so a conflict
     // on an already-qualified name whose suffix `ensure_dot_local` left cased (e.g. `Foo.LOCAL`) yields
-    // a VALID mDNS name (`Foo-2.LOCAL`), not `Foo.LOCAL-2` (which has no `local` top label).
-    let (label, suffix) = if name.len() > 6 && name[name.len() - 6..].eq_ignore_ascii_case(".local") {
-        name.split_at(name.len() - 6)
-    } else {
-        (name, "")
+    // a VALID mDNS name (`Foo-2.LOCAL`), not `Foo.LOCAL-2` (which has no `local` top label). `str::get`
+    // slices on a CHAR BOUNDARY (returning None otherwise), so a non-ASCII label — `.local` is 6 ASCII
+    // bytes, but the byte 6 back from the end may fall mid-codepoint — can't panic here.
+    let (label, suffix) = match name.len().checked_sub(6).and_then(|i| name.get(i..).map(|s| (i, s))) {
+        Some((i, tail)) if tail.eq_ignore_ascii_case(".local") => name.split_at(i),
+        _ => (name, ""),
     };
     match label
         .rsplit_once('-')
@@ -1623,6 +1624,10 @@ mod tests {
         // A case-variant suffix is stripped case-insensitively and kept as-is, so the result is still a
         // valid mDNS name (the `-N` goes BEFORE the suffix, not after it).
         assert_eq!(next_conflict_name("host.LOCAL"), "host-2.LOCAL");
+        // A multi-byte codepoint 6 bytes from the end must not panic the `.local` byte-slice: `é` is two
+        // bytes, so `caf\u{e9}` (6 bytes) has no char boundary at len-6 — safe `str::get` returns None and
+        // we treat it as a suffix-less label. (Real Avahi host-names are ASCII; this only proves no panic.)
+        assert_eq!(next_conflict_name("caf\u{e9}"), "caf\u{e9}-2");
     }
 
     #[test]

@@ -1496,17 +1496,17 @@ async fn announce(
                 eprintln!("btmqttd: publish camera mDNS host failed: {e}");
             }
         }
-        // CLEAR the retained topic only when the feature is OFF, so a value a previous ON-device build
-        // left on the broker doesn't linger (discovery tombstones the HA entities but not this state).
-        // When on-device but the host is momentarily unavailable, LEAVE the last retained value rather
-        // than blanking HA's URL sensors on a transient hiccup — a permanent responder failure clears it
-        // at the source instead (run_responder on a bind failure).
-        None if !camera_mdns_active(&cfg) => {
+        // CLEAR the retained topic on ANY None, so a restarted broker + HA are reconciled to "no host"
+        // rather than a value a previous run (or a previous ON-device build with the feature since turned
+        // off) left cached. When the feature is ON the watch only reads None BEFORE the owner's first
+        // commit — and never regresses to None afterwards (pick_host keeps the learned name across
+        // transient reverse-PTR failures), so this can't blank a settled host on a hiccup: it only
+        // asserts "not yet resolved", which is exactly what HA should show until the owner commits.
+        None => {
             let _ = client
                 .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, Vec::new())
                 .await;
         }
-        None => {}
     }
     // Re-publish the tracked light state on every connect (a restarted broker dropped its
     // retained topics; a changed WHERE reusing the topic left a stale value). This is
