@@ -384,10 +384,11 @@ async fn run() -> Result<bool, String> {
     // re-assert that exact name on each reconnect. `None` on the C100X (announce() reads the factory
     // Avahi name directly) and off-device.
     #[allow(clippy::type_complexity)]
-    let (still_task, still_stopping, camera_mdns_name): (
+    let (still_task, still_stopping, camera_mdns_name, host_refresher): (
         Option<tokio::task::JoinHandle<()>>,
         Arc<std::sync::atomic::AtomicBool>,
         Option<tokio::sync::watch::Receiver<Option<String>>>,
+        Option<tokio::task::JoinHandle<()>>,
     ) = {
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if cfg.camera_ondevice {
@@ -400,7 +401,7 @@ async fn run() -> Result<bool, String> {
             // `Bticino-Classe100X.local`, so a second responder would cause mDNS name-conflict flapping —
             // there we only READ that name for the Part A diagnostic sensors. The responder shares its
             // conflict-resolved chosen name over a watch channel so announce() re-asserts it on connect.
-            let name_rx = if camera_mdns_active(&cfg) {
+            let (name_rx, host_refresher) = if camera_mdns_active(&cfg) {
                 if !mdns::system_mdns_responder_present().await {
                     // C300X: our own responder owns the (conflict-resolved) name and shares it over a
                     // watch channel so announce() re-asserts it on connect.
@@ -415,30 +416,32 @@ async fn run() -> Result<bool, String> {
                                 name_tx,
                                 stopping.clone(),
                             ));
-                            Some(name_rx)
+                            (Some(name_rx), None)
                         }
-                        None => None,
+                        None => (None, None),
                     }
                 } else {
                     // C100X: the factory Avahi owns the name; we only READ it. Spawn a lightweight refresher
                     // that re-resolves Avahi's RUNTIME name and republishes the retained host topic if it
                     // changes (e.g. a conflict-rename mid-connection), so the URL sensors don't advertise a
                     // stale name until the next reconnect. announce() still does the per-connect publish, so
-                    // no watch channel is needed here.
-                    tokio::spawn(mdns::run_host_refresher(
+                    // no watch channel is needed here. Its JoinHandle is retained so shutdown can abort-and-
+                    // await it (like still_task) BEFORE the final offline publish — otherwise a mid-await
+                    // reverse-PTR lookup could emit a retained host publish after shutdown.
+                    let h = tokio::spawn(mdns::run_host_refresher(
                         cfg.mqtt_host.clone(),
                         client.clone(),
                         cfg.topic_camera_mdns_host.clone(),
                         stopping.clone(),
                     ));
-                    None
+                    (None, Some(h))
                 }
             } else {
-                None
+                (None, None)
             };
-            (Some(tokio::spawn(still::run(stopping.clone()))), stopping, name_rx)
+            (Some(tokio::spawn(still::run(stopping.clone()))), stopping, name_rx, host_refresher)
         } else {
-            (None, stopping, None)
+            (None, stopping, None, None)
         }
     };
     // First-run idle auto-capture (issue #169): on the first boot where no idle.jpg exists yet, grab the
@@ -1263,6 +1266,13 @@ async fn run() -> Result<bool, String> {
     // holds no half-actuated state, so stop it like av/sprop — signal `stopping`, then abort-and-await.
     if let Some(h) = still_task {
         still_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
+        stop(h).await;
+    }
+    // C100X mDNS host refresher (issue #171): it PUBLISHES the retained camera-host topic, so it must be
+    // stopped BEFORE the final offline publish — a mid-await reverse-PTR lookup (up to ~2 s) could
+    // otherwise emit a stale/late retained host after shutdown. It shares `still_stopping` (set above);
+    // abort-and-await interrupts any pending resolve so no publish escapes.
+    if let Some(h) = host_refresher {
         stop(h).await;
     }
     // On-demand SIP UA (issue #104): drain it gracefully. `stop(cmd_worker)` above already dropped

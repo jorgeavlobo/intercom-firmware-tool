@@ -498,11 +498,12 @@ namespace IntercomFirmwareTool.Core
             sb.Append("Add it to Home Assistant as a Generic Camera (Settings -> Devices &\n");
             sb.Append("Services -> Add Integration -> Generic Camera).\n\n");
 
-            // Preferred path (issue #171) — ONLY when HA discovery is enabled, because the three
-            // diagnostic sensors that carry the ready-to-paste URLs are created BY that discovery
-            // (btmqttd clears them when HA_DISCOVERY=0). With discovery off they don't exist, so the
-            // guide leads straight with the manual URLs instead of pointing at absent sensors.
-            bool haveSensors = opts.EnableHaDiscovery;
+            // Preferred path (issue #171) — ONLY when the three diagnostic sensors that carry the
+            // ready-to-paste URLs are actually emitted. GenerateHaDiscovery gates them on exactly
+            // `EnableHaDiscovery && CameraEnabled && CameraOnDevice` (and btmqttd clears them otherwise),
+            // so mirror that EXACT condition here: a build with the camera feature off (CameraEnabled=0)
+            // but CameraOnDevice=1 would otherwise be told to copy sensors that were never created.
+            bool haveSensors = opts.EnableHaDiscovery && opts.CameraEnabled && opts.CameraOnDevice;
             if (haveSensors)
             {
                 sb.Append("Easiest — copy the ready-made URLs Home Assistant already has: the panel\n");

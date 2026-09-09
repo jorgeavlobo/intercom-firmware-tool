@@ -1089,11 +1089,12 @@ pub async fn run_host_refresher(
         if stopping.load(Ordering::Relaxed) {
             return;
         }
-        // Mirror announce()'s C100X resolve: prefer the off-hot-path cached IP, else a fresh bounded probe.
-        let ip = match crate::still::cached_self_ipv4() {
-            Some(ip) => Some(ip),
-            None => crate::still::reachable_ipv4(&broker).await,
-        };
+        // A FRESH routing-table probe each tick — NOT the up-to-300 s ring cache (`cached_self_ipv4`):
+        // on this periodic path a stale cached IP would reverse-resolve the OLD address after a DHCP
+        // change, time out, and fall back to the configured UNRENAMED hostname — republishing the wrong
+        // name. The refresher is off any hot path (30 s cadence, bounded probe + 2 s reverse lookup), so
+        // a fresh probe is cheap and gives the reverse-PTR the current address.
+        let ip = crate::still::reachable_ipv4(&broker).await;
         if let Some(host) = resolve_avahi_or_system_host(ip).await {
             if last.as_deref() != Some(host.as_str()) {
                 match client.publish(&topic, QoS::AtMostOnce, true, host.clone().into_bytes()).await {
