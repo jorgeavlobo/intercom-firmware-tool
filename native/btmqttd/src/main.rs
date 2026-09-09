@@ -424,7 +424,16 @@ async fn run() -> Result<bool, String> {
                             ));
                             (Some(name_rx), Some(h))
                         }
-                        None => (None, None),
+                        None => {
+                            // No base host to advertise (no Avahi host-name AND no model digits in the
+                            // kernel hostname — unusual on a real C300X). Start NO responder, but hand
+                            // announce() a watch receiver that stays None (the sender is dropped here) so it
+                            // publishes NOTHING and leaves the retained host untouched — never a
+                            // system-hostname `.local` that no responder actually serves. This keeps the
+                            // C300X path distinct from the C100X `None` (where announce() reads Avahi).
+                            let (_name_tx, name_rx) = tokio::sync::watch::channel(None::<String>);
+                            (Some(name_rx), None)
+                        }
                     }
                 } else {
                     // C100X: the factory Avahi owns the name; we only READ it. Spawn a lightweight refresher
