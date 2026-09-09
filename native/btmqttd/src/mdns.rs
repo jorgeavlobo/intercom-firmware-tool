@@ -801,10 +801,17 @@ fn query_asks_for_a(b: &[u8], our_name: &str) -> Option<bool> {
 /// Co-bind the shared 5353 mDNS port and JOIN the group, so we both receive queries and can multicast
 /// answers. `None` if the bind or join fails (without the socket there is no responder; the still
 /// endpoint is still reachable by IP, so this is a soft failure, not a panic).
+///
+/// Both the MULTICAST and the UNICAST IP TTL are set to 255 (RFC 6762 §11): every mDNS message — the
+/// group announcements AND a QU (unicast-response, §5.4) reply sent straight to a querier's source port —
+/// must leave with TTL 255, so a receiver performing the §11 source-address/TTL check does not discard
+/// it. `set_multicast_ttl_v4` covers the group traffic; `set_ttl` covers the unicast replies (which would
+/// otherwise inherit the platform default, typically 64).
 async fn open_responder_socket() -> Option<UdpSocket> {
     let sock = bind_reuse(MDNS_PORT).ok()?;
     sock.join_multicast_v4(MDNS_GROUP, Ipv4Addr::UNSPECIFIED).ok()?;
     let _ = sock.set_multicast_ttl_v4(255);
+    let _ = sock.set_ttl(255);
     Some(sock)
 }
 
