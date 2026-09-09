@@ -764,6 +764,10 @@ namespace IntercomFirmwareTool.App
             {
                 // On-device (#120): served on the panel; target pinned to 127.0.0.2 (host ignored).
                 CameraOnDevice = onDevice,
+                // Mirror the Build path's discovery choice (issue #171): the on-device guide leads with the
+                // three ready-made HA sensors ONLY when discovery is on, so the PREVIEW must reflect the same
+                // checkbox the next build reads — otherwise it always hides the sensor steps the build creates.
+                EnableHaDiscovery = ChkMqttHaDiscovery.IsChecked == true,
                 // Locked (default) ⇒ blank so the device defaults to the broker/HA host (and follows
                 // it on an IP change); overridden ⇒ the user's distinct go2rtc host (issue #111).
                 CameraTargetHost = ChkMqttCameraHostOverride.IsChecked == true
