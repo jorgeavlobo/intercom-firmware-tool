@@ -426,11 +426,18 @@ async fn run() -> Result<bool, String> {
                         }
                         None => {
                             // No base host to advertise (no Avahi host-name AND no model digits in the
-                            // kernel hostname — unusual on a real C300X). Start NO responder, but hand
-                            // announce() a watch receiver that stays None (the sender is dropped here) so it
-                            // publishes NOTHING and leaves the retained host untouched — never a
-                            // system-hostname `.local` that no responder actually serves. This keeps the
-                            // C300X path distinct from the C100X `None` (where announce() reads Avahi).
+                            // kernel hostname — unusual on a real C300X). Start NO responder, and CLEAR any
+                            // retained host a PRIOR run left on the broker: with nothing serving a
+                            // `<name>.local`, HA must not keep rendering RTSP/still URLs for it. Then hand
+                            // announce() a permanently-None receiver so it neither republishes a
+                            // system-hostname `.local` (the C100X `None` path would) nor re-clears — the
+                            // empty retained payload here is the final state.
+                            if let Err(e) = client
+                                .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, Vec::new())
+                                .await
+                            {
+                                eprintln!("btmqttd: clear camera mDNS host (no base host) failed: {e}");
+                            }
                             let (_name_tx, name_rx) = tokio::sync::watch::channel(None::<String>);
                             (Some(name_rx), None)
                         }
