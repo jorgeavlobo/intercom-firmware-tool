@@ -21,9 +21,10 @@
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rumqttc::{AsyncClient, QoS};
 use tokio::net::UdpSocket;
 
 /// The IPv4 link-local mDNS multicast group and port (RFC 6762).
@@ -738,51 +739,188 @@ async fn open_responder_socket() -> Option<UdpSocket> {
     Some(sock)
 }
 
-/// Poll slice: how often the responder wakes to re-check the cached IP (a DHCP change) when no query
-/// arrives. Also bounds how promptly it observes `stopping`.
-const RESPONDER_TICK: Duration = Duration::from_secs(5);
-
-/// Advertise `host` (`<name>.local`) → the panel's own wlan0 IPv4 over mDNS: answer A/ANY queries for
-/// the name and send an unsolicited announcement whenever the cached address first appears or changes
-/// (a DHCP renewal). The address is read from `still::cached_self_ipv4()` — the same off-ring-path
-/// cache the ring snapshot uses — so this never resolves on a hot path; while it is unresolved the
-/// responder simply stays quiet. Exits promptly when `stopping` is set. Never panics (a failed socket
-/// just ends the task; the still endpoint stays reachable by IP).
-///
-/// MUST be spawned ONLY where no system responder owns the name (see
-/// `system_mdns_responder_present`) — otherwise two responders for one name conflict.
-pub async fn run_responder(host: String, stopping: Arc<AtomicBool>) {
-    let Some(sock) = open_responder_socket().await else {
-        eprintln!("btmqttd: mdns responder: could not bind :5353 — not advertising {host}");
-        return;
+/// The next candidate name after an mDNS conflict (RFC 6762 §9): increment a trailing `-N` on the
+/// label (before `.local`), starting at `-2`. `Bticino-Classe300X.local` → `Bticino-Classe300X-2.local`
+/// → `…-3.local`. The `Bticino-Classe` hyphen is preserved because its tail (`Classe300X`) isn't a
+/// bare number. Pure; unit-tested.
+fn next_conflict_name(name: &str) -> String {
+    let (label, suffix) = match name.strip_suffix(".local") {
+        Some(l) => (l, ".local"),
+        None => (name, ""),
     };
-    let mut last_announced: Option<Ipv4Addr> = None;
-    let mut buf = [0u8; 9000];
-    while !stopping.load(Ordering::Relaxed) {
-        // Gratuitous announcement on the first resolved address and on every change (DHCP renewal),
-        // so resolvers update without waiting to re-query.
-        if let Some(ip) = crate::still::cached_self_ipv4() {
-            if last_announced != Some(ip) {
-                if let Some(resp) = build_a_response(&host, ip) {
-                    let _ = sock.send_to(&resp, (MDNS_GROUP, MDNS_PORT)).await;
-                }
-                last_announced = Some(ip);
+    match label
+        .rsplit_once('-')
+        .and_then(|(head, tail)| tail.parse::<u32>().ok().map(|n| (head, n)))
+    {
+        Some((head, n)) => format!("{head}-{}{suffix}", n + 1),
+        None => format!("{label}-2{suffix}"),
+    }
+}
+
+/// True when datagram `b` means our claim to `our_name_lc` LOSES — i.e. we must pick another name.
+/// Reuses [`parse_response`] to pull every A record for our name (in any section, so a probe's
+/// authority record counts too):
+/// - a RESPONSE (QR=1) carrying our name at a DIFFERENT address = an already-committed owner, so we
+///   always yield;
+/// - a simultaneous PROBE (QR=0) proposing a NUMERICALLY-GREATER address wins the RFC 6762 §8.2
+///   address tiebreak, so we yield to it; a lesser address loses, so we keep our name.
+///
+/// Our own record echoed back (same address) is ignored. Bounds-checked via `parse_response`.
+fn datagram_conflict(b: &[u8], our_name_lc: &str, our_ip: Ipv4Addr) -> bool {
+    if b.len() < 12 {
+        return false;
+    }
+    let is_response = b[2] & 0x80 != 0;
+    let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
+    // Empty `services` → no PTR is collected (we only need A records); A/SRV parse regardless.
+    parse_response(b, &[], &mut ptr, &mut srv, &mut a);
+    if let Some(ips) = a.get(our_name_lc) {
+        for &ip in ips {
+            if ip == our_ip {
+                continue; // our own record looped back
+            }
+            if is_response || ip > our_ip {
+                return true;
             }
         }
-        tokio::select! {
-            _ = tokio::time::sleep(RESPONDER_TICK) => {}
-            r = sock.recv_from(&mut buf) => {
-                if let Ok((n, _)) = r {
-                    if query_asks_for_a(&buf[..n], &host) {
-                        if let Some(ip) = crate::still::cached_self_ipv4() {
-                            if let Some(resp) = build_a_response(&host, ip) {
-                                let _ = sock.send_to(&resp, (MDNS_GROUP, MDNS_PORT)).await;
-                            }
+    }
+    false
+}
+
+/// RFC 6762 §8.1 probing: how many probe queries and how far apart.
+const PROBE_COUNT: u32 = 3;
+const PROBE_INTERVAL: Duration = Duration::from_millis(250);
+/// RFC 6762 §8.3 announcing: how many unsolicited announcements on commit / address change.
+const ANNOUNCE_COUNT: u32 = 2;
+const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(1);
+/// Serve-loop poll slice: also the cadence at which the responder re-checks its own address for a DHCP
+/// change (a routing-table probe, so cheap), and bounds how promptly it observes `stopping`. Kept far
+/// below the ring cache's 300 s so a DHCP change converges quickly (issue #171 review).
+const RESPONDER_TICK: Duration = Duration::from_secs(15);
+
+/// Send `count` unsolicited A-record announcements for `name` → `ip`, `ANNOUNCE_INTERVAL` apart (§8.3).
+async fn announce_record(sock: &UdpSocket, name: &str, ip: Ipv4Addr, count: u32) {
+    let Some(resp) = build_a_response(name, ip) else {
+        return;
+    };
+    for i in 0..count {
+        let _ = sock.send_to(&resp, (MDNS_GROUP, MDNS_PORT)).await;
+        if i + 1 < count {
+            tokio::time::sleep(ANNOUNCE_INTERVAL).await;
+        }
+    }
+}
+
+/// Probe `name` (§8.1): send `PROBE_COUNT` multicast ANY-queries `PROBE_INTERVAL` apart and listen for
+/// a conflict ([`datagram_conflict`] vs `our_ip`). Returns true if the name is TAKEN (or we lose the
+/// tiebreak), so the caller renames and re-probes. Bounded by the probe window; returns false early if
+/// `stopping` is set.
+async fn probe(sock: &UdpSocket, name: &str, name_lc: &str, our_ip: Ipv4Addr, stopping: &AtomicBool) -> bool {
+    let query = build_query(name, QTYPE_ANY, false); // QM on the shared 5353 socket
+    let mut buf = [0u8; 9000];
+    for _ in 0..PROBE_COUNT {
+        if stopping.load(Ordering::Relaxed) {
+            return false;
+        }
+        if let Some(q) = &query {
+            let _ = sock.send_to(q, (MDNS_GROUP, MDNS_PORT)).await;
+        }
+        let deadline = tokio::time::sleep(PROBE_INTERVAL);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => break,
+                r = sock.recv_from(&mut buf) => {
+                    if let Ok((n, _)) = r {
+                        if datagram_conflict(&buf[..n], name_lc, our_ip) {
+                            return true;
                         }
                     }
                 }
             }
         }
+    }
+    false
+}
+
+/// Advertise the panel's own `<name>.local` A record over mDNS (issue #171 Part B), with full RFC 6762
+/// conflict resolution: PROBE the name (§8.1) with the §8.2 address tiebreak, on conflict rename via
+/// [`next_conflict_name`] and re-probe, then ANNOUNCE (§8.3), publish the FINAL chosen name retained on
+/// `topic` (and expose it in `advertised` for the reconnect re-assert in `announce()`), and answer
+/// A/ANY queries — renaming again if a later claim (§9) takes the name. The advertised address is a
+/// fresh `still::reachable_ipv4` routing-table probe (a named broker hits `/etc/hosts`, so no network
+/// DNS), re-checked every `RESPONDER_TICK`, so a DHCP change converges in seconds — NOT the 300 s ring
+/// cache. Exits promptly when `stopping` is set. Never panics.
+///
+/// MUST be spawned ONLY where no system responder owns the name (see `system_mdns_responder_present`).
+pub async fn run_responder(
+    base_host: String,
+    broker: String,
+    client: AsyncClient,
+    topic: String,
+    advertised: Arc<Mutex<Option<String>>>,
+    stopping: Arc<AtomicBool>,
+) {
+    let Some(sock) = open_responder_socket().await else {
+        eprintln!("btmqttd: mdns responder: could not bind :5353 — not advertising {base_host}");
+        return;
+    };
+    let mut buf = [0u8; 9000];
+    let mut name = base_host;
+    'claim: while !stopping.load(Ordering::Relaxed) {
+        // Our own wlan0 source address, resolved fresh (no packet; a named broker hits /etc/hosts).
+        // Without it we can neither probe meaningfully nor answer, so wait a tick and retry.
+        let Some(mut our_ip) = crate::still::reachable_ipv4(&broker).await else {
+            tokio::time::sleep(RESPONDER_TICK).await;
+            continue;
+        };
+        let name_lc = name.to_ascii_lowercase();
+        // PROBE (§8.1): if the name is taken, rename and re-probe.
+        if probe(&sock, &name, &name_lc, our_ip, &stopping).await {
+            name = next_conflict_name(&name);
+            continue;
+        }
+        // COMMIT: announce (§8.3), then publish the chosen name retained + expose it for announce()'s
+        // reconnect re-assert. (A prior name's record just times out via its TTL — no goodbye packet.)
+        announce_record(&sock, &name, our_ip, ANNOUNCE_COUNT).await;
+        if let Ok(mut slot) = advertised.lock() {
+            *slot = Some(name.clone());
+        }
+        if let Err(e) = client
+            .publish(&topic, QoS::AtMostOnce, true, name.clone().into_bytes())
+            .await
+        {
+            eprintln!("btmqttd: mdns responder: publish host failed: {e}");
+        }
+        // SERVE until a conflicting claim forces a rename or we stop.
+        while !stopping.load(Ordering::Relaxed) {
+            tokio::select! {
+                _ = tokio::time::sleep(RESPONDER_TICK) => {
+                    // Track a DHCP address change and re-announce so resolvers (and the HA URL) follow.
+                    if let Some(ip) = crate::still::reachable_ipv4(&broker).await {
+                        if ip != our_ip {
+                            our_ip = ip;
+                            announce_record(&sock, &name, our_ip, ANNOUNCE_COUNT).await;
+                        }
+                    }
+                }
+                r = sock.recv_from(&mut buf) => {
+                    if let Ok((n, _)) = r {
+                        let pkt = &buf[..n];
+                        if query_asks_for_a(pkt, &name_lc) {
+                            if let Some(resp) = build_a_response(&name, our_ip) {
+                                let _ = sock.send_to(&resp, (MDNS_GROUP, MDNS_PORT)).await;
+                            }
+                        } else if datagram_conflict(pkt, &name_lc, our_ip) {
+                            // Someone else claimed our name (§9): drop it, rename, re-probe.
+                            name = next_conflict_name(&name);
+                            continue 'claim;
+                        }
+                    }
+                }
+            }
+        }
+        return;
     }
 }
 
@@ -1189,5 +1327,41 @@ mod tests {
         assert!(!query_asks_for_a(&resp, "Bticino-Classe300X.local"));
         // Truncated datagram.
         assert!(!query_asks_for_a(&[0, 0, 0, 0], "Bticino-Classe300X.local"));
+    }
+
+    #[test]
+    fn next_conflict_name_increments_the_suffix() {
+        // First conflict → `-2`; then increment; the `Bticino-Classe` hyphen (non-numeric tail) is
+        // preserved, and the `.local` suffix is kept.
+        assert_eq!(next_conflict_name("Bticino-Classe300X.local"), "Bticino-Classe300X-2.local");
+        assert_eq!(next_conflict_name("Bticino-Classe300X-2.local"), "Bticino-Classe300X-3.local");
+        assert_eq!(next_conflict_name("Bticino-Classe300X-9.local"), "Bticino-Classe300X-10.local");
+        assert_eq!(next_conflict_name("host"), "host-2"); // no .local suffix still works
+        assert_eq!(next_conflict_name("a-b"), "a-b-2"); // non-numeric tail isn't a counter
+    }
+
+    #[test]
+    fn datagram_conflict_applies_the_ownership_and_tiebreak_rules() {
+        let ours = Ipv4Addr::new(192, 168, 50, 7);
+        let name = "bticino-classe300x.local"; // parse_response lower-cases, so compare lower-cased
+
+        // A RESPONSE (QR=1) advertising our name at a DIFFERENT address = an existing owner → yield.
+        let owner = build_a_response("Bticino-Classe300X.local", Ipv4Addr::new(192, 168, 50, 8)).unwrap();
+        assert!(datagram_conflict(&owner, name, ours));
+        // Our OWN record looped back (same address) → not a conflict.
+        let echo = build_a_response("Bticino-Classe300X.local", ours).unwrap();
+        assert!(!datagram_conflict(&echo, name, ours));
+        // A record for a DIFFERENT name → not a conflict.
+        let other = build_a_response("someone-else.local", Ipv4Addr::new(192, 168, 50, 8)).unwrap();
+        assert!(!datagram_conflict(&other, name, ours));
+
+        // A simultaneous PROBE (QR=0) proposing a GREATER address wins the §8.2 tiebreak → we yield;
+        // a LESSER address loses → we keep our name.
+        let mut probe_hi = build_a_response("Bticino-Classe300X.local", Ipv4Addr::new(192, 168, 50, 8)).unwrap();
+        probe_hi[2] &= !0x80; // clear QR → a query/probe
+        assert!(datagram_conflict(&probe_hi, name, ours));
+        let mut probe_lo = build_a_response("Bticino-Classe300X.local", Ipv4Addr::new(192, 168, 50, 6)).unwrap();
+        probe_lo[2] &= !0x80;
+        assert!(!datagram_conflict(&probe_lo, name, ours));
     }
 }
