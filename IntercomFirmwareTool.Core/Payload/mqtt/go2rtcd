@@ -235,7 +235,9 @@ firewall_open() {
 	fw_list=$(iptables -S "$FW_CHAIN" 2>/dev/null) || return 0
 	n=$(printf '%s\n' "$fw_list" | grep -c -- "^-A ")
 	# Desired rule count: one ACCEPT per opened endpoint (address present), or an empty chain (no address).
-	# Counting the explicit list — rather than hard-coding — keeps every check in step as endpoints are added.
+	# The tcp ports are COUNTED FROM THE LIST; the mDNS udp/CAM_MDNS_PORT rule is a different protocol, so it
+	# is counted SEPARATELY (the +1 below) and reconciled with its own -C/-A lines — adjust both places
+	# together if an endpoint is added or removed.
 	want=0
 	for p in "$CAM_PORT" "$CAM_STILL_PORT"; do want=$((want + 1)); done
 	want=$((want + 1))   # + the mDNS udp/CAM_MDNS_PORT rule (issue #171), reconciled alongside the tcp ports
