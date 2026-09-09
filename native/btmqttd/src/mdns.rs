@@ -840,6 +840,17 @@ fn datagram_conflict(b: &[u8], our_name_lc: &str, our_ip: Ipv4Addr) -> bool {
     if b.len() < 12 {
         return false;
     }
+    // Cheap header guard (issue #171 review): a conflict is signalled ONLY by a datagram carrying an
+    // A record for our name — present only in the answer/authority/additional sections. A datagram
+    // with no records (AN+NS+AR == 0), e.g. a plain question, can never conflict, so skip the full
+    // `parse_response` + its Vec/HashMap allocations. On a chatty LAN most traffic reaching here is
+    // record-less queries for OTHER names, and this runs on the responder's per-packet hot path.
+    let records = (((b[6] as usize) << 8) | b[7] as usize)
+        + (((b[8] as usize) << 8) | b[9] as usize)
+        + (((b[10] as usize) << 8) | b[11] as usize);
+    if records == 0 {
+        return false;
+    }
     let is_response = b[2] & 0x80 != 0;
     let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
     // Empty `services` → no PTR is collected (we only need A records); A/SRV parse regardless.
@@ -1527,5 +1538,11 @@ mod tests {
         let mut probe_lo = build_a_response("Bticino-Classe300X.local", Ipv4Addr::new(192, 168, 50, 6)).unwrap();
         probe_lo[2] &= !0x80;
         assert!(!datagram_conflict(&probe_lo, name, ours));
+
+        // A plain QUERY for our name (QDCOUNT only, no answer/authority/additional records) carries no
+        // A record, so it can never signal a conflict — the cheap header guard short-circuits it before
+        // the full parse. This is the bulk of the LAN chatter reaching this hot path.
+        let bare_query = build_query("Bticino-Classe300X.local", QTYPE_ANY, false).unwrap();
+        assert!(!datagram_conflict(&bare_query, name, ours));
     }
 }
