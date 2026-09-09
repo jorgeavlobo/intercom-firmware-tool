@@ -387,7 +387,7 @@ async fn run() -> Result<bool, String> {
     let (still_task, still_stopping, camera_mdns_name): (
         Option<tokio::task::JoinHandle<()>>,
         Arc<std::sync::atomic::AtomicBool>,
-        Option<Arc<std::sync::Mutex<Option<String>>>>,
+        Option<tokio::sync::watch::Receiver<Option<String>>>,
     ) = {
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if cfg.camera_ondevice {
@@ -398,28 +398,28 @@ async fn run() -> Result<bool, String> {
             // mDNS responder (issue #171 Part B): advertise our own `<name>.local` A record ONLY on a
             // model with no factory responder (the C300X). On the C100X the factory Avahi already owns
             // `Bticino-Classe100X.local`, so a second responder would cause mDNS name-conflict flapping —
-            // there we only READ that name for the Part A diagnostic sensors. Shares the still stopping
-            // flag; the loop exits on it (and the runtime cancels it at process exit regardless).
-            let cell = if !mdns::system_mdns_responder_present().await {
+            // there we only READ that name for the Part A diagnostic sensors. The responder shares its
+            // conflict-resolved chosen name over a watch channel so announce() re-asserts it on connect.
+            let name_rx = if !mdns::system_mdns_responder_present().await {
                 match mdns::resolve_responder_base_host().await {
                     Some(base) => {
-                        let cell = Arc::new(std::sync::Mutex::new(None::<String>));
+                        let (name_tx, name_rx) = tokio::sync::watch::channel(None::<String>);
                         tokio::spawn(mdns::run_responder(
                             base,
                             cfg.mqtt_host.clone(),
                             client.clone(),
                             cfg.topic_camera_mdns_host.clone(),
-                            cell.clone(),
+                            name_tx,
                             stopping.clone(),
                         ));
-                        Some(cell)
+                        Some(name_rx)
                     }
                     None => None,
                 }
             } else {
                 None
             };
-            (Some(tokio::spawn(still::run(stopping.clone()))), stopping, cell)
+            (Some(tokio::spawn(still::run(stopping.clone()))), stopping, name_rx)
         } else {
             (None, stopping, None)
         }
@@ -1359,7 +1359,7 @@ async fn announce(
     volume: Arc<volume::VolumeCtl>,
     light: Option<Arc<light::LightCtl>>,
     update_latest: update::LatestVersion,
-    camera_mdns_name: Option<Arc<std::sync::Mutex<Option<String>>>>,
+    camera_mdns_name: Option<tokio::sync::watch::Receiver<Option<String>>>,
 ) {
     // Assert the light-subsystem availability GATE *before* the bridge birth `online`. On a
     // reflash from a configured WHERE to blank learn mode, the broker can still hold a retained
@@ -1421,36 +1421,27 @@ async fn announce(
     // omits it (the sensors stay unavailable, the literal-IP guide fallback still works). A
     // reconnect re-runs announce, so a broker that dropped its retained set is reconciled.
     // Camera mDNS host diagnostic (#171). C300X: our responder owns the (conflict-resolved) name and
-    // reports it via the shared cell; re-assert whatever it has settled on. C100X: the name the factory
-    // Avahi advertises. When the feature is OFF or nothing resolves, publish an EMPTY retained payload
-    // to CLEAR a value a previous on-device build left on the broker (the discovery tombstones remove
-    // the HA entities, but not this retained state). The one case we must NOT clear is the C300X path
-    // before the responder has settled (cell still None): the responder itself publishes the name on
-    // commit, so clearing here would race and blank it — leave it untouched.
-    let responder_pending = camera_mdns_name.as_ref().is_some_and(|c| c.lock().ok().is_some_and(|s| s.is_none()));
+    // shares it over the watch channel; re-assert whatever it has settled on (the responder also
+    // publishes it itself on commit — this is the reconnect re-assert). C100X: the name the factory
+    // Avahi advertises. When the feature is OFF, or nothing resolves yet, publish an EMPTY retained
+    // payload to CLEAR a value a previous on-device build left on the broker (the discovery tombstones
+    // remove the HA entities, but not this retained state), so HA never advertises a host nothing is
+    // serving. A borrow of the watch value is a cheap synchronous read (no blocking lock held across an
+    // await). A brief empty flash before the responder's first commit is harmless.
     let host = if cfg.camera_ondevice {
         match &camera_mdns_name {
-            Some(cell) => cell.lock().ok().and_then(|s| s.clone()),
+            Some(rx) => rx.borrow().clone(),
             None => mdns::resolve_avahi_or_system_host().await,
         }
     } else {
         None
     };
-    match host {
-        Some(host) => {
-            if let Err(e) = client
-                .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, host.into_bytes())
-                .await
-            {
-                eprintln!("btmqttd: publish camera mDNS host failed: {e}");
-            }
-        }
-        None if !responder_pending => {
-            let _ = client
-                .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, Vec::new())
-                .await;
-        }
-        None => {}
+    let payload = host.map(String::into_bytes).unwrap_or_default();
+    if let Err(e) = client
+        .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, payload)
+        .await
+    {
+        eprintln!("btmqttd: publish camera mDNS host failed: {e}");
     }
     // Re-publish the tracked light state on every connect (a restarted broker dropped its
     // retained topics; a changed WHERE reusing the topic left a stale value). This is
