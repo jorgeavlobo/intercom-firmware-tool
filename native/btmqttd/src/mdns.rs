@@ -651,9 +651,14 @@ async fn reverse_lookup_host(our_ip: Ipv4Addr) -> Option<String> {
 /// C100X path — the name the FACTORY Avahi actually advertises, so the HA sensors match what it
 /// resolves. Prefer Avahi's RUNTIME name via a reverse-PTR self-lookup of `our_ip` (this reflects a
 /// conflict-rename that the static conf can't show); fall back to the configured `host-name` if set,
-/// else the RAW system hostname (Avahi's own fallback — NOT the model-derived name). btmqttd only
-/// REPORTS this; it never runs its own responder where Avahi is present. `None` only if nothing yields
-/// a usable label.
+/// else the `Bticino-Classe<model>X` name DERIVED from the kernel hostname. btmqttd only REPORTS this;
+/// it never runs its own responder where Avahi is present. `None` only if nothing yields a usable label.
+///
+/// The final fallback derives the model name rather than using the RAW `/etc/hostname` (e.g.
+/// `Bticino_Classe_100_X`): the raw kernel hostname carries underscores, which are invalid in DNS
+/// labels, so publishing it as `<name>.local` yields an unresolvable name — whereas the derived
+/// `Bticino-Classe100X` is a valid label matching the C100X factory convention (and the C300X responder
+/// path). The raw hostname is used only as a last resort when no model digits are present.
 pub async fn resolve_avahi_or_system_host(our_ip: Option<Ipv4Addr>) -> Option<String> {
     if let Some(ip) = our_ip {
         if let Some(host) = reverse_lookup_host(ip).await {
@@ -662,7 +667,10 @@ pub async fn resolve_avahi_or_system_host(our_ip: Option<Ipv4Addr>) -> Option<St
     }
     let label = match read_avahi_host_name().await {
         Some(l) => l,
-        None => read_system_hostname().await?,
+        None => {
+            let sys = read_system_hostname().await?;
+            model_host_from_hostname(&sys).unwrap_or(sys)
+        }
     };
     ensure_dot_local(&label)
 }
