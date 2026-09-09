@@ -101,6 +101,20 @@ public class MqttCameraConfTests
     }
 
     [Fact]
+    public void Conf_writes_the_camera_mdns_host_topic()
+    {
+        // #171: btmqttd publishes the panel's advertised <name>.local on this topic; the conf carries it
+        // (default derived from the LWT namespace) so the daemon and the HA sensors agree on it.
+        var conf = MqttInstaller.GenerateConf(new MqttOptions("broker.lan") { CameraEnabled = true });
+        Assert.Contains("TOPIC_CAMERA_MDNS_HOST=", conf);
+        var custom = MqttInstaller.GenerateConf(new MqttOptions("broker.lan")
+        {
+            TopicCameraMdnsHost = "home/i42/cam_host",
+        });
+        Assert.Contains("TOPIC_CAMERA_MDNS_HOST='home/i42/cam_host'\n", custom);
+    }
+
+    [Fact]
     public void On_device_mode_writes_the_rtsp_credentials_for_capture()
     {
         // #169: the still-capture helper reads rtsp://<user>:<pass>@127.0.0.1:8554/doorbell, so the go2rtc

@@ -245,6 +245,13 @@ public class Go2RtcConfigTests
         Assert.Contains("http://<intercom-ip>:8556/idle.jpg", guide);
         // The loopback-only API is called out; no HA-side go2rtc.
         Assert.Contains("127.0.0.1:1984", guide);
+        // Issue #171: the guide leads with the three auto-created diagnostic sensors (the DHCP-proof,
+        // copy-paste path) and references the panel's <name>.local mDNS host; the literal-IP URLs stay
+        // as a hand-entry fallback.
+        Assert.Contains("Camera mDNS host", guide);
+        Assert.Contains("Camera RTSP URL", guide);
+        Assert.Contains("Camera still image URL", guide);
+        Assert.Contains(".local", guide);
         Assert.DoesNotContain("\r", guide);
     }
 

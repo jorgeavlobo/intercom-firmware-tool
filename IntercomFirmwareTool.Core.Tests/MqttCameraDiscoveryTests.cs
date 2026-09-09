@@ -136,4 +136,86 @@ public class MqttCameraDiscoveryTests
             CameraOnDevice = true,
         }));
     }
+
+    // --- Camera addressing diagnostics (issue #171): mDNS host + RTSP/still URL sensors ---------
+
+    private static string CameraSensorJson(MqttOptions opts, string file) =>
+        MqttInstaller.GenerateHaDiscovery(opts, restoreFirewallEligible: false)
+            .Single(e => e.FileName == file).Json;
+
+    [Fact]
+    public void Camera_mdns_sensors_are_emitted_on_device()
+    {
+        var opts = new MqttOptions("broker.lan")
+        {
+            EnableHaDiscovery = true,
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+        };
+
+        // The host sensor shows the raw payload (the panel's <name>.local); it's a read-only
+        // diagnostic reading the camera-mDNS-host topic — no command topic.
+        string host = CameraSensorJson(opts, "camera_mdns_host.json");
+        Assert.Contains("Camera mDNS host", host);
+        Assert.Contains(opts.EffectiveTopicCameraMdnsHost, host);
+        Assert.Contains("diagnostic", host);
+        Assert.DoesNotContain("command_topic", host);
+
+        // The RTSP URL sensor renders the host from the SAME topic via a value_template, with the
+        // fixed scheme/port/path/stream and the embedded credentials baked in; the host is the
+        // {{ value }} token, not a concrete IP.
+        string rtsp = CameraSensorJson(opts, "camera_rtsp_url.json");
+        Assert.Contains("Camera RTSP URL", rtsp);
+        Assert.Contains(opts.EffectiveTopicCameraMdnsHost, rtsp);
+        Assert.Contains("rtsp://camera:s3cr3t@{{ value }}:8554/doorbell", rtsp);
+
+        // The still-image URL sensor: same host token, fixed still port + /idle.jpg, no credentials.
+        string still = CameraSensorJson(opts, "camera_still_url.json");
+        Assert.Contains("Camera still image URL", still);
+        Assert.Contains("http://{{ value }}:8556/idle.jpg", still);
+
+        // No concrete device IP is ever baked into a sensor — the host is always payload-driven.
+        Assert.DoesNotContain("192.168", host + rtsp + still);
+    }
+
+    [Fact]
+    public void Camera_mdns_sensors_are_tombstoned_off_device()
+    {
+        foreach (var file in new[] { "camera_mdns_host.json", "camera_rtsp_url.json", "camera_still_url.json" })
+        {
+            // Off-device (classic go2rtc-on-HA): no on-box endpoints to address, so tombstoned.
+            Assert.Equal("", CameraSensorJson(new MqttOptions("broker.lan")
+            {
+                EnableHaDiscovery = true,
+                CameraEnabled = true,
+                CameraOnDevice = false,
+            }, file));
+            // Camera feature off entirely: also tombstoned.
+            Assert.Equal("", CameraSensorJson(new MqttOptions("broker.lan")
+            {
+                EnableHaDiscovery = true,
+                CameraEnabled = false,
+                CameraOnDevice = true,
+            }, file));
+        }
+    }
+
+    [Fact]
+    public void Camera_rtsp_url_sensor_percent_encodes_the_credentials()
+    {
+        // A password with RTSP-URL-reserved punctuation (@ : /) must be escaped in the userinfo so the
+        // rendered URL doesn't break — same Uri.EscapeDataString the setup guide uses.
+        string rtsp = CameraSensorJson(new MqttOptions("broker.lan")
+        {
+            EnableHaDiscovery = true,
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "p@ss:w/rd",
+        }, "camera_rtsp_url.json");
+        Assert.Contains("p%40ss%3Aw%2Frd", rtsp);
+        Assert.DoesNotContain("@ss:w/rd", rtsp);
+    }
 }

@@ -80,6 +80,13 @@ pub struct Config {
     /// fires only once the image exists and fetches exactly that event's frame (a fixed post-ring delay
     /// can't establish readiness — a cold capture can take ~20 s). Only used in on-device mode.
     pub topic_ring_snapshot: String,
+    /// Retained "camera mDNS host" diagnostic topic (issue #171): btmqttd publishes the panel's
+    /// own advertised `<name>.local` here (read from the factory avahi `host-name` on a C100X, or
+    /// btmqttd's own responder name on a C300X), so Home Assistant can address the live RTSP stream
+    /// and the idle still endpoint by a stable name instead of a DHCP IP. The installer's three
+    /// diagnostic sensors render the host + the ready-to-paste RTSP/still URLs from this one value.
+    /// Only used in on-device mode.
+    pub topic_camera_mdns_host: String,
     // Stair-light SWITCH (opt-in). `light_enabled` reflects the installer's "has exterior
     // light" choice: when true the light subsystem RUNS even before a WHERE is known, so a
     // build left blank can LEARN the WHERE at runtime (see light.rs). `light_where` is the
@@ -247,6 +254,7 @@ impl Config {
             topic_floor_call: get("TOPIC_FLOOR_CALL", "Bticino/floor_call"),
             topic_call_state: get("TOPIC_CALL_STATE", "Bticino/call_state"),
             topic_ring_snapshot: get("TOPIC_RING_SNAPSHOT", "Bticino/ring_snapshot"),
+            topic_camera_mdns_host: get("TOPIC_CAMERA_MDNS_HOST", "Bticino/camera_mdns_host"),
             // Digits only — a WHERE like "112". Empty ⇒ unknown (learn mode when enabled).
             light_where: opt("LIGHT_WHERE").filter(|s| s.bytes().all(|b| b.is_ascii_digit())),
             // "Has exterior light". When the installer wrote LIGHT_ENABLED it is AUTHORITATIVE

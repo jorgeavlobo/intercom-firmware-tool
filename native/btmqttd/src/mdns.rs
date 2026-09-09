@@ -20,6 +20,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::net::UdpSocket;
@@ -263,6 +265,9 @@ fn bind_reuse(port: u16) -> std::io::Result<UdpSocket> {
 const QTYPE_A: u16 = 1;
 const QTYPE_PTR: u16 = 12;
 const QTYPE_SRV: u16 = 33;
+/// The wildcard query type (`*`): a querier asking for ANY record of a name, which our responder must
+/// also answer for an A-record host (RFC 6762 §6).
+const QTYPE_ANY: u16 = 255;
 
 /// Split a DNS presentation-format name into its wire labels, reversing the `\.`/`\\` escaping
 /// that [`read_name`] applies. A `\` escapes the next character (so an escaped `.` stays inside a
@@ -529,6 +534,232 @@ fn correlate(
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Camera mDNS host resolution (issue #171) — the `<name>.local` the panel is
+// reachable on, published as a retained diagnostic so Home Assistant can address
+// the live RTSP stream and the idle still endpoint by name instead of a DHCP IP.
+// ---------------------------------------------------------------------------
+
+/// The factory Avahi responder config (present + running on the C100X, absent on the C300X).
+const AVAHI_CONF_PATH: &str = "/etc/avahi/avahi-daemon.conf";
+/// The kernel hostname, e.g. `Bticino_Classe_100_X` / `Bticino_Classe_300_X`.
+const ETC_HOSTNAME_PATH: &str = "/etc/hostname";
+
+/// Extract the `host-name=` value from an `avahi-daemon.conf`, or `None` if unset/commented.
+///
+/// Avahi's `[server]` `host-name` key (when set) is the label it advertises as `<value>.local`,
+/// overriding `/etc/hostname` — so the C100X advertises `Bticino-Classe100X.local` even though its
+/// kernel hostname is `Bticino_Classe_100_X`. A commented (`#host-name=…`) or absent key yields
+/// `None` (Avahi would then derive the name from the kernel hostname, handled by the caller). Pure;
+/// unit-tested.
+pub(crate) fn parse_avahi_host_name(conf: &str) -> Option<String> {
+    for line in conf.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("host-name") {
+            // Accept `host-name=X` / `host-name = X` — the key must be exactly `host-name`, not a
+            // longer key like `host-name-from-machine-id`, so require `=` (after optional spaces)
+            // to be the next non-space character.
+            let val = rest.trim_start();
+            if let Some(val) = val.strip_prefix('=') {
+                let val = val.trim();
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Derive the panel's `Bticino-Classe<model>X` mDNS label from its kernel hostname (the naming
+/// convention the C100X factory uses, applied uniformly). `Bticino_Classe_100_X` → `Bticino-Classe100X`,
+/// `Bticino_Classe_300_X` → `Bticino-Classe300X`. Returns `None` if no model digits are present, so
+/// the caller can fall back rather than advertise a modelless name. Pure; unit-tested.
+pub(crate) fn model_host_from_hostname(etc_hostname: &str) -> Option<String> {
+    let digits: String = etc_hostname.chars().filter(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    Some(format!("Bticino-Classe{digits}X"))
+}
+
+/// Resolve the panel's advertised `<name>.local` — the factory Avahi `host-name` when set (C100X),
+/// else the `Bticino-Classe<model>X` name derived from the kernel hostname (C300X, where btmqttd's
+/// own responder advertises it). `None` only if neither file yields a usable label. Reads the two
+/// factory files off the runtime thread; never panics.
+pub async fn resolve_camera_mdns_host() -> Option<String> {
+    let label = match tokio::fs::read_to_string(AVAHI_CONF_PATH).await {
+        Ok(conf) => parse_avahi_host_name(&conf),
+        Err(_) => None,
+    };
+    let label = match label {
+        Some(l) => Some(l),
+        None => tokio::fs::read_to_string(ETC_HOSTNAME_PATH)
+            .await
+            .ok()
+            .and_then(|h| model_host_from_hostname(h.trim())),
+    }?;
+    Some(format!("{label}.local"))
+}
+
+// ---------------------------------------------------------------------------
+// mDNS responder (issue #171 Part B) — advertise OUR OWN `<name>.local` A record
+// on models WITHOUT a factory responder (the C300X). On the C100X the factory Avahi
+// already owns `Bticino-Classe100X.local`, so a second responder would trigger mDNS
+// name-conflict flapping — the caller must NOT run this there (see
+// `system_mdns_responder_present`); it only READS that name for the Part A sensors.
+// ---------------------------------------------------------------------------
+
+/// The factory Avahi responder binary. Its PRESENCE marks a model whose system already owns the
+/// `.local` name (the C100X), so btmqttd must not advertise — the discriminator the issue asks for
+/// ("presence of avahi-daemon", not a hard-coded model).
+const AVAHI_DAEMON_PATH: &str = "/usr/sbin/avahi-daemon";
+
+/// A-record TTL for our answers/announcements. RFC 6762 §10 recommends 120 s for hostname records.
+const RESPONDER_TTL: u32 = 120;
+
+/// True when a system mDNS responder (Avahi) owns the `.local` name on this model, so btmqttd must
+/// NOT run its own responder. Detected by the presence of the Avahi daemon binary (C100X ships it,
+/// C300X does not), which is stable and independent of boot timing. Never panics.
+pub async fn system_mdns_responder_present() -> bool {
+    tokio::fs::metadata(AVAHI_DAEMON_PATH).await.is_ok()
+}
+
+/// Encode `name` as a DNS wire QNAME (length-prefixed labels + root), honouring `\.`/`\\` escaping,
+/// or `None` if it violates the RFC 1035 limits (each label 1..=63 bytes, encoded QNAME <= 255). Our
+/// name is the fixed `Bticino-Classe<model>X.local`, well within the bounds, but the limit is enforced
+/// anyway so a future caller can't emit a malformed answer.
+fn encode_qname(name: &str, out: &mut Vec<u8>) -> Option<()> {
+    let labels = presentation_labels(name);
+    let mut encoded_len = 1usize; // terminating root label
+    for label in &labels {
+        let l = label.len();
+        if l == 0 || l > 63 {
+            return None;
+        }
+        encoded_len += 1 + l;
+    }
+    if encoded_len > 255 {
+        return None;
+    }
+    for label in &labels {
+        out.push(label.len() as u8); // <= 63, checked above
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0x00);
+    Some(())
+}
+
+/// Build an mDNS response advertising `name` → `ip` as a single A record: an authoritative answer
+/// (QR=1, AA=1) with the mDNS cache-flush bit set on the record's class (RFC 6762 §10.2 — our host
+/// address is unique, so resolvers replace rather than accumulate) and a `RESPONDER_TTL` TTL. `None`
+/// only if `name` doesn't fit the DNS wire limits.
+fn build_a_response(name: &str, ip: Ipv4Addr) -> Option<Vec<u8>> {
+    let mut b = vec![
+        0x00, 0x00, // ID 0 (mDNS)
+        0x84, 0x00, // flags: QR=1 (response), AA=1 (authoritative)
+        0x00, 0x00, // QDCOUNT
+        0x00, 0x01, // ANCOUNT = 1
+        0x00, 0x00, // NSCOUNT
+        0x00, 0x00, // ARCOUNT
+    ];
+    encode_qname(name, &mut b)?;
+    b.extend_from_slice(&QTYPE_A.to_be_bytes()); // TYPE = A
+    // CLASS = IN (0x0001) | cache-flush bit (0x8000).
+    b.extend_from_slice(&0x8001u16.to_be_bytes());
+    b.extend_from_slice(&RESPONDER_TTL.to_be_bytes());
+    b.extend_from_slice(&4u16.to_be_bytes()); // RDLENGTH = 4 (one IPv4)
+    b.extend_from_slice(&ip.octets());
+    Some(b)
+}
+
+/// True when datagram `b` is an mDNS QUERY carrying a question for `our_name` (compared
+/// case-insensitively) of type A or ANY — i.e. "what is `<name>.local`'s address?". A response
+/// (QR=1), an unrelated name/type, or a truncated datagram yields false. Bounds-checked throughout.
+fn query_asks_for_a(b: &[u8], our_name: &str) -> bool {
+    if b.len() < 12 {
+        return false;
+    }
+    if b[2] & 0x80 != 0 {
+        return false; // QR=1 → a response, not a query
+    }
+    let qd = ((b[4] as usize) << 8) | b[5] as usize;
+    let mut pos = 12usize;
+    for _ in 0..qd {
+        let name = read_name(b, &mut pos);
+        if pos + 4 > b.len() {
+            return false;
+        }
+        let qtype = ((b[pos] as u16) << 8) | b[pos + 1] as u16;
+        pos += 4;
+        if (qtype == QTYPE_A || qtype == QTYPE_ANY) && name.eq_ignore_ascii_case(our_name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Co-bind the shared 5353 mDNS port and JOIN the group, so we both receive queries and can multicast
+/// answers. `None` if the bind or join fails (without the socket there is no responder; the still
+/// endpoint is still reachable by IP, so this is a soft failure, not a panic).
+async fn open_responder_socket() -> Option<UdpSocket> {
+    let sock = bind_reuse(MDNS_PORT).ok()?;
+    sock.join_multicast_v4(MDNS_GROUP, Ipv4Addr::UNSPECIFIED).ok()?;
+    let _ = sock.set_multicast_ttl_v4(255);
+    Some(sock)
+}
+
+/// Poll slice: how often the responder wakes to re-check the cached IP (a DHCP change) when no query
+/// arrives. Also bounds how promptly it observes `stopping`.
+const RESPONDER_TICK: Duration = Duration::from_secs(5);
+
+/// Advertise `host` (`<name>.local`) → the panel's own wlan0 IPv4 over mDNS: answer A/ANY queries for
+/// the name and send an unsolicited announcement whenever the cached address first appears or changes
+/// (a DHCP renewal). The address is read from `still::cached_self_ipv4()` — the same off-ring-path
+/// cache the ring snapshot uses — so this never resolves on a hot path; while it is unresolved the
+/// responder simply stays quiet. Exits promptly when `stopping` is set. Never panics (a failed socket
+/// just ends the task; the still endpoint stays reachable by IP).
+///
+/// MUST be spawned ONLY where no system responder owns the name (see
+/// `system_mdns_responder_present`) — otherwise two responders for one name conflict.
+pub async fn run_responder(host: String, stopping: Arc<AtomicBool>) {
+    let Some(sock) = open_responder_socket().await else {
+        eprintln!("btmqttd: mdns responder: could not bind :5353 — not advertising {host}");
+        return;
+    };
+    let mut last_announced: Option<Ipv4Addr> = None;
+    let mut buf = [0u8; 9000];
+    while !stopping.load(Ordering::Relaxed) {
+        // Gratuitous announcement on the first resolved address and on every change (DHCP renewal),
+        // so resolvers update without waiting to re-query.
+        if let Some(ip) = crate::still::cached_self_ipv4() {
+            if last_announced != Some(ip) {
+                if let Some(resp) = build_a_response(&host, ip) {
+                    let _ = sock.send_to(&resp, (MDNS_GROUP, MDNS_PORT)).await;
+                }
+                last_announced = Some(ip);
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(RESPONDER_TICK) => {}
+            r = sock.recv_from(&mut buf) => {
+                if let Ok((n, _)) = r {
+                    if query_asks_for_a(&buf[..n], &host) {
+                        if let Some(ip) = crate::still::cached_self_ipv4() {
+                            if let Some(resp) = build_a_response(&host, ip) {
+                                let _ = sock.send_to(&resp, (MDNS_GROUP, MDNS_PORT)).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -846,5 +1077,76 @@ mod tests {
         let (mut ptr, mut srv, mut a) = (Vec::new(), HashMap::new(), HashMap::new());
         parse_response(&b, &SERVICES, &mut ptr, &mut srv, &mut a);
         assert!(srv.is_empty()); // the overrunning SRV target was rejected
+    }
+
+    #[test]
+    fn parse_avahi_host_name_reads_the_c100x_factory_name() {
+        // The C100X ships this key set; the advertised name is `<value>.local`, overriding the
+        // kernel hostname. Tolerate surrounding keys, comments, and `key = value` spacing.
+        let conf = "\
+            [server]\n\
+            #host-name=commented-out\n\
+            host-name=Bticino-Classe100X\n\
+            use-ipv4=yes\n\
+            use-ipv6=no\n";
+        assert_eq!(parse_avahi_host_name(conf).as_deref(), Some("Bticino-Classe100X"));
+        assert_eq!(parse_avahi_host_name("host-name = spaced \n").as_deref(), Some("spaced"));
+        // Absent / only-commented / empty value ⇒ None (Avahi would derive from the kernel hostname).
+        assert_eq!(parse_avahi_host_name("[server]\nuse-ipv4=yes\n"), None);
+        assert_eq!(parse_avahi_host_name("#host-name=x\n"), None);
+        assert_eq!(parse_avahi_host_name("host-name=\n"), None);
+        // A LONGER key that merely starts with `host-name` must not match.
+        assert_eq!(parse_avahi_host_name("host-name-from-machine-id=yes\n"), None);
+    }
+
+    #[test]
+    fn model_host_from_hostname_derives_the_bticino_classe_name() {
+        // The kernel hostname carries the model; the mDNS label follows the C100 factory convention.
+        assert_eq!(model_host_from_hostname("Bticino_Classe_100_X").as_deref(), Some("Bticino-Classe100X"));
+        assert_eq!(model_host_from_hostname("Bticino_Classe_300_X").as_deref(), Some("Bticino-Classe300X"));
+        // No digits ⇒ None (caller falls back rather than advertise a modelless name).
+        assert_eq!(model_host_from_hostname("localhost"), None);
+        assert_eq!(model_host_from_hostname(""), None);
+    }
+
+    #[test]
+    fn build_a_response_encodes_our_host_record() {
+        let resp = build_a_response("Bticino-Classe300X.local", Ipv4Addr::new(192, 168, 50, 7)).unwrap();
+        // Header: QR=1|AA (0x8400), QDCOUNT 0, ANCOUNT 1, NS/AR 0.
+        assert_eq!(&resp[0..12], &[0, 0, 0x84, 0x00, 0, 0, 0, 1, 0, 0, 0, 0]);
+        // QNAME: 18 "Bticino-Classe300X", 5 "local", 0.
+        assert_eq!(resp[12], 18);
+        assert_eq!(&resp[13..31], b"Bticino-Classe300X");
+        assert_eq!(resp[31], 5);
+        assert_eq!(&resp[32..37], b"local");
+        assert_eq!(resp[37], 0);
+        // TYPE A(1), CLASS IN|cache-flush (0x8001), TTL 120, RDLENGTH 4, then the 4 IP bytes.
+        assert_eq!(&resp[38..40], &[0x00, 0x01]);
+        assert_eq!(&resp[40..42], &[0x80, 0x01]);
+        assert_eq!(&resp[42..46], &120u32.to_be_bytes());
+        assert_eq!(&resp[46..48], &[0x00, 0x04]);
+        assert_eq!(&resp[48..52], &[192, 168, 50, 7]);
+    }
+
+    #[test]
+    fn query_asks_for_a_matches_our_name_case_insensitively() {
+        // A QUERY (QR=0) asking A (or ANY) for our name → true; a different name/type, or a RESPONSE,
+        // → false. `build_query` emits QDCOUNT=1 with QR=0, so it doubles as a query fixture here.
+        let q = build_query("Bticino-Classe300X.local", QTYPE_A, false).unwrap();
+        assert!(query_asks_for_a(&q, "bticino-classe300x.local")); // compared case-insensitively
+        let any = build_query("Bticino-Classe300X.local", QTYPE_ANY, false).unwrap();
+        assert!(query_asks_for_a(&any, "Bticino-Classe300X.local"));
+        // A DIFFERENT name must not match.
+        let other = build_query("some-other-host.local", QTYPE_A, false).unwrap();
+        assert!(!query_asks_for_a(&other, "Bticino-Classe300X.local"));
+        // A different TYPE (SRV) for our name must not match — we only answer A/ANY.
+        let srv = build_query("Bticino-Classe300X.local", QTYPE_SRV, false).unwrap();
+        assert!(!query_asks_for_a(&srv, "Bticino-Classe300X.local"));
+        // A RESPONSE (QR=1) is not a query, even for our name+type.
+        let mut resp = build_query("Bticino-Classe300X.local", QTYPE_A, false).unwrap();
+        resp[2] |= 0x80;
+        assert!(!query_asks_for_a(&resp, "Bticino-Classe300X.local"));
+        // Truncated datagram.
+        assert!(!query_asks_for_a(&[0, 0, 0, 0], "Bticino-Classe300X.local"));
     }
 }

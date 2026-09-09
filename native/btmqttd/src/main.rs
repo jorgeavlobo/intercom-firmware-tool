@@ -386,6 +386,16 @@ async fn run() -> Result<bool, String> {
             // it synchronously and a hung resolver can never delay the ring's camera-session binding.
             // Shares the still task's stopping flag.
             tokio::spawn(still::refresh_self_ipv4_loop(cfg.mqtt_host.clone(), stopping.clone()));
+            // mDNS responder (issue #171 Part B): advertise our own `<name>.local` A record ONLY on a
+            // model with no factory responder (the C300X). On the C100X the factory Avahi already owns
+            // `Bticino-Classe100X.local`, so a second responder would cause mDNS name-conflict flapping —
+            // there we only READ that name for the Part A diagnostic sensors. Shares the still stopping
+            // flag; the loop exits on it (and the runtime cancels it at process exit regardless).
+            if !mdns::system_mdns_responder_present().await {
+                if let Some(host) = mdns::resolve_camera_mdns_host().await {
+                    tokio::spawn(mdns::run_responder(host, stopping.clone()));
+                }
+            }
             (Some(tokio::spawn(still::run(stopping.clone()))), stopping)
         } else {
             (None, stopping)
@@ -1379,6 +1389,22 @@ async fn announce(
     // that restarted — dropping its retained set — is reconciled on reconnect. No network here;
     // the background task does the fetching. No-op when the update check is disabled.
     update::announce(&cfg, &client, &update_latest).await;
+    // Camera mDNS host diagnostic (issue #171): publish the panel's advertised `<name>.local`
+    // retained, so HA can address the live RTSP stream + idle still endpoint by a stable name
+    // rather than a DHCP IP (the installer's three diagnostic sensors render the host + the
+    // ready-to-paste RTSP/still URLs from this one value). On-device only; a failed resolve just
+    // omits it (the sensors stay unavailable, the literal-IP guide fallback still works). A
+    // reconnect re-runs announce, so a broker that dropped its retained set is reconciled.
+    if cfg.camera_ondevice {
+        if let Some(host) = mdns::resolve_camera_mdns_host().await {
+            if let Err(e) = client
+                .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, host.into_bytes())
+                .await
+            {
+                eprintln!("btmqttd: publish camera mDNS host failed: {e}");
+            }
+        }
+    }
     // Re-publish the tracked light state on every connect (a restarted broker dropped its
     // retained topics; a changed WHERE reusing the topic left a stale value). This is
     // INDEPENDENT of discovery — unlike the volume seed below it does NO gateway round-trip,
