@@ -32,7 +32,7 @@
 //! `u64` (anything else serves the idle image), so the path can never name a file to traverse — the id
 //! only ever indexes a `ring-<u64>.jpg` in the run dir.
 
-use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,11 +65,14 @@ pub fn ring_url(ip: Ipv4Addr, id: u64) -> String {
 /// (always current across a DHCP change).
 ///
 /// Uses the standard "connect a UDP socket to learn the outbound source address" idiom: `connect`
-/// sends NO packet — it only consults the routing table — so there is no traffic and no blocking DNS
-/// as long as the destination is a literal IPv4. We aim at the broker's IP when it is one (Home
-/// Assistant is typically the broker host or on its subnet, so that source IP is reachable from HA);
-/// a named broker (or IPv6) falls back to a TEST-NET-1 documentation address (RFC 5737) purely to
-/// pick the default-route interface's source IP — again without emitting anything.
+/// sends NO packet — it only consults the routing table — so there is no traffic. We aim at the
+/// broker so the chosen source address is the one facing Home Assistant (typically the broker host or
+/// on its subnet), which is what makes it correct even on a multi-homed device: a literal IPv4 broker
+/// is used directly; a NAMED broker is resolved to an IPv4 first (via the system resolver, which reads
+/// the `/etc/hosts` the installer populates for a named broker); only when neither yields a usable
+/// IPv4 do we fall back to a TEST-NET-1 documentation address (RFC 5737) to pick the default-route
+/// interface's source IP. The one blocking step is that name resolution, reached only for a named
+/// broker at ring time (rings are rare, and the mapping is normally local `/etc/hosts`).
 ///
 /// Returns `None` (⇒ the caller omits `url`, leaving the bare `id` for the manual/templated path)
 /// when the source address is unusable for an HA fetch: unspecified, loopback (a loopback broker),
@@ -77,6 +80,8 @@ pub fn ring_url(ip: Ipv4Addr, id: u64) -> String {
 pub fn reachable_ipv4(broker: &str) -> Option<Ipv4Addr> {
     let dest = broker
         .parse::<Ipv4Addr>()
+        .ok()
+        .or_else(|| resolve_ipv4(broker))
         .unwrap_or(Ipv4Addr::new(192, 0, 2, 1));
     let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
     // Port is irrelevant (no datagram is sent); 9 is the discard protocol.
@@ -89,6 +94,23 @@ pub fn reachable_ipv4(broker: &str) -> Option<Ipv4Addr> {
         }
         _ => None,
     }
+}
+
+/// Resolve a broker host to its first IPv4 via the system resolver (which reads `/etc/hosts`, where
+/// the installer maps a named broker). `None` for an empty host, a resolver failure, or an
+/// IPv6-only result — the caller then keeps its documentation-address fallback.
+fn resolve_ipv4(host: &str) -> Option<Ipv4Addr> {
+    if host.is_empty() {
+        return None;
+    }
+    // Port 0 is a placeholder — resolution ignores it; we only read the returned IPs.
+    (host, 0u16)
+        .to_socket_addrs()
+        .ok()?
+        .find_map(|addr| match addr.ip() {
+            IpAddr::V4(ip) => Some(ip),
+            IpAddr::V6(_) => None,
+        })
 }
 
 /// Whole-request-head read budget: a client has this long to send the request line + headers. A
@@ -519,6 +541,17 @@ mod tests {
         // A loopback broker routes to a loopback source, which HA can never fetch — so the
         // caller must get None (and omit `url`) rather than advertise a 127.x URL.
         assert_eq!(reachable_ipv4("127.0.0.1"), None);
+    }
+
+    #[test]
+    fn reachable_ipv4_resolves_a_named_broker_then_rejects_a_loopback_route() {
+        // A NAMED broker is resolved to an IPv4 before route selection (not sent to the
+        // documentation-address fallback). "localhost" resolves to 127.0.0.1, whose route is
+        // loopback, so the result is still None — exercising the resolve path end to end.
+        assert_eq!(reachable_ipv4("localhost"), None);
+        // An empty host resolves to nothing → documentation-address fallback (default route); it
+        // yields some source address decision without panicking (value is host-dependent).
+        let _ = reachable_ipv4("");
     }
 
     #[test]
