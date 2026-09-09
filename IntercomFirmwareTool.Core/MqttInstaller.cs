@@ -2283,7 +2283,7 @@ namespace IntercomFirmwareTool.Core
                         // remains the primary trust boundary). The daemon omits `ip` when it can't resolve
                         // a usable LAN address; the template then yields a hostless URL that fails to
                         // fetch, so HA keeps the last frame rather than loading a bad image.
-                        url_template = $"http://{{{{ value_json.ip | regex_replace('[^0-9.]', '') }}}}:{Go2RtcConfig.OnDeviceStillPort}/ring-{{{{ value_json.id | int }}}}.jpg",
+                        url_template = $"http://{{{{ value_json.ip | default('') | regex_replace('[^0-9.]', '') }}}}:{Go2RtcConfig.OnDeviceStillPort}/ring-{{{{ value_json.id | int }}}}.jpg",
                         icon = "mdi:doorbell-video",
                         availability_topic = opts.TopicLastWill,
                         payload_available = "online",

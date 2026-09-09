@@ -565,7 +565,7 @@ namespace IntercomFirmwareTool.Core
                 $"        data:\n" +
                 $"          message: \"Someone is at the door\"\n" +
                 $"          data:\n" +
-                $"            image: \"http://{{{{ trigger.payload_json.ip | regex_replace('[^0-9.]', '') }}}}:{OnDeviceStillPort}/ring-{{{{ trigger.payload_json.id | int }}}}.jpg\"\n\n"));
+                $"            image: \"http://{{{{ trigger.payload_json.ip | default('') | regex_replace('[^0-9.]', '') }}}}:{OnDeviceStillPort}/ring-{{{{ trigger.payload_json.id | int }}}}.jpg\"\n\n"));
             sb.Append(string.Create(ci,
                 $"The snapshot payload is `{{\"at\":\"…\",\"id\":123,\"ip\":\"192.168.…\"}}` — the panel fills\n" +
                 $"in its own LAN `ip` at ring time (so it tracks a DHCP change), published ONLY after the\n" +

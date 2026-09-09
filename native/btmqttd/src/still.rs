@@ -52,10 +52,10 @@ pub const STILL_PORT: u16 = 8556;
 const PLACEHOLDER: &[u8] = include_bytes!("../assets/idle-placeholder.jpg");
 
 /// Best-effort resolution of the device's own LAN IPv4 — the address a Home Assistant host reaches
-/// this still endpoint on — so the ring-snapshot signal can carry a ready-to-fetch `url` (issue
-/// #144). Neither the installer (it only knows the broker host, not the device's DHCP-assigned IP)
-/// nor the daemon's verbatim discovery publish can bake this in, so we resolve it here at ring time
-/// (always current across a DHCP change).
+/// this still endpoint on — so the ring-snapshot signal can carry the device `ip` for HA to build the
+/// frame URL from (issue #144). Neither the installer (it only knows the broker host, not the device's
+/// DHCP-assigned IP) nor the daemon's verbatim discovery publish can bake this in, so we resolve it —
+/// cached OFF the ring path by [`refresh_self_ipv4_loop`] and refreshed so a DHCP change is picked up.
 ///
 /// Uses the standard "connect a UDP socket to learn the outbound source address" idiom: `connect`
 /// sends NO packet — it only consults the routing table — so there is no traffic. We aim at the

@@ -82,8 +82,10 @@ public class MqttCameraDiscoveryTests
         // path are baked, the id is coerced to an int, and the ip is stripped to digits+dots so an
         // injected value can't escape the host component — only the host is payload-driven.
         // NOTE: HaJson's default encoder escapes the single quotes to ' (HA unescapes them when it
-        // parses the discovery JSON), so assert the un-escaped parts of the sanitizing filter.
-        Assert.Contains("value_json.ip | regex_replace(", json);
+        // parses the discovery JSON), so assert the un-escaped parts of the sanitizing filter. The ip is
+        // default('')'d (so an omitted ip renders empty, not "None") then stripped to digits+dots.
+        Assert.Contains("value_json.ip | default(", json);
+        Assert.Contains("regex_replace(", json);
         Assert.Contains("[^0-9.]", json);
         Assert.Contains(":8556/ring-", json);
         Assert.Contains("value_json.id | int", json);
