@@ -85,6 +85,24 @@ public class MqttCameraDiscoveryTests
     }
 
     [Fact]
+    public void Ring_snapshot_image_survives_a_wildcard_command_topic()
+    {
+        // The image entity is READ-ONLY (no command topic), so it must ship even when TopicRx is a
+        // wildcard filter — which makes ConcretePublishTopic return null and GenerateHaDiscovery take the
+        // control-topic early return that only tombstones the command entities. Regression for the entity
+        // being dropped from the manifest entirely in that path.
+        string json = RingSnapshotJson(new MqttOptions("broker.lan")
+        {
+            EnableHaDiscovery = true,
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            TopicRx = "commands/#",
+        });
+        Assert.False(string.IsNullOrEmpty(json), "the read-only image entity must ship even with a wildcard TopicRx");
+        Assert.Contains("Doorbell snapshot", json);
+    }
+
+    [Fact]
     public void Ring_snapshot_image_is_tombstoned_off_device()
     {
         // Off-device (classic go2rtc-on-HA) path: no on-box capture, so the image entity is tombstoned.

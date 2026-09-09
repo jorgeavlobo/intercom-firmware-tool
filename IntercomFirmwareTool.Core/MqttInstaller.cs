@@ -2248,6 +2248,41 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
+            // Ring snapshot image (#144): an auto-discovered MQTT `image` entity showing the most recent
+            // ring's frame — the "who's at the door" picture with zero manual config. The daemon publishes
+            // the FULL per-event URL (built from its OWN LAN IP) in the ring_snapshot payload's `url`, so
+            // this discovery config carries NO device IP (the installer can't know the DHCP address, and
+            // the daemon publishes discovery verbatim) — the entity resolves each frame via url_template.
+            // The image BYTES stay on the :8556 endpoint (only the id + url travel over MQTT), and the
+            // signal is non-retained (#71), so the entity updates to that ring's frame and never
+            // resurrects a stale one on reconnect. Gated like the ring CAPTURE — on-device camera only;
+            // NOT on-demand, because a ring already has the panel streaming so no SIP wake is needed
+            // (unlike the idle-refresh button). It is READ-ONLY (no command topic), so it is emitted HERE
+            // with the other read-only entities, BEFORE the control-topic early return — otherwise a
+            // wildcard TopicRx (ConcretePublishTopic == null) would return early and drop it from the
+            // manifest entirely. Tombstoned when off-device so a prior build's entity is cleared.
+            if (opts.CameraEnabled && opts.CameraOnDevice)
+                entities.Add(new HaEntity(
+                    "ring_snapshot.json",
+                    Topic("image", "ring_snapshot"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Doorbell snapshot",
+                        unique_id = $"{node}_ring_snapshot",
+                        default_entity_id = EntId("image", "ring_snapshot"),
+                        url_topic = opts.EffectiveTopicRingSnapshot,
+                        // The daemon omits `url` when it can't resolve a usable LAN IP; the template
+                        // then yields empty and HA keeps the last frame rather than fetching a bad URL.
+                        url_template = "{{ value_json.url }}",
+                        icon = "mdi:doorbell-video",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            else
+                entities.Add(new HaEntity("ring_snapshot.json", Topic("image", "ring_snapshot"), ""));
+
             // Bridge UPDATE entity (issue #114): HA's native Update card. btmqttd publishes a retained
             // {"installed_version":…,"latest_version":…} to EffectiveTopicUpdate (installed = the daemon's
             // own version; latest = the version manifest it fetched); HA reads those keys directly and shows
@@ -2557,39 +2592,6 @@ namespace IntercomFirmwareTool.Core
                     }, HaJson)));
             else
                 entities.Add(new HaEntity("update_idle.json", Topic("button", "update_idle"), ""));
-
-            // Ring snapshot image (#144): an auto-discovered MQTT `image` entity showing the most
-            // recent ring's frame — so the "who's at the door" picture appears in HA with zero manual
-            // configuration. The daemon publishes the FULL per-event URL (built from its OWN LAN IP)
-            // in the ring_snapshot payload's `url`, so this discovery config carries NO device IP —
-            // the installer can't know the device's DHCP address, and the daemon publishes discovery
-            // verbatim — and the entity resolves each frame via url_template. The image BYTES stay on
-            // the :8556 endpoint (only the id + url travel over MQTT), and the signal is non-retained
-            // (#71), so the entity updates to that ring's frame and never resurrects a stale one on
-            // reconnect. Gated like the ring CAPTURE itself — on-device camera only; NOT on-demand,
-            // because a ring already has the panel streaming so no SIP wake is needed (unlike the
-            // idle-refresh button above). Tombstoned otherwise so a prior build's entity is cleared.
-            if (opts.CameraEnabled && opts.CameraOnDevice)
-                entities.Add(new HaEntity(
-                    "ring_snapshot.json",
-                    Topic("image", "ring_snapshot"),
-                    JsonSerializer.Serialize(new
-                    {
-                        name = "Doorbell snapshot",
-                        unique_id = $"{node}_ring_snapshot",
-                        default_entity_id = EntId("image", "ring_snapshot"),
-                        url_topic = opts.EffectiveTopicRingSnapshot,
-                        // The daemon omits `url` when it can't resolve a usable LAN IP; the template
-                        // then yields empty and HA keeps the last frame rather than fetching a bad URL.
-                        url_template = "{{ value_json.url }}",
-                        icon = "mdi:doorbell-video",
-                        availability_topic = opts.TopicLastWill,
-                        payload_available = "online",
-                        payload_not_available = "offline",
-                        device,
-                    }, HaJson)));
-            else
-                entities.Add(new HaEntity("ring_snapshot.json", Topic("image", "ring_snapshot"), ""));
 
             // Maintenance buttons (issue #43): a "Reboot device" and a "Restart bridge" button, same
             // {"action":...}-to-TopicRx pattern as the locks / camera buttons. They are ALWAYS emitted
