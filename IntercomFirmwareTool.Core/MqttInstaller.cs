@@ -2274,12 +2274,16 @@ namespace IntercomFirmwareTool.Core
                         url_topic = opts.EffectiveTopicRingSnapshot,
                         // Build a FIXED-shape URL from the payload's device `ip` (SSRF hardening, #144):
                         // the http scheme, the :8556 still port, and the /ring-<id>.jpg path are baked
-                        // here and the id is coerced to an int, so a rogue publisher on this topic can at
-                        // most redirect the HOST — never the port, path, or scheme (the broker remains the
-                        // primary trust boundary). The daemon omits `ip` when it can't resolve a usable
-                        // LAN address; the template then yields a hostless URL that fails to fetch, so HA
-                        // keeps the last frame rather than loading a bad image.
-                        url_template = $"http://{{{{ value_json.ip }}}}:{Go2RtcConfig.OnDeviceStillPort}/ring-{{{{ value_json.id | int }}}}.jpg",
+                        // here, the id is coerced to an int, and the ip is stripped to digits+dots by
+                        // regex_replace — so URL delimiters (`:`, `/`, `#`, `?`, `@`) a rogue publisher
+                        // might inject can't escape the host component (e.g. an `ip` of
+                        // "169.254.169.254:80/x#" can no longer redirect the fetch off :8556/ring-<n>.jpg).
+                        // A rogue publisher can therefore at most redirect the HOST to another digits+dots
+                        // address on the SAME port/path — never the port, path, or scheme (the broker
+                        // remains the primary trust boundary). The daemon omits `ip` when it can't resolve
+                        // a usable LAN address; the template then yields a hostless URL that fails to
+                        // fetch, so HA keeps the last frame rather than loading a bad image.
+                        url_template = $"http://{{{{ value_json.ip | regex_replace('[^0-9.]', '') }}}}:{Go2RtcConfig.OnDeviceStillPort}/ring-{{{{ value_json.id | int }}}}.jpg",
                         icon = "mdi:doorbell-video",
                         availability_topic = opts.TopicLastWill,
                         payload_available = "online",

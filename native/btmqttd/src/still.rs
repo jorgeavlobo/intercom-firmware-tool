@@ -33,7 +33,7 @@
 //! only ever indexes a `ring-<u64>.jpg` in the run dir.
 
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -84,6 +84,40 @@ pub async fn reachable_ipv4(broker: &str) -> Option<Ipv4Addr> {
             Some(ip)
         }
         _ => None,
+    }
+}
+
+/// Cache of the device's own LAN IPv4 as `u32` big-endian bits (`0` = unknown), refreshed OFF the
+/// ring path by [`refresh_self_ipv4_loop`] so a ring publish reads it synchronously — a hung resolver
+/// can then never delay the ring's camera-session binding (issue #144).
+static SELF_IPV4: AtomicU32 = AtomicU32::new(0);
+
+/// How often [`refresh_self_ipv4_loop`] re-resolves the device IP so a DHCP lease change is picked up.
+const SELF_IPV4_REFRESH: Duration = Duration::from_secs(300);
+/// Poll slice for a prompt shutdown while sleeping between refreshes.
+const SELF_IPV4_STEP: Duration = Duration::from_secs(5);
+
+/// The cached device LAN IPv4, or `None` if not yet resolved / unusable. Synchronous — read on the
+/// ring path so resolution never sits on the ring's critical section (issue #144).
+pub fn cached_self_ipv4() -> Option<Ipv4Addr> {
+    match SELF_IPV4.load(Ordering::Relaxed) {
+        0 => None,
+        bits => Some(Ipv4Addr::from(bits)),
+    }
+}
+
+/// Resolve the device's own LAN IPv4 toward `broker` and cache it, refreshing every
+/// [`SELF_IPV4_REFRESH`] so a DHCP change is eventually picked up. Runs as its own task (gated on the
+/// on-device camera, like the still server) so the bounded resolve is entirely OFF the ring path.
+/// Exits promptly when `stopping` is set.
+pub async fn refresh_self_ipv4_loop(broker: String, stopping: Arc<AtomicBool>) {
+    while !stopping.load(Ordering::Relaxed) {
+        SELF_IPV4.store(reachable_ipv4(&broker).await.map_or(0, u32::from), Ordering::Relaxed);
+        let mut slept = Duration::ZERO;
+        while slept < SELF_IPV4_REFRESH && !stopping.load(Ordering::Relaxed) {
+            tokio::time::sleep(SELF_IPV4_STEP).await;
+            slept += SELF_IPV4_STEP;
+        }
     }
 }
 

@@ -269,9 +269,10 @@ public class Go2RtcConfigTests
         // The device auto-creates the snapshot image entity, so the guide advertises it (issue #144).
         Assert.Contains("Doorbell snapshot", guide);
         // The pasteable automation builds the image URL from the payload's device ip with a FIXED
-        // scheme/port/path (SSRF hardening, #144) — no hand-typed IP, and a rogue publisher can't
-        // redirect it off :8556/ring-<id>.jpg.
-        Assert.Contains("{{ trigger.payload_json.ip }}", guide);
+        // scheme/port/path (SSRF hardening, #144) — no hand-typed IP, and the ip is stripped to
+        // digits+dots so a rogue publisher can't redirect it off :8556/ring-<id>.jpg.
+        Assert.Contains("trigger.payload_json.ip", guide);
+        Assert.Contains("regex_replace('[^0-9.]', '')", guide);
         Assert.Contains(":8556/ring-", guide);
         // The payload carries the device ip alongside the id.
         Assert.Contains("\"ip\":\"", guide);

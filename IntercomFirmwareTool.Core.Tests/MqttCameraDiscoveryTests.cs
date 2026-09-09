@@ -79,8 +79,12 @@ public class MqttCameraDiscoveryTests
         // A url-topic image: bytes stay on the :8556 endpoint, only the id+ip travel over MQTT.
         Assert.Contains("url_topic", json);
         // Fixed-shape url_template built from the payload's `ip` (SSRF hardening, #144): scheme, port and
-        // path are baked and the id is coerced to an int, so only the host is payload-driven.
-        Assert.Contains("value_json.ip", json);
+        // path are baked, the id is coerced to an int, and the ip is stripped to digits+dots so an
+        // injected value can't escape the host component — only the host is payload-driven.
+        // NOTE: HaJson's default encoder escapes the single quotes to ' (HA unescapes them when it
+        // parses the discovery JSON), so assert the un-escaped parts of the sanitizing filter.
+        Assert.Contains("value_json.ip | regex_replace(", json);
+        Assert.Contains("[^0-9.]", json);
         Assert.Contains(":8556/ring-", json);
         Assert.Contains("value_json.id | int", json);
         // No concrete device IP is baked into the discovery config — the host comes from the payload.

@@ -698,11 +698,11 @@ async fn publish_frame(
                 let client_ring = client.clone();
                 let broker_ring = broker_online.clone();
                 tokio::spawn(async move {
-                    // Resolve the device's own LAN IPv4 ONCE per ring runner (reused across a coalesced
-                    // burst; a later ring re-acquires a runner and re-resolves, so it tracks a DHCP
-                    // change). The lookup is the shared BOUNDED async resolver, so a hung resolver can
-                    // neither stall the runtime nor hold this runner slot open indefinitely.
-                    let self_ip = crate::still::reachable_ipv4(&cfg_ring.mqtt_host).await;
+                    // Read the device's own LAN IPv4 from the cache refreshed OFF the ring path
+                    // (still::refresh_self_ipv4_loop). Synchronous — no resolve here — so a hung
+                    // resolver can never delay this ring's camera-session binding (issue #144). `None`
+                    // (not yet resolved) just omits `ip`; the bare `id` still drives the manual path.
+                    let self_ip = crate::still::cached_self_ipv4();
                     // On each successful capture the runner calls back here with the event id AND the epoch
                     // it was detected on, to publish a "ring snapshot ready" signal carrying that id, so the
                     // HA push fetches exactly THIS event's frame — triggered by this signal, not a fixed
