@@ -2355,7 +2355,10 @@ namespace IntercomFirmwareTool.Core
                         unique_id = $"{node}_camera_rtsp_url",
                         default_entity_id = EntId("sensor", "camera_rtsp_url"),
                         state_topic = opts.EffectiveTopicCameraMdnsHost,
-                        value_template = Go2RtcConfig.OnDeviceRtspUrl("{{ value }}", camUserEnc, camPassInUrl, OnDeviceStreamName),
+                        // Guard on a non-empty host so a momentarily-empty host topic (startup, or a
+                        // transient resolve failure) renders an EMPTY sensor state, not an invalid
+                        // `rtsp://…@:8554/…` a user might copy (same posture as the ring image's `{% if %}`).
+                        value_template = $"{{% if value %}}{Go2RtcConfig.OnDeviceRtspUrl("{{ value }}", camUserEnc, camPassInUrl, OnDeviceStreamName)}{{% endif %}}",
                         icon = "mdi:video",
                         entity_category = "diagnostic",
                         availability_topic = opts.TopicLastWill,
@@ -2372,7 +2375,7 @@ namespace IntercomFirmwareTool.Core
                         unique_id = $"{node}_camera_still_url",
                         default_entity_id = EntId("sensor", "camera_still_url"),
                         state_topic = opts.EffectiveTopicCameraMdnsHost,
-                        value_template = Go2RtcConfig.OnDeviceStillUrl("{{ value }}"),
+                        value_template = $"{{% if value %}}{Go2RtcConfig.OnDeviceStillUrl("{{ value }}")}{{% endif %}}",
                         icon = "mdi:image",
                         entity_category = "diagnostic",
                         availability_topic = opts.TopicLastWill,

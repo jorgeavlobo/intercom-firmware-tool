@@ -766,30 +766,33 @@ fn build_a_response(name: &str, ip: Ipv4Addr) -> Option<Vec<u8>> {
     Some(b)
 }
 
-/// True when datagram `b` is an mDNS QUERY carrying a question for `our_name` (compared
-/// case-insensitively) of type A or ANY — i.e. "what is `<name>.local`'s address?". A response
-/// (QR=1), an unrelated name/type, or a truncated datagram yields false. Bounds-checked throughout.
-fn query_asks_for_a(b: &[u8], our_name: &str) -> bool {
+/// If datagram `b` is an mDNS QUERY carrying a question for `our_name` (compared case-insensitively)
+/// of type A or ANY — "what is `<name>.local`'s address?" — return `Some(unicast)`, where `unicast`
+/// is the mDNS QU (unicast-response) bit of the question's QCLASS (RFC 6762 §5.4): the querier is
+/// asking for a unicast reply to its source port. `None` for a response (QR=1), an unrelated
+/// name/type, or a truncated datagram. Bounds-checked throughout.
+fn query_asks_for_a(b: &[u8], our_name: &str) -> Option<bool> {
     if b.len() < 12 {
-        return false;
+        return None;
     }
     if b[2] & 0x80 != 0 {
-        return false; // QR=1 → a response, not a query
+        return None; // QR=1 → a response, not a query
     }
     let qd = ((b[4] as usize) << 8) | b[5] as usize;
     let mut pos = 12usize;
     for _ in 0..qd {
         let name = read_name(b, &mut pos);
         if pos + 4 > b.len() {
-            return false;
+            return None;
         }
         let qtype = ((b[pos] as u16) << 8) | b[pos + 1] as u16;
+        let qclass = ((b[pos + 2] as u16) << 8) | b[pos + 3] as u16;
         pos += 4;
         if (qtype == QTYPE_A || qtype == QTYPE_ANY) && name.eq_ignore_ascii_case(our_name) {
-            return true;
+            return Some(qclass & 0x8000 != 0); // top QCLASS bit = QU (unicast response requested)
         }
     }
-    false
+    None
 }
 
 /// Co-bind the shared 5353 mDNS port and JOIN the group, so we both receive queries and can multicast
@@ -944,9 +947,10 @@ async fn probe(sock: &UdpSocket, name: &str, name_lc: &str, our_ip: Ipv4Addr, st
 /// [`next_conflict_name`] and re-probe, then ANNOUNCE (§8.3), publish the FINAL chosen name retained on
 /// `topic` (and share it over `name_tx` for the reconnect re-assert in `announce()`), and answer A/ANY
 /// queries — renaming again if a later claim (§9) takes the name. The advertised address is a fresh
-/// `still::reachable_ipv4` routing-table probe (a named broker hits `/etc/hosts`, so no network DNS),
-/// re-checked every `RESPONDER_TICK`, so a DHCP change converges in seconds — NOT the 300 s ring cache.
-/// Exits promptly when `stopping` is set. Never panics.
+/// `still::reachable_ipv4` routing-table probe (a named broker is resolved through the bounded
+/// resolver — typically `/etc/hosts`, which the installer populates for a named broker, so usually no
+/// network DNS), re-checked every `RESPONDER_TICK`, so a DHCP change converges in seconds — NOT the
+/// 300 s ring cache. Exits promptly when `stopping` is set. Never panics.
 ///
 /// MUST be spawned ONLY where no system responder owns the name (see `system_mdns_responder_present`).
 pub async fn run_responder(
@@ -967,8 +971,9 @@ pub async fn run_responder(
     let mut buf = [0u8; 9000];
     let mut name = base_host;
     'claim: while !stopping.load(Ordering::Relaxed) {
-        // Our own wlan0 source address, resolved fresh (no packet; a named broker hits /etc/hosts).
-        // Without it we can neither probe meaningfully nor answer, so wait a tick and retry.
+        // Our own wlan0 source address, resolved fresh via the bounded resolver (no datagram sent; a
+        // named broker is typically in /etc/hosts, so usually no network DNS). Without it we can
+        // neither probe meaningfully nor answer, so wait a tick and retry.
         let Some(mut our_ip) = crate::still::reachable_ipv4(&broker).await else {
             tokio::time::sleep(RESPONDER_TICK).await;
             continue;
@@ -978,6 +983,11 @@ pub async fn run_responder(
         if probe(&sock, &name, &name_lc, our_ip, &stopping).await {
             name = next_conflict_name(&name);
             continue;
+        }
+        // `probe` also returns early if `stopping` flipped mid-window — don't commit/announce/publish
+        // during shutdown; bail before emitting extra multicast and a retained publish.
+        if stopping.load(Ordering::Relaxed) {
+            return;
         }
         // COMMIT: announce (§8.3), then publish the chosen name retained + expose it for announce()'s
         // reconnect re-assert. (A prior name's record just times out via its TTL — no goodbye packet.)
@@ -1007,11 +1017,15 @@ pub async fn run_responder(
                     }
                 }
                 r = sock.recv_from(&mut buf) => {
-                    if let Ok((n, _)) = r {
+                    if let Ok((n, src)) = r {
                         let pkt = &buf[..n];
-                        if query_asks_for_a(pkt, &name_lc) {
+                        if let Some(unicast) = query_asks_for_a(pkt, &name_lc) {
                             if let Some(resp) = build_a_response(&name, our_ip) {
-                                let _ = sock.send_to(&resp, (MDNS_GROUP, MDNS_PORT)).await;
+                                // Honor the querier's QU bit (§5.4): reply unicast to its source port
+                                // when requested, otherwise multicast to the group.
+                                let dest: std::net::SocketAddr =
+                                    if unicast { src } else { (MDNS_GROUP, MDNS_PORT).into() };
+                                let _ = sock.send_to(&resp, dest).await;
                             }
                         } else if datagram_conflict(pkt, &name_lc, our_ip) {
                             // Someone else claimed our name (§9): drop it, rename, re-probe.
@@ -1413,22 +1427,25 @@ mod tests {
     fn query_asks_for_a_matches_our_name_case_insensitively() {
         // A QUERY (QR=0) asking A (or ANY) for our name → true; a different name/type, or a RESPONSE,
         // → false. `build_query` emits QDCOUNT=1 with QR=0, so it doubles as a query fixture here.
+        // A match returns Some(unicast); build_query(false) clears QU → Some(false), (true) sets it.
         let q = build_query("Bticino-Classe300X.local", QTYPE_A, false).unwrap();
-        assert!(query_asks_for_a(&q, "bticino-classe300x.local")); // compared case-insensitively
+        assert_eq!(query_asks_for_a(&q, "bticino-classe300x.local"), Some(false)); // compared case-insens
+        let qu = build_query("Bticino-Classe300X.local", QTYPE_A, true).unwrap();
+        assert_eq!(query_asks_for_a(&qu, "Bticino-Classe300X.local"), Some(true)); // QU bit → unicast
         let any = build_query("Bticino-Classe300X.local", QTYPE_ANY, false).unwrap();
-        assert!(query_asks_for_a(&any, "Bticino-Classe300X.local"));
+        assert_eq!(query_asks_for_a(&any, "Bticino-Classe300X.local"), Some(false));
         // A DIFFERENT name must not match.
         let other = build_query("some-other-host.local", QTYPE_A, false).unwrap();
-        assert!(!query_asks_for_a(&other, "Bticino-Classe300X.local"));
+        assert_eq!(query_asks_for_a(&other, "Bticino-Classe300X.local"), None);
         // A different TYPE (SRV) for our name must not match — we only answer A/ANY.
         let srv = build_query("Bticino-Classe300X.local", QTYPE_SRV, false).unwrap();
-        assert!(!query_asks_for_a(&srv, "Bticino-Classe300X.local"));
+        assert_eq!(query_asks_for_a(&srv, "Bticino-Classe300X.local"), None);
         // A RESPONSE (QR=1) is not a query, even for our name+type.
         let mut resp = build_query("Bticino-Classe300X.local", QTYPE_A, false).unwrap();
         resp[2] |= 0x80;
-        assert!(!query_asks_for_a(&resp, "Bticino-Classe300X.local"));
+        assert_eq!(query_asks_for_a(&resp, "Bticino-Classe300X.local"), None);
         // Truncated datagram.
-        assert!(!query_asks_for_a(&[0, 0, 0, 0], "Bticino-Classe300X.local"));
+        assert_eq!(query_asks_for_a(&[0, 0, 0, 0], "Bticino-Classe300X.local"), None);
     }
 
     #[test]

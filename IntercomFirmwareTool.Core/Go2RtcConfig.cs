@@ -577,12 +577,26 @@ namespace IntercomFirmwareTool.Core
                 $"door. Each ring is its own EVENT with a unique id, and its picture is served\n" +
                 $"(transiently, on tmpfs) at a per-event URL:\n\n" +
                 $"    http://<intercom-ip>:{OnDeviceStillPort}/ring-<id>.jpg\n\n"));
-            sb.Append("This never overwrites the idle thumbnail, and it needs no manual setup: the\n");
-            sb.Append("panel auto-creates a \"Doorbell snapshot\" image entity in Home Assistant (via\n");
-            sb.Append("MQTT discovery) that always shows the latest ring's frame. The snapshot topic\n");
-            sb.Append("carries the event id and the device's LAN ip, published AFTER the frame is\n");
-            sb.Append("written, so the picture is always exactly that ring's (two rings can never\n");
-            sb.Append("cross images) and there is no fixed-delay guesswork.\n\n");
+            // The auto-created "Doorbell snapshot" image entity exists only under MQTT discovery
+            // (btmqttd clears its config when HA_DISCOVERY=0), so only promise it when discovery is on.
+            // The snapshot TOPIC + the notification recipe below work regardless of discovery.
+            if (haveSensors)
+            {
+                sb.Append("This never overwrites the idle thumbnail, and it needs no manual setup: the\n");
+                sb.Append("panel auto-creates a \"Doorbell snapshot\" image entity in Home Assistant (via\n");
+                sb.Append("MQTT discovery) that always shows the latest ring's frame. The snapshot topic\n");
+                sb.Append("carries the event id and the device's LAN ip, published AFTER the frame is\n");
+                sb.Append("written, so the picture is always exactly that ring's (two rings can never\n");
+                sb.Append("cross images) and there is no fixed-delay guesswork.\n\n");
+            }
+            else
+            {
+                sb.Append("This never overwrites the idle thumbnail. With Home Assistant discovery\n");
+                sb.Append("disabled the panel does NOT auto-create an image entity, but the snapshot\n");
+                sb.Append("topic still carries the event id and the device's LAN ip (published AFTER the\n");
+                sb.Append("frame is written), so the notification automation below works — the picture\n");
+                sb.Append("is always exactly that ring's, with no fixed-delay guesswork.\n\n");
+            }
             sb.Append("To also get a phone notification with the picture, add a Home Assistant\n");
             sb.Append("automation like this — replace notify.mobile_app_your_phone with your own (the\n");
             sb.Append("automation builds the image URL from the ip and id in the message):\n\n");

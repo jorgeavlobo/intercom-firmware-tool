@@ -1422,28 +1422,37 @@ async fn announce(
     // reconnect re-runs announce, so a broker that dropped its retained set is reconciled.
     // Camera mDNS host diagnostic (#171). C300X: our responder owns the (conflict-resolved) name and
     // shares it over the watch channel; re-assert whatever it has settled on (the responder also
-    // publishes it itself on commit — this is the reconnect re-assert). C100X: the name the factory
-    // Avahi advertises. When the feature is OFF, or nothing resolves yet, publish an EMPTY retained
-    // payload to CLEAR a value a previous on-device build left on the broker (the discovery tombstones
-    // remove the HA entities, but not this retained state), so HA never advertises a host nothing is
-    // serving. A borrow of the watch value is a cheap synchronous read (no blocking lock held across an
-    // await). A brief empty flash before the responder's first commit is harmless.
+    // publishes it on commit and clears it on a bind failure — this is just the reconnect re-assert).
+    // C100X: the name the factory Avahi advertises (a reverse-PTR self-lookup reflects a conflict-rename,
+    // falling back to the configured host-name). A watch borrow is a cheap synchronous read.
     let host = if cfg.camera_ondevice {
         match &camera_mdns_name {
             Some(rx) => rx.borrow().clone(),
-            // C100X: report Avahi's advertised name — a reverse-PTR self-lookup (using the cached wlan0
-            // IP) reflects a conflict-rename, falling back to the configured host-name.
             None => mdns::resolve_avahi_or_system_host(still::cached_self_ipv4()).await,
         }
     } else {
         None
     };
-    let payload = host.map(String::into_bytes).unwrap_or_default();
-    if let Err(e) = client
-        .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, payload)
-        .await
-    {
-        eprintln!("btmqttd: publish camera mDNS host failed: {e}");
+    match host {
+        Some(host) => {
+            if let Err(e) = client
+                .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, host.into_bytes())
+                .await
+            {
+                eprintln!("btmqttd: publish camera mDNS host failed: {e}");
+            }
+        }
+        // CLEAR the retained topic only when the feature is OFF, so a value a previous ON-device build
+        // left on the broker doesn't linger (discovery tombstones the HA entities but not this state).
+        // When on-device but the host is momentarily unavailable, LEAVE the last retained value rather
+        // than blanking HA's URL sensors on a transient hiccup — a permanent responder failure clears it
+        // at the source instead (run_responder on a bind failure).
+        None if !cfg.camera_ondevice => {
+            let _ = client
+                .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, Vec::new())
+                .await;
+        }
+        None => {}
     }
     // Re-publish the tracked light state on every connect (a restarted broker dropped its
     // retained topics; a changed WHERE reusing the topic left a stale value). This is

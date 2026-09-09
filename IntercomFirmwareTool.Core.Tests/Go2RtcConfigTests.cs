@@ -274,6 +274,8 @@ public class Go2RtcConfigTests
         Assert.DoesNotContain("Camera mDNS host", guide);
         Assert.DoesNotContain("Camera RTSP URL", guide);
         Assert.DoesNotContain("Camera still image URL", guide);
+        // With discovery off the guide must NOT promise the auto-created ring image entity either.
+        Assert.DoesNotContain("auto-creates a \"Doorbell snapshot\"", guide);
         // The manual URLs are still there.
         Assert.Contains("rtsp://camera:s3cr3t@<intercom-ip>:8554/doorbell", guide);
         Assert.Contains("http://<intercom-ip>:8556/idle.jpg", guide);
@@ -290,6 +292,7 @@ public class Go2RtcConfigTests
             CameraOnDevice = true,
             CameraRtspUser = "camera",
             CameraRtspPass = "s3cr3t",
+            EnableHaDiscovery = true, // the auto-created "Doorbell snapshot" entity exists only with discovery
         };
         string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "doorbell");
         // The idle thumbnail is a real captured view, refreshable via the HA button.

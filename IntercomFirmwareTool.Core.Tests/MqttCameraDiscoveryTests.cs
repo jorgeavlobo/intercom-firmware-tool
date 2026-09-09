@@ -170,6 +170,8 @@ public class MqttCameraDiscoveryTests
         Assert.Contains("Camera RTSP URL", rtsp);
         Assert.Contains(opts.EffectiveTopicCameraMdnsHost, rtsp);
         Assert.Contains("rtsp://camera:s3cr3t@{{ value }}:8554/doorbell", rtsp);
+        // Guarded so a momentarily-empty host renders an empty state, not `rtsp://…@:8554/…`.
+        Assert.Contains("{% if value %}", rtsp);
 
         // The still-image URL sensor: same host token, fixed still port + /idle.jpg, no credentials.
         string still = CameraSensorJson(opts, "camera_still_url.json");
