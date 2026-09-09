@@ -400,21 +400,38 @@ async fn run() -> Result<bool, String> {
             // `Bticino-Classe100X.local`, so a second responder would cause mDNS name-conflict flapping —
             // there we only READ that name for the Part A diagnostic sensors. The responder shares its
             // conflict-resolved chosen name over a watch channel so announce() re-asserts it on connect.
-            let name_rx = if camera_mdns_active(&cfg) && !mdns::system_mdns_responder_present().await {
-                match mdns::resolve_responder_base_host().await {
-                    Some(base) => {
-                        let (name_tx, name_rx) = tokio::sync::watch::channel(None::<String>);
-                        tokio::spawn(mdns::run_responder(
-                            base,
-                            cfg.mqtt_host.clone(),
-                            client.clone(),
-                            cfg.topic_camera_mdns_host.clone(),
-                            name_tx,
-                            stopping.clone(),
-                        ));
-                        Some(name_rx)
+            let name_rx = if camera_mdns_active(&cfg) {
+                if !mdns::system_mdns_responder_present().await {
+                    // C300X: our own responder owns the (conflict-resolved) name and shares it over a
+                    // watch channel so announce() re-asserts it on connect.
+                    match mdns::resolve_responder_base_host().await {
+                        Some(base) => {
+                            let (name_tx, name_rx) = tokio::sync::watch::channel(None::<String>);
+                            tokio::spawn(mdns::run_responder(
+                                base,
+                                cfg.mqtt_host.clone(),
+                                client.clone(),
+                                cfg.topic_camera_mdns_host.clone(),
+                                name_tx,
+                                stopping.clone(),
+                            ));
+                            Some(name_rx)
+                        }
+                        None => None,
                     }
-                    None => None,
+                } else {
+                    // C100X: the factory Avahi owns the name; we only READ it. Spawn a lightweight refresher
+                    // that re-resolves Avahi's RUNTIME name and republishes the retained host topic if it
+                    // changes (e.g. a conflict-rename mid-connection), so the URL sensors don't advertise a
+                    // stale name until the next reconnect. announce() still does the per-connect publish, so
+                    // no watch channel is needed here.
+                    tokio::spawn(mdns::run_host_refresher(
+                        cfg.mqtt_host.clone(),
+                        client.clone(),
+                        cfg.topic_camera_mdns_host.clone(),
+                        stopping.clone(),
+                    ));
+                    None
                 }
             } else {
                 None

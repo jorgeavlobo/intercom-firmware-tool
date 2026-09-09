@@ -907,6 +907,11 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(1);
 /// change (a routing-table probe, so cheap), and bounds how promptly it observes `stopping`. Kept far
 /// below the ring cache's 300 s so a DHCP change converges quickly (issue #171 review).
 const RESPONDER_TICK: Duration = Duration::from_secs(15);
+/// Poll cadence for the C100X host refresher (issue #171 review). Re-resolves the factory Avahi's
+/// RUNTIME name and republishes only on change, so a mid-connection Avahi rename is reflected without
+/// waiting for the next broker reconnect. Well above the reverse-PTR's own 2 s bound; a rename is rare,
+/// so a slow cadence keeps the periodic mDNS query load negligible.
+const HOST_REFRESH_TICK: Duration = Duration::from_secs(30);
 
 /// Send `count` unsolicited A-record announcements for `name` → `ip`, `ANNOUNCE_INTERVAL` apart (§8.3).
 async fn announce_record(sock: &UdpSocket, name: &str, ip: Ipv4Addr, count: u32) {
@@ -1057,6 +1062,46 @@ pub async fn run_responder(
             }
         }
         return;
+    }
+}
+
+/// C100X-only (issue #171 review): periodically re-resolve the factory Avahi's RUNTIME `<name>.local`
+/// (the reverse-PTR self-lookup, falling back to the configured host-name) and republish it RETAINED on
+/// `topic` WHENEVER IT CHANGES — so a conflict-rename Avahi applies mid-connection is reflected on the HA
+/// URL sensors without waiting for the next broker reconnect (`announce()`'s only trigger). It publishes
+/// nothing when the name is unchanged or unresolvable, and exits promptly when `stopping` is set. This is
+/// the read-only C100X analogue of `run_responder`'s address-change re-announce (the C300X path, where our
+/// own responder already owns and republishes the name); MUST be spawned ONLY where a factory Avahi owns
+/// the name.
+pub async fn run_host_refresher(
+    broker: String,
+    client: AsyncClient,
+    topic: String,
+    stopping: Arc<AtomicBool>,
+) {
+    let mut last: Option<String> = None;
+    // Pin ONE interval so the cadence is wall-clock, not per-iteration; consume the immediate first tick —
+    // announce() already publishes the host on connect, so the first refresh is one TICK later.
+    let mut tick = tokio::time::interval(HOST_REFRESH_TICK);
+    tick.tick().await;
+    while !stopping.load(Ordering::Relaxed) {
+        tick.tick().await;
+        if stopping.load(Ordering::Relaxed) {
+            return;
+        }
+        // Mirror announce()'s C100X resolve: prefer the off-hot-path cached IP, else a fresh bounded probe.
+        let ip = match crate::still::cached_self_ipv4() {
+            Some(ip) => Some(ip),
+            None => crate::still::reachable_ipv4(&broker).await,
+        };
+        if let Some(host) = resolve_avahi_or_system_host(ip).await {
+            if last.as_deref() != Some(host.as_str()) {
+                match client.publish(&topic, QoS::AtMostOnce, true, host.clone().into_bytes()).await {
+                    Ok(()) => last = Some(host),
+                    Err(e) => eprintln!("btmqttd: mdns host refresher: publish failed: {e}"),
+                }
+            }
+        }
     }
 }
 
