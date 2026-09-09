@@ -698,6 +698,17 @@ async fn publish_frame(
                 let client_ring = client.clone();
                 let broker_ring = broker_online.clone();
                 tokio::spawn(async move {
+                    // Resolve the device's own LAN IPv4 ONCE, OFF the single-threaded runtime thread
+                    // (resolving a NAMED broker can block on the system resolver), and reuse it for
+                    // every event this runner serves — the address is stable across a coalesced ring
+                    // burst, and a later ring re-acquires a runner and re-resolves, so it still tracks
+                    // a DHCP change. Keeping the blocking resolve off the runtime means a slow resolver
+                    // can't stall the daemon during a ring publish.
+                    let host = cfg_ring.mqtt_host.clone();
+                    let self_ip = tokio::task::spawn_blocking(move || crate::still::reachable_ipv4(&host))
+                        .await
+                        .ok()
+                        .flatten();
                     // On each successful capture the runner calls back here with the event id AND the epoch
                     // it was detected on, to publish a "ring snapshot ready" signal carrying that id, so the
                     // HA push fetches exactly THIS event's frame — triggered by this signal, not a fixed
@@ -712,14 +723,13 @@ async fn publish_frame(
                         if !ring_snapshot_deliverable(&broker_ring, event_epoch) {
                             return;
                         }
-                        // Carry a ready-to-fetch absolute URL for THIS event's frame (issue #144),
-                        // so an auto-discovered HA `image` entity (and the notification recipe) need
-                        // no hand-typed device IP. Resolved at ring time from the device's own LAN
-                        // address, so it tracks a DHCP change; the discovery config stays IP-free.
-                        // If the address can't be resolved usefully, omit `url` — the bare `id` still
-                        // drives the manual/templated path.
+                        // Carry a ready-to-fetch absolute URL for THIS event's frame (issue #144), so an
+                        // auto-discovered HA `image` entity (and the notification recipe) need no
+                        // hand-typed device IP. `self_ip` was resolved once above (off the runtime
+                        // thread); the discovery config stays IP-free. If it couldn't be resolved
+                        // usefully, omit `url` — the bare `id` still drives the manual/templated path.
                         let now = crate::own::utc_now_iso();
-                        let payload = match crate::still::reachable_ipv4(&cfg_ring.mqtt_host) {
+                        let payload = match self_ip {
                             Some(ip) => format!(
                                 "{{\"at\":\"{now}\",\"id\":{event_id},\"url\":\"{}\"}}",
                                 crate::still::ring_url(ip, event_id)
