@@ -287,7 +287,7 @@ public class Go2RtcConfigTests
         // The three diagnostic sensors are emitted only when EnableHaDiscovery && CameraEnabled &&
         // CameraOnDevice (GenerateHaDiscovery). Discovery ON but the camera feature OFF (CameraEnabled=0
         // with CameraOnDevice=1, reachable in the UI/build flow) emits NO sensors, so the guide must NOT
-        // tell the user to copy them (Copilot #171 review) — it leads with the manual URLs instead.
+        // tell the user to copy them (#171 review) — it leads with the manual URLs instead.
         var opts = new MqttOptions("broker.lan")
         {
             CameraEnabled = false,
