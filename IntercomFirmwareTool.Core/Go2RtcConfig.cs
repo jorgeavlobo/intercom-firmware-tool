@@ -565,14 +565,15 @@ namespace IntercomFirmwareTool.Core
                 $"        data:\n" +
                 $"          message: \"Someone is at the door\"\n" +
                 $"          data:\n" +
-                $"            image: \"{{{{ trigger.payload_json.url }}}}\"\n\n"));
+                $"            image: \"http://{{{{ trigger.payload_json.ip }}}}:{OnDeviceStillPort}/ring-{{{{ trigger.payload_json.id | int }}}}.jpg\"\n\n"));
             sb.Append(string.Create(ci,
-                $"The snapshot payload is `{{\"at\":\"…\",\"id\":123,\"url\":\"http://…:{OnDeviceStillPort}/ring-123.jpg\"}}`\n" +
-                $"— the panel fills in the url from its own LAN address at ring time (so it tracks a\n" +
-                $"DHCP change), and it is published ONLY after the frame is written (no fixed-delay\n" +
-                $"guesswork; a cold stream can take a while to produce a frame). If the panel can't\n" +
-                $"resolve its address the url is omitted — fall back to the per-event URL above with\n" +
-                $"your panel's IP. The raw ring event on \"{opts.EffectiveTopicEntrancePanelCall}\"\n" +
+                $"The snapshot payload is `{{\"at\":\"…\",\"id\":123,\"ip\":\"192.168.…\"}}` — the panel fills\n" +
+                $"in its own LAN `ip` at ring time (so it tracks a DHCP change), published ONLY after the\n" +
+                $"frame is written (no fixed-delay guesswork; a cold stream can take a while to produce a\n" +
+                $"frame). The automation builds the URL from that `ip` with a FIXED scheme/port/path and an\n" +
+                $"integer id, so a stray publisher can't redirect it off `:{OnDeviceStillPort}/ring-<id>.jpg`.\n" +
+                $"If the panel can't resolve its address the `ip` is omitted — fall back to the per-event\n" +
+                $"URL above with your panel's IP. The raw ring event on \"{opts.EffectiveTopicEntrancePanelCall}\"\n" +
                 $"still fires immediately, for automations that only need to know a ring happened.\n"));
             return sb.ToString();
         }

@@ -76,12 +76,15 @@ public class MqttCameraDiscoveryTests
         Assert.False(string.IsNullOrEmpty(json), "the image entity should carry a real payload on-device");
         Assert.Contains("Doorbell snapshot", json);
         Assert.Contains("ring_snapshot", json);
-        // A url-topic image: bytes stay on the :8556 endpoint, only the id+url travel over MQTT, and the
-        // per-event URL is resolved from the payload's `url`.
+        // A url-topic image: bytes stay on the :8556 endpoint, only the id+ip travel over MQTT.
         Assert.Contains("url_topic", json);
-        Assert.Contains("{{ value_json.url }}", json);
-        // The discovery config carries NO device IP/URL — the daemon supplies it at runtime (issue #144).
-        Assert.DoesNotContain("http", json);
+        // Fixed-shape url_template built from the payload's `ip` (SSRF hardening, #144): scheme, port and
+        // path are baked and the id is coerced to an int, so only the host is payload-driven.
+        Assert.Contains("value_json.ip", json);
+        Assert.Contains(":8556/ring-", json);
+        Assert.Contains("value_json.id | int", json);
+        // No concrete device IP is baked into the discovery config — the host comes from the payload.
+        Assert.DoesNotContain("192.168", json);
     }
 
     [Fact]

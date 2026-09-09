@@ -2271,9 +2271,14 @@ namespace IntercomFirmwareTool.Core
                         unique_id = $"{node}_ring_snapshot",
                         default_entity_id = EntId("image", "ring_snapshot"),
                         url_topic = opts.EffectiveTopicRingSnapshot,
-                        // The daemon omits `url` when it can't resolve a usable LAN IP; the template
-                        // then yields empty and HA keeps the last frame rather than fetching a bad URL.
-                        url_template = "{{ value_json.url }}",
+                        // Build a FIXED-shape URL from the payload's device `ip` (SSRF hardening, #144):
+                        // the http scheme, the :8556 still port, and the /ring-<id>.jpg path are baked
+                        // here and the id is coerced to an int, so a rogue publisher on this topic can at
+                        // most redirect the HOST — never the port, path, or scheme (the broker remains the
+                        // primary trust boundary). The daemon omits `ip` when it can't resolve a usable
+                        // LAN address; the template then yields a hostless URL that fails to fetch, so HA
+                        // keeps the last frame rather than loading a bad image.
+                        url_template = $"http://{{{{ value_json.ip }}}}:{Go2RtcConfig.OnDeviceStillPort}/ring-{{{{ value_json.id | int }}}}.jpg",
                         icon = "mdi:doorbell-video",
                         availability_topic = opts.TopicLastWill,
                         payload_available = "online",

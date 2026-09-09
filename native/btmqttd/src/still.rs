@@ -51,13 +51,6 @@ pub const STILL_PORT: u16 = 8556;
 /// rest of the binary). A ~11 KB 640×480 JPEG — see `native/btmqttd/assets/idle-placeholder.jpg`.
 const PLACEHOLDER: &[u8] = include_bytes!("../assets/idle-placeholder.jpg");
 
-/// The absolute URL a Home Assistant host fetches ONE ring event's frame from (issue #144). The
-/// still server binds `0.0.0.0`, so `ip` is the device's own LAN address (see [`reachable_ipv4`]);
-/// the path is the immutable per-event file the endpoint serves.
-pub fn ring_url(ip: Ipv4Addr, id: u64) -> String {
-    format!("http://{ip}:{STILL_PORT}/ring-{id}.jpg")
-}
-
 /// Best-effort resolution of the device's own LAN IPv4 — the address a Home Assistant host reaches
 /// this still endpoint on — so the ring-snapshot signal can carry a ready-to-fetch `url` (issue
 /// #144). Neither the installer (it only knows the broker host, not the device's DHCP-assigned IP)
@@ -525,15 +518,6 @@ mod tests {
         assert!(!is_jpeg(b"\xff\xd8\xff")); // too short, no structure
         assert!(!is_jpeg(b"not a jpeg at all")); // wrong magic
         assert!(!is_jpeg(b"\x89PNG\r\n\x1a\n")); // a PNG
-    }
-
-    #[test]
-    fn ring_url_targets_the_still_port_and_event_path() {
-        let ip = Ipv4Addr::new(192, 168, 50, 251);
-        assert_eq!(
-            ring_url(ip, 20_000_000_002),
-            "http://192.168.50.251:8556/ring-20000000002.jpg"
-        );
     }
 
     #[test]

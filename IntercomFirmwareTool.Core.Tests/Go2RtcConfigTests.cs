@@ -268,11 +268,13 @@ public class Go2RtcConfigTests
         Assert.Contains("http://<intercom-ip>:8556/ring-<id>.jpg", guide);
         // The device auto-creates the snapshot image entity, so the guide advertises it (issue #144).
         Assert.Contains("Doorbell snapshot", guide);
-        // The pasteable automation reads the ready-to-fetch url straight from the MQTT payload — no
-        // hand-typed device IP (issue #144): the daemon fills it in from its own LAN address.
-        Assert.Contains("{{ trigger.payload_json.url }}", guide);
-        // The payload now carries that url alongside the id.
-        Assert.Contains("\"url\":\"http://", guide);
+        // The pasteable automation builds the image URL from the payload's device ip with a FIXED
+        // scheme/port/path (SSRF hardening, #144) — no hand-typed IP, and a rogue publisher can't
+        // redirect it off :8556/ring-<id>.jpg.
+        Assert.Contains("{{ trigger.payload_json.ip }}", guide);
+        Assert.Contains(":8556/ring-", guide);
+        // The payload carries the device ip alongside the id.
+        Assert.Contains("\"ip\":\"", guide);
         // The ring-notification automation triggers on the ring-snapshot-READY topic (published only
         // after the frame is written), so it never fires on a fixed delay that a cold capture outlasts.
         Assert.Contains(opts.EffectiveTopicRingSnapshot, guide);

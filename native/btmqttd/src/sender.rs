@@ -723,17 +723,16 @@ async fn publish_frame(
                         if !ring_snapshot_deliverable(&broker_ring, event_epoch) {
                             return;
                         }
-                        // Carry a ready-to-fetch absolute URL for THIS event's frame (issue #144), so an
-                        // auto-discovered HA `image` entity (and the notification recipe) need no
-                        // hand-typed device IP. `self_ip` was resolved once above (off the runtime
-                        // thread); the discovery config stays IP-free. If it couldn't be resolved
-                        // usefully, omit `url` — the bare `id` still drives the manual/templated path.
+                        // Carry the device's own resolved LAN `ip` (issue #144) — NOT a full URL. The HA
+                        // image entity and the notification recipe build a FIXED-shape URL from it (fixed
+                        // http scheme + port :8556 + /ring-<id>.jpg path, with the id coerced to an int),
+                        // so a rogue MQTT publisher on this topic can at most redirect the HOST, never the
+                        // port, path, or scheme (SSRF hardening, PR #186 — the broker is still the primary
+                        // trust boundary). `self_ip` was resolved once above, off the runtime thread. Omit
+                        // `ip` if unresolved — the bare `id` still drives the manual/templated path.
                         let now = crate::own::utc_now_iso();
                         let payload = match self_ip {
-                            Some(ip) => format!(
-                                "{{\"at\":\"{now}\",\"id\":{event_id},\"url\":\"{}\"}}",
-                                crate::still::ring_url(ip, event_id)
-                            ),
+                            Some(ip) => format!("{{\"at\":\"{now}\",\"id\":{event_id},\"ip\":\"{ip}\"}}"),
                             None => format!("{{\"at\":\"{now}\",\"id\":{event_id}}}"),
                         };
                         if let Err(e) = client_ring.try_publish(
