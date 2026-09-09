@@ -383,8 +383,11 @@ async fn run() -> Result<bool, String> {
     // resolves the final (conflict-resolved) `<name>.local` and reports it here, so announce() can
     // re-assert that exact name on each reconnect. `None` on the C100X (announce() reads the factory
     // Avahi name directly) and off-device.
+    // `camera_host_task` holds the JoinHandle of whichever mDNS task PUBLISHES the retained camera-host
+    // topic on this model — the C300X responder OR the C100X refresher (mutually exclusive) — so shutdown
+    // can abort-and-await it before the final offline publish (neither may emit a host publish after it).
     #[allow(clippy::type_complexity)]
-    let (still_task, still_stopping, camera_mdns_name, host_refresher): (
+    let (still_task, still_stopping, camera_mdns_name, camera_host_task): (
         Option<tokio::task::JoinHandle<()>>,
         Arc<std::sync::atomic::AtomicBool>,
         Option<tokio::sync::watch::Receiver<Option<String>>>,
@@ -401,14 +404,17 @@ async fn run() -> Result<bool, String> {
             // `Bticino-Classe100X.local`, so a second responder would cause mDNS name-conflict flapping —
             // there we only READ that name for the Part A diagnostic sensors. The responder shares its
             // conflict-resolved chosen name over a watch channel so announce() re-asserts it on connect.
-            let (name_rx, host_refresher) = if camera_mdns_active(&cfg) {
+            let (name_rx, camera_host_task) = if camera_mdns_active(&cfg) {
                 if !mdns::system_mdns_responder_present().await {
                     // C300X: our own responder owns the (conflict-resolved) name and shares it over a
-                    // watch channel so announce() re-asserts it on connect.
+                    // watch channel so announce() re-asserts it on connect. It PUBLISHES the retained
+                    // host topic, so its JoinHandle is retained for the shutdown abort-and-await (below),
+                    // like the C100X refresher — otherwise a mid-await probe/announce/publish could emit a
+                    // retained host after the shutdown offline.
                     match mdns::resolve_responder_base_host().await {
                         Some(base) => {
                             let (name_tx, name_rx) = tokio::sync::watch::channel(None::<String>);
-                            tokio::spawn(mdns::run_responder(
+                            let h = tokio::spawn(mdns::run_responder(
                                 base,
                                 cfg.mqtt_host.clone(),
                                 client.clone(),
@@ -416,7 +422,7 @@ async fn run() -> Result<bool, String> {
                                 name_tx,
                                 stopping.clone(),
                             ));
-                            (Some(name_rx), None)
+                            (Some(name_rx), Some(h))
                         }
                         None => (None, None),
                     }
@@ -439,7 +445,7 @@ async fn run() -> Result<bool, String> {
             } else {
                 (None, None)
             };
-            (Some(tokio::spawn(still::run(stopping.clone()))), stopping, name_rx, host_refresher)
+            (Some(tokio::spawn(still::run(stopping.clone()))), stopping, name_rx, camera_host_task)
         } else {
             (None, stopping, None, None)
         }
@@ -1268,11 +1274,12 @@ async fn run() -> Result<bool, String> {
         still_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
     }
-    // C100X mDNS host refresher (issue #171): it PUBLISHES the retained camera-host topic, so it must be
-    // stopped BEFORE the final offline publish — a mid-await reverse-PTR lookup (up to ~2 s) could
-    // otherwise emit a stale/late retained host after shutdown. It shares `still_stopping` (set above);
-    // abort-and-await interrupts any pending resolve so no publish escapes.
-    if let Some(h) = host_refresher {
+    // mDNS camera-host task (issue #171): the C300X responder OR the C100X refresher (whichever runs on
+    // this model). BOTH PUBLISH the retained camera-host topic, so the task must be stopped BEFORE the
+    // final offline publish — a mid-await probe / reverse-PTR lookup / publish could otherwise emit a
+    // stale/late retained host after shutdown. It shares `still_stopping` (set above); abort-and-await
+    // interrupts any pending await so no publish escapes.
+    if let Some(h) = camera_host_task {
         stop(h).await;
     }
     // On-demand SIP UA (issue #104): drain it gracefully. `stop(cmd_worker)` above already dropped
