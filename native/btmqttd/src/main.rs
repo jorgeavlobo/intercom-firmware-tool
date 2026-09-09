@@ -379,10 +379,9 @@ async fn run() -> Result<bool, String> {
     // `camera_ondevice` like sprop. It publishes NOTHING to the broker and holds no half-actuated
     // state, so shutdown is a plain `stopping`-flag + abort (like av/sprop). `None` (feature off)
     // threads through as a no-op.
-    // `camera_mdns_name` is `Some(cell)` ONLY on the C300X-responder path: btmqttd's own responder
-    // resolves the final (conflict-resolved) `<name>.local` and reports it here, so announce() can
-    // re-assert that exact name on each reconnect. `None` on the C100X (announce() reads the factory
-    // Avahi name directly) and off-device.
+    // `camera_mdns_name` is `Some(cell)` on EVERY on-device model: the owning task (the C300X responder
+    // or the C100X refresher) resolves the final `<name>.local` and reports it here, so announce() only
+    // re-asserts that exact name on each reconnect and never re-resolves. `None` only off-device.
     // `camera_host_task` holds the JoinHandle of whichever mDNS task PUBLISHES the retained camera-host
     // topic on this model — the C300X responder OR the C100X refresher (mutually exclusive) — so shutdown
     // can abort-and-await it before the final offline publish (neither may emit a host publish after it).
@@ -443,20 +442,23 @@ async fn run() -> Result<bool, String> {
                         }
                     }
                 } else {
-                    // C100X: the factory Avahi owns the name; we only READ it. Spawn a lightweight refresher
-                    // that re-resolves Avahi's RUNTIME name and republishes the retained host topic if it
-                    // changes (e.g. a conflict-rename mid-connection), so the URL sensors don't advertise a
-                    // stale name until the next reconnect. announce() still does the per-connect publish, so
-                    // no watch channel is needed here. Its JoinHandle is retained so shutdown can abort-and-
-                    // await it (like still_task) BEFORE the final offline publish — otherwise a mid-await
-                    // reverse-PTR lookup could emit a retained host publish after shutdown.
+                    // C100X: the factory Avahi owns the name; we only READ it. The refresher is the SOLE
+                    // authority — it resolves Avahi's RUNTIME name (reverse-PTR, preferred and PRESERVED
+                    // across transient failures rather than regressing to the configured/unrenamed name),
+                    // publishes it retained, and shares it over a watch channel so announce() re-asserts that
+                    // exact value on reconnect (never re-resolving itself). Its JoinHandle is retained so
+                    // shutdown can abort-and-await it (like still_task) BEFORE the final offline publish —
+                    // otherwise a mid-await reverse-PTR lookup could emit a retained host publish after
+                    // shutdown.
+                    let (name_tx, name_rx) = tokio::sync::watch::channel(None::<String>);
                     let h = tokio::spawn(mdns::run_host_refresher(
                         cfg.mqtt_host.clone(),
                         client.clone(),
                         cfg.topic_camera_mdns_host.clone(),
+                        name_tx,
                         stopping.clone(),
                     ));
-                    (None, Some(h))
+                    (Some(name_rx), Some(h))
                 }
             } else {
                 (None, None)
@@ -1471,29 +1473,15 @@ async fn announce(
     // AND on-device (`camera_mdns_active`); a failed resolve just omits it (the sensors stay
     // unavailable, the literal-IP guide fallback still works). A reconnect re-runs announce, so a
     // broker that dropped its retained set is reconciled.
-    // Camera mDNS host diagnostic (#171). C300X: our responder owns the (conflict-resolved) name and
-    // shares it over the watch channel; re-assert whatever it has settled on (the responder also
-    // publishes it on commit and clears it on a bind failure — this is just the reconnect re-assert).
-    // C100X: the name the factory Avahi advertises (a reverse-PTR self-lookup reflects a conflict-rename,
-    // falling back to the configured host-name). A watch borrow is a cheap synchronous read.
+    // Camera mDNS host diagnostic (#171). BOTH models now share the host over the watch channel:
+    // the C300X responder or the C100X refresher owns the (conflict-resolved / runtime) name, publishes
+    // it retained on commit, and shares it here so announce() only RE-ASSERTS whatever it has settled on
+    // (reconciling a broker that dropped its retained set). A watch borrow is a cheap synchronous read;
+    // announce() never re-resolves, so a transient reverse-PTR failure can't regress the name on reconnect.
     let host = if camera_mdns_active(&cfg) {
-        match &camera_mdns_name {
-            Some(rx) => rx.borrow().clone(),
-            None => {
-                // C100X: reflect Avahi's RUNTIME name (a conflict-rename it applied) via the
-                // reverse-PTR self-lookup. Prefer the off-hot-path cached IP; if it isn't warm yet —
-                // the FIRST connect, before refresh_self_ipv4_loop has populated it — fall back to a
-                // fresh bounded routing-table probe (no datagram sent; a named broker is typically in
-                // /etc/hosts) so the reverse-PTR runs on the first connect too, not only after a
-                // reconnect repopulates the cache. Falls back to the configured host-name if neither
-                // yields an IP.
-                let ip = match still::cached_self_ipv4() {
-                    Some(ip) => Some(ip),
-                    None => still::reachable_ipv4(&cfg.mqtt_host).await,
-                };
-                mdns::resolve_avahi_or_system_host(ip).await
-            }
-        }
+        // Some(rx) on every on-device model (responder / refresher / no-base-host); its value is None
+        // until the owner first commits — announce() then leaves the retained topic untouched (below).
+        camera_mdns_name.as_ref().and_then(|rx| rx.borrow().clone())
     } else {
         None
     };

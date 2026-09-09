@@ -648,23 +648,18 @@ async fn reverse_lookup_host(our_ip: Ipv4Addr) -> Option<String> {
     }
 }
 
-/// C100X path — the name the FACTORY Avahi actually advertises, so the HA sensors match what it
-/// resolves. Prefer Avahi's RUNTIME name via a reverse-PTR self-lookup of `our_ip` (this reflects a
-/// conflict-rename that the static conf can't show); fall back to the configured `host-name` if set,
-/// else the `Bticino-Classe<model>X` name DERIVED from the kernel hostname. btmqttd only REPORTS this;
-/// it never runs its own responder where Avahi is present. `None` only if nothing yields a usable label.
+/// C100X path — the STATIC/derived camera host, WITHOUT the reverse-PTR runtime lookup: the configured
+/// Avahi `host-name` if set, else the `Bticino-Classe<model>X` name DERIVED from the kernel hostname.
+/// [`run_host_refresher`] uses this ONLY to BOOTSTRAP the host before it has learned an authoritative
+/// reverse-PTR runtime name (`reverse_lookup_host`), which it prefers and never regresses from on a
+/// transient failure. `None` only if nothing yields a usable label.
 ///
-/// The final fallback derives the model name rather than using the RAW `/etc/hostname` (e.g.
-/// `Bticino_Classe_100_X`): the raw kernel hostname carries underscores, which are invalid in DNS
-/// labels, so publishing it as `<name>.local` yields an unresolvable name — whereas the derived
+/// The fallback derives the model name rather than using the RAW `/etc/hostname` (e.g.
+/// `Bticino_Classe_100_X`): the raw kernel hostname carries underscores, which are invalid in DNS labels,
+/// so publishing it as `<name>.local` yields an unresolvable name — whereas the derived
 /// `Bticino-Classe100X` is a valid label matching the C100X factory convention (and the C300X responder
 /// path). The raw hostname is used only as a last resort when no model digits are present.
-pub async fn resolve_avahi_or_system_host(our_ip: Option<Ipv4Addr>) -> Option<String> {
-    if let Some(ip) = our_ip {
-        if let Some(host) = reverse_lookup_host(ip).await {
-            return Some(host);
-        }
-    }
+async fn configured_or_model_host() -> Option<String> {
     let label = match read_avahi_host_name().await {
         Some(l) => l,
         None => {
@@ -1073,55 +1068,130 @@ pub async fn run_responder(
     }
 }
 
-/// C100X-only (issue #171 review): periodically re-resolve the factory Avahi's RUNTIME `<name>.local`
-/// (the reverse-PTR self-lookup, falling back to the configured host-name) and republish it RETAINED on
-/// `topic` WHENEVER IT CHANGES — so a conflict-rename Avahi applies mid-connection is reflected on the HA
-/// URL sensors without waiting for the next broker reconnect (`announce()`'s only trigger). It publishes
-/// nothing when the name is unchanged or unresolvable, and exits promptly when `stopping` is set. This is
-/// the read-only C100X analogue of `run_responder`'s address-change re-announce (the C300X path, where our
-/// own responder already owns and republishes the name); MUST be spawned ONLY where a factory Avahi owns
-/// the name.
+/// Decide the host to publish and the new learned-runtime state for one refresher tick (issue #171
+/// review). `runtime` is a FRESH authoritative reverse-PTR result (`Some` only when the lookup
+/// succeeded), `learned` the last authoritative runtime name (`None` until one has been observed),
+/// `bootstrap` the configured/derived fallback:
+/// - an authoritative `runtime` wins and is remembered;
+/// - a FAILED lookup (`runtime` == `None`) KEEPS the learned runtime name — it never regresses to
+///   `bootstrap`, so a transient reverse-PTR timeout can't republish the original (unrenamed) name of a
+///   conflict-renamed panel;
+/// - `bootstrap` is used ONLY before any runtime name has been learned.
+///
+/// Returns `(host_to_publish, new_learned)`. Pure; unit-tested.
+fn pick_host(
+    runtime: Option<String>,
+    learned: Option<String>,
+    bootstrap: Option<String>,
+) -> (Option<String>, Option<String>) {
+    match runtime {
+        Some(name) => (Some(name.clone()), Some(name)),
+        None => match learned {
+            Some(name) => (Some(name.clone()), Some(name)),
+            None => (bootstrap, None),
+        },
+    }
+}
+
+/// C100X-only (issue #171 review): the SOLE authority for the C100X camera host. It resolves the factory
+/// Avahi's RUNTIME `<name>.local`, publishes it RETAINED on `topic`, and shares it over `name_tx` so
+/// `announce()` re-asserts that exact value on every reconnect (never re-resolving itself) — the read-only
+/// C100X analogue of `run_responder` (the C300X path). MUST be spawned ONLY where a factory Avahi owns the
+/// name.
+///
+/// RESOLUTION PRECEDENCE, and why a transient failure must not regress (issue #171 review):
+/// - The AUTHORITATIVE source is the reverse-PTR self-lookup (`reverse_lookup_host`) — it reflects a
+///   conflict-rename (`…-2.local`) the static config can't show.
+/// - Once an authoritative runtime name has been LEARNED, a later transient reverse-PTR timeout must KEEP
+///   it — falling back to the configured `host-name` would republish the ORIGINAL (unrenamed) name, i.e.
+///   the OTHER panel that won the conflict, until the next successful lookup.
+/// - The configured/derived name (`configured_or_model_host`) is used ONLY to BOOTSTRAP, before any
+///   runtime name has been learned, so HA has a usable name immediately.
+///
+/// Publishes only on a real (case-insensitive) change — the reverse-PTR path lower-cases the label while a
+/// configured `host-name` preserves case, so a case-only flip is pointless retained churn. Exits promptly
+/// when `stopping` is set (and is abort-and-awaited at shutdown before the final offline publish).
 pub async fn run_host_refresher(
     broker: String,
     client: AsyncClient,
     topic: String,
+    name_tx: tokio::sync::watch::Sender<Option<String>>,
     stopping: Arc<AtomicBool>,
 ) {
-    let mut last: Option<String> = None;
-    // Pin ONE interval so the cadence is wall-clock, not per-iteration; consume the immediate first tick —
-    // announce() already publishes the host on connect, so the first refresh is one TICK later.
+    let mut learned: Option<String> = None; // last AUTHORITATIVE reverse-PTR name
+    let mut published: Option<String> = None; // last value we published / shared
+    // Pin ONE interval so the cadence is wall-clock. Consume the immediate first tick, then do an initial
+    // resolve BEFORE waiting — so the host is seeded promptly (announce() reads the watch this feeds).
     let mut tick = tokio::time::interval(HOST_REFRESH_TICK);
     tick.tick().await;
-    while !stopping.load(Ordering::Relaxed) {
-        tick.tick().await;
+    loop {
         if stopping.load(Ordering::Relaxed) {
             return;
         }
-        // A FRESH routing-table probe each tick — NOT the up-to-300 s ring cache (`cached_self_ipv4`):
-        // on this periodic path a stale cached IP would reverse-resolve the OLD address after a DHCP
-        // change, time out, and fall back to the configured UNRENAMED hostname — republishing the wrong
-        // name. The refresher is off any hot path (30 s cadence, bounded probe + 2 s reverse lookup), so
-        // a fresh probe is cheap and gives the reverse-PTR the current address.
+        // A FRESH routing-table probe (NOT the up-to-300 s ring cache): a stale IP would reverse-resolve the
+        // OLD address after a DHCP change, time out, and look like a lost runtime name. Off any hot path
+        // (30 s cadence, bounded probe + 2 s reverse lookup), so a fresh probe is cheap.
         let ip = crate::still::reachable_ipv4(&broker).await;
-        if let Some(host) = resolve_avahi_or_system_host(ip).await {
-            // Compare case-INSENSITIVELY: the reverse-PTR path lower-cases the label (`read_name`) while a
-            // configured Avahi `host-name` preserves case, so a plain `!=` would republish on a case-only
-            // flip — pointless retained churn / HA state updates (a `.local` name resolves case-insensitively
-            // anyway). Only a real label change republishes.
-            let changed = last.as_deref().is_none_or(|prev| !prev.eq_ignore_ascii_case(&host));
-            if changed {
+        let runtime = match ip {
+            Some(ip) => reverse_lookup_host(ip).await,
+            None => None,
+        };
+        // Only READ the configured/derived bootstrap name when it could actually be used (no runtime name
+        // now AND none learned yet) — avoids the file I/O on the steady-state path.
+        let bootstrap = if runtime.is_none() && learned.is_none() {
+            configured_or_model_host().await
+        } else {
+            None
+        };
+        let (desired, new_learned) = pick_host(runtime, learned, bootstrap);
+        learned = new_learned;
+        if let Some(host) = desired {
+            if published.as_deref().is_none_or(|p| !p.eq_ignore_ascii_case(&host)) {
                 match client.publish(&topic, QoS::AtMostOnce, true, host.clone().into_bytes()).await {
-                    Ok(()) => last = Some(host),
+                    Ok(()) => {
+                        let _ = name_tx.send(Some(host.clone()));
+                        published = Some(host);
+                    }
                     Err(e) => eprintln!("btmqttd: mdns host refresher: publish failed: {e}"),
                 }
             }
         }
+        tick.tick().await; // wait one cadence (abort at shutdown cancels this immediately)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pick_host_prefers_runtime_and_never_regresses_on_failure() {
+        let rt = |s: &str| Some(s.to_string());
+        // Authoritative reverse-PTR result → publish it AND remember it as learned.
+        assert_eq!(
+            pick_host(rt("Bticino-Classe100X-2.local"), None, rt("Bticino-Classe100X.local")),
+            (rt("Bticino-Classe100X-2.local"), rt("Bticino-Classe100X-2.local"))
+        );
+        // A later authoritative result overrides the learned one.
+        assert_eq!(
+            pick_host(rt("Bticino-Classe100X-3.local"), rt("Bticino-Classe100X-2.local"), None),
+            (rt("Bticino-Classe100X-3.local"), rt("Bticino-Classe100X-3.local"))
+        );
+        // THE FIX: a failed lookup AFTER learning keeps the learned runtime name — it must NOT regress to
+        // the configured/unrenamed bootstrap (which would point HA at the panel that won the conflict).
+        assert_eq!(
+            pick_host(None, rt("Bticino-Classe100X-2.local"), rt("Bticino-Classe100X.local")),
+            (rt("Bticino-Classe100X-2.local"), rt("Bticino-Classe100X-2.local"))
+        );
+        // Before anything is learned, a failed lookup bootstraps with the configured/derived name (and
+        // does NOT mark it learned, so the next authoritative result still wins).
+        assert_eq!(
+            pick_host(None, None, rt("Bticino-Classe100X.local")),
+            (rt("Bticino-Classe100X.local"), None)
+        );
+        // Nothing available at all (no runtime, none learned, no bootstrap) → publish nothing.
+        assert_eq!(pick_host(None, None, None), (None, None));
+    }
 
     #[test]
     fn build_ptr_query_has_the_expected_shape() {
