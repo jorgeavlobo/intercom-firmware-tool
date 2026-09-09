@@ -179,16 +179,20 @@ async fn discover_service_ips(services: &[&str], window: Duration) -> Vec<Ipv4Ad
 /// bind. Fallback: an ephemeral port we solely own, where we did NOT join the group and so must
 /// ask for a UNICAST reply (`unicast_response = true`) to receive anything. TTL 255 per §11.
 async fn open_socket() -> std::io::Result<(UdpSocket, bool)> {
-    // Preferred: co-bind 5353 AND join the group — both must succeed to request multicast answers.
+    // Preferred: co-bind 5353 AND join the group AND set TTL 255 — all must succeed to request multicast
+    // answers. A failed TTL set would emit queries at the platform default TTL that a §11-checking
+    // responder may drop, so treat it like a failed join and fall through to the fallback.
     if let Ok(sock) = bind_reuse(MDNS_PORT) {
-        if sock.join_multicast_v4(MDNS_GROUP, Ipv4Addr::UNSPECIFIED).is_ok() {
-            let _ = sock.set_multicast_ttl_v4(255);
-            return Ok((sock, false)); // shared 5353 + joined group → request MULTICAST answers
+        if sock.join_multicast_v4(MDNS_GROUP, Ipv4Addr::UNSPECIFIED).is_ok()
+            && sock.set_multicast_ttl_v4(255).is_ok()
+        {
+            return Ok((sock, false)); // shared 5353 + joined group + TTL 255 → request MULTICAST answers
         }
     }
-    // Fallback: an ephemeral port we solely own → request UNICAST answers (QU).
+    // Fallback: an ephemeral port we solely own → request UNICAST answers (QU). TTL 255 is REQUIRED (§11),
+    // so propagate a failure to set it rather than emitting under-TTL queries the responder would discard.
     let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?;
-    let _ = sock.set_multicast_ttl_v4(255);
+    sock.set_multicast_ttl_v4(255)?;
     Ok((sock, true))
 }
 
@@ -810,8 +814,11 @@ fn query_asks_for_a(b: &[u8], our_name: &str) -> Option<bool> {
 async fn open_responder_socket() -> Option<UdpSocket> {
     let sock = bind_reuse(MDNS_PORT).ok()?;
     sock.join_multicast_v4(MDNS_GROUP, Ipv4Addr::UNSPECIFIED).ok()?;
-    let _ = sock.set_multicast_ttl_v4(255);
-    let _ = sock.set_ttl(255);
+    // Both TTLs are REQUIRED (§11): fail the socket if either can't be set — a responder that emitted
+    // under-TTL announcements/replies would have them dropped by a §11-checking receiver, so it is better
+    // to have no responder (soft failure; the still endpoint is still reachable by IP) than a broken one.
+    sock.set_multicast_ttl_v4(255).ok()?;
+    sock.set_ttl(255).ok()?;
     Some(sock)
 }
 

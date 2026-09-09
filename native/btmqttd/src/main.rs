@@ -379,9 +379,11 @@ async fn run() -> Result<bool, String> {
     // `camera_ondevice` like sprop. It publishes NOTHING to the broker and holds no half-actuated
     // state, so shutdown is a plain `stopping`-flag + abort (like av/sprop). `None` (feature off)
     // threads through as a no-op.
-    // `camera_mdns_name` is `Some(cell)` on EVERY on-device model: the owning task (the C300X responder
+    // `camera_mdns_name` is `Some(cell)` exactly when the camera mDNS surface is active
+    // (`camera_mdns_active` = `camera_enabled && camera_ondevice`): the owning task (the C300X responder
     // or the C100X refresher) resolves the final `<name>.local` and reports it here, so announce() only
-    // re-asserts that exact name on each reconnect and never re-resolves. `None` only off-device.
+    // re-asserts that exact name on each reconnect and never re-resolves. `None` otherwise — off-device,
+    // OR on-device with the camera feature disabled (`camera_ondevice` set but `camera_enabled` clear).
     // `camera_host_task` holds the JoinHandle of whichever mDNS task PUBLISHES the retained camera-host
     // topic on this model — the C300X responder OR the C100X refresher (mutually exclusive) — so shutdown
     // can abort-and-await it before the final offline publish (neither may emit a host publish after it).
