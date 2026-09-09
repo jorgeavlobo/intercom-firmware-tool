@@ -1482,7 +1482,8 @@ async fn announce(
     // announce() never re-resolves, so a transient reverse-PTR failure can't regress the name on reconnect.
     let host = if camera_mdns_active(&cfg) {
         // Some(rx) on every on-device model (responder / refresher / no-base-host); its value is None
-        // until the owner first commits — announce() then leaves the retained topic untouched (below).
+        // until the owner first commits — announce() then CLEARS the retained topic (below), so a
+        // reconnecting HA sees "no host yet" rather than a value a previous run left cached.
         camera_mdns_name.as_ref().and_then(|rx| rx.borrow().clone())
     } else {
         None

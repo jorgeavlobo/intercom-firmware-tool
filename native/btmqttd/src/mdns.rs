@@ -652,38 +652,35 @@ async fn reverse_lookup_host(our_ip: Ipv4Addr) -> Option<String> {
     }
 }
 
-/// C100X path — the STATIC/derived camera host, WITHOUT the reverse-PTR runtime lookup: the configured
-/// Avahi `host-name` if set, else the `Bticino-Classe<model>X` name DERIVED from the kernel hostname.
-/// [`run_host_refresher`] uses this ONLY to BOOTSTRAP the host before it has learned an authoritative
-/// reverse-PTR runtime name (`reverse_lookup_host`), which it prefers and never regresses from on a
-/// transient failure. `None` only if nothing yields a usable label.
-///
-/// The fallback derives the model name rather than using the RAW `/etc/hostname` (e.g.
-/// `Bticino_Classe_100_X`): the raw kernel hostname carries underscores, which are invalid in DNS labels,
-/// so publishing it as `<name>.local` yields an unresolvable name — whereas the derived
-/// `Bticino-Classe100X` is a valid label matching the C100X factory convention (and the C300X responder
-/// path). The raw hostname is used only as a last resort when no model digits are present.
-async fn configured_or_model_host() -> Option<String> {
-    let label = match read_avahi_host_name().await {
-        Some(l) => l,
-        None => {
-            let sys = read_system_hostname().await?;
-            model_host_from_hostname(&sys).unwrap_or(sys)
-        }
-    };
-    ensure_dot_local(&label)
-}
-
-/// C300X path — the base `<name>.local` btmqttd's OWN responder advertises: a configured Avahi
-/// `host-name` if somehow present, else the `Bticino-Classe<model>X` name derived from the kernel
-/// hostname (the factory C100X convention, applied uniformly; conflict resolution may append `-N`).
-/// `None` if no model digits are present. Used only where no system responder owns the name.
-pub async fn resolve_responder_base_host() -> Option<String> {
+/// Shared base-host derivation for BOTH on-device paths (the C100X bootstrap and the C300X responder):
+/// the configured Avahi `host-name` if set, else the `Bticino-Classe<model>X` name DERIVED from the
+/// kernel hostname. NEVER the raw `/etc/hostname` (e.g. `Bticino_Classe_100_X`) — its underscores are
+/// invalid in DNS labels, so publishing it as `<name>.local` would yield an UNRESOLVABLE name, which is
+/// strictly worse for the diagnostic host sensor than publishing nothing (an unresolvable value has no
+/// diagnostic worth and would just mislead). `None` when there is no configured name and the hostname
+/// carries no model digits. Normalized to a bare `<name>.local`.
+async fn derive_base_host() -> Option<String> {
     let label = match read_avahi_host_name().await {
         Some(l) => l,
         None => model_host_from_hostname(read_system_hostname().await?.as_str())?,
     };
     ensure_dot_local(&label)
+}
+
+/// C100X path — the STATIC/derived camera host, WITHOUT the reverse-PTR runtime lookup.
+/// [`run_host_refresher`] uses this ONLY to BOOTSTRAP the host before it has learned an authoritative
+/// reverse-PTR runtime name (`reverse_lookup_host`), which it prefers and never regresses from on a
+/// transient failure. Uses the same derivation as the C300X responder base ([`derive_base_host`]) so the
+/// two on-device paths can't disagree on what counts as a valid `<name>.local`; `None` if none results.
+async fn configured_or_model_host() -> Option<String> {
+    derive_base_host().await
+}
+
+/// C300X path — the base `<name>.local` btmqttd's OWN responder advertises. Same derivation as the
+/// C100X bootstrap ([`derive_base_host`]); `None` if there is no configured name and no model digits are
+/// present (conflict resolution may later append `-N`). Used only where no system responder owns the name.
+pub async fn resolve_responder_base_host() -> Option<String> {
+    derive_base_host().await
 }
 
 /// Normalize `label` to a bare `<name>.local` mDNS name: append `.local` only when it isn't already
