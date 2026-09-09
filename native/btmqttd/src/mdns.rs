@@ -1096,7 +1096,12 @@ pub async fn run_host_refresher(
         // a fresh probe is cheap and gives the reverse-PTR the current address.
         let ip = crate::still::reachable_ipv4(&broker).await;
         if let Some(host) = resolve_avahi_or_system_host(ip).await {
-            if last.as_deref() != Some(host.as_str()) {
+            // Compare case-INSENSITIVELY: the reverse-PTR path lower-cases the label (`read_name`) while a
+            // configured Avahi `host-name` preserves case, so a plain `!=` would republish on a case-only
+            // flip — pointless retained churn / HA state updates (a `.local` name resolves case-insensitively
+            // anyway). Only a real label change republishes.
+            let changed = last.as_deref().is_none_or(|prev| !prev.eq_ignore_ascii_case(&host));
+            if changed {
                 match client.publish(&topic, QoS::AtMostOnce, true, host.clone().into_bytes()).await {
                     Ok(()) => last = Some(host),
                     Err(e) => eprintln!("btmqttd: mdns host refresher: publish failed: {e}"),

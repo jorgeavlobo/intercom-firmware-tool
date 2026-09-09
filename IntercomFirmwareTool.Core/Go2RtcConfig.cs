@@ -578,9 +578,12 @@ namespace IntercomFirmwareTool.Core
                 $"door. Each ring is its own EVENT with a unique id, and its picture is served\n" +
                 $"(transiently, on tmpfs) at a per-event URL:\n\n" +
                 $"    http://<intercom-ip>:{OnDeviceStillPort}/ring-<id>.jpg\n\n"));
-            // The auto-created "Doorbell snapshot" image entity exists only under MQTT discovery
-            // (btmqttd clears its config when HA_DISCOVERY=0), so only promise it when discovery is on.
-            // The snapshot TOPIC + the notification recipe below work regardless of discovery.
+            // The auto-created "Doorbell snapshot" image entity exists only when the three diagnostic
+            // sensors do — i.e. under `haveSensors` (MQTT discovery AND the on-device camera; btmqttd
+            // clears its config otherwise) — so only promise it then. The snapshot TOPIC + the
+            // notification recipe below work regardless. The else branch stays cause-AGNOSTIC: `haveSensors`
+            // can be false because discovery is off OR because the camera feature is off, so it must not
+            // attribute the missing entity to discovery specifically.
             if (haveSensors)
             {
                 sb.Append("This never overwrites the idle thumbnail, and it needs no manual setup: the\n");
@@ -592,11 +595,12 @@ namespace IntercomFirmwareTool.Core
             }
             else
             {
-                sb.Append("This never overwrites the idle thumbnail. With Home Assistant discovery\n");
-                sb.Append("disabled the panel does NOT auto-create an image entity, but the snapshot\n");
+                sb.Append("This never overwrites the idle thumbnail. In this configuration the panel does\n");
+                sb.Append("NOT auto-create a \"Doorbell snapshot\" image entity (that entity needs BOTH Home\n");
+                sb.Append("Assistant MQTT discovery and the on-device camera enabled), but the snapshot\n");
                 sb.Append("topic still carries the event id and the device's LAN ip (published AFTER the\n");
-                sb.Append("frame is written), so the notification automation below works — the picture\n");
-                sb.Append("is always exactly that ring's, with no fixed-delay guesswork.\n\n");
+                sb.Append("frame is written), so the notification automation below works — the picture is\n");
+                sb.Append("always exactly that ring's, with no fixed-delay guesswork.\n\n");
             }
             sb.Append("To also get a phone notification with the picture, add a Home Assistant\n");
             sb.Append("automation like this — replace notify.mobile_app_your_phone with your own (the\n");
