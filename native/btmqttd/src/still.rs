@@ -94,6 +94,9 @@ static SELF_IPV4: AtomicU32 = AtomicU32::new(0);
 
 /// How often [`refresh_self_ipv4_loop`] re-resolves the device IP so a DHCP lease change is picked up.
 const SELF_IPV4_REFRESH: Duration = Duration::from_secs(300);
+/// Shorter cadence after a FAILED resolve (no route / DHCP not ready yet / transient outage), so a
+/// usable address is picked up in seconds once the network recovers instead of after a full refresh.
+const SELF_IPV4_RETRY: Duration = Duration::from_secs(15);
 /// Poll slice for a prompt shutdown while sleeping between refreshes.
 const SELF_IPV4_STEP: Duration = Duration::from_secs(5);
 
@@ -112,9 +115,22 @@ pub fn cached_self_ipv4() -> Option<Ipv4Addr> {
 /// Exits promptly when `stopping` is set.
 pub async fn refresh_self_ipv4_loop(broker: String, stopping: Arc<AtomicBool>) {
     while !stopping.load(Ordering::Relaxed) {
-        SELF_IPV4.store(reachable_ipv4(&broker).await.map_or(0, u32::from), Ordering::Relaxed);
+        // A SUCCESSFUL resolve updates the cache and is trusted for the full refresh interval. A
+        // FAILURE (no usable route: boot before the DHCP lease, or a transient outage) does NOT wipe
+        // a previously-good address to 0 — a briefly-stale address is never worse for HA than an
+        // omitted one (if the address truly moved, the fetch just fails, exactly as omitting `ip`
+        // would), and it lets rings during the blip still advertise the last reachable address. The
+        // failure instead retries on the short SELF_IPV4_RETRY cadence so a recovered network (or a
+        // new DHCP address) is picked up in seconds, not after a full 5-minute refresh.
+        let next = match reachable_ipv4(&broker).await {
+            Some(ip) => {
+                SELF_IPV4.store(u32::from(ip), Ordering::Relaxed);
+                SELF_IPV4_REFRESH
+            }
+            None => SELF_IPV4_RETRY,
+        };
         let mut slept = Duration::ZERO;
-        while slept < SELF_IPV4_REFRESH && !stopping.load(Ordering::Relaxed) {
+        while slept < next && !stopping.load(Ordering::Relaxed) {
             tokio::time::sleep(SELF_IPV4_STEP).await;
             slept += SELF_IPV4_STEP;
         }
