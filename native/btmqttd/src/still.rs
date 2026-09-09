@@ -32,7 +32,7 @@
 //! `u64` (anything else serves the idle image), so the path can never name a file to traverse — the id
 //! only ever indexes a `ring-<u64>.jpg` in the run dir.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -50,6 +50,46 @@ pub const STILL_PORT: u16 = 8556;
 /// into the binary so the endpoint always has SOMETHING to return (it is provenance-covered like the
 /// rest of the binary). A ~11 KB 640×480 JPEG — see `native/btmqttd/assets/idle-placeholder.jpg`.
 const PLACEHOLDER: &[u8] = include_bytes!("../assets/idle-placeholder.jpg");
+
+/// The absolute URL a Home Assistant host fetches ONE ring event's frame from (issue #144). The
+/// still server binds `0.0.0.0`, so `ip` is the device's own LAN address (see [`reachable_ipv4`]);
+/// the path is the immutable per-event file the endpoint serves.
+pub fn ring_url(ip: Ipv4Addr, id: u64) -> String {
+    format!("http://{ip}:{STILL_PORT}/ring-{id}.jpg")
+}
+
+/// Best-effort resolution of the device's own LAN IPv4 — the address a Home Assistant host reaches
+/// this still endpoint on — so the ring-snapshot signal can carry a ready-to-fetch `url` (issue
+/// #144). Neither the installer (it only knows the broker host, not the device's DHCP-assigned IP)
+/// nor the daemon's verbatim discovery publish can bake this in, so we resolve it here at ring time
+/// (always current across a DHCP change).
+///
+/// Uses the standard "connect a UDP socket to learn the outbound source address" idiom: `connect`
+/// sends NO packet — it only consults the routing table — so there is no traffic and no blocking DNS
+/// as long as the destination is a literal IPv4. We aim at the broker's IP when it is one (Home
+/// Assistant is typically the broker host or on its subnet, so that source IP is reachable from HA);
+/// a named broker (or IPv6) falls back to a TEST-NET-1 documentation address (RFC 5737) purely to
+/// pick the default-route interface's source IP — again without emitting anything.
+///
+/// Returns `None` (⇒ the caller omits `url`, leaving the bare `id` for the manual/templated path)
+/// when the source address is unusable for an HA fetch: unspecified, loopback (a loopback broker),
+/// or link-local (no DHCP lease / APIPA).
+pub fn reachable_ipv4(broker: &str) -> Option<Ipv4Addr> {
+    let dest = broker
+        .parse::<Ipv4Addr>()
+        .unwrap_or(Ipv4Addr::new(192, 0, 2, 1));
+    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    // Port is irrelevant (no datagram is sent); 9 is the discard protocol.
+    sock.connect((dest, 9)).ok()?;
+    match sock.local_addr().ok()?.ip() {
+        IpAddr::V4(ip)
+            if !ip.is_unspecified() && !ip.is_loopback() && !ip.is_link_local() =>
+        {
+            Some(ip)
+        }
+        _ => None,
+    }
+}
 
 /// Whole-request-head read budget: a client has this long to send the request line + headers. A
 /// slow-loris that dribbles bytes is cut off here rather than pinning a task/socket.
@@ -463,6 +503,22 @@ mod tests {
         assert!(!is_jpeg(b"\xff\xd8\xff")); // too short, no structure
         assert!(!is_jpeg(b"not a jpeg at all")); // wrong magic
         assert!(!is_jpeg(b"\x89PNG\r\n\x1a\n")); // a PNG
+    }
+
+    #[test]
+    fn ring_url_targets_the_still_port_and_event_path() {
+        let ip = Ipv4Addr::new(192, 168, 50, 251);
+        assert_eq!(
+            ring_url(ip, 20_000_000_002),
+            "http://192.168.50.251:8556/ring-20000000002.jpg"
+        );
+    }
+
+    #[test]
+    fn reachable_ipv4_rejects_a_loopback_route() {
+        // A loopback broker routes to a loopback source, which HA can never fetch — so the
+        // caller must get None (and omit `url`) rather than advertise a 127.x URL.
+        assert_eq!(reachable_ipv4("127.0.0.1"), None);
     }
 
     #[test]

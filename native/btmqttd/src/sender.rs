@@ -712,8 +712,20 @@ async fn publish_frame(
                         if !ring_snapshot_deliverable(&broker_ring, event_epoch) {
                             return;
                         }
-                        let payload =
-                            format!("{{\"at\":\"{}\",\"id\":{event_id}}}", crate::own::utc_now_iso());
+                        // Carry a ready-to-fetch absolute URL for THIS event's frame (issue #144),
+                        // so an auto-discovered HA `image` entity (and the notification recipe) need
+                        // no hand-typed device IP. Resolved at ring time from the device's own LAN
+                        // address, so it tracks a DHCP change; the discovery config stays IP-free.
+                        // If the address can't be resolved usefully, omit `url` — the bare `id` still
+                        // drives the manual/templated path.
+                        let now = crate::own::utc_now_iso();
+                        let payload = match crate::still::reachable_ipv4(&cfg_ring.mqtt_host) {
+                            Some(ip) => format!(
+                                "{{\"at\":\"{now}\",\"id\":{event_id},\"url\":\"{}\"}}",
+                                crate::still::ring_url(ip, event_id)
+                            ),
+                            None => format!("{{\"at\":\"{now}\",\"id\":{event_id}}}"),
+                        };
                         if let Err(e) = client_ring.try_publish(
                             &cfg_ring.topic_ring_snapshot,
                             QoS::AtMostOnce,

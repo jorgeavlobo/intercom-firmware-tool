@@ -55,4 +55,51 @@ public class MqttCameraDiscoveryTests
             CameraOnDemand = true,
         }));
     }
+
+    private static string RingSnapshotJson(MqttOptions opts) =>
+        MqttInstaller.GenerateHaDiscovery(opts, restoreFirewallEligible: false)
+            .Single(e => e.FileName == "ring_snapshot.json").Json;
+
+    [Fact]
+    public void Ring_snapshot_image_is_emitted_on_device_even_without_on_demand()
+    {
+        // The ring capture needs NO SIP wake (a ring already has the panel streaming), so — unlike the
+        // idle-refresh button — the image entity ships whenever the on-device camera is on, even with
+        // on-demand OFF (issue #144).
+        string json = RingSnapshotJson(new MqttOptions("broker.lan")
+        {
+            EnableHaDiscovery = true,
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraOnDemand = false,
+        });
+        Assert.False(string.IsNullOrEmpty(json), "the image entity should carry a real payload on-device");
+        Assert.Contains("Doorbell snapshot", json);
+        Assert.Contains("ring_snapshot", json);
+        // A url-topic image: bytes stay on the :8556 endpoint, only the id+url travel over MQTT, and the
+        // per-event URL is resolved from the payload's `url`.
+        Assert.Contains("url_topic", json);
+        Assert.Contains("{{ value_json.url }}", json);
+        // The discovery config carries NO device IP/URL — the daemon supplies it at runtime (issue #144).
+        Assert.DoesNotContain("http", json);
+    }
+
+    [Fact]
+    public void Ring_snapshot_image_is_tombstoned_off_device()
+    {
+        // Off-device (classic go2rtc-on-HA) path: no on-box capture, so the image entity is tombstoned.
+        Assert.Equal("", RingSnapshotJson(new MqttOptions("broker.lan")
+        {
+            EnableHaDiscovery = true,
+            CameraEnabled = true,
+            CameraOnDevice = false,
+        }));
+        // Camera feature off entirely: also tombstoned.
+        Assert.Equal("", RingSnapshotJson(new MqttOptions("broker.lan")
+        {
+            EnableHaDiscovery = true,
+            CameraEnabled = false,
+            CameraOnDevice = true,
+        }));
+    }
 }

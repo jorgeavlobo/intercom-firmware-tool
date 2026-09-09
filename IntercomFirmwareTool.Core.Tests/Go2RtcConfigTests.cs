@@ -266,8 +266,13 @@ public class Go2RtcConfigTests
         // Ring snapshots are per-EVENT URLs (issue #169), addressed by the id the notification carries
         // — the industry pattern (Ring/Nest/Frigate) so two rings can never cross images.
         Assert.Contains("http://<intercom-ip>:8556/ring-<id>.jpg", guide);
-        // The pasteable automation templates the image URL from the event id in the MQTT payload.
-        Assert.Contains("/ring-{{ trigger.payload_json.id }}.jpg", guide);
+        // The device auto-creates the snapshot image entity, so the guide advertises it (issue #144).
+        Assert.Contains("Doorbell snapshot", guide);
+        // The pasteable automation reads the ready-to-fetch url straight from the MQTT payload — no
+        // hand-typed device IP (issue #144): the daemon fills it in from its own LAN address.
+        Assert.Contains("{{ trigger.payload_json.url }}", guide);
+        // The payload now carries that url alongside the id.
+        Assert.Contains("\"url\":\"http://", guide);
         // The ring-notification automation triggers on the ring-snapshot-READY topic (published only
         // after the frame is written), so it never fires on a fixed delay that a cold capture outlasts.
         Assert.Contains(opts.EffectiveTopicRingSnapshot, guide);
