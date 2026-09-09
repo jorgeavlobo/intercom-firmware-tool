@@ -2250,11 +2250,12 @@ namespace IntercomFirmwareTool.Core
 
             // Ring snapshot image (#144): an auto-discovered MQTT `image` entity showing the most recent
             // ring's frame — the "who's at the door" picture with zero manual config. The daemon publishes
-            // the FULL per-event URL (built from its OWN LAN IP) in the ring_snapshot payload's `url`, so
-            // this discovery config carries NO device IP (the installer can't know the DHCP address, and
-            // the daemon publishes discovery verbatim) — the entity resolves each frame via url_template.
-            // The image BYTES stay on the :8556 endpoint (only the id + url travel over MQTT), and the
-            // signal is non-retained (#71), so the entity updates to that ring's frame and never
+            // the device's own LAN `ip` and the event `id` in the ring_snapshot payload (NOT a full URL),
+            // and url_template below builds the fixed-shape URL from them — so this discovery config bakes
+            // in the scheme/port/path and only the host is payload-driven (the installer can't know the
+            // DHCP address, and the daemon publishes discovery verbatim). The image BYTES stay on the
+            // :8556 endpoint (only the id + ip travel over MQTT), and the signal is non-retained (#71),
+            // so the entity updates to that ring's frame and never
             // resurrects a stale one on reconnect. Gated like the ring CAPTURE — on-device camera only;
             // NOT on-demand, because a ring already has the panel streaming so no SIP wake is needed
             // (unlike the idle-refresh button). It is READ-ONLY (no command topic), so it is emitted HERE

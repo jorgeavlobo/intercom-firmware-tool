@@ -698,17 +698,11 @@ async fn publish_frame(
                 let client_ring = client.clone();
                 let broker_ring = broker_online.clone();
                 tokio::spawn(async move {
-                    // Resolve the device's own LAN IPv4 ONCE, OFF the single-threaded runtime thread
-                    // (resolving a NAMED broker can block on the system resolver), and reuse it for
-                    // every event this runner serves — the address is stable across a coalesced ring
-                    // burst, and a later ring re-acquires a runner and re-resolves, so it still tracks
-                    // a DHCP change. Keeping the blocking resolve off the runtime means a slow resolver
-                    // can't stall the daemon during a ring publish.
-                    let host = cfg_ring.mqtt_host.clone();
-                    let self_ip = tokio::task::spawn_blocking(move || crate::still::reachable_ipv4(&host))
-                        .await
-                        .ok()
-                        .flatten();
+                    // Resolve the device's own LAN IPv4 ONCE per ring runner (reused across a coalesced
+                    // burst; a later ring re-acquires a runner and re-resolves, so it tracks a DHCP
+                    // change). The lookup is the shared BOUNDED async resolver, so a hung resolver can
+                    // neither stall the runtime nor hold this runner slot open indefinitely.
+                    let self_ip = crate::still::reachable_ipv4(&cfg_ring.mqtt_host).await;
                     // On each successful capture the runner calls back here with the event id AND the epoch
                     // it was detected on, to publish a "ring snapshot ready" signal carrying that id, so the
                     // HA push fetches exactly THIS event's frame — triggered by this signal, not a fixed

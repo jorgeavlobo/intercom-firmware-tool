@@ -541,12 +541,12 @@ namespace IntercomFirmwareTool.Core
             sb.Append("This never overwrites the idle thumbnail, and it needs no manual setup: the\n");
             sb.Append("panel auto-creates a \"Doorbell snapshot\" image entity in Home Assistant (via\n");
             sb.Append("MQTT discovery) that always shows the latest ring's frame. The snapshot topic\n");
-            sb.Append("carries BOTH the event id and a ready-to-fetch absolute url, published AFTER\n");
-            sb.Append("the frame is written, so the picture is always exactly that ring's (two rings\n");
-            sb.Append("can never cross images) and there is no fixed-delay guesswork.\n\n");
+            sb.Append("carries the event id and the device's LAN ip, published AFTER the frame is\n");
+            sb.Append("written, so the picture is always exactly that ring's (two rings can never\n");
+            sb.Append("cross images) and there is no fixed-delay guesswork.\n\n");
             sb.Append("To also get a phone notification with the picture, add a Home Assistant\n");
-            sb.Append("automation like this — replace notify.mobile_app_your_phone with your own\n");
-            sb.Append("(there is no IP to fill in: the url comes from the message):\n\n");
+            sb.Append("automation like this — replace notify.mobile_app_your_phone with your own (the\n");
+            sb.Append("automation builds the image URL from the ip and id in the message):\n\n");
             // The topic goes into a double-quoted YAML scalar, so escape the two PRINTABLE characters a
             // double-quoted scalar treats specially — backslash first, then the quote. Topic validation
             // (MqttInstaller) already rejects every control character (newlines included) and the MQTT
