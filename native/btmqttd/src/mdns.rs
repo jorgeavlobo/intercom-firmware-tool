@@ -566,7 +566,15 @@ pub(crate) fn parse_avahi_host_name(conf: &str) -> Option<String> {
             // to be the next non-space character.
             let val = rest.trim_start();
             if let Some(val) = val.strip_prefix('=') {
-                let val = val.trim();
+                // A hostname is a single DNS label token (letters/digits/hyphen, optionally
+                // dot-qualified) — never whitespace or a comment marker. Take only the first token so
+                // an inline comment (`host-name=Foo # factory`) or trailing junk can't leak into the
+                // published `<name>.local`.
+                let val = val
+                    .trim()
+                    .split(|c: char| c.is_whitespace() || c == '#' || c == ';')
+                    .next()
+                    .unwrap_or("");
                 if !val.is_empty() {
                     return Some(val.to_string());
                 }
@@ -604,7 +612,23 @@ pub async fn resolve_camera_mdns_host() -> Option<String> {
             .ok()
             .and_then(|h| model_host_from_hostname(h.trim())),
     }?;
-    Some(format!("{label}.local"))
+    ensure_dot_local(&label)
+}
+
+/// Normalize `label` to a bare `<name>.local` mDNS name: append `.local` only when it isn't already
+/// there (case-insensitive) and drop any trailing FQDN dot, so an already-qualified Avahi `host-name`
+/// (or a future fully-qualified caller) can't become `<name>.local.local`. `None` if nothing usable
+/// remains. Pure; unit-tested.
+fn ensure_dot_local(label: &str) -> Option<String> {
+    let label = label.trim().trim_end_matches('.').trim();
+    if label.is_empty() {
+        return None;
+    }
+    if label.to_ascii_lowercase().ends_with(".local") {
+        Some(label.to_string())
+    } else {
+        Some(format!("{label}.local"))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,12 +1115,29 @@ mod tests {
             use-ipv6=no\n";
         assert_eq!(parse_avahi_host_name(conf).as_deref(), Some("Bticino-Classe100X"));
         assert_eq!(parse_avahi_host_name("host-name = spaced \n").as_deref(), Some("spaced"));
+        // An INLINE comment or trailing junk after the value must be stripped (a hostname is a single
+        // token) — otherwise a `<name> # factory.local` would be published.
+        assert_eq!(parse_avahi_host_name("host-name=Foo # factory\n").as_deref(), Some("Foo"));
+        assert_eq!(parse_avahi_host_name("host-name=Bar;comment\n").as_deref(), Some("Bar"));
         // Absent / only-commented / empty value ⇒ None (Avahi would derive from the kernel hostname).
         assert_eq!(parse_avahi_host_name("[server]\nuse-ipv4=yes\n"), None);
         assert_eq!(parse_avahi_host_name("#host-name=x\n"), None);
         assert_eq!(parse_avahi_host_name("host-name=\n"), None);
         // A LONGER key that merely starts with `host-name` must not match.
         assert_eq!(parse_avahi_host_name("host-name-from-machine-id=yes\n"), None);
+    }
+
+    #[test]
+    fn ensure_dot_local_appends_once_and_normalizes() {
+        // A bare label gains `.local`; an already-qualified name (any case) is left as one `.local`;
+        // a trailing FQDN dot is dropped. Guards against `<name>.local.local`.
+        assert_eq!(ensure_dot_local("Bticino-Classe300X").as_deref(), Some("Bticino-Classe300X.local"));
+        assert_eq!(ensure_dot_local("Bticino-Classe100X.local").as_deref(), Some("Bticino-Classe100X.local"));
+        assert_eq!(ensure_dot_local("host.LOCAL").as_deref(), Some("host.LOCAL"));
+        assert_eq!(ensure_dot_local("host.local.").as_deref(), Some("host.local"));
+        assert_eq!(ensure_dot_local("  spaced  ").as_deref(), Some("spaced.local"));
+        assert_eq!(ensure_dot_local(""), None);
+        assert_eq!(ensure_dot_local("."), None);
     }
 
     #[test]
