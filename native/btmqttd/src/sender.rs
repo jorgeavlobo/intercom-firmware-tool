@@ -698,11 +698,6 @@ async fn publish_frame(
                 let client_ring = client.clone();
                 let broker_ring = broker_online.clone();
                 tokio::spawn(async move {
-                    // Read the device's own LAN IPv4 from the cache refreshed OFF the ring path
-                    // (still::refresh_self_ipv4_loop). Synchronous — no resolve here — so a hung
-                    // resolver can never delay this ring's camera-session binding (issue #144). `None`
-                    // (not yet resolved) just omits `ip`; the bare `id` still drives the manual path.
-                    let self_ip = crate::still::cached_self_ipv4();
                     // On each successful capture the runner calls back here with the event id AND the epoch
                     // it was detected on, to publish a "ring snapshot ready" signal carrying that id, so the
                     // HA push fetches exactly THIS event's frame — triggered by this signal, not a fixed
@@ -722,8 +717,13 @@ async fn publish_frame(
                         // http scheme + port :8556 + /ring-<id>.jpg path, id coerced to an int), so a rogue
                         // MQTT publisher on this topic can at most redirect the HOST, never the port, path,
                         // or scheme (SSRF hardening — the broker is still the primary trust boundary).
-                        // `self_ip` was read from the `still::cached_self_ipv4` cache above (refreshed by a
-                        // background task), so no resolution runs on the ring path. Omit `ip` if unresolved.
+                        // Read the cache HERE, per completed capture (not once before the await): a cold
+                        // capture can span a DHCP renewal, and one runner can fire this callback for several
+                        // successive rings, so each payload must carry the CURRENT cached address. The read
+                        // is a synchronous atomic load off the resolution path (still::refresh_self_ipv4_loop
+                        // refreshes it), so it adds nothing to the ring latency. Omit `ip` if unresolved —
+                        // the bare `id` still drives the manual/templated path.
+                        let self_ip = crate::still::cached_self_ipv4();
                         let now = crate::own::utc_now_iso();
                         let payload = match self_ip {
                             Some(ip) => format!("{{\"at\":\"{now}\",\"id\":{event_id},\"ip\":\"{ip}\"}}"),
