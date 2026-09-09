@@ -1624,10 +1624,11 @@ mod tests {
         // A case-variant suffix is stripped case-insensitively and kept as-is, so the result is still a
         // valid mDNS name (the `-N` goes BEFORE the suffix, not after it).
         assert_eq!(next_conflict_name("host.LOCAL"), "host-2.LOCAL");
-        // A multi-byte codepoint 6 bytes from the end must not panic the `.local` byte-slice: `é` is two
-        // bytes, so `caf\u{e9}` (6 bytes) has no char boundary at len-6 — safe `str::get` returns None and
-        // we treat it as a suffix-less label. (Real Avahi host-names are ASCII; this only proves no panic.)
-        assert_eq!(next_conflict_name("caf\u{e9}"), "caf\u{e9}-2");
+        // A multi-byte codepoint straddling the `.local` byte-slice boundary must not panic. `\u{e9}xxxxx`
+        // is 7 bytes (`é` is 2, then five ASCII), so `len - 6 == 1` lands INSIDE the two-byte `é` — the
+        // exact case the old raw byte-slice `name[len-6..]` would have panicked on. Safe `str::get` returns
+        // None there, so we treat it as a suffix-less label. (Real Avahi host-names are ASCII; proves no panic.)
+        assert_eq!(next_conflict_name("\u{e9}xxxxx"), "\u{e9}xxxxx-2");
     }
 
     #[test]
