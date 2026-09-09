@@ -2281,9 +2281,10 @@ namespace IntercomFirmwareTool.Core
                         // A rogue publisher can therefore at most redirect the HOST to another digits+dots
                         // address on the SAME port/path — never the port, path, or scheme (the broker
                         // remains the primary trust boundary). The daemon omits `ip` when it can't resolve
-                        // a usable LAN address; the template then yields a hostless URL that fails to
-                        // fetch, so HA keeps the last frame rather than loading a bad image.
-                        url_template = $"http://{{{{ value_json.ip | default('') | regex_replace('[^0-9.]', '') }}}}:{Go2RtcConfig.OnDeviceStillPort}/ring-{{{{ value_json.id | int }}}}.jpg",
+                        // a usable LAN address; the `{% if ip %}` guard then renders the WHOLE template
+                        // empty (not a hostless `http://:8556/…`), so HA skips the fetch and keeps the last
+                        // frame rather than loading a malformed image URL.
+                        url_template = $"{{% set ip = value_json.ip | default('') | regex_replace('[^0-9.]', '') %}}{{% if ip %}}http://{{{{ ip }}}}:{Go2RtcConfig.OnDeviceStillPort}/ring-{{{{ value_json.id | int }}}}.jpg{{% endif %}}",
                         icon = "mdi:doorbell-video",
                         availability_topic = opts.TopicLastWill,
                         payload_available = "online",

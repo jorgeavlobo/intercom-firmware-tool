@@ -565,15 +565,17 @@ namespace IntercomFirmwareTool.Core
                 $"        data:\n" +
                 $"          message: \"Someone is at the door\"\n" +
                 $"          data:\n" +
-                $"            image: \"http://{{{{ trigger.payload_json.ip | default('') | regex_replace('[^0-9.]', '') }}}}:{OnDeviceStillPort}/ring-{{{{ trigger.payload_json.id | int }}}}.jpg\"\n\n"));
+                $"            image: \"{{% set ip = trigger.payload_json.ip | default('') | regex_replace('[^0-9.]', '') %}}{{% if ip %}}http://{{{{ ip }}}}:{OnDeviceStillPort}/ring-{{{{ trigger.payload_json.id | int }}}}.jpg{{% endif %}}\"\n\n"));
             sb.Append(string.Create(ci,
                 $"The snapshot payload is `{{\"at\":\"…\",\"id\":123,\"ip\":\"192.168.…\"}}` — the panel fills\n" +
                 $"in its own LAN `ip` at ring time (so it tracks a DHCP change), published ONLY after the\n" +
                 $"frame is written (no fixed-delay guesswork; a cold stream can take a while to produce a\n" +
                 $"frame). The automation builds the URL from that `ip` with a FIXED scheme/port/path and an\n" +
                 $"integer id, so a stray publisher can't redirect it off `:{OnDeviceStillPort}/ring-<id>.jpg`.\n" +
-                $"If the panel can't resolve its address the `ip` is omitted — fall back to the per-event\n" +
-                $"URL above with your panel's IP. The raw ring event on \"{opts.EffectiveTopicEntrancePanelCall}\"\n" +
+                $"If the panel can't resolve its address the `ip` is omitted; the `{{% if ip %}}` guard then\n" +
+                $"renders no `image:` at all (the notification just arrives without a picture, never a broken\n" +
+                $"URL). To still get a picture in that case, hard-code your panel's IP in the `image:` line.\n" +
+                $"The raw ring event on \"{opts.EffectiveTopicEntrancePanelCall}\"\n" +
                 $"still fires immediately, for automations that only need to know a ring happened.\n"));
             return sb.ToString();
         }

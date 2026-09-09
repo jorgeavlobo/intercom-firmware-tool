@@ -89,6 +89,10 @@ public class MqttCameraDiscoveryTests
         Assert.Contains("[^0-9.]", json);
         Assert.Contains(":8556/ring-", json);
         Assert.Contains("value_json.id | int", json);
+        // The `{% if ip %}` guard renders the whole template EMPTY when the sanitized ip is blank, so an
+        // omitted `ip` yields no URL (HA skips the fetch) rather than a malformed `http://:8556/…`.
+        Assert.Contains("{% if ip %}", json);
+        Assert.Contains("{% endif %}", json);
         // No concrete device IP is baked into the discovery config — the host comes from the payload.
         Assert.DoesNotContain("192.168", json);
     }

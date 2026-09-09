@@ -719,11 +719,11 @@ async fn publish_frame(
                         }
                         // Carry the device's own resolved LAN `ip` (issue #144) — NOT a full URL. The HA
                         // image entity and the notification recipe build a FIXED-shape URL from it (fixed
-                        // http scheme + port :8556 + /ring-<id>.jpg path, with the id coerced to an int),
-                        // so a rogue MQTT publisher on this topic can at most redirect the HOST, never the
-                        // port, path, or scheme (SSRF hardening, PR #186 — the broker is still the primary
-                        // trust boundary). `self_ip` was resolved once above, off the runtime thread. Omit
-                        // `ip` if unresolved — the bare `id` still drives the manual/templated path.
+                        // http scheme + port :8556 + /ring-<id>.jpg path, id coerced to an int), so a rogue
+                        // MQTT publisher on this topic can at most redirect the HOST, never the port, path,
+                        // or scheme (SSRF hardening — the broker is still the primary trust boundary).
+                        // `self_ip` was read from the `still::cached_self_ipv4` cache above (refreshed by a
+                        // background task), so no resolution runs on the ring path. Omit `ip` if unresolved.
                         let now = crate::own::utc_now_iso();
                         let payload = match self_ip {
                             Some(ip) => format!("{{\"at\":\"{now}\",\"id\":{event_id},\"ip\":\"{ip}\"}}"),

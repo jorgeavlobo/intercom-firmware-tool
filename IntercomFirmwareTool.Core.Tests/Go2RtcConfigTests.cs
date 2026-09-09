@@ -274,6 +274,9 @@ public class Go2RtcConfigTests
         Assert.Contains("trigger.payload_json.ip", guide);
         Assert.Contains("regex_replace('[^0-9.]', '')", guide);
         Assert.Contains(":8556/ring-", guide);
+        // The `{% if ip %}` guard drops the whole `image:` value when the ip is unresolved, so the push
+        // arrives without a picture instead of carrying a malformed `http://:8556/…` URL.
+        Assert.Contains("{% if ip %}", guide);
         // The payload carries the device ip alongside the id.
         Assert.Contains("\"ip\":\"", guide);
         // The ring-notification automation triggers on the ring-snapshot-READY topic (published only
