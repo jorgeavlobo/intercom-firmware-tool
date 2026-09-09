@@ -538,11 +538,15 @@ namespace IntercomFirmwareTool.Core
                 $"door. Each ring is its own EVENT with a unique id, and its picture is served\n" +
                 $"(transiently, on tmpfs) at a per-event URL:\n\n" +
                 $"    http://<intercom-ip>:{OnDeviceStillPort}/ring-<id>.jpg\n\n"));
-            sb.Append("This never overwrites the idle thumbnail. The panel publishes the id on the\n");
-            sb.Append("snapshot topic AFTER the frame is written, so the notification below fetches\n");
-            sb.Append("exactly that ring's picture (two rings can never cross images). Add a Home\n");
-            sb.Append("Assistant automation like this — replace <intercom-ip> and\n");
-            sb.Append("notify.mobile_app_your_phone with your own:\n\n");
+            sb.Append("This never overwrites the idle thumbnail, and it needs no manual setup: the\n");
+            sb.Append("panel auto-creates a \"Doorbell snapshot\" image entity in Home Assistant (via\n");
+            sb.Append("MQTT discovery) that always shows the latest ring's frame. The snapshot topic\n");
+            sb.Append("carries the event id and the device's LAN ip, published AFTER the frame is\n");
+            sb.Append("written, so the picture is always exactly that ring's (two rings can never\n");
+            sb.Append("cross images) and there is no fixed-delay guesswork.\n\n");
+            sb.Append("To also get a phone notification with the picture, add a Home Assistant\n");
+            sb.Append("automation like this — replace notify.mobile_app_your_phone with your own (the\n");
+            sb.Append("automation builds the image URL from the ip and id in the message):\n\n");
             // The topic goes into a double-quoted YAML scalar, so escape the two PRINTABLE characters a
             // double-quoted scalar treats specially — backslash first, then the quote. Topic validation
             // (MqttInstaller) already rejects every control character (newlines included) and the MQTT
@@ -561,13 +565,17 @@ namespace IntercomFirmwareTool.Core
                 $"        data:\n" +
                 $"          message: \"Someone is at the door\"\n" +
                 $"          data:\n" +
-                $"            image: >-\n" +
-                $"              http://<intercom-ip>:{OnDeviceStillPort}/ring-{{{{ trigger.payload_json.id }}}}.jpg\n\n"));
+                $"            image: \"{{% set ip = trigger.payload_json.ip | default('', true) | regex_replace('[^0-9.]', '') %}}{{% if ip %}}http://{{{{ ip }}}}:{OnDeviceStillPort}/ring-{{{{ trigger.payload_json.id | int }}}}.jpg{{% endif %}}\"\n\n"));
             sb.Append(string.Create(ci,
-                $"The snapshot topic carries the ring's event id (`{{\"at\":\"…\",\"id\":123}}`), and\n" +
-                $"the templated image URL above fetches that exact frame — published ONLY after it is\n" +
-                $"written, so there is no fixed-delay guesswork (a cold stream can take a while to\n" +
-                $"produce a frame). The raw ring event on \"{opts.EffectiveTopicEntrancePanelCall}\"\n" +
+                $"The snapshot payload is `{{\"at\":\"…\",\"id\":123,\"ip\":\"192.168.…\"}}` — the panel fills\n" +
+                $"in its own LAN `ip` at ring time (so it tracks a DHCP change), published ONLY after the\n" +
+                $"frame is written (no fixed-delay guesswork; a cold stream can take a while to produce a\n" +
+                $"frame). The automation builds the URL from that `ip` with a FIXED scheme/port/path and an\n" +
+                $"integer id, so a stray publisher can't redirect it off `:{OnDeviceStillPort}/ring-<id>.jpg`.\n" +
+                $"If the panel can't resolve its address the `ip` is omitted; the `{{% if ip %}}` guard then\n" +
+                $"renders no `image:` at all (the notification just arrives without a picture, never a broken\n" +
+                $"URL). To still get a picture in that case, hard-code your panel's IP in the `image:` line.\n" +
+                $"The raw ring event on \"{opts.EffectiveTopicEntrancePanelCall}\"\n" +
                 $"still fires immediately, for automations that only need to know a ring happened.\n"));
             return sb.ToString();
         }

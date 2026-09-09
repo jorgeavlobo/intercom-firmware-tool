@@ -266,8 +266,23 @@ public class Go2RtcConfigTests
         // Ring snapshots are per-EVENT URLs (issue #169), addressed by the id the notification carries
         // — the industry pattern (Ring/Nest/Frigate) so two rings can never cross images.
         Assert.Contains("http://<intercom-ip>:8556/ring-<id>.jpg", guide);
-        // The pasteable automation templates the image URL from the event id in the MQTT payload.
-        Assert.Contains("/ring-{{ trigger.payload_json.id }}.jpg", guide);
+        // The device auto-creates the snapshot image entity, so the guide advertises it (issue #144).
+        Assert.Contains("Doorbell snapshot", guide);
+        // The pasteable automation builds the image URL from the payload's device ip with a FIXED
+        // scheme/port/path (SSRF hardening, #144) — no hand-typed IP, and the ip is stripped to
+        // digits+dots so a rogue publisher can't redirect it off :8556/ring-<id>.jpg.
+        Assert.Contains("trigger.payload_json.ip", guide);
+        Assert.Contains("regex_replace('[^0-9.]', '')", guide);
+        Assert.Contains(":8556/ring-", guide);
+        // default('', true) — the boolean arg makes Jinja treat a null/empty ip (not only an undefined
+        // one) as '', so a rogue `{"ip": null}` can't error regex_replace; the guide's copy-paste recipe
+        // stays robust for users' own automations.
+        Assert.Contains("default('', true)", guide);
+        // The `{% if ip %}` guard drops the whole `image:` value when the ip is unresolved, so the push
+        // arrives without a picture instead of carrying a malformed `http://:8556/…` URL.
+        Assert.Contains("{% if ip %}", guide);
+        // The payload carries the device ip alongside the id.
+        Assert.Contains("\"ip\":\"", guide);
         // The ring-notification automation triggers on the ring-snapshot-READY topic (published only
         // after the frame is written), so it never fires on a fixed delay that a cold capture outlasts.
         Assert.Contains(opts.EffectiveTopicRingSnapshot, guide);

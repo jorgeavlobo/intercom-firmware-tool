@@ -712,8 +712,23 @@ async fn publish_frame(
                         if !ring_snapshot_deliverable(&broker_ring, event_epoch) {
                             return;
                         }
-                        let payload =
-                            format!("{{\"at\":\"{}\",\"id\":{event_id}}}", crate::own::utc_now_iso());
+                        // Carry the device's own resolved LAN `ip` (issue #144) — NOT a full URL. The HA
+                        // image entity and the notification recipe build a FIXED-shape URL from it (fixed
+                        // http scheme + port :8556 + /ring-<id>.jpg path, id coerced to an int), so a rogue
+                        // MQTT publisher on this topic can at most redirect the HOST, never the port, path,
+                        // or scheme (SSRF hardening — the broker is still the primary trust boundary).
+                        // Read the cache HERE, per completed capture (not once before the await): a cold
+                        // capture can span a DHCP renewal, and one runner can fire this callback for several
+                        // successive rings, so each payload must carry the CURRENT cached address. The read
+                        // is a synchronous atomic load off the resolution path (still::refresh_self_ipv4_loop
+                        // refreshes it), so it adds nothing to the ring latency. Omit `ip` if unresolved —
+                        // the bare `id` still drives the manual/templated path.
+                        let self_ip = crate::still::cached_self_ipv4();
+                        let now = crate::own::utc_now_iso();
+                        let payload = match self_ip {
+                            Some(ip) => format!("{{\"at\":\"{now}\",\"id\":{event_id},\"ip\":\"{ip}\"}}"),
+                            None => format!("{{\"at\":\"{now}\",\"id\":{event_id}}}"),
+                        };
                         if let Err(e) = client_ring.try_publish(
                             &cfg_ring.topic_ring_snapshot,
                             QoS::AtMostOnce,

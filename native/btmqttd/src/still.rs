@@ -32,8 +32,8 @@
 //! `u64` (anything else serves the idle image), so the path can never name a file to traverse — the id
 //! only ever indexes a `ring-<u64>.jpg` in the run dir.
 
-use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -50,6 +50,92 @@ pub const STILL_PORT: u16 = 8556;
 /// into the binary so the endpoint always has SOMETHING to return (it is provenance-covered like the
 /// rest of the binary). A ~11 KB 640×480 JPEG — see `native/btmqttd/assets/idle-placeholder.jpg`.
 const PLACEHOLDER: &[u8] = include_bytes!("../assets/idle-placeholder.jpg");
+
+/// Best-effort resolution of the device's own LAN IPv4 — the address a Home Assistant host reaches
+/// this still endpoint on — so the ring-snapshot signal can carry the device `ip` for HA to build the
+/// frame URL from (issue #144). Neither the installer (it only knows the broker host, not the device's
+/// DHCP-assigned IP) nor the daemon's verbatim discovery publish can bake this in, so we resolve it —
+/// cached OFF the ring path by [`refresh_self_ipv4_loop`] and refreshed so a DHCP change is picked up.
+///
+/// Uses the standard "connect a UDP socket to learn the outbound source address" idiom: `connect`
+/// sends NO packet — it only consults the routing table — so there is no traffic. We aim at the
+/// broker so the chosen source address is the one facing Home Assistant (typically the broker host or
+/// on its subnet), which is what makes it correct even on a multi-homed device. A literal IPv4 broker
+/// is used directly; a NAMED broker is resolved to an IPv4 through the shared, BOUNDED
+/// [`crate::av::resolve_ipv4`] (so a hung resolver can neither stall the caller nor hold a ring-runner
+/// slot open indefinitely); only when neither yields a usable IPv4 do we fall back to a TEST-NET-1
+/// documentation address (RFC 5737) to pick the default-route interface's source IP.
+///
+/// `async` so the name lookup is the bounded tokio resolver rather than a blocking `getaddrinfo` on
+/// the runtime thread; the UDP socket calls are local, non-blocking kernel operations.
+///
+/// Returns `None` (⇒ the caller omits `ip`, leaving the bare `id` for the manual/templated path)
+/// when the source address is unusable for an HA fetch: unspecified, loopback (a loopback broker),
+/// or link-local (no DHCP lease / APIPA).
+pub async fn reachable_ipv4(broker: &str) -> Option<Ipv4Addr> {
+    let dest = crate::av::resolve_ipv4(broker)
+        .await
+        .unwrap_or(Ipv4Addr::new(192, 0, 2, 1));
+    let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    // Port is irrelevant (no datagram is sent); 9 is the discard protocol.
+    sock.connect((dest, 9)).ok()?;
+    match sock.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if !ip.is_unspecified() && !ip.is_loopback() && !ip.is_link_local() => {
+            Some(ip)
+        }
+        _ => None,
+    }
+}
+
+/// Cache of the device's own LAN IPv4 as `u32` big-endian bits (`0` = unknown), refreshed OFF the
+/// ring path by [`refresh_self_ipv4_loop`] so a ring publish reads it synchronously — a hung resolver
+/// can then never delay the ring's camera-session binding (issue #144).
+static SELF_IPV4: AtomicU32 = AtomicU32::new(0);
+
+/// How often [`refresh_self_ipv4_loop`] re-resolves the device IP so a DHCP lease change is picked up.
+const SELF_IPV4_REFRESH: Duration = Duration::from_secs(300);
+/// Shorter cadence after a FAILED resolve (no route / DHCP not ready yet / transient outage), so a
+/// usable address is picked up in seconds once the network recovers instead of after a full refresh.
+const SELF_IPV4_RETRY: Duration = Duration::from_secs(15);
+/// Poll slice for a prompt shutdown while sleeping between refreshes.
+const SELF_IPV4_STEP: Duration = Duration::from_secs(5);
+
+/// The cached device LAN IPv4, or `None` if not yet resolved / unusable. Synchronous — read on the
+/// ring path so resolution never sits on the ring's critical section (issue #144).
+pub fn cached_self_ipv4() -> Option<Ipv4Addr> {
+    match SELF_IPV4.load(Ordering::Relaxed) {
+        0 => None,
+        bits => Some(Ipv4Addr::from(bits)),
+    }
+}
+
+/// Resolve the device's own LAN IPv4 toward `broker` and cache it, refreshing every
+/// [`SELF_IPV4_REFRESH`] so a DHCP change is eventually picked up. Runs as its own task (gated on the
+/// on-device camera, like the still server) so the bounded resolve is entirely OFF the ring path.
+/// Exits promptly when `stopping` is set.
+pub async fn refresh_self_ipv4_loop(broker: String, stopping: Arc<AtomicBool>) {
+    while !stopping.load(Ordering::Relaxed) {
+        // A SUCCESSFUL resolve updates the cache and is trusted for the full refresh interval. A
+        // FAILURE (no usable route: boot before the DHCP lease, or a transient outage) does NOT wipe
+        // a previously-good address to 0 — a briefly-stale address is never worse for HA than an
+        // omitted one (if the address truly moved, the fetch just fails, exactly as omitting `ip`
+        // would), and it lets rings during the blip still advertise the last reachable address. The
+        // failure instead retries on the short SELF_IPV4_RETRY cadence so a recovered network (or a
+        // new DHCP address) is picked up in seconds, not after a full 5-minute refresh.
+        let next = match reachable_ipv4(&broker).await {
+            Some(ip) => {
+                SELF_IPV4.store(u32::from(ip), Ordering::Relaxed);
+                SELF_IPV4_REFRESH
+            }
+            None => SELF_IPV4_RETRY,
+        };
+        let mut slept = Duration::ZERO;
+        while slept < next && !stopping.load(Ordering::Relaxed) {
+            tokio::time::sleep(SELF_IPV4_STEP).await;
+            slept += SELF_IPV4_STEP;
+        }
+    }
+}
 
 /// Whole-request-head read budget: a client has this long to send the request line + headers. A
 /// slow-loris that dribbles bytes is cut off here rather than pinning a task/socket.
@@ -463,6 +549,29 @@ mod tests {
         assert!(!is_jpeg(b"\xff\xd8\xff")); // too short, no structure
         assert!(!is_jpeg(b"not a jpeg at all")); // wrong magic
         assert!(!is_jpeg(b"\x89PNG\r\n\x1a\n")); // a PNG
+    }
+
+    #[test]
+    fn reachable_ipv4_rejects_a_loopback_route() {
+        // reachable_ipv4 is async (it uses the shared bounded resolver); drive it on a
+        // current-thread runtime. enable_all() gives the bounded lookup a time driver.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // A literal loopback broker routes to a loopback source, which HA can never fetch — so the
+        // caller must get None (and omit `ip`) rather than advertise a 127.x address. This is
+        // environment-independent: the address is parsed, not resolved.
+        assert_eq!(rt.block_on(reachable_ipv4("127.0.0.1")), None);
+        // A NAMED broker is resolved to an IPv4 through the bounded resolver before route selection.
+        // Exercise that resolve→route path end to end ONLY when this host actually maps "localhost"
+        // to an IPv4 loopback: on IPv6-only-localhost boxes the name yields no IPv4, reachable_ipv4
+        // falls back to its TEST-NET-1 probe destination and would select a real LAN source, so the
+        // None result no longer holds — gate the assertion on resolution rather than flake CI. (A hung
+        // resolver returning None within the bound is covered by av::resolve_ipv4's own tests.)
+        if rt.block_on(crate::av::resolve_ipv4("localhost")) == Some(std::net::Ipv4Addr::LOCALHOST) {
+            assert_eq!(rt.block_on(reachable_ipv4("localhost")), None);
+        }
     }
 
     #[test]

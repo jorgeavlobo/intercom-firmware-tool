@@ -972,7 +972,7 @@ async fn add_client(sock: &mut TcpStream, frame: &str) -> std::io::Result<()> {
 /// Resolve `host` to an IPv4 for the OWN `*7*300#a#b#c#d#…` target: a literal dotted
 /// IPv4 is used as-is; otherwise the first IPv4 from a DNS lookup. `None` if neither
 /// yields an IPv4 (an IPv6-only or unresolvable target — the fan-out frame is IPv4-only).
-async fn resolve_ipv4(host: &str) -> Option<Ipv4Addr> {
+pub(crate) async fn resolve_ipv4(host: &str) -> Option<Ipv4Addr> {
     if let Ok(v4) = host.parse::<Ipv4Addr>() {
         return Some(v4);
     }

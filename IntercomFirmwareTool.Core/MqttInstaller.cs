@@ -2248,6 +2248,52 @@ namespace IntercomFirmwareTool.Core
                     device,
                 }, HaJson)));
 
+            // Ring snapshot image (#144): an auto-discovered MQTT `image` entity showing the most recent
+            // ring's frame — the "who's at the door" picture with zero manual config. The daemon publishes
+            // the device's own LAN `ip` and the event `id` in the ring_snapshot payload (NOT a full URL),
+            // and url_template below builds the fixed-shape URL from them — so this discovery config bakes
+            // in the scheme/port/path and only the host is payload-driven (the installer can't know the
+            // DHCP address, and the daemon publishes discovery verbatim). The image BYTES stay on the
+            // :8556 endpoint (only the id + ip travel over MQTT), and the signal is non-retained (#71),
+            // so the entity updates to that ring's frame and never
+            // resurrects a stale one on reconnect. Gated like the ring CAPTURE — on-device camera only;
+            // NOT on-demand, because a ring already has the panel streaming so no SIP wake is needed
+            // (unlike the idle-refresh button). It is READ-ONLY (no command topic), so it is emitted HERE
+            // with the other read-only entities, BEFORE the control-topic early return — otherwise a
+            // wildcard TopicRx (ConcretePublishTopic == null) would return early and drop it from the
+            // manifest entirely. Tombstoned when off-device so a prior build's entity is cleared.
+            if (opts.CameraEnabled && opts.CameraOnDevice)
+                entities.Add(new HaEntity(
+                    "ring_snapshot.json",
+                    Topic("image", "ring_snapshot"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Doorbell snapshot",
+                        unique_id = $"{node}_ring_snapshot",
+                        default_entity_id = EntId("image", "ring_snapshot"),
+                        url_topic = opts.EffectiveTopicRingSnapshot,
+                        // Build a FIXED-shape URL from the payload's device `ip` (SSRF hardening, #144):
+                        // the http scheme, the :8556 still port, and the /ring-<id>.jpg path are baked
+                        // here, the id is coerced to an int, and the ip is stripped to digits+dots by
+                        // regex_replace — so URL delimiters (`:`, `/`, `#`, `?`, `@`) a rogue publisher
+                        // might inject can't escape the host component (e.g. an `ip` of
+                        // "169.254.169.254:80/x#" can no longer redirect the fetch off :8556/ring-<n>.jpg).
+                        // A rogue publisher can therefore at most redirect the HOST to another digits+dots
+                        // address on the SAME port/path — never the port, path, or scheme (the broker
+                        // remains the primary trust boundary). The daemon omits `ip` when it can't resolve
+                        // a usable LAN address; the `{% if ip %}` guard then renders the WHOLE template
+                        // empty (not a hostless `http://:8556/…`), so HA skips the fetch and keeps the last
+                        // frame rather than loading a malformed image URL.
+                        url_template = $"{{% set ip = value_json.ip | default('', true) | regex_replace('[^0-9.]', '') %}}{{% if ip %}}http://{{{{ ip }}}}:{Go2RtcConfig.OnDeviceStillPort}/ring-{{{{ value_json.id | int }}}}.jpg{{% endif %}}",
+                        icon = "mdi:doorbell-video",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            else
+                entities.Add(new HaEntity("ring_snapshot.json", Topic("image", "ring_snapshot"), ""));
+
             // Bridge UPDATE entity (issue #114): HA's native Update card. btmqttd publishes a retained
             // {"installed_version":…,"latest_version":…} to EffectiveTopicUpdate (installed = the daemon's
             // own version; latest = the version manifest it fetched); HA reads those keys directly and shows

@@ -382,6 +382,10 @@ async fn run() -> Result<bool, String> {
     let (still_task, still_stopping): (Option<tokio::task::JoinHandle<()>>, Arc<std::sync::atomic::AtomicBool>) = {
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if cfg.camera_ondevice {
+            // Cache the device's own LAN IPv4 OFF the ring path (issue #144), so a ring publish reads
+            // it synchronously and a hung resolver can never delay the ring's camera-session binding.
+            // Shares the still task's stopping flag.
+            tokio::spawn(still::refresh_self_ipv4_loop(cfg.mqtt_host.clone(), stopping.clone()));
             (Some(tokio::spawn(still::run(stopping.clone()))), stopping)
         } else {
             (None, stopping)

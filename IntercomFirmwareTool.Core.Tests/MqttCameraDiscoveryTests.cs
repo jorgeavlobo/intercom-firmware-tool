@@ -55,4 +55,85 @@ public class MqttCameraDiscoveryTests
             CameraOnDemand = true,
         }));
     }
+
+    private static string RingSnapshotJson(MqttOptions opts) =>
+        MqttInstaller.GenerateHaDiscovery(opts, restoreFirewallEligible: false)
+            .Single(e => e.FileName == "ring_snapshot.json").Json;
+
+    [Fact]
+    public void Ring_snapshot_image_is_emitted_on_device_even_without_on_demand()
+    {
+        // The ring capture needs NO SIP wake (a ring already has the panel streaming), so — unlike the
+        // idle-refresh button — the image entity ships whenever the on-device camera is on, even with
+        // on-demand OFF (issue #144).
+        string json = RingSnapshotJson(new MqttOptions("broker.lan")
+        {
+            EnableHaDiscovery = true,
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraOnDemand = false,
+        });
+        Assert.False(string.IsNullOrEmpty(json), "the image entity should carry a real payload on-device");
+        Assert.Contains("Doorbell snapshot", json);
+        Assert.Contains("ring_snapshot", json);
+        // A url-topic image: bytes stay on the :8556 endpoint, only the id+ip travel over MQTT.
+        Assert.Contains("url_topic", json);
+        // Fixed-shape url_template built from the payload's `ip` (SSRF hardening, #144): scheme, port and
+        // path are baked, the id is coerced to an int, and the ip is stripped to digits+dots so an
+        // injected value can't escape the host component — only the host is payload-driven.
+        // NOTE: HaJson's default encoder escapes the single quotes to ' (HA unescapes them when it
+        // parses the discovery JSON), so assert the un-escaped parts of the sanitizing filter. The ip is
+        // default('', true)'d — the `, true` makes Jinja's default() coerce a null/empty `ip` (not just
+        // an *undefined* one, as a rogue publisher could send `{"ip": null}`) to '' instead of erroring
+        // regex_replace on null — then stripped to digits+dots.
+        Assert.Contains("value_json.ip | default(", json);
+        Assert.Contains(", true)", json);
+        Assert.Contains("regex_replace(", json);
+        Assert.Contains("[^0-9.]", json);
+        Assert.Contains(":8556/ring-", json);
+        Assert.Contains("value_json.id | int", json);
+        // The `{% if ip %}` guard renders the whole template EMPTY when the sanitized ip is blank, so an
+        // omitted `ip` yields no URL (HA skips the fetch) rather than a malformed `http://:8556/…`.
+        Assert.Contains("{% if ip %}", json);
+        Assert.Contains("{% endif %}", json);
+        // No concrete device IP is baked into the discovery config — the host comes from the payload.
+        Assert.DoesNotContain("192.168", json);
+    }
+
+    [Fact]
+    public void Ring_snapshot_image_survives_a_wildcard_command_topic()
+    {
+        // The image entity is READ-ONLY (no command topic), so it must ship even when TopicRx is a
+        // wildcard filter — which makes ConcretePublishTopic return null and GenerateHaDiscovery take the
+        // control-topic early return that only tombstones the command entities. Regression for the entity
+        // being dropped from the manifest entirely in that path.
+        string json = RingSnapshotJson(new MqttOptions("broker.lan")
+        {
+            EnableHaDiscovery = true,
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            TopicRx = "commands/#",
+        });
+        Assert.False(string.IsNullOrEmpty(json), "the read-only image entity must ship even with a wildcard TopicRx");
+        Assert.Contains("Doorbell snapshot", json);
+    }
+
+    [Fact]
+    public void Ring_snapshot_image_is_tombstoned_off_device()
+    {
+        // Off-device (classic go2rtc-on-HA) path: no on-box capture, so the image entity is tombstoned.
+        Assert.Equal("", RingSnapshotJson(new MqttOptions("broker.lan")
+        {
+            EnableHaDiscovery = true,
+            CameraEnabled = true,
+            CameraOnDevice = false,
+        }));
+        // Camera feature off entirely: also tombstoned.
+        Assert.Equal("", RingSnapshotJson(new MqttOptions("broker.lan")
+        {
+            EnableHaDiscovery = true,
+            CameraEnabled = false,
+            CameraOnDevice = true,
+        }));
+    }
 }
