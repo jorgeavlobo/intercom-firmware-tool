@@ -2284,7 +2284,7 @@ namespace IntercomFirmwareTool.Core
                         // a usable LAN address; the `{% if ip %}` guard then renders the WHOLE template
                         // empty (not a hostless `http://:8556/…`), so HA skips the fetch and keeps the last
                         // frame rather than loading a malformed image URL.
-                        url_template = $"{{% set ip = value_json.ip | default('') | regex_replace('[^0-9.]', '') %}}{{% if ip %}}http://{{{{ ip }}}}:{Go2RtcConfig.OnDeviceStillPort}/ring-{{{{ value_json.id | int }}}}.jpg{{% endif %}}",
+                        url_template = $"{{% set ip = value_json.ip | default('', true) | regex_replace('[^0-9.]', '') %}}{{% if ip %}}http://{{{{ ip }}}}:{Go2RtcConfig.OnDeviceStillPort}/ring-{{{{ value_json.id | int }}}}.jpg{{% endif %}}",
                         icon = "mdi:doorbell-video",
                         availability_topic = opts.TopicLastWill,
                         payload_available = "online",

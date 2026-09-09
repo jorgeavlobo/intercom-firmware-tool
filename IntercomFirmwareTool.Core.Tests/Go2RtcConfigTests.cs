@@ -274,6 +274,10 @@ public class Go2RtcConfigTests
         Assert.Contains("trigger.payload_json.ip", guide);
         Assert.Contains("regex_replace('[^0-9.]', '')", guide);
         Assert.Contains(":8556/ring-", guide);
+        // default('', true) — the boolean arg makes Jinja treat a null/empty ip (not only an undefined
+        // one) as '', so a rogue `{"ip": null}` can't error regex_replace; the guide's copy-paste recipe
+        // stays robust for users' own automations.
+        Assert.Contains("default('', true)", guide);
         // The `{% if ip %}` guard drops the whole `image:` value when the ip is unresolved, so the push
         // arrives without a picture instead of carrying a malformed `http://:8556/…` URL.
         Assert.Contains("{% if ip %}", guide);

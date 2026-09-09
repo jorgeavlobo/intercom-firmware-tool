@@ -83,8 +83,11 @@ public class MqttCameraDiscoveryTests
         // injected value can't escape the host component — only the host is payload-driven.
         // NOTE: HaJson's default encoder escapes the single quotes to ' (HA unescapes them when it
         // parses the discovery JSON), so assert the un-escaped parts of the sanitizing filter. The ip is
-        // default('')'d (so an omitted ip renders empty, not "None") then stripped to digits+dots.
+        // default('', true)'d — the `, true` makes Jinja's default() coerce a null/empty `ip` (not just
+        // an *undefined* one, as a rogue publisher could send `{"ip": null}`) to '' instead of erroring
+        // regex_replace on null — then stripped to digits+dots.
         Assert.Contains("value_json.ip | default(", json);
+        Assert.Contains(", true)", json);
         Assert.Contains("regex_replace(", json);
         Assert.Contains("[^0-9.]", json);
         Assert.Contains(":8556/ring-", json);
