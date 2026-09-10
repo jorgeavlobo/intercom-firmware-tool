@@ -169,20 +169,30 @@ async fn wait_for_boot_ready(cfg: &Config) -> BootReady {
             (Ok(t), Ok(i)) => (t, i),
             _ => return BootReady::Proceed,
         };
-    // Race the whole readiness poll against ONE overall cap timer and the two signals. Because
-    // `select!` cancels the losing branches, an in-flight probe (a DNS resolve in
-    // `still::reachable_ipv4`, a `TcpStream::connect` in `own_gateway_accepting`) is dropped the
-    // instant the cap elapses or a signal arrives — so the cap holds regardless of a probe in flight,
-    // and a SIGTERM/SIGINT is handled promptly rather than waiting one out. The cap timer starts here,
-    // before the first probe, so that probe is bounded too.
+    gate_on(poll_until_ready(cfg), BOOT_GATE_CAP, &mut sig_term, &mut sig_int).await
+}
+
+/// Race a readiness `poll` against the overall `cap` and the two shutdown signals, returning as soon
+/// as any resolves. Because `select!` CANCELS the losing branches, a `poll` still in flight (an
+/// in-flight DNS resolve in `still::reachable_ipv4`, a `TcpStream::connect` in `own_gateway_accepting`)
+/// is dropped the instant the cap elapses or a signal arrives — so the cap is honored, and a
+/// SIGTERM/SIGINT is handled promptly, even while a probe is stuck. The `cap` timer starts on entry,
+/// before the first probe the `poll` runs, so that probe is bounded too. Extracted from
+/// [`wait_for_boot_ready`] so this guarantee is unit-testable with a controllable `poll` future.
+async fn gate_on(
+    poll: impl std::future::Future<Output = BootReady>,
+    cap: Duration,
+    sig_term: &mut tokio::signal::unix::Signal,
+    sig_int: &mut tokio::signal::unix::Signal,
+) -> BootReady {
     tokio::select! {
         _ = sig_term.recv() => BootReady::Shutdown,
         _ = sig_int.recv() => BootReady::Shutdown,
-        outcome = poll_until_ready(cfg) => outcome,
-        _ = tokio::time::sleep(BOOT_GATE_CAP) => {
+        outcome = poll => outcome,
+        _ = tokio::time::sleep(cap) => {
             eprintln!(
                 "btmqttd: boot gate — not ready after {}s; starting anyway (reconnect loops self-heal)",
-                BOOT_GATE_CAP.as_secs()
+                cap.as_secs()
             );
             BootReady::Proceed
         }
@@ -1863,5 +1873,24 @@ mod tests {
             drop(listener);
             assert!(!own_gateway_accepting("127.0.0.1", port).await);
         });
+    }
+
+    #[tokio::test]
+    async fn boot_gate_honors_the_cap_when_a_probe_never_completes() {
+        // The crux of the gate (#177 / #188 review): the cap must win even if a readiness probe
+        // stalls indefinitely (e.g. a stuck DNS resolve), and the still-pending probe must be
+        // dropped — never awaited past the cap. `std::future::pending` models a probe that never
+        // resolves; `gate_on` races it against the cap, and `select!` cancels it when the cap fires.
+        // A short cap keeps the test fast. The un-fired signal streams stand in for the real pair.
+        let mut sig_term = signal(SignalKind::terminate()).unwrap();
+        let mut sig_int = signal(SignalKind::interrupt()).unwrap();
+        let outcome = gate_on(
+            std::future::pending::<BootReady>(),
+            Duration::from_millis(50),
+            &mut sig_term,
+            &mut sig_int,
+        )
+        .await;
+        assert!(matches!(outcome, BootReady::Proceed));
     }
 }
