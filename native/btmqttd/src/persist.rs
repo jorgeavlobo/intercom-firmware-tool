@@ -82,6 +82,19 @@ const CAMERA_SPROP_FILE: &str = "camera-sprop";
 /// so the thumbnail stays stable), NOT keyed: the newest capture is always the wanted one.
 const IDLE_JPG_FILE: &str = "idle.jpg";
 
+/// The daemon version that CAPTURED the current `idle.jpg` (issue #176), one plain trimmed line written
+/// alongside it. Because `cfg/extra` SURVIVES a firmware reflash, `idle.jpg` persists across an UPGRADE —
+/// so without a version marker a unit that changed hardware/framing/exposure between releases would keep
+/// serving the OLD firmware's empty-doorway thumbnail forever (the first-run auto-capture skips whenever a
+/// valid `idle.jpg` is present). Stamping the capturing version lets the first-run gate notice
+/// `stored != INSTALLED_VERSION` and re-capture EXACTLY ONCE on the first boot of a new version, then
+/// re-stamp; a same-version reboot matches and keeps the existing thumbnail (no behavior change). Written
+/// by `capture_idle` right after a successful store (first-run AND the HA "Update idle snapshot" button),
+/// so the stamp always tracks the bytes actually on disk regardless of which path captured them.
+/// Deliberately NOT keyed and self-correcting like `update-latest`: an absent/stale/corrupt stamp simply
+/// reads as a mismatch and triggers one harmless refresh.
+const IDLE_VERSION_FILE: &str = "idle.version";
+
 /// A strictly-monotonic per-PROCESS counter (issue #169), one plain line, on the reboot- and
 /// reflash-persistent partition. Each daemon start (restart OR reboot) increments it and derives a
 /// DISJOINT ring-event-id range from it, so a ring id is never reused across process lifetimes — even a
@@ -318,6 +331,38 @@ pub fn store_idle_jpg<G>(bytes: &[u8], commit_ok: impl FnOnce() -> Option<G>) ->
 
 fn idle_jpg_file_in(dir: &Path) -> PathBuf {
     dir.join(IDLE_JPG_FILE)
+}
+
+/// Read the version that captured the current `idle.jpg` (issue #176) — a single non-empty trimmed line,
+/// or `None` when absent, unreadable, or empty. The caller compares it against `INSTALLED_VERSION`; ANY of
+/// those `None` cases reads as a mismatch, so a pre-#176 `idle.jpg` (no stamp yet) or a corrupt stamp
+/// triggers exactly one refresh rather than being trusted. Blocking `std::fs`; call via `spawn_blocking`.
+pub fn read_idle_version() -> Option<String> {
+    read_idle_version_in(&state_dir())
+}
+
+/// Persist the version that captured the current `idle.jpg` (issue #176). Written by `capture_idle` right
+/// after a successful `store_idle_jpg`, so the stamp tracks the bytes actually on disk. Atomic write + dir
+/// fsync like every other record. Returns `true` on success; a `false` (I/O blip) is self-healing — the
+/// next boot simply reads a mismatch and re-captures once. Blocking; call via `spawn_blocking`.
+#[must_use]
+pub fn store_idle_version(version: &str) -> bool {
+    let dir = state_dir();
+    store_idle_version_in(&dir, version)
+}
+
+fn idle_version_file_in(dir: &Path) -> PathBuf {
+    dir.join(IDLE_VERSION_FILE)
+}
+
+fn read_idle_version_in(dir: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(idle_version_file_in(dir)).ok()?;
+    let t = s.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+fn store_idle_version_in(dir: &Path, version: &str) -> bool {
+    atomic_write_in(dir, &idle_version_file_in(dir), format!("{version}\n").as_bytes())
 }
 
 fn read_idle_jpg_in(dir: &Path) -> Option<Vec<u8>> {
@@ -898,6 +943,36 @@ mod tests {
         // An empty file reads back as None (treated as "no idle image yet").
         assert!(atomic_write_in(&dir, &file, b""));
         assert_eq!(read_idle_jpg_in(&dir), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn idle_version_store_read_roundtrip_and_none_when_absent_or_empty() {
+        // Directory-injected core (no env mutation → parallel-safe). The idle-capture version stamp
+        // (issue #176) is one plain trimmed line: store writes it, read returns it trimmed, and a missing
+        // OR empty file reads back as None — which the first-run gate treats as a mismatch (so a pre-#176
+        // idle.jpg with no stamp refreshes exactly once).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NONCE: AtomicU32 = AtomicU32::new(8500);
+        let uniq = NONCE.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("btmqttd-idlever-{}-{uniq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = idle_version_file_in(&dir);
+
+        assert_eq!(read_idle_version_in(&dir), None); // no file yet → mismatch → refresh
+        assert!(store_idle_version_in(&dir, "0.4.0"));
+        assert_eq!(read_idle_version_in(&dir).as_deref(), Some("0.4.0"));
+        // A later version overwrites in place (the refresh path re-stamps after a re-capture).
+        assert!(store_idle_version_in(&dir, "0.5.1"));
+        assert_eq!(read_idle_version_in(&dir).as_deref(), Some("0.5.1"));
+        // Surrounding whitespace/newline is trimmed on read, so the comparison is exact.
+        assert!(atomic_write_in(&dir, &file, b"  0.5.1  \n"));
+        assert_eq!(read_idle_version_in(&dir).as_deref(), Some("0.5.1"));
+        // An empty/whitespace file reads back as None (treated as no stamp → mismatch → refresh).
+        assert!(atomic_write_in(&dir, &file, b"\n"));
+        assert_eq!(read_idle_version_in(&dir), None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

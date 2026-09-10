@@ -312,6 +312,17 @@ async fn poll_until_ready(cfg: &Config) -> BootReady {
     }
 }
 
+/// Whether the persisted idle thumbnail is BOTH a structurally valid JPEG AND was captured by THIS
+/// daemon version — the condition under which the first-run auto-capture skips (issue #176). A stored
+/// idle.jpg survives a firmware reflash (it lives on cfg/extra), so presence + validity alone is not
+/// enough: an image from a prior version must be refreshed once. Returns `false` (⇒ re-capture) when the
+/// idle.jpg is absent/corrupt/oversized OR its version stamp is absent/mismatched (an absent stamp is the
+/// pre-#176 image, treated as a mismatch). Blocking `std::fs`; call via `spawn_blocking`.
+fn idle_snapshot_is_current() -> bool {
+    persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
+        && persist::read_idle_version().as_deref() == Some(update::INSTALLED_VERSION)
+}
+
 /// Returns `Ok(true)` when the caller should RE-EXEC the daemon immediately (a WHERE was just
 /// learned), or `Ok(false)` for an ordinary signal-driven shutdown.
 async fn run() -> Result<bool, String> {
@@ -713,32 +724,37 @@ async fn run() -> Result<bool, String> {
         if let Some(view_tx) = view_tx.clone() {
             let cfg_fr = cfg.clone();
             tokio::spawn(async move {
-                // Nothing to do if a VALID idle image already exists. Validate the JPEG (same check the
-                // still endpoint serves by), NOT just presence: a corrupt/non-JPEG idle.jpg must NOT
-                // permanently suppress the self-healing first-run capture while the endpoint falls back
-                // to the placeholder. Checked off the single-threaded runtime.
-                if tokio::task::spawn_blocking(|| {
-                    persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
-                })
-                .await
-                // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid idle
-                // image exists" — that would permanently skip the self-healing first-run capture for this
-                // boot. Default to false so a transient failure falls through to a capture attempt.
-                .unwrap_or(false)
+                // Nothing to do if a VALID, CURRENT-VERSION idle image already exists. Two conditions,
+                // both required to skip (issue #176):
+                //   * the stored idle.jpg is a structurally valid JPEG (same check the still endpoint
+                //     serves by), NOT merely present — a corrupt/non-JPEG idle.jpg must NOT permanently
+                //     suppress the self-healing first-run capture while the endpoint falls back to the
+                //     placeholder; and
+                //   * its version stamp equals this daemon's INSTALLED_VERSION. cfg/extra survives a
+                //     firmware reflash, so a valid idle.jpg from a PRIOR version would otherwise be kept
+                //     forever; a mismatch (or an absent/corrupt stamp — e.g. a pre-#176 image) means the
+                //     firmware changed, so re-capture EXACTLY ONCE and re-stamp (capture_idle stamps on a
+                //     successful store). A same-version reboot matches → skip → no behavior change.
+                // Checked off the single-threaded runtime.
+                if tokio::task::spawn_blocking(idle_snapshot_is_current).await
+                    // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid,
+                    // current idle image exists" — that would permanently skip the self-healing first-run
+                    // capture for this boot. Default to false so a transient failure falls through to a
+                    // capture attempt.
+                    .unwrap_or(false)
                 {
                     return;
                 }
                 // Let go2rtc, the firewall and the SIP UA settle before waking the panel on a fresh boot.
                 tokio::time::sleep(capture::FIRST_RUN_DELAY).await;
-                // Re-check after the delay: a button press could have produced one meanwhile.
-                if tokio::task::spawn_blocking(|| {
-                    persist::read_idle_jpg().is_some_and(|b| still::is_jpeg(&b))
-                })
-                .await
-                // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid idle
-                // image exists" — that would permanently skip the self-healing first-run capture for this
-                // boot. Default to false so a transient failure falls through to a capture attempt.
-                .unwrap_or(false)
+                // Re-check after the delay: a button press (which also re-stamps) could have produced a
+                // current one meanwhile.
+                if tokio::task::spawn_blocking(idle_snapshot_is_current).await
+                    // A JoinError (the blocking read/validation panicked) must NOT be read as "a valid,
+                    // current idle image exists" — that would permanently skip the self-healing first-run
+                    // capture for this boot. Default to false so a transient failure falls through to a
+                    // capture attempt.
+                    .unwrap_or(false)
                 {
                     return;
                 }

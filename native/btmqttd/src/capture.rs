@@ -873,6 +873,23 @@ pub async fn capture_idle(cfg: &Config, view_tx: Option<&mpsc::Sender<ViewCmd>>)
         .unwrap_or(false);
         if stored {
             eprintln!("btmqttd: capture: idle snapshot updated");
+            // Stamp the version that captured this idle.jpg (issue #176), so the first-run gate can tell a
+            // same-version reboot (skip — keep the thumbnail) from the first boot of a NEW firmware (the
+            // cfg/extra idle.jpg survives a reflash, so re-capture exactly once). Written AFTER a successful
+            // store on BOTH the first-run and the HA-button paths, so the stamp always tracks the bytes now
+            // on disk. Best-effort: a write failure just leaves a stale/absent stamp, which reads as a
+            // mismatch next boot and self-heals with one extra capture — never a wrong thumbnail.
+            let stamped = tokio::task::spawn_blocking(|| {
+                crate::persist::store_idle_version(crate::update::INSTALLED_VERSION)
+            })
+            .await
+            .unwrap_or(false);
+            if !stamped {
+                eprintln!(
+                    "btmqttd: capture: could not persist the idle-snapshot version stamp; \
+                     the next boot will re-capture once (self-healing)"
+                );
+            }
         } else {
             eprintln!(
                 "btmqttd: capture: idle snapshot not stored (a ring arrived during the write, or an I/O error)"
