@@ -162,12 +162,17 @@ fn has_route_to_broker(mqtt_host: &str) -> bool {
 /// Is the OWN gateway accepting TCP connections on `host:port`? A bounded connect probe — it does
 /// NOT perform the OWN handshake, only checks that the local openwebnet daemon is listening on
 /// `:20000` — so btmqttd doesn't start dialing it (sender/av/dimension/volume) before it is up.
-/// `host` is parsed as an IP (it is `127.0.0.1` in every shipped config) so the connect is DNS-free —
-/// see [`has_route_to_broker`] for why the boot gate must never spawn a blocking resolve. Unit-tested
-/// against a real loopback listener.
+///
+/// The probe is DNS-FREE (see [`has_route_to_broker`] for why the gate must never spawn a blocking
+/// resolve), so it only runs when `host` is an IP literal — which it is in every shipped config
+/// (`127.0.0.1`). When `OWN_HOST` is a HOSTNAME (a supported but unusual remote-gateway config), we
+/// can't probe it without resolving, so we DON'T gate on it: return `true` and let the route
+/// condition gate the boot while `sender`/`av`'s own reconnect loops handle a not-yet-up hostname
+/// gateway — rather than making a hostname `OWN_HOST` wait out the full cap on every boot.
+/// Unit-tested against a real loopback listener and for the hostname pass-through.
 async fn own_gateway_accepting(host: &str, port: u16) -> bool {
     let Ok(ip) = host.parse::<std::net::IpAddr>() else {
-        return false;
+        return true;
     };
     matches!(
         tokio::time::timeout(BOOT_GATE_PROBE_TIMEOUT, tokio::net::TcpStream::connect((ip, port)))
@@ -1908,6 +1913,9 @@ mod tests {
             // probe reports the gateway DOWN — the state the gate waits out at boot.
             drop(listener);
             assert!(!own_gateway_accepting("127.0.0.1", port).await);
+            // A non-IP host (a supported but unusual hostname OWN_HOST) can't be probed DNS-free, so
+            // it passes through as "ready" rather than making the gate wait out the cap every boot.
+            assert!(own_gateway_accepting("openserver.local", port).await);
         });
     }
 
