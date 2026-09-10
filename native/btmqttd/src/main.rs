@@ -111,12 +111,108 @@ fn reexec_self() {
     eprintln!("btmqttd: re-exec failed ({err}); exiting for watchdog respawn");
 }
 
+/// Maximum time the boot gate waits for the network + OWN gateway before proceeding anyway (#177).
+/// Matches go2rtcd's #166 gate cap (~5 min): long enough for WiFi association + DHCP on a cold boot,
+/// bounded so a genuinely offline unit still comes up and self-heals via the reconnect loops rather
+/// than blocking startup forever.
+const BOOT_GATE_CAP: Duration = Duration::from_secs(300);
+/// Poll cadence while the boot gate waits (the same 5 s slice go2rtcd's #166 gate uses).
+const BOOT_GATE_STEP: Duration = Duration::from_secs(5);
+/// Per-attempt TCP-connect timeout when probing the OWN gateway during the boot gate — short, since
+/// a listening `:20000` accepts on loopback near-instantly and a missing one should fail fast.
+const BOOT_GATE_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// The boot gate's decision: `Proceed` with startup, or `Shutdown` because a termination signal
+/// arrived while waiting (so `run` returns `Ok(false)` — an ordinary shutdown, no re-exec).
+enum BootReady {
+    Proceed,
+    Shutdown,
+}
+
+/// Is the OWN gateway accepting TCP connections on `host:port`? A bounded connect probe — it does
+/// NOT perform the OWN handshake, only checks that the local openwebnet daemon is listening on
+/// `:20000` — so btmqttd doesn't start dialing it (sender/av/dimension/volume) before it is up.
+/// Pure network I/O; unit-tested against a real loopback listener.
+async fn own_gateway_accepting(host: &str, port: u16) -> bool {
+    matches!(
+        tokio::time::timeout(BOOT_GATE_PROBE_TIMEOUT, tokio::net::TcpStream::connect((host, port)))
+            .await,
+        Ok(Ok(_))
+    )
+}
+
+/// Both boot-readiness conditions: a routable LAN IPv4 (a default route toward the broker exists,
+/// via [`still::reachable_ipv4`]) AND the OWN gateway accepting on `:20000`. Evaluated fresh on each
+/// poll so the gate reflects the live network state.
+async fn boot_ready(cfg: &Config) -> bool {
+    still::reachable_ipv4(&cfg.mqtt_host).await.is_some()
+        && own_gateway_accepting(&cfg.own_host, cfg.own_port_mon).await
+}
+
+/// Boot gate (#177). btmqttd can start before the network is usable — before `wlan0` has a default
+/// route and before the local OWN gateway is listening on `:20000`. Starting the connect loops then
+/// floods the log with `Network unreachable` / `Connection refused` and pushes the first-run idle
+/// capture out non-deterministically. Wait — bounded — for both readiness conditions ([`boot_ready`])
+/// before proceeding, so startup is quiet and first-run timing is deterministic regardless of boot
+/// ordering. Mirrors the go2rtcd #166 gate.
+///
+/// Capped at [`BOOT_GATE_CAP`]: a genuinely offline unit still comes up and self-heals via the
+/// existing reconnect loops (sender/av/broker) instead of blocking here forever. A SIGTERM/SIGINT
+/// during the wait returns [`BootReady::Shutdown`] promptly so `systemctl stop` never hangs on the
+/// gate. Logs once when it begins waiting and once when it resolves — never per attempt.
+async fn wait_for_boot_ready(cfg: &Config) -> BootReady {
+    // The run()-level signal streams aren't created until later; multiple tokio Signal streams for
+    // the same signal each receive it, so a temporary pair here is safe. If handlers can't be
+    // installed, don't block boot — just proceed.
+    let (mut sig_term, mut sig_int) =
+        match (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
+            (Ok(t), Ok(i)) => (t, i),
+            _ => return BootReady::Proceed,
+        };
+    // Clean reboot: already up — stay quiet and proceed immediately (the common case #177 observed).
+    if boot_ready(cfg).await {
+        return BootReady::Proceed;
+    }
+    eprintln!(
+        "btmqttd: boot gate — waiting up to {}s for a network route and the OWN gateway {}:{}",
+        BOOT_GATE_CAP.as_secs(),
+        cfg.own_host,
+        cfg.own_port_mon
+    );
+    let deadline = tokio::time::Instant::now() + BOOT_GATE_CAP;
+    loop {
+        tokio::select! {
+            _ = sig_term.recv() => return BootReady::Shutdown,
+            _ = sig_int.recv() => return BootReady::Shutdown,
+            _ = tokio::time::sleep(BOOT_GATE_STEP) => {}
+        }
+        if boot_ready(cfg).await {
+            eprintln!("btmqttd: boot gate — network route and OWN gateway up; starting");
+            return BootReady::Proceed;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            eprintln!(
+                "btmqttd: boot gate — not ready after {}s; starting anyway (reconnect loops self-heal)",
+                BOOT_GATE_CAP.as_secs()
+            );
+            return BootReady::Proceed;
+        }
+    }
+}
+
 /// Returns `Ok(true)` when the caller should RE-EXEC the daemon immediately (a WHERE was just
 /// learned), or `Ok(false)` for an ordinary signal-driven shutdown.
 async fn run() -> Result<bool, String> {
     let cfg = Arc::new(Config::load()?);
     if cfg.mqtt_host.is_empty() {
         return Err("MQTT_HOST is not set in the config".into());
+    }
+    // Boot gate (#177): wait — bounded — for the network route and the OWN gateway before spawning
+    // the connect loops, so a boot-before-network race can't flood the log with unreachable/refused
+    // churn and push out the first-run idle capture. A shutdown signal during the wait exits cleanly.
+    match wait_for_boot_ready(&cfg).await {
+        BootReady::Proceed => {}
+        BootReady::Shutdown => return Ok(false),
     }
     // Service activation time (UTC ISO-8601), captured once and republished retained
     // on every connect. Arc<str> so each spawned birth task gets a cheap clone.
@@ -1731,5 +1827,25 @@ mod tests {
         assert!(!camera_mdns_active(&cfg(&[("MQTT_HOST", "h"), ("CAMERA_ENABLED", "1")])));
         // Default (camera off) → inactive.
         assert!(!camera_mdns_active(&cfg(&[("MQTT_HOST", "h")])));
+    }
+
+    #[test]
+    fn own_gateway_accepting_detects_a_listener_and_a_closed_port() {
+        // The boot gate's OWN-gateway readiness probe (#177): a real loopback listener reads as up;
+        // a freed port with nothing listening reads as down (refused, not a timeout). Driven on an
+        // explicit current-thread runtime (the still.rs convention for async network-helper tests).
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            // A bound listener → connect succeeds (the kernel completes the handshake from the
+            // backlog even without an accept), so the probe reports the gateway UP.
+            let listener =
+                tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            assert!(own_gateway_accepting("127.0.0.1", port).await);
+            // Free the port, then probe it: nothing listens → connection refused (RST), so the
+            // probe reports the gateway DOWN — the state the gate waits out at boot.
+            drop(listener);
+            assert!(!own_gateway_accepting("127.0.0.1", port).await);
+        });
     }
 }
