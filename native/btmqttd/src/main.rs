@@ -179,23 +179,27 @@ async fn wait_for_boot_ready(cfg: &Config) -> BootReady {
         cfg.own_host,
         cfg.own_port_mon
     );
+    // Race the poll cadence against a SINGLE deadline timer (and the signals). Sleeping the full step
+    // and only THEN checking the deadline could overrun the cap by up to one BOOT_GATE_STEP;
+    // `sleep_until` fires exactly at the cap, so the documented "up to CAP" bound is honored strictly.
     let deadline = tokio::time::Instant::now() + BOOT_GATE_CAP;
     loop {
         tokio::select! {
             _ = sig_term.recv() => return BootReady::Shutdown,
             _ = sig_int.recv() => return BootReady::Shutdown,
-            _ = tokio::time::sleep(BOOT_GATE_STEP) => {}
-        }
-        if boot_ready(cfg).await {
-            eprintln!("btmqttd: boot gate — network route and OWN gateway up; starting");
-            return BootReady::Proceed;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            eprintln!(
-                "btmqttd: boot gate — not ready after {}s; starting anyway (reconnect loops self-heal)",
-                BOOT_GATE_CAP.as_secs()
-            );
-            return BootReady::Proceed;
+            _ = tokio::time::sleep_until(deadline) => {
+                eprintln!(
+                    "btmqttd: boot gate — not ready after {}s; starting anyway (reconnect loops self-heal)",
+                    BOOT_GATE_CAP.as_secs()
+                );
+                return BootReady::Proceed;
+            }
+            _ = tokio::time::sleep(BOOT_GATE_STEP) => {
+                if boot_ready(cfg).await {
+                    eprintln!("btmqttd: boot gate — network route and OWN gateway up; starting");
+                    return BootReady::Proceed;
+                }
+            }
         }
     }
 }
