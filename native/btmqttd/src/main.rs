@@ -129,24 +129,58 @@ enum BootReady {
     Shutdown,
 }
 
+/// Does the device have a usable route toward the broker — i.e. `wlan0` has a lease and the reply
+/// path exists? Bind a UDP socket and "connect" it to the broker (no datagram is sent); the kernel
+/// picks the source address from the routing table, and a routable (non-loopback / -link-local /
+/// -unspecified) source means the network is up. `mqtt_host` is used ONLY when it is an IP literal
+/// (covers an on-link broker with no default gateway); a hostname falls back to a fixed off-link
+/// sentinel (RFC 5737 TEST-NET-1), which needs a default route.
+///
+/// SYNCHRONOUS and DNS-FREE on purpose: a hostname is NOT resolved here. An async resolve
+/// (`still::reachable_ipv4` → `lookup_host`) runs `getaddrinfo` on tokio's BLOCKING pool, where a
+/// dropped future can't cancel it and runtime teardown (`drop(rt)`) would WAIT for it — so a wedged
+/// resolver would defeat the boot gate's prompt-cancellation guarantee and could hang shutdown to
+/// systemd's kill timeout. The UDP-connect probe is a couple of non-blocking syscalls instead.
+fn has_route_to_broker(mqtt_host: &str) -> bool {
+    let dest = mqtt_host
+        .parse::<std::net::Ipv4Addr>()
+        .unwrap_or(std::net::Ipv4Addr::new(192, 0, 2, 1));
+    let Ok(sock) = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) else {
+        return false;
+    };
+    // Port is irrelevant (no datagram is sent); 9 is the discard protocol.
+    if sock.connect((dest, 9)).is_err() {
+        return false;
+    }
+    matches!(
+        sock.local_addr().map(|a| a.ip()),
+        Ok(std::net::IpAddr::V4(ip))
+            if !ip.is_unspecified() && !ip.is_loopback() && !ip.is_link_local()
+    )
+}
+
 /// Is the OWN gateway accepting TCP connections on `host:port`? A bounded connect probe — it does
 /// NOT perform the OWN handshake, only checks that the local openwebnet daemon is listening on
 /// `:20000` — so btmqttd doesn't start dialing it (sender/av/dimension/volume) before it is up.
-/// Pure network I/O; unit-tested against a real loopback listener.
+/// `host` is parsed as an IP (it is `127.0.0.1` in every shipped config) so the connect is DNS-free —
+/// see [`has_route_to_broker`] for why the boot gate must never spawn a blocking resolve. Unit-tested
+/// against a real loopback listener.
 async fn own_gateway_accepting(host: &str, port: u16) -> bool {
+    let Ok(ip) = host.parse::<std::net::IpAddr>() else {
+        return false;
+    };
     matches!(
-        tokio::time::timeout(BOOT_GATE_PROBE_TIMEOUT, tokio::net::TcpStream::connect((host, port)))
+        tokio::time::timeout(BOOT_GATE_PROBE_TIMEOUT, tokio::net::TcpStream::connect((ip, port)))
             .await,
         Ok(Ok(_))
     )
 }
 
-/// Both boot-readiness conditions: a routable LAN IPv4 (a default route toward the broker exists,
-/// via [`still::reachable_ipv4`]) AND the OWN gateway accepting on `:20000`. Evaluated fresh on each
-/// poll so the gate reflects the live network state.
+/// Both boot-readiness conditions: a usable route toward the broker ([`has_route_to_broker`]) AND the
+/// OWN gateway accepting on `:20000` ([`own_gateway_accepting`]). Evaluated fresh on each poll;
+/// neither touches DNS, so the whole poll is promptly cancellable by the cap or a shutdown signal.
 async fn boot_ready(cfg: &Config) -> bool {
-    still::reachable_ipv4(&cfg.mqtt_host).await.is_some()
-        && own_gateway_accepting(&cfg.own_host, cfg.own_port_mon).await
+    has_route_to_broker(&cfg.mqtt_host) && own_gateway_accepting(&cfg.own_host, cfg.own_port_mon).await
 }
 
 /// Boot gate (#177). btmqttd can start before the network is usable — before `wlan0` has a default
@@ -174,11 +208,13 @@ async fn wait_for_boot_ready(cfg: &Config) -> BootReady {
 
 /// Race a readiness `poll` against the overall `cap` and the two shutdown signals, returning as soon
 /// as any resolves. Because `select!` CANCELS the losing branches, a `poll` still in flight (an
-/// in-flight DNS resolve in `still::reachable_ipv4`, a `TcpStream::connect` in `own_gateway_accepting`)
-/// is dropped the instant the cap elapses or a signal arrives — so the cap is honored, and a
-/// SIGTERM/SIGINT is handled promptly, even while a probe is stuck. The `cap` timer starts on entry,
-/// before the first probe the `poll` runs, so that probe is bounded too. Extracted from
-/// [`wait_for_boot_ready`] so this guarantee is unit-testable with a controllable `poll` future.
+/// in-flight `TcpStream::connect` in `own_gateway_accepting`) is dropped the instant the cap elapses
+/// or a signal arrives — so the cap is honored, and a SIGTERM/SIGINT is handled promptly, even while
+/// a probe is mid-flight. This cancellation is only truthful because the probes are DNS-free (see
+/// [`has_route_to_broker`]): a dropped async DNS resolve would keep running on the blocking pool and
+/// `drop(rt)` would wait it out. The `cap` timer starts on entry, before the first probe the `poll`
+/// runs, so that probe is bounded too. Extracted from [`wait_for_boot_ready`] so this guarantee is
+/// unit-testable with a controllable `poll` future.
 async fn gate_on(
     poll: impl std::future::Future<Output = BootReady>,
     cap: Duration,
@@ -1873,6 +1909,14 @@ mod tests {
             drop(listener);
             assert!(!own_gateway_accepting("127.0.0.1", port).await);
         });
+    }
+
+    #[test]
+    fn has_route_to_broker_rejects_a_loopback_only_route() {
+        // A loopback broker yields a loopback SOURCE address — not a real network route — so the gate
+        // keeps waiting rather than treating loopback-only as "network up". This is the DNS-free route
+        // probe; a literal IP is used verbatim, so the assertion is deterministic. (Mirrors still.rs.)
+        assert!(!has_route_to_broker("127.0.0.1"));
     }
 
     #[tokio::test]
