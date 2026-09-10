@@ -129,12 +129,24 @@ enum BootReady {
     Shutdown,
 }
 
+/// Is `ip` a routable source address — not unspecified / loopback / link-local — in either family?
+fn is_routable_source(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => !v4.is_unspecified() && !v4.is_loopback() && !v4.is_link_local(),
+        // `Ipv6Addr::is_unicast_link_local` is unstable, so test the `fe80::/10` prefix directly.
+        std::net::IpAddr::V6(v6) => {
+            !v6.is_unspecified() && !v6.is_loopback() && (v6.segments()[0] & 0xffc0) != 0xfe80
+        }
+    }
+}
+
 /// Does the device have a usable route toward the broker — i.e. `wlan0` has a lease and the reply
 /// path exists? Bind a UDP socket and "connect" it to the broker (no datagram is sent); the kernel
-/// picks the source address from the routing table, and a routable (non-loopback / -link-local /
-/// -unspecified) source means the network is up. `mqtt_host` is used ONLY when it is an IP literal
-/// (covers an on-link broker with no default gateway); a hostname falls back to a fixed off-link
-/// sentinel (RFC 5737 TEST-NET-1), which needs a default route.
+/// picks the source address from the routing table, and a routable ([`is_routable_source`]) source
+/// means the network is up. The probe runs over the broker's OWN address family: `mqtt_host` is used
+/// when it is an IP literal (v4 or v6 — covers an on-link broker with no default gateway, and an
+/// IPv6-only network), else a hostname falls back to a fixed off-link IPv4 sentinel (RFC 5737
+/// TEST-NET-1), which needs a default route.
 ///
 /// SYNCHRONOUS and DNS-FREE on purpose: a hostname is NOT resolved here. An async resolve
 /// (`still::reachable_ipv4` → `lookup_host`) runs `getaddrinfo` on tokio's BLOCKING pool, where a
@@ -142,21 +154,23 @@ enum BootReady {
 /// resolver would defeat the boot gate's prompt-cancellation guarantee and could hang shutdown to
 /// systemd's kill timeout. The UDP-connect probe is a couple of non-blocking syscalls instead.
 fn has_route_to_broker(mqtt_host: &str) -> bool {
-    let dest = mqtt_host
-        .parse::<std::net::Ipv4Addr>()
-        .unwrap_or(std::net::Ipv4Addr::new(192, 0, 2, 1));
-    let Ok(sock) = std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)) else {
+    // Probe over the broker's family so an IPv6-literal broker on an IPv6-only network isn't judged
+    // unreachable by an IPv4-only probe (which would stall the gate to the cap on every boot).
+    let dest: std::net::IpAddr = mqtt_host
+        .parse()
+        .unwrap_or_else(|_| std::net::Ipv4Addr::new(192, 0, 2, 1).into());
+    let bind: std::net::IpAddr = match dest {
+        std::net::IpAddr::V4(_) => std::net::Ipv4Addr::UNSPECIFIED.into(),
+        std::net::IpAddr::V6(_) => std::net::Ipv6Addr::UNSPECIFIED.into(),
+    };
+    let Ok(sock) = std::net::UdpSocket::bind((bind, 0)) else {
         return false;
     };
     // Port is irrelevant (no datagram is sent); 9 is the discard protocol.
     if sock.connect((dest, 9)).is_err() {
         return false;
     }
-    matches!(
-        sock.local_addr().map(|a| a.ip()),
-        Ok(std::net::IpAddr::V4(ip))
-            if !ip.is_unspecified() && !ip.is_loopback() && !ip.is_link_local()
-    )
+    sock.local_addr().map(|a| a.ip()).is_ok_and(is_routable_source)
 }
 
 /// Is the OWN gateway accepting TCP connections on `host:port`? A bounded connect probe — it does
@@ -227,6 +241,10 @@ async fn gate_on(
     sig_int: &mut tokio::signal::unix::Signal,
 ) -> BootReady {
     tokio::select! {
+        // BIASED: poll the branches top-to-bottom so a ready signal ALWAYS wins over a
+        // simultaneously-ready `poll` (readiness) — an unbiased select could pick `Proceed` in the
+        // same scheduling window a stop signal arrived and then drop these streams, missing it.
+        biased;
         _ = sig_term.recv() => BootReady::Shutdown,
         _ = sig_int.recv() => BootReady::Shutdown,
         outcome = poll => outcome,
@@ -1924,7 +1942,9 @@ mod tests {
         // A loopback broker yields a loopback SOURCE address — not a real network route — so the gate
         // keeps waiting rather than treating loopback-only as "network up". This is the DNS-free route
         // probe; a literal IP is used verbatim, so the assertion is deterministic. (Mirrors still.rs.)
+        // Both families: the v6 literal exercises the family-aware bind/probe path.
         assert!(!has_route_to_broker("127.0.0.1"));
+        assert!(!has_route_to_broker("::1"));
     }
 
     #[tokio::test]
