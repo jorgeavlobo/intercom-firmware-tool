@@ -169,38 +169,50 @@ async fn wait_for_boot_ready(cfg: &Config) -> BootReady {
             (Ok(t), Ok(i)) => (t, i),
             _ => return BootReady::Proceed,
         };
-    // Clean reboot: already up — stay quiet and proceed immediately (the common case #177 observed).
-    if boot_ready(cfg).await {
-        return BootReady::Proceed;
-    }
-    eprintln!(
-        "btmqttd: boot gate — waiting up to {}s for a network route and the OWN gateway {}:{}",
-        BOOT_GATE_CAP.as_secs(),
-        cfg.own_host,
-        cfg.own_port_mon
-    );
-    // Race the poll cadence against a SINGLE deadline timer (and the signals). Sleeping the full step
-    // and only THEN checking the deadline could overrun the cap by up to one BOOT_GATE_STEP;
-    // `sleep_until` fires exactly at the cap, so the documented "up to CAP" bound is honored strictly.
-    let deadline = tokio::time::Instant::now() + BOOT_GATE_CAP;
-    loop {
-        tokio::select! {
-            _ = sig_term.recv() => return BootReady::Shutdown,
-            _ = sig_int.recv() => return BootReady::Shutdown,
-            _ = tokio::time::sleep_until(deadline) => {
-                eprintln!(
-                    "btmqttd: boot gate — not ready after {}s; starting anyway (reconnect loops self-heal)",
-                    BOOT_GATE_CAP.as_secs()
-                );
-                return BootReady::Proceed;
-            }
-            _ = tokio::time::sleep(BOOT_GATE_STEP) => {
-                if boot_ready(cfg).await {
-                    eprintln!("btmqttd: boot gate — network route and OWN gateway up; starting");
-                    return BootReady::Proceed;
-                }
-            }
+    // Race the whole readiness poll against ONE overall cap timer and the two signals. Because
+    // `select!` cancels the losing branches, an in-flight probe (a DNS resolve in
+    // `still::reachable_ipv4`, a `TcpStream::connect` in `own_gateway_accepting`) is dropped the
+    // instant the cap elapses or a signal arrives — so the cap holds regardless of a probe in flight,
+    // and a SIGTERM/SIGINT is handled promptly rather than waiting one out. The cap timer starts here,
+    // before the first probe, so that probe is bounded too.
+    tokio::select! {
+        _ = sig_term.recv() => BootReady::Shutdown,
+        _ = sig_int.recv() => BootReady::Shutdown,
+        outcome = poll_until_ready(cfg) => outcome,
+        _ = tokio::time::sleep(BOOT_GATE_CAP) => {
+            eprintln!(
+                "btmqttd: boot gate — not ready after {}s; starting anyway (reconnect loops self-heal)",
+                BOOT_GATE_CAP.as_secs()
+            );
+            BootReady::Proceed
         }
+    }
+}
+
+/// Poll [`boot_ready`] every [`BOOT_GATE_STEP`] until both conditions hold, then return
+/// [`BootReady::Proceed`]. Runs UNBOUNDED — [`wait_for_boot_ready`] races it against the overall cap
+/// and the signals, which cancel it (dropping any in-flight probe). Logs a single "waiting" line the
+/// first time it finds the system not ready and a single "up; starting" line when it becomes ready
+/// after having waited; a clean reboot that is ready on the first probe stays silent.
+async fn poll_until_ready(cfg: &Config) -> BootReady {
+    let mut waited = false;
+    loop {
+        if boot_ready(cfg).await {
+            if waited {
+                eprintln!("btmqttd: boot gate — network route and OWN gateway up; starting");
+            }
+            return BootReady::Proceed;
+        }
+        if !waited {
+            eprintln!(
+                "btmqttd: boot gate — waiting up to {}s for a network route and the OWN gateway {}:{}",
+                BOOT_GATE_CAP.as_secs(),
+                cfg.own_host,
+                cfg.own_port_mon
+            );
+            waited = true;
+        }
+        tokio::time::sleep(BOOT_GATE_STEP).await;
     }
 }
 
