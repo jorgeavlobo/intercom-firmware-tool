@@ -268,21 +268,30 @@ async fn gate_on(
 /// first time it finds the system not ready and a single "up; starting" line when it becomes ready
 /// after having waited; a clean reboot that is ready on the first probe stays silent.
 async fn poll_until_ready(cfg: &Config) -> BootReady {
+    // The gateway is only pre-checked for a concrete IP:port (see `own_gateway_accepting`); for a
+    // hostname or port-0 endpoint the gate waits on the route ALONE, so the log must reflect that
+    // rather than claim it is waiting on / confirming the gateway it never probes.
+    let gateway_probed = cfg.own_host.parse::<std::net::IpAddr>().is_ok() && cfg.own_port_mon != 0;
+    let waiting_for = if gateway_probed {
+        format!("a network route and the OWN gateway {}:{}", cfg.own_host, cfg.own_port_mon)
+    } else {
+        "a network route".to_string()
+    };
+    let ready_msg = if gateway_probed {
+        "network route and OWN gateway up; starting"
+    } else {
+        "network route up; starting"
+    };
     let mut waited = false;
     loop {
         if boot_ready(cfg).await {
             if waited {
-                eprintln!("btmqttd: boot gate — network route and OWN gateway up; starting");
+                eprintln!("btmqttd: boot gate — {ready_msg}");
             }
             return BootReady::Proceed;
         }
         if !waited {
-            eprintln!(
-                "btmqttd: boot gate — waiting up to {}s for a network route and the OWN gateway {}:{}",
-                BOOT_GATE_CAP.as_secs(),
-                cfg.own_host,
-                cfg.own_port_mon
-            );
+            eprintln!("btmqttd: boot gate — waiting up to {}s for {waiting_for}", BOOT_GATE_CAP.as_secs());
             waited = true;
         }
         tokio::time::sleep(BOOT_GATE_STEP).await;
@@ -296,6 +305,10 @@ async fn run() -> Result<bool, String> {
     if cfg.mqtt_host.is_empty() {
         return Err("MQTT_HOST is not set in the config".into());
     }
+    // Build (and thereby VALIDATE) the TLS config BEFORE the boot gate, so a misconfigured
+    // CA/cert/key path fails fast at startup instead of surfacing only after the gate's up-to-cap
+    // wait on a network-down boot. Consumed into the transport once MqttOptions is built, below.
+    let tls = if cfg.uses_tls() { Some(build_tls(&cfg)?) } else { None };
     // SIGTERM/SIGINT receivers, installed HERE and reused by BOTH the boot gate below and the main
     // shutdown select. A single continuous pair (never a temporary one dropped and re-created) closes
     // the window where tokio's installed handler suppresses the default terminate action but no
@@ -345,8 +358,8 @@ async fn run() -> Result<bool, String> {
         QoS::AtMostOnce,
         true,
     ));
-    if cfg.uses_tls() {
-        opts.set_transport(Transport::tls_with_config(build_tls(&cfg)?));
+    if let Some(tls) = tls {
+        opts.set_transport(Transport::tls_with_config(tls));
     }
 
     let (client, mut eventloop) = AsyncClient::new(opts, 32);
