@@ -178,13 +178,16 @@ fn has_route_to_broker(mqtt_host: &str) -> bool {
 /// `:20000` — so btmqttd doesn't start dialing it (sender/av/dimension/volume) before it is up.
 ///
 /// The probe is DNS-FREE (see [`has_route_to_broker`] for why the gate must never spawn a blocking
-/// resolve), so it only runs when `host` is an IP literal — which it is in every shipped config
-/// (`127.0.0.1`). When `OWN_HOST` is a HOSTNAME (a supported but unusual remote-gateway config), we
-/// can't probe it without resolving, so we DON'T gate on it: return `true` and let the route
-/// condition gate the boot while `sender`/`av`'s own reconnect loops handle a not-yet-up hostname
-/// gateway — rather than making a hostname `OWN_HOST` wait out the full cap on every boot.
-/// Unit-tested against a real loopback listener and for the hostname pass-through.
+/// resolve), so it only runs on a concrete `IP:port` — the shipped `127.0.0.1:20000`. We DON'T gate
+/// on an endpoint that can't be probed DNS-free — a HOSTNAME `OWN_HOST` (a supported but unusual
+/// remote-gateway config), or port 0 (a misconfig a connect could never satisfy): return `true` so
+/// the route condition gates the boot and `sender`/`av`'s reconnect loops handle the endpoint, rather
+/// than waiting out the full cap every boot. Unit-tested for the real-listener, closed-port, hostname
+/// and port-0 cases.
 async fn own_gateway_accepting(host: &str, port: u16) -> bool {
+    if port == 0 {
+        return true;
+    }
     let Ok(ip) = host.parse::<std::net::IpAddr>() else {
         return true;
     };
@@ -1942,6 +1945,8 @@ mod tests {
             // A non-IP host (a supported but unusual hostname OWN_HOST) can't be probed DNS-free, so
             // it passes through as "ready" rather than making the gate wait out the cap every boot.
             assert!(own_gateway_accepting("openserver.local", port).await);
+            // Port 0 (a misconfig a connect could never satisfy) also passes through, not gated.
+            assert!(own_gateway_accepting("127.0.0.1", 0).await);
         });
     }
 
