@@ -226,7 +226,7 @@ async fn wait_for_boot_ready(
     sig_term: &mut tokio::signal::unix::Signal,
     sig_int: &mut tokio::signal::unix::Signal,
 ) -> BootReady {
-    gate_on(poll_until_ready(cfg), BOOT_GATE_CAP, sig_term, sig_int).await
+    gate_on(poll_until_ready(cfg), BOOT_GATE_CAP, sig_term.recv(), sig_int.recv()).await
 }
 
 /// Race a readiness `poll` against the overall `cap` and the two shutdown signals, returning as soon
@@ -236,21 +236,22 @@ async fn wait_for_boot_ready(
 /// a probe is mid-flight. This cancellation is only truthful because the probes are DNS-free (see
 /// [`has_route_to_broker`]): a dropped async DNS resolve would keep running on the blocking pool and
 /// `drop(rt)` would wait it out. The `cap` timer starts on entry, before the first probe the `poll`
-/// runs, so that probe is bounded too. Extracted from [`wait_for_boot_ready`] so this guarantee is
-/// unit-testable with a controllable `poll` future.
+/// runs, so that probe is bounded too. Takes the two shutdown signals as bare FUTURES (the caller
+/// passes `Signal::recv()`), so the guarantee is unit-testable with controllable `poll`/signal
+/// futures — without a test installing real, process-global signal handlers.
 async fn gate_on(
     poll: impl std::future::Future<Output = BootReady>,
     cap: Duration,
-    sig_term: &mut tokio::signal::unix::Signal,
-    sig_int: &mut tokio::signal::unix::Signal,
+    term: impl std::future::Future,
+    intr: impl std::future::Future,
 ) -> BootReady {
     tokio::select! {
         // BIASED: poll the branches top-to-bottom so a ready signal ALWAYS wins over a
         // simultaneously-ready `poll` (readiness) — an unbiased select could pick `Proceed` in the
-        // same scheduling window a stop signal arrived and then drop these streams, missing it.
+        // same scheduling window a stop signal arrived, missing the stop.
         biased;
-        _ = sig_term.recv() => BootReady::Shutdown,
-        _ = sig_int.recv() => BootReady::Shutdown,
+        _ = term => BootReady::Shutdown,
+        _ = intr => BootReady::Shutdown,
         outcome = poll => outcome,
         _ = tokio::time::sleep(cap) => {
             eprintln!(
@@ -1979,14 +1980,13 @@ mod tests {
         // stalls indefinitely (e.g. a stuck DNS resolve), and the still-pending probe must be
         // dropped — never awaited past the cap. `std::future::pending` models a probe that never
         // resolves; `gate_on` races it against the cap, and `select!` cancels it when the cap fires.
-        // A short cap keeps the test fast. The un-fired signal streams stand in for the real pair.
-        let mut sig_term = signal(SignalKind::terminate()).unwrap();
-        let mut sig_int = signal(SignalKind::interrupt()).unwrap();
+        // A short cap keeps the test fast. The signals are `pending()` futures too — so this test
+        // installs NO real, process-global signal handler (only the cap should fire).
         let outcome = gate_on(
             std::future::pending::<BootReady>(),
             Duration::from_millis(50),
-            &mut sig_term,
-            &mut sig_int,
+            std::future::pending::<()>(),
+            std::future::pending::<()>(),
         )
         .await;
         assert!(matches!(outcome, BootReady::Proceed));
