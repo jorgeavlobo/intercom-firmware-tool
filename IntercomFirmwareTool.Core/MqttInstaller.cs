@@ -300,6 +300,12 @@ namespace IntercomFirmwareTool.Core
         /// derives from the <see cref="TopicLastWill"/> namespace — see
         /// <see cref="TopicVolume"/> and <see cref="EffectiveTopicCallState"/>.</summary>
         public string? TopicCallState { get; init; }
+        /// <summary>Retained "camera mDNS host" diagnostic topic (issue #171): btmqttd publishes the
+        /// panel's advertised <c>&lt;name&gt;.local</c> here so HA can address the live RTSP stream and the
+        /// idle still endpoint by a stable name rather than a DHCP IP. NULL (default) derives from the
+        /// <see cref="TopicLastWill"/> namespace — see <see cref="EffectiveTopicCameraMdnsHost"/>.
+        /// Used on-device only.</summary>
+        public string? TopicCameraMdnsHost { get; init; }
 
         /// <summary>
         /// Stair-light SWITCH (opt-in): the WHO=8 actuator WHERE, digits only (e.g.
@@ -377,6 +383,9 @@ namespace IntercomFirmwareTool.Core
         public string EffectiveTopicFloorCall => TopicFloorCall ?? (TopicNamespace(TopicLastWill) + "floor_call");
         /// <summary>The call-state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicCallState => TopicCallState ?? (TopicNamespace(TopicLastWill) + "call_state");
+        /// <summary>The camera-mDNS-host diagnostic topic actually used (issue #171; see
+        /// <see cref="EffectiveTopicVolume"/>). btmqttd's default key must match (TOPIC_CAMERA_MDNS_HOST).</summary>
+        public string EffectiveTopicCameraMdnsHost => TopicCameraMdnsHost ?? (TopicNamespace(TopicLastWill) + "camera_mdns_host");
         /// <summary>The light state topic actually used (see <see cref="EffectiveTopicVolume"/>).</summary>
         public string EffectiveTopicLight => TopicLight ?? (TopicNamespace(TopicLastWill) + "light");
         /// <summary>The light-availability topic actually used (retained online/offline gate that
@@ -1072,7 +1081,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicLastWill, opts.TopicKey, opts.TopicCmdResult,
                                       opts.TopicFileContent, opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicRingSnapshot,
+                                      opts.EffectiveTopicRingSnapshot, opts.EffectiveTopicCameraMdnsHost,
                                       opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
                                       opts.EffectiveTopicUpdate })
                 if (string.IsNullOrWhiteSpace(t) || t.Any(char.IsControl))
@@ -1087,7 +1096,7 @@ namespace IntercomFirmwareTool.Core
                                       opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                       opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                       opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
-                                      opts.EffectiveTopicRingSnapshot,
+                                      opts.EffectiveTopicRingSnapshot, opts.EffectiveTopicCameraMdnsHost,
                                       opts.EffectiveTopicLight, opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
                                       opts.EffectiveTopicUpdate })
                 // '+'/'#' are subscription wildcards, and '$share/' is a shared-subscription
@@ -1120,6 +1129,10 @@ namespace IntercomFirmwareTool.Core
                 opts.EffectiveTopicMute, opts.EffectiveTopicEntrancePanelCall,
                 opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
                 opts.EffectiveTopicLightAvail, opts.EffectiveTopicMaintenance,
+                // The camera mDNS host diagnostic (#171) is published in EVERY state — the resolved host
+                // when on-device, an empty retained CLEAR otherwise (main.rs announce) — so, like the
+                // last-will / light-avail topics, an alias onto it must always be rejected.
+                opts.EffectiveTopicCameraMdnsHost,
             };
             // Ring-snapshot-ready (#169): btmqttd publishes to it ONLY under on-device capture
             // (camera_enabled && camera_ondevice); an off-device / camera-off build derives the topic
@@ -1200,6 +1213,7 @@ namespace IntercomFirmwareTool.Core
                                         opts.TopicKey, opts.TopicCmdResult, opts.TopicFileContent,
                                         opts.EffectiveTopicVolume, opts.EffectiveTopicMute,
                                         opts.EffectiveTopicEntrancePanelCall, opts.EffectiveTopicFloorCall, opts.EffectiveTopicCallState,
+                                        opts.EffectiveTopicCameraMdnsHost,
                                         opts.EffectiveTopicMaintenance })
                 if (TopicFilterMatches(rxFilter, pub))
                     throw new ArgumentException(
@@ -1758,6 +1772,10 @@ namespace IntercomFirmwareTool.Core
             // on-device ring capture has written that event's /ring-<id>.jpg, so the HA push automation
             // triggers on this and fetches that exact frame (not a fixed delay).
             sb.Append(Conf("TOPIC_RING_SNAPSHOT", opts.EffectiveTopicRingSnapshot));
+            // Camera mDNS host diagnostic (#171): btmqttd publishes the panel's `<name>.local` here so
+            // HA can reach the live stream + idle still by name across a DHCP change. On-device only;
+            // the key is harmless (unused) off-device.
+            sb.Append(Conf("TOPIC_CAMERA_MDNS_HOST", opts.EffectiveTopicCameraMdnsHost));
 
             // Stair-light SWITCH (opt-in). LIGHT_ENABLED is the "has exterior light" choice: the
             // subsystem runs when set, even with an EMPTY LIGHT_WHERE (learn mode — btmqttd learns
@@ -2293,6 +2311,85 @@ namespace IntercomFirmwareTool.Core
                     }, HaJson)));
             else
                 entities.Add(new HaEntity("ring_snapshot.json", Topic("image", "ring_snapshot"), ""));
+
+            // Camera addressing diagnostics (issue #171): three retained, read-only sensors that let HA
+            // reach the panel's live RTSP stream + idle still endpoint by a stable <name>.local mDNS host
+            // instead of a DHCP IP. btmqttd publishes the resolved host on EffectiveTopicCameraMdnsHost;
+            // the two URL sensors render it into ready-to-paste Generic-Camera URLs via a value_template.
+            // The URL shape has ONE source of truth — Go2RtcConfig.OnDeviceRtspUrl/OnDeviceStillUrl, shared
+            // with the setup guide. The RTSP URL embeds the generated camera credentials (visible on the
+            // broker — accepted by the owner, the same trust boundary as the LAN-only stream itself). Gated
+            // like the ring image (on-device camera; NO on-demand needed — these are addressing hints, not
+            // a capture) and tombstoned otherwise so a prior build's sensors are cleared from HA.
+            if (opts.CameraEnabled && opts.CameraOnDevice)
+            {
+                // Escape the credentials for the RTSP userinfo, mirroring the setup guide. A missing
+                // password (misconfigured on-device install) renders the literal <password> placeholder
+                // rather than a silently broken URL.
+                string camUserEnc = Uri.EscapeDataString(opts.CameraRtspUser);
+                string camPassInUrl = string.IsNullOrEmpty(opts.CameraRtspPass)
+                    ? "<password>"
+                    : Uri.EscapeDataString(opts.CameraRtspPass);
+                entities.Add(new HaEntity(
+                    "camera_mdns_host.json",
+                    Topic("sensor", "camera_mdns_host"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Camera mDNS host",
+                        unique_id = $"{node}_camera_mdns_host",
+                        default_entity_id = EntId("sensor", "camera_mdns_host"),
+                        state_topic = opts.EffectiveTopicCameraMdnsHost,
+                        icon = "mdi:lan",
+                        entity_category = "diagnostic",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+                entities.Add(new HaEntity(
+                    "camera_rtsp_url.json",
+                    Topic("sensor", "camera_rtsp_url"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Camera RTSP URL",
+                        unique_id = $"{node}_camera_rtsp_url",
+                        default_entity_id = EntId("sensor", "camera_rtsp_url"),
+                        state_topic = opts.EffectiveTopicCameraMdnsHost,
+                        // Guard on a non-empty host so a momentarily-empty host topic (startup, or a
+                        // transient resolve failure) renders an EMPTY sensor state, not an invalid
+                        // `rtsp://…@:8554/…` a user might copy (same posture as the ring image's `{% if %}`).
+                        value_template = $"{{% if value %}}{Go2RtcConfig.OnDeviceRtspUrl("{{ value }}", camUserEnc, camPassInUrl, OnDeviceStreamName)}{{% endif %}}",
+                        icon = "mdi:video",
+                        entity_category = "diagnostic",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+                entities.Add(new HaEntity(
+                    "camera_still_url.json",
+                    Topic("sensor", "camera_still_url"),
+                    JsonSerializer.Serialize(new
+                    {
+                        name = "Camera still image URL",
+                        unique_id = $"{node}_camera_still_url",
+                        default_entity_id = EntId("sensor", "camera_still_url"),
+                        state_topic = opts.EffectiveTopicCameraMdnsHost,
+                        value_template = $"{{% if value %}}{Go2RtcConfig.OnDeviceStillUrl("{{ value }}")}{{% endif %}}",
+                        icon = "mdi:image",
+                        entity_category = "diagnostic",
+                        availability_topic = opts.TopicLastWill,
+                        payload_available = "online",
+                        payload_not_available = "offline",
+                        device,
+                    }, HaJson)));
+            }
+            else
+            {
+                entities.Add(new HaEntity("camera_mdns_host.json", Topic("sensor", "camera_mdns_host"), ""));
+                entities.Add(new HaEntity("camera_rtsp_url.json", Topic("sensor", "camera_rtsp_url"), ""));
+                entities.Add(new HaEntity("camera_still_url.json", Topic("sensor", "camera_still_url"), ""));
+            }
 
             // Bridge UPDATE entity (issue #114): HA's native Update card. btmqttd publishes a retained
             // {"installed_version":…,"latest_version":…} to EffectiveTopicUpdate (installed = the daemon's

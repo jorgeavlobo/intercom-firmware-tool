@@ -233,6 +233,7 @@ public class Go2RtcConfigTests
             CameraOnDevice = true,
             CameraRtspUser = "camera",
             CameraRtspPass = "s3cr3t",
+            EnableHaDiscovery = true, // the three diagnostic sensors exist only with discovery on
         };
         string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "Front Door");
         // The HA Generic Camera URL: creds embedded, sanitized stream name, on-device RTSP port.
@@ -245,7 +246,63 @@ public class Go2RtcConfigTests
         Assert.Contains("http://<intercom-ip>:8556/idle.jpg", guide);
         // The loopback-only API is called out; no HA-side go2rtc.
         Assert.Contains("127.0.0.1:1984", guide);
+        // Issue #171: with discovery ON, the guide leads with the three auto-created diagnostic sensors
+        // (the DHCP-proof, copy-paste path) and references the panel's <name>.local mDNS host; the
+        // literal-IP URLs stay as a hand-entry fallback.
+        Assert.Contains("Camera mDNS host", guide);
+        Assert.Contains("Camera RTSP URL", guide);
+        Assert.Contains("Camera still image URL", guide);
+        Assert.Contains(".local", guide);
         Assert.DoesNotContain("\r", guide);
+    }
+
+    [Fact]
+    public void BuildOnDeviceSetupGuide_omits_the_sensor_path_when_discovery_is_off()
+    {
+        // With HA discovery disabled, btmqttd clears the diagnostic sensor configs, so the sensors
+        // don't exist — the guide must NOT point at them and should lead with the manual URLs instead
+        // (issue #171 review). The manual URLs themselves still appear.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = true,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+            EnableHaDiscovery = false,
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "doorbell");
+        Assert.DoesNotContain("Camera mDNS host", guide);
+        Assert.DoesNotContain("Camera RTSP URL", guide);
+        Assert.DoesNotContain("Camera still image URL", guide);
+        // With discovery off the guide must NOT promise the auto-created ring image entity either.
+        Assert.DoesNotContain("auto-creates a \"Doorbell snapshot\"", guide);
+        // The manual URLs are still there.
+        Assert.Contains("rtsp://camera:s3cr3t@<intercom-ip>:8554/doorbell", guide);
+        Assert.Contains("http://<intercom-ip>:8556/idle.jpg", guide);
+    }
+
+    [Fact]
+    public void BuildOnDeviceSetupGuide_omits_the_sensor_path_when_the_camera_feature_is_off()
+    {
+        // The three diagnostic sensors are emitted only when EnableHaDiscovery && CameraEnabled &&
+        // CameraOnDevice (GenerateHaDiscovery). Discovery ON but the camera feature OFF (CameraEnabled=0
+        // with CameraOnDevice=1, reachable in the UI/build flow) emits NO sensors, so the guide must NOT
+        // tell the user to copy them (#171 review) — it leads with the manual URLs instead.
+        var opts = new MqttOptions("broker.lan")
+        {
+            CameraEnabled = false,
+            CameraOnDevice = true,
+            CameraRtspUser = "camera",
+            CameraRtspPass = "s3cr3t",
+            EnableHaDiscovery = true,
+        };
+        string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "doorbell");
+        Assert.DoesNotContain("Camera mDNS host", guide);
+        Assert.DoesNotContain("Camera RTSP URL", guide);
+        Assert.DoesNotContain("Camera still image URL", guide);
+        // The manual URLs are still there.
+        Assert.Contains("rtsp://camera:s3cr3t@<intercom-ip>:8554/doorbell", guide);
+        Assert.Contains("http://<intercom-ip>:8556/idle.jpg", guide);
     }
 
     [Fact]
@@ -259,6 +316,7 @@ public class Go2RtcConfigTests
             CameraOnDevice = true,
             CameraRtspUser = "camera",
             CameraRtspPass = "s3cr3t",
+            EnableHaDiscovery = true, // the auto-created "Doorbell snapshot" entity exists only with discovery
         };
         string guide = Go2RtcConfig.BuildOnDeviceSetupGuide(opts, "doorbell");
         // The idle thumbnail is a real captured view, refreshable via the HA button.

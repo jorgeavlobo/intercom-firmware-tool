@@ -53,13 +53,16 @@ SPROP_FILE=$STATE_DIR/camera-sprop
 # re-learns it. Absent/unreadable ⇒ default branch 1 (matches config.rs's CAMERA_BRANCH default).
 CONF_FILE=/etc/btmqttd/btmqttd.conf
 
-# Firewall (issue #120, phase 1c-3; extended in #168): the LAN-facing TCP ports + the LAN interface
+# Firewall (issue #120, phase 1c-3; extended in #168 and #171): the LAN-facing ports + the LAN interface
 # they are served on. The panel enforces a default-deny INPUT chain (`-P INPUT DROP`) and does NOT
-# open them, so nothing reaches go2rtc / btmqttd from Home Assistant without a rule. TWO ports are
-# opened, each source-restricted to the LAN: the go2rtc RTSP media port (:8554) and btmqttd's
-# still-image HTTP endpoint (:8556, issue #168 — the cheap JPEG HA polls for the camera thumbnail so
-# a poll never wakes the live stream). The go2rtc control API (:1984) stays loopback-only and gets NO
-# rule. Both ports live in this ONE chain and are reconciled together (exactly these rules, no more).
+# open them, so nothing reaches go2rtc / btmqttd from Home Assistant without a rule. THREE endpoints are
+# opened, each source-restricted to the LAN: the go2rtc RTSP media port (tcp :8554), btmqttd's
+# still-image HTTP endpoint (tcp :8556, issue #168 — the cheap JPEG HA polls for the camera thumbnail so
+# a poll never wakes the live stream), and btmqttd's mDNS responder (udp :5353, issue #171 — so its
+# `<name>.local` A record can be QUERIED and its probe/conflict traffic RECEIVED on a model with no
+# factory Avahi, i.e. the C300X; on the C100X Avahi already answers on :5353, so this rule is a harmless
+# redundant allow). The go2rtc control API (:1984) stays loopback-only and gets NO rule. All three live
+# in this ONE chain and are reconciled together (exactly these rules, no more).
 #
 # Ownership is a DEDICATED chain (FW_CHAIN), the industry-standard mechanism for a userspace program that
 # manages iptables: Docker owns a `DOCKER` chain, kube-proxy owns `KUBE-*` chains, fail2ban owns `f2b-*`
@@ -84,6 +87,12 @@ CAM_PORT=8554
 # thrash). Kept in step with btmqttd's `still::STILL_PORT` and the C# installer's on-device setup
 # guide (`Go2RtcConfig.OnDeviceStillPort`). Opened alongside CAM_PORT in the SAME GO2RTC chain.
 CAM_STILL_PORT=8556
+# btmqttd's mDNS responder port (issue #171): udp/5353, the multicast DNS port its Part B responder
+# binds on a model with no factory Avahi (the C300X) to advertise `Bticino-Classe<model>X.local`. Under
+# `-P INPUT DROP` the inbound queries/probes/conflict announcements are dropped without this allow, so
+# the record can never be QUERIED or refreshed after its TTL. Kept in step with btmqttd's `mdns::MDNS_PORT`.
+# UDP (not tcp) — reconciled in the SAME GO2RTC chain as the two camera tcp ports, as a distinct endpoint.
+CAM_MDNS_PORT=5353
 CAM_IFACE=wlan0
 FW_CHAIN=GO2RTC
 FW_OWN=/var/run/go2rtc.fwown
@@ -225,10 +234,13 @@ firewall_open() {
 	# listing.
 	fw_list=$(iptables -S "$FW_CHAIN" 2>/dev/null) || return 0
 	n=$(printf '%s\n' "$fw_list" | grep -c -- "^-A ")
-	# Desired rule count: one ACCEPT per opened port (address present), or an empty chain (no address).
-	# Counting the explicit list — rather than hard-coding 2 — keeps every check in step if a port is added.
+	# Desired rule count: one ACCEPT per opened endpoint (address present), or an empty chain (no address).
+	# The tcp ports are COUNTED FROM THE LIST; the mDNS udp/CAM_MDNS_PORT rule is a different protocol, so it
+	# is counted SEPARATELY (the +1 below) and reconciled with its own -C/-A lines — adjust both places
+	# together if an endpoint is added or removed.
 	want=0
 	for p in "$CAM_PORT" "$CAM_STILL_PORT"; do want=$((want + 1)); done
+	want=$((want + 1))   # + the mDNS udp/CAM_MDNS_PORT rule (issue #171), reconciled alongside the tcp ports
 	# ZERO-WRITE FAST PATH: if the chain is ALREADY in the desired state, perform NO iptables writes — only
 	# re-assert the jump and return. `-C` (also non-blocking) canonicalizes arg order / `-m tcp` / subnet
 	# masking, so it matches the rule iptables actually stored, not just its textual form. Desired state is
@@ -253,6 +265,15 @@ firewall_open() {
 					*) return 0 ;;                                               # lock / unknown → bail
 				esac
 			done
+			# Same membership check for the mDNS udp/CAM_MDNS_PORT rule (issue #171): only when the tcp
+			# rules already matched, so a genuine miss here also drops to the flush+repopulate below.
+			if [ "$mismatch" -eq 0 ]; then
+				cerr=$(iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p udp --dport "$CAM_MDNS_PORT" \
+					-s "$lan" -j ACCEPT 2>&1) || case "$cerr" in
+					*"Bad rule"* | *"matching rule exist"*) mismatch=1 ;;         # genuine → reconcile
+					*) return 0 ;;                                               # lock / unknown → bail
+				esac
+			fi
 			[ "$mismatch" -eq 0 ] && { fw_jump; return 0; }  # all present + count exact → zero-write
 			# genuine mismatch (changed subnet, wrong rule) → fall through to flush + repopulate
 		fi
@@ -274,6 +295,9 @@ firewall_open() {
 		for p in "$CAM_PORT" "$CAM_STILL_PORT"; do
 			iptables -w 5 -A "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$p" -s "$lan" -j ACCEPT 2>/dev/null || true
 		done
+		# The mDNS responder rule (issue #171): same interface + LAN source, udp/CAM_MDNS_PORT. Best-effort
+		# like the tcp ACCEPTs above; a failed -A is repaired by the next reconcile (count mismatch).
+		iptables -w 5 -A "$FW_CHAIN" -i "$CAM_IFACE" -p udp --dport "$CAM_MDNS_PORT" -s "$lan" -j ACCEPT 2>/dev/null || true
 	fi
 	fw_jump
 }
@@ -306,10 +330,14 @@ firewall_is_open() {
 	cn=$(printf '%s\n' "$fw_rules" | grep -c -- "^-A ")
 	want=0
 	for p in "$CAM_PORT" "$CAM_STILL_PORT"; do want=$((want + 1)); done
+	want=$((want + 1))   # + the mDNS udp/CAM_MDNS_PORT rule (issue #171)
 	[ "$cn" -eq "$want" ] || return 1
 	for p in "$CAM_PORT" "$CAM_STILL_PORT"; do
 		iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p tcp --dport "$p" -s "$lan" -j ACCEPT 2>/dev/null || return 1
 	done
+	# The mDNS responder rule (issue #171) must ALSO be present, and no more (the count check above
+	# already forbids extras): if it is missing, the chain is not in its intended state → not open.
+	iptables -C "$FW_CHAIN" -i "$CAM_IFACE" -p udp --dport "$CAM_MDNS_PORT" -s "$lan" -j ACCEPT 2>/dev/null || return 1
 	return 0
 }
 

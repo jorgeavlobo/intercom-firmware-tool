@@ -61,6 +61,23 @@ namespace IntercomFirmwareTool.Core
         /// Must equal btmqttd's <c>still::STILL_PORT</c> and the go2rtcd script's <c>CAM_STILL_PORT</c>.</summary>
         public const int OnDeviceStillPort = 8556;
 
+        /// <summary>The on-device RTSP stream URL for <paramref name="host"/>, with URL-encoded
+        /// credentials embedded (issue #171). Single source of truth for the URL shape, shared by the
+        /// setup guide and the HA "Camera RTSP URL" diagnostic sensor. <paramref name="host"/> may be a
+        /// literal address, a <c>&lt;placeholder&gt;</c>, or an HA template token like <c>{{ value }}</c>
+        /// (the sensor renders the panel's mDNS host from the payload into it). <paramref name="userEnc"/>
+        /// / <paramref name="passInUrl"/> must already be <see cref="Uri.EscapeDataString(string)"/>-escaped
+        /// for the URL userinfo.</summary>
+        public static string OnDeviceRtspUrl(string host, string userEnc, string passInUrl, string streamName) =>
+            $"rtsp://{userEnc}:{passInUrl}@{host}:{OnDeviceRtspPort}/{streamName}";
+
+        /// <summary>The on-device idle still-image URL for <paramref name="host"/> (no credentials).
+        /// Single source of truth shared by the setup guide and the HA "Camera still image URL"
+        /// diagnostic sensor (issue #171). <paramref name="host"/> may be a literal address, a
+        /// <c>&lt;placeholder&gt;</c>, or an HA template token like <c>{{ value }}</c>.</summary>
+        public static string OnDeviceStillUrl(string host) =>
+            $"http://{host}:{OnDeviceStillPort}/idle.jpg";
+
         /// <summary>Absolute path of the vendored ffmpeg on the device (see <c>PayloadBinaries.Ffmpeg</c>).
         /// go2rtc's <c>exec:</c> source runs it to copy the panel's H.264 into RTSP.</summary>
         public const string OnDeviceFfmpegPath = "/usr/sbin/ffmpeg";
@@ -479,10 +496,24 @@ namespace IntercomFirmwareTool.Core
             sb.Append("nothing here needs to be pasted into a go2rtc config.\n\n");
 
             sb.Append("Add it to Home Assistant as a Generic Camera (Settings -> Devices &\n");
-            sb.Append("Services -> Add Integration -> Generic Camera) with this stream URL —\n");
-            sb.Append(hasPass
-                ? "replace <intercom-ip> with the panel's IP address on your network:\n\n"
-                : "replace <intercom-ip> with the panel's IP and <password> with the RTSP password:\n\n");
+            sb.Append("Services -> Add Integration -> Generic Camera).\n\n");
+
+            // Preferred path (issue #171) — ONLY when the three diagnostic sensors that carry the
+            // ready-to-paste URLs are actually emitted. GenerateHaDiscovery gates them on exactly
+            // `EnableHaDiscovery && CameraEnabled && CameraOnDevice` (and btmqttd clears them otherwise),
+            // so mirror that EXACT condition here: a build with the camera feature off (CameraEnabled=0)
+            // but CameraOnDevice=1 would otherwise be told to copy sensors that were never created.
+            bool haveSensors = opts.EnableHaDiscovery && opts.CameraEnabled && opts.CameraOnDevice;
+            if (haveSensors)
+            {
+                sb.Append("Easiest — copy the ready-made URLs Home Assistant already has: the panel\n");
+                sb.Append("auto-creates three diagnostic sensors — \"Camera mDNS host\", \"Camera RTSP\n");
+                sb.Append("URL\" and \"Camera still image URL\". Their values use the panel's\n");
+                sb.Append("<name>.local mDNS name, so they keep working if the panel's DHCP address\n");
+                sb.Append("changes. Paste \"Camera RTSP URL\" as the stream and \"Camera still image\n");
+                sb.Append("URL\" as the Still Image URL.\n\n");
+            }
+
             // URL-encode the credentials for the URL's userinfo: Validate rejects control chars but not
             // RTSP-URL-reserved punctuation (@ : / #), so escape defensively (today's fixed "camera" +
             // base64url password never need it, but a future caller might). The labeled
@@ -490,13 +521,22 @@ namespace IntercomFirmwareTool.Core
             // <password> placeholder is left literal (not %3C…%3E) so it reads as a placeholder.
             string userEnc = Uri.EscapeDataString(user);
             string passInUrl = hasPass ? Uri.EscapeDataString(pass) : pass;
+            // Manual URLs: the hand-entry FALLBACK when the sensors exist, or the PRIMARY path when
+            // discovery is off (no "from the sensor above" pointer then). Prefer a DHCP reservation so
+            // the literal IP stays put.
+            string manualIntro = haveSensors
+                ? (hasPass
+                    ? "Or enter them by hand — replace <intercom-ip> with the panel's IP (a DHCP\nreservation keeps it stable), or its <name>.local host from the sensor above:\n\n"
+                    : "Or enter them by hand — replace <intercom-ip> with the panel's IP and\n<password> with the RTSP password:\n\n")
+                : (hasPass
+                    ? "Set the stream URL — replace <intercom-ip> with the panel's IP (a DHCP\nreservation keeps it stable):\n\n"
+                    : "Set the stream URL — replace <intercom-ip> with the panel's IP and\n<password> with the RTSP password:\n\n");
+            sb.Append(manualIntro);
             sb.Append(string.Create(ci,
-                $"    rtsp://{userEnc}:{passInUrl}@<intercom-ip>:{OnDeviceRtspPort}/{name}\n\n"));
+                $"    {OnDeviceRtspUrl("<intercom-ip>", userEnc, passInUrl, name)}\n\n"));
 
-            sb.Append("Also set the Generic Camera's \"Still Image URL\" to this (no login) —\n");
-            sb.Append("replace <intercom-ip> with the panel's IP:\n\n");
-            sb.Append(string.Create(ci,
-                $"    http://<intercom-ip>:{OnDeviceStillPort}/idle.jpg\n\n"));
+            sb.Append("Also set the Generic Camera's \"Still Image URL\" (no login):\n\n");
+            sb.Append(string.Create(ci, $"    {OnDeviceStillUrl("<intercom-ip>")}\n\n"));
 
             sb.Append("Credentials (generated for this build):\n");
             sb.Append(string.Create(ci, $"    username: {user}\n"));
@@ -538,12 +578,30 @@ namespace IntercomFirmwareTool.Core
                 $"door. Each ring is its own EVENT with a unique id, and its picture is served\n" +
                 $"(transiently, on tmpfs) at a per-event URL:\n\n" +
                 $"    http://<intercom-ip>:{OnDeviceStillPort}/ring-<id>.jpg\n\n"));
-            sb.Append("This never overwrites the idle thumbnail, and it needs no manual setup: the\n");
-            sb.Append("panel auto-creates a \"Doorbell snapshot\" image entity in Home Assistant (via\n");
-            sb.Append("MQTT discovery) that always shows the latest ring's frame. The snapshot topic\n");
-            sb.Append("carries the event id and the device's LAN ip, published AFTER the frame is\n");
-            sb.Append("written, so the picture is always exactly that ring's (two rings can never\n");
-            sb.Append("cross images) and there is no fixed-delay guesswork.\n\n");
+            // The auto-created "Doorbell snapshot" image entity exists only when the three diagnostic
+            // sensors do — i.e. under `haveSensors` (MQTT discovery AND the on-device camera; btmqttd
+            // clears its config otherwise) — so only promise it then. The snapshot TOPIC + the
+            // notification recipe below work regardless. The else branch stays cause-AGNOSTIC: `haveSensors`
+            // can be false because discovery is off OR because the camera feature is off, so it must not
+            // attribute the missing entity to discovery specifically.
+            if (haveSensors)
+            {
+                sb.Append("This never overwrites the idle thumbnail, and it needs no manual setup: the\n");
+                sb.Append("panel auto-creates a \"Doorbell snapshot\" image entity in Home Assistant (via\n");
+                sb.Append("MQTT discovery) that always shows the latest ring's frame. The snapshot topic\n");
+                sb.Append("carries the event id and the device's LAN ip, published AFTER the frame is\n");
+                sb.Append("written, so the picture is always exactly that ring's (two rings can never\n");
+                sb.Append("cross images) and there is no fixed-delay guesswork.\n\n");
+            }
+            else
+            {
+                sb.Append("This never overwrites the idle thumbnail. In this configuration the panel does\n");
+                sb.Append("NOT auto-create a \"Doorbell snapshot\" image entity (that entity needs BOTH Home\n");
+                sb.Append("Assistant MQTT discovery and the on-device camera enabled), but the snapshot\n");
+                sb.Append("topic still carries the event id and the device's LAN ip (published AFTER the\n");
+                sb.Append("frame is written), so the notification automation below works — the picture is\n");
+                sb.Append("always exactly that ring's, with no fixed-delay guesswork.\n\n");
+            }
             sb.Append("To also get a phone notification with the picture, add a Home Assistant\n");
             sb.Append("automation like this — replace notify.mobile_app_your_phone with your own (the\n");
             sb.Append("automation builds the image URL from the ip and id in the message):\n\n");

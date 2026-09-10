@@ -202,14 +202,15 @@ public class Go2RtcdScriptTests
     [Fact]
     public void Opens_the_rtsp_and_still_ports_least_privilege_lan_restricted()
     {
-        // Phase 1c-3 + issue #168: open :8554 (go2rtc RTSP) AND :8556 (btmqttd still-image endpoint) on the
-        // LAN interface, each source-restricted to the interface's own subnet. The control API (:1984) must
-        // NOT be opened, and no other port is touched.
+        // Phase 1c-3 + issue #168 + issue #171: open tcp :8554 (go2rtc RTSP), tcp :8556 (btmqttd still-image
+        // endpoint) AND udp :5353 (btmqttd's mDNS responder) on the LAN interface, each source-restricted to
+        // the interface's own subnet. The control API (:1984) must NOT be opened, and no other port is touched.
         string s = ReadScript();
         string joined = JoinedScript();
         string[] code = CodeLines(s);
         Assert.Contains("CAM_PORT=8554", s);
         Assert.Contains("CAM_STILL_PORT=8556", s);
+        Assert.Contains("CAM_MDNS_PORT=5353", s);
         Assert.Contains("CAM_IFACE=wlan0", s);
         // The still port must match the C# installer's on-device guide constant (which HA is pointed at).
         Assert.Equal(8556, Go2RtcConfig.OnDeviceStillPort);
@@ -218,6 +219,17 @@ public class Go2RtcdScriptTests
         Assert.Contains(code, l => l.Contains("for p in \"$CAM_PORT\" \"$CAM_STILL_PORT\""));
         Assert.Contains(
             "iptables -w 5 -A \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p tcp --dport \"$p\" -s \"$lan\" -j ACCEPT",
+            joined);
+        // The mDNS responder (issue #171) is opened as a DISTINCT udp endpoint alongside the tcp ports — same
+        // interface + LAN source, protocol udp, port CAM_MDNS_PORT. Required on a model with no factory Avahi
+        // (the C300X) so its `<name>.local` A record can be queried/refreshed under the panel's `-P INPUT DROP`.
+        Assert.Contains(
+            "iptables -w 5 -A \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p udp --dport \"$CAM_MDNS_PORT\" -s \"$lan\" -j ACCEPT",
+            joined);
+        // And it is reconciled like the tcp ports: a membership `-C` check on both the zero-write fast path
+        // and firewall_is_open, so a missing/extra mDNS rule forces a flush+repopulate (never a false "open").
+        Assert.Contains(
+            "iptables -C \"$FW_CHAIN\" -i \"$CAM_IFACE\" -p udp --dport \"$CAM_MDNS_PORT\" -s \"$lan\" -j ACCEPT",
             joined);
         // LAN source derived at runtime; the ACCEPTs are added ONLY when an address exists — with no address
         // the chain is left empty (ports closed), never opened interface-wide.

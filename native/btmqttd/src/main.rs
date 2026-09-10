@@ -379,16 +379,95 @@ async fn run() -> Result<bool, String> {
     // `camera_ondevice` like sprop. It publishes NOTHING to the broker and holds no half-actuated
     // state, so shutdown is a plain `stopping`-flag + abort (like av/sprop). `None` (feature off)
     // threads through as a no-op.
-    let (still_task, still_stopping): (Option<tokio::task::JoinHandle<()>>, Arc<std::sync::atomic::AtomicBool>) = {
+    // `camera_mdns_name` is `Some(cell)` exactly when the camera mDNS surface is active
+    // (`camera_mdns_active` = `camera_enabled && camera_ondevice`): the owning task (the C300X responder
+    // or the C100X refresher) resolves the final `<name>.local` and reports it here, so announce() only
+    // re-asserts that exact name on each reconnect and never re-resolves. `None` otherwise — off-device,
+    // OR on-device with the camera feature disabled (`camera_ondevice` set but `camera_enabled` clear).
+    // `camera_host_task` holds the JoinHandle of whichever mDNS task PUBLISHES the retained camera-host
+    // topic on this model — the C300X responder OR the C100X refresher (mutually exclusive) — so shutdown
+    // can abort-and-await it before the final offline publish (neither may emit a host publish after it).
+    #[allow(clippy::type_complexity)]
+    let (still_task, still_stopping, camera_mdns_name, camera_host_task): (
+        Option<tokio::task::JoinHandle<()>>,
+        Arc<std::sync::atomic::AtomicBool>,
+        Option<tokio::sync::watch::Receiver<Option<String>>>,
+        Option<tokio::task::JoinHandle<()>>,
+    ) = {
         let stopping = Arc::new(std::sync::atomic::AtomicBool::new(false));
         if cfg.camera_ondevice {
             // Cache the device's own LAN IPv4 OFF the ring path (issue #144), so a ring publish reads
             // it synchronously and a hung resolver can never delay the ring's camera-session binding.
             // Shares the still task's stopping flag.
             tokio::spawn(still::refresh_self_ipv4_loop(cfg.mqtt_host.clone(), stopping.clone()));
-            (Some(tokio::spawn(still::run(stopping.clone()))), stopping)
+            // mDNS responder (issue #171 Part B): advertise our own `<name>.local` A record ONLY on a
+            // model with no factory responder (the C300X). On the C100X the factory Avahi already owns
+            // `Bticino-Classe100X.local`, so a second responder would cause mDNS name-conflict flapping —
+            // there we only READ that name for the Part A diagnostic sensors. The responder shares its
+            // conflict-resolved chosen name over a watch channel so announce() re-asserts it on connect.
+            let (name_rx, camera_host_task) = if camera_mdns_active(&cfg) {
+                if !mdns::system_mdns_responder_present().await {
+                    // C300X: our own responder owns the (conflict-resolved) name and shares it over a
+                    // watch channel so announce() re-asserts it on connect. It PUBLISHES the retained
+                    // host topic, so its JoinHandle is retained for the shutdown abort-and-await (below),
+                    // like the C100X refresher — otherwise a mid-await probe/announce/publish could emit a
+                    // retained host after the shutdown offline.
+                    match mdns::resolve_responder_base_host().await {
+                        Some(base) => {
+                            let (name_tx, name_rx) = tokio::sync::watch::channel(None::<String>);
+                            let h = tokio::spawn(mdns::run_responder(
+                                base,
+                                cfg.mqtt_host.clone(),
+                                client.clone(),
+                                cfg.topic_camera_mdns_host.clone(),
+                                name_tx,
+                                stopping.clone(),
+                            ));
+                            (Some(name_rx), Some(h))
+                        }
+                        None => {
+                            // No base host to advertise (no Avahi host-name AND no model digits in the
+                            // kernel hostname — unusual on a real C300X). Start NO responder, and CLEAR any
+                            // retained host a PRIOR run left on the broker: with nothing serving a
+                            // `<name>.local`, HA must not keep rendering RTSP/still URLs for it. Then hand
+                            // announce() a permanently-None receiver so it neither republishes a
+                            // system-hostname `.local` (the C100X `None` path would) nor re-clears — the
+                            // empty retained payload here is the final state.
+                            if let Err(e) = client
+                                .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, Vec::new())
+                                .await
+                            {
+                                eprintln!("btmqttd: clear camera mDNS host (no base host) failed: {e}");
+                            }
+                            let (_name_tx, name_rx) = tokio::sync::watch::channel(None::<String>);
+                            (Some(name_rx), None)
+                        }
+                    }
+                } else {
+                    // C100X: the factory Avahi owns the name; we only READ it. The refresher is the SOLE
+                    // authority — it resolves Avahi's RUNTIME name (reverse-PTR, preferred and PRESERVED
+                    // across transient failures rather than regressing to the configured/unrenamed name),
+                    // publishes it retained, and shares it over a watch channel so announce() re-asserts that
+                    // exact value on reconnect (never re-resolving itself). Its JoinHandle is retained so
+                    // shutdown can abort-and-await it (like still_task) BEFORE the final offline publish —
+                    // otherwise a mid-await reverse-PTR lookup could emit a retained host publish after
+                    // shutdown.
+                    let (name_tx, name_rx) = tokio::sync::watch::channel(None::<String>);
+                    let h = tokio::spawn(mdns::run_host_refresher(
+                        cfg.mqtt_host.clone(),
+                        client.clone(),
+                        cfg.topic_camera_mdns_host.clone(),
+                        name_tx,
+                        stopping.clone(),
+                    ));
+                    (Some(name_rx), Some(h))
+                }
+            } else {
+                (None, None)
+            };
+            (Some(tokio::spawn(still::run(stopping.clone()))), stopping, name_rx, camera_host_task)
         } else {
-            (None, stopping)
+            (None, stopping, None, None)
         }
     };
     // First-run idle auto-capture (issue #169): on the first boot where no idle.jpg exists yet, grab the
@@ -899,6 +978,7 @@ async fn run() -> Result<bool, String> {
                                 volume.clone(),
                                 light.clone(),
                                 update_latest.clone(),
+                                camera_mdns_name.clone(),
                             )));
                         }
                     }
@@ -1214,6 +1294,14 @@ async fn run() -> Result<bool, String> {
         still_stopping.store(true, std::sync::atomic::Ordering::Relaxed);
         stop(h).await;
     }
+    // mDNS camera-host task (issue #171): the C300X responder OR the C100X refresher (whichever runs on
+    // this model). BOTH PUBLISH the retained camera-host topic, so the task must be stopped BEFORE the
+    // final offline publish — a mid-await probe / reverse-PTR lookup / publish could otherwise emit a
+    // stale/late retained host after shutdown. It shares `still_stopping` (set above); abort-and-await
+    // interrupts any pending await so no publish escapes.
+    if let Some(h) = camera_host_task {
+        stop(h).await;
+    }
     // On-demand SIP UA (issue #104): drain it gracefully. `stop(cmd_worker)` above already dropped
     // that task's `view_tx` clone, so dropping THIS last sender closes `view_rx`; the SIP task then
     // observes the closed channel (its `view_rx.recv()==None`) and sends its BYE to tear the panel
@@ -1325,6 +1413,7 @@ async fn announce(
     volume: Arc<volume::VolumeCtl>,
     light: Option<Arc<light::LightCtl>>,
     update_latest: update::LatestVersion,
+    camera_mdns_name: Option<tokio::sync::watch::Receiver<Option<String>>>,
 ) {
     // Assert the light-subsystem availability GATE *before* the bridge birth `online`. On a
     // reflash from a configured WHERE to blank learn mode, the broker can still hold a retained
@@ -1379,6 +1468,47 @@ async fn announce(
     // that restarted — dropping its retained set — is reconciled on reconnect. No network here;
     // the background task does the fetching. No-op when the update check is disabled.
     update::announce(&cfg, &client, &update_latest).await;
+    // Camera mDNS host diagnostic (issue #171): publish the panel's advertised `<name>.local`
+    // retained, so HA can address the live RTSP stream + idle still endpoint by a stable name
+    // rather than a DHCP IP (the installer's three diagnostic sensors render the host + the
+    // ready-to-paste RTSP/still URLs from this one value). Only when the camera media path is on
+    // AND on-device (`camera_mdns_active`); a failed resolve just omits it (the sensors stay
+    // unavailable, the literal-IP guide fallback still works). A reconnect re-runs announce, so a
+    // broker that dropped its retained set is reconciled.
+    // Camera mDNS host diagnostic (#171). BOTH models now share the host over the watch channel:
+    // the C300X responder or the C100X refresher owns the (conflict-resolved / runtime) name, publishes
+    // it retained on commit, and shares it here so announce() only RE-ASSERTS whatever it has settled on
+    // (reconciling a broker that dropped its retained set). A watch borrow is a cheap synchronous read;
+    // announce() never re-resolves, so a transient reverse-PTR failure can't regress the name on reconnect.
+    let host = if camera_mdns_active(&cfg) {
+        // Some(rx) on every on-device model (responder / refresher / no-base-host); its value is None
+        // until the owner first commits — announce() then CLEARS the retained topic (below), so a
+        // reconnecting HA sees "no host yet" rather than a value a previous run left cached.
+        camera_mdns_name.as_ref().and_then(|rx| rx.borrow().clone())
+    } else {
+        None
+    };
+    match host {
+        Some(host) => {
+            if let Err(e) = client
+                .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, host.into_bytes())
+                .await
+            {
+                eprintln!("btmqttd: publish camera mDNS host failed: {e}");
+            }
+        }
+        // CLEAR the retained topic on ANY None, so a restarted broker + HA are reconciled to "no host"
+        // rather than a value a previous run (or a previous ON-device build with the feature since turned
+        // off) left cached. When the feature is ON the watch only reads None BEFORE the owner's first
+        // commit — and never regresses to None afterwards (pick_host keeps the learned name across
+        // transient reverse-PTR failures), so this can't blank a settled host on a hiccup: it only
+        // asserts "not yet resolved", which is exactly what HA should show until the owner commits.
+        None => {
+            let _ = client
+                .publish(&cfg.topic_camera_mdns_host, QoS::AtMostOnce, true, Vec::new())
+                .await;
+        }
+    }
     // Re-publish the tracked light state on every connect (a restarted broker dropped its
     // retained topics; a changed WHERE reusing the topic left a stale value). This is
     // INDEPENDENT of discovery — unlike the volume seed below it does NO gateway round-trip,
@@ -1422,6 +1552,17 @@ fn is_concrete_topic(topic: &str) -> bool {
 /// topic; that aliased publish is QoS 0 / non-retained bus data that MUST survive a reconnect, so the
 /// shape guard alone would not save it — gate the ring-topic match on the capture feature so an
 /// off-device alias is never mistaken for a momentary snapshot event and purged.
+/// Whether the on-device camera mDNS surface — the Part B responder (C300X) and the retained
+/// `TOPIC_CAMERA_MDNS_HOST` diagnostic (issue #171) — is active. Gated on the MEDIA path
+/// (`camera_enabled`) AS WELL as on-device: `CAMERA_ONDEVICE` can be set independently of
+/// `CAMERA_ENABLED` in a hand-edited `.conf`, and with the camera feature off the installer
+/// tombstones the three HA sensors — so the daemon must neither advertise a `.local` name nor
+/// retain a host for a camera that isn't there (it clears the retained topic instead). Mirrors the
+/// installer's `CameraEnabled && CameraOnDevice` gate on those same sensors.
+fn camera_mdns_active(cfg: &Config) -> bool {
+    cfg.camera_enabled && cfg.camera_ondevice
+}
+
 fn is_momentary_publish(req: &Request, cfg: &Config) -> bool {
     matches!(
         req,
@@ -1570,5 +1711,25 @@ mod tests {
         );
         assert!(off_device_only.camera_enabled && !off_device_only.camera_ondevice);
         assert!(!is_momentary_publish(&pub_to(&off_device_only.topic_ring_snapshot), &off_device_only));
+    }
+
+    #[test]
+    fn camera_mdns_active_requires_both_enabled_and_on_device() {
+        // The #171 mDNS surface (Part B responder + retained TOPIC_CAMERA_MDNS_HOST) must track the
+        // installer's own `CameraEnabled && CameraOnDevice` gate on the three camera sensors. A
+        // hand-edited conf can set CAMERA_ONDEVICE=1 with CAMERA_ENABLED=0 (media path off): in that
+        // state the HA sensors are tombstoned, so the daemon must NOT advertise a `.local` name or
+        // retain a host — the gate is false, and announce() clears the retained topic instead.
+        let cfg = |pairs: &[(&str, &str)]| {
+            Config::from_map(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+        };
+        // Both on → active (C300X advertises, host retained).
+        assert!(camera_mdns_active(&cfg(&[("MQTT_HOST", "h"), ("CAMERA_ENABLED", "1"), ("CAMERA_ONDEVICE", "1")])));
+        // On-device but media OFF → inactive (the case under review): sensors tombstoned, no advertise.
+        assert!(!camera_mdns_active(&cfg(&[("MQTT_HOST", "h"), ("CAMERA_ENABLED", "0"), ("CAMERA_ONDEVICE", "1")])));
+        // Enabled but OFF-device (classic go2rtc-on-HA) → inactive: nothing on the box to address.
+        assert!(!camera_mdns_active(&cfg(&[("MQTT_HOST", "h"), ("CAMERA_ENABLED", "1")])));
+        // Default (camera off) → inactive.
+        assert!(!camera_mdns_active(&cfg(&[("MQTT_HOST", "h")])));
     }
 }
