@@ -133,32 +133,16 @@ enum BootReady {
 fn is_routable_source(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => !v4.is_unspecified() && !v4.is_loopback() && !v4.is_link_local(),
-        // `Ipv6Addr::is_unicast_link_local` is unstable, so test the `fe80::/10` prefix directly.
         std::net::IpAddr::V6(v6) => {
-            !v6.is_unspecified() && !v6.is_loopback() && (v6.segments()[0] & 0xffc0) != 0xfe80
+            !v6.is_unspecified() && !v6.is_loopback() && !v6.is_unicast_link_local()
         }
     }
 }
 
-/// Does the device have a usable route toward the broker — i.e. `wlan0` has a lease and the reply
-/// path exists? Bind a UDP socket and "connect" it to the broker (no datagram is sent); the kernel
-/// picks the source address from the routing table, and a routable ([`is_routable_source`]) source
-/// means the network is up. The probe runs over the broker's OWN address family: `mqtt_host` is used
-/// when it is an IP literal (v4 or v6 — covers an on-link broker with no default gateway, and an
-/// IPv6-only network), else a hostname falls back to a fixed off-link IPv4 sentinel (RFC 5737
-/// TEST-NET-1), which needs a default route.
-///
-/// SYNCHRONOUS and DNS-FREE on purpose: a hostname is NOT resolved here. An async resolve
-/// (`still::reachable_ipv4` → `lookup_host`) runs `getaddrinfo` on tokio's BLOCKING pool, where a
-/// dropped future can't cancel it and runtime teardown (`drop(rt)`) would WAIT for it — so a wedged
-/// resolver would defeat the boot gate's prompt-cancellation guarantee and could hang shutdown to
-/// systemd's kill timeout. The UDP-connect probe is a couple of non-blocking syscalls instead.
-fn has_route_to_broker(mqtt_host: &str) -> bool {
-    // Probe over the broker's family so an IPv6-literal broker on an IPv6-only network isn't judged
-    // unreachable by an IPv4-only probe (which would stall the gate to the cap on every boot).
-    let dest: std::net::IpAddr = mqtt_host
-        .parse()
-        .unwrap_or_else(|_| std::net::Ipv4Addr::new(192, 0, 2, 1).into());
+/// Bind a UDP socket in `dest`'s family and "connect" it to `dest` (no datagram is sent); the kernel
+/// selects the source address from the routing table. A routable ([`is_routable_source`]) source
+/// means a route to that family is up. SYNCHRONOUS — a couple of non-blocking syscalls.
+fn probe_route(dest: std::net::IpAddr) -> bool {
     let bind: std::net::IpAddr = match dest {
         std::net::IpAddr::V4(_) => std::net::Ipv4Addr::UNSPECIFIED.into(),
         std::net::IpAddr::V6(_) => std::net::Ipv6Addr::UNSPECIFIED.into(),
@@ -171,6 +155,29 @@ fn has_route_to_broker(mqtt_host: &str) -> bool {
         return false;
     }
     sock.local_addr().map(|a| a.ip()).is_ok_and(is_routable_source)
+}
+
+/// Does the device have a usable route toward the broker — i.e. `wlan0` has a lease and the reply
+/// path exists? When `mqtt_host` is an IP literal, probe its OWN family (covers an on-link broker
+/// with no default gateway, and an IPv6-only network). When it's a HOSTNAME — which can't be resolved
+/// here (see below) to learn its family — accept a default route in EITHER family, so a hostname
+/// broker on an IPv6-only device isn't judged unreachable by an IPv4-only probe (which would stall
+/// the gate to the cap on every boot). The sentinels are fixed off-link documentation addresses
+/// (RFC 5737 / RFC 3849), so a hit means a real default route exists.
+///
+/// SYNCHRONOUS and DNS-FREE on purpose: a hostname is NOT resolved here. An async resolve
+/// (`still::reachable_ipv4` → `lookup_host`) runs `getaddrinfo` on tokio's BLOCKING pool, where a
+/// dropped future can't cancel it and runtime teardown (`drop(rt)`) would WAIT for it — so a wedged
+/// resolver would defeat the boot gate's prompt-cancellation guarantee and could hang shutdown to
+/// systemd's kill timeout. The UDP-connect probe is a couple of non-blocking syscalls instead.
+fn has_route_to_broker(mqtt_host: &str) -> bool {
+    const V4_SENTINEL: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 1); // RFC 5737 TEST-NET-1
+    const V6_SENTINEL: std::net::Ipv6Addr =
+        std::net::Ipv6Addr::new(0x2001, 0x0db8, 0, 0, 0, 0, 0, 1); // RFC 3849 documentation range
+    match mqtt_host.parse::<std::net::IpAddr>() {
+        Ok(ip) => probe_route(ip),
+        Err(_) => probe_route(V4_SENTINEL.into()) || probe_route(V6_SENTINEL.into()),
+    }
 }
 
 /// Is the OWN gateway accepting TCP connections on `host:port`? A bounded connect probe — it does
@@ -274,7 +281,13 @@ async fn poll_until_ready(cfg: &Config) -> BootReady {
     // rather than claim it is waiting on / confirming the gateway it never probes.
     let gateway_probed = cfg.own_host.parse::<std::net::IpAddr>().is_ok() && cfg.own_port_mon != 0;
     let waiting_for = if gateway_probed {
-        format!("a network route and the OWN gateway {}:{}", cfg.own_host, cfg.own_port_mon)
+        // Bracket an IPv6 literal so the `host:port` isn't ambiguous against its own colons.
+        let host = if cfg.own_host.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{}]", cfg.own_host)
+        } else {
+            cfg.own_host.clone()
+        };
+        format!("a network route and the OWN gateway {host}:{}", cfg.own_port_mon)
     } else {
         "a network route".to_string()
     };
@@ -1972,6 +1985,26 @@ mod tests {
         // Both families: the v6 literal exercises the family-aware bind/probe path.
         assert!(!has_route_to_broker("127.0.0.1"));
         assert!(!has_route_to_broker("::1"));
+    }
+
+    #[test]
+    fn is_routable_source_classifies_both_families() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        // Loopback / unspecified / link-local are NOT a real route — in either family. (The v6
+        // link-local case is the one the route probe must reject on an IPv6-only device.)
+        for ip in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 1, 2)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED),
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+        ] {
+            assert!(!is_routable_source(ip), "{ip} should not be routable");
+        }
+        // A normal LAN / global address in either family IS routable.
+        assert!(is_routable_source(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50))));
+        assert!(is_routable_source(IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 50))));
     }
 
     #[tokio::test]
